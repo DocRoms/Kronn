@@ -112,6 +112,26 @@ pub struct WorkersConfig {
     /// cost is tokens spent on a review that may never converge.
     #[serde(default)]
     pub review_rounds_unlimited: bool,
+    /// KT-1633 — run task workers (first dispatch and re-dispatch), their
+    /// validations and workflow Agent / Exec steps at background priority
+    /// (`taskpolicy -b`, `nice -n 10`, below-normal on Windows), so the owner's
+    /// applications and Kronn's own UI stay responsive. On by default; off keeps
+    /// every spawn at the backend's priority. `KRONN_BACKGROUND_PRIORITY=0` turns
+    /// it off too, whatever this says.
+    #[serde(default = "default_true")]
+    pub background_priority: bool,
+    /// KT-1632 — local task workers (a CLI agent in its own worktree) running at
+    /// once. A launch or re-dispatch beyond it waits `Queued`, in launch order,
+    /// and starts when a slot frees. Remote (HTTP) and Ollama workers do not
+    /// count. `max_concurrent_agents` counts agent processes, not the builds
+    /// behind them, so it cannot bound the machine load on its own.
+    #[serde(default = "default_workers_max_concurrent_task_workers")]
+    pub max_concurrent_task_workers: u32,
+    /// KT-1525 — a workflow step output above this many KB is shown as a
+    /// « heavy output » warning in the run view and on the workflow card.
+    /// The run itself is never refused.
+    #[serde(default = "default_workers_heavy_output_kb")]
+    pub heavy_output_kb: u32,
 }
 
 impl Default for WorkersConfig {
@@ -119,12 +139,23 @@ impl Default for WorkersConfig {
         Self {
             default_max_review_rounds: DEFAULT_MAX_REVIEW_ROUNDS,
             review_rounds_unlimited: false,
+            background_priority: true,
+            max_concurrent_task_workers: DEFAULT_MAX_CONCURRENT_TASK_WORKERS,
+            heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
         }
     }
 }
 
 fn default_workers_review_rounds() -> u32 {
     DEFAULT_MAX_REVIEW_ROUNDS
+}
+
+fn default_workers_heavy_output_kb() -> u32 {
+    DEFAULT_HEAVY_OUTPUT_KB
+}
+
+fn default_workers_max_concurrent_task_workers() -> u32 {
+    DEFAULT_MAX_CONCURRENT_TASK_WORKERS
 }
 
 impl WorkersConfig {
@@ -139,8 +170,26 @@ impl WorkersConfig {
         }
     }
 
+    /// The cap the dispatcher enforces: never 0 (a 0 would queue every worker
+    /// for ever), whatever a hand-edited `config.toml` holds.
+    pub fn effective_max_concurrent_task_workers(&self) -> usize {
+        self.max_concurrent_task_workers
+            .clamp(1, MAX_CONCURRENT_TASK_WORKERS_LIMIT) as usize
+    }
+
     /// Refuse what the Settings form must never persist.
     pub fn validate(&self) -> Result<(), String> {
+        if !(1..=MAX_CONCURRENT_TASK_WORKERS_LIMIT).contains(&self.max_concurrent_task_workers) {
+            return Err(format!(
+                "max_concurrent_task_workers must be between 1 and \
+                 {MAX_CONCURRENT_TASK_WORKERS_LIMIT}"
+            ));
+        }
+        if !(1..=MAX_HEAVY_OUTPUT_KB).contains(&self.heavy_output_kb) {
+            return Err(format!(
+                "heavy_output_kb must be between 1 and {MAX_HEAVY_OUTPUT_KB}"
+            ));
+        }
         if !(1..=MAX_REVIEW_ROUNDS_INTEGER).contains(&self.default_max_review_rounds) {
             return Err(format!(
                 "default_max_review_rounds must be between 1 and {MAX_REVIEW_ROUNDS_INTEGER}"
@@ -150,6 +199,15 @@ impl WorkersConfig {
     }
 }
 
+/// KT-1525 — default size (KB) above which a step output is flagged heavy.
+pub const DEFAULT_HEAVY_OUTPUT_KB: u32 = 256;
+/// Largest threshold the Settings form accepts (100 MB).
+pub const MAX_HEAVY_OUTPUT_KB: u32 = 102_400;
+/// Default cap on local task workers running at once (KT-1632). Builds, not
+/// agent processes, are what loads the machine: two lanes is what it carries.
+pub const DEFAULT_MAX_CONCURRENT_TASK_WORKERS: u32 = 2;
+/// Largest cap the Settings form accepts.
+pub const MAX_CONCURRENT_TASK_WORKERS_LIMIT: u32 = 64;
 /// Default review-round limit (KT-1345; it was a hard-coded 3).
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 5;
 /// Largest explicit integer; above it, say « unlimited ».
@@ -220,7 +278,7 @@ pub struct ServerConfig {
     /// pragmatic self-hosted behaviour). Flipping to `true` is the
     /// hardening path for users who run multiple processes on the
     /// same host (one of which they don't trust) — e.g. shared dev
-    /// VMs. Once TLS lands (TD-20260314-no-tls) we'll deprecate the
+    /// VMs. Once peers reach Kronn over TLS by default we'll deprecate the
     /// bypass entirely; this flag is the early-opt-out for users who
     /// can't wait.
     #[serde(default)]
@@ -234,6 +292,41 @@ pub struct ServerConfig {
     #[serde(default = "default_protect_vault_from_agents")]
     #[ts(skip)]
     pub protect_vault_from_agents: bool,
+    /// KT-1438 — copy a project's lane seeds (gitignored generated assets, such
+    /// as `public/images`) from its main checkout into each task worktree. On by
+    /// default; off seeds nothing anywhere, whatever a project declared.
+    #[serde(default = "default_true")]
+    #[ts(skip)]
+    pub lane_seeds_copy_enabled: bool,
+    /// KT-1438 — seed Kronn's suggested candidates into the task worktrees of a
+    /// project that declared no seeds of its own. Off by default. A candidate
+    /// holding a secret-looking file stays held until a human confirms that file.
+    #[serde(default)]
+    #[ts(skip)]
+    pub lane_seeds_adopt_suggested: bool,
+    /// KT-1438 — `PUT /api/projects/{id}/lane-seeds` asks for the strong
+    /// confirmation (when one is enrolled). On by default; off waives it for that
+    /// route only. Changing this flag is itself a `POST /api/config/server`, which
+    /// always asks.
+    #[serde(default = "default_true")]
+    #[ts(skip)]
+    pub lane_seeds_strong_confirm: bool,
+    /// KT-1596 — the owner declares that a TLS-terminating reverse proxy
+    /// (nginx, Caddy, `tailscale serve`) on THIS machine carries every peer's
+    /// traffic. Kronn cannot verify it. It lifts the plain-HTTP refusal of the
+    /// network-exposure toggle, binds the backend to loopback (only the proxy
+    /// reaches it) and withdraws the loopback auth bypass, since every proxied
+    /// request then arrives from 127.0.0.1. `KRONN_TLS_TERMINATED_BY_PROXY=1`
+    /// declares the same thing without touching this file.
+    #[serde(default)]
+    #[ts(skip)]
+    pub tls_terminated_by_proxy: bool,
+    /// KT-1596 — the proxy's public origin (`https://kronn.example.com[:port]`),
+    /// the address invite codes advertise and peers dial over wss. Required to
+    /// declare a proxy; `KRONN_PUBLIC_ORIGIN` supplies it without this file.
+    #[serde(default)]
+    #[ts(skip)]
+    pub public_origin: Option<String>,
     /// Accept federation peers (inbound `/api/ws` peers, the peer HTTP routes)
     /// and dial contacts. Off by default: a peer is identified only by its
     /// invite code until pairing secrets exist (KT-1033).
@@ -686,6 +779,18 @@ pub struct AgentsConfig {
 pub struct HttpEndpoints {
     pub lite_llm: Option<String>,
     pub nvidia: Option<String>,
+    /// The operator's tool-executor switch per HTTP agent (KT-1600), carried
+    /// with the endpoints because every call site already hands them to the
+    /// runner. `Some(false)` = off, anything else = on. A named `Custom`
+    /// connection has its own on `ExternalHttpRuntime::tools_enabled`.
+    pub tools: HttpToolSettings,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct HttpToolSettings {
+    pub ollama: Option<bool>,
+    pub lite_llm: Option<bool>,
+    pub nvidia: Option<bool>,
 }
 
 impl HttpEndpoints {
@@ -693,6 +798,22 @@ impl HttpEndpoints {
         Self {
             lite_llm: agents.lite_llm.base_url.clone(),
             nvidia: agents.nvidia.base_url.clone(),
+            tools: HttpToolSettings {
+                ollama: agents.ollama.tools_enabled,
+                lite_llm: agents.lite_llm.tools_enabled,
+                nvidia: agents.nvidia.tools_enabled,
+            },
+        }
+    }
+
+    /// The explicit tool setting for this agent, `None` when none is declared
+    /// or the agent has no slot (a CLI agent, or `Custom`).
+    pub fn tools_setting_for(&self, agent_type: &AgentType) -> Option<bool> {
+        match agent_type {
+            AgentType::Ollama => self.tools.ollama,
+            AgentType::LiteLlm => self.tools.lite_llm,
+            AgentType::Nvidia => self.tools.nvidia,
+            _ => None,
         }
     }
 
@@ -827,6 +948,13 @@ pub struct AgentConfig {
     /// to the frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
+    /// Tools are on by default: `Some(false)` withholds them from every model
+    /// of this agent (for one that cannot take tool calls); `None` and
+    /// `Some(true)` leave them on, Ollama's catalogue still withholding them
+    /// from a model it lists without `tools`. Ignored by CLI agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_enabled: Option<bool>,
 }
 
 // ─── Model tiers ──────────────────────────────────────────────────────────
@@ -1217,6 +1345,14 @@ pub struct SetAgentConcurrencyRequest {
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
+pub struct SetAgentToolsRequest {
+    pub agent: AgentType,
+    /// `None` clears the operator switch (tools on); see `AgentConfig::tools_enabled`.
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 pub struct SetAgentMentionColorRequest {
     pub agent: AgentType,
     /// `None` or an empty string restores the built-in color.
@@ -1268,6 +1404,12 @@ pub struct ServerConfigPublic {
     pub disk_sweep_idle_hours: u64,
     pub p2p_enabled: bool,
     pub frontend_origins: Vec<String>,
+    /// KT-1438 - copy lane seeds into task worktrees (default on).
+    pub lane_seeds_copy_enabled: bool,
+    /// KT-1438 - seed Kronn's secret-free suggestions for a project that declared none.
+    pub lane_seeds_adopt_suggested: bool,
+    /// KT-1438 - changing a project's lane seeds asks for the strong confirmation.
+    pub lane_seeds_strong_confirm: bool,
     /// The zone set in Settings; `None` follows the machine.
     pub timezone: Option<String>,
     /// The zone in effect: `timezone`, else `timezone_detected`.
@@ -1322,6 +1464,15 @@ pub struct UpdateServerConfigRequest {
     /// KT-1318 - `server.disk_sweep_idle_hours`.
     #[serde(default)]
     pub disk_sweep_idle_hours: Option<u64>,
+    /// KT-1438 - `server.lane_seeds_copy_enabled`.
+    #[serde(default)]
+    pub lane_seeds_copy_enabled: Option<bool>,
+    /// KT-1438 - `server.lane_seeds_adopt_suggested`.
+    #[serde(default)]
+    pub lane_seeds_adopt_suggested: Option<bool>,
+    /// KT-1438 - `server.lane_seeds_strong_confirm`.
+    #[serde(default)]
+    pub lane_seeds_strong_confirm: Option<bool>,
     #[serde(default)]
     pub p2p_enabled: Option<bool>,
     /// Replaces the whole list; every entry must be an exact origin.

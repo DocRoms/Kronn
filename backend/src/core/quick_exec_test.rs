@@ -524,6 +524,131 @@ fn the_generic_summariser_prefers_stderr_but_falls_back_to_stdout() {
     assert!(without.summary.contains("only stdout"));
 }
 
+/// KT-1438: a wrapper (`make`) prints the real failure on stdout and only its
+/// own verdict on stderr; the tail alone sent a worker back with `Error 1`.
+fn wrapped_phpunit_run() -> (String, String) {
+    let mut stdout = String::from("PHPUnit 10.5\n");
+    stdout.push_str("Twig\\Error\\LoaderError: Unable to find template \"@web/images/vector/menu-icons/icon-hr-language.svg\" (looked into: /app/public)\n");
+    for index in 0..200 {
+        stdout.push_str(&format!(
+            "#{index} /app/vendor/twig/twig/src/Environment.php({index})\n"
+        ));
+    }
+    stdout.push_str("Tests: 11, Assertions: 4, Errors: 7.\n");
+    let stderr = "WARNING: The requested image's platform (linux/amd64) does not match\n\
+                  make: *** [iso-test-class] Error 1\n"
+        .to_string();
+    (stdout, stderr)
+}
+
+#[test]
+fn a_red_generic_run_keeps_its_first_error_lines_not_only_its_tail() {
+    let (stdout, stderr) = wrapped_phpunit_run();
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        &stderr,
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        extracted.summary.contains("Unable to find template"),
+        "the first error must survive: {}",
+        extracted.summary
+    );
+    assert!(extracted.summary.contains("icon-hr-language.svg"));
+    assert!(
+        extracted.summary.contains("Error 1"),
+        "the tail is kept too: {}",
+        extracted.summary
+    );
+    assert!(extracted.summary.len() <= SUMMARY_MAX_BYTES);
+}
+
+#[test]
+fn a_passing_generic_run_has_no_first_errors_section() {
+    let extracted = summarise(
+        Summariser::Generic,
+        "0 errors, 0 failed\nall good\n",
+        "",
+        QuickExecStatus::Passed,
+        true,
+    );
+    assert!(!extracted.summary.contains("first errors"));
+    assert!(extracted.summary.contains("all good"));
+}
+
+#[test]
+fn a_count_of_zero_errors_is_not_a_first_error() {
+    let extracted = summarise(
+        Summariser::Generic,
+        "build: 0 errors\n",
+        "boom\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(!extracted.summary.contains("first errors"));
+    assert!(extracted.summary.contains("boom"));
+}
+
+#[test]
+fn the_first_error_section_cannot_push_the_tail_out_of_the_summary() {
+    let stdout: String = (0..400)
+        .map(|index| format!("error: noisy failure number {index} {}\n", "x".repeat(200)))
+        .collect();
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        "the last line says make: Error 1\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(extracted.summary.contains("first errors"));
+    assert!(extracted.summary.contains("noisy failure number 0 "));
+    assert!(
+        extracted.summary.contains("make: Error 1"),
+        "tail lost: {}",
+        extracted.summary
+    );
+}
+
+/// KT-1438: error lines are where connection strings and tokens appear, and the
+/// first errors leave to the room and the worker.
+#[test]
+fn the_first_errors_of_a_red_run_are_redacted() {
+    let stdout =
+        "PDOException: could not connect to postgres://app:Sup3rS3cretPw@db.internal:5432/kronn\n\
+                  fatal: Authorization: Bearer abc123def456ghi789jkl was rejected\n\
+                  APP_SECRET=61cc0ffee1234abcd5678 error while booting\n"
+            .to_string();
+    let extracted = summarise(
+        Summariser::Generic,
+        &stdout,
+        "make: *** [test] Error 1\n",
+        QuickExecStatus::Failed,
+        true,
+    );
+    assert!(
+        extracted.summary.contains("first errors"),
+        "{}",
+        extracted.summary
+    );
+    assert!(extracted
+        .summary
+        .contains("could not connect to postgres://app:"));
+    for secret in [
+        "Sup3rS3cretPw",
+        "abc123def456ghi789jkl",
+        "61cc0ffee1234abcd5678",
+    ] {
+        assert!(
+            !extracted.summary.contains(secret),
+            "{secret} leaked: {}",
+            extracted.summary
+        );
+    }
+}
+
 // ── idempotency key ─────────────────────────────────────────────────
 
 #[test]
@@ -710,7 +835,7 @@ fn a_quick_exec_child_carries_a_built_environment() {
             ("OPENAI_API_KEY", "sk"),
             ("GH_TOKEN", "ghp"),
         ],
-        || build_command(&validated, None),
+        || build_command(&validated, None, Priority::Normal),
     );
     let env: Vec<String> = command
         .as_std()
@@ -730,4 +855,44 @@ fn a_quick_exec_child_carries_a_built_environment() {
             "{gone} reached Quick Exec"
         );
     }
+}
+
+/// KT-1633: a validation starts behind the host's priority launcher and keeps
+/// its own argv after the program; a collector keeps the backend's priority.
+#[test]
+#[serial_test::serial(background_launcher)]
+fn a_background_validation_runs_behind_the_priority_launcher() {
+    use crate::core::background_priority::{self, HostOs, LauncherCheck, LauncherGuard};
+    // The launcher state is process-wide: pin it, so the plan below is the one
+    // the spawn uses whatever the host (un)checked.
+    background_priority::set_enabled(true);
+    let _launcher = LauncherGuard::set(LauncherCheck::Works);
+    let root = tempfile::tempdir().unwrap();
+    let roots = vec![root.path().to_path_buf()];
+    let validated = validate(&spec("git", &["status"], root.path()), &roots).unwrap();
+    let plan = background_priority::plan_here(Priority::Background);
+    if crate::core::background_priority::enabled()
+        && background_priority::launcher_for(HostOs::CURRENT, |path| Path::new(path).is_file())
+            .is_some()
+    {
+        assert!(
+            plan.launcher.is_some(),
+            "an installed launcher is used: {plan:?}"
+        );
+    }
+
+    let background = build_command(&validated, None, Priority::Background);
+    let normal = build_command(&validated, None, Priority::Normal);
+    let program = normal.as_std().get_program().to_os_string();
+    assert_eq!(normal.as_std().get_args().count(), 1, "normal: argv only");
+
+    let (expected_program, mut expected_args) = plan.argv(&program);
+    expected_args.push("status".into());
+    assert_eq!(background.as_std().get_program(), expected_program);
+    let args: Vec<_> = background
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_os_string())
+        .collect();
+    assert_eq!(args, expected_args);
 }

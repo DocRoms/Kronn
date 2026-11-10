@@ -313,6 +313,18 @@ pub async fn strong_gate(State(state): State<AppState>, request: Request, next: 
     if protection == Protection::Open {
         return next.run(request).await;
     }
+    // KT-1438: the owner may release the lane-seeds save from the code
+    // (Settings › Worktrees). Only the human's own request: a bridge token keeps
+    // the full gate whatever the setting says.
+    if strong::is_lane_seeds_save(&method, &pattern)
+        && request
+            .extensions()
+            .get::<crate::core::bridge_token::BridgeCaller>()
+            .is_none()
+        && !state.config.read().await.server.lane_seeds_strong_confirm
+    {
+        return next.run(request).await;
+    }
     let bridge_pass = request.extensions().get::<BridgeCodePass>().is_some();
     // A bridge request admitted on its own list keeps that list's scoping.
     let on_bridge_list = request

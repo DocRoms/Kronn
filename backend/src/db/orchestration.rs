@@ -64,7 +64,8 @@ const RUN_COLS: &str = "id, kind, discussion_id, project_id, target_workspace_id
     integration_strategy, validation_json, escalation_notify_url, status, \
     created_at, updated_at, allow_self_review, control_state, control_reason, \
     timeout_secs, max_cli_concurrent_executions, allowed_agents_json, \
-    default_worker_json, auto_continue, quota_fallback, quota_fallback_agents_json";
+    default_worker_json, auto_continue, quota_fallback, quota_fallback_agents_json, \
+    reviewer_json";
 
 fn parse_dt(value: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&value)
@@ -114,6 +115,7 @@ fn row_to_run(row: &Row) -> rusqlite::Result<OrchestrationRun> {
     let allowed_agents_json: String = row.get(20)?;
     let default_worker_json: Option<String> = row.get(21)?;
     let quota_fallback_agents_json: String = row.get(24)?;
+    let reviewer_json: Option<String> = row.get(25)?;
     Ok(OrchestrationRun {
         id: row.get(0)?,
         kind: OrchestrationRunKind::from_str(&kind).unwrap_or_default(),
@@ -143,6 +145,10 @@ fn row_to_run(row: &Row) -> rusqlite::Result<OrchestrationRun> {
         auto_continue: row.get::<_, i64>(22)? != 0,
         quota_fallback: row.get::<_, i64>(23)? != 0,
         quota_fallback_agents: parse_json_column(24, &quota_fallback_agents_json)?,
+        reviewer: reviewer_json
+            .as_deref()
+            .map(|json| parse_json_column(25, json))
+            .transpose()?,
     })
 }
 
@@ -444,6 +450,117 @@ pub fn worktree_cleanup_liveness(
     conn: &Connection,
     canonical_path: &str,
 ) -> Result<crate::core::worktree::ExecutionLiveness> {
+    workspace_liveness(conn, canonical_path, false)
+}
+
+/// [`worktree_cleanup_liveness`] for the release of a checkout (KT-1676): an
+/// execution that never reached a terminal state also counts as finished when
+/// its task was closed (`done` or `archived`) and nothing still works in the
+/// checkout. A task set to `done` by hand leaves its execution wherever it was,
+/// and that checkout would otherwise stay for good. Everything else the plain
+/// verdict requires still applies.
+pub fn worktree_release_liveness(
+    conn: &Connection,
+    canonical_path: &str,
+) -> Result<crate::core::worktree::ExecutionLiveness> {
+    workspace_liveness(conn, canonical_path, true)
+}
+
+/// Why an unfinished execution of a closed task still holds its checkout, or
+/// `None` when the task is closed and nothing works in it any more (KT-1676).
+///
+/// Mid-integration states keep it: the backend itself is acting in the
+/// checkout. So does a pending or running dispatch, an unsettled commit lease
+/// or an attached session of the execution's room.
+fn closed_task_blocker(
+    conn: &Connection,
+    execution_id: &str,
+    status: TaskExecutionStatus,
+) -> Result<Option<String>> {
+    // The execution's own room; an execution without a workspace row has none.
+    let disc_id: String = conn
+        .query_row(
+            "SELECT disc_id FROM discussion_workspaces WHERE task_execution_id = ?1",
+            params![execution_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let disc_id = disc_id.as_str();
+    let task_status: Option<String> = conn
+        .query_row(
+            "SELECT pt.status FROM task_executions te
+               JOIN planning_tasks pt ON pt.id = te.task_id
+              WHERE te.id = ?1",
+            params![execution_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !matches!(task_status.as_deref(), Some("done" | "archived")) {
+        return Ok(Some(format!(
+            "execution {execution_id} is {}, which is not a finished state",
+            status.as_str()
+        )));
+    }
+    if matches!(
+        status,
+        TaskExecutionStatus::Provisioning
+            | TaskExecutionStatus::Approved
+            | TaskExecutionStatus::Integrating
+            | TaskExecutionStatus::Validating
+            | TaskExecutionStatus::Applying
+    ) {
+        return Ok(Some(format!(
+            "execution {execution_id} is {}, mid-way through its integration",
+            status.as_str()
+        )));
+    }
+    let busy = |sql: &str, key: &str| -> Result<bool> {
+        Ok(conn.query_row(sql, params![key], |row| row.get::<_, bool>(0))?)
+    };
+    if busy(
+        "SELECT EXISTS(SELECT 1 FROM agent_dispatch_jobs
+                        WHERE discussion_id = ?1 AND status IN ('Pending', 'Running'))",
+        disc_id,
+    )? {
+        return Ok(Some(format!(
+            "a worker dispatch of execution {execution_id} is still pending or running"
+        )));
+    }
+    if busy(
+        "SELECT EXISTS(SELECT 1 FROM task_execution_commit_leases
+                        WHERE task_execution_id = ?1 AND settled_at IS NULL)",
+        execution_id,
+    )? {
+        return Ok(Some(format!(
+            "execution {execution_id} holds an unsettled commit lease"
+        )));
+    }
+    // A joined CLI worker sits in the principal room and is bound to the
+    // execution; a native one sits in the execution's own room.
+    let attached: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM discussion_sessions s
+                        WHERE s.status = 'active'
+                          AND (s.disc_id = ?2
+                               OR s.id IN (SELECT cli_session_id
+                                             FROM task_execution_cli_bindings
+                                            WHERE task_execution_id = ?1)))",
+        params![execution_id, disc_id],
+        |row| row.get(0),
+    )?;
+    if attached {
+        return Ok(Some(format!(
+            "a session is still attached to execution {execution_id}"
+        )));
+    }
+    Ok(None)
+}
+
+fn workspace_liveness(
+    conn: &Connection,
+    canonical_path: &str,
+    closed_task_is_finished: bool,
+) -> Result<crate::core::worktree::ExecutionLiveness> {
     use crate::core::worktree::ExecutionLiveness;
 
     let row: Option<(String, String, Option<String>, Option<i64>)> = conn
@@ -490,9 +607,16 @@ pub fn worktree_cleanup_liveness(
     let parsed = TaskExecutionStatus::from_str(&status)
         .map_err(|error| anyhow::anyhow!("unreadable execution status {status}: {error}"))?;
     if !parsed.is_terminal() {
-        return Ok(ExecutionLiveness::Active(format!(
-            "execution {execution_id} is {status}, which is not a finished state"
-        )));
+        let reason = if closed_task_is_finished {
+            closed_task_blocker(conn, &execution_id, parsed)?
+        } else {
+            Some(format!(
+                "execution {execution_id} is {status}, which is not a finished state"
+            ))
+        };
+        if let Some(reason) = reason {
+            return Ok(ExecutionLiveness::Active(reason));
+        }
     }
 
     // A finished execution whose workspace is still attached to a live session
@@ -834,6 +958,43 @@ pub fn terminal_executions_with_checkout(
         .collect())
 }
 
+/// Managed checkouts of executions that never finished although their task was
+/// closed (`done` or `archived`) by hand (KT-1676): the sibling of
+/// [`terminal_executions_with_checkout`]. Whether such a checkout may really go
+/// is [`worktree_release_liveness`]'s to prove.
+pub fn closed_task_executions_with_checkout(conn: &Connection) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT te.id FROM task_executions te
+           JOIN discussion_workspaces dw ON dw.task_execution_id = te.id
+           JOIN planning_tasks pt ON pt.id = te.task_id
+          WHERE dw.ownership = 'managed' AND dw.canonical_path IS NOT NULL
+            AND te.status NOT IN ('Done', 'Failed', 'Cancelled')
+            AND pt.status IN ('done', 'archived')
+          ORDER BY te.id",
+    )?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+/// Every execution of `task_id` that still holds a managed checkout, whatever
+/// its state (KT-1676): what closing the task hands to the release, which then
+/// judges each one.
+pub fn executions_of_task_with_checkout(conn: &Connection, task_id: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT te.id FROM task_executions te
+           JOIN discussion_workspaces dw ON dw.task_execution_id = te.id
+          WHERE te.task_id = ?1
+            AND dw.ownership = 'managed' AND dw.canonical_path IS NOT NULL
+          ORDER BY te.id",
+    )?;
+    let ids = statement
+        .query_map(params![task_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 /// Audit one lane target reclaim against the execution that owned `canonical_path`.
 /// The same shape as [`record_artifact_reclaim`], under its own actions so a
 /// worktree's `target/` and its lane target are told apart. KT-1256.
@@ -980,6 +1141,83 @@ pub fn managed_working_execution_for_workspace(
     }
 }
 
+/// KT-1643 — make the campaign room match a reviewer the caller named
+/// explicitly. A delivery's review request is addressed to the room's agent:
+/// left as it was created (`no_agent`, a `ClaudeCode` nobody serves), it was
+/// orphaned. An agent or remote-model reviewer becomes the room's agent and
+/// model and the room answers again; a human reviewer keeps the room
+/// human-only, so the review card is the whole conversation. Never called for
+/// a campaign that names no reviewer: such a room stays as its owner set it up.
+pub fn reconfigure_room_for_reviewer(
+    tx: &rusqlite::Transaction<'_>,
+    discussion_id: &str,
+    reviewer: &crate::models::CampaignReviewer,
+) -> Result<()> {
+    use crate::models::CampaignReviewerKind;
+    match (reviewer.kind, reviewer.agent.as_ref()) {
+        (CampaignReviewerKind::Human, _) => {
+            crate::db::discussions::set_disc_no_agent_within_tx(tx, discussion_id, true)?;
+        }
+        (_, Some(agent)) => {
+            // One statement: `update_discussion_agent` and `_connection` each
+            // open their own transaction, which cannot nest in the caller's.
+            tx.execute(
+                "UPDATE discussions \
+                    SET agent = ?2, participants_json = ?3, model = ?4, \
+                        connection_id = ?5, updated_at = ?6 \
+                  WHERE id = ?1",
+                params![
+                    discussion_id,
+                    crate::db::discussions::format_agent_type(agent),
+                    serde_json::to_string(&[agent])?,
+                    reviewer.model,
+                    reviewer.connection_id,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            crate::db::discussions::set_disc_no_agent_within_tx(tx, discussion_id, false)?;
+        }
+        (_, None) => bail!("a non-human reviewer names the agent that reviews"),
+    }
+    Ok(())
+}
+
+/// KT-1643 — say in the campaign room which branch deliveries integrate into,
+/// the review budget and who reviews them.
+pub fn announce_campaign_rules(
+    tx: &rusqlite::Transaction<'_>,
+    discussion_id: &str,
+    announcement: &str,
+) -> Result<()> {
+    let message = DiscussionMessage {
+        id: format!("orch-campaign-reviewer:{}", Uuid::new_v4()),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: announcement.to_string(),
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
+    };
+    crate::db::discussions::insert_message(tx, discussion_id, &message)?;
+    Ok(())
+}
+
 pub fn create_orchestration_run(
     conn: &Connection,
     input: &OrchestrationRunInput,
@@ -1015,11 +1253,16 @@ pub fn create_orchestration_run(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let reviewer_json = input
+        .reviewer
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     conn.execute(
         &format!(
             "INSERT INTO orchestration_runs ({RUN_COLS}) \
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                    ?17, NULL, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+                    ?17, NULL, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"
         ),
         params![
             id,
@@ -1048,6 +1291,7 @@ pub fn create_orchestration_run(
             i64::from(input.auto_continue),
             i64::from(input.quota_fallback),
             quota_fallback_agents_json,
+            reviewer_json,
         ],
     )?;
     get_orchestration_run(conn, &id)?
@@ -2761,6 +3005,97 @@ pub fn executions_past_quota_reset(conn: &Connection, now: DateTime<Utc>) -> Res
     Ok(ids)
 }
 
+/// An execution parked `Escalated` on its worker's provider quota with no
+/// announced reset, waiting for the provider to answer again (KT-1664).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnannouncedQuotaEscalation {
+    pub execution_id: String,
+    /// The refused provider, in the [`agent_type_to_db`] form.
+    pub provider: String,
+    /// The project the run works in, where a provider probe may start.
+    pub project_path: Option<String>,
+}
+
+/// KT-1664 — executions parked `Escalated` by a quota refusal that announced
+/// no reset, so [`executions_past_quota_reset`] never lists them and only a
+/// person would say the quota is back. The provider re-check of KT-1657 asks
+/// instead. Same guards as the reset sweep: the exact `quota_exhausted:<worker>`
+/// escalation (a worker the owner changed, an escalation opened on purpose or
+/// for another cause never matches), a native worker, a task still open and a
+/// run that is neither paused, human-gated nor finished.
+pub fn executions_escalated_on_unannounced_quota(
+    conn: &Connection,
+) -> Result<Vec<UnannouncedQuotaEscalation>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id, e.worker_agent_type, p.path
+         FROM task_execution_recovery r
+         JOIN task_executions e ON e.id = r.task_execution_id
+         JOIN planning_tasks t ON t.id = e.task_id
+         LEFT JOIN orchestration_runs o ON o.id = e.orchestration_run_id
+         LEFT JOIN projects p ON p.id = o.project_id
+         LEFT JOIN provider_quota_generations g ON g.provider = e.worker_agent_type
+         WHERE e.status = 'Escalated'
+           AND r.recovery_action = 'await_human'
+           AND r.recovery_reason = 'quota_exhausted:' || e.worker_agent_type
+           AND COALESCE(e.worker_target_kind, '') <> 'cli'
+           AND g.reset_at IS NULL
+           AND t.status NOT IN ('done', 'archived')
+           AND {RUN_ALLOWS_RESTART_SQL}
+         ORDER BY r.updated_at ASC, e.id ASC"
+    ))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(UnannouncedQuotaEscalation {
+                execution_id: row.get(0)?,
+                provider: row.get(1)?,
+                project_path: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Re-checked inside the reassignment transaction, right before the provider
+/// re-check hands an execution back its worker (KT-1664): it must still be
+/// parked on that very provider's quota with the run running, and no newer
+/// refusal may have announced a reset still ahead.
+pub fn ensure_probed_quota_return_still_parked(
+    conn: &Connection,
+    exec_id: &str,
+    provider: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let allowed: bool = conn.query_row(
+        &format!("SELECT {RUN_ALLOWS_RESTART_SQL} FROM task_executions e WHERE e.id = ?1"),
+        [exec_id],
+        |row| row.get(0),
+    )?;
+    if !allowed {
+        bail!("quota return skipped: the campaign or run is not running");
+    }
+    let parked: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM task_execution_recovery r
+             JOIN task_executions e ON e.id = r.task_execution_id
+             WHERE e.id = ?1
+               AND e.status = 'Escalated'
+               AND e.worker_agent_type = ?2
+               AND r.recovery_action = 'await_human'
+               AND r.recovery_reason = ?3
+         )",
+        params![exec_id, provider, format!("quota_exhausted:{provider}")],
+        |row| row.get(0),
+    )?;
+    if !parked {
+        bail!("quota return skipped: the execution is no longer parked on its provider's quota");
+    }
+    if provider_quota_reset_at(conn, provider)?.is_some_and(|reset| reset > quota_reset_stamp(now))
+    {
+        bail!("quota return skipped: the provider announced a reset that is still ahead");
+    }
+    Ok(())
+}
+
 /// A campaign or run that is paused, waiting on a human, or finished must not
 /// have a worker restarted behind its back, whatever the quota clock says.
 const RUN_ALLOWS_RESTART_SQL: &str = "EXISTS(SELECT 1 FROM orchestration_runs o \
@@ -3059,6 +3394,76 @@ pub fn provider_changes(conn: &Connection, exec_id: &str) -> Result<Vec<Provider
                 from,
                 to,
                 reason: text("reason").unwrap_or_default(),
+            })
+        })
+        .collect())
+}
+
+/// Journal action of an integration merge that settled a citation-only doc
+/// conflict without the worker (KT-1669).
+pub const CITATIONS_SETTLED_ACTION: &str = "integration_citations_settled";
+
+/// Record that the candidate merged at `merge_sha` settled a citation-only
+/// conflict, so the delivery card can say so.
+pub fn record_citations_settled(
+    conn: &Connection,
+    exec_id: &str,
+    merge_sha: &str,
+    settled: &crate::core::docs_citations::merge::Settlement,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        CITATIONS_SETTLED_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({
+            "merge_sha": merge_sha,
+            "docs": settled.docs,
+            "moved": settled.moved,
+            "reanchored": settled.reanchored,
+        }),
+    )
+}
+
+/// Every citation-only conflict the integration merges of an execution settled,
+/// oldest first. Each merge stays in the branch's history, so a candidate that
+/// was rebuilt after the target advanced adds to the earlier ones.
+pub fn citations_settled(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Vec<crate::core::docs_citations::merge::Settlement>> {
+    let mut stmt = conn.prepare(
+        "SELECT changes_json FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND action = ?2 \
+         ORDER BY created_at ASC, rowid ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![exec_id, CITATIONS_SETTLED_ACTION], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|json| {
+            let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+            let names = |key: &str| -> Option<Vec<String>> {
+                Some(
+                    value
+                        .get(key)?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|doc| doc.as_str().map(str::to_owned))
+                        .collect(),
+                )
+            };
+            Some(crate::core::docs_citations::merge::Settlement {
+                docs: names("docs")?,
+                moved: usize::try_from(value.get("moved")?.as_u64()?).ok()?,
+                // Absent from a row journaled before clean merges were reported.
+                reanchored: names("reanchored").unwrap_or_default(),
             })
         })
         .collect())
@@ -5496,14 +5901,254 @@ fn park_campaign_after_failed_execution(
         return Ok(());
     };
     if run.kind == OrchestrationRunKind::Campaign && !run.control_state.is_terminal() {
-        set_orchestration_control_state(
+        // The terminal card of this execution is a fact and owes nothing
+        // (`notify_principal_of_terminal`); the obligation it leaves behind is
+        // minted here, by the producer of the park.
+        park_campaign_awaiting_human(
             conn,
             &run_id,
-            OrchestrationControlState::AwaitingHuman,
-            Some("a child execution failed; decide whether the campaign may continue"),
+            CampaignParkCause::FailedExecution,
+            "a child execution failed; decide whether the campaign may continue",
+            Some(exec_id),
             actor,
         )?;
     }
+    Ok(())
+}
+
+/// Why a campaign was parked on a human outside the escalation path. Each cause
+/// owes the human something different, so each words its own card.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CampaignParkCause {
+    /// A child execution ended `Failed`.
+    FailedExecution,
+    /// A child execution is waiting on a human decision.
+    ChildDecision,
+    /// The automatic launch of the next task failed.
+    LaunchFailed,
+    /// No task is launchable and the plan is not complete.
+    PlanBlocked,
+}
+
+/// Park a campaign on a human and leave the durable card that says so (KT-650).
+///
+/// The control-state write propagates its error exactly as before. The card is
+/// best effort: it runs in its own savepoint and a failure is logged and
+/// swallowed, because losing a card is cheaper than aborting the transition
+/// that triggered it — and two of the three callers are not even inside a state
+/// transition.
+///
+/// A card is minted only when the park actually flips the state into
+/// `AwaitingHuman`. A campaign that is already parked has a standing card owing
+/// a human decision, and a second park adds no new occurrence to settle. (The
+/// escalation path publishes its own card in `sync_campaign_human_gate`.)
+pub fn park_campaign_awaiting_human(
+    conn: &Connection,
+    run_id: &str,
+    cause: CampaignParkCause,
+    reason: &str,
+    anchor_exec: Option<&str>,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    let before = get_orchestration_run(conn, run_id)?.map(|run| run.control_state);
+    set_orchestration_control_state(
+        conn,
+        run_id,
+        OrchestrationControlState::AwaitingHuman,
+        Some(reason),
+        actor,
+    )?;
+    if before == Some(OrchestrationControlState::AwaitingHuman) {
+        return Ok(());
+    }
+    if let Err(error) = in_savepoint(conn, |conn| {
+        publish_campaign_park_card(conn, run_id, cause, reason, anchor_exec)
+    }) {
+        tracing::warn!(run_id, ?cause, %error, "campaign park card not published");
+    }
+    Ok(())
+}
+
+/// The `HumanActionRequired` card of a campaign parked outside escalation.
+///
+/// Keyed on the OCCURRENCE (KT-647): the number of times this run entered
+/// `AwaitingHuman`, counted from its own journal after the flip was recorded.
+/// A run parked, resumed and parked again owns one message and one dedup key per
+/// park instead of colliding on the execution. The anchor only names who the
+/// card is about; a run-level park (no execution) uses `run`.
+fn publish_campaign_park_card(
+    conn: &Connection,
+    run_id: &str,
+    cause: CampaignParkCause,
+    reason: &str,
+    anchor_exec: Option<&str>,
+) -> Result<()> {
+    let Some(run) = get_orchestration_run(conn, run_id)? else {
+        return Ok(());
+    };
+    let Some(principal) = crate::db::discussions::get_discussion(conn, &run.discussion_id)? else {
+        return Ok(());
+    };
+    let lang = RoomLang::from_code(&principal.language);
+
+    let task: Option<(i64, String)> = match anchor_exec {
+        Some(exec_id) => conn
+            .query_row(
+                "SELECT t.task_number, t.title FROM task_executions e \
+                 JOIN planning_tasks t ON t.id = e.task_id WHERE e.id = ?1",
+                [exec_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?,
+        None => None,
+    };
+    let reference = task.as_ref().map(|(number, _)| format!("KT-{number}"));
+    let title = match (&reference, &task) {
+        (Some(reference), Some((_, title))) => format!("{reference} — {title}"),
+        _ => lang
+            .pick(
+                "Campagne en attente d'une décision humaine",
+                "Campaign waiting for a human decision",
+            )
+            .to_string(),
+    };
+
+    let detail: String = reason
+        .chars()
+        .take(300)
+        .map(|c| if c == '`' { '\'' } else { c })
+        .collect();
+    let (what_fr, what_en, action_fr, action_en) = match cause {
+        CampaignParkCause::FailedExecution => (
+            "une exécution enfant a échoué",
+            "a child execution failed",
+            "Décider si la campagne peut continuer, puis la relancer",
+            "Decide whether the campaign may continue, then resume it",
+        ),
+        CampaignParkCause::ChildDecision => (
+            "une exécution enfant attend une décision humaine",
+            "a child execution is waiting on a human decision",
+            "Trancher la décision de l'exécution enfant, puis relancer la campagne",
+            "Settle the child execution's decision, then resume the campaign",
+        ),
+        CampaignParkCause::LaunchFailed => (
+            "le lancement automatique de la tâche suivante a échoué",
+            "the automatic launch of the next task failed",
+            "Corriger la cause de l'échec de lancement, puis relancer la campagne",
+            "Fix the cause of the launch failure, then resume the campaign",
+        ),
+        CampaignParkCause::PlanBlocked => (
+            "aucune tâche n'est lançable et le plan n'est pas terminé",
+            "no task is launchable and the plan is not complete",
+            "Corriger le plan (tâches bloquées ou dépendances), puis relancer la campagne",
+            "Correct the plan (blocked tasks or dependencies), then resume the campaign",
+        ),
+    };
+    let content = match lang {
+        RoomLang::Fr => format!(
+            "**{title}**\n\nLa campagne est en pause : {what_fr}. Elle n'enchaînera pas seule.\n\nRaison : `{detail}`"
+        ),
+        RoomLang::En => format!(
+            "**{title}**\n\nThe campaign is paused: {what_en}. It will not chain on its own.\n\nReason: `{detail}`"
+        ),
+    };
+    let highlight = match (&reference, lang) {
+        (Some(reference), RoomLang::Fr) => {
+            format!("{reference} — la campagne attend une décision humaine.")
+        }
+        (Some(reference), RoomLang::En) => {
+            format!("{reference} — the campaign is waiting for a human decision.")
+        }
+        (None, _) => lang
+            .pick(
+                "La campagne attend une décision humaine.",
+                "The campaign is waiting for a human decision.",
+            )
+            .to_string(),
+    };
+
+    // Counted AFTER the flip was journalled by `set_orchestration_control_state`,
+    // so this park is its own index (>= 1).
+    let occurrence: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM orchestration_run_events \
+         WHERE orchestration_run_id = ?1 AND action = 'control_state_changed' \
+           AND to_state = 'awaiting_human'",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let anchor = anchor_exec.unwrap_or("run");
+    let message_id = format!("orch-campaign-gate:{run_id}:{anchor}:parked:{occurrence}");
+    let already_posted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+        [&message_id],
+        |row| row.get(0),
+    )?;
+    if already_posted {
+        return Ok(());
+    }
+
+    let message = DiscussionMessage {
+        id: message_id,
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content,
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
+    };
+    let target = match anchor_exec {
+        Some(exec_id) => principal_notice_target(conn, exec_id, principal.agent)?,
+        None => MessageTarget::discussion_agent(principal.agent),
+    };
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        conn,
+        &run.discussion_id,
+        &message,
+        &[target],
+        &[],
+        None,
+    )?;
+    crate::db::discussion_important::publish_steering_card(
+        conn,
+        &run.discussion_id,
+        &message.id,
+        crate::db::discussion_important::SteeringCard {
+            category: crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+            dedup_key: &format!("orch.campaign.gate.{run_id}.{anchor}.parked.{occurrence}"),
+            title: &title,
+            highlight: &highlight,
+            impact: lang.pick(
+                "Aucune tâche de cette campagne n'avance tant qu'un humain n'a pas tranché.",
+                "No task of this campaign advances until a human decides.",
+            ),
+            action_required: crate::db::discussion_important::ImportantAction::owed(
+                lang.pick(action_fr, action_en),
+                lang.pick("Humain", "Human"),
+            ),
+            references: crate::db::discussion_important::ImportantReferences {
+                task_ref: reference,
+                execution_id: anchor_exec.map(str::to_string),
+                ..Default::default()
+            },
+        },
+        &message.timestamp.to_rfc3339(),
+    )?;
     Ok(())
 }
 
@@ -6606,6 +7251,127 @@ pub fn record_lane_warm_start(
     )
 }
 
+/// Journal what the launch fetched into the host's dependency caches for the
+/// worker's lock files (KT-1649): per lock file, the registries the fetch was
+/// bounded to and how it ended. Append-only; readers take the latest.
+pub fn record_dependency_fetch(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_dep_fetch::DepFetchRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_dep_fetch::DEP_FETCH_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent dependency-fetch record of an execution, if any.
+pub fn latest_dependency_fetch(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_dep_fetch::DepFetchRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_dep_fetch::DEP_FETCH_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+/// Journal what seeding a task worktree with the project's gitignored assets
+/// did (KT-1438): which paths were cloned, refreshed, left alone or refused,
+/// and why.
+pub fn record_lane_seeds(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_lane_seeds::LaneSeedsRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_lane_seeds::LANE_SEEDS_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent lane-seeds record of an execution, if any.
+pub fn latest_lane_seeds(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_lane_seeds::LaneSeedsRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_lane_seeds::LANE_SEEDS_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
+/// The most recent lane-seeds record among a project's task executions, with
+/// the execution it belongs to and when it was journalled (KT-1438): what the
+/// project's settings show of how seeding last went.
+pub fn latest_lane_seeds_for_project(
+    conn: &Connection,
+    project_id: &str,
+) -> Result<
+    Option<(
+        String,
+        String,
+        crate::core::task_worker_lane_seeds::LaneSeedsRecord,
+    )>,
+> {
+    let latest: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT e.task_execution_id, e.created_at, e.changes_json \
+             FROM task_execution_events e \
+             JOIN task_executions x ON x.id = e.task_execution_id \
+             JOIN orchestration_runs r ON r.id = x.orchestration_run_id \
+             WHERE r.project_id = ?1 AND e.action = ?2 \
+             ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1",
+            params![
+                project_id,
+                crate::core::task_worker_lane_seeds::LANE_SEEDS_EVENT_ACTION
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    latest
+        .map(|(exec_id, at, changes)| {
+            serde_json::from_str(&changes)
+                .map(|record| (exec_id, at, record))
+                .map_err(anyhow::Error::from)
+        })
+        .transpose()
+}
+
 /// The most recent warm-start record of an execution, if any.
 pub fn latest_lane_warm_start(
     conn: &Connection,
@@ -6671,6 +7437,69 @@ pub fn lane_warming_since(conn: &Connection, exec_id: &str) -> Result<Option<Dat
         )
         .optional()?;
     Ok(since.map(parse_dt))
+}
+
+/// When the execution's lane last started warming: the latest `lane_warming`
+/// event, whether or not the warm-up has finished since (KT-1637). `None` for
+/// an execution that never deferred its warm-up.
+pub fn lane_warming_started_at(conn: &Connection, exec_id: &str) -> Result<Option<DateTime<Utc>>> {
+    let at: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY rowid DESC LIMIT 1",
+            params![exec_id, LANE_WARMING_ACTION],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(at.map(parse_dt))
+}
+
+/// Action of the event that times one sub-step of the warming phase (KT-1637).
+const WARMING_STEP_ACTION: &str = "lane_warming_step";
+
+/// Journal how long one sub-step of the warming phase took. The steps timed
+/// inside the lane warm-up itself travel in its `lane_warm_start` record; this
+/// is for the ones the launch runs around it (worktree creation, lane seeds,
+/// the smoke check).
+pub fn record_warming_step(
+    conn: &Connection,
+    exec_id: &str,
+    step: crate::models::WarmingStepKind,
+    duration_ms: u64,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        WARMING_STEP_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({ "step": step, "duration_ms": duration_ms }),
+    )
+}
+
+/// The journalled warming steps of an execution, the latest of each kind (a
+/// resumed execution runs a step again), in journal order of that latest run.
+pub fn latest_warming_steps(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Vec<crate::models::TaskExecutionWarmingStep>> {
+    let mut stmt = conn.prepare(
+        "SELECT changes_json FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND action = ?2 ORDER BY rowid ASC",
+    )?;
+    let rows = stmt.query_map(params![exec_id, WARMING_STEP_ACTION], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut steps: Vec<crate::models::TaskExecutionWarmingStep> = Vec::new();
+    for changes in rows {
+        let step: crate::models::TaskExecutionWarmingStep = serde_json::from_str(&changes?)?;
+        steps.retain(|known| known.step != step.step);
+        steps.push(step);
+    }
+    Ok(steps)
 }
 
 const WORKER_SCOPE_REANCHORED: &str = "worker_scope_reanchored";
@@ -6904,6 +7733,8 @@ pub fn extend_review_rounds(
     in_savepoint(conn, |conn| {
         let execution = get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("execution not found or caller is not its principal"))?;
+        // KT-1646 — raising the limit re-offers the execution to its worker.
+        crate::core::checkout_release::ensure_not_being_released(exec_id)?;
         if execution.status.is_terminal() {
             bail!(
                 "execution is {}: its review-round limit can no longer change",
@@ -8123,6 +8954,8 @@ pub fn reassign_execution_worker_keeping_origin(
     in_savepoint(conn, |conn| {
         let mut execution = get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("unknown task execution"))?;
+        // KT-1646 — a checkout a release is removing is not handed to a worker.
+        crate::core::checkout_release::ensure_not_being_released(exec_id)?;
         if execution.status.is_terminal() {
             bail!("a terminal execution cannot be reassigned");
         }

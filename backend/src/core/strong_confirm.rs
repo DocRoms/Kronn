@@ -80,11 +80,25 @@ const ALWAYS: &[(&str, &str)] = &[
     ("PUT", "/api/projects/{id}/validations-access"),
     ("POST", "/api/agents/uninstall"),
     ("POST", "/api/pages/import"),
+    // The gitignored paths copied into a project's task worktrees (KT-1438): a
+    // seed puts files of the main checkout where a worker reads them. The owner
+    // may waive the code for this route alone (`WAIVABLE_BY_SETTING`).
+    ("PUT", "/api/projects/{id}/lane-seeds"),
 ];
+
+/// The route the owner may release from the strong confirmation with
+/// `server.lane_seeds_strong_confirm = false` (Settings › Worktrees, default on).
+/// Changing that setting is a `POST /api/config/server`, which always asks.
+pub const LANE_SEEDS_ROUTE: (&str, &str) = ("PUT", "/api/projects/{id}/lane-seeds");
+
+/// Whether this call is the one the `lane_seeds_strong_confirm` setting governs.
+pub fn is_lane_seeds_save(method: &str, pattern: &str) -> bool {
+    method.eq_ignore_ascii_case(LANE_SEEDS_ROUTE.0) && pattern == LANE_SEEDS_ROUTE.1
+}
 
 /// The deletions that ask for the proof (owner decision, 28/10): an
 /// irreversible loss of value. A project; a plugin or a connection together with
-/// its credentials; a stored provider API key. Every other `DELETE` is an
+/// its credentials; a stored provider API key; a set-aside `config.toml.corrupt.<ts>` (KT-1594). Every other `DELETE` is an
 /// everyday deletion (a message, a discussion, a task, a workflow, a page, a
 /// Quick Prompt, a Quick Exec, a skill, …) and goes through: it stays behind the
 /// destructive gate of `auth_allows` (local or token), which this does not touch.
@@ -93,6 +107,8 @@ const SENSITIVE_DELETES: &[&str] = &[
     "/api/mcps/configs/{id}",
     "/api/external-api/connections/{id}",
     "/api/config/api-keys/{id}",
+    // A kept config.toml that may hold the last copy of a credential or a key.
+    "/api/config/recovery/set-aside-files/{name}",
 ];
 
 /// Routes where the handler decides, because only part of the calls matter:

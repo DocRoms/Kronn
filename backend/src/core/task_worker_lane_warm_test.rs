@@ -272,6 +272,24 @@ fn the_first_build_runs_with_the_jobs_cap_and_the_lane_target() {
     );
 }
 
+/// KT-1633: the lane's first build (a `cargo test --no-run` of the whole
+/// graph) reaches the probe runner as a background command, so the runner —
+/// the sandboxed one included — starts it behind the priority launcher.
+#[test]
+fn the_first_build_asks_the_runner_for_background_priority() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1633-priority", LOCK_A);
+    let runner = ScriptedBuild::ok();
+    warm(&lane, &runner, &RecordingClone::new(), &BuildGate::new());
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].priority,
+        crate::core::background_priority::Priority::Background
+    );
+}
+
 // ── Seeding ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -547,7 +565,7 @@ fn an_existing_debug_directory_is_never_overwritten() {
 
 /// GNU `cp --reflink=always` on a file system without reflinks (ext4) makes
 /// the directories, then fails on the first file: the clone must remove them.
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
 #[test]
 fn a_failed_cp_reflink_leaves_no_partial_tree() {
     use std::os::unix::fs::PermissionsExt;
@@ -580,7 +598,7 @@ fn a_failed_cp_reflink_leaves_no_partial_tree() {
     assert!(destination.join("keep").is_dir());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // reads unix inode metadata
 #[test]
 fn clone_tree_is_copy_on_write_not_a_shared_or_a_copied_tree() {
     use std::os::unix::fs::MetadataExt;
@@ -739,6 +757,8 @@ fn the_warm_start_record_roundtrips_as_json() {
             duration_ms: 90_000,
         },
         queued_ms: 5,
+        provision_ms: Some(7),
+        seed_ms: Some(13),
     };
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["seed"]["outcome"], "cloned");
@@ -750,6 +770,114 @@ fn the_warm_start_record_roundtrips_as_json() {
 
     let cancelled = serde_json::to_value(FirstBuild::Cancelled { duration_ms: 7 }).unwrap();
     assert_eq!(cancelled["outcome"], "cancelled");
+}
+
+#[test]
+fn a_warm_start_row_journalled_before_the_timings_still_reads() {
+    // KT-1637: `provision_ms` and `seed_ms` were added; older rows have neither.
+    let record: WarmStartRecord = serde_json::from_value(serde_json::json!({
+        "lock_hash": "abc",
+        "seed": { "outcome": "already_present" },
+        "build_jobs": 4,
+        "first_build": { "outcome": "succeeded", "duration_ms": 1 },
+        "queued_ms": 2
+    }))
+    .unwrap();
+    assert_eq!((record.provision_ms, record.seed_ms), (None, None));
+    // An old row cannot say how long it provisioned or seeded: the breakdown
+    // leaves both out rather than reporting 0 ms.
+    use crate::models::WarmingStepKind as Step;
+    assert_eq!(
+        record.timed_steps(),
+        vec![(Step::GateWait, 2), (Step::FirstBuild, 1)]
+    );
+}
+
+fn timed(first_build: FirstBuild, queued_ms: u64) -> WarmStartRecord {
+    WarmStartRecord {
+        lock_hash: Some("abc".into()),
+        seed: SeedOutcome::Cloned {
+            source: PathBuf::from("/repo/target"),
+            kind: SeedSourceKind::MainCheckout,
+            clone_ms: 30,
+        },
+        build_jobs: 4,
+        first_build,
+        queued_ms,
+        provision_ms: Some(11),
+        seed_ms: Some(35),
+    }
+}
+
+#[test]
+fn a_built_lane_reports_each_warming_step_in_run_order() {
+    use crate::models::WarmingStepKind as Step;
+    let record = timed(FirstBuild::Succeeded { duration_ms: 400 }, 20);
+    assert_eq!(
+        record.timed_steps(),
+        vec![
+            (Step::LaneProvision, 11),
+            (Step::SeedClone, 35),
+            (Step::GateWait, 20),
+            (Step::FirstBuild, 400),
+        ]
+    );
+}
+
+#[test]
+fn a_step_that_did_not_run_is_absent_not_zero() {
+    use crate::models::WarmingStepKind as Step;
+    // Already built: no queue, no build, but the lane was still provisioned.
+    let built = timed(
+        FirstBuild::Skipped {
+            reason: "already built".into(),
+        },
+        0,
+    );
+    assert_eq!(
+        built.timed_steps(),
+        vec![(Step::LaneProvision, 11), (Step::SeedClone, 35)]
+    );
+    // A queue that never drained spent its wait, and never built.
+    let gave_up = timed(
+        FirstBuild::Skipped {
+            reason: "no slot".into(),
+        },
+        1_800_000,
+    );
+    assert!(gave_up.timed_steps().contains(&(Step::GateWait, 1_800_000)));
+    assert!(!gave_up
+        .timed_steps()
+        .iter()
+        .any(|(step, _)| *step == Step::FirstBuild));
+    // Cancelled while queued: it never started compiling.
+    let cancelled = timed(FirstBuild::Cancelled { duration_ms: 0 }, 5);
+    assert!(!cancelled
+        .timed_steps()
+        .iter()
+        .any(|(step, _)| *step == Step::FirstBuild));
+    // Nothing prepared, nothing seeded, nothing provisioned.
+    let none = WarmStartRecord::not_applicable("no Cargo.toml", 4);
+    assert!(none.timed_steps().is_empty());
+    // No warm target to clone from: no seed step either, even though the lane
+    // was provisioned.
+    let mut no_source = timed(FirstBuild::Succeeded { duration_ms: 9 }, 0);
+    no_source.seed = SeedOutcome::NoSource {
+        reason: "no warm target".into(),
+    };
+    assert!(!no_source
+        .timed_steps()
+        .iter()
+        .any(|(step, _)| *step == Step::SeedClone));
+    assert!(no_source.timed_steps().contains(&(Step::LaneProvision, 11)));
+}
+
+#[test]
+fn a_row_journalled_before_seed_ms_falls_back_to_its_clone_time() {
+    use crate::models::WarmingStepKind as Step;
+    let mut record = timed(FirstBuild::Succeeded { duration_ms: 1 }, 0);
+    record.seed_ms = None;
+    assert!(record.timed_steps().contains(&(Step::SeedClone, 30)));
 }
 
 #[test]
@@ -1135,7 +1263,7 @@ fn cancelling_a_running_first_build_stops_it_and_frees_its_slot() {
     assert!(gate.try_acquire(1).is_some());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
 #[test]
 fn the_process_runner_kills_a_cancelled_build_and_what_it_started() {
     let dir = tempfile::tempdir().unwrap();
@@ -1148,6 +1276,8 @@ fn the_process_runner_kills_a_cancelled_build_and_what_it_started() {
         cwd: dir.path().to_path_buf(),
         env: Vec::new(),
         timeout: Duration::from_secs(120),
+        priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
     };
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();

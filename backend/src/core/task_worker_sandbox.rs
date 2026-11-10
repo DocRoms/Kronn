@@ -93,6 +93,9 @@ impl Mechanism {
     /// a launcher that is missing or cannot apply its sandbox. Only a success
     /// is remembered: a host that gains `bwrap` is picked up without a restart.
     pub fn usable_on_host() -> Result<Self, String> {
+        if let Some(refusal) = crate::core::cmd::real_sandbox_refusal() {
+            return Err(refusal);
+        }
         Self::usable_from(Self::of_host(), Self::check_usable_remembered)
     }
 
@@ -183,7 +186,9 @@ impl Mechanism {
 /// ([`Confinement`]) or the profile of what a trust level grants
 /// ([`crate::core::trust_sandbox::LevelConfinement`]).
 pub trait CommandConfinement: Send + Sync {
-    /// The process `probe` becomes under this confinement, not yet started.
+    /// The process `probe` becomes under this confinement, not yet started, at
+    /// `probe.priority` (KT-1633): the priority launcher goes in front of the
+    /// sandbox's own.
     fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command;
 }
 
@@ -403,9 +408,7 @@ pub fn bubblewrap_args_hiding(
         let at = socket.to_string_lossy().into_owned();
         args.extend(["--bind".to_string(), real, at]);
     }
-    for dir in crate::core::trust_sandbox::bubblewrap_mount_points(hidden) {
-        args.extend(["--tmpfs".to_string(), dir]);
-    }
+    args.extend(crate::core::trust_sandbox::bubblewrap_hide_args(hidden));
     args.extend(
         [
             "--unshare-net",
@@ -463,6 +466,8 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
         cwd: probe.cwd.clone(),
         env,
         timeout: probe.timeout,
+        priority: probe.priority,
+        clean_env: probe.clean_env,
     }
 }
 
@@ -579,8 +584,20 @@ pub struct Confinement {
 impl Confinement {
     /// The confinement of a task worktree on this host: its mechanism, once
     /// the host proved it can apply it ([`Mechanism::check_usable`]).
+    ///
+    /// KT-1656 — it also closes the agents' credential stores of the owner's
+    /// home (`~/.gemini`, `~/.codex`, `~/.claude.json`, …): the build and the
+    /// tests of a worker's tree are worker-written code, and the worker must not
+    /// reach through them what its own sandbox refuses it. The shared tools'
+    /// files (`~/.npmrc`, `~/.docker/config.json`) stay readable here: a package
+    /// manager or the Docker CLI that a validation runs fails on a file it is
+    /// refused, where the worker's shell is told what it may not run.
     pub fn for_worktree(work_dir: &Path) -> Result<Self, String> {
-        Self::with_mechanism(work_dir, Some(Mechanism::usable_on_host()?))
+        let confinement = Self::with_mechanism(work_dir, Some(Mechanism::usable_on_host()?))?;
+        Ok(confinement.hiding(crate::core::home_credentials::hidden(
+            None,
+            crate::core::home_credentials::Reach::FullAccess,
+        )))
     }
 
     /// [`Confinement::for_worktree`] with the host's mechanism and the check of
@@ -634,9 +651,12 @@ impl Confinement {
         self
     }
 
-    /// This confinement with `dirs` closed to the command (KT-1492).
+    /// This confinement with `dirs` closed to the command (KT-1492), on top of
+    /// what it already hides.
     pub fn hiding(mut self, dirs: Vec<PathBuf>) -> Self {
-        self.policy.hidden = dirs;
+        self.policy.hidden.extend(dirs);
+        self.policy.hidden.sort();
+        self.policy.hidden.dedup();
         self
     }
 
@@ -667,10 +687,11 @@ impl Confinement {
     /// The process that runs `probe` confined: the sealed environment of
     /// `route`, in a session of its own with no controlling terminal
     /// ([`crate::core::task_worker_env::detach_from_terminal`], the launcher of
-    /// the lane's first build). Not started.
+    /// the lane's first build), at `probe.priority` (KT-1633). Not started.
     pub fn command(&self, probe: &ProbeCommand, route: ChildRoute) -> tokio::process::Command {
         let wrapped = self.wrap(probe);
-        let mut command = crate::core::cmd::async_cmd(&wrapped.program, route);
+        let mut command =
+            crate::core::cmd::async_cmd_with(&wrapped.program, route, wrapped.priority);
         command.args(&wrapped.args).current_dir(&wrapped.cwd);
         for (name, value) in &wrapped.env {
             command.env(name, value);
