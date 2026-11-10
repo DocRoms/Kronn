@@ -5,7 +5,7 @@ Status: **implemented for 0.9.1** (2026-07-25).
 The domain schema, compact HTTP/MCP contract, discussion panel, global backlog,
 human-gated proposal cards and delta-only prompt notifications are implemented.
 `[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99#planning_tasks]`
-`[src: file: backend/src/api/planning.rs:223-264#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:311-358#decide_proposal_item]`
+`[src: file: backend/src/api/planning.rs:239-280#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:327-374#decide_proposal_item]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
 `[src: file: frontend/src/pages/PlanningPage.tsx:191-216#withDiscussion]`
 `[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3771-3802#planning_change_count]`

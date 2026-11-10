@@ -51,8 +51,8 @@ container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4706-4711#read_only_repos]
 [src: file: backend/src/agents/runner.rs:4732-4734#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:1001-1010#apply]
-[src: file: backend/src/agents/runner.rs:14808-14813#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15043-15054#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:14853-14858#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15088-15099#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14664-14683#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14821-14835#is_codex]
+[src: file: backend/src/agents/runner.rs:14709-14728#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:14866-14880#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even

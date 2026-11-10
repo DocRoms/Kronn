@@ -217,8 +217,8 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13833-13850#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13965-13996#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13878-13895#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14010-14041#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
 [src: file: backend/src/agents/runner.rs:5162-5190#adapter_task_worker_args]
