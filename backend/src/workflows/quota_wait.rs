@@ -7,8 +7,10 @@
 //! until a human resumes it. The state lives on the run row, so it survives a
 //! backend restart.
 //!
-//! A foreach child waits the same way, but its parent mirrors the wait and
-//! owns the wake-up: resuming the parent reclaims the child at its step.
+//! A sub-workflow child (foreach item or single, at any depth) waits the same
+//! way, but its parent mirrors the wait and owns the wake-up: resuming the
+//! parent reclaims the child at its step. A batch whose children were all
+//! refused makes its own step wait, like an Agent step.
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -24,7 +26,7 @@ const RESET_MARGIN: Duration = Duration::minutes(2);
 pub const MAX_AUTOMATIC_WAKES: u32 = 4;
 /// Longest reset Kronn trusts; anything further is a misparse.
 const MAX_RESET_HORIZON: Duration = Duration::days(45);
-/// Set by a foreach on a child its parent can resume after a quota wait.
+/// Set by a parent on a child it can resume after a quota wait.
 pub const PARENT_RESUMES_KEY: &str = "__subwf_quota_resumable__";
 
 /// Whether a quota refusal in `run` may wait instead of failing: a top-level
@@ -57,8 +59,9 @@ fn mirrored_child_key(step_name: &str) -> String {
     format!("__kronn.quota_mirrored_child.{step_name}")
 }
 
-/// Records which child, and which of its waits, a foreach step mirrored, so
-/// its resume tells that wait apart from a child some other pass left waiting.
+/// Records which child, and which of its waits, a sub-workflow step mirrored,
+/// again each time the child parks. A foreach resume only trusts the wait it
+/// mirrored; a single step follows the child run whichever wait it is on.
 pub fn remember_mirrored_child(
     run_state: &mut std::collections::HashMap<String, String>,
     step_name: &str,

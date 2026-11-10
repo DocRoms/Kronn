@@ -150,7 +150,7 @@ that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4225-4271#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
-[src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
 that names a connection uses it; a row on another agent uses none, even when
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:945-975#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:964-994#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -217,8 +217,8 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13622-13639#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13761-13792#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13688-13705#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13827-13858#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
 [src: file: backend/src/agents/runner.rs:5036-5064#adapter_task_worker_args]

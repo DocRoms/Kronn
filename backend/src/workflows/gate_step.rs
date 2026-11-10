@@ -71,6 +71,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -101,6 +102,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }

@@ -57,6 +57,9 @@ import { detectAutomationImport, type AutomationImportKind } from '../lib/automa
 import { describeRedacted, exportRedactionNotice, redactedFieldsIn } from '../lib/redactedFields';
 import { AGENT_LABELS } from '../lib/constants';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
+import { isHeavyOutput } from '../lib/heavyOutput';
+import { formatBytes } from '../lib/live-page-weight';
+import { useHeavyOutputThreshold } from '../hooks/useHeavyOutputThreshold';
 import type { AgentSwitchTarget } from '../components/AgentSwitchPicker';
 import { AgentCompareSelector } from '../components/AgentCompareSelector';
 import { defaultCompareTargets, type CompareTarget } from '../lib/compareTargets';
@@ -352,6 +355,7 @@ const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
 function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, highlightQuickPromptId = null, onHighlightConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings, onNavigateSettingsAnchor }: WorkflowsPageProps) {
   const { t } = useT();
+  const heavyOutputKb = useHeavyOutputThreshold();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
   // navigation on tablets too, before the detail content becomes cramped.
@@ -2988,6 +2992,17 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                         >
                           <AlertTriangle size={10} />
                           {t('wf.needsConfig').replace('{0}', String(wf.misconfigured_step_count))}
+                        </span>
+                      )}
+                      {/* KT-1525 — the last run's heaviest step output, named. */}
+                      {wf.last_run?.heaviest_output_step && isHeavyOutput(wf.last_run.heaviest_output_bytes, heavyOutputKb) && (
+                        <span
+                          className="wf-needs-config-badge wf-unsafe-badge"
+                          data-testid="wf-heavy-output-card"
+                          title={t('wf.heavyOutput.cardTip', wf.last_run.heaviest_output_step, formatBytes(wf.last_run.heaviest_output_bytes ?? 0))}
+                        >
+                          <AlertTriangle size={10} />
+                          {t('wf.heavyOutput.cardBadge', wf.last_run.heaviest_output_step, formatBytes(wf.last_run.heaviest_output_bytes ?? 0))}
                         </span>
                       )}
                     </div>

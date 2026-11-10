@@ -31,22 +31,22 @@ for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
 pre-edit file or a repetition refusal (KT-948).
-[src: file: backend/src/agents/runner.rs:11819-11862#observation_readers_to_restore]
+[src: file: backend/src/agents/runner.rs:11885-11928#observation_readers_to_restore]
 
 The HTTP runner also publishes structured input/output and reported cache-token
 counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:8926-8937#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:2119-2126#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10245-10275#task_usage]
+[src: file: backend/src/agents/runner.rs:8992-9003#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:2119-2126#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10311-10341#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
-[src: file: backend/src/agents/runner.rs:8219-8225#request_provider_cost]
+[src: file: backend/src/agents/runner.rs:8285-8291#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:2112-2117#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2239#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1295#reported_cost_usd_micros]
@@ -71,9 +71,9 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8233-8235#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8237-8239#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:12512-12527#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:8299-8301#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8303-8305#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:12578-12593#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:8968-8972#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:9034-9038#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the
@@ -224,8 +224,8 @@ behaviour is the same as for a joined CLI; see
   [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:710-718#checked_launch_connection]
   [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection]
-  [src: file: backend/src/workflows/steps.rs:1153-1193#resolve_step_connection]
-  [src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
+  [src: file: backend/src/workflows/steps.rs:1171-1211#resolve_step_connection]
+  [src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 - **Mid-thread `@mention` autocomplete doesn't suggest connection aliases.**
   The composer's autocomplete only lists built-in agents; typing a
   connection's exact alias (e.g. `@groq`) still dispatches correctly — the

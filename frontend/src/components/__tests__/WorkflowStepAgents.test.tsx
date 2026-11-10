@@ -4,9 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApiMock } from '../../test/apiMock';
 import type { AgentType, CatalogModelEntry, ModelCatalogView, ModelTier } from '../../types/generated';
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), workflow: vi.fn(), detect: vi.fn() }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), workflow: vi.fn(), detect: vi.fn(), access: vi.fn() }));
 vi.mock('../../lib/api', () => buildApiMock({
   modelCatalogApi: { list: mocks.list as never },
+  config: { getAgentAccess: mocks.access as never },
   workflows: { get: mocks.workflow as never },
   agents: { detect: mocks.detect as never },
 }));
@@ -43,7 +44,9 @@ beforeEach(() => {
   mocks.detect.mockReset().mockResolvedValue([
     { agent_type: 'Codex', enabled: true, installed: true, runtime_available: true },
     { agent_type: 'ClaudeCode', enabled: true, installed: true, runtime_available: true },
+    { agent_type: 'CopilotCli', enabled: true, installed: true, runtime_available: true },
   ]);
+  mocks.access.mockReset().mockResolvedValue({ copilot_cli: { full_access: false } });
 });
 afterEach(cleanup);
 
@@ -100,5 +103,32 @@ describe('KT-1095 — the launch card follows the step tier with the real catalo
     expect(changed).toHaveBeenLastCalledWith({ 'step-1': { agent: 'ClaudeCode' } });
     expect(modelBox()).toHaveAttribute('placeholder', 'claude-reasoning');
     expect(effortOptions()).toContain('xhigh');
+  });
+});
+
+describe('KT-1150 — the launch selector badges agents that need full access', () => {
+  async function openCopilotStep(fullAccess: boolean) {
+    mocks.access.mockResolvedValue({ copilot_cli: { full_access: fullAccess } });
+    mocks.workflow.mockResolvedValue({ id: 'wf', steps: [{
+      id: 'step-1', name: 'Draft', step_type: { type: 'Agent' }, agent: 'CopilotCli',
+      agent_settings: { tier: 'default' },
+    }] });
+    render(<Harness onChange={vi.fn()} />);
+    await act(async () => {});
+    fireEvent.click((await screen.findByTestId('action-card-step-agents')).querySelector('summary')!);
+    fireEvent.click(screen.getByRole('button', { name: 'disc.action.stepAgents.agentFor' }));
+  }
+
+  it('badges a native agent whose full access is off', async () => {
+    await openCopilotStep(false);
+    const copilot = screen.getAllByRole('menuitem').find(item => /copilot/i.test(item.textContent ?? ''))!;
+    expect(copilot).toHaveTextContent('agentPicker.needsFullAccess');
+    const claude = screen.getAllByRole('menuitem').find(item => /claude/i.test(item.textContent ?? ''))!;
+    expect(claude).not.toHaveTextContent('agentPicker.needsFullAccess');
+  });
+
+  it('shows no badge once full access is on', async () => {
+    await openCopilotStep(true);
+    expect(screen.queryByTestId('agent-needs-full-access')).toBeNull();
   });
 });

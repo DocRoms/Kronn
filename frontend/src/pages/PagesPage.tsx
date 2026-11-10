@@ -15,6 +15,7 @@ import { datasetRecords, recordsToRows } from '../lib/live-page-csv';
 import { formatBytes, pageHtmlWeight } from '../lib/live-page-weight';
 import { replayQueue } from '../lib/live-page-replay';
 import { HtmlWeightBadge } from '../components/HtmlWeightBadge';
+import { DatasetWeightBadge } from '../components/DatasetWeightBadge';
 import { DetailHeaderShell } from '../components/DetailHeaderShell';
 import {
   buildSandboxDocument,
@@ -1195,6 +1196,7 @@ export function PagesPage({
                   {pageHtmlWeight(detail.html_size_bytes) !== 'ok' && (
                     <HtmlWeightBadge bytes={detail.html_size_bytes} variant="header" />
                   )}
+                  <DatasetWeightBadge bytes={totalDatasetSize} variant="header" />
                   {detail.archived && <span className="live-pages-archived-badge"><Archive size={11} />{t('pages.archived')}</span>}
                   <div className="live-pages-header-actions">
                     <a
@@ -1546,6 +1548,7 @@ export function PagesPage({
                     <button type="button" onClick={() => setSelectedDatasetId(dataset.id)} title={t('pages.datasetSizeTitle', dataset.name, formatBytes(dataset.data_size_bytes))}>
                       <strong>{dataset.name}</strong>
                       <span>{formatBytes(dataset.data_size_bytes)}</span>
+                      <DatasetWeightBadge bytes={dataset.data_size_bytes} name={dataset.name} variant="list" />
                       <LivePageDatasetUsageLine dataset={dataset} usage={datasetUsage.find(item => item.name === dataset.name)} />
                     </button>
                   </li>

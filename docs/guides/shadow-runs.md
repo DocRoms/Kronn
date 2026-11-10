@@ -76,7 +76,7 @@ settings. That is the step's `external_effect` flag.
 
 The shadow run skips those steps and every Gate, since a trial run must never
 wait for a person.
-[src: file: backend/src/workflows/runner.rs:2494-2500#skip_in_shadow]
+[src: file: backend/src/workflows/runner.rs:2507-2513#skip_in_shadow]
 A skipped step records a success with `[SIGNAL: SKIPPED_SHADOW]` and the run
 goes on with the next step.
 [src: file: backend/src/workflows/shadow.rs:262-294#skipped]

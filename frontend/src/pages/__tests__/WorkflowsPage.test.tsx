@@ -294,6 +294,29 @@ describe('WorkflowsPage', () => {
     expect(screen.getByRole('button', { name: 'Ouvrir la liste' })).toHaveClass('collection-shell-sidebar-rail');
   });
 
+  it('KT-1525 — the card of a workflow whose last run left a heavy output names the step', async () => {
+    const card = (id: string, name: string, bytes: number, step: string | null) => ({
+      id, name, project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
+      enabled: true, pinned: false, created_at: '2026-01-01T00:00:00Z',
+      last_run: {
+        id: `${id}-run`, status: 'Success', started_at: '2026-10-31T10:00:00Z', finished_at: '2026-10-31T10:01:00Z',
+        tokens_used: 0, heaviest_output_bytes: bytes, heaviest_output_step: step,
+      },
+    }) as WorkflowSummary;
+    mockWorkflowsApi.list.mockResolvedValueOnce([
+      card('wf-heavy', 'Hourly Jira', 1_153_434, 'collect_jira'),
+      card('wf-light', 'Daily digest', 2048, 'digest'),
+      card('wf-legacy', 'Old run', 0, null),
+    ]);
+    await wrap(<WorkflowsPage projects={[]} />);
+    const badges = await screen.findAllByTestId('wf-heavy-output-card');
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent('collect_jira');
+    expect(badges[0]).toHaveTextContent('1.1 MB');
+    expect(badges[0].getAttribute('title')).toMatch(/collect_jira/);
+  });
+
   it('collapses to the shared Discussions-style rail and reopens the sidebar', async () => {
     await wrap(<WorkflowsPage projects={[]} />);
     const collapse = screen.getByRole('button', { name: 'Fermer la liste' });

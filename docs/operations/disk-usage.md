@@ -101,8 +101,8 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 (`reassign_execution_worker_keeping_origin` and `extend_review_rounds` refuse a terminal one), so there is no
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
-[src: file: backend/src/api/orchestration.rs:4409-4421#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:13379-13390#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:4430-4442#cleanup_integrated_execution]
+[src: file: backend/src/api/orchestration.rs:13512-13523#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -144,7 +144,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:791-857#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:9887-9910#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:9914-9937#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.

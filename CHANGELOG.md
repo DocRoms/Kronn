@@ -13,6 +13,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Workflows: a heavy step output no longer goes unnoticed (KT-1525). Each step
+  result records its output size, a Collect API data step records the payload of
+  each source, and the run view flags a step above the threshold (256 KB by
+  default, Settings > Workers) with its name and the fix (select fields, limit,
+  paginate); the workflow card names the heaviest step of its last run. The
+  Page header and sync panel grade the weight of the datasets a Page receives,
+  whoever publishes them, like its HTML weight.
+
 - Workflows: the design doctrine now reaches the agents that author them over
   MCP. One short file (decision tree, "at equal cost, choose for
   maintainability" rules, ApiCall limits) is served as `authoring_doctrine` by
@@ -387,6 +395,16 @@ Release notes for 0.9.3 and earlier are available in the
   sweep (no duplicate PR comments). Claude's short "limit · resets …" wordings
   are classified as quota; "Context limit: reset the conversation" is not. The
   run page no longer offers Resume on a sub-workflow child.
+- A single sub-workflow child refused for quota, at any depth, waits through
+  its parent instead of failing it (KT-1119). The parent goes to
+  `WaitingQuota` with the wait it mirrored, and its resume reclaims the same
+  child at the refused step: neither the parent's nor the child's earlier steps
+  are replayed. A foreach under a single sub-workflow waits through the whole
+  chain. A batch step whose children were all refused for quota waits too and
+  re-runs at the reset; a batch with at least one success keeps its partial
+  verdict. Cancellation never wakes the chain, a child cancelled on its own ends
+  the parent's wait with a clear failure, and the parent follows its child
+  across repeated refusals instead of starting another.
 - A quota pause no longer spends a run's Timeout guard, which now measures
   active runner time (persisted, so a restart keeps it). A reset announced past
   the old deadline schedules a wake like any other instead of leaving the run

@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:9436-9439#resolve_chat_codec] (call site)
+[src: file: backend/src/agents/runner.rs:9502-9505#resolve_chat_codec] (call site)
 
 ### Pre-dispatch capability gate
 
@@ -127,13 +127,13 @@ integrated. [src: file: backend/src/api/discussions/orchestration.rs:66-132#chec
 participant round: [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection],
 synthesis: [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection])
 Workflow Agent steps: the connection resolver
-[src: file: backend/src/workflows/steps.rs:1153-1193#resolve_step_connection],
+[src: file: backend/src/workflows/steps.rs:1171-1211#resolve_step_connection],
 the run-start check
 [src: file: backend/src/workflows/runner.rs:1967-2015#resolve_step_connection],
 the check immediately before dispatch
-[src: file: backend/src/workflows/steps.rs:402-414#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:412-424#preflight_workflow_launch]
 and the preflight on the `http:<connection-id>` target and effective model
-[src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 
 ## Sources
 

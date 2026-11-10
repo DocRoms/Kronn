@@ -1055,6 +1055,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "289_project_lane_seeds_confirmed",
         include_str!("sql/289_project_lane_seeds_confirmed.sql"),
     ),
+    (
+        "291_workflow_runs_heaviest_output",
+        include_str!("sql/291_workflow_runs_heaviest_output.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

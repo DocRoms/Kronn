@@ -239,9 +239,9 @@ Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5#collection-detail-header]`
 `[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1858#collection-detail-header]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3236#selectedQuickPromptId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3716#selectedQuickApiId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:4139#selectedQuickExecId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3251#selectedQuickPromptId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3731#selectedQuickApiId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:4154#selectedQuickExecId]`
 
 The Projects initial loading state keeps the complete master/detail shell
 mounted. Its indicators render inside the sidebar and detail slots rather than
@@ -265,12 +265,12 @@ resource and collapsed resource categories, while search expands matching
 categories only temporarily.
 `[src: file: frontend/src/lib/automationNavigation.ts:20-33#readAutomationLastVisit]`
 `[src: file: frontend/src/lib/automationNavigation.ts:35-41#writeAutomationLastVisit]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:257-267#readCollapsedAutomationSections]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:584-593#AUTOMATION_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2596-2601#isGroupCollapsed]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:263-273#readCollapsedAutomationSections]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:588-597#AUTOMATION_COLLAPSED_STORAGE_KEY]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2600-2605#isGroupCollapsed]`
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
-`[src: file: frontend/src/pages/PagesPage.tsx:77-78#PAGE_NAVIGATION_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:78-79#PAGE_NAVIGATION_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:94-113#readPageNavigation]`
 `[src: file: frontend/src/pages/PagesPage.tsx:294-300#PAGE_COLLAPSED_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:325-350#refresh]`

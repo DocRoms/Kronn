@@ -612,6 +612,7 @@ pub async fn settle_errored_run(
         last_activity: None,
         quota_wait: None,
         terminal_stop: None,
+        output_bytes: None,
     });
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let run_id = run.id.clone();
@@ -746,6 +747,7 @@ fn workspace_failure_result(msg: &str) -> StepResult {
         last_activity: None,
         quota_wait: None,
         terminal_stop: None,
+        output_bytes: None,
     }
 }
 
@@ -1547,6 +1549,7 @@ async fn execute_run_body(
                                 last_activity: None,
                                 quota_wait: None,
                                 terminal_stop: None,
+                                output_bytes: None,
                             });
                             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                             let db_w = db.clone();
@@ -1623,6 +1626,7 @@ async fn execute_run_body(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1661,6 +1665,7 @@ async fn execute_run_body(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1966,6 +1971,7 @@ async fn execute_run_body(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -2053,6 +2059,7 @@ async fn execute_run_body(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -2158,6 +2165,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             all_success = false;
             break;
@@ -2192,6 +2200,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             break;
         }
@@ -2237,6 +2246,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             stopped_by_guard = true;
             break;
@@ -2295,6 +2305,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             stopped_by_guard = true;
             break;
@@ -2359,6 +2370,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             stopped_by_guard = true;
             break;
@@ -2433,6 +2445,7 @@ async fn execute_run_body(
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         };
         apply_step_snapshot(
             step,
@@ -2618,6 +2631,7 @@ async fn execute_run_body(
                                 last_activity: None,
                                 quota_wait: None,
                                 terminal_stop: None,
+                                output_bytes: None,
                             },
                             condition_action: None,
                         }
@@ -2990,6 +3004,7 @@ async fn execute_run_body(
                         last_activity: None,
                         quota_wait: None,
                         terminal_stop: None,
+                        output_bytes: None,
                     },
                     condition_action: None,
                 }
@@ -3039,6 +3054,7 @@ async fn execute_run_body(
                         last_activity: None,
                         quota_wait: None,
                         terminal_stop: None,
+                        output_bytes: None,
                     },
                     condition_action: None,
                 }
@@ -4550,6 +4566,7 @@ fn budget_unrecorded_row(error: &anyhow::Error) -> StepResult {
         last_activity: None,
         quota_wait: None,
         terminal_stop: Some(reason),
+        output_bytes: None,
     }
 }
 
@@ -4954,6 +4971,8 @@ pub(crate) fn apply_step_snapshot(
         StepType::TaskBoard => "TaskBoard",
     };
     result.step_kind = Some(kind.into());
+    // KT-1525 — what the step left in the run: the run view grades it.
+    result.output_bytes = Some(result.output.len() as u64);
     if matches!(step.step_type, StepType::Agent) {
         if let Some(provenance) = &result.agent_provenance {
             let selected = provenance
@@ -5386,6 +5405,7 @@ mod tests {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         }
     }
 
@@ -5743,7 +5763,24 @@ mod tests {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         }
+    }
+
+    /// KT-1525 — the size of what the step left in the run is stamped on its
+    /// result, in bytes (not characters), whatever the step kind.
+    #[test]
+    fn snapshot_stamps_the_output_size_in_bytes() {
+        for kind in [StepType::Agent, StepType::ApiCall, StepType::CollectApiData] {
+            let step = mk_step_for_snapshot(kind);
+            let mut r = empty_result();
+            r.output = "é".repeat(1000);
+            apply_step_snapshot(&step, &mut r, None);
+            assert_eq!(r.output_bytes, Some(2000));
+        }
+        let mut empty = empty_result();
+        apply_step_snapshot(&mk_step_for_snapshot(StepType::Agent), &mut empty, None);
+        assert_eq!(empty.output_bytes, Some(0));
     }
 
     #[test]
@@ -5876,6 +5913,7 @@ mod tests {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         }
     }
 
@@ -11073,6 +11111,7 @@ mod tests {
     mod native_full_access_runs;
     mod quota_wait_foreach_runs;
     mod quota_wait_runs;
+    mod quota_wait_subworkflow_runs;
     mod run_effect_runs;
     mod run_pin_runs;
     mod shadow_runs;

@@ -172,7 +172,7 @@ for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:5986-5996#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:15800-16081#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:15866-16147#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:532-560#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
@@ -228,5 +228,5 @@ explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1372-1380#currentConnectionId]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1186-1203#agentSettingsForSelection]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1190-1207#agentSettingsForSelection]
 [src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]

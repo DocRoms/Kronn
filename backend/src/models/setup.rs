@@ -127,6 +127,11 @@ pub struct WorkersConfig {
     /// behind them, so it cannot bound the machine load on its own.
     #[serde(default = "default_workers_max_concurrent_task_workers")]
     pub max_concurrent_task_workers: u32,
+    /// KT-1525 — a workflow step output above this many KB is shown as a
+    /// « heavy output » warning in the run view and on the workflow card.
+    /// The run itself is never refused.
+    #[serde(default = "default_workers_heavy_output_kb")]
+    pub heavy_output_kb: u32,
 }
 
 impl Default for WorkersConfig {
@@ -136,12 +141,17 @@ impl Default for WorkersConfig {
             review_rounds_unlimited: false,
             background_priority: true,
             max_concurrent_task_workers: DEFAULT_MAX_CONCURRENT_TASK_WORKERS,
+            heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
         }
     }
 }
 
 fn default_workers_review_rounds() -> u32 {
     DEFAULT_MAX_REVIEW_ROUNDS
+}
+
+fn default_workers_heavy_output_kb() -> u32 {
+    DEFAULT_HEAVY_OUTPUT_KB
 }
 
 fn default_workers_max_concurrent_task_workers() -> u32 {
@@ -175,6 +185,11 @@ impl WorkersConfig {
                  {MAX_CONCURRENT_TASK_WORKERS_LIMIT}"
             ));
         }
+        if !(1..=MAX_HEAVY_OUTPUT_KB).contains(&self.heavy_output_kb) {
+            return Err(format!(
+                "heavy_output_kb must be between 1 and {MAX_HEAVY_OUTPUT_KB}"
+            ));
+        }
         if !(1..=MAX_REVIEW_ROUNDS_INTEGER).contains(&self.default_max_review_rounds) {
             return Err(format!(
                 "default_max_review_rounds must be between 1 and {MAX_REVIEW_ROUNDS_INTEGER}"
@@ -184,6 +199,10 @@ impl WorkersConfig {
     }
 }
 
+/// KT-1525 — default size (KB) above which a step output is flagged heavy.
+pub const DEFAULT_HEAVY_OUTPUT_KB: u32 = 256;
+/// Largest threshold the Settings form accepts (100 MB).
+pub const MAX_HEAVY_OUTPUT_KB: u32 = 102_400;
 /// Default cap on local task workers running at once (KT-1632). Builds, not
 /// agent processes, are what loads the machine: two lanes is what it carries.
 pub const DEFAULT_MAX_CONCURRENT_TASK_WORKERS: u32 = 2;

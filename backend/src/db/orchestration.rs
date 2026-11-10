@@ -5496,14 +5496,254 @@ fn park_campaign_after_failed_execution(
         return Ok(());
     };
     if run.kind == OrchestrationRunKind::Campaign && !run.control_state.is_terminal() {
-        set_orchestration_control_state(
+        // The terminal card of this execution is a fact and owes nothing
+        // (`notify_principal_of_terminal`); the obligation it leaves behind is
+        // minted here, by the producer of the park.
+        park_campaign_awaiting_human(
             conn,
             &run_id,
-            OrchestrationControlState::AwaitingHuman,
-            Some("a child execution failed; decide whether the campaign may continue"),
+            CampaignParkCause::FailedExecution,
+            "a child execution failed; decide whether the campaign may continue",
+            Some(exec_id),
             actor,
         )?;
     }
+    Ok(())
+}
+
+/// Why a campaign was parked on a human outside the escalation path. Each cause
+/// owes the human something different, so each words its own card.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CampaignParkCause {
+    /// A child execution ended `Failed`.
+    FailedExecution,
+    /// A child execution is waiting on a human decision.
+    ChildDecision,
+    /// The automatic launch of the next task failed.
+    LaunchFailed,
+    /// No task is launchable and the plan is not complete.
+    PlanBlocked,
+}
+
+/// Park a campaign on a human and leave the durable card that says so (KT-650).
+///
+/// The control-state write propagates its error exactly as before. The card is
+/// best effort: it runs in its own savepoint and a failure is logged and
+/// swallowed, because losing a card is cheaper than aborting the transition
+/// that triggered it — and two of the three callers are not even inside a state
+/// transition.
+///
+/// A card is minted only when the park actually flips the state into
+/// `AwaitingHuman`. A campaign that is already parked has a standing card owing
+/// a human decision, and a second park adds no new occurrence to settle. (The
+/// escalation path publishes its own card in `sync_campaign_human_gate`.)
+pub fn park_campaign_awaiting_human(
+    conn: &Connection,
+    run_id: &str,
+    cause: CampaignParkCause,
+    reason: &str,
+    anchor_exec: Option<&str>,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    let before = get_orchestration_run(conn, run_id)?.map(|run| run.control_state);
+    set_orchestration_control_state(
+        conn,
+        run_id,
+        OrchestrationControlState::AwaitingHuman,
+        Some(reason),
+        actor,
+    )?;
+    if before == Some(OrchestrationControlState::AwaitingHuman) {
+        return Ok(());
+    }
+    if let Err(error) = in_savepoint(conn, |conn| {
+        publish_campaign_park_card(conn, run_id, cause, reason, anchor_exec)
+    }) {
+        tracing::warn!(run_id, ?cause, %error, "campaign park card not published");
+    }
+    Ok(())
+}
+
+/// The `HumanActionRequired` card of a campaign parked outside escalation.
+///
+/// Keyed on the OCCURRENCE (KT-647): the number of times this run entered
+/// `AwaitingHuman`, counted from its own journal after the flip was recorded.
+/// A run parked, resumed and parked again owns one message and one dedup key per
+/// park instead of colliding on the execution. The anchor only names who the
+/// card is about; a run-level park (no execution) uses `run`.
+fn publish_campaign_park_card(
+    conn: &Connection,
+    run_id: &str,
+    cause: CampaignParkCause,
+    reason: &str,
+    anchor_exec: Option<&str>,
+) -> Result<()> {
+    let Some(run) = get_orchestration_run(conn, run_id)? else {
+        return Ok(());
+    };
+    let Some(principal) = crate::db::discussions::get_discussion(conn, &run.discussion_id)? else {
+        return Ok(());
+    };
+    let lang = RoomLang::from_code(&principal.language);
+
+    let task: Option<(i64, String)> = match anchor_exec {
+        Some(exec_id) => conn
+            .query_row(
+                "SELECT t.task_number, t.title FROM task_executions e \
+                 JOIN planning_tasks t ON t.id = e.task_id WHERE e.id = ?1",
+                [exec_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?,
+        None => None,
+    };
+    let reference = task.as_ref().map(|(number, _)| format!("KT-{number}"));
+    let title = match (&reference, &task) {
+        (Some(reference), Some((_, title))) => format!("{reference} — {title}"),
+        _ => lang
+            .pick(
+                "Campagne en attente d'une décision humaine",
+                "Campaign waiting for a human decision",
+            )
+            .to_string(),
+    };
+
+    let detail: String = reason
+        .chars()
+        .take(300)
+        .map(|c| if c == '`' { '\'' } else { c })
+        .collect();
+    let (what_fr, what_en, action_fr, action_en) = match cause {
+        CampaignParkCause::FailedExecution => (
+            "une exécution enfant a échoué",
+            "a child execution failed",
+            "Décider si la campagne peut continuer, puis la relancer",
+            "Decide whether the campaign may continue, then resume it",
+        ),
+        CampaignParkCause::ChildDecision => (
+            "une exécution enfant attend une décision humaine",
+            "a child execution is waiting on a human decision",
+            "Trancher la décision de l'exécution enfant, puis relancer la campagne",
+            "Settle the child execution's decision, then resume the campaign",
+        ),
+        CampaignParkCause::LaunchFailed => (
+            "le lancement automatique de la tâche suivante a échoué",
+            "the automatic launch of the next task failed",
+            "Corriger la cause de l'échec de lancement, puis relancer la campagne",
+            "Fix the cause of the launch failure, then resume the campaign",
+        ),
+        CampaignParkCause::PlanBlocked => (
+            "aucune tâche n'est lançable et le plan n'est pas terminé",
+            "no task is launchable and the plan is not complete",
+            "Corriger le plan (tâches bloquées ou dépendances), puis relancer la campagne",
+            "Correct the plan (blocked tasks or dependencies), then resume the campaign",
+        ),
+    };
+    let content = match lang {
+        RoomLang::Fr => format!(
+            "**{title}**\n\nLa campagne est en pause : {what_fr}. Elle n'enchaînera pas seule.\n\nRaison : `{detail}`"
+        ),
+        RoomLang::En => format!(
+            "**{title}**\n\nThe campaign is paused: {what_en}. It will not chain on its own.\n\nReason: `{detail}`"
+        ),
+    };
+    let highlight = match (&reference, lang) {
+        (Some(reference), RoomLang::Fr) => {
+            format!("{reference} — la campagne attend une décision humaine.")
+        }
+        (Some(reference), RoomLang::En) => {
+            format!("{reference} — the campaign is waiting for a human decision.")
+        }
+        (None, _) => lang
+            .pick(
+                "La campagne attend une décision humaine.",
+                "The campaign is waiting for a human decision.",
+            )
+            .to_string(),
+    };
+
+    // Counted AFTER the flip was journalled by `set_orchestration_control_state`,
+    // so this park is its own index (>= 1).
+    let occurrence: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM orchestration_run_events \
+         WHERE orchestration_run_id = ?1 AND action = 'control_state_changed' \
+           AND to_state = 'awaiting_human'",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let anchor = anchor_exec.unwrap_or("run");
+    let message_id = format!("orch-campaign-gate:{run_id}:{anchor}:parked:{occurrence}");
+    let already_posted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+        [&message_id],
+        |row| row.get(0),
+    )?;
+    if already_posted {
+        return Ok(());
+    }
+
+    let message = DiscussionMessage {
+        id: message_id,
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content,
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
+    };
+    let target = match anchor_exec {
+        Some(exec_id) => principal_notice_target(conn, exec_id, principal.agent)?,
+        None => MessageTarget::discussion_agent(principal.agent),
+    };
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        conn,
+        &run.discussion_id,
+        &message,
+        &[target],
+        &[],
+        None,
+    )?;
+    crate::db::discussion_important::publish_steering_card(
+        conn,
+        &run.discussion_id,
+        &message.id,
+        crate::db::discussion_important::SteeringCard {
+            category: crate::db::discussion_important::ImportantCategory::HumanActionRequired,
+            dedup_key: &format!("orch.campaign.gate.{run_id}.{anchor}.parked.{occurrence}"),
+            title: &title,
+            highlight: &highlight,
+            impact: lang.pick(
+                "Aucune tâche de cette campagne n'avance tant qu'un humain n'a pas tranché.",
+                "No task of this campaign advances until a human decides.",
+            ),
+            action_required: crate::db::discussion_important::ImportantAction::owed(
+                lang.pick(action_fr, action_en),
+                lang.pick("Humain", "Human"),
+            ),
+            references: crate::db::discussion_important::ImportantReferences {
+                task_ref: reference,
+                execution_id: anchor_exec.map(str::to_string),
+                ..Default::default()
+            },
+        },
+        &message.timestamp.to_rfc3339(),
+    )?;
     Ok(())
 }
 

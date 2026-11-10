@@ -21,6 +21,7 @@ import type { WorkersConfig } from '../../types/generated';
 import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { MAX_REVIEW_ROUNDS, MIN_REVIEW_ROUNDS } from '../../lib/reviewRounds';
+import { DEFAULT_HEAVY_OUTPUT_KB, MAX_HEAVY_OUTPUT_KB, MIN_HEAVY_OUTPUT_KB } from '../../lib/heavyOutput';
 import { DEFAULT_TASK_WORKERS, MAX_TASK_WORKERS, MIN_TASK_WORKERS } from '../../lib/taskWorkers';
 import '../../pages/SettingsPage.css';
 
@@ -34,6 +35,7 @@ export function WorkersSection({ t }: Props) {
   const [unlimited, setUnlimited] = useState(false);
   const [background, setBackground] = useState(true);
   const [taskWorkers, setTaskWorkers] = useState(String(DEFAULT_TASK_WORKERS));
+  const [heavyKb, setHeavyKb] = useState(String(DEFAULT_HEAVY_OUTPUT_KB));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -48,6 +50,7 @@ export function WorkersSection({ t }: Props) {
         // A server that predates the switch leaves it on, as the server's own default does.
         setBackground(value.background_priority !== false);
         setTaskWorkers(String(value.max_concurrent_task_workers));
+        setHeavyKb(String(value.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -60,13 +63,16 @@ export function WorkersSection({ t }: Props) {
     && workerCap >= MIN_TASK_WORKERS && workerCap <= MAX_TASK_WORKERS;
   // Unlimited keeps the integer for when the box is unticked again, so an
   // unparseable field only blocks the save while it would actually be used.
-  const valid = (unlimited || validCount) && validWorkerCap;
+  const heavy = Number(heavyKb);
+  const validHeavy = Number.isInteger(heavy) && heavy >= MIN_HEAVY_OUTPUT_KB && heavy <= MAX_HEAVY_OUTPUT_KB;
+  const valid = (unlimited || validCount) && validWorkerCap && validHeavy;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
     && (unlimited || count === saved.default_max_review_rounds);
   const unchanged = roundsUnchanged
-    && saved !== null && workerCap === saved.max_concurrent_task_workers;
+    && saved !== null && workerCap === saved.max_concurrent_task_workers
+    && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB);
 
   const save = useAsyncGuard(async () => {
     if (!saved || !valid) return;
@@ -77,12 +83,14 @@ export function WorkersSection({ t }: Props) {
         review_rounds_unlimited: unlimited,
         background_priority: background,
         max_concurrent_task_workers: workerCap,
+        heavy_output_kb: heavy,
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
       setUnlimited(next.review_rounds_unlimited);
       setBackground(next.background_priority !== false);
       setTaskWorkers(String(next.max_concurrent_task_workers));
+      setHeavyKb(String(next.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
     } catch (cause) {
       setError(userError(cause));
     }
@@ -195,6 +203,33 @@ export function WorkersSection({ t }: Props) {
         {!validWorkerCap && (
           <p role="alert" className="default-docs-dir-error" data-testid="workers-cap-invalid">
             {t('config.workers.maxConcurrentInvalid', MIN_TASK_WORKERS, MAX_TASK_WORKERS)}
+          </p>
+        )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.heavyOutput')}</span>
+          <span className="text-base font-semibold text-accent" style={{ marginLeft: 'auto' }} data-testid="workers-heavy-current">
+            {saved === null ? '…' : t('config.workers.heavyOutputCurrent', saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)}
+          </span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-heavy-hint">{t('config.workers.heavyOutputHint')}</p>
+        <div className="flex-row gap-3">
+          <input
+            type="number"
+            className="set-input set-input-sm"
+            min={MIN_HEAVY_OUTPUT_KB}
+            max={MAX_HEAVY_OUTPUT_KB}
+            aria-label={t('config.workers.heavyOutput')}
+            value={heavyKb}
+            disabled={saved === null}
+            onChange={event => setHeavyKb(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-heavy-input"
+          />
+        </div>
+        {!validHeavy && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-heavy-invalid">
+            {t('config.workers.heavyOutputInvalid', MIN_HEAVY_OUTPUT_KB, MAX_HEAVY_OUTPUT_KB)}
           </p>
         )}
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}

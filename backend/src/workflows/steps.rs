@@ -100,6 +100,7 @@ fn refusal_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }
@@ -268,6 +269,16 @@ pub async fn execute_step(
     if let Some(refusal) = native_full_access_refusal_for(&step.agent) {
         return refusal_outcome(step, refusal);
     }
+    // A debate reviewer runs on its own agent, with that agent's saved access:
+    // refuse before the author spends a turn rather than letting the debate
+    // swallow the reviewer's error and keep the author's output as a success.
+    if let Some(refusal) = step
+        .multi_agent_review
+        .as_ref()
+        .and_then(|cfg| native_full_access_refusal_for(&cfg.reviewer_agent))
+    {
+        return refusal_outcome(step, refusal);
+    }
 
     // Build prompt (template render + output-format addendum + triage
     // addendum). Errors map to a Failed StepOutcome.
@@ -298,6 +309,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -397,6 +409,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -444,6 +457,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -822,6 +836,7 @@ pub async fn execute_step(
                                         last_activity: None,
                                         quota_wait: None,
                                         terminal_stop: None,
+                                        output_bytes: None,
                                     },
                                     condition_action: None,
                                 };
@@ -966,6 +981,7 @@ pub async fn execute_step(
                         last_activity: None,
                         quota_wait: None,
                         terminal_stop: None,
+                        output_bytes: None,
                     },
                     condition_action,
                 };
@@ -1006,6 +1022,7 @@ pub async fn execute_step(
                             last_activity: None,
                             quota_wait: Some(quota),
                             terminal_stop: None,
+                            output_bytes: None,
                         },
                         condition_action: None,
                     };
@@ -1048,6 +1065,7 @@ pub async fn execute_step(
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action,
     }
@@ -2147,6 +2165,7 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     })

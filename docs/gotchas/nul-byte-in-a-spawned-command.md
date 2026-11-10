@@ -4,7 +4,7 @@
 data` and names nothing. Four carriers produce that identical error — the
 program name, any argument, any environment entry, and the working directory —
 and Kronn's pre-spawn check examines all four.
-[src: file: backend/src/agents/runner.rs:14214-14262#nul_byte_offender]
+[src: file: backend/src/agents/runner.rs:14280-14328#nul_byte_offender]
 
 A `\0` is valid UTF-8, so `read_to_string` carries one out of a file without a
 word. Any value Kronn reads from disk or decrypts can therefore reach a command
@@ -19,11 +19,11 @@ into a C string, it substitutes the literal `<string-with-nul>`. Only
 
 A byte scan alone — the obvious implementation — therefore detects the
 environment case and stays blind to the other three, with nothing to signal it.
-Both checks are needed. [src: file: backend/src/agents/runner.rs:14191-14200#NUL_BEARING_PLACEHOLDER]
+Both checks are needed. [src: file: backend/src/agents/runner.rs:14257-14266#NUL_BEARING_PLACEHOLDER]
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
-detection. [src: file: backend/src/agents/runner_test.rs:11261-11295#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
+detection. [src: file: backend/src/agents/runner_test.rs:11413-11447#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
 
 ## Report the carrier, never the value
 
@@ -31,7 +31,7 @@ These fields hold API keys and tokens. The refusal names the environment
 variable by key, or the argument by the flag it follows — positions shift
 between agents — and never the content, matching the invocation receipt's own
 rule that no argument content is logged.
-[src: file: backend/src/agents/runner_test.rs:11193-11259#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
+[src: file: backend/src/agents/runner_test.rs:11345-11411#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
 
 ## It is settled before anything runs
 

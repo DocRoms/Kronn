@@ -2325,6 +2325,29 @@ pub struct StepResult {
     /// no recovery rule (a Security limit, a counter failure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_stop: Option<String>,
+    /// KT-1525 — UTF-8 bytes of `output`, stamped when the step completes. A
+    /// heavy output slows every run, the run storage and the page it feeds;
+    /// the run view grades it against the configured threshold. `None` on a
+    /// run recorded before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output_bytes: Option<u64>,
+}
+
+/// The heaviest step output of a run: its size and its step's name.
+pub fn heaviest_output(results: &[StepResult]) -> (u64, Option<String>) {
+    results
+        .iter()
+        .map(|result| {
+            (
+                result.output_bytes.unwrap_or(result.output.len() as u64),
+                result,
+            )
+        })
+        .max_by_key(|(bytes, _)| *bytes)
+        .map_or((0, None), |(bytes, result)| {
+            (bytes, Some(result.step_name.clone()))
+        })
 }
 
 fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {
@@ -2678,6 +2701,15 @@ pub struct WorkflowRunSummary {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub tokens_used: u64,
+    /// KT-1525 — bytes of the run's heaviest step output (0 when unknown) and
+    /// that step's name, so the workflow card can warn without reading the
+    /// run's payload. The UI grades it against the configured threshold.
+    #[serde(default)]
+    #[ts(optional)]
+    pub heaviest_output_bytes: Option<u64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub heaviest_output_step: Option<String>,
 }
 
 /// Compact summary of a batch workflow run, with its parent linear run

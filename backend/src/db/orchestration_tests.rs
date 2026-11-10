@@ -6360,6 +6360,282 @@ fn a_replayed_campaign_gate_publishes_nothing_and_breaks_no_transition() {
     );
 }
 
+/// A campaign with one launched execution, for the KT-650 park-card tests.
+fn campaign_with_execution(
+    conn: &Connection,
+    task_id: &str,
+    task_number: i64,
+) -> (OrchestrationRun, TaskExecution) {
+    seed_plan_task(conn, task_id, task_number, 0, "active");
+    let run = campaign(conn, 1, 1);
+    let selection = run.default_worker.clone().unwrap();
+    let mut input = LaunchSingleTaskInput::new(task_id, DISC);
+    input.project_id = Some("p1".into());
+    input.worker_target_kind = Some(selection.target.kind);
+    input.worker_agent_type = Some(agent_type_to_db(&selection.target.agent_type));
+    let execution = launch_task_in_run(conn, &run.id, &input, &selection, &backend_actor())
+        .unwrap()
+        .execution;
+    (run, execution)
+}
+
+fn fail_execution(conn: &Connection, exec_id: &str) -> bool {
+    transition_execution(
+        conn,
+        exec_id,
+        TaskExecutionStatus::Provisioning,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    transition_execution(
+        conn,
+        exec_id,
+        TaskExecutionStatus::Failed,
+        &backend_actor(),
+        serde_json::json!({ "reason": "worker crashed" }),
+    )
+    .unwrap()
+}
+
+fn gate_cards(conn: &Connection) -> Vec<crate::db::discussion_important::ImportantMessage> {
+    crate::db::discussion_important::list(conn, DISC, None)
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|item| {
+            item.category == crate::db::discussion_important::ImportantCategory::HumanActionRequired
+        })
+        .collect()
+}
+
+fn run_state(conn: &Connection, run_id: &str) -> OrchestrationControlState {
+    get_orchestration_run(conn, run_id)
+        .unwrap()
+        .unwrap()
+        .control_state
+}
+
+/// KT-650 — a child that ends `Failed` parks the campaign on a human, so the
+/// rail must say who owes what. The terminal card is a fact and owes nothing;
+/// the obligation is a second, distinct card.
+#[test]
+fn a_failed_child_parks_the_campaign_with_a_human_action_card() {
+    let conn = setup();
+    let (run, execution) = campaign_with_execution(&conn, "t-park-failed", 1650);
+    assert!(fail_execution(&conn, &execution.id));
+    assert_eq!(
+        run_state(&conn, &run.id),
+        OrchestrationControlState::AwaitingHuman
+    );
+
+    let cards = gate_cards(&conn);
+    assert_eq!(cards.len(), 1, "one human-action card for the park");
+    let card = &cards[0];
+    assert!(card.action_required.required);
+    assert_eq!(card.action_required.owner.as_deref(), Some("Humain"));
+    assert_eq!(
+        card.references.execution_id.as_deref(),
+        Some(execution.id.as_str())
+    );
+    assert!(card.message_id.starts_with("orch-campaign-gate:"));
+
+    // The terminal card is still there, and still owes nothing.
+    let all = crate::db::discussion_important::list(&conn, DISC, None).unwrap();
+    let terminal: Vec<_> = all
+        .items
+        .iter()
+        .filter(|item| {
+            item.category == crate::db::discussion_important::ImportantCategory::BlockingAlert
+        })
+        .collect();
+    assert_eq!(terminal.len(), 1);
+    assert!(!terminal[0].action_required.required);
+}
+
+/// KT-650 — the three run-level parks of the API layer (child decision, failed
+/// automatic launch, blocked plan) each leave their own card, worded for what
+/// the human owes.
+#[test]
+fn every_run_level_park_cause_leaves_a_human_action_card() {
+    use crate::db::orchestration::CampaignParkCause::*;
+    let mut actions = std::collections::HashSet::new();
+    for (index, cause) in [ChildDecision, LaunchFailed, PlanBlocked]
+        .into_iter()
+        .enumerate()
+    {
+        let conn = setup();
+        seed_plan_task(&conn, "t-park-run", 1651, 0, "active");
+        let run = campaign(&conn, 1, 1);
+        crate::db::orchestration::park_campaign_awaiting_human(
+            &conn,
+            &run.id,
+            cause,
+            "automatic next-task launch failed: `boom`",
+            None,
+            &backend_actor(),
+        )
+        .unwrap();
+        assert_eq!(
+            run_state(&conn, &run.id),
+            OrchestrationControlState::AwaitingHuman,
+            "cause {index}"
+        );
+        let cards = gate_cards(&conn);
+        assert_eq!(cards.len(), 1, "cause {index} leaves exactly one card");
+        assert!(cards[0].action_required.required);
+        assert_eq!(cards[0].action_required.owner.as_deref(), Some("Humain"));
+        assert!(cards[0].references.execution_id.is_none());
+        actions.insert(cards[0].action_required.action.clone().unwrap());
+    }
+    assert_eq!(actions.len(), 3, "each cause words its own action");
+}
+
+/// KT-650 / KT-647 — a campaign parked several times owns one card per
+/// occurrence, with no id collision, across both the run-level and the
+/// execution-level producer. A repeat park while already parked adds nothing.
+#[test]
+fn a_campaign_parked_repeatedly_leaves_one_card_per_occurrence() {
+    use crate::db::orchestration::CampaignParkCause::*;
+    let conn = setup();
+    let (run, execution) = campaign_with_execution(&conn, "t-park-twice", 1652);
+
+    let park = |cause| {
+        crate::db::orchestration::park_campaign_awaiting_human(
+            &conn,
+            &run.id,
+            cause,
+            "blocked",
+            None,
+            &backend_actor(),
+        )
+        .unwrap();
+    };
+    let resume = || {
+        set_orchestration_control_state(
+            &conn,
+            &run.id,
+            OrchestrationControlState::Running,
+            None,
+            &backend_actor(),
+        )
+        .unwrap();
+    };
+
+    park(PlanBlocked);
+    park(PlanBlocked); // already parked: same occurrence, no second card
+    assert_eq!(gate_cards(&conn).len(), 1);
+    resume();
+    park(PlanBlocked);
+    resume();
+    assert!(fail_execution(&conn, &execution.id));
+
+    let cards = gate_cards(&conn);
+    assert_eq!(cards.len(), 3, "three occurrences, three cards");
+    let messages: std::collections::HashSet<_> =
+        cards.iter().map(|c| c.message_id.as_str()).collect();
+    let keys: std::collections::HashSet<_> = cards.iter().map(|c| c.dedup_key.as_str()).collect();
+    assert_eq!(messages.len(), 3, "each occurrence owns its own message");
+    assert_eq!(keys.len(), 3, "each occurrence owns its own dedup key");
+}
+
+/// KT-650 — no publication may abort the transition that triggers it. Covered
+/// two ways: the id the card would mint is already taken (a replay), and the
+/// card store itself is unusable.
+#[test]
+fn a_park_card_never_aborts_the_transition_that_triggers_it() {
+    // Replay: the message id is already taken.
+    let conn = setup();
+    let (run, execution) = campaign_with_execution(&conn, "t-park-replay", 1653);
+    let planted_id = format!("orch-campaign-gate:{}:{}:parked:1", run.id, execution.id);
+    let planted = DiscussionMessage {
+        id: planted_id.clone(),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: "a park message that survived a restart".to_string(),
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+        kind: Default::default(),
+    };
+    crate::db::discussions::insert_message_with_targets_and_dispatches_within_tx(
+        &conn,
+        DISC,
+        &planted,
+        &[],
+        &[],
+        None,
+    )
+    .unwrap();
+    assert!(
+        fail_execution(&conn, &execution.id),
+        "a duplicate park message must not abort the failure"
+    );
+    assert_eq!(
+        run_state(&conn, &run.id),
+        OrchestrationControlState::AwaitingHuman
+    );
+    assert!(
+        gate_cards(&conn).is_empty(),
+        "a skipped park publishes no card"
+    );
+
+    // Broken card store, for the park card only (the terminal card is a
+    // separate, older producer): the park and the transition still commit.
+    let conn = setup();
+    let (run, execution) = campaign_with_execution(&conn, "t-park-broken", 1654);
+    conn.execute_batch(
+        "CREATE TRIGGER refuse_park_cards BEFORE INSERT ON discussion_important_messages \
+         WHEN NEW.dedup_key LIKE '%.parked.%' \
+         BEGIN SELECT RAISE(ABORT, 'card store refused'); END",
+    )
+    .unwrap();
+    assert!(
+        fail_execution(&conn, &execution.id),
+        "an unusable card store must not abort the failure"
+    );
+    assert_eq!(
+        run_state(&conn, &run.id),
+        OrchestrationControlState::AwaitingHuman
+    );
+    set_orchestration_control_state(
+        &conn,
+        &run.id,
+        OrchestrationControlState::Running,
+        None,
+        &backend_actor(),
+    )
+    .unwrap();
+    crate::db::orchestration::park_campaign_awaiting_human(
+        &conn,
+        &run.id,
+        crate::db::orchestration::CampaignParkCause::PlanBlocked,
+        "blocked",
+        None,
+        &backend_actor(),
+    )
+    .unwrap();
+    assert_eq!(
+        run_state(&conn, &run.id),
+        OrchestrationControlState::AwaitingHuman
+    );
+}
+
 /// KT-793 — a workflow step replayed after a resume takes over the executions its
 /// previous session steered, so their notices wake the replayed agent.
 #[test]

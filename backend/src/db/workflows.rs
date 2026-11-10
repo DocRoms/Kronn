@@ -1987,12 +1987,15 @@ pub fn shadow_run_of(conn: &Connection, normal_id: &str) -> Result<Option<String
 }
 
 pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
+    let heaviest = crate::models::heaviest_output(&run.step_results);
     conn.execute(
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
          run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state,
-         produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+         produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id,
+         heaviest_output_bytes, heaviest_output_step)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
+                 ?22, ?23)",
         params![
             run.id,
             run.workflow_id,
@@ -2028,6 +2031,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.concurrency_key,
             run.triggered_by_run_id,
             run.project_id,
+            heaviest.0 as i64,
+            heaviest.1,
         ],
     )?;
     crate::db::shared_runs::sync_workflow(conn, run)?;
@@ -2573,10 +2578,11 @@ impl RunProgressSnapshot {
 /// changed hands beneath us" and stop.
 pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Result<bool> {
     let new_status = run_status_str(&snap.status);
+    let heaviest = crate::models::heaviest_output(&snap.step_results);
     let affected = conn.execute(
         "UPDATE workflow_runs SET status = ?2, step_results_json = ?3,
          tokens_used = ?4, workspace_path = ?5, finished_at = ?6, state = ?7,
-         produced_branches = ?8
+         produced_branches = ?8, heaviest_output_bytes = ?9, heaviest_output_step = ?10
          WHERE id = ?1 AND (status = ?2 OR status IN ('Pending', 'Running'))",
         params![
             snap.id,
@@ -2595,6 +2601,8 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
             } else {
                 Some(serde_json::to_string(&snap.produced_branches)?)
             },
+            heaviest.0 as i64,
+            heaviest.1,
         ],
     )?;
     if affected == 0 {
@@ -2671,7 +2679,7 @@ pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<()> {
 /// here is stored after the step results, so touching the table would walk
 /// each run's payload pages.
 pub const LAST_RUN_SUMMARIES_SQL: &str = "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
-            wr.finished_at, wr.tokens_used
+            wr.finished_at, wr.tokens_used, wr.heaviest_output_bytes, wr.heaviest_output_step
      FROM workflow_runs wr
      INNER JOIN (
          SELECT workflow_id, MAX(started_at) AS max_started
@@ -2682,7 +2690,7 @@ pub const LAST_RUN_SUMMARIES_SQL: &str = "SELECT wr.workflow_id, wr.id, wr.statu
 /// runs (`?1`) and its own run (`?2`).
 pub const LAST_RUN_SUMMARIES_VISIBLE_SQL: &str =
     "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
-            wr.finished_at, wr.tokens_used
+            wr.finished_at, wr.tokens_used, wr.heaviest_output_bytes, wr.heaviest_output_step
      FROM workflow_runs wr
      INNER JOIN (
          SELECT workflow_id, MAX(started_at) AS max_started
@@ -2725,6 +2733,8 @@ pub fn get_last_run_summaries_visible(
                 started_at: parse_dt(row.get::<_, String>(3)?),
                 finished_at: row.get::<_, Option<String>>(4)?.map(parse_dt),
                 tokens_used: row.get::<_, i64>(5)?.max(0) as u64,
+                heaviest_output_bytes: Some(row.get::<_, i64>(6)?.max(0) as u64),
+                heaviest_output_step: row.get(7)?,
             },
         ))
     })?;
