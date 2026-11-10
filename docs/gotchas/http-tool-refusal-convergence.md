@@ -4,7 +4,7 @@ An HTTP model can ignore a withdrawn tool and keep varying its arguments, so
 exact-call repetition is not sufficient to stop a refusal loop. Kronn classifies
 only its own non-executed anti-loop outcomes as loop refusals; executor failures
 and worker-stage policy refusals keep their separate handling.
-[src: file: backend/src/agents/runner.rs:8542-8559#is_loop_refusal]
+[src: file: backend/src/agents/runner.rs:8554-8571#is_loop_refusal]
 
 The runner bounds this behavior at two levels. Within one provider response it
 answers at most eight loop refusals, then omits only later calls that would also
@@ -17,7 +17,7 @@ zero, so convergence never takes the rounds an audit needs to write. Room-visibl
 refusal traces are limited to two per logical tool and round, while aggregate
 refusal counts remain available to the ceiling report and final diagnostic.
 [src: file: backend/src/agents/runner.rs:50-55#MAX_LOOP_REFUSALS_PER_RESPONSE]
-[src: file: backend/src/agents/runner.rs:8564-8594#RefusalTraces]
+[src: file: backend/src/agents/runner.rs:8580-8610#RefusalTraces]
 [src: file: backend/src/agents/runner.rs:12052-12078]
 [src: file: backend/src/agents/runner.rs:12219-12222]
 

@@ -39,7 +39,7 @@ One refused read therefore ended the whole audit step.
 The decision has to be made inside OpenCode, by pattern, before any question is
 asked. Kronn starts `opencode acp` with an inline configuration
 (`OPENCODE_CONFIG_CONTENT`, merged after the user's and the project's own files)
-[src: file: backend/src/acp.rs:928-941#apply_opencode_policy]:
+[src: file: backend/src/acp.rs:937-950#apply_opencode_policy]:
 
 - `permission.read` denies `*.env` and `*.env.*`, then allows the four template
   suffixes (`*.env.<suffix>` and `*.env.*.<suffix>`). OpenCode honours the last
@@ -84,14 +84,14 @@ Now an ACP agent is stopped like an HTTP agent (KT-924), through a token:
 2. `cancel_audit` trips the token. The ACP session writes `session/cancel`
    (bounded to five seconds, so a wedged agent cannot hold the stop hostage),
    drops the turn, and shuts the agent's process down
-   [src: file: backend/src/agents/runner.rs:5553-5555#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:5995-6014#task_cancel] [src: file: backend/src/agents/runner.rs:6075-6081#shutdown].
+   [src: file: backend/src/agents/runner.rs:5565-5567#ACP_CANCEL_GRACE] [src: file: backend/src/agents/runner.rs:6007-6026#task_cancel] [src: file: backend/src/agents/runner.rs:6087-6093#shutdown].
 3. The process is started as its own process group, and shutdown kills the
    group, so what the agent started — a shell command, an MCP server — stops
-   with it [src: file: backend/src/acp.rs:1042-1046#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1846-1854#shutdown].
+   with it [src: file: backend/src/acp.rs:1051-1055#process_group] [src: file: backend/src/acp.rs:780-793#kill_process_group] [src: file: backend/src/acp.rs:1855-1863#shutdown].
 4. The pipeline waits on the lifeline, which exits only after that shutdown, so
    the audit is finalised as `Cancelled` once the agent is really gone. This is
    also why the lifeline's PID is **not** killed: doing it ended the wait early
-   [src: file: backend/src/agents/runner.rs:6087-6090#lifeline_stdin].
+   [src: file: backend/src/agents/runner.rs:6099-6102#lifeline_stdin].
 
 The partial audit now checks the stop between two steps and after each step's
 agent, finalises the run as `Cancelled` and releases the project lease, like the
@@ -116,7 +116,7 @@ Every ACP step was recorded at 0 tokens, per step and per run. Now:
   runtime puts them on the `session/prompt` response — OpenCode sends
   `inputTokens`, `outputTokens`, `cachedReadTokens`, `cachedWriteTokens`, which
   the ACP host now keeps apart instead of dropping the cache
-  [src: file: backend/src/acp.rs:1445-1468#usage_from_prompt_result]. The counters are read as the stream goes and
+  [src: file: backend/src/acp.rs:1454-1477#usage_from_prompt_result]. The counters are read as the stream goes and
   once more when it ends, because ACP reports them with the end of the turn.
 - **What is recorded.** `audit_run_steps` keeps `input_tokens`, `output_tokens`,
   `cache_read_tokens` and `cache_write_tokens` (migration 205), and
@@ -145,7 +145,7 @@ not before.
 - **Where the cost comes from.** Only what a runtime reports itself: Claude
   Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
   `Cost` event) and OpenRouter's `usage.cost`, summed per response
-  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:15039-15045#total_cost_usd] [src: file: backend/src/agents/runner.rs:5980-5982#usd_micros] [src: file: backend/src/agents/runner.rs:10435-10441#cost_usd_micros].
+  [src: file: backend/src/agents/chat_codec.rs:151-160#cost_usd_micros] [src: file: backend/src/agents/runner.rs:15051-15057#total_cost_usd] [src: file: backend/src/agents/runner.rs:5992-5994#usd_micros] [src: file: backend/src/agents/runner.rs:10447-10453#cost_usd_micros].
   The recorded cost is never recomputed from a rate table; a finished step
   whose agent reported none is priced on read by `core::pricing` for the served
   model and shown as an estimate, never as a reported cost

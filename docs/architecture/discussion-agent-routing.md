@@ -127,7 +127,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/api/discussions/messaging.rs:1105-1113#DispatchInProgress]
 [src: file: backend/src/db/discussions.rs:3539-3801#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
-[src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
+[src: file: backend/src/api/federation.rs:130-175#federate_message_revision]
 [src: file: backend/src/api/ws.rs:1179-1187#resolved_targets]
 [src: file: backend/src/api/ws.rs:934#target_agent]
 

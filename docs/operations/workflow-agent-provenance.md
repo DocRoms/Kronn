@@ -96,5 +96,5 @@ current configuration.
 [src: file: backend/src/workflows/steps.rs:1443-1491#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:4929-4945#record_step_completion]
 [src: file: backend/src/agents/provenance.rs:36-101#observe_model]
-[src: file: backend/src/agents/runner.rs:4892-4898#claude_observed_model]
+[src: file: backend/src/agents/runner.rs:4908-4914#claude_observed_model]
 [src: file: backend/src/workflows/template.rs:182-223#set_step_provenance]

@@ -70,7 +70,7 @@ Three Docker services behind nginx gateway:
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8685-8795#LeadingThinkingFilter]
+  [src: file: backend/src/agents/runner.rs:8701-8811#LeadingThinkingFilter]
   [src: file: backend/src/api/discussions/streaming.rs:5467-5468#strip_leading_thinking_blocks]
 
 ### Discussions
@@ -257,7 +257,7 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5828-5836#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5930-5945#begin_tool]
+[src: file: backend/src/agents/runner.rs:5840-5848#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5946-5961#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1539-1553#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
 

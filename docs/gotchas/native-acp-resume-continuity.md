@@ -7,7 +7,7 @@ directory. The discussion layer selects the resume identity and delta together;
 A first turn, incomplete checkpoint, missing marker or delta without a size
 saving uses the ordinary bounded full prompt and no resume identity.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
-[src: file: backend/src/agents/runner.rs:4564-4568#acp_resume_id]
+[src: file: backend/src/agents/runner.rs:4572-4576#acp_resume_id]
 
 ## Two boundaries, one completed turn
 
@@ -49,7 +49,7 @@ old progress before spawning, even if the next init event never arrives; a
 database failure there prevents the spawn rather than leaving a stale frontier.
 [src: file: backend/src/agents/runner.rs:2939-2944#CLI_PRINT_RUNTIME]
 [src: file: backend/src/agents/runner.rs:3071-3126#prepare_cli_print_turn]
-[src: file: backend/src/agents/runner.rs:4802-4811#prepare_cli_print_turn]
+[src: file: backend/src/agents/runner.rs:4814-4823#prepare_cli_print_turn]
 [src: file: backend/src/api/discussions/streaming.rs:2657-2669#acp_delta]
 
 ## Negotiated resumption
@@ -69,8 +69,8 @@ The safe fresh-session fallback is restricted to absent resume capability or a
 positively identified missing session before a prompt is sent. Authentication,
 timeouts and ambiguous transport errors fail visibly. Prompt, cancellation and
 persistence failures are not followed by an automatic fresh-session replay.
-[src: file: backend/src/agents/runner.rs:5611-5667#resume_refused]
-[src: file: backend/src/agents/runner.rs:5999-6064#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:5623-5679#resume_refused]
+[src: file: backend/src/agents/runner.rs:6011-6076#acp_failure_diagnostic]
 
 OpenCode v1.18.27 defines a structured missing-session error using code -32602,
 the exact message `session not found: <id>` and `data.sessionId`. The transport
@@ -80,9 +80,9 @@ fallback. Unstructured upstream failures remain ambiguous rather than being
 guessed from a 404 or free text.
 [Pinned OpenCode error contract](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/acp/error.ts)
 [src: file: backend/src/acp.rs:156-161#PendingRequest]
-[src: file: backend/src/acp.rs:1158-1166#missing_session_id]
-[src: file: backend/src/acp.rs:1241-1245#JSON_RPC_INVALID_PARAMS]
-[src: file: backend/src/acp.rs:1245-1281#classify_response_error]
+[src: file: backend/src/acp.rs:1167-1175#missing_session_id]
+[src: file: backend/src/acp.rs:1250-1254#JSON_RPC_INVALID_PARAMS]
+[src: file: backend/src/acp.rs:1254-1290#classify_response_error]
 
 Each agent reply records which path its turn took in
 `messages.session_continuity`: `resumed`, `new` or `fallback_full_history`
@@ -91,7 +91,7 @@ discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
 [src: file: backend/src/api/discussions/streaming.rs:2759-2769#settle_turn_continuity]
-[src: file: backend/src/agents/runner.rs:6093-6108#resume_refused]
+[src: file: backend/src/agents/runner.rs:6105-6120#resume_refused]
 
 ## Deterministic qualification boundaries
 
@@ -111,8 +111,8 @@ cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
 [src: file: backend/src/api/discussions/streaming.rs:8912-9231#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
-[src: file: backend/src/agents/runner.rs:15870-15971#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
-[src: file: backend/src/agents/runner.rs:16028-16232#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
+[src: file: backend/src/agents/runner.rs:15882-15983#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
+[src: file: backend/src/agents/runner.rs:16040-16244#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
 
 These tests do not launch a live provider or qualify real model behavior.
 Kronn normalizes ACP token counts but does not yet normalize optional cumulative
