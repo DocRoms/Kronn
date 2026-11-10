@@ -789,3 +789,23 @@ category.
   it, the validation prompt carries it, and `redo_steps` (with
   `resume_run_id`) redoes the inherited steps it affects.
   [src: file: backend/src/api/audit/full.rs:1102-1116#set_resume_drift] [src: file: backend/src/api/audit/full.rs:608-634#redo_steps_req]
+
+## Release recette (KT-1133)
+
+The gate of the run-state work is automated end to end on the HTTP agent: the
+real Full pipeline and templates run against a mocked OpenAI-wire provider that
+plays the model. Run it with `cargo nextest run --lib recette_http_e2e_tests`.
+
+| # | Scenario | Test |
+|---|---|---|
+| 1 | Blank repository, Full audit → `Completed`, 0 failed step | `scenario_1_…` |
+| 2 | Second Full audit, the model changes nothing → `Completed`, documentary steps `unchanged` | `scenario_2_…` |
+| 3 | One step refused by the provider → that step retried alone → `Completed` → `Validated` | `scenario_3_…` |
+| 4 | Same failure → accepted by a human → finalized → `Completed` → `Validated` | `scenario_4_…` |
+| 5 | Kronn killed mid-run → the timeline and the resumable run read `Interrupted` with the steps left → resume → `Completed` | `scenario_5_…` (backend), `a restart in the middle of a run shows the exact state and offers to resume it` in `AuditTimeline.run-states.test.tsx` (front) |
+
+A forced failure uses a 401: the runner retries a 5xx, so an outage would not
+fail the step. The real recette (two consecutive global audits on a real
+repository, with Claude Code and then an ACP agent) is not automated: it is
+checked live after integration.
+[src: file: backend/src/api/audit/recette_http_e2e_tests.rs:1] [src: file: frontend/src/components/__tests__/AuditTimeline.run-states.test.tsx:1]

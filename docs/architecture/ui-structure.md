@@ -236,7 +236,7 @@ makes; a handler the build does not know hides its button. The panel renders onl
 generic facts, so **a new kind of row is one new `ActivitySource` in the backend and
 nothing in the panel**: a backend test injects one, and a frontend test renders a row
 type no locale file names.
-[src: file: backend/src/models/activity.rs:80-132#ActivityRow]
+[src: file: backend/src/models/activity.rs:87-139#ActivityRow]
 [src: file: backend/src/api/activity.rs:61-90#collect_activity]
 [src: file: backend/src/api/activity_tests.rs:382-405#new_source]
 [src: file: frontend/src/lib/activity.ts:116-135#ACTIVITY_ACTION_HANDLERS]

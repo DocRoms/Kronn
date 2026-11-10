@@ -42,7 +42,7 @@ the document body; intentional outside focus is preserved.
 Actions use a synchronous per-action ref guard as well as the disabled UI.
 Failures show a localized alert on the row, permit an explicit retry and refresh
 the parent's snapshot after settlement; they never navigate from the action button.
-[src: file: frontend/src/components/activity/ActivityPanel.tsx:66-100#perform]
+[src: file: frontend/src/components/activity/ActivityPanel.tsx:77-111#perform]
 
 ## Regression evidence
 
