@@ -85,15 +85,15 @@ limit. The API/worker regression mixes filenames (including an accented name)
 and ids for three sources, for both image and video, then changes the local
 slot before the worker runs.
 [src: commit: 9f3889ee2]
-[src: file: backend/src/api/media.rs:2029#resolve_references]
-[src: file: backend/tests/api_tests.rs:29037#media_generate_accepts_an_exact_filename_of_this_rooms_image_only]
+[src: file: backend/src/api/media.rs:2923#resolve_references]
+[src: file: backend/tests/api_tests.rs:29086#media_generate_accepts_an_exact_filename_of_this_rooms_image_only]
 [src: file: backend/tests/support/api_media_references.rs:159#comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker]
 
 The old CI catalogue failure was a 220-byte increase in the media tool
 declaration. Compact guidance retains the source, ordering, limit and slot
 contracts; the measured catalogue is now 84,389 bytes, 61 bytes below this
 base's ceiling. The ceiling is lowered to that measurement.
-[src: file: backend/scripts/ci/mcp_surface_budget.py:180#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:186#CATALOGUE_MAX_BYTES]
 [src: file: backend/scripts/disc-introspection-mcp.py:2378]
 
 The October 21 video evidence is historical; no new real generation was run

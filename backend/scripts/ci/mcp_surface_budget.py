@@ -169,7 +169,7 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # paid for by shortening five schema descriptions of the launch/prepare pair
 # that repeated their tool's manual: ceiling lowered by 36 B (84_379 -> 84_343).
 # KT-1403: `media_generate` takes several references and `expected_model`, paid
-# for by tightening its media guidance: ceiling lowered by 61 B (84_343 -> 84_282).
+# for by tightening its media guidance (84_343 -> 84_282).
 # KT-1216: `workflow_create_draft`, `workflow_update` and `workflow_step_schema`
 # point at `authoring_doctrine` and the draft lists all fifteen step types (it
 # listed thirteen). Paid for by tightening the same declaration (its discovery
@@ -177,7 +177,13 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # (84_282 -> 84_244).
 # 0.15.3 batch: the catalogue measured on the batch head is 19 B smaller;
 # ceiling re-pinned to that payload (84_244 -> 84_225).
-CATALOGUE_MAX_BYTES = 84_225
+# KT-1420: `media_models_list` was added by paying for it in place — its
+# contract lives in TOOL_MANUALS, the merge-commit rule returned to the
+# `task_exec_commit` description (workers cannot call tool_manual), and four
+# descriptions shed manual-duplicated guidance (two gained manuals that now
+# carry it): re-measured on the merged 0.15.3 tree, then the workflow_trigger
+# declaration shed its manual-duplicated polling warning: 84_144 B.
+CATALOGUE_MAX_BYTES = 84155
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

@@ -455,6 +455,42 @@ pub fn observed_unit_cost(
     })
 }
 
+/// One `(model, modality, unit_cost, samples)` row per model with billable
+/// samples, in one pass — the catalogue-wide form of [`observed_unit_cost`]
+/// with the same semantics: per second for video, per image otherwise, BYOK
+/// rows excluded.
+pub fn observed_unit_costs(conn: &Connection) -> Result<Vec<(String, String, f64, u32)>> {
+    let mut stmt = conn.prepare(
+        "SELECT model, modality,
+                AVG(CASE WHEN modality = 'video'
+                         THEN cost_usd * 1000.0 / rendered_duration_ms
+                         ELSE cost_usd END),
+                COUNT(*)
+         FROM media_jobs
+         WHERE cost_usd IS NOT NULL AND is_byok = 0
+           AND (modality = 'image'
+                OR (modality = 'video' AND rendered_duration_ms IS NOT NULL
+                    AND rendered_duration_ms > 0))
+         GROUP BY model, modality",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)? as u32,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // The same `> 0` floor `observed_unit_cost` applies: a zero or negative
+    // average (a refund in the samples) reads as unknown, never free.
+    Ok(rows
+        .into_iter()
+        .filter(|(_, _, unit, _)| unit.is_finite() && *unit > 0.0)
+        .collect())
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
@@ -831,6 +867,135 @@ mod tests {
             // If the CHECK held, the value never changed — that is fine too.
             assert_eq!(job.status, MediaJobStatus::Pending);
         }
+    }
+
+    #[test]
+    fn observed_unit_costs_aggregate_per_model_and_modality_and_skip_byok() {
+        // The catalogue-wide form of `observed_unit_cost`: per second for
+        // video, per image otherwise, BYOK rows excluded, one row per
+        // (model, modality) that has billable samples.
+        let conn = db();
+        let at = now();
+        let billed = |conn: &Connection,
+                      id: &str,
+                      modality: MediaModality,
+                      model: &str,
+                      duration_ms: Option<u64>,
+                      cost: f64,
+                      byok: bool| {
+            insert(
+                conn,
+                NewMediaJob {
+                    id,
+                    modality,
+                    connection_id: "conn-1",
+                    model,
+                    prompt: "un chat",
+                    params: &MediaParams {
+                        duration_secs: Some(5),
+                        ..Default::default()
+                    },
+                    discussion_id: Some("d1"),
+                    message_id: None,
+                    project_id: Some("p1"),
+                    scheduled_at: at,
+                    deadline_at: at + Duration::minutes(20),
+                },
+                at,
+            )
+            .unwrap();
+            complete(
+                conn,
+                id,
+                Completion {
+                    context_file_id: "cf1",
+                    rendered: &MediaRendered {
+                        width: None,
+                        height: None,
+                        duration_ms,
+                    },
+                    cost: Some(MediaCost {
+                        cost_usd: cost,
+                        is_byok: byok,
+                    }),
+                    generation_id: None,
+                },
+                at,
+            )
+            .unwrap();
+        };
+
+        // Two video samples of the same model: 0.10 over 5 s and 0.20 over
+        // 10 s are both 0.02 per second.
+        billed(
+            &conn,
+            "v1",
+            MediaModality::Video,
+            "bytedance/seedance-2.0-mini",
+            Some(5_000),
+            0.10,
+            false,
+        );
+        billed(
+            &conn,
+            "v2",
+            MediaModality::Video,
+            "bytedance/seedance-2.0-mini",
+            Some(10_000),
+            0.20,
+            false,
+        );
+        // A BYOK video of the same model costs nobody else anything.
+        billed(
+            &conn,
+            "b1",
+            MediaModality::Video,
+            "bytedance/seedance-2.0-mini",
+            Some(4_000),
+            0.50,
+            true,
+        );
+        // Two image samples: 0.05 and 0.07 per picture.
+        billed(
+            &conn,
+            "i1",
+            MediaModality::Image,
+            "google/gemini-2.5-flash-image",
+            None,
+            0.05,
+            false,
+        );
+        billed(
+            &conn,
+            "i2",
+            MediaModality::Image,
+            "google/gemini-2.5-flash-image",
+            None,
+            0.07,
+            false,
+        );
+
+        let rows = observed_unit_costs(&conn).unwrap();
+        let by_key = |model: &str, modality: &str| {
+            rows.iter()
+                .find(|(m, k, _, _)| m == model && k == modality)
+                .unwrap_or_else(|| panic!("no row for {model}/{modality}: {rows:?}"))
+        };
+        let video = by_key("bytedance/seedance-2.0-mini", "video");
+        assert!(
+            (video.2 - 0.02).abs() < 1e-9,
+            "per-second average, got {}",
+            video.2
+        );
+        assert_eq!(video.3, 2, "BYOK rows never enter the count");
+        let image = by_key("google/gemini-2.5-flash-image", "image");
+        assert!((image.2 - 0.06).abs() < 1e-9, "got {}", image.2);
+        assert_eq!(image.3, 2);
+        assert_eq!(
+            rows.len(),
+            2,
+            "BYOK-only rows carry no row at all: {rows:?}"
+        );
     }
 }
 

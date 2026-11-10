@@ -685,6 +685,7 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("GET", "/api/pages/{id}/workflows", Read, &[("id", G)]),
     r("GET", "/api/pages/{id}/discussions", Read, &[("id", G)]),
     r("POST", "/api/media/generate", Effect, &[]),
+    r("GET", "/api/media/models/list", Read, &[]),
     r(
         "GET",
         "/api/media/jobs/{id}",

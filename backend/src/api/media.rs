@@ -16,6 +16,7 @@ use axum::{
 use chrono::Utc;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::agents::media_worker::DEFAULT_DEADLINE;
@@ -870,6 +871,334 @@ pub struct MediaSpendResponse {
     pub total_usd: f64,
 }
 
+/// One connection's media catalogue, every entry parsed, plus what the
+/// connection currently has configured. Unknown stays unknown: a model the
+/// catalogue never mentions reports `configured_capabilities: null`, and a
+/// catalogue that answers nothing reports its cause — a provider without a
+/// media catalogue at all is a working connection, not a dead one.
+#[derive(serde::Serialize)]
+struct MediaCatalogueReport {
+    connection_id: String,
+    display_name: String,
+    alias: String,
+    image: MediaModalityCatalogue,
+    video: MediaModalityCatalogue,
+    /// The decision models this connection is known to serve, from the shared
+    /// model catalogue (`http:<connection-id>`) — only the entries that
+    /// declare the `decision` capability, the same filter the Decision picker
+    /// applies. A model absent from it is not absent from the world.
+    decision: DecisionCatalogue,
+}
+
+/// One decision model as the report carries it: the fields a recommendation
+/// needs, not the whole 26-field catalogue row.
+#[derive(serde::Serialize)]
+struct ReportedDecisionModel {
+    model_id: String,
+    display_name: String,
+    capabilities: Vec<String>,
+    /// Coarse cost classification; `null` means unassessed, never free.
+    cost_hint: Option<crate::models::model_catalog::ModelCostHint>,
+}
+
+#[derive(serde::Serialize)]
+struct DecisionCatalogue {
+    configured: Option<String>,
+    models: Vec<ReportedDecisionModel>,
+}
+
+/// Why a catalogue answered the way it did. `absent` is a provider with no
+/// media catalogue at all (NVIDIA, Ollama answer 404); `unauthorized` is an
+/// auth refusal (401/403); `unreadable` is a 200 whose body we cannot parse;
+/// `unreachable` is everything else transport-level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CatalogueState {
+    Ok,
+    Unreachable,
+    Absent,
+    Unauthorized,
+    Unreadable,
+}
+
+#[derive(serde::Serialize)]
+struct MediaModalityCatalogue {
+    state: CatalogueState,
+    configured: Option<String>,
+    /// Capabilities of the configured model, when the catalogue names it.
+    configured_capabilities: Option<crate::agents::media_capabilities::MediaModelCapabilities>,
+    models: Vec<ReportedModel>,
+}
+
+/// One catalogue entry plus what the agent is told at submission time
+/// (#400 DoD 3): image-to-video eligibility comes from `frame_positions`,
+/// never from `max_input_references`, which stays null when the provider
+/// says nothing. The cost is what Kronn itself was billed for this exact
+/// model (BYOK rows excluded); no sample means unknown, never free.
+#[derive(Clone, serde::Serialize)]
+struct ReportedModel {
+    #[serde(flatten)]
+    capabilities: crate::agents::media_capabilities::MediaModelCapabilities,
+    reference_modes: Vec<&'static str>,
+    observed_unit_cost_usd: Option<f64>,
+    cost_samples: u32,
+}
+
+/// Every catalogue entry one connection serves, for the discovery tool
+/// (KT-1420 slice 1). Both modalities are fetched concurrently; each has its
+/// own bounded timeout, so a dead connection delays the report by at most one
+/// timeout, not by the number of models. `costs` is the whole report's one
+/// observed-cost pass, taken once in [`models_list`].
+async fn connection_catalogue(
+    state: &AppState,
+    connection: &crate::models::ExternalApiConnection,
+    costs: &[(String, String, f64, u32)],
+) -> MediaCatalogueReport {
+    if crate::api::comfyui::is_local(connection) {
+        return local_comfyui_catalogue(state, connection).await;
+    }
+    let base = connection
+        .media_endpoint
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| connection.endpoint.clone())
+        .unwrap_or_default();
+
+    let image_fetch = fetch_catalogue(
+        state,
+        &base,
+        &connection.credential_slug,
+        MediaModality::Image,
+    );
+    let video_fetch = fetch_catalogue(
+        state,
+        &base,
+        &connection.credential_slug,
+        MediaModality::Video,
+    );
+    let (image_fetch, video_fetch) = futures::future::join(image_fetch, video_fetch).await;
+
+    let target = crate::db::model_catalog::http_runtime_target_id(&connection.id);
+    let decision = state
+        .db
+        .with_read_conn(move |conn| crate::db::model_catalog::list_for_target(conn, &target))
+        .await
+        .unwrap_or_default();
+
+    // The reference envelope the generation preflight enforces: #505's
+    // resolved capabilities (Config limits + the local reference support),
+    // applied to every entry so the report answers exactly like
+    // `media_generate` does for the same model.
+    let limits = state.config.read().await.media_reference_limits.clone();
+
+    MediaCatalogueReport {
+        connection_id: connection.id.clone(),
+        display_name: connection.display_name.clone(),
+        alias: connection.mention_alias.clone(),
+        image: modality_catalogue(
+            image_fetch,
+            connection,
+            MediaModality::Image,
+            costs,
+            &limits,
+        ),
+        video: modality_catalogue(
+            video_fetch,
+            connection,
+            MediaModality::Video,
+            costs,
+            &limits,
+        ),
+        decision: DecisionCatalogue {
+            configured: connection.decision_model.clone(),
+            models: decision
+                .into_iter()
+                .filter(|entry| entry.capabilities.iter().any(|cap| cap == "decision"))
+                .map(|entry| ReportedDecisionModel {
+                    model_id: entry.model_id,
+                    display_name: entry.display_name,
+                    capabilities: entry.capabilities,
+                    cost_hint: entry.cost_hint,
+                })
+                .collect(),
+        },
+    }
+}
+
+/// The local ComfyUI has no catalogue to fetch: its envelope comes from
+/// `resolved_capabilities` — the same reference support the workflows take
+/// (`comfyui::reference_capabilities`) plus the operator's Config limits, so
+/// the report answers exactly like `media_generate` for the same slot. Local
+/// generations are not billed, so their cost stays unknown.
+async fn local_comfyui_catalogue(
+    state: &AppState,
+    connection: &crate::models::ExternalApiConnection,
+) -> MediaCatalogueReport {
+    let mut slots: [(Option<String>, Vec<ReportedModel>); 2] =
+        [(None, Vec::new()), (None, Vec::new())];
+    for (index, modality) in [MediaModality::Image, MediaModality::Video]
+        .into_iter()
+        .enumerate()
+    {
+        let configured = media_slot(connection, modality);
+        let models = Vec::new();
+        slots[index] = (configured, models);
+        if let Some(model) = media_slot(connection, modality) {
+            let (capabilities, _) =
+                resolved_capabilities(state, connection, &model, modality).await;
+            let reference_modes = capabilities.advertised_modes();
+            slots[index].1.push(ReportedModel {
+                capabilities,
+                reference_modes,
+                observed_unit_cost_usd: None,
+                cost_samples: 0,
+            });
+        }
+    }
+    let image = MediaModalityCatalogue {
+        state: CatalogueState::Ok,
+        configured: slots[0].0.clone(),
+        configured_capabilities: slots[0].1.first().map(|model| model.capabilities.clone()),
+        models: slots[0].1.clone(),
+    };
+    let video = MediaModalityCatalogue {
+        state: CatalogueState::Ok,
+        configured: slots[1].0.clone(),
+        configured_capabilities: slots[1].1.first().map(|model| model.capabilities.clone()),
+        models: slots[1].1.clone(),
+    };
+    MediaCatalogueReport {
+        connection_id: connection.id.clone(),
+        display_name: connection.display_name.clone(),
+        alias: connection.mention_alias.clone(),
+        image,
+        video,
+        decision: DecisionCatalogue {
+            configured: connection.decision_model.clone(),
+            models: Vec::new(),
+        },
+    }
+}
+
+/// One modality of the catalogue report. A catalogue that answers nothing
+/// reports its cause with an empty model list — never an entry the provider
+/// never sent.
+fn modality_catalogue(
+    fetch: Result<serde_json::Value, CatalogueState>,
+    connection: &crate::models::ExternalApiConnection,
+    modality: MediaModality,
+    costs: &[(String, String, f64, u32)],
+    limits: &[crate::models::MediaReferenceLimit],
+) -> MediaModalityCatalogue {
+    let configured = media_slot(connection, modality);
+    // A 200 whose body is JSON but carries no `data` array is a shape we
+    // cannot read — `unreadable`, never an empty `ok` catalogue.
+    let body = match fetch {
+        Ok(body) if body.get("data").is_some_and(Value::is_array) => body,
+        Ok(_) => {
+            return MediaModalityCatalogue {
+                state: CatalogueState::Unreadable,
+                configured,
+                configured_capabilities: None,
+                models: Vec::new(),
+            };
+        }
+        Err(state) => {
+            return MediaModalityCatalogue {
+                state,
+                configured,
+                configured_capabilities: None,
+                models: Vec::new(),
+            };
+        }
+    };
+    let configured_capabilities = configured.as_deref().and_then(|model| {
+        crate::agents::media_capabilities::capabilities_for(&body, model, modality).map(|raw| {
+            super::media_reference_settings::resolve(connection, model, modality, Some(raw), limits)
+        })
+    });
+    let models = crate::agents::media_capabilities::catalogue_capabilities(&body, modality)
+        .into_iter()
+        .map(|raw| {
+            // The effective envelope: #505's resolve applies the operator's
+            // Config reference limits exactly like the preflight does, so the
+            // report never advertises a mode the submission would refuse.
+            let model = raw.model.clone();
+            let capabilities = super::media_reference_settings::resolve(
+                connection,
+                &model,
+                modality,
+                Some(raw),
+                limits,
+            );
+            let reference_modes = capabilities.advertised_modes();
+            let cost = costs
+                .iter()
+                .find(|(model, kind, unit, _)| {
+                    model == &capabilities.model
+                        && kind == modality.as_str()
+                        && unit.is_finite()
+                        && *unit > 0.0
+                })
+                .map(|&(_, _, unit, samples)| (unit, samples));
+            ReportedModel {
+                capabilities,
+                reference_modes,
+                observed_unit_cost_usd: cost.map(|(unit, _)| unit),
+                cost_samples: cost.map(|(_, samples)| samples).unwrap_or(0),
+            }
+        })
+        .collect();
+    MediaModalityCatalogue {
+        state: CatalogueState::Ok,
+        configured,
+        configured_capabilities,
+        models,
+    }
+}
+
+/// The discovery report behind the `media_models_list` agent tool and its
+/// HTTP parity route (KT-1420 slice 1): every media model reachable from the
+/// configured connections and the local ComfyUI, what each advertises, what
+/// Kronn itself was billed for it, and the current choice per connection.
+/// Unknown capabilities are reported as unknown — never as "no".
+pub async fn models_list(State(state): State<AppState>) -> Json<ApiResponse<Value>> {
+    let mut connections = match state
+        .db
+        .with_read_conn(crate::db::external_api_connections::list)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return Json(ApiResponse::err(format!(
+                "Failed to list connections: {error}"
+            )))
+        }
+    };
+    // The local ComfyUI is a media source like a connection, but never a row.
+    let config = state.config.read().await.clone();
+    connections = crate::api::orchestration::with_local_media_source(connections, &config);
+
+    // One pass for the whole report: what Kronn itself was billed per model.
+    let costs = state
+        .db
+        .with_read_conn(crate::db::media_jobs::observed_unit_costs)
+        .await
+        .unwrap_or_default();
+
+    let reports = futures::future::join_all(
+        connections
+            .iter()
+            .map(|connection| connection_catalogue(&state, connection, &costs)),
+    )
+    .await;
+
+    Json(ApiResponse::ok(serde_json::json!({
+        "connections": reports,
+        "note": "The local ComfyUI is listed from its built-in sizes and durations whenever a ComfyUI slot is configured: checkpoints, T5, custom nodes and filesystem layout are not verified. Costs are what Kronn itself was billed for each exact model, BYOK rows excluded; no sample means unknown, never free. Decision lists carry only the models the catalogue marks with the `decision` capability and can lag discovery.",
+    })))
+}
+
 /// Media spend, deliberately its OWN counter.
 ///
 /// A generation is billed per image or per second and its provider usage
@@ -1660,6 +1989,537 @@ mod tests {
         connection.image_model = None;
         assert!(configured_media_model(&connection, MediaModality::Image).is_none());
     }
+
+    #[tokio::test]
+    async fn media_models_list_reports_catalogued_models_and_honest_unreachability() {
+        // KT-1420 slice 1: the discovery report lists every catalogue entry
+        // with the eligibility the agent is told at submission time, names its
+        // cost source, tells a provider without a media catalogue apart from a
+        // dead one, and answers for the local ComfyUI too.
+        let video_catalogue = serde_json::json!({"data": [
+            {"id": "bytedance/seedance-2.0-mini", "supported_durations": [4, 5],
+             "supported_frame_images": ["first_frame"]}
+        ]});
+        let app = axum::Router::new()
+            .route(
+                "/v1/videos/models",
+                axum::routing::get(move || {
+                    let body = video_catalogue.clone();
+                    async move { axum::Json(body) }
+                }),
+            )
+            // A text-only provider (NVIDIA, Ollama): no media catalogue at all.
+            .route(
+                "/v1/images/models",
+                axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let mut live = connection(
+            "conn-live",
+            "Reachable",
+            "reachable",
+            Some("google/gemini-2.5-flash-image"),
+            Some("bytedance/seedance-2.0-mini"),
+        );
+        live.endpoint = Some(format!("http://{address}"));
+        let dead = connection("conn-dead", "Dead", "dead", None, Some("kling/v2"));
+        let state = media_state(vec![live, dead]).await;
+
+        let Json(report) = models_list(State(state)).await;
+        let data = report.data.unwrap_or_else(|| panic!("{:?}", report.error));
+        let connections = data["connections"].as_array().unwrap();
+        assert_eq!(connections.len(), 2);
+        let by_id = |id: &str| {
+            connections
+                .iter()
+                .find(|row| row["connection_id"] == id)
+                .unwrap_or_else(|| panic!("no {id} in the report"))
+        };
+
+        let live_video = &by_id("conn-live")["video"];
+        assert_eq!(live_video["state"], serde_json::json!("ok"));
+        let models = live_video["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["model"], "bytedance/seedance-2.0-mini");
+        assert_eq!(
+            models[0]["reference_modes"],
+            serde_json::json!(["first_frame"])
+        );
+        assert!(models[0]["observed_unit_cost_usd"].is_null());
+        assert_eq!(models[0]["cost_samples"], serde_json::json!(0));
+        assert_eq!(
+            live_video["configured"],
+            serde_json::json!("bytedance/seedance-2.0-mini")
+        );
+        // The configured model is in this catalogue, so its capabilities ride
+        // along with the report.
+        let configured = &live_video["configured_capabilities"];
+        assert_eq!(configured["model"], "bytedance/seedance-2.0-mini");
+        assert_eq!(configured["durations_secs"], serde_json::json!([4, 5]));
+        assert_eq!(
+            configured["frame_positions"],
+            serde_json::json!(["first_frame"])
+        );
+
+        // A provider with no media catalogue at all is `absent`, not down:
+        // the configured image model is unknown to it — capabilities stay
+        // null, never "no".
+        let live_image = &by_id("conn-live")["image"];
+        assert_eq!(live_image["state"], serde_json::json!("absent"));
+        assert_eq!(live_image["models"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            live_image["configured"],
+            serde_json::json!("google/gemini-2.5-flash-image")
+        );
+        assert!(live_image["configured_capabilities"].is_null());
+
+        // A connection nothing answers for reports `unreachable` — an empty
+        // model list alone would read as "the provider serves nothing".
+        let dead_video = &by_id("conn-dead")["video"];
+        assert_eq!(dead_video["state"], serde_json::json!("unreachable"));
+        assert_eq!(dead_video["models"].as_array().unwrap().len(), 0);
+        assert!(dead_video["configured_capabilities"].is_null());
+
+        // Decision models come from the shared model catalogue; this test
+        // seeds none, so the list is empty rather than invented.
+        let decision = &by_id("conn-live")["decision"];
+        assert!(decision["configured"].is_null());
+        assert_eq!(decision["models"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn media_models_list_applies_the_configured_reference_limit() {
+        // The report must answer with the envelope the preflight enforces:
+        // the resolve applies the operator's Config limit (here: 1 where the
+        // catalogue advertises 3), and the report marks the limit's source as
+        // `configured`. Dropping the resolve — or passing no limits — fails
+        // these asserts.
+        let video_catalogue = serde_json::json!({"data": [
+            {"id": "bytedance/seedance-2.0-mini", "supported_durations": [4, 5],
+             "supported_frame_images": ["first_frame"],
+             "supported_parameters": {"input_references": {"type": "range", "min": 0, "max": 3}}}
+        ]});
+        let app = axum::Router::new().route(
+            "/v1/videos/models",
+            axum::routing::get(move || {
+                let body = video_catalogue.clone();
+                async move { axum::Json(body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let mut live = connection(
+            "conn-live",
+            "Reachable",
+            "reachable",
+            None,
+            Some("bytedance/seedance-2.0-mini"),
+        );
+        live.endpoint = Some(format!("http://{address}"));
+        let state = media_state(vec![live]).await;
+        state.config.write().await.media_reference_limits =
+            vec![crate::models::MediaReferenceLimit {
+                connection_id: "conn-live".into(),
+                endpoint: format!("http://{address}"),
+                workflow: None,
+                model: "bytedance/seedance-2.0-mini".into(),
+                modality: MediaModality::Video,
+                max_input_references: 1,
+            }];
+
+        let Json(report) = models_list(State(state)).await;
+        let data = report.data.unwrap_or_else(|| panic!("{:?}", report.error));
+        let row = data["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connection_id"] == "conn-live")
+            .unwrap();
+        let model = &row["video"]["models"][0];
+        assert_eq!(model["max_input_references"], serde_json::json!(1));
+        let support = &model["reference_support"];
+        assert_eq!(support["advertised_max"], serde_json::json!(3));
+        assert_eq!(support["configured_max"], serde_json::json!(1));
+        assert_eq!(support["source"], serde_json::json!("configured"));
+    }
+
+    #[tokio::test]
+    async fn media_models_list_reports_the_cost_kronn_itself_was_billed() {
+        // The cost fields come from past media_jobs rows, never from a
+        // published rate: one billed sample answers with its observed unit
+        // cost and says how many samples back it.
+        let video_catalogue = serde_json::json!({"data": [
+            {"id": "bytedance/seedance-2.0-mini", "supported_durations": [4, 5]}
+        ]});
+        let app = axum::Router::new().route(
+            "/v1/videos/models",
+            axum::routing::get(move || {
+                let body = video_catalogue.clone();
+                async move { axum::Json(body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let mut live = connection(
+            "conn-live",
+            "Reachable",
+            "reachable",
+            None,
+            Some("bytedance/seedance-2.0-mini"),
+        );
+        live.endpoint = Some(format!("http://{address}"));
+        let state = media_state(vec![live]).await;
+        let at = Utc::now();
+        let scheduled = at;
+        let deadline = at + chrono::Duration::minutes(20);
+        let rendered = crate::models::MediaRendered {
+            width: None,
+            height: None,
+            duration_ms: Some(10_000),
+        };
+        let cost = crate::models::MediaCost {
+            cost_usd: 0.20,
+            is_byok: false,
+        };
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::media_jobs::insert(
+                    conn,
+                    crate::db::media_jobs::NewMediaJob {
+                        id: "job-cost",
+                        modality: MediaModality::Video,
+                        connection_id: "conn-live",
+                        model: "bytedance/seedance-2.0-mini",
+                        prompt: "un chat",
+                        params: &crate::models::MediaParams {
+                            duration_secs: Some(5),
+                            ..Default::default()
+                        },
+                        discussion_id: Some("disc-1"),
+                        message_id: None,
+                        project_id: None,
+                        scheduled_at: scheduled,
+                        deadline_at: deadline,
+                    },
+                    scheduled,
+                )?;
+                crate::db::media_jobs::complete(
+                    conn,
+                    "job-cost",
+                    crate::db::media_jobs::Completion {
+                        context_file_id: "cf-cost",
+                        rendered: &rendered,
+                        cost: Some(cost),
+                        generation_id: None,
+                    },
+                    scheduled,
+                )
+            })
+            .await
+            .unwrap();
+
+        let Json(report) = models_list(State(state)).await;
+        let data = report.data.unwrap_or_else(|| panic!("{:?}", report.error));
+        let row = data["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connection_id"] == "conn-live")
+            .unwrap();
+        let model = &row["video"]["models"][0];
+        // 0.20 over 10 s is 0.02 per second, from one billed sample.
+        assert_eq!(model["observed_unit_cost_usd"], serde_json::json!(0.02));
+        assert_eq!(model["cost_samples"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn a_405_catalogue_answers_absent_rather_than_unreachable() {
+        let app = axum::Router::new().route(
+            "/v1/videos/models",
+            axum::routing::post(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let state = media_state(Vec::new()).await;
+        let answer = fetch_catalogue(
+            &state,
+            &format!("http://{address}"),
+            "cred",
+            MediaModality::Video,
+        )
+        .await;
+        assert_eq!(answer, Err(CatalogueState::Absent));
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_200_answers_unreadable() {
+        let app = axum::Router::new().route(
+            "/v1/videos/models",
+            axum::routing::get(|| async { "this is not json" }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let state = media_state(Vec::new()).await;
+        let answer = fetch_catalogue(
+            &state,
+            &format!("http://{address}"),
+            "cred",
+            MediaModality::Video,
+        )
+        .await;
+        assert_eq!(answer, Err(CatalogueState::Unreadable));
+    }
+
+    #[tokio::test]
+    async fn a_500_catalogue_answers_unreachable_and_an_auth_refusal_answers_unauthorized() {
+        for (status, expected) in [
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                CatalogueState::Unreachable,
+            ),
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                CatalogueState::Unauthorized,
+            ),
+        ] {
+            let app = axum::Router::new().route(
+                "/v1/videos/models",
+                axum::routing::get(move || async move { status }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.ok();
+            });
+            let state = media_state(Vec::new()).await;
+            let answer = fetch_catalogue(
+                &state,
+                &format!("http://{address}"),
+                "cred",
+                MediaModality::Video,
+            )
+            .await;
+            assert_eq!(answer, Err(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_403_catalogue_answers_unauthorized() {
+        let app = axum::Router::new().route(
+            "/v1/videos/models",
+            axum::routing::get(|| async { axum::http::StatusCode::FORBIDDEN }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let state = media_state(Vec::new()).await;
+        let answer = fetch_catalogue(
+            &state,
+            &format!("http://{address}"),
+            "cred",
+            MediaModality::Video,
+        )
+        .await;
+        assert_eq!(answer, Err(CatalogueState::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn a_200_without_a_data_array_answers_unreadable_not_an_empty_ok() {
+        // A JSON body that parses but carries no `data` array is a shape we
+        // cannot read: an empty `ok` list would read as "the provider serves
+        // nothing".
+        let app = axum::Router::new().route(
+            "/v1/videos/models",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"models": []})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let state = media_state(Vec::new()).await;
+        let answer = fetch_catalogue(
+            &state,
+            &format!("http://{address}"),
+            "cred",
+            MediaModality::Video,
+        )
+        .await;
+        assert_eq!(answer, Err(CatalogueState::Unreadable));
+    }
+
+    #[tokio::test]
+    async fn the_decision_catalogue_lists_only_decision_capability_models() {
+        // The Decision picker keeps only `decision`-capability entries: a chat
+        // model in the shared catalogue must not reach the agent as a
+        // decision recommendation.
+        let mut live = connection("conn-live", "Reachable", "reachable", None, None);
+        live.decision_model = Some("qwen/qwen3.8-max".into());
+        live.endpoint = Some("http://127.0.0.1:1".into());
+        let state = media_state(vec![live]).await;
+        state
+            .db
+            .with_conn(|conn| {
+                for (model, caps) in [
+                    ("qwen/qwen3.8-max", "decision"),
+                    ("qwen/qwen3-chat", "chat"),
+                ] {
+                    crate::db::model_catalog::create_manual(
+                        conn,
+                        &crate::models::model_catalog::UpsertManualModelRequest {
+                            runtime_target_id: "http:conn-live".into(),
+                            agent_type: crate::models::AgentType::Ollama,
+                            model_id: model.into(),
+                            display_name: model.into(),
+                            capabilities: vec![caps.into()],
+                            reasoning_modes: Vec::new(),
+                            default_reasoning_mode: None,
+                            tier_assignment: None,
+                            cost_hint: None,
+                            privacy_note: None,
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let Json(report) = models_list(State(state)).await;
+        let data = report.data.unwrap_or_else(|| panic!("{:?}", report.error));
+        let row = data["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connection_id"] == "conn-live")
+            .unwrap();
+        let decision = &row["decision"];
+        assert_eq!(
+            decision["configured"],
+            serde_json::json!("qwen/qwen3.8-max")
+        );
+        let models = decision["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1, "chat models are not decisions: {models:?}");
+        assert_eq!(models[0]["model_id"], "qwen/qwen3.8-max");
+        assert_eq!(models[0]["display_name"], "qwen/qwen3.8-max");
+    }
+
+    #[tokio::test]
+    async fn a_zero_or_negative_observed_cost_reads_as_unknown() {
+        // A zero-cost sample would drag the reported price to zero for
+        // everyone else: the floor keeps it unknown instead.
+        let video_catalogue = serde_json::json!({"data": [
+            {"id": "bytedance/seedance-2.0-mini", "supported_durations": [4, 5]}
+        ]});
+        let app = axum::Router::new().route(
+            "/v1/videos/models",
+            axum::routing::get(move || {
+                let body = video_catalogue.clone();
+                async move { axum::Json(body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let mut live = connection(
+            "conn-live",
+            "Reachable",
+            "reachable",
+            None,
+            Some("bytedance/seedance-2.0-mini"),
+        );
+        live.endpoint = Some(format!("http://{address}"));
+        let state = media_state(vec![live]).await;
+        let at = Utc::now();
+        let scheduled = at;
+        let deadline = at + chrono::Duration::minutes(20);
+        let rendered = crate::models::MediaRendered {
+            width: None,
+            height: None,
+            duration_ms: Some(5_000),
+        };
+        let cost = crate::models::MediaCost {
+            cost_usd: 0.0,
+            is_byok: false,
+        };
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::media_jobs::insert(
+                    conn,
+                    crate::db::media_jobs::NewMediaJob {
+                        id: "job-zero",
+                        modality: MediaModality::Video,
+                        connection_id: "conn-live",
+                        model: "bytedance/seedance-2.0-mini",
+                        prompt: "un chat",
+                        params: &crate::models::MediaParams {
+                            duration_secs: Some(5),
+                            ..Default::default()
+                        },
+                        discussion_id: Some("disc-1"),
+                        message_id: None,
+                        project_id: None,
+                        scheduled_at: scheduled,
+                        deadline_at: deadline,
+                    },
+                    scheduled,
+                )?;
+                crate::db::media_jobs::complete(
+                    conn,
+                    "job-zero",
+                    crate::db::media_jobs::Completion {
+                        context_file_id: "cf-zero",
+                        rendered: &rendered,
+                        cost: Some(cost),
+                        generation_id: None,
+                    },
+                    scheduled,
+                )
+            })
+            .await
+            .unwrap();
+
+        let Json(report) = models_list(State(state)).await;
+        let data = report.data.unwrap_or_else(|| panic!("{:?}", report.error));
+        let row = data["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["connection_id"] == "conn-live")
+            .unwrap();
+        let model = &row["video"]["models"][0];
+        assert!(
+            model["observed_unit_cost_usd"].is_null(),
+            "a zero-cost sample reads as unknown: {model}"
+        );
+        assert_eq!(model["cost_samples"], serde_json::json!(0));
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1904,9 +2764,27 @@ async fn fetch_model_capabilities(
     model: &str,
     modality: MediaModality,
 ) -> Option<crate::agents::media_capabilities::MediaModelCapabilities> {
+    let body = fetch_catalogue(state, base, credential_slug, modality)
+        .await
+        .ok()?;
+    crate::agents::media_capabilities::capabilities_for(&body, model, modality)
+}
+
+/// Fetches one whole catalogue payload. `Err(Absent)` is a provider that has
+/// no media catalogue at all (NVIDIA, Ollama answer 404) — a working
+/// connection; `Err(Unauthorized)` is a 401/403; `Err(Unreadable)` is a 200
+/// whose body we cannot parse; every other transport-level failure is
+/// `Err(Unreachable)`. All of them must leave the caller on its configured
+/// defaults rather than emptying it.
+async fn fetch_catalogue(
+    state: &AppState,
+    base: &str,
+    credential_slug: &str,
+    modality: MediaModality,
+) -> Result<serde_json::Value, CatalogueState> {
     let base = base.trim_end_matches('/').trim_end_matches("/v1");
     if base.is_empty() {
-        return None;
+        return Err(CatalogueState::Absent);
     }
     let path = match modality {
         MediaModality::Image => "/v1/images/models",
@@ -1916,7 +2794,7 @@ async fn fetch_model_capabilities(
         .timeout(std::time::Duration::from_secs(6))
         .connect_timeout(std::time::Duration::from_secs(3))
         .build()
-        .ok()?;
+        .map_err(|_| CatalogueState::Unreachable)?;
     let mut request = client.get(format!("{base}{path}"));
     if let Some(key) = state
         .config
@@ -1927,12 +2805,28 @@ async fn fetch_model_capabilities(
     {
         request = request.bearer_auth(key);
     }
-    let response = request.send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
+    let response = request
+        .send()
+        .await
+        .map_err(|_| CatalogueState::Unreachable)?;
+    if matches!(response.status().as_u16(), 404 | 405) {
+        return Err(CatalogueState::Absent);
     }
-    let body: serde_json::Value = response.json().await.ok()?;
-    crate::agents::media_capabilities::capabilities_for(&body, model, modality)
+    if matches!(response.status().as_u16(), 401 | 403) {
+        return Err(CatalogueState::Unauthorized);
+    }
+    if !response.status().is_success() {
+        return Err(CatalogueState::Unreachable);
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|_| CatalogueState::Unreadable)?;
+    // A 200 whose JSON carries no `data` array is a shape we cannot read.
+    if !body.get("data").is_some_and(serde_json::Value::is_array) {
+        return Err(CatalogueState::Unreadable);
+    }
+    Ok(body)
 }
 
 /// A generation's catalogue read, shared by every check that needs it.

@@ -439,8 +439,8 @@ pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
     ),
     (
         "media",
-        "make an image or a video: `media_generate`, `media_job_status` (the connection comes from `agent_list`, in the core)",
-        &["media_generate", "media_job_status"],
+        "make an image or a video: `media_generate`, `media_job_status`, and read what the providers actually serve with `media_models_list` (the connection comes from `agent_list`, in the core)",
+        &["media_generate", "media_job_status", "media_models_list"],
     ),
     (
         "delegation",
@@ -1361,6 +1361,12 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
             "Read one media generation job by id: status, model and the asset once it is ready. The asset reaches the discussion by itself; call this only when the result is needed within the current answer.",
             json!({"job_id": {"type": "string", "description": "From `media_generate`."}}),
             json!(["job_id"]),
+        ),
+        tool(
+            "media_models_list",
+            "List every media model reachable from the configured connections and the local ComfyUI, per capability (image, video): what each advertises — durations, resolutions, ratios, frame positions, `reference_modes` — plus which model each connection currently has configured and whether that exact model is in the catalogue. Image-to-video comes from `reference_modes` (or `frame_positions`): a video can start from a picture only when it lists a frame mode, and `max_input_references` null there means unknown, never no. `observed_unit_cost_usd` is what Kronn itself was billed for that exact model; no sample means unknown, never free. Decision models are listed per connection from the shared model catalogue. A modality whose provider has no catalogue at all reports `state: \"absent\"` — that connection is working, not down; an auth refusal is \"unauthorized\". Use this before promising a modality, a duration or a reference mode, and when recommending a model to a human; never infer capabilities from habit.",
+            json!({}),
+            json!([]),
         ),
         tool(
             "task_exec_prepare",
@@ -2749,6 +2755,13 @@ impl KronnToolExecutor {
                     },
                 )
                 .await
+            }
+            "media_models_list" => {
+                let Json(res) = crate::api::media::models_list(State(self.state.clone())).await;
+                match (res.success, res.data) {
+                    (true, Some(v)) => ok(call, v),
+                    _ => fail(call, res.error.unwrap_or_else(|| "call failed".into())),
+                }
             }
             "media_job_status" => self.read_media_job(call).await,
             "task_exec_prepare" => {
@@ -5434,6 +5447,7 @@ mod tests {
                 "agent_list",
                 "media_generate",
                 "media_job_status",
+                "media_models_list",
                 "task_exec_prepare",
                 "task_exec_launch",
                 "task_exec_status",
@@ -6769,7 +6783,7 @@ mod tests {
         let declarations = declarations_for_family("media");
         assert_eq!(
             names(&declarations),
-            ["media_generate", "media_job_status"]
+            ["media_generate", "media_job_status", "media_models_list"]
                 .into_iter()
                 .map(str::to_string)
                 .collect()
@@ -6779,5 +6793,65 @@ mod tests {
             "Generate an image or a video. The rest of the description explains the envelope.",
         );
         assert_eq!(summary, "Generate an image or a video.");
+    }
+
+    #[tokio::test]
+    async fn media_models_list_executes_against_a_seeded_connection() {
+        // The gate and the bridge route prove the wiring; this runs the tool
+        // through the executor, the way an agent calls it.
+        let state = super::quick_prompt_tests::state_with_prompts().await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::external_api_connections::insert(
+                    conn,
+                    &crate::models::ExternalApiConnection {
+                        id: "conn-list".into(),
+                        display_name: "OpenRouter".into(),
+                        mention_alias: "openrouter".into(),
+                        // Closed on purpose: nothing here may reach a provider.
+                        endpoint: Some("http://127.0.0.1:1".into()),
+                        credential_slug: "openrouter".into(),
+                        origin_preset: crate::models::ExternalApiConnectionPreset::OpenRouter,
+                        economy_model: None,
+                        default_model: None,
+                        reasoning_model: None,
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                        image_model: None,
+                        video_model: Some("bytedance/seedance-2.0-mini".into()),
+                        decision_model: None,
+                        media_endpoint: None,
+                        tools_enabled: None,
+                    },
+                )
+            })
+            .await
+            .unwrap();
+
+        let executor = KronnToolExecutor::arc(
+            state,
+            Some("general".into()),
+            crate::models::AgentType::Ollama,
+            None,
+            None,
+        );
+        let result = executor
+            .execute(&ToolCall {
+                id: "list".into(),
+                name: "media_models_list".into(),
+                arguments: json!({}),
+            })
+            .await;
+        assert!(result.ok, "{}", result.content);
+        let connections = result.content["connections"].as_array().unwrap();
+        let row = connections
+            .iter()
+            .find(|row| row["connection_id"] == "conn-list")
+            .expect("the seeded connection is in the report");
+        // Closed on purpose, so the catalogue answers `unreachable` — not an
+        // empty list that would read as "the provider serves nothing".
+        assert_eq!(row["video"]["state"], "unreachable");
+        assert_eq!(row["video"]["configured"], "bytedance/seedance-2.0-mini");
     }
 }

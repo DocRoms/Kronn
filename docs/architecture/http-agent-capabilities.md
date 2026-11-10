@@ -82,13 +82,37 @@ And, since 0.13.0, media generation: `media_generate` and `media_job_status`
 [src: file: backend/src/api/agent_tools.rs:1268-1363#orchestration_tool_catalogue]. These sit in the orchestration
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
-[src: file: backend/src/api/agent_tools.rs:1620-1673#NOT_FOR_A_WORKER].
+[src: file: backend/src/api/agent_tools.rs:1626-1679#NOT_FOR_A_WORKER].
+
+Beside them sits the discovery tool `media_models_list`
+[src: file: backend/src/api/agent_tools.rs:1365-1370#media_models_list]: per connection and per
+capability, every model the provider's catalogue advertises — durations, resolutions, ratios,
+frame positions, `reference_modes` — plus the model each connection has configured and whether
+the catalogue names that exact model. Every entry carries the effective envelope the
+generation preflight enforces (`media_reference_settings::resolve`): the operator's Config
+reference limits are applied, and the local ComfyUI reports the reference support its
+workflows actually take (`comfyui::reference_capabilities`), never a hardcoded zero. What
+Kronn itself was billed for each exact model rides along as `observed_unit_cost_usd`, read
+from past `media_jobs` rows in one pass
+[src: file: backend/src/db/media_jobs.rs:462-492#observed_unit_costs]; no sample means unknown,
+never free. A catalogue that answers nothing reports its cause: `unreachable`, `absent` (a
+provider with no media catalogue at all — a working connection, not a down one), `unauthorized`
+or `unreadable` — never an empty list pretending to be the whole story, and a model the
+catalogue never mentions stays unknown, never "no" [src: file: backend/src/api/media.rs:1160-1195#models_list].
+The report also lists each connection's decision models from the shared model catalogue —
+only the entries that declare the `decision` capability, the same filter the Decision picker
+applies, projected to the fields a recommendation needs. The same handler serves the HTTP
+route `GET /api/media/models/list` [src: file: backend/src/lib.rs:2462], so an agent and any
+HTTP client read one report. CLI agents read the same report through the `kronn-internal`
+bridge [src: file: backend/scripts/disc-introspection-mcp.py:2487-2493#media_models_list],
+with the full contract in its `TOOL_MANUALS` entry
+[src: file: backend/scripts/disc-introspection-mcp.py:10946-10974#media_models_list].
 
 Since 0.15.3 a Workflow Agent step on an HTTP or local agent (Ollama, LiteLLM, OpenRouter…)
 has these two tools as well, and **only** these two: every other orchestration tool
 (`agent_list`, `task_exec_*`, `agent_job_start`, `agent_schedule_wake`…) stays out of its
 catalogue and is refused when named
-[src: file: backend/src/api/agent_tools.rs:1591-1618#workflow_tool_catalogue]. The step runs the
+[src: file: backend/src/api/agent_tools.rs:1597-1624#workflow_tool_catalogue]. The step runs the
 very same handler as a discussion — one body, so the validation, the request guard, the
 connection resolution and the idempotency key cannot drift
 [src: file: backend/src/api/agent_media_tools.rs:58-72#generate_media] — and differs only in where
@@ -181,7 +205,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3420-3487#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3436-3503#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -227,7 +251,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3723-3771#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3783-3831#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -332,7 +356,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:428-508#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2696-2704#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2692-2700#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -461,7 +485,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:955-983#extract]
-  [src: file: backend/src/api/agent_tools.rs:4886-4910#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4899-4923#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -555,7 +579,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-457#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9693-9695#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9702-9704#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON
