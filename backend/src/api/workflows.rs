@@ -3150,6 +3150,76 @@ pub async fn create_feasibility_autopilot(
     create_as(state, parent_req, WorkflowWriter::Human).await
 }
 
+/// The two workflows `POST /api/workflows/templates/autocode-issue` installs.
+#[derive(Debug, serde::Serialize)]
+pub struct AutocodeIssueInstall {
+    pub contribute: Workflow,
+    pub publish: Workflow,
+}
+
+/// POST /api/workflows/templates/autocode-issue (KT-1643): installs the
+/// contribution workflows Kronn ships (start the campaign of an issue, publish
+/// its pull request), the same on every instance: they carry no project id, no
+/// URL, no instance value. Body `{ project_id? }`. Refused when they are
+/// already installed, so a second click never duplicates them.
+pub async fn create_autocode_issue(
+    State(state): State<AppState>,
+    Json(params): Json<crate::workflows::autocode_issue_template::AutocodeIssueParams>,
+) -> Json<ApiResponse<AutocodeIssueInstall>> {
+    use crate::workflows::autocode_issue_template as tpl;
+    let installed = state
+        .db
+        .with_conn(crate::db::workflows::list_workflows)
+        .await
+        .unwrap_or_default();
+    if let Some(existing) = installed
+        .iter()
+        .find(|wf| wf.name == tpl::CONTRIBUTE_NAME || wf.name == tpl::PUBLISH_NAME)
+    {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            format!(
+                "« {} » is already installed (workflow {}): open it from the Workflows page.",
+                existing.name, existing.id
+            ),
+        ));
+    }
+    let template = tpl::build_autocode_issue(&params);
+    let Json(contribute) =
+        create_as(state.clone(), template.contribute, WorkflowWriter::Human).await;
+    // A refusal of either creation is relayed as it came.
+    fn relayed(refusal: ApiResponse<Workflow>) -> Json<ApiResponse<AutocodeIssueInstall>> {
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            error: refusal.error,
+            error_code: refusal.error_code,
+            notice: refusal.notice,
+            readiness: None,
+        })
+    }
+    let Some(created) = contribute.data.clone() else {
+        return relayed(contribute);
+    };
+    let contribute = created;
+    let Json(publish) = create_as(state.clone(), template.publish, WorkflowWriter::Human).await;
+    match publish.data.clone() {
+        Some(publish) => Json(ApiResponse::ok(AutocodeIssueInstall {
+            contribute,
+            publish,
+        })),
+        None => {
+            // No half-installed pair: the first one goes, the error stays.
+            let id = contribute.id.clone();
+            let _ = state
+                .db
+                .with_conn(move |conn| crate::db::workflows::delete_workflow(conn, &id))
+                .await;
+            relayed(publish)
+        }
+    }
+}
+
 /// PUT /api/workflows/:id
 pub async fn update(
     State(state): State<AppState>,

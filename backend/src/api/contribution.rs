@@ -190,13 +190,12 @@ pub async fn preflight(
         project: Some(project),
         local_workers,
     };
-    Json(ApiResponse::ok(contribution::evaluate(
-        &repo,
-        &target_branch,
-        max_review_rounds,
-        &branch,
-        &facts,
-    )))
+    let mut report =
+        contribution::evaluate(&repo, &target_branch, max_review_rounds, &branch, &facts);
+    report.suggested_reviewer = contribution::suggested_reviewer(
+        &contribution::remote_reviewer_candidates(&*state.config.read().await),
+    );
+    Json(ApiResponse::ok(report))
 }
 
 #[cfg(test)]

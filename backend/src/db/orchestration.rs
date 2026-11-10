@@ -986,17 +986,17 @@ pub fn managed_working_execution_for_workspace(
     }
 }
 
-/// KT-1643 — make the campaign room match the reviewer the campaign named, and
-/// say so in the room. A delivery's review request is addressed to the room's
-/// agent: left as it was created (`no_agent`, a `ClaudeCode` nobody serves), it
-/// was orphaned. An agent or remote-model reviewer becomes the room's agent and
+/// KT-1643 — make the campaign room match a reviewer the caller named
+/// explicitly. A delivery's review request is addressed to the room's agent:
+/// left as it was created (`no_agent`, a `ClaudeCode` nobody serves), it was
+/// orphaned. An agent or remote-model reviewer becomes the room's agent and
 /// model and the room answers again; a human reviewer keeps the room
-/// human-only, so the review card is the whole conversation.
-pub fn apply_campaign_reviewer(
+/// human-only, so the review card is the whole conversation. Never called for
+/// a campaign that names no reviewer: such a room stays as its owner set it up.
+pub fn reconfigure_room_for_reviewer(
     tx: &rusqlite::Transaction<'_>,
     discussion_id: &str,
     reviewer: &crate::models::CampaignReviewer,
-    announcement: &str,
 ) -> Result<()> {
     use crate::models::CampaignReviewerKind;
     match (reviewer.kind, reviewer.agent.as_ref()) {
@@ -1024,6 +1024,16 @@ pub fn apply_campaign_reviewer(
         }
         (_, None) => bail!("a non-human reviewer names the agent that reviews"),
     }
+    Ok(())
+}
+
+/// KT-1643 — say in the campaign room which branch deliveries integrate into,
+/// the review budget and who reviews them.
+pub fn announce_campaign_rules(
+    tx: &rusqlite::Transaction<'_>,
+    discussion_id: &str,
+    announcement: &str,
+) -> Result<()> {
     let message = DiscussionMessage {
         id: format!("orch-campaign-reviewer:{}", Uuid::new_v4()),
         role: MessageRole::User,

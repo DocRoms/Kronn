@@ -163,6 +163,70 @@ fn a_contributor_pushes_to_their_fork_and_the_pull_request_targets_the_repositor
     assert!(!again.needs_fork, "an existing fork is reused");
 }
 
+fn push(repo: &str, branch: &str) -> PublicationStep {
+    PublicationStep::Push {
+        repo: repo.into(),
+        branch: branch.into(),
+    }
+}
+
+fn pull_request(head: &str) -> PublicationStep {
+    PublicationStep::OpenPullRequest {
+        repo: REPO.into(),
+        base: "main".into(),
+        head: head.into(),
+    }
+}
+
+/// The dry run of a publication: the ordered actions the publish step carries
+/// out, read without touching `gh` or git.
+#[test]
+fn the_dry_run_of_a_maintainer_publication_pushes_then_opens_the_pull_request() {
+    let mut facts = all_good();
+    facts.can_push = Some(true);
+    let plan = evaluate(REPO, "main", 10, "autocode/issue-7", &facts)
+        .publication
+        .unwrap();
+    assert_eq!(
+        plan.steps,
+        vec![
+            push(REPO, "autocode/issue-7"),
+            pull_request("autocode/issue-7")
+        ]
+    );
+}
+
+#[test]
+fn the_dry_run_of_a_fork_publication_forks_pushes_to_the_fork_and_targets_the_repository() {
+    let mut facts = all_good();
+    facts.can_push = Some(false);
+    facts.fork_exists = false;
+    let plan = evaluate(REPO, "main", 10, "autocode/issue-7", &facts)
+        .publication
+        .unwrap();
+    assert_eq!(
+        plan.steps,
+        vec![
+            PublicationStep::ForkRepo { repo: REPO.into() },
+            push("octo/widgets", "autocode/issue-7"),
+            pull_request("octo:autocode/issue-7"),
+        ]
+    );
+
+    facts.fork_exists = true;
+    let reused = evaluate(REPO, "main", 10, "autocode/issue-7", &facts)
+        .publication
+        .unwrap();
+    assert_eq!(
+        reused.steps,
+        vec![
+            push("octo/widgets", "autocode/issue-7"),
+            pull_request("octo:autocode/issue-7"),
+        ],
+        "an existing fork is reused, not created again"
+    );
+}
+
 #[test]
 fn the_preflight_reports_the_publication_it_resolved() {
     let mut facts = all_good();
@@ -302,20 +366,41 @@ fn remote(agent: AgentType, model: &str) -> (AgentType, Option<String>) {
 }
 
 #[test]
-fn the_default_reviewer_is_the_first_configured_remote_model() {
-    let reviewer = resolve_reviewer(None, &[remote(AgentType::LiteLlm, "gpt-x")]).unwrap();
+fn the_suggested_reviewer_is_the_first_configured_remote_model() {
+    let reviewer = suggested_reviewer(&[
+        remote(AgentType::LiteLlm, "gpt-x"),
+        remote(AgentType::Nvidia, "n"),
+    ])
+    .unwrap();
     assert_eq!(reviewer.kind, CampaignReviewerKind::RemoteModel);
     assert_eq!(reviewer.agent, Some(AgentType::LiteLlm));
     assert_eq!(reviewer.model.as_deref(), Some("gpt-x"));
     assert!(reviewer.defaulted);
+    assert!(
+        suggested_reviewer(&[]).is_none(),
+        "none configured: no proposal"
+    );
 }
 
 #[test]
-fn without_a_remote_model_the_default_is_the_human_never_an_unserved_agent() {
-    let reviewer = resolve_reviewer(None, &[]).unwrap();
+fn a_room_with_no_agent_has_the_human_as_reviewer() {
+    let reviewer = room_reviewer(&AgentType::ClaudeCode, Some("opus"), None, true);
     assert_eq!(reviewer.kind, CampaignReviewerKind::Human);
-    assert_eq!(reviewer.agent, None);
+    assert_eq!((reviewer.agent, reviewer.model), (None, None));
     assert!(reviewer.defaulted);
+}
+
+#[test]
+fn a_room_served_by_an_agent_has_that_agent_as_reviewer() {
+    let local = room_reviewer(&AgentType::Codex, Some("gpt-5"), None, false);
+    assert_eq!(local.kind, CampaignReviewerKind::Agent);
+    assert_eq!(local.agent, Some(AgentType::Codex));
+    assert_eq!(local.model.as_deref(), Some("gpt-5"));
+
+    let remote = room_reviewer(&AgentType::Custom, None, Some("c1"), false);
+    assert_eq!(remote.kind, CampaignReviewerKind::RemoteModel);
+    assert_eq!(remote.connection_id.as_deref(), Some("c1"));
+    assert!(remote.defaulted);
 }
 
 #[test]
@@ -327,7 +412,7 @@ fn a_named_reviewer_is_kept_and_not_marked_defaulted() {
         connection_id: None,
         defaulted: true,
     };
-    let resolved = resolve_reviewer(Some(human), &[remote(AgentType::LiteLlm, "m")]).unwrap();
+    let resolved = resolve_reviewer(human).unwrap();
     assert_eq!(resolved.kind, CampaignReviewerKind::Human);
     assert_eq!(resolved.agent, None, "a human reviewer carries no agent");
     assert!(!resolved.defaulted);
@@ -339,7 +424,7 @@ fn a_named_reviewer_is_kept_and_not_marked_defaulted() {
         connection_id: None,
         defaulted: true,
     };
-    let resolved = resolve_reviewer(Some(agent), &[]).unwrap();
+    let resolved = resolve_reviewer(agent).unwrap();
     assert_eq!(resolved.agent, Some(AgentType::ClaudeCode));
     assert!(!resolved.defaulted);
 }
@@ -353,12 +438,10 @@ fn an_agent_reviewer_needs_a_configured_model() {
         connection_id: None,
         defaulted: false,
     };
-    assert!(resolve_reviewer(Some(reviewer(Some(AgentType::ClaudeCode), None)), &[]).is_err());
-    assert!(
-        resolve_reviewer(Some(reviewer(Some(AgentType::ClaudeCode), Some("  "))), &[]).is_err()
-    );
-    assert!(resolve_reviewer(Some(reviewer(None, Some("opus"))), &[]).is_err());
-    assert!(resolve_reviewer(Some(reviewer(Some(AgentType::LiteLlm), Some("m"))), &[]).is_err());
+    assert!(resolve_reviewer(reviewer(Some(AgentType::ClaudeCode), None)).is_err());
+    assert!(resolve_reviewer(reviewer(Some(AgentType::ClaudeCode), Some("  "))).is_err());
+    assert!(resolve_reviewer(reviewer(None, Some("opus"))).is_err());
+    assert!(resolve_reviewer(reviewer(Some(AgentType::LiteLlm), Some("m"))).is_err());
 }
 
 #[test]
@@ -370,16 +453,16 @@ fn a_remote_reviewer_needs_an_http_provider_and_a_custom_one_its_connection() {
         connection_id: connection.map(String::from),
         defaulted: false,
     };
-    assert!(resolve_reviewer(Some(reviewer(Some(AgentType::Nvidia), None)), &[]).is_ok());
-    assert!(resolve_reviewer(Some(reviewer(Some(AgentType::ClaudeCode), None)), &[]).is_err());
-    assert!(resolve_reviewer(Some(reviewer(None, None)), &[]).is_err());
-    assert!(resolve_reviewer(Some(reviewer(Some(AgentType::Custom), None)), &[]).is_err());
-    assert!(resolve_reviewer(Some(reviewer(Some(AgentType::Custom), Some("c1"))), &[]).is_ok());
+    assert!(resolve_reviewer(reviewer(Some(AgentType::Nvidia), None)).is_ok());
+    assert!(resolve_reviewer(reviewer(Some(AgentType::ClaudeCode), None)).is_err());
+    assert!(resolve_reviewer(reviewer(None, None)).is_err());
+    assert!(resolve_reviewer(reviewer(Some(AgentType::Custom), None)).is_err());
+    assert!(resolve_reviewer(reviewer(Some(AgentType::Custom), Some("c1"))).is_ok());
 }
 
 #[test]
 fn the_room_announcement_names_the_branch_the_rounds_and_the_reviewer() {
-    let reviewer = resolve_reviewer(None, &[remote(AgentType::LiteLlm, "gpt-x")]).unwrap();
+    let reviewer = suggested_reviewer(&[remote(AgentType::LiteLlm, "gpt-x")]).unwrap();
     let text = room_announcement("main", "10", &reviewer);
     assert!(
         text.contains("`main`") && text.contains("10 review round"),
@@ -389,9 +472,9 @@ fn the_room_announcement_names_the_branch_the_rounds_and_the_reviewer() {
         text.contains("remote model") && text.contains("gpt-x"),
         "{text}"
     );
-    assert!(text.contains("default"), "{text}");
+    assert!(text.contains("as it is set up"), "{text}");
 
-    let human = resolve_reviewer(None, &[]).unwrap();
+    let human = room_reviewer(&AgentType::ClaudeCode, None, None, true);
     let text = room_announcement("main", "10", &human);
     assert!(
         text.contains("**you**") && text.contains("review card"),

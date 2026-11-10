@@ -7352,7 +7352,18 @@ id: string, ok: boolean,
  */
 message: string, };
 
-export type PreflightReport = { ok: boolean, repo: string, target_branch: string, max_review_rounds: number, checks: Array<PreflightCheck>, project_id?: string, publication?: PublicationPlan, };
+export type PreflightReport = { ok: boolean, repo: string, target_branch: string, max_review_rounds: number, checks: Array<PreflightCheck>, project_id?: string, publication?: PublicationPlan,
+/**
+ * The remote model this instance proposes as the campaign's reviewer, when
+ * one is configured; the workflow passes it explicitly. Absent: the
+ * campaign room keeps its own setup.
+ */
+suggested_reviewer?: CampaignReviewer,
+/**
+ * The local agents a task can be launched on, for the workflow to pick
+ * its default worker from instead of assuming one is installed.
+ */
+workers: Array<AgentType>, };
 
 /**
  * 0.9.2-G — honest presence state, server-derived (never a bare "connected"
@@ -7986,7 +7997,17 @@ pr_head: string,
 /**
  * The fork has to be created (`gh repo fork`) before the push.
  */
-needs_fork: boolean, };
+needs_fork: boolean,
+/**
+ * What publishing does, in order: the workflow's publish step runs
+ * exactly these, so the plan read here is the plan carried out.
+ */
+steps: Array<PublicationStep>, };
+
+/**
+ * One action of a publication.
+ */
+export type PublicationStep = { "action": "fork_repo", repo: string, } | { "action": "push", repo: string, branch: string, } | { "action": "open_pull_request", repo: string, base: string, head: string, };
 
 export type PublishLivePageRequest = { workflow_id?: string | null, workflow_run_id?: string | null, writes: Array<LivePageWrite>, };
 

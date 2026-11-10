@@ -23,6 +23,9 @@ use ts_rs::TS;
 
 use crate::models::{AgentType, CampaignReviewer, CampaignReviewerKind, Project};
 
+/// The repository the shipped autoCode Issue workflow contributes to unless
+/// its `repo` variable names another.
+pub const DEFAULT_REPOSITORY: &str = "DocRoms/Kronn";
 /// The review rounds a campaign allows when the workflow sets none.
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 10;
 /// The branch a pull request targets when the workflow sets none.
@@ -117,6 +120,26 @@ pub struct PublicationPlan {
     pub pr_head: String,
     /// The fork has to be created (`gh repo fork`) before the push.
     pub needs_fork: bool,
+    /// What publishing does, in order: the workflow's publish step runs
+    /// exactly these, so the plan read here is the plan carried out.
+    pub steps: Vec<PublicationStep>,
+}
+
+/// One action of a publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[ts(export)]
+pub enum PublicationStep {
+    /// `gh repo fork <repo>`: the contributor's copy of the repository.
+    ForkRepo { repo: String },
+    /// Push `branch` to the repository `repo`.
+    Push { repo: String, branch: String },
+    /// `gh pr create --repo <repo> --base <base> --head <head>`.
+    OpenPullRequest {
+        repo: String,
+        base: String,
+        head: String,
+    },
 }
 
 /// How to publish `branch`: straight to `base_repo` when the user can push
@@ -130,6 +153,11 @@ pub fn plan_publication(
     fork_exists: bool,
     branch: &str,
 ) -> PublicationPlan {
+    let pull_request = |head: &str| PublicationStep::OpenPullRequest {
+        repo: base_repo.to_string(),
+        base: base_branch.to_string(),
+        head: head.to_string(),
+    };
     if can_push {
         return PublicationPlan {
             mode: PublicationMode::Maintainer,
@@ -138,16 +166,37 @@ pub fn plan_publication(
             push_repo: base_repo.to_string(),
             pr_head: branch.to_string(),
             needs_fork: false,
+            steps: vec![
+                PublicationStep::Push {
+                    repo: base_repo.to_string(),
+                    branch: branch.to_string(),
+                },
+                pull_request(branch),
+            ],
         };
     }
     let name = base_repo.rsplit('/').next().unwrap_or(base_repo);
+    let push_repo = format!("{login}/{name}");
+    let pr_head = format!("{login}:{branch}");
+    let mut steps = Vec::new();
+    if !fork_exists {
+        steps.push(PublicationStep::ForkRepo {
+            repo: base_repo.to_string(),
+        });
+    }
+    steps.push(PublicationStep::Push {
+        repo: push_repo.clone(),
+        branch: branch.to_string(),
+    });
+    steps.push(pull_request(&pr_head));
     PublicationPlan {
         mode: PublicationMode::Fork,
         base_repo: base_repo.to_string(),
         base_branch: base_branch.to_string(),
-        push_repo: format!("{login}/{name}"),
-        pr_head: format!("{login}:{branch}"),
+        push_repo,
+        pr_head,
         needs_fork: !fork_exists,
+        steps,
     }
 }
 
@@ -213,6 +262,15 @@ pub struct PreflightReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub publication: Option<PublicationPlan>,
+    /// The remote model this instance proposes as the campaign's reviewer, when
+    /// one is configured; the workflow passes it explicitly. Absent: the
+    /// campaign room keeps its own setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub suggested_reviewer: Option<CampaignReviewer>,
+    /// The local agents a task can be launched on, for the workflow to pick
+    /// its default worker from instead of assuming one is installed.
+    pub workers: Vec<AgentType>,
 }
 
 fn check(id: &str, ok: bool, message: impl Into<String>) -> PreflightCheck {
@@ -418,6 +476,8 @@ pub fn evaluate(
         checks,
         project_id,
         publication,
+        suggested_reviewer: None,
+        workers: facts.local_workers.clone(),
     }
 }
 
@@ -452,32 +512,58 @@ pub fn remote_reviewer_candidates(
     candidates
 }
 
-/// The reviewer a campaign is created with. `requested` is what the caller
-/// named; without one the default is a remote model (`remote_candidates`, the
-/// first that is configured) and, when none is, the human: a delivery is never
-/// left to an agent nobody serves.
-pub fn resolve_reviewer(
-    requested: Option<CampaignReviewer>,
+/// The reviewer a workflow proposes when the contributor names none: a remote
+/// model (`remote_candidates`, the first that is configured), else `None`. A
+/// proposal only: a campaign reconfigures its room for a reviewer the caller
+/// passes explicitly, never for one it chose on its own.
+pub fn suggested_reviewer(
     remote_candidates: &[(AgentType, Option<String>)],
-) -> Result<CampaignReviewer, String> {
-    let Some(mut reviewer) = requested else {
-        return Ok(match remote_candidates.first() {
-            Some((agent, model)) => CampaignReviewer {
-                kind: CampaignReviewerKind::RemoteModel,
-                agent: Some(agent.clone()),
-                model: model.clone(),
-                connection_id: None,
-                defaulted: true,
-            },
-            None => CampaignReviewer {
-                kind: CampaignReviewerKind::Human,
-                agent: None,
-                model: None,
-                connection_id: None,
-                defaulted: true,
-            },
-        });
-    };
+) -> Option<CampaignReviewer> {
+    let (agent, model) = remote_candidates.first()?;
+    Some(CampaignReviewer {
+        kind: CampaignReviewerKind::RemoteModel,
+        agent: Some(agent.clone()),
+        model: model.clone(),
+        connection_id: None,
+        defaulted: true,
+    })
+}
+
+/// Who reviews a campaign created without a named reviewer: the room as it
+/// is. The room's own agent and model when one answers in it, the human when
+/// the room is `no_agent`. The room is not touched, so a campaign started from
+/// a room the owner set up keeps that setup.
+pub fn room_reviewer(
+    room_agent: &AgentType,
+    model: Option<&str>,
+    connection_id: Option<&str>,
+    no_agent: bool,
+) -> CampaignReviewer {
+    if no_agent {
+        return CampaignReviewer {
+            kind: CampaignReviewerKind::Human,
+            agent: None,
+            model: None,
+            connection_id: None,
+            defaulted: true,
+        };
+    }
+    CampaignReviewer {
+        kind: if is_remote_agent(room_agent) {
+            CampaignReviewerKind::RemoteModel
+        } else {
+            CampaignReviewerKind::Agent
+        },
+        agent: Some(room_agent.clone()),
+        model: model.map(String::from),
+        connection_id: connection_id.map(String::from),
+        defaulted: true,
+    }
+}
+
+/// A reviewer the caller named, checked: one that cannot review is refused, so
+/// no campaign is created with a delivery nobody serves.
+pub fn resolve_reviewer(mut reviewer: CampaignReviewer) -> Result<CampaignReviewer, String> {
     reviewer.defaulted = false;
     let model = reviewer
         .model
@@ -550,7 +636,7 @@ pub fn room_announcement(
         _ => "nobody named".to_string(),
     };
     let origin = if reviewer.defaulted {
-        " (the default; you can still decide from the review card)"
+        " (this room as it is set up; you can still decide from the review card)"
     } else {
         ""
     };

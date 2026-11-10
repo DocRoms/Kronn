@@ -2580,6 +2580,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/workflows/templates/feasibility-autopilot",
             post(api::workflows::create_feasibility_autopilot),
         )
+        // KT-1643 — the autoCode Issue workflows (start the campaign, publish
+        // the pull request), shipped with Kronn: same on every instance.
+        .route(
+            "/api/workflows/templates/autocode-issue",
+            post(api::workflows::create_autocode_issue),
+        )
         // 0.8.3 — Bundle creator. Atomic creation of (Quick Prompts
         // × N) + (Quick APIs × N) + (Custom API plugins × N) +
         // (1 Workflow) from a single `KRONN:BUNDLE_READY` chat

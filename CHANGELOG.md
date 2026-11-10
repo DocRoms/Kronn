@@ -19,12 +19,17 @@ Release notes for 0.9.3 and earlier are available in the
   (no fixed id), checks `gh` (installed, logged in, `repo` scope), the clone
   and a local worker with the command that fixes each failure, and says whether
   the branch goes straight to the repository or through the contributor's fork
-  (the pull request always targets the repository). Review rounds (default 10)
-  and the target branch (default `main`) are workflow settings, and a campaign
-  names its reviewer at creation (a remote model by default, else the human):
-  the choice is stored, announced in the campaign room and shown on the
-  campaign panel, so a delivery is no longer addressed to an agent nobody
-  serves. See [the guide](docs/guides/autocode-issue-workflow.md).
+  (the pull request always targets the repository). The workflows ship with
+  Kronn: `POST /api/workflows/templates/autocode-issue` installs « start the
+  campaign » (preflight, take the issue, task, room, campaign, launch) and
+  « publish the pull request » (fork when needed, push, `gh pr create`) on any
+  instance, with the repository, the target branch (default `main`) and the
+  review rounds (default 10) as launch variables. A campaign records who
+  reviews each delivery and announces it in its room: the reviewer it was
+  created with, else the agent the room already has, else the human. A room is
+  reconfigured only for a reviewer passed explicitly, and the shipped workflow
+  passes the instance's configured remote model when it has one. See
+  [the guide](docs/guides/autocode-issue-workflow.md).
 - API connections: a revoked or expired token is surfaced before the next run
   fails on it (KT-1524). A 401 (or a 403 that names the credential, or a failed
   OAuth refresh) flags the connection until its next successful call: the card
