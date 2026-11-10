@@ -188,8 +188,11 @@ Steps, in order (nothing live changes before step 6):
    is running and asks before restarting (`--yes` restarts, declining aborts).
    `--force` skips the wait;
 6. record the previous version (`previous`) and the modification time of the
-   database backup (`update.state`), switch `current`, restart, wait for
-   `/api/health` to report the target version;
+   database backup (`update.state`), switch `current`, rewrite the unit with
+   the target release's own CLI (`current/cli/lib/service.sh`, so a key a later
+   release adds reaches updated services; the data dir, `XDG_CONFIG_HOME` and the
+   port keep the unit's values), reload the service, wait for `/api/health` to
+   report the target version;
 7. on failure: automatic rollback (below), exit 1. On success: prune
    `releases/` (3 most recent by semver, never the current or the previous
    one) and print the `## [<version>]` section of the changelog.
@@ -212,7 +215,7 @@ modified, so an update can replace the script that is executing it.
 | `KRONN_SERVICE_DRAIN_TIMEOUT` | `1800` | seconds to wait for running work |
 | `KRONN_SERVICE_DRAIN_INTERVAL` | `10` | seconds between two drain polls |
 | `KRONN_SERVICE_HEALTH_TIMEOUT` | `90` | seconds to wait for a healthy backend after a switch |
-| `KRONN_DATA_DIR` | platform data dir | where the database lives (same override as the backend) |
+| `KRONN_DATA_DIR` | the unit's value | where the database lives: read from the installed unit, never from your shell (export it before `install`) |
 | `KRONN_API_MAX_TIME` | `30` | seconds one in-flight check may take before its answer counts as unknown |
 
 ## Rollback
@@ -228,8 +231,8 @@ update runs the same code:
    `kronn.db.failed-<version>` together with its `-wal` and `-shm` files, and
    the backup is copied back. The manual command asks first, because everything
    written since the update is dropped (the failed database is kept);
-3. switch `current` back, load the service, wait for the previous version to be
-   healthy.
+3. switch `current` back, rewrite the unit with the previous release's CLI, load
+   the service, wait for the previous version to be healthy.
 
 Without an update record (`update.state`) a manual rollback only switches the
 release and leaves the database alone.

@@ -356,6 +356,28 @@ _su_restore_db() { # <failed_version>
     printf "  ${DIM}The database written by %s was kept as %s${RESET}\n" "$1" "$db.$suffix"
 }
 
+# Rewrite the unit with the CLI of the release `current` now points at, so a
+# key a later release adds (KRONN_DOCS_SIDECAR, KRONN_TEMPLATES_DIR…) reaches
+# the services it updates, and a rollback drops it again. service_load then
+# rereads the unit (a launchd kickstart does not). The values chosen at install
+# come from the unit, never from this shell: an exported KRONN_DATA_DIR must
+# not move the service to another database during an update.
+_su_rewrite_unit() {
+    local lib
+    lib="$(service_home)/current/cli/lib/service.sh"
+    if ! (
+        unset KRONN_DATA_DIR XDG_CONFIG_HOME KRONN_PORT
+        if [[ -f "$lib" ]]; then
+            # shellcheck source=/dev/null
+            source "$lib" || exit 1
+        fi
+        service_write_unit
+    ); then
+        fail "Could not rewrite the service unit for $(service_current_version)."
+        return 1
+    fi
+}
+
 # Back to <prev>. $3 = auto | manual. $4 = "migrated" when the DB must be
 # restored. Returns 0 when the previous release is healthy again.
 _su_rollback() { # <prev> <failed_version> <mode> <migrated:0|1>
@@ -376,6 +398,7 @@ _su_rollback() { # <prev> <failed_version> <mode> <migrated:0|1>
         fi
     fi
     service_switch_current "$prev" || return 1
+    _su_rewrite_unit || return 1
     service_load || { fail "Could not load the service after the rollback."; return 1; }
     info "Waiting for $prev to answer on $(service_url) ..."
     if service_wait_healthy "$(_su_backend_version "$prev")" "${KRONN_SERVICE_HEALTH_TIMEOUT:-90}"; then
@@ -538,7 +561,7 @@ _su_update_locked() { # <to> <check> <force>
 
     info "Switching $prev -> $target and restarting..."
     service_switch_current "$target" || return 1
-    if service_restart && service_wait_healthy "$(_su_backend_version "$target")" "${KRONN_SERVICE_HEALTH_TIMEOUT:-90}"; then
+    if _su_rewrite_unit && service_load && service_wait_healthy "$(_su_backend_version "$target")" "${KRONN_SERVICE_HEALTH_TIMEOUT:-90}"; then
         :
     else
         fail "Release $target did not become healthy — rolling back to $prev."

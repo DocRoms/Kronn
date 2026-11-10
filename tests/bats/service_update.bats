@@ -53,15 +53,20 @@ EOF
         echo "health $1" >> "$CALLS"
         [[ -z "${FAIL_HEALTH_FOR:-}" || "$1" != "$FAIL_HEALTH_FOR" ]]
     }
-    # A restart on which the "new backend" migrates the database first.
-    service_restart() {
-        echo "restart" >> "$CALLS"
-        if [[ -n "${MIGRATE_ON_RESTART:-}" ]]; then
+    # The update and the rollback reload the unit; the first load is the "new
+    # backend" starting, which migrates the database when MIGRATE_ON_RESTART is
+    # set. The real service_load then runs against the fake launchctl.
+    eval "_real_service_load() $(declare -f service_load | tail -n +2)"
+    service_load() {
+        echo "load $(service_current_version)" >> "$CALLS"
+        if [[ -n "${MIGRATE_ON_RESTART:-}" && ! -e "$STATE/migrated" ]]; then
+            touch "$STATE/migrated"
             echo "migrated" > "$(service_db_path)"
             echo "wal" > "$(service_db_path)-wal"
             echo "shm" > "$(service_db_path)-shm"
             echo "pre-migration" > "$(service_db_backup)"
         fi
+        _real_service_load
     }
     service_missing_tools() { echo; }
     service_update_active_work() { return "${FAKE_ACTIVE_RC:-1}"; }
@@ -88,7 +93,7 @@ add_tag() { # <version>
     if [[ "${NO_SERVICE:-0}" == "1" ]]; then
         rm -f "$w/lib/service.sh"
     else
-        echo "# service" > "$w/lib/service.sh"
+        printf '%s\n' "${SERVICE_SH:-# service}" > "$w/lib/service.sh"
     fi
     printf '%s\n' "$v" > "$w/VERSION"
     {
@@ -138,7 +143,7 @@ old_time() { touch -t 202001010000 "$1"; }
     [ "$(service_current_version)" = "0.2.0" ]
     [ "$(cat "$KRONN_SERVICE_HOME/previous")" = "0.1.0" ]
     grep -q "^build " "$CALLS"
-    grep -q "^restart" "$CALLS"
+    grep -q "^load 0.2.0" "$CALLS"
     grep -q "^health 0.2.0" "$CALLS"
     [ -f "$KRONN_SERVICE_HOME/releases/0.2.0/VERSION" ]
     # The old release is untouched (the running CLI lives there).
@@ -163,7 +168,7 @@ old_time() { touch -t 202001010000 "$1"; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"Already up to date"* ]]
     ! grep -q "^build " "$CALLS"
-    ! grep -q "^restart" "$CALLS"
+    ! grep -q "^load" "$CALLS"
 }
 
 @test "update --check through the real CLI (set -e) still releases the lock" {
@@ -293,7 +298,7 @@ old_time() { touch -t 202001010000 "$1"; }
     [ "$status" -eq 1 ]
     [[ "$output" == *"Aborted"* ]]
     [ "$(service_current_version)" = "0.1.0" ]
-    ! grep -q "^restart" "$CALLS"
+    ! grep -q "^load" "$CALLS"
 }
 
 @test "update drain: --yes proceeds after the timeout, --force skips the wait" {
@@ -372,6 +377,51 @@ old_time() { touch -t 202001010000 "$1"; }
     [ ! -e "$(service_db_path)-wal" ]
     [ ! -e "$(service_db_path)-shm" ]
     grep -q "^launchctl bootstrap" "$CALLS"
+}
+
+# ─── The unit follows the release ────────────────────────────────────────────
+
+# A release whose CLI writes one more key into the unit, like a later release
+# adding KRONN_DOCS_SIDECAR.
+SERVICE_SH_NEW_KEY='eval "_orig_pairs() $(declare -f _service_env_pairs | tail -n +2)"; _service_env_pairs() { _orig_pairs "$@"; printf "KRONN_NEW_KEY=yes\n"; }'
+
+@test "update rewrites the unit with the target release's CLI and reloads it" {
+    add_tag 0.1.0
+    install_at 0.1.0
+    ! service_unit_env KRONN_NEW_KEY
+    SERVICE_SH="$SERVICE_SH_NEW_KEY" add_tag 0.2.0
+    run cmd_service_update --yes
+    [ "$status" -eq 0 ]
+    [ "$(service_unit_env KRONN_NEW_KEY)" = "yes" ]
+    # Reloaded (bootout + bootstrap rereads the plist), not just kickstarted.
+    grep -q "^launchctl bootstrap" "$CALLS"
+    ! grep -q "^launchctl kickstart" "$CALLS"
+}
+
+@test "rollback rewrites the unit with the previous release's CLI" {
+    add_tag 0.1.0
+    install_at 0.1.0
+    SERVICE_SH="$SERVICE_SH_NEW_KEY" add_tag 0.2.0
+    run cmd_service_update --yes
+    [ "$status" -eq 0 ]
+    [ "$(service_unit_env KRONN_NEW_KEY)" = "yes" ]
+    run cmd_service_rollback --yes
+    [ "$status" -eq 0 ]
+    [ "$(service_current_version)" = "0.1.0" ]
+    ! service_unit_env KRONN_NEW_KEY
+}
+
+@test "update keeps the unit's data dir and port, whatever the shell exports" {
+    add_tag 0.1.0
+    install_at 0.1.0
+    add_tag 0.2.0
+    local data="$KRONN_DATA_DIR"
+    KRONN_DATA_DIR="$TEST_TMPDIR/dev-db" XDG_CONFIG_HOME="$TEST_TMPDIR/xdg" KRONN_PORT=4999 \
+        run cmd_service_update --yes
+    [ "$status" -eq 0 ]
+    [ "$(service_unit_env KRONN_DATA_DIR)" = "$data" ]
+    [ "$(service_unit_env KRONN_PORT)" = "1" ]
+    ! service_unit_env XDG_CONFIG_HOME
 }
 
 # ─── Manual rollback ─────────────────────────────────────────────────────────
@@ -513,7 +563,7 @@ old_time() { touch -t 202001010000 "$1"; }
     [ "$status" -eq 1 ]
     [[ "$output" == *"refused the in-flight check"* ]]
     grep -q "^asked: Restart anyway" "$CALLS"
-    ! grep -q "^restart" "$CALLS"
+    ! grep -q "^load" "$CALLS"
     [ "$(service_current_version)" = "0.1.0" ]
     [ ! -e "$KRONN_SERVICE_HOME/update.lock" ]
 }
@@ -528,7 +578,7 @@ old_time() { touch -t 202001010000 "$1"; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"restarting anyway"* ]]
     ! grep -q "^asked" "$CALLS"
-    grep -q "^restart" "$CALLS"
+    grep -q "^load 0.2.0" "$CALLS"
     [ "$(service_current_version)" = "0.2.0" ]
 }
 
