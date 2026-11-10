@@ -62,6 +62,7 @@ jobs:
       # Sparse: the script is all this job needs.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref }}
           sparse-checkout: scripts/ci
       - name: Require ci-test label for pull requests
         id: label

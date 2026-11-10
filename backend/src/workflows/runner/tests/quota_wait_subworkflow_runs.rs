@@ -542,7 +542,8 @@ async fn set_record(tree: &Tree, child: Option<&str>, wait: Option<&str>) {
     tree.state
         .db
         .with_conn(move |conn| {
-            let mut run = crate::db::workflows::get_run(conn, &root_id)?.ok_or_else(|| anyhow::anyhow!("root run missing"))?;
+            let mut run = crate::db::workflows::get_run(conn, &root_id)?
+                .ok_or_else(|| anyhow::anyhow!("root run missing"))?;
             run.state.insert(key, value);
             conn.execute(
                 "UPDATE workflow_runs SET state = ?2 WHERE id = ?1",
@@ -836,7 +837,8 @@ fn a_child_never_resumes_past_its_own_timeout() {
         tree.state
             .db
             .with_conn(move |conn| {
-                let mut child = crate::db::workflows::get_run(conn, &child_id)?.ok_or_else(|| anyhow::anyhow!("child run missing"))?;
+                let mut child = crate::db::workflows::get_run(conn, &child_id)?
+                    .ok_or_else(|| anyhow::anyhow!("child run missing"))?;
                 child
                     .state
                     .insert(TIMEOUT_ACTIVE_MS_STATE_KEY.into(), "11000".into());
@@ -935,8 +937,12 @@ fn a_resumed_child_keeps_its_own_trigger_context() {
         tree.state
             .db
             .with_conn(move |conn| {
-                let mut child = crate::db::workflows::get_run(conn, &child_id)?.ok_or_else(|| anyhow::anyhow!("child run missing"))?;
-                let mut context = child.trigger_context.take().ok_or_else(|| anyhow::anyhow!("child run has no trigger context"))?;
+                let mut child = crate::db::workflows::get_run(conn, &child_id)?
+                    .ok_or_else(|| anyhow::anyhow!("child run missing"))?;
+                let mut context = child
+                    .trigger_context
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("child run has no trigger context"))?;
                 context["accumulated_while_waiting"] = serde_json::json!("kept");
                 context[crate::workflows::quota_wait::PARENT_RESUMES_KEY] =
                     serde_json::json!(false);
@@ -1031,7 +1037,8 @@ fn a_resumed_child_keeps_its_pinned_variables() {
         tree.state
             .db
             .with_conn(move |conn| {
-                let mut workflow = crate::db::workflows::get_workflow(conn, &workflow_id)?.ok_or_else(|| anyhow::anyhow!("workflow missing"))?;
+                let mut workflow = crate::db::workflows::get_workflow(conn, &workflow_id)?
+                    .ok_or_else(|| anyhow::anyhow!("workflow missing"))?;
                 workflow.steps[1]
                     .sub_workflow_variables
                     .insert("ticketKey".into(), "EW-99".into());

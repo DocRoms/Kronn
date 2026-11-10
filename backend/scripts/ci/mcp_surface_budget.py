@@ -175,7 +175,9 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # listed thirteen). Paid for by tightening the same declaration (its discovery
 # sentence, the `steps` and `trigger` descriptions): ceiling lowered by 38 B
 # (84_282 -> 84_244).
-CATALOGUE_MAX_BYTES = 84_244
+# 0.15.3 batch: the catalogue measured on the batch head is 19 B smaller;
+# ceiling re-pinned to that payload (84_244 -> 84_225).
+CATALOGUE_MAX_BYTES = 84_225
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
