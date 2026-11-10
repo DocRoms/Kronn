@@ -15,13 +15,13 @@ warns; it never refuses a run.
   (`data.meta.sources[]`), 0 for a failed source, so the heavy source is
   obvious (Quick API and Quick Exec sources alike).
   `[src: file: backend/src/workflows/collect_api_data_step.rs:586-640]`
-- `workflow_runs.heaviest_output_bytes` / `heaviest_output_step` (migration 290):
+- `workflow_runs.heaviest_output_bytes` / `heaviest_output_step` (migration 291):
   the run's heaviest step output and its step's name, written on insert and on
   every progress write, and read by the workflow list from the last-run summary.
   Both summary indexes (`idx_workflow_runs_summary`,
   `idx_workflow_runs_project_summary`) include them so the list still never reads a
-  run's payload. A run recorded before migration 290 reports 0 and no step.
-  `[src: file: backend/src/db/sql/290_workflow_runs_heaviest_output.sql:1-15]`
+  run's payload. A run recorded before migration 291 reports 0 and no step.
+  `[src: file: backend/src/db/sql/291_workflow_runs_heaviest_output.sql:1-15]`
 
 ## The threshold
 

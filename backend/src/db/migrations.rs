@@ -1056,8 +1056,8 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/289_project_lane_seeds_confirmed.sql"),
     ),
     (
-        "290_workflow_runs_heaviest_output",
-        include_str!("sql/290_workflow_runs_heaviest_output.sql"),
+        "291_workflow_runs_heaviest_output",
+        include_str!("sql/291_workflow_runs_heaviest_output.sql"),
     ),
 ];
 

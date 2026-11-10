@@ -338,6 +338,7 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
             | "lane_seeds_copy_enabled"
             | "lane_seeds_adopt_suggested"
             | "lane_seeds_strong_confirm"
+            | "tls_terminated_by_proxy"
             | "p2p_enabled"
             | "continual_learning_enabled"
             | "discussion_notes_enabled"
