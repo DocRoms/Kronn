@@ -6,6 +6,10 @@ use axum::{extract::Path, extract::State, Json};
 #[path = "agent_workflow_tests.rs"]
 mod tests;
 
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "agent_workflow_bench.rs"]
+mod bench;
+
 pub(super) fn declarations() -> Vec<Value> {
     let mut editable = json!({
         "name":{"type":"string"}, "trigger":{"type":"object","description":"Tagged object, e.g. {type: Manual}."},
@@ -25,9 +29,9 @@ pub(super) fn declarations() -> Vec<Value> {
     [
         ("workflow_list", "List accessible workflows with ids, trigger, enabled state and step counts.", json!({}), json!([])),
         ("workflow_get", "Read the complete accessible workflow before editing it; omitted fields are preserved by update.", json!({"workflow_id":{"type":"string"}}), json!(["workflow_id"])),
-        ("workflow_step_schema", "Read the complete canonical step contracts before authoring. Optional step_type narrows to one type; section selects a shared contract.", json!({"step_type":{"type":"string"},"section":{"type":"string","enum":["template_vars","data_pipeline_contract"]}}), json!([])),
-        ("workflow_create_draft", "Save a disabled workflow for human review. Never runs or enables it. Read workflow_step_schema and tool_manual for authoring rules. Its kronn_readiness says if it can start.", create, json!(["name","trigger","steps"])),
-        ("workflow_update", "Patch a disabled workflow, preserving omitted fields and project. Enabled workflows must first be disabled in the Workflows UI. Read workflow_get before replacing steps.", editable, json!(["workflow_id"])),
+        ("workflow_step_schema", "Read the canonical step contracts and `authoring_doctrine` (which step type to prefer) before authoring. Optional step_type narrows to one type; section selects a shared contract.", json!({"step_type":{"type":"string"},"section":{"type":"string","enum":["template_vars","data_pipeline_contract","authoring_doctrine"]}}), json!([])),
+        ("workflow_create_draft", "Save a disabled workflow for human review. Never runs or enables it. Read `authoring_doctrine` (workflow_step_schema) before composing, then tool_manual. Its kronn_readiness says if it can start.", create, json!(["name","trigger","steps"])),
+        ("workflow_update", "Patch a disabled workflow, preserving omitted fields and project. Enabled workflows must first be disabled in the Workflows UI. Read workflow_get before replacing steps, and `authoring_doctrine` (workflow_step_schema) before changing them.", editable, json!(["workflow_id"])),
     ].into_iter().map(|(name,description,properties,required)| json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required}}})).collect()
 }
 
@@ -38,8 +42,17 @@ fn schema_section(arguments: &Value) -> Result<Value, String> {
         return Ok(json!({"shape":schema["shape"],"step_type":kind,"contract":fields}));
     }
     if let Some(section) = arguments["section"].as_str() {
-        if !["template_vars", "data_pipeline_contract"].contains(&section) {
-            return Err("section must be template_vars or data_pipeline_contract".into());
+        if ![
+            "template_vars",
+            "data_pipeline_contract",
+            "authoring_doctrine",
+        ]
+        .contains(&section)
+        {
+            return Err(
+                "section must be template_vars, data_pipeline_contract or authoring_doctrine"
+                    .into(),
+            );
         }
         return Ok(json!({"section":section,"contract":schema[section]}));
     }

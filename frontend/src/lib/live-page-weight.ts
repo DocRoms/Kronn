@@ -12,6 +12,18 @@ export function pageHtmlWeight(bytes: number): PageHtmlWeight {
   return 'ok';
 }
 
+// KT-1525: the datasets a Page receives weigh on it like its HTML does, whoever
+// publishes them (a workflow, an agent, the UI). Smaller thresholds than the
+// HTML's: a dataset is data the page loads on every refresh.
+export const PAGE_DATASET_HEAVY_BYTES = 256 * 1024;
+export const PAGE_DATASET_VERY_HEAVY_BYTES = 1024 * 1024;
+
+export function pageDatasetWeight(bytes: number): PageHtmlWeight {
+  if (bytes > PAGE_DATASET_VERY_HEAVY_BYTES) return 'very-heavy';
+  if (bytes > PAGE_DATASET_HEAVY_BYTES) return 'heavy';
+  return 'ok';
+}
+
 /** Binary units, as the Pages UI has always printed sizes. */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;

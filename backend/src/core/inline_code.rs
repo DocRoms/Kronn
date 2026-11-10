@@ -140,10 +140,10 @@ pub fn is_trusted_template_path(path: &str) -> bool {
 }
 
 /// Values Kronn sets itself for the run (`run.id`, `run.artifacts_dir`,
-/// `time.now…`): never outside data, so a data position takes them freely.
-/// Program text still accepts only [`is_trusted_template_path`].
+/// `run.kronn_url`, `time.now…`): never outside data, so a data position takes
+/// them freely. Program text still accepts only [`is_trusted_template_path`].
 pub fn is_kronn_value(path: &str) -> bool {
-    is_trusted_template_path(path) || path == "run.artifacts_dir"
+    is_trusted_template_path(path) || path == "run.artifacts_dir" || path == "run.kronn_url"
 }
 
 /// Why an inline script is unsafe.
@@ -2024,6 +2024,18 @@ mod tests {
 
     const HOSTILE: &str = "a'b\"c $(touch pwned) ; touch pwned2 `touch pwned3` \\ é🦀";
 
+    /// KT-1643 — the Kronn URL is Kronn's own value, so it is data in an
+    /// argument but never program text of an inline script.
+    #[test]
+    fn the_kronn_url_is_data_never_program_text() {
+        assert!(is_kronn_value("run.kronn_url"));
+        assert!(!is_trusted_template_path("run.kronn_url"));
+        let call = args(&["-fsS", "{{run.kronn_url}}/api/contribution/preflight"]);
+        assert!(validation_error("s", "curl", &call, false).is_none());
+        let code = args(&["-c", "curl {{run.kronn_url}}"]);
+        assert!(validation_error("s", "bash", &code, false).is_some());
+    }
+
     /// Kronn's own run values (`run.artifacts_dir`) are data anywhere a value
     /// is data, with no approval; program text still refuses them.
     #[test]
@@ -2243,7 +2255,7 @@ mod tests {
 
     /// Real execution: the migrated line prints a benign value exactly like
     /// the original, and a hostile one verbatim, without running any of it.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[test]
     fn migrated_lines_keep_benign_output_and_never_run_a_hostile_value() {
         for (cmd, original) in [
@@ -2984,7 +2996,7 @@ mod tests {
     /// values (those the original line itself treats as plain text), the
     /// rewritten line prints the same thing and exits the same way. The
     /// shapes include the 13 fixes found on real workflows.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[test]
     fn suggested_fixes_are_equivalent_on_a_value_corpus() {
         // Shell double quotes: everything but `"`, `$`, backtick, backslash.
@@ -3071,7 +3083,7 @@ mod tests {
 
     /// Why an unquoted value gets no automatic fix: the original word-splits
     /// it, so `"$1"` prints something else for an empty or spaced value.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[test]
     fn an_unquoted_shell_value_diverges_and_stays_manual() {
         let original = args(&["-c", "echo start {{x}} end"]);

@@ -1382,6 +1382,56 @@ pub enum StepType {
     TaskBoard,
 }
 
+impl StepType {
+    /// Every step type, in the order authors are shown them. The one list the
+    /// authoring surfaces render (`workflow_step_schema`, the workflow guide,
+    /// the MCP greeting): a variant added to the enum fails `name` to compile
+    /// until it is named, and a test fails until it is listed here.
+    pub const ALL: [StepType; 15] = [
+        StepType::Agent,
+        StepType::ApiCall,
+        StepType::BatchApiCall,
+        StepType::BatchQuickPrompt,
+        StepType::Exec,
+        StepType::Gate,
+        StepType::Notify,
+        StepType::JsonData,
+        StepType::CollectApiData,
+        StepType::TransformData,
+        StepType::PublishPageData,
+        StepType::SubWorkflow,
+        StepType::TriggerWorkflow,
+        StepType::DelegateSubtasks,
+        StepType::TaskBoard,
+    ];
+
+    /// The tag a step's `step_type` carries (`{"type": "<name>"}`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            StepType::Agent => "Agent",
+            StepType::ApiCall => "ApiCall",
+            StepType::BatchQuickPrompt => "BatchQuickPrompt",
+            StepType::Notify => "Notify",
+            StepType::Gate => "Gate",
+            StepType::Exec => "Exec",
+            StepType::BatchApiCall => "BatchApiCall",
+            StepType::JsonData => "JsonData",
+            StepType::CollectApiData => "CollectApiData",
+            StepType::TransformData => "TransformData",
+            StepType::PublishPageData => "PublishPageData",
+            StepType::SubWorkflow => "SubWorkflow",
+            StepType::TriggerWorkflow => "TriggerWorkflow",
+            StepType::DelegateSubtasks => "DelegateSubtasks",
+            StepType::TaskBoard => "TaskBoard",
+        }
+    }
+
+    /// The names of [`StepType::ALL`].
+    pub fn names() -> Vec<&'static str> {
+        Self::ALL.iter().map(StepType::name).collect()
+    }
+}
+
 /// What a `TaskBoard` step does before returning the board's rows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -2275,6 +2325,29 @@ pub struct StepResult {
     /// no recovery rule (a Security limit, a counter failure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_stop: Option<String>,
+    /// KT-1525 — UTF-8 bytes of `output`, stamped when the step completes. A
+    /// heavy output slows every run, the run storage and the page it feeds;
+    /// the run view grades it against the configured threshold. `None` on a
+    /// run recorded before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output_bytes: Option<u64>,
+}
+
+/// The heaviest step output of a run: its size and its step's name.
+pub fn heaviest_output(results: &[StepResult]) -> (u64, Option<String>) {
+    results
+        .iter()
+        .map(|result| {
+            (
+                result.output_bytes.unwrap_or(result.output.len() as u64),
+                result,
+            )
+        })
+        .max_by_key(|(bytes, _)| *bytes)
+        .map_or((0, None), |(bytes, result)| {
+            (bytes, Some(result.step_name.clone()))
+        })
 }
 
 fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {
@@ -2572,6 +2645,31 @@ pub struct BlockedQuickExec {
     pub program: String,
 }
 
+/// A sign that a workflow drifts from the authoring doctrine (KT-1216).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowWarningKind {
+    /// The same script or inline code sits in several Exec steps.
+    DuplicatedExecScript,
+    /// An Exec runs `gh`/`curl` against a service that has a configured plugin.
+    ExecBypassesPlugin,
+}
+
+/// An advisory finding: the workflow can still start, but it was built against
+/// the doctrine served by `workflow_step_schema` (`authoring_doctrine`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowWarning {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    /// The steps that show it, in workflow order.
+    pub steps: Vec<String>,
+    pub kind: WorkflowWarningKind,
+    pub message: String,
+    pub action: String,
+}
+
 /// Whether a saved workflow can start, as far as Kronn can tell before a run
 /// (KT-1138). Saving and enabling are separate facts, not proof of readiness.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -2585,6 +2683,10 @@ pub struct WorkflowReadiness {
     pub ready: bool,
     pub blockers: Vec<WorkflowBlocker>,
     pub human_approval_count: u32,
+    /// Design drift (KT-1216): advisory, never a blocker, never part of `ready`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<WorkflowWarning>>")]
+    pub warnings: Vec<WorkflowWarning>,
     /// The workflows checked: this one, then its sub-workflows.
     pub checked_workflow_ids: Vec<String>,
     /// One line for an agent or a human to read first.
@@ -2599,6 +2701,66 @@ pub struct WorkflowRunSummary {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub tokens_used: u64,
+    /// KT-1525 — bytes of the run's heaviest step output (0 when unknown) and
+    /// that step's name, so the workflow card can warn without reading the
+    /// run's payload. The UI grades it against the configured threshold.
+    #[serde(default)]
+    #[ts(optional)]
+    pub heaviest_output_bytes: Option<u64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub heaviest_output_step: Option<String>,
+}
+
+/// One run that is not finished (KT-1657): the board `workflow_active_runs`
+/// and the UI's active-run indicators read. A run paused on a provider quota
+/// is listed with its wake time, so it is never mistaken for a run that is
+/// working, nor invisible while it still holds a concurrency slot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ActiveRunSummary {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub project_id: Option<String>,
+    pub status: RunStatus,
+    pub started_at: DateTime<Utc>,
+    /// The sub-workflow's parent run; a child's wait is resumed through it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent_run_id: Option<String>,
+    /// The quota wait, for a `WaitingQuota` run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub quota: Option<ActiveRunQuota>,
+    /// The last sign of life the run records: the end of its latest finished
+    /// step, else its start. A step in progress records nothing until it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// What a `WaitingQuota` run is parked on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ActiveRunQuota {
+    /// The step that was refused.
+    pub step_name: String,
+    /// The agent the refused step runs on, when it is an Agent step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent: Option<AgentType>,
+    /// When the engine resumes the run on its own; `None` while parked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wake_at: Option<DateTime<Utc>>,
+    /// The reset the provider announced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reset_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parked: Option<QuotaParkReason>,
 }
 
 /// Compact summary of a batch workflow run, with its parent linear run

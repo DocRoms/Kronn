@@ -205,6 +205,40 @@ describe('PagesPage', () => {
     expect(document.querySelector('.live-pages-weight-badge[data-weight="very-heavy"]')).toHaveTextContent('5.0 MB');
   });
 
+  it('grades the weight of the datasets a workflow publishes, in the header and per dataset (KT-1525)', async () => {
+    vi.mocked(pagesApi.get).mockResolvedValue({
+      ...detail,
+      datasets: [
+        ...detail.datasets,
+        {
+          id: 'dataset-jira', page_id: page.id, name: 'jira_issues', kind: 'time_series',
+          current: null, schema: null, max_points: 50_000, max_age_days: null, updated_at: page.updated_at,
+          points: [{ id: 'p1', dataset_id: 'dataset-jira', observed_at: page.updated_at, payload: { issues: [] }, workflow_run_id: 'run-1' }],
+          data_size_bytes: 300 * 1024,
+        },
+      ],
+    });
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    // The Page total (summary 1.5 KB + 300 KB) is heavy: warned in the header, like the HTML.
+    const header = (await screen.findAllByTestId('dataset-weight-badge'))[0];
+    expect(header).toHaveAttribute('data-weight', 'heavy');
+    expect(header.getAttribute('aria-label')).toBe('pages.datasetWeight.heavy:pages.datasetWeight.total,301.5 KB');
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
+    const datasets = within(await screen.findByTestId('live-page-sync-datasets'));
+    // Only the heavy dataset carries a badge, named; the light one stays plain.
+    const badges = datasets.getAllByTestId('dataset-weight-badge');
+    expect(badges).toHaveLength(1);
+    expect(badges[0].getAttribute('aria-label')).toBe('pages.datasetWeight.heavy:jira_issues,300.0 KB');
+    expect(badges[0].closest('li')).toHaveTextContent('jira_issues');
+  });
+
+  it('shows no dataset warning for a light page', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    expect(screen.queryByTestId('dataset-weight-badge')).toBeNull();
+  });
+
   it('shows a light page in green without a list badge', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');
