@@ -398,12 +398,7 @@ describe('api.discussions (rest)', () => {
     fetchMock.mockResolvedValue({ ok: false, status: 413, json: async () => { throw new Error('not json'); } });
     await expect(discussions.uploadContextFile('d-1', new File([''], 'big.har'))).rejects.toThrow(/413/);
   });
-  it('deleteLastAgentMessages', async () => { await exec(discussions.deleteLastAgentMessages('d-1'), 'DELETE', '/discussions/d-1/messages/last'); });
   it('deleteMessage', async () => { await exec(discussions.deleteMessage('d/1', 'm/1'), 'DELETE', '/discussions/d%2F1/messages/m%2F1'); });
-  it('editLastUserMessage', async () => {
-    const b = await exec(discussions.editLastUserMessage('d-1', 'new text'), 'PATCH', '/discussions/d-1/messages/last');
-    expect(b).toEqual({ content: 'new text' });
-  });
   it('exportDiscussion downloads the versioned bundle', async () => {
     const out = await discussions.exportDiscussion('disc/a');
     const [url, options] = fetchMock.mock.calls[0];

@@ -2539,6 +2539,212 @@ mod tests {
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 
+    /// A joined MCP peer, one User turn addressed to it and one trailing reply.
+    /// Returns the peer's session id and the turn's revision.
+    async fn seed_peer_turn_with_reply(
+        state: &AppState,
+        disc: &'static str,
+        user_id: &'static str,
+    ) -> (i64, String) {
+        let session_id = state
+            .db
+            .with_conn(move |conn| {
+                let session_id = crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("live-retry-peer"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("live-retry-peer"),
+                    "listening",
+                    300,
+                )?;
+                let message = |id: &str, role: MessageRole, agent_type: Option<AgentType>| {
+                    DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
+                        session_continuity: None,
+                        kind: Default::default(),
+                        id: id.into(),
+                        role,
+                        channel: MessageChannel::Main,
+                        content: "review this diff".into(),
+                        timestamp: Utc::now(),
+                        model: None,
+                        lint_report: None,
+                        agent_type,
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
+                    }
+                };
+                crate::db::discussions::insert_message(
+                    conn,
+                    disc,
+                    &message(user_id, MessageRole::User, None),
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    user_id,
+                    &[MessageTarget::cli(AgentType::ClaudeCode, session_id)],
+                )?;
+                crate::db::discussions::insert_message(
+                    conn,
+                    disc,
+                    &message(
+                        "peer-reply",
+                        MessageRole::Agent,
+                        Some(AgentType::ClaudeCode),
+                    ),
+                )?;
+                Ok(session_id)
+            })
+            .await
+            .unwrap();
+        let revision = state
+            .db
+            .with_conn(move |conn| {
+                let messages = crate::db::discussions::list_messages(conn, disc)?;
+                let turn = messages
+                    .iter()
+                    .find(|message| message.id == user_id)
+                    .expect("seeded turn");
+                Ok(serde_json::to_value(turn)?["timestamp"]
+                    .as_str()
+                    .expect("serialized message timestamp")
+                    .to_string())
+            })
+            .await
+            .unwrap();
+        (session_id, revision)
+    }
+
+    async fn count_rows(state: &AppState, table: &'static str, disc: &'static str) -> i64 {
+        state
+            .db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE discussion_id = ?1"),
+                    [disc],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// KT-1598 — "Retry" is a revision of the last User turn, not a DELETE
+    /// followed by an unguarded run. With a joined MCP peer owning the turn it
+    /// archives the reply, publishes a revision event and starts no local CLI:
+    /// no dispatch job exists and the stream carries nothing but the receipt.
+    #[tokio::test]
+    async fn retry_through_revise_with_a_live_mcp_peer_starts_no_local_cli() {
+        let disc = "d-retry-peer";
+        let state = make_state_with_disc(disc).await;
+        let (session_id, revision) = seed_peer_turn_with_reply(&state, disc, "u-retry-peer").await;
+
+        let response = revise_message(
+            State(state.clone()),
+            Path(disc.into()),
+            Json(ReviseMessageRequest {
+                message_id: "u-retry-peer".into(),
+                content: "review this diff".into(),
+                expected_revision: revision,
+                idempotency_key: Uuid::new_v4().to_string(),
+                targets: vec![MessageTarget::cli(AgentType::ClaudeCode, session_id)],
+                target_all: false,
+                target_agent: None,
+                target_agents: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_to_string(response).await;
+        assert!(body.contains("event: message_revised"), "{body}");
+        assert!(body.contains("\"dispatch_job_id\":null"), "{body}");
+        assert!(
+            !body.contains("event: start") && !body.contains("event: chunk"),
+            "no local agent may stream: {body}"
+        );
+
+        assert_eq!(
+            count_rows(&state, "agent_dispatch_jobs", disc).await,
+            0,
+            "a peer-owned retry must not enqueue a local dispatch"
+        );
+        assert_eq!(
+            count_rows(&state, "message_revision_events", disc).await,
+            1
+        );
+        assert_eq!(
+            count_rows(&state, "message_tombstones", disc).await,
+            1,
+            "the superseded reply is tombstoned, not just deleted"
+        );
+        assert_eq!(
+            count_rows(&state, "messages", disc).await,
+            1,
+            "only the retried turn stays in the live projection"
+        );
+    }
+
+    /// KT-1598 — `/run` is the explicit force-retry escape hatch. It takes a
+    /// durable local-runner obligation (a pending `force:` dispatch bound to
+    /// the latest User turn) instead of launching a bare stream.
+    #[tokio::test]
+    async fn forced_run_takes_a_durable_runner_obligation() {
+        let disc = "d-force-obligation";
+        let state = make_state_with_disc(disc).await;
+        let _ = seed_peer_turn_with_reply(&state, disc, "u-force").await;
+        state
+            .db
+            .with_conn(move |conn| {
+                // A native turn: the discussion agent owns it, not the peer.
+                crate::db::discussions::replace_message_targets(conn, "u-force", &[])?;
+                let transaction = conn.unchecked_transaction()?;
+                let jobs =
+                    enqueue_dispatches_for_trigger(&transaction, disc, "u-force", 1, "k-1")?;
+                transaction.commit()?;
+                assert_eq!(jobs.len(), 1);
+                assert_eq!(jobs[0].trigger_message_id, "u-force");
+                assert!(jobs[0].dedupe_key.starts_with("force:k-1:"), "{jobs:?}");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(count_rows(&state, "agent_dispatch_jobs", disc).await, 1);
+    }
+
+    /// The same escape hatch on a turn owned by a joined peer must not start a
+    /// local CLI either: it takes no obligation and streams nothing.
+    #[tokio::test]
+    async fn forced_run_on_a_peer_owned_turn_starts_no_local_cli() {
+        let disc = "d-force-peer";
+        let state = make_state_with_disc(disc).await;
+        let _ = seed_peer_turn_with_reply(&state, disc, "u-force-peer").await;
+
+        let response = run_agent(State(state.clone()), Path(disc.into()), None).await;
+        let body = sse_body_to_string(response).await;
+        assert!(
+            !body.contains("event: start") && !body.contains("event: chunk"),
+            "{body}"
+        );
+        assert_eq!(count_rows(&state, "agent_dispatch_jobs", disc).await, 0);
+    }
+
     #[tokio::test]
     async fn no_agent_receives_accepted_before_skip() {
         let disc = "d-no-agent";

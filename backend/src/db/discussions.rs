@@ -3259,33 +3259,6 @@ pub fn update_discussion_sharing(
     Ok(affected > 0)
 }
 
-pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Result<u64> {
-    // Delete trailing non-User messages (Agent + System) from the end
-    let affected = conn.execute(
-        "DELETE FROM messages WHERE discussion_id = ?1
-         AND EXISTS (
-            SELECT 1 FROM messages
-            WHERE discussion_id = ?1 AND role = 'User'
-         )
-         AND sort_order > (
-            SELECT COALESCE(MAX(sort_order), -1) FROM messages
-            WHERE discussion_id = ?1 AND role = 'User'
-        )",
-        params![discussion_id],
-    )?;
-
-    // Recount to keep message_count accurate after bulk delete
-    conn.execute(
-        "UPDATE discussions SET message_count = (
-            SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
-         ) WHERE id = ?1",
-        params![discussion_id],
-    )?;
-
-    update_discussion_timestamp(conn, discussion_id)?;
-    Ok(affected as u64)
-}
-
 #[derive(Debug)]
 pub enum TombstoneMessageError {
     NotFound,
@@ -3422,27 +3395,6 @@ pub fn delete_dispatch_reply_messages(
 
     update_discussion_timestamp(conn, discussion_id)?;
     Ok(affected as u64)
-}
-
-pub fn edit_last_user_message(
-    conn: &Connection,
-    discussion_id: &str,
-    content: &str,
-) -> Result<bool> {
-    let masked =
-        crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, content)?;
-    let content = masked.as_str();
-    let affected = conn.execute(
-        "UPDATE messages SET content = ?1, timestamp = ?2
-         WHERE discussion_id = ?3 AND role = 'User'
-         AND sort_order = (SELECT MAX(sort_order) FROM messages WHERE discussion_id = ?3 AND role = 'User')",
-        params![content, Utc::now().to_rfc3339(), discussion_id],
-    )?;
-
-    update_discussion_timestamp(conn, discussion_id)?;
-    // Invalidate cached summary since conversation content changed
-    let _ = invalidate_summary_cache(conn, discussion_id);
-    Ok(affected > 0)
 }
 
 #[derive(Debug)]

@@ -765,9 +765,9 @@ export function DiscussionsPage({
   const [deletingMessageIds, setDeletingMessageIds] = useState<Set<string>>(() => new Set());
   // Race-free guard for handleEditMessage. A fast double Ctrl+Enter on
   // the message-edit textarea (the only re-submit path) was reading
-  // `sending` from a stale closure → both invocations called
-  // `deleteLastAgentMessages` + `editLastUserMessage` + `runAgent` in
-  // parallel, producing duplicate user edits and parallel agent runs.
+  // `sending` from a stale closure → both invocations resubmitted the turn
+  // in parallel, producing duplicate user edits and parallel agent runs.
+  // `handleRetry` shares it: both go through the same revise endpoint.
   const editingMsgInFlightRef = useRef(false);
   // One key per edit intent, reused after transport retries. The backend
   // dedupes the whole edit+tombstone+dispatch transaction on this key.
@@ -3274,34 +3274,68 @@ export function DiscussionsPage({
     return { msgs, messagesById, repliesByTarget };
   }, [activeDiscussion?.messages, showDiscussionNotes]);
 
+  // One key per retry intent, reused after a transport replay; cleared once
+  // the server acknowledged the revision.
+  const retryRevisionKeyRef = useRef<string | null>(null);
+  // Retry resends the last User turn through the revise endpoint: the trailing
+  // replies are tombstoned, a revision event is published for peers, and the
+  // server (not this client) decides whether a local runner or a joined MCP
+  // peer owns the answer.
   const handleRetry = async () => {
-    if (!activeDiscussionId || sending) return;
+    if (!activeDiscussionId || !activeDiscussion || sending) return;
+    if (editingMsgInFlightRef.current || abortControllers.current[activeDiscussionId]) return;
     const discId = activeDiscussionId;
-    await discussionsApi.deleteLastAgentMessages(discId);
-    await refetchDiscussions();
-    reloadDiscussion(discId);
+    const targetMessage = [...messagesInConversationOrder(activeDiscussion.messages)]
+      .reverse()
+      .find(message => message.role === 'User');
+    if (!targetMessage) return;
+    editingMsgInFlightRef.current = true;
+    const idempotencyKey = retryRevisionKeyRef.current ?? newClientMessageId();
+    retryRevisionKeyRef.current = idempotencyKey;
+    const targets = activeDiscussion.message_targets?.[targetMessage.id] ?? [];
+    const targetAgent = targets[0]?.agent_type;
     const controller = new AbortController();
-    abortControllers.current[discId] = controller;
+    registerAbortController(abortControllers, discId, controller);
     setSendingMap(prev => ({ ...prev, [discId]: true }));
     setStreamingMap(prev => ({ ...prev, [discId]: '' }));
     resetAgentLogs();
-    await discussionsApi.runAgent(
-      discId,
-      (text) => appendRememberedStreamChunk(discId, text),
-      () => cleanupStream(discId),
-      (error) => {
-        console.error('Agent error:', error);
-        const errStr = userError(error);
-        if (errStr.includes('checked out') || errStr.includes('worktree')) {
-          setWorktreeError(errStr);
-        } else {
-          toast(errStr, 'error');
-        }
-        cleanupStream(discId);
-      },
-      controller.signal,
+    try {
+      await discussionsApi.reviseMessageStream(
+        discId,
+        {
+          message_id: targetMessage.id,
+          content: targetMessage.content,
+          expected_revision: targetMessage.timestamp,
+          idempotency_key: idempotencyKey,
+          targets,
+          target_all: false,
+          target_agent: targetAgent,
+          target_agents: targets.map(target => target.agent_type),
+        },
+        (text) => appendRememberedStreamChunk(discId, text),
+        () => cleanupStream(discId),
+        (error) => {
+          console.error('Agent error:', error);
+          const errStr = userError(error);
+          if (errStr.includes('checked out') || errStr.includes('worktree')) {
+            setWorktreeError(errStr);
+          } else {
+            toast(errStr, 'error');
+          }
+          cleanupStream(discId);
+        },
+        controller.signal,
+        undefined,
         onAgentLog,
-    );
+        () => {
+          retryRevisionKeyRef.current = null;
+          refetchDiscussions();
+          reloadDiscussion(discId);
+        },
+      );
+    } finally {
+      editingMsgInFlightRef.current = false;
+    }
   };
 
   const retryDispatchKeys = useRef(new Map<string, string>());

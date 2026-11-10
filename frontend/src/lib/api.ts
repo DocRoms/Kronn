@@ -2398,9 +2398,6 @@ export const discussions = {
     return json.data;
   },
 
-  /** Delete trailing agent/system messages (for retry/edit). */
-  deleteLastAgentMessages: (id: string) => api<void>('DELETE', `/discussions/${id}/messages/last`),
-
   /** KT-580 — the notes of a discussion, for a human. The route existed to
    *  serve `disc_note_list` to agents; nothing on this side ever called it,
    *  so an agent could read a room's notes properly and its author could not. */
@@ -2527,9 +2524,6 @@ export const discussions = {
     'DELETE',
     `/discussions/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`,
   ),
-
-  /** Edit the last user message content. */
-  editLastUserMessage: (id: string, content: string) => api<void>('PATCH', `/discussions/${id}/messages/last`, { content } as SendMessageRequest),
 
   /** Atomically edit a User turn, archive its trailing replies and resend. */
   reviseMessageStream: (
