@@ -59,6 +59,9 @@ mod workflow_tools;
 #[path = "agent_page_tools.rs"]
 mod page_tools;
 
+#[path = "agent_room_tools.rs"]
+mod room_tools;
+
 #[path = "agent_media_tools.rs"]
 mod media_tools;
 
@@ -111,6 +114,9 @@ pub struct KronnToolExecutor {
     bridge_token: std::sync::Mutex<Option<crate::core::bridge_token::BridgeTokenGuard>>,
     /// What a workflow step's media generations are keyed on (KT-1605).
     step_media: media_tools::StepMedia,
+    /// The room an HTTP Agent step with a `room_id` is a member of (KT-1244).
+    /// Its presence is what adds the room tools to the step's catalogue.
+    step_room: Option<crate::workflows::step_room::StepRoomMember>,
 }
 
 impl KronnToolExecutor {
@@ -131,6 +137,7 @@ impl KronnToolExecutor {
             launch_identity: Default::default(),
             bridge_token: Default::default(),
             step_media: Default::default(),
+            step_room: None,
         }
     }
 
@@ -159,6 +166,7 @@ impl KronnToolExecutor {
             launch_identity: Default::default(),
             bridge_token: Default::default(),
             step_media: Default::default(),
+            step_room: None,
         })
     }
 
@@ -190,6 +198,7 @@ impl KronnToolExecutor {
             launch_identity: Default::default(),
             bridge_token: Default::default(),
             step_media: Default::default(),
+            step_room: None,
         })
     }
 
@@ -202,13 +211,23 @@ impl KronnToolExecutor {
         workflow_run_id: String,
         step_name: String,
     ) -> std::sync::Arc<dyn ToolExecutor> {
-        std::sync::Arc::new(Self::workflow_executor(
-            state,
-            project_id,
-            workflow_run_id,
-            step_name,
-            false,
-        ))
+        Self::workflow_room_arc(state, project_id, workflow_run_id, step_name, None)
+    }
+
+    /// [`Self::workflow_arc`] for a step that may be a member of a room
+    /// (KT-1244): only then is the catalogue extended with the room tools, all
+    /// bound to that room.
+    pub fn workflow_room_arc(
+        state: AppState,
+        project_id: Option<String>,
+        workflow_run_id: String,
+        step_name: String,
+        room: Option<crate::workflows::step_room::StepRoomMember>,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        let mut executor =
+            Self::workflow_executor(state, project_id, workflow_run_id, step_name, false);
+        executor.step_room = room;
+        std::sync::Arc::new(executor)
     }
 
     /// The same catalogue for the Test button of one step. It has no run, so a
@@ -258,6 +277,7 @@ impl KronnToolExecutor {
                 test_invocation,
                 dry_run,
             },
+            step_room: None,
         }
     }
 
@@ -338,6 +358,7 @@ impl KronnToolExecutor {
             launch_identity: Default::default(),
             bridge_token: Default::default(),
             step_media: Default::default(),
+            step_room: None,
         })
     }
 }
@@ -1777,6 +1798,11 @@ impl ToolExecutor for KronnToolExecutor {
         if self.project_id.is_some() {
             catalogue.extend(workflow_workspace_tool_catalogue());
         }
+        // KT-1244 — the step is a member of its room: read it, post in it, ask
+        // in it. A step without a room is offered none of these.
+        if self.step_room.is_some() {
+            catalogue.extend(room_tools::declarations());
+        }
         catalogue
     }
 
@@ -1890,6 +1916,12 @@ impl ToolExecutor for KronnToolExecutor {
 
         // Handlers are invoked directly rather than over loopback HTTP: same
         // code path as the bridge's calls, minus a round-trip and an auth hop.
+        // The step's own room tools (KT-1244) share their names with the CLI
+        // bridge's, not its handlers: the catalogue check above already refused
+        // them to a step that is not a member of a room.
+        if self.workflow_run_id.is_some() && room_tools::NAMES.contains(&call.name.as_str()) {
+            return self.execute_step_room_tool(call).await;
+        }
         match tool_dispatch(&call.name) {
             ToolDispatch::DiscussionRead => return self.read_other_discussion(call).await,
             ToolDispatch::DiscussionList => return self.list_project_discussions(call).await,
@@ -2763,6 +2795,12 @@ impl KronnToolExecutor {
                     Err(error) => return fail(call, error),
                 };
                 let parent = discussion_id;
+                crate::api::orchestration::reclaim_finished_worktrees_for_launch(
+                    &self.state.db,
+                    &task_reference,
+                    &worker,
+                )
+                .await;
                 match self
                     .state
                     .db
@@ -2830,6 +2868,12 @@ impl KronnToolExecutor {
                     let task = task_reference.clone();
                     let parent = discussion_id.clone();
                     let selected = worker.clone();
+                    crate::api::orchestration::reclaim_finished_worktrees_for_launch(
+                        &self.state.db,
+                        &task,
+                        &selected,
+                    )
+                    .await;
                     self.state
                         .db
                         .with_conn(move |conn| {
@@ -3505,23 +3549,7 @@ impl KronnToolExecutor {
         }
         // Keep the tail: the recent exchange is what a reader needs, and the whole
         // history would blow the window on a long room.
-        let total = messages.len();
-        let tail: Vec<Value> = messages
-            .into_iter()
-            .rev()
-            .take(limit)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|message| {
-                let body = message.content.chars().take(4_000).collect::<String>();
-                serde_json::json!({
-                    "role": format!("{:?}", message.role),
-                    "agent_type": message.agent_type.map(|a| format!("{a:?}")),
-                    "content": body,
-                })
-            })
-            .collect();
+        let (total, tail) = message_tail(messages, limit);
         ok(
             call,
             serde_json::json!({
@@ -4900,6 +4928,32 @@ pub(super) fn unwrap_api_noticed<T: serde::Serialize>(
         value
     });
     unwrap_api(call, response.success, data, response.error)
+}
+
+/// The last `limit` messages of a room, each cut to what a model can use, and
+/// how many the room holds.
+fn message_tail(
+    messages: Vec<crate::models::DiscussionMessage>,
+    limit: usize,
+) -> (usize, Vec<Value>) {
+    let total = messages.len();
+    let tail = messages
+        .into_iter()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|message| {
+            let body = message.content.chars().take(4_000).collect::<String>();
+            serde_json::json!({
+                "role": format!("{:?}", message.role),
+                "agent_type": message.agent_type.map(|a| format!("{a:?}")),
+                "content": body,
+            })
+        })
+        .collect();
+    (total, tail)
 }
 
 fn unwrap_api<T: serde::Serialize>(

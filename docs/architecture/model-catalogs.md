@@ -148,7 +148,7 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4193-4239#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:4225-4271#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
 
@@ -218,7 +218,7 @@ is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
 [src: file: backend/src/agents/runner.rs:13567-13584#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13668-13699#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13706-13737#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
 [src: file: backend/src/agents/runner.rs:5036-5064#adapter_task_worker_args]
@@ -259,7 +259,7 @@ when it was not. QPs with no effort or only whitespace keep the old behavior.
 [src: file: backend/src/db/sql/176_discussion_effort_snapshots.sql:1-8#discussion_effort_snapshots]
 [src: file: backend/src/api/discussions/crud.rs:653-675#capture]
 [src: file: backend/src/api/discussions/crud.rs:817-825#UnresolvedQuickPromptEffort]
-[src: file: backend/src/api/discussions/streaming.rs:4106-4159#for_run]
+[src: file: backend/src/api/discussions/streaming.rs:4182-4235#for_run]
 [src: file: backend/src/db/discussion_effort.rs:56-76#for_run]
 
 These snapshots are local execution state, not a portable QP setting. Exporting

@@ -121,7 +121,7 @@ Omitting the field (or `{"type": "Json"}`) keeps the JSON behaviour unchanged.
 [src: file: backend/src/workflows/api_call_binary.rs:51-97#resolve_binary_policy]
 [src: file: backend/src/workflows/api_call_binary.rs:101-150#read_binary_body]
 [src: file: backend/src/workflows/api_call_binary.rs:152-157#binary_summary]
-[src: file: backend/src/api/workflows.rs:1225-1226#resolve_binary_policy]
+[src: file: backend/src/api/workflows.rs:1227-1228#resolve_binary_policy]
 
 `base64` and `data_uri` carry the same bytes. Use `api_extract` to keep the one
 you need, for example `{"path": "$.data_uri"}` for a Page image, so the payload

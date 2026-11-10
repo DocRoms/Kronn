@@ -6223,7 +6223,7 @@ const zh: TranslationDict = {
   "wiz.projectScope.none": "暂无其他项目。",
   "wiz.projectScope.hint": "上方的项目承载该工作流并始终被服务。每次运行在触发时选定的项目中执行（定时任务为每个项目各运行一次，跟踪器为与仓库关联的项目），并在该项目的工作树中进行。",
   "wiz.projectScope.hintGlobal": "没有项目时，多项目工作流会在每次启动时询问项目。",
-  "wiz.roomIdHint": "可选，仅限 Claude Code 或 Codex。讨论 ID 或模板。此步骤的代理在每次启动和每次恢复时都以主代理身份加入该房间，无需邀请令牌。",
+  "wiz.roomIdHint": "可选，适用于 Claude Code、Codex 或 HTTP 代理（LiteLLM、Ollama、自定义连接）。讨论 ID 或模板。此步骤的代理在每次启动和每次恢复时都以主代理身份加入该房间，无需邀请令牌。",
   "wiz.stallTimeout": "停滞超时（秒）",
   "wiz.delayAfter": "延迟后（秒）",
   "wiz.retry": "重试",

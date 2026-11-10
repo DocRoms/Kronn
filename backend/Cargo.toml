@@ -128,12 +128,12 @@ ts-rs = { version = "12", features = ["chrono-impl", "uuid-impl", "serde-json-im
 # embedded Swagger UI served at /api/docs. utoipa-swagger-ui ships an
 # axum integration we use directly; we don't run an external swagger
 # binary in production.
-utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
+utoipa = { version = "6", features = ["chrono", "uuid", "axum_extras"] }
 # `vendored` ships the Swagger UI assets inside the crate so the build
 # doesn't need network or `curl` at compile time. Without it, the
 # build script tries to fetch the SWAGGER_UI_DOWNLOAD_URL via curl,
 # which fails inside slim Docker builders that don't ship curl.
-utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum", "vendored"] }
 html5ever = "0.40.1"
 
 # rooted_io reads a file's link count through its handle on Windows.

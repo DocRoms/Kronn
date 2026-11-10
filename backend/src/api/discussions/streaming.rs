@@ -1351,6 +1351,38 @@ fn agent_http_status(error: &str) -> Option<u16> {
         .and_then(|status| status.trim_end_matches(':').parse::<u16>().ok())
 }
 
+/// KT-1607 — whether an HTTP agent failure is the model refusing the prompt as
+/// too large, as opposed to refusing the model or being unreachable. A 413 always
+/// is; a 400/422 is when the provider's own words name the context window or the
+/// size, which is how OpenAI-wire proxies phrase it. Ollama has no status: Kronn's
+/// own pre-send refusal (`prompt is about N tokens but the context window is M`)
+/// is matched on its fixed wording only, so a timeout that says "too long" is not.
+fn is_prompt_size_refusal(status: Option<u16>, error: &str) -> bool {
+    const PROVIDER_MARKERS: [&str; 10] = [
+        "context length",
+        "context_length",
+        "context window",
+        "maximum context",
+        "too long",
+        "too large",
+        "token limit",
+        "maximum number of tokens",
+        "input token count",
+        "reduce the length",
+    ];
+    match status {
+        Some(413) => true,
+        Some(400 | 422) => {
+            let lowered = error.to_ascii_lowercase();
+            PROVIDER_MARKERS
+                .iter()
+                .any(|marker| lowered.contains(marker))
+        }
+        Some(_) => false,
+        None => error.contains("Sending it would make Ollama silently drop"),
+    }
+}
+
 /// The sentence a LiteLLM user reads when the proxy lists a model it cannot
 /// serve (KT-941): which model, what the proxy answered, and where to change
 /// it. The proxy's raw JSON — nested and escaped — stays in the collapsible
@@ -6237,7 +6269,13 @@ pub(super) async fn make_agent_stream_inner(
                     crate::models::ModelTier::Default => "default",
                     crate::models::ModelTier::Reasoning => "reasoning",
                 };
-                if agent_type == AgentType::LiteLlm {
+                // KT-1607 — a provider that refuses the prompt as too large says
+                // nothing against the model: no catalogue flag, no "model not
+                // found" card, but the size and the limit it was held against.
+                let size_refusal = runner::is_http_chat_agent(&agent_type)
+                    && start_timeout.is_none()
+                    && is_prompt_size_refusal(agent_http_status(&e), &e);
+                if agent_type == AgentType::LiteLlm && !size_refusal {
                     if let (Some(status), Some(model)) =
                         (agent_http_status(&e), attempted_model.as_deref())
                     {
@@ -6280,6 +6318,23 @@ pub(super) async fn make_agent_stream_inner(
                 }
                 let content = match start_timeout {
                     Some(_) => e.clone(),
+                    None if size_refusal => {
+                        let limit = super::prompt_limit::limit_for(
+                            &agent_type,
+                            attempted_model.as_deref(),
+                            &ollama_context_overrides,
+                            super::prompt_limit::hard_ceiling(&state).await,
+                        );
+                        super::start_refusal::prompt_too_large_card(
+                            &disc.language,
+                            agent_http_status(&e),
+                            prompt.len() + extra_context_len,
+                            &limit,
+                            &e,
+                            disc_tier,
+                            dispatch_job_id.as_deref(),
+                        )
+                    }
                     None => agent_start_error_content(
                         &agent_type,
                         attempted_model.as_deref(),
@@ -6898,7 +6953,7 @@ mod agent_lifecycle_tests {
         auth_required_system_message, cap_agent_response, child_run_counts_as_success,
         configured_agent_global_timeout, connection_mismatch, effective_global_timeout,
         effective_stall_timeout, finish_tracked_preflight, forwards_to_log_panel,
-        lift_acp_tool_calls, AgentExecutionOutcome, ConnectionMismatch,
+        is_prompt_size_refusal, lift_acp_tool_calls, AgentExecutionOutcome, ConnectionMismatch,
         NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
@@ -7618,6 +7673,34 @@ mod agent_lifecycle_tests {
             agent_http_status("LiteLLM unreachable at http://proxy: connection refused"),
             None
         );
+    }
+
+    /// KT-1607 — which provider answers are the prompt being too large, and
+    /// which are not: a 413 always, a 400/422 only when it names the window or
+    /// the size, never a model refusal, a rate limit or a plain outage.
+    #[test]
+    fn a_provider_refusing_the_prompt_as_too_large_is_told_apart_from_a_model_refusal() {
+        let big = "LiteLlm error 400: Provider response: {\"error\":{\"message\":\"This model's maximum context length is 131072 tokens. However, your messages resulted in 150000 tokens.\"}}";
+        assert!(is_prompt_size_refusal(agent_http_status(big), big));
+        let vertex = "LiteLlm error 400: Provider response: input token count exceeds the maximum number of tokens allowed";
+        assert!(is_prompt_size_refusal(agent_http_status(vertex), vertex));
+        let body_limit = "LiteLlm error 413: Provider response: Request Entity Too Large";
+        assert!(is_prompt_size_refusal(
+            agent_http_status(body_limit),
+            body_limit
+        ));
+        let ollama = "prompt is about 90000 tokens but the context window is 32768 (this model's own trained context window). Sending it would make Ollama silently drop part of the conversation and answer from the remainder, so Kronn refuses instead: shorten the step's input.";
+        assert!(is_prompt_size_refusal(agent_http_status(ollama), ollama));
+
+        let model_gone = "LiteLlm error 400: Provider response: model not found";
+        assert!(!is_prompt_size_refusal(
+            agent_http_status(model_gone),
+            model_gone
+        ));
+        let rate = "LiteLlm error 429: Provider response: token limit reached for this minute";
+        assert!(!is_prompt_size_refusal(agent_http_status(rate), rate));
+        let timeout = "error sending request: operation took too long";
+        assert!(!is_prompt_size_refusal(agent_http_status(timeout), timeout));
     }
 
     #[test]

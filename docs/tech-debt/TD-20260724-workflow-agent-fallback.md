@@ -231,7 +231,7 @@ This matters today because HTTP agents have a different execution path: since
 project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
-is pulled. [src: file: backend/src/api/agent_tools.rs:196-217#workflow_arc]
+is pulled. [src: file: backend/src/api/agent_tools.rs:205-226#workflow_arc]
 [src: file: backend/src/workflows/runner.rs:2638-2643#workflow_arc]
 [src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
@@ -248,7 +248,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 
 | Current spawn path | What it covers |
 |---|---|
-| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4543-4586#native_http_tools] |
+| Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4575-4618#native_http_tools] |
 | Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:695-791#ToolFreeSummary] |
 | Debate participants | Starts every participant/round independently. [src: file: backend/src/api/discussions/orchestration.rs:803-1020#start_agent_with_config] |
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
