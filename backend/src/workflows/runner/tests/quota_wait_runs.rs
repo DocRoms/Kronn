@@ -177,7 +177,7 @@ pub(super) async fn fixture(
     }
 }
 
-async fn run_until_paused(fx: &Fixture, run_id: &str) -> WorkflowRun {
+pub(super) async fn run_until_paused(fx: &Fixture, run_id: &str) -> WorkflowRun {
     let (_, tokens, agents) = test_state_and_configs();
     let mut run = pending_run(run_id, &fx.workflow.id);
     insert_wf_and_run(&fx.state, &fx.workflow, &run).await;

@@ -5743,10 +5743,11 @@ class WorkflowTriggerTests(unittest.TestCase):
 
 
 class WorkflowActiveRunsTests(unittest.TestCase):
-    """`workflow_active_runs` — in-flight board over GET /api/workflows.
+    """`workflow_active_runs` - in-flight board over GET /api/workflows/active-runs.
 
-    Keeps only workflows whose latest run is still in flight
-    (Running / WaitingApproval / Pending); finished + never-run drop out.
+    KT-1657: the backend lists every unfinished run, a WaitingQuota one with
+    its wake time and the agent of its refused step, so a paused run is not
+    mistaken for a working one nor invisible while it holds a concurrency slot.
     """
 
     def setUp(self):
@@ -5754,37 +5755,46 @@ class WorkflowActiveRunsTests(unittest.TestCase):
         self.fake_http = mock.MagicMock(return_value={
             "success": True,
             "data": [
-                {"id": "wf-run", "name": "Running one", "project_id": "p1",
-                 "last_run": {"id": "r1", "status": "Running", "started_at": "2026-06-11T10:00:00Z"}},
-                {"id": "wf-gate", "name": "Awaiting gate", "project_id": None,
-                 "last_run": {"id": "r2", "status": "WaitingApproval", "started_at": "2026-06-11T09:00:00Z"}},
-                {"id": "wf-done", "name": "Finished", "project_id": "p2",
-                 "last_run": {"id": "r3", "status": "Success", "started_at": "2026-06-11T08:00:00Z"}},
-                {"id": "wf-never", "name": "Never run", "project_id": None, "last_run": None},
+                {"workflow_id": "wf-run", "workflow_name": "Running one", "project_id": "p1",
+                 "run_id": "r1", "status": "Running", "started_at": "2026-06-11T10:00:00Z"},
+                {"workflow_id": "wf-gate", "workflow_name": "Awaiting gate", "project_id": None,
+                 "run_id": "r2", "status": "WaitingApproval", "started_at": "2026-06-11T09:00:00Z"},
+                {"workflow_id": "wf-quota", "workflow_name": "PR Review", "project_id": "p2",
+                 "run_id": "r3", "status": "WaitingQuota", "started_at": "2026-06-11T08:00:00Z",
+                 "parent_run_id": "r0",
+                 "quota": {"step_name": "Agent", "agent": "ClaudeCode",
+                           "wake_at": "2026-06-12T03:02:00Z", "reset_at": "2026-06-12T03:00:00Z"}},
             ],
         })
         self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
         self.http_patch.start()
         self.addCleanup(self.http_patch.stop)
 
-    def test_lists_only_in_flight_runs(self):
+    def test_lists_every_unfinished_run_including_a_paused_one(self):
         out = self.mod.call_workflow_active_runs({})
-        ids = [r["workflow_id"] for r in out]
-        self.assertEqual(ids, ["wf-run", "wf-gate"])
+        self.assertEqual([r["workflow_id"] for r in out], ["wf-run", "wf-gate", "wf-quota"])
+        self.assertEqual(out[2]["status"], "WaitingQuota")
 
     def test_surfaces_run_id_status_started_at(self):
-        out = self.mod.call_workflow_active_runs({})
-        first = out[0]
+        first = self.mod.call_workflow_active_runs({})[0]
         self.assertEqual(first["run_id"], "r1")
         self.assertEqual(first["status"], "Running")
         self.assertEqual(first["workflow_name"], "Running one")
         self.assertEqual(first["started_at"], "2026-06-11T10:00:00Z")
+        self.assertNotIn("quota", first)
 
-    def test_hits_workflows_list_endpoint_with_get(self):
+    def test_a_waiting_quota_run_carries_its_wake_time_and_agent(self):
+        paused = self.mod.call_workflow_active_runs({})[2]
+        self.assertEqual(paused["quota"]["wake_at"], "2026-06-12T03:02:00Z")
+        self.assertEqual(paused["quota"]["agent"], "ClaudeCode")
+        self.assertEqual(paused["quota"]["step"], "Agent")
+        self.assertEqual(paused["parent_run_id"], "r0")
+
+    def test_hits_the_active_runs_endpoint_with_get(self):
         self.mod.call_workflow_active_runs({})
         method, path = self.fake_http.call_args.args[:2]
         self.assertEqual(method, "GET")
-        self.assertEqual(path, "/api/workflows")
+        self.assertEqual(path, "/api/workflows/active-runs")
 
 
 class DiskUsageToolTests(unittest.TestCase):
@@ -7363,6 +7373,14 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
             )
 
 
+def _backend_step_types():
+    """`StepType::ALL` read from the backend source: the one list in the code."""
+    models = (_SCRIPT.parent.parent / "src" / "models" / "workflows.rs").read_text()
+    block = re.search(r"pub const ALL: \[StepType; \d+\] = \[(.*?)\];", models, re.S)
+    assert block, "StepType::ALL not found"
+    return re.findall(r"StepType::(\w+)", block.group(1))
+
+
 class StepSchemaAndBindingListTests(unittest.TestCase):
     """0.8.8 (2026-06-24) — `workflow_step_schema` (canonical schema as an
     untruncatable tool RESULT) + the Agent-step binding catalogs
@@ -7374,6 +7392,11 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         self.mod = _load_module()
         schema_path = _SCRIPT.parent.parent / "src" / "api" / "workflow_step_schema.json"
         self.schema = json.loads(schema_path.read_text())
+        # The backend injects both from the code before serving the schema.
+        self.schema["step_types_closed_set"] = _backend_step_types()
+        self.schema["authoring_doctrine"] = (
+            _SCRIPT.parent.parent / "src" / "workflows" / "authoring_doctrine.md"
+        ).read_text()
         def read_schema(method, path, *args, **kwargs):
             self.assertEqual((method, path), ("GET", "/api/workflows/step-schema"))
             return self._env(self.schema)
@@ -7402,6 +7425,34 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         # every type has a field spec
         for st in out["step_types_closed_set"]:
             self.assertIn(st, out["fields_by_type"])
+
+    def test_step_types_are_named_the_same_everywhere(self):
+        """KT-1216 — the greeting, the `workflow_create_draft` description and
+        the schema all name the backend enum's step types, no more, no less."""
+        backend = _backend_step_types()
+        self.assertEqual(list(self.mod.STEP_TYPES), backend)
+        tools = {t["name"]: t for t in self.mod.TOOLS}
+        draft = tools["workflow_create_draft"]["description"]
+        listed = re.search(r"closed set \*\*(.*?)\*\*", draft)
+        self.assertIsNotNone(listed, draft)
+        self.assertEqual(listed.group(1).split(", "), backend)
+        response = self.mod._handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+        })
+        instructions = response["result"]["instructions"]
+        self.assertIn(f"the closed {len(backend)} `step_type`s", instructions)
+        self.assertEqual(
+            self.mod.call_workflow_step_schema({})["step_types_closed_set"], backend
+        )
+
+    def test_authoring_doctrine_reaches_the_schema_and_the_authoring_tools(self):
+        out = self.mod.call_workflow_step_schema({})
+        doctrine = out["authoring_doctrine"]
+        self.assertIn("ApiCall", doctrine)
+        self.assertIn("PAGINATION_TRUNCATED", doctrine)
+        tools = {t["name"]: t["description"] for t in self.mod.TOOLS}
+        for name in ("workflow_create_draft", "workflow_update", "workflow_step_schema"):
+            self.assertIn("authoring_doctrine", tools[name], name)
 
     def test_step_schema_documents_foreach_runtime_contract(self):
         out = self.mod.call_workflow_step_schema({})
@@ -7581,7 +7632,8 @@ class LivePageToolTests(unittest.TestCase):
         self.assertIn("page_list", instructions)
         self.assertIn("page_add_dataset", instructions)
         self.assertIn("page_delete_dataset", instructions)
-        self.assertIn("closed 12", instructions)
+        self.assertIn(f"closed {len(self.mod.STEP_TYPES)} ", instructions)
+        self.assertNotIn("closed 12 ", instructions)
         self.assertNotIn("closed 9", instructions)
 
     def test_page_list_returns_compact_discovery_shape(self):

@@ -17,7 +17,7 @@ journalled, confined by an OS sandbox, and taken back when the level is lowered.
   agents its steps launch (the run is on the bridge token). A room that merely
   edits a workflow never takes that workflow's level: an agent in a room with no
   level, editing a Full workflow, gets no approval from it.
-  [src: file: backend/src/api/workflows.rs:2380-2395#approve_exec_steps_by_trust]
+  [src: file: backend/src/api/workflows.rs:2391-2406#approve_exec_steps_by_trust]
 - **Storage**: `trust_settings` (one row per scope, no row = inherit), the journal
   `trust_audit_log` (migrations 278 to 282), and two marks on the objects a
   level approved: `quick_execs.approved_by_trust` and the step field
@@ -113,7 +113,7 @@ reaches the route and is refused for want of a code (see below).
   directory or a parent as a volume is refused, `argv_reaches_protected`; every
   source is compared as written **and** with its symlinks resolved, so a worktree
   link to the data directory is caught).
-  [src: file: backend/src/api/orchestration.rs:5693-5711#launch_for_reach]
+  [src: file: backend/src/api/orchestration.rs:6544-6562#launch_for_reach]
 - A human's approval is not marked and runs as before. A mark survives only on the
   very lines a level approved: an edit of the line, or a request that forges the
   mark, drops it (`mark_line_writers`, `update_as_in`).
@@ -143,7 +143,7 @@ machine (no sandbox-exec or bubblewrap)" (or "turned off in the config"), the ri
 panel repeats it, and a raise while the vault is unprotected needs its own
 acknowledgement: the PUT answers 400 unless `acknowledged_vault_unprotected` is
 true, and the panel adds a checkbox for it. The raise still needs the TOTP proof.
-[src: file: backend/src/core/trust_sandbox.rs:376-383#vault_protection]
+[src: file: backend/src/core/trust_sandbox.rs:405-412#vault_protection]
 
 ## Raising a level needs a proof an agent cannot produce
 

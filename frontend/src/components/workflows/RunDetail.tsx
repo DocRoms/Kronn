@@ -4,13 +4,20 @@ import { workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch, QuotaWait } from '../../types/generated';
+import { quotaPauseLabel } from '../../lib/quotaPause';
+import { QuotaAgentSwitch } from './QuotaPauseControls';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle, Clock } from 'lucide-react';
 import { AGENT_LABELS, agentTextColor } from '../../lib/constants';
 import { AgentProvenanceDetails, StepModelBadge } from './AgentProvenance';
 import { StepTokensBadge } from './StepTokens';
 import { stepTokensUnknown } from './stepTokenStatus';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
+import { collectSourceWeights, isHeavyOutput, stepOutputBytes } from '../../lib/heavyOutput';
+import { formatBytes } from '../../lib/live-page-weight';
+import { useHeavyOutputThreshold } from '../../hooks/useHeavyOutputThreshold';
+import { HeavyOutputBadge, HeavyOutputNotice, SourceWeights } from './HeavyOutput';
 import { CopyIdPill } from '../CopyIdPill';
+import { authRefusalSentence, runAuthRefusals } from '../../lib/authRefusal';
 import {
   runStatusTimeline,
   tryParseTriageManifest,
@@ -48,19 +55,25 @@ function pendingQuotaWait(run: WorkflowRun): QuotaWait | null {
 export function QuotaWaitNotice({ wait }: { wait: QuotaWait }) {
   const { t } = useT();
   const at = (iso: string) => new Date(iso).toLocaleString();
-  let message: string;
-  if (wait.wake_at) message = t('wf.quota.waitingUntil', at(wait.wake_at));
-  else if (wait.parked === 'after_deadline') message = t('wf.quota.parked.afterDeadline');
-  else if (wait.parked === 'too_many_attempts') message = t('wf.quota.parked.tooManyAttempts', wait.attempt - 1);
-  else if (wait.parked === 'not_resumable') message = t('wf.quota.parked.notResumable', wait.detail ?? '');
-  else message = t('wf.quota.parked.noResetTime');
+  // KT-1657 — always labelled paused; the parked reason says what a human must do.
+  let detail: string | null = null;
+  if (!wait.wake_at) {
+    if (wait.parked === 'after_deadline') detail = t('wf.quota.parked.afterDeadline');
+    else if (wait.parked === 'too_many_attempts') detail = t('wf.quota.parked.tooManyAttempts', wait.attempt - 1);
+    else if (wait.parked === 'not_resumable') detail = t('wf.quota.parked.notResumable', wait.detail ?? '');
+    else detail = t('wf.quota.parked.noResetTime');
+  }
+  // The engine asks the provider on its own, except where a human must decide.
+  const rechecked = !wait.parked || wait.parked === 'no_reset_time';
   return (
     <div className="wf-quota-notice" data-testid="wf-quota-notice" data-parked={wait.wake_at ? undefined : 'true'}>
       <Clock size={12} aria-hidden />
-      <span>{message}</span>
+      <span data-testid="wf-quota-paused-label">{quotaPauseLabel(t, wait)}</span>
+      {detail && <span>{detail}</span>}
       {wait.reset_at && (
         <span className="wf-quota-notice-reset">{t('wf.quota.reset', at(wait.reset_at))}</span>
       )}
+      {rechecked && <span className="wf-quota-notice-reset">{t('wf.quota.recheckHint')}</span>}
     </div>
   );
 }
@@ -107,7 +120,7 @@ export function RunStatusTrail({
           >
             {status === 'StoppedByGuard'
               ? t('wf.guards.stoppedBy.title')
-              : status === 'WaitingQuota' ? t('run.status.quota') : status}
+              : status === 'WaitingQuota' ? t('wf.quota.pausedShort') : status}
           </span>
         </span>
       ))}
@@ -690,6 +703,7 @@ function ProducedBranchesPanel({
 
 export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
   const { t } = useT();
+  const heavyOutputKb = useHeavyOutputThreshold();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const statusTimeline = runStatusTimeline(run);
   const uncertainEffect = uncertainSideEffectIntent(run);
@@ -812,7 +826,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
               : quotaWait ? t('wf.quota.resumeHint') : t('wf.resumeRunHint')}
           >
             {uncertainEffect ? <AlertTriangle size={10} /> : <RotateCcw size={10} />}
-            {uncertainEffect ? t('wf.resumeUncertain') : t('wf.resumeRun')}
+            {uncertainEffect ? t('wf.resumeUncertain') : quotaWait ? t('wf.quota.resumeNow') : t('wf.resumeRun')}
           </button>
         )}
         <button
@@ -825,6 +839,12 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
       </div>
 
       {quotaWait && <QuotaWaitNotice wait={quotaWait} />}
+      {quotaWait && (
+        <QuotaAgentSwitch
+          runId={run.id}
+          current={run.step_results[run.step_results.length - 1]?.step_agent}
+        />
+      )}
 
       {/* Worktree path — surfaces the actual filesystem location of the run's
           isolated git worktree. The wizard chips promise isolation; this row
@@ -976,6 +996,24 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
           this static `run.step_results` snapshot which would only update
           on page reload. Splitting the responsibility avoids two parallel
           step lists fighting for the user's attention. */}
+      {/* KT-1524 — run level: which connection refuses its token, in plain
+          words, instead of leaving it to the raw output of the failed step. */}
+      {run.status !== 'Running' && (() => {
+        const refusals = runAuthRefusals(run.step_results);
+        if (refusals.length === 0) return null;
+        return (
+          <div className="wf-auth-refused" role="alert" data-testid="wf-auth-refused">
+            <strong><AlertTriangle size={13} /> {t('wf.authRefused.title')}</strong>
+            {refusals.map(refusal => (
+              <p key={refusal.stepName}>
+                <span className="text-faint">{t('wf.authRefused.step', refusal.stepName)}</span> — {refusal.sentence}
+              </p>
+            ))}
+            <small>{t('wf.authRefused.hint')}</small>
+          </div>
+        );
+      })()}
+
       {run.step_results.length > 0 && run.status !== 'Running' && (
         <div className="mt-4">
           {run.step_results.map((sr, i) => {
@@ -996,6 +1034,10 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             const childWorkflowId = foreach
               ? workflowSteps?.find(ws => ws.name === sr.step_name)?.sub_workflow_id ?? null
               : null;
+            // KT-1525 — what the step left in the run, and whether it is heavy.
+            const outputBytes = stepOutputBytes(sr);
+            const heavyOutput = isHeavyOutput(outputBytes, heavyOutputKb);
+            const sourceWeights = sr.step_kind === 'CollectApiData' ? collectSourceWeights(sr.output) : [];
             return (
               <div key={i} className="wf-step-result" data-expanded={isExpanded} data-rollback={sr.is_rollback ? 'true' : undefined}>
                 {isFirstRollback && (
@@ -1107,6 +1149,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                   <span className="text-ghost">
                     {sr.duration_ms > 0 ? `${(sr.duration_ms / 1000).toFixed(1)}s` : ''}
                   </span>
+                  {heavyOutput && <HeavyOutputBadge bytes={outputBytes} />}
                   {sr.condition_result && (
                     <span className="wf-condition-badge" data-action={sr.condition_result === 'Stop' ? 'stop' : 'other'}>
                       {conditionLabel(sr.condition_result)}
@@ -1211,12 +1254,23 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                         </tbody>
                       </table>
                     )}
+                    {(() => {
+                      const sentence = authRefusalSentence(sr.output);
+                      return sentence && (
+                        <div className="wf-auth-refused" role="note" data-testid="wf-step-auth-refused">{sentence}</div>
+                      );
+                    })()}
+                    {heavyOutput && (
+                      <HeavyOutputNotice stepName={sr.step_name} bytes={outputBytes} sources={sourceWeights} />
+                    )}
+                    {!heavyOutput && <SourceWeights sources={sourceWeights} />}
                     <div className="wf-step-output-code">
                       {sr.output || t('wf.noOutput')}
                     </div>
                     <div className="flex-row gap-6 mt-3 text-xs text-faint">
                       <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}>{sr.status}</span></span>
                       {sr.duration_ms > 0 && <span>{t('wf.duration')}: {(sr.duration_ms / 1000).toFixed(1)}s</span>}
+                      <span data-testid="wf-step-output-size">{t('wf.heavyOutput.size')}: {formatBytes(outputBytes)}</span>
                       {stepTokensUnknown(sr)
                         ? <span>Tokens: {t('wf.stepTokensUnknown')}</span>
                         : (sr.tokens_used ?? 0) > 0 && <span>Tokens: {sr.tokens_used}</span>}
