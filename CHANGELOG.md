@@ -20,9 +20,11 @@ Release notes for 0.9.3 and earlier are available in the
   the actions: resume it now, open it, cancel it, or switch the agent of its
   waiting step. `workflow_active_runs` and `GET /api/workflows/active-runs`
   list every unfinished run, a `WaitingQuota` one with its wake time; the
-  workflow list, card, run page and the nav's active-runs indicator read
+  workflow list, card and run page read
   « Paused — provider quota, resumes automatically at <time> » with a
-  « Resume now » reachable without opening the run. A paused run no longer
+  « Resume now » reachable without opening the run, and the active-runs
+  popover lists paused runs apart from the running ones (no new header
+  indicator: the global view is the notification bell). A paused run no longer
   waits blindly for the announced reset: about every 20 minutes, and at once
   after a key, agent or login change, Kronn asks the provider with a minimal
   request and resumes the run as soon as it answers; the refused step can be

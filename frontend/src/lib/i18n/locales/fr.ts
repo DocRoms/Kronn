@@ -5767,7 +5767,6 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'wf.quota.resuming': 'Reprise…',
   'wf.quota.resumeFailed': 'Impossible de reprendre le run : {0}',
   'wf.quota.openRun': 'Ouvrir le run',
-  'wf.quota.pausedRunsTitle': '{0} run{1} en pause sur un quota fournisseur',
   'wf.quota.recheckHint': 'Kronn interroge le fournisseur environ toutes les 20 minutes et reprend le run dès que le quota est revenu',
   'wf.quota.switchAgent': 'Changer d\'agent',
   'wf.quota.switchAgentHint': 'Exécuter l\'étape refusée sur un autre agent installé au lieu d\'attendre',

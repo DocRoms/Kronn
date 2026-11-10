@@ -5658,7 +5658,6 @@ const zh: TranslationDict = {
   "wf.quota.resuming": "正在恢复…",
   "wf.quota.resumeFailed": "无法恢复运行：{0}",
   "wf.quota.openRun": "打开运行",
-  "wf.quota.pausedRunsTitle": "{0} 个运行因提供方配额而暂停",
   "wf.quota.recheckHint": "Kronn 大约每 20 分钟询问一次提供方，配额恢复后立即恢复运行",
   "wf.quota.switchAgent": "切换代理",
   "wf.quota.switchAgentHint": "改用另一个已安装的代理运行被拒绝的步骤，而不是等待",

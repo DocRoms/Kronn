@@ -5754,7 +5754,6 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'wf.quota.resuming': 'Reanudando…',
   'wf.quota.resumeFailed': 'No se pudo reanudar el run: {0}',
   'wf.quota.openRun': 'Abrir el run',
-  'wf.quota.pausedRunsTitle': '{0} run{1} en pausa por una cuota del proveedor',
   'wf.quota.recheckHint': 'Kronn consulta al proveedor cada 20 minutos aproximadamente y reanuda el run en cuanto vuelve la cuota',
   'wf.quota.switchAgent': 'Cambiar de agente',
   'wf.quota.switchAgentHint': 'Ejecutar el paso rechazado en otro agente instalado en lugar de esperar',

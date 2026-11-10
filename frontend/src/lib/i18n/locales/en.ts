@@ -5754,7 +5754,6 @@ suggestion; that would overwrite the real value with a placeholder
   'wf.quota.resuming': 'Resuming…',
   'wf.quota.resumeFailed': 'Could not resume the run: {0}',
   'wf.quota.openRun': 'Open the run',
-  'wf.quota.pausedRunsTitle': '{0} run{1} paused on a provider quota',
   'wf.quota.recheckHint': 'Kronn asks the provider about every 20 minutes and resumes the run as soon as the quota is back',
   'wf.quota.switchAgent': 'Switch agent',
   'wf.quota.switchAgentHint': 'Run the refused step on another installed agent instead of waiting',

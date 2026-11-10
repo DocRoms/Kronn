@@ -57,7 +57,6 @@ describe('the paused wording, in every language', () => {
     'wf.quota.pausedUntil',
     'wf.quota.pausedParked',
     'wf.quota.resumeNow',
-    'wf.quota.pausedRunsTitle',
     'wf.quota.switchAgent',
     'wf.quota.switched',
   ];

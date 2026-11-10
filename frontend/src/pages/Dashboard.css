@@ -139,17 +139,6 @@
   cursor: pointer;
 }
 
-.dash-nav-activity-btn[data-quota-paused="true"] {
-  color: var(--kr-warning);
-}
-
-.dash-nav-activity-count {
-  margin-left: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-}
-
 .dash-nav-activity-btn:hover,
 .dash-nav-activity-btn:focus-visible {
   background: var(--kr-bg-hover);

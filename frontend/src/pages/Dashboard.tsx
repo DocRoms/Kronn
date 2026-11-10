@@ -37,7 +37,6 @@ import {
   Folder, FolderOpen, Puzzle,
   Search, Zap, Settings,
   Loader2,
-  Clock,
   MessageSquare, X,
   Rocket, Check, Workflow, FileText, ListTodo,
 } from 'lucide-react';
@@ -231,8 +230,9 @@ export function Dashboard({ onReset }: DashboardProps) {
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
-  // KT-1657 — runs paused on a provider quota: shown by the active-runs
-  // indicator on every page, with a "Resume now", never counted as running.
+  // KT-1657 — runs paused on a provider quota, listed (never counted as
+  // running) by the existing active-runs popover. No header indicator of
+  // their own: the global view is the notification bell (KT-1658).
   const { runs: quotaPausedRuns, refetch: refetchQuotaRuns } = useQuotaPausedRuns();
 
   // Poll workflows — fast when running, slow otherwise
@@ -851,17 +851,14 @@ export function Dashboard({ onReset }: DashboardProps) {
               )}
             </div>
           )}
-          {(runningWorkflows > 0 || quotaPausedRuns.length > 0 || activeRunsPopoverOpen) && (
+          {(runningWorkflows > 0 || activeRunsPopoverOpen) && (
             <div className="dash-nav-activity-wrap">
               <button
                 ref={runsTriggerRef}
                 type="button"
                 className="dash-nav-activity-btn"
                 data-testid="active-runs-trigger"
-                data-quota-paused={runningWorkflows === 0 && quotaPausedRuns.length > 0 ? 'true' : undefined}
-                aria-label={runningWorkflows === 0 && quotaPausedRuns.length > 0
-                  ? t('wf.quota.pausedRunsTitle', quotaPausedRuns.length, quotaPausedRuns.length === 1 ? '' : 's')
-                  : t('wf.activeRunsDisclosure', runningWorkflows, runningWorkflows === 1 ? '' : 's')}
+                aria-label={t('wf.activeRunsDisclosure', runningWorkflows, runningWorkflows === 1 ? '' : 's')}
                 aria-haspopup="dialog"
                 aria-expanded={activeRunsPopoverOpen}
                 aria-controls={activeRunsPopoverOpen ? 'active-runs-popover' : undefined}
@@ -870,12 +867,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   setActiveRunsPopoverOpen(open => !open);
                 }}
               >
-                {runningWorkflows === 0 && quotaPausedRuns.length > 0
-                  ? <Clock size={14} aria-hidden="true" />
-                  : <Loader2 size={14} className="spin" aria-hidden="true" />}
-                {quotaPausedRuns.length > 0 && (
-                  <span className="dash-nav-activity-count" data-testid="quota-paused-count">{quotaPausedRuns.length}</span>
-                )}
+                <Loader2 size={14} className="spin" aria-hidden="true" />
               </button>
               {activeRunsPopoverOpen && (
                 <ActiveRunsPopover
