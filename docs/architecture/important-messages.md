@@ -100,7 +100,7 @@ is selected without moving the transcript. A page reload starts navigation
 fresh. Publication invalidations during a pending GET coalesce into a fresh
 follow-up read rather than accepting the old snapshot as the final state.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:194-264#goTo]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4579-4583#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4624-4628#ImportantMessagesBar]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:151-180#selections]
 [src: file: frontend/src/lib/importantMessages.ts:50-75#load]
 [src: file: frontend/src/lib/importantMessages.ts:84-90#refreshImportantMessages]
@@ -114,16 +114,16 @@ card is rendered beside the folded report, visible without opening its details.
 Only a matching row with `source_kind: orchestration` enables that path; an
 orchestrator display label or ordinary notification alone renders no card and
 no false refusal notice.
-[src: file: frontend/src/components/MessageBubble.tsx:2121-2128#ImportantMessageCard]
+[src: file: frontend/src/components/MessageBubble.tsx:2127-2134#ImportantMessageCard]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:36-130#ImportantMessageCard]
-[src: file: frontend/src/components/MessageBubble.tsx:1132-1142#serverEventOnly]
+[src: file: frontend/src/components/MessageBubble.tsx:1138-1148#serverEventOnly]
 
 The bar re-fetches when the transcript's newest durable message id changes
 (`messageRevision`, the same idiom `DiscussionQuestionBanner` uses) — one
 fetch per arrival, not one per render or per bubble, and never stuck on the
 first GET while a new card lands.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:182-192#messageRevision]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4579-4583#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4624-4628#ImportantMessagesBar]
 
 ## Human form (0.13.0, KT-643)
 
@@ -133,7 +133,7 @@ select an existing task from this discussion's plan. This does not create,
 complete or otherwise modify a task. The card's task link resolves a fresh plan
 and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
-[src: file: frontend/src/pages/DiscussionsPage.tsx:5496-5520#ImportantMessageForm]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:5541-5565#ImportantMessageForm]
 [src: file: frontend/src/components/ImportantMessageForm.tsx:90-104#taskRef]
 [src: file: frontend/src/pages/DiscussionsPage.tsx:1376-1406#openPlan]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:88-91#initialTaskId]
@@ -166,7 +166,7 @@ identities, foreign keys, category checks and indexes.
 [src: file: frontend/src/lib/importantMessageDraft.ts:54-72#takeScalars]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:3-24#discussion_important_messages_next]
 [src: file: backend/src/db/sql/175_important_message_information_category.sql:25-33#idx_disc_important_message]
-[src: file: backend/src/db/migrations.rs:1847-1979#migration_175_preserves_populated_cards_and_closes_information_category]
+[src: file: backend/src/db/migrations.rs:1879-2011#migration_175_preserves_populated_cards_and_closes_information_category]
 
 ## Tests
 

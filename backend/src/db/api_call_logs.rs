@@ -606,6 +606,67 @@ mod tests {
     }
 
     #[test]
+    fn a_json_excerpt_loses_the_url_secrets_of_its_strings_on_write_and_on_read() {
+        // KT-1673: the URL strip counts inside a valid JSON document.
+        let body = r#"{"next":"https://api.example.com/v1/items?api_key=Qk7SecretValue9","webhook":"https://user:s3cr3t@hooks.example.com/cb"}"#;
+        let conn = mkconn();
+        let mut log = sample("api-test");
+        log.response_excerpt = Some(body);
+        let id = record(&conn, log).unwrap();
+        let check = |stored: &str| {
+            let parsed: serde_json::Value = serde_json::from_str(stored).expect(stored);
+            assert_eq!(parsed["next"], "https://api.example.com/v1/items");
+            assert_eq!(parsed["webhook"], "https://hooks.example.com/cb");
+            assert!(!stored.contains("Qk7SecretValue9"), "{stored}");
+            assert!(!stored.contains("s3cr3t"), "{stored}");
+        };
+        check(&get(&conn, &id).unwrap().unwrap().response_excerpt.unwrap());
+        conn.execute(
+            "UPDATE api_call_logs SET response_excerpt = ?1 WHERE id = ?2",
+            params![body, id],
+        )
+        .unwrap();
+        check(
+            &list(&conn, ListFilter::default()).unwrap()[0]
+                .response_excerpt
+                .clone()
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn a_json_excerpt_stays_valid_json_once_redacted_on_write_and_on_read() {
+        // KT-1526: a header example inside a JSON string, escaped quotes around it.
+        let body = r#"{"issues":[{"description":"curl -H \"X-Api-Token: Qk7SecretValue9\" https://x.example"}],"total":1}"#;
+        let conn = mkconn();
+        let mut log = sample("api-test");
+        log.response_excerpt = Some(body);
+        let id = record(&conn, log).unwrap();
+        let written = get(&conn, &id).unwrap().unwrap();
+        let stored = written.response_excerpt.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored).expect(&stored);
+        assert_eq!(parsed["total"], 1);
+        assert!(!stored.contains("Qk7SecretValue9"), "{stored}");
+        assert!(stored.contains("REDACTED"), "{stored}");
+
+        // A row stored raw before the fix is redacted the same way on read.
+        conn.execute(
+            "UPDATE api_call_logs SET response_excerpt = ?1 WHERE id = ?2",
+            params![body, id],
+        )
+        .unwrap();
+        let read = list(&conn, ListFilter::default()).unwrap()[0]
+            .response_excerpt
+            .clone()
+            .unwrap();
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&read).is_ok(),
+            "{read}"
+        );
+        assert!(!read.contains("Qk7SecretValue9"), "{read}");
+    }
+
+    #[test]
     fn rows_written_raw_before_the_fix_are_redacted_on_read() {
         let conn = mkconn();
         let id = record(&conn, sample("api-test")).unwrap();

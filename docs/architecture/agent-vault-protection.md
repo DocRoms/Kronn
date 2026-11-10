@@ -18,6 +18,10 @@ own vault** and nothing else:
   elsewhere) is denied, read and write. Project databases, other repositories,
   the credentials of other tools (`~/.aws`, `gh`), Docker and the network stay as
   they were.
+- **Exception (KT-1656): the credential files of the home.** The login of one
+  agent CLI is not another's to read, so every confined launch also loses the
+  stores of the *other* agents, and a *sandboxed* launch the shared ones. See
+  [Credential files of the home](#credential-files-of-the-home-kt-1656).
 - **The Kronn API port stays open.** The agents' MCP bridge and the owner's Quick
   Exec scripts go through it. It is not denied by the sandbox.
 - **`auth_strict_localhost` is unchanged** (off by default): it would break every
@@ -51,8 +55,8 @@ How the choice is made, in one place: every native agent process goes through
 own OS sandbox. A Claude launch whose `--settings` enable it keeps it (and tells
 it the data directory); a Codex launch that did not turn its sandbox off has it
 replaced; everything else is wrapped as it is.
-[src: file: backend/src/core/vault_guard.rs:132-142#launch_sandbox]
-[src: file: backend/src/core/vault_guard.rs:319-338#wrap_launch]
+[src: file: backend/src/core/vault_guard.rs:150-160#launch_sandbox]
+[src: file: backend/src/core/vault_guard.rs:343-362#wrap_launch]
 
 - macOS wraps with `sandbox-exec` (allow by default, one deny on the data
   directory). Linux wraps with `bwrap`: the data directory is replaced by an empty
@@ -65,7 +69,7 @@ replaced; everything else is wrapped as it is.
 - Claude's rules name the directory as `Read(//abs/path/**)` (two slashes: a path
   from the filesystem root), for `Read`, `Edit` and `Write`. A deny rule is checked
   before the permission mode, so the bypass flag does not lift it.
-  [src: file: backend/src/core/vault_guard.rs:416-426#claude_permission_deny]
+  [src: file: backend/src/core/vault_guard.rs:461-470#claude_vault_permission_deny]
   `sandbox.filesystem.denyRead` is a documented field of Claude Code's sandbox
   settings ("paths to deny reading within the sandbox, merged with paths from
   `Read(...)` deny permission rules", read from the installed 2.1.285 binary's
@@ -85,7 +89,7 @@ therefore starts Codex with `--sandbox=danger-full-access` (dropping any
 | `read-only` (Codex's default for `exec`) | the temp directories, `CODEX_HOME` (else `~/.codex`), `/dev`; `~/.npm` for an `npx` launch | everything | denied, read and write |
 | `workspace-write` (the task worker) | the same, plus the worktree; the worktree's `.git` stays read-only | everything | denied, read and write |
 
-[src: file: backend/src/core/vault_guard.rs:242-275#codex_seatbelt_profile]
+[src: file: backend/src/core/vault_guard.rs:260-293#codex_seatbelt_profile]
 
 macOS is allow-by-default with a broad `file-write*` deny, the allowed roots, the
 `.git` deny, and the data-directory deny last (the last matching rule wins). Linux
@@ -117,6 +121,210 @@ exactly as before.
   another directory) is not covered; neither is a secret in the agent's own
   environment (the child environment is built, not inherited: `core::child_env`).
 
+### Credential files of the home (KT-1656)
+
+A task worker that probed Gemini CLI printed `~/.gemini/settings.json`, tokens
+included, into its transcript (stored, and sent to the provider on every later
+turn). `core::home_credentials` lists the credential stores of the home that
+exist on the host, as given and with their links resolved, in two tiers:
+
+| Tier | Stores | Hidden from |
+|---|---|---|
+| Other agents' | `~/.gemini`, `~/.codex`, `~/.claude.json`, `~/.claude/.credentials.json`, `~/.claude/settings.json`, `~/.claude/settings.local.json` (their `env` block, `apiKeyHelper` and `mcpServers.*.env` have the shape that leaked from `~/.gemini/settings.json`), `~/.copilot`, `~/.config/github-copilot`, `~/.kiro`, `~/.local/share/kiro-cli`, `~/.vibe`, `~/.local/share/opencode`, `~/.config/opencode` | every confined launch, except the store of the agent that is running |
+| Shared | `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.config/glab-cli`, `~/.config/hub`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`, `~/.yarnrc.yml`, `~/.pypirc`, `~/.cargo/credentials*`, `~/.docker/config.json`, `~/.kube/config`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.vault-token`, … | a **sandboxed** launch only |
+
+[src: file: backend/src/core/home_credentials.rs:178-194#hidden_in]
+
+| Launch | Tiers hidden | Mechanism |
+|---|---|---|
+| Claude task worker, read-only review (its own sandbox) | both, **including Claude's own** (the CLI reads its login from outside the sandbox it gives its shell) | `sandbox.filesystem.denyRead` and a `Read(…)` rule per store; independent of the vault setting |
+| **Any restricted launch**, whatever the agent (Claude, Codex, Gemini, Kiro, Copilot, Vibe, OpenCode, an ACP adapter), and a Codex `read-only` / `workspace-write` one | both, but the running agent's own store | the Kronn profile / `bwrap` mounts |
+| A launch the owner opened in **full access** (CLI, ACP runtime) | other agents' only | the Kronn profile / `bwrap` mounts |
+| The validations Kronn runs in a worker's tree | other agents' | the lane's sandbox |
+
+- **The tier follows the launch's real trust level, not the kind of its
+  sandbox.** `vault_guard::launch_reach` gives `Reach::FullAccess` only to a
+  launch with no sandbox of its own that the owner opened in full access
+  (`try_spawn`'s `full_access`, which is `false` for a task worker and for a
+  launch under a read-only repository policy; the `full_access` of the ACP
+  adapter's broker; the one `spawn_native` verified). Every other launch,
+  including a restricted Gemini, Kiro, Copilot or Vibe CLI launch and a
+  restricted ACP adapter, is `Reach::Sandboxed`. A native ACP runtime starts only
+  with its full-access setting on, so it is always a full-access launch, unless it
+  carries read-only grants (`NativeLaunchEnv::read_only_grants`): every route asks
+  `runner::reach_is_full_access(launch_full_access, has_read_only_grants)`. No
+  native agent can hold such grants today (`read_only_repos` is refused for any
+  agent but Claude Code and Codex), so on that route it is defense in depth.
+  [src: file: backend/src/core/vault_guard.rs:642-648#launch_reach]
+- Owner decision (2026-11-10): the owner's rule above holds for an agent in full
+  access: `~/.ssh`, `~/.aws`, `gh` stay reachable, as in the owner's terminal.
+  Only the restricted launches lose them. The validations keep the shared files
+  readable: a package manager or the Docker CLI fails on a file it is refused.
+- **Independent of "Protect the Kronn vault from agents".** With the setting off,
+  `trust_sandbox::credential_confinement` still builds a confinement, which hides
+  the stores and no Kronn data; it is `None` only when the host has no sandbox, or
+  when the setting is off and there is no store to hide.
+  [src: file: backend/src/core/vault_guard.rs:651-666#launch_confinement_for]
+- A path that does not exist is not listed (bubblewrap cannot mount over it);
+  a store created after the launch is not covered until the next one. A `HOME`
+  other than the user's is not followed.
+- **A store is hidden where the tools would put it on this host**, not only under
+  the home. Each store is also resolved through the environment of the Kronn
+  process (read through `core::child_env::var_os`): `CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME`, `GEMINI_CLI_HOME` (the Gemini CLI's home, which holds `.gemini`),
+  `XDG_CONFIG_HOME` (everything of `~/.config/…`: `gh`, `gcloud`, `glab-cli`,
+  `opencode`, `github-copilot`, `git/credentials`), `XDG_DATA_HOME`
+  (`~/.local/share/…`: `opencode`, `kiro-cli`), `GNUPGHOME`,
+  `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE`, `KUBECONFIG` (each entry
+  of the list), `DOCKER_CONFIG`, `CARGO_HOME`, `NPM_CONFIG_USERCONFIG`,
+  `GH_CONFIG_DIR`, `CLOUDSDK_CONFIG`. The default place stays hidden too: a tool
+  run without the variable still finds its store there. A relative value is
+  ignored (it is relative to the working directory of the tool, which Kronn does
+  not know), and so is one that names the home or a parent of it
+  (`GNUPGHOME=$HOME`), which would hide everything. `GEMINI_CLI_HOME` was
+  verified against the installed Gemini CLI 0.66.0 (its bundled `homedir()` returns
+  `process.env["GEMINI_CLI_HOME"]` when set, else the OS home, and the global
+  directory is `<that home>/.gemini`, `oauth_creds.json` in it); it is not a
+  documented contract, so re-check it when the CLI is upgraded.
+  `CLAUDE_CONFIG_DIR` moves Claude's `.credentials.json`, `.claude.json`,
+  `settings.json` and `settings.local.json` alike.
+  [src: file: backend/src/core/home_credentials.rs:214-252#locations]
+- Linux masks a directory with an empty tmpfs and a file with `/dev/null`
+  bound over it.
+- On a host with no sandbox the wrapped launches (full access, Codex, the other
+  CLIs, ACP) are not confined, so these stores are open to them; a Claude worker's
+  settings carry the denial either way. With "Protect the Kronn vault from
+  agents" off they are hidden all the same (see above).
+- **Stored output is masked, with a measured false-positive rate.** An Agent
+  message is redacted when it is inserted (`db::discussions::mask_agent_output`
+  → `core::redact::redact_agent_output`), irreversibly, and what a human typed is
+  left alone. It masks the vendor token shapes, and a secret-named assignment or
+  JSON key (`"GITHUB_PERSONAL_ACCESS_TOKEN": "…"`, `GEMINI_API_KEY=…`, the `env`
+  block of a CLI's `settings.json`) **only when its value is a credential**: the
+  audit redaction used for audit artifacts also rewrote code and prose that merely
+  names a token (`let token = lexer.next_token();`, `Authorization: Bearer $TOKEN`),
+  which an agent's reply is full of. A value is not a credential when it is a
+  placeholder (`$TOKEN`, `<your-token>`, `your-api-key`, `changeme`, `xxxx`,
+  `kr-join-...`, `…`), the name of an environment variable (`VOTRE_API_KEY`),
+  prose (whitespace, or a script with no spaces), a dotted or snake_case
+  identifier, a CSS variable, a reference (`secret://NAME`), or, for a bare value,
+  shorter than 12 characters or without letters and digits or shaped like code (a
+  call, a path, a URL). A quoted value counts from 8 characters, 6 under a
+  `password`-like name; a `pin` name needs 4 to 12 digits. The price is the
+  inverse risk: a short bare secret under a harmless name is stored as written.
+  **No identifier carve-out (round 5).** A camelCase word (`initGeneration`,
+  `CorrectHorseBatteryStaple`), a lowercase or mixed path (`session/cancel`,
+  `summer2026/winter2026`), a value that repeats its name (`CHANNEL_TOKEN =
+  'channeltoken'`, `admin_password = "adminpassword"`), a short number
+  (`PIN=1234`) and a word in backticks after `token:` / `secret:` are masked: each
+  is also what a real password, token or PIN looks like. Zero defect on secrets, so
+  an identifier masked in a transcript is the accepted cost. The measurement's five
+  former false positives are `EXPECTED_MASKED` in `db::insert_redaction_measure`.
+  A secret word followed by a qualifier (`key`, `value`, `string`, `str`), after
+  any run of `_` / `-` (`SECRET__KEY`, `secret--value`), still
+  names a secret (`SECRET_KEY`, `TOKEN_VALUE`, `passwordString`): the value is then
+  judged by the same rules as under the bare word.
+- **A room invitation is stored as written.** An agent posts
+  `disc_join({token: "kr-join-<32 hex>"})` on purpose, so that a peer can join
+  within the invitation's ten minutes (`INVITE_TTL_SECS`; the database keeps only
+  its hash). Masking it at insert would break the invite, so the insert path
+  leaves it, but only the WHOLE value, exactly as `create_invite_token` writes it
+  (`is_invite_token`: `kr-join-` and 32 lowercase hex characters, inside at most
+  one quote or backtick on each side). A prefix put in front of a real secret, an
+  invitation embedded in a longer value, an uppercase or non-hex suffix are masked
+  like any value. The audit
+  passes (`redact_for_audit_artifact`, `redact_stored_text`, so the owner-run
+  `redact-discussion`) still mask it: they run on history, long after the expiry,
+  and a `kr-join-` token found in a public place means a compromised room.
+- The login files of the other agents are masked by shape too: Google OAuth
+  access (`ya29.…`) and refresh (`1//0…`) tokens (`~/.gemini/oauth_creds.json`),
+  GitHub fine-grained `github_pat_…` and AWS STS `ASIA…` keys.
+- **Masked once, then fed everywhere.** `insert_message_inner` masks the content
+  one time and hands that text to the row, `ingest_message_proposals`,
+  `ingest_message_actions`, `ingest_message_questions` and
+  `audit_validation::on_agent_message`: a `kronn-*` fence that carries a token is
+  still ingested as a card, with the token masked in the card's own tables. The
+  streaming checkpoints (`set_partial_response`,
+  `set_partial_response_for_dispatch`) mask their text the same way, so
+  `discussions.partial_response` and the message a boot recovery makes of it hold
+  no clear secret. **A peer receives the stored text too**: `federate_message`
+  sends an Agent message as its stored (masked) row, or masks the in-memory text
+  when no row is found, never what the agent wrote; every caller of
+  `federate_message` goes through it (the runner's reply, a source append, a
+  refused start). The `validation_documents` of a validation reply are not reply
+  text: they are the fingerprints of the documents on disk, captured after the
+  validation child stopped.
+  The regression samples are `AS_WRITTEN` in `db::insert_redaction_measure`.
+  [src: file: backend/src/core/redact.rs:745#redact_agent_output]
+- **Measured on a corpus, not yet on a database.** `db::insert_redaction_measure`
+  (ignored) runs the insert path over every Agent message of a copy of a database
+  and/or over text files cut into message-sized chunks. On this repository (prose,
+  code, hashes, git history: 21,926 chunks) the audit redaction changed 1,508 and
+  the insert path 227, each one reviewed. After the widening of round 3
+  (`ya29.` / `1//0` / `github_pat_` / `ASIA` shapes, secret-word names with a
+  qualifier), the same run over the merged tree (20,412 chunks, a corpus rebuilt
+  from the repository, so not the same chunks) changes 206 (1.0%; the audit
+  redaction 1,430); the changes the widening adds are all the fixtures of its own
+  tests. Each change is: all are credential-shaped literals in
+  test fixtures and demo scripts (fake `sk-…` / `ghp_…` keys, `password=hunter2`,
+  `postgres://user:secret@…`), none is prose, code that only names a token, a
+  commit SHA, a UUID or a digest. The false positives the review found
+  (placeholders, ellipses, env-var names, an i18n key, a CJK sentence under a
+  `*_token` key, the word "pin", a CSS variable, `user:pass@host`) were fixed and
+  are regression samples. The run over a copy of a real database is the owner's:
+  `docs/operations/db-backup.md#redaction-of-stored-credentials-kt-1656`.
+  The principal ran it on the 16,004 Agent messages of the owner's database
+  (read-only extract): 42 would be masked (0.26%), each reviewed. True positives:
+  a real `KRONN_AUTH_TOKEN` and credential-shaped URL examples. False positives,
+  fixed and now samples: 12 room invitations (`kr-join-`), kept as written, and 5
+  identifiers or prose (`"token":"initGeneration"`, `` cancel token:
+  `session/cancel` ``, `` un secret : `TooLarge` ``, `CHANNEL_TOKEN =
+  'channeltoken'`, `PIN=1234`). Round 4 stored those five as written; the security
+  passes showed each carve-out lets a real credential through, so round 5 masks
+  them again (accepted cost) and keeps them as expected-masked samples. The
+  repository corpus count after round 5 is in the delivery.
+
+#### What is scrubbed after the fact, and where
+
+A printed credential file is copied by more than the message it was quoted in.
+`db::credential_scrub::TARGETS` lists every column that can carry an agent
+transcript or tool output, and two passes read it:
+
+- **Migration 293, on every install** (`redact_known_shapes`): a value with a
+  vendor-shaped token (`ghp_…`, `AIza…`, `sk-…`, a JWT, a `Bearer` value, a
+  `"password": "…"` field) is masked, a placeholder and every other value stay as
+  written, and no secret-named JSON key masks by itself. Agent messages only for
+  `messages`; every listed column elsewhere.
+- **The owner-run audit of one discussion**, `POST /api/maintenance/redact-discussion`
+  with `{"discussion_id": "<id or its first 8+ characters>"}` (the full audit
+  redaction, whatever the role, over every table below that belongs to the
+  discussion). It names no discussion in the code, is gated like the other
+  destructive POSTs and is not reachable with an agent's bridge token.
+
+| Table.column | Carries | Pass |
+|---|---|---|
+| `messages.content` | the transcript | 293 (Agent), audit |
+| `message_tombstones.content`, `message_revision_events.content` | the copy a deletion or an edit keeps | 293, audit |
+| `discussions.partial_response`, `discussions.summary_cache`, `disc_summary_ranges.summary` | a turn in flight, text written from the transcript | 293, audit |
+| `discussion_important_messages.payload_json`, `discussion_questions.{payload_json,answer_json,resume_error}`, `discussion_actions.{values_json,diagnostic}`, `planning_proposal_items.{payload_json,rejected_reason}` | excerpts, answers, and the cards ingested from the `kronn-*` fences of a message | 293, audit |
+| `agent_dispatch_jobs.{last_error,progress_detail}`, `agent_resume_jobs.{result_json,last_error,reason}`, `shared_runs.{result_json,exec_details_json,diagnostic}` | job results and errors | 293, audit |
+| `task_execution_deliveries.manifest_json`, `task_execution_reviews.decision_json`, `task_execution_validation_runs.output`, `task_executions.{blocked_reason,outcome_reason}`, `task_execution_events.changes_json`, `delivery_summaries.canonical_json` | what a worker delivered, a principal decided, a command printed | 293, audit (by the execution's `sub_discussion_id`) |
+| `planning_task_dod_items.evidence`, `planning_task_events.changes_json`, `planning_tasks.{description,blocked_reason}`, `review_findings.evidence`, `learnings.evidence_json` | evidence and notes agents attach to tasks | 293 (audit for `learnings` by discussion) |
+| `workflow_runs.step_results_json`, `workflow_run_pins.content_json`, `workflow_watch_state.{last_result,last_error}`, `quick_exec_runs.{summary,diagnostics}`, `tasks.last_status_json` | step and run outputs | 293 |
+| `api_call_logs.{request_excerpt,response_excerpt,error_message}`, `media_jobs.last_error`, `mcp_probe_results.summary`, `mcp_auth_failures.message`, `lite_llm_model_failures.error_message`, `trust_audit_log.detail` | what a call, a probe or a job reported | 293 (audit by discussion where the row has one) |
+| `audit_runs.{documentary_notes,recommendations_json,step_outcomes_json}`, `audit_cross_findings.record_json` | what an audit agent wrote | 293 |
+
+Not listed, with the reason: **no FTS or other virtual table exists** (nothing
+creates one, and a test asserts the schema holds none), so there is no shadow copy
+to rebuild after a rewrite; `context_files.extracted_text` is a file a human
+uploaded, not agent output; configuration tables (`workflows.steps_json`,
+`quick_prompts`, `projects`, …) hold what a human wrote; hashes (`*_hash`) hold no
+text. A file on disk (`quick_exec_runs.artifact_path`, a run's artifacts
+directory, a backup) is outside the database and not rewritten; the pre-migration
+backup keeps the clear text (see `docs/operations/db-backup.md`). A test checks
+that every column of the list exists in the schema, so a renamed column cannot
+make a pass skip it silently.
+
 ### Run artifacts sit outside the vault (KT-1585)
 
 A workflow run's artifacts directory (`{{run.artifacts_dir}}`) used to live in
@@ -127,10 +335,64 @@ else the platform cache directory. A base inside a protected directory, or one
 that contains it, is refused and the default is used. Details:
 [workflow-read-only-repos.md](../operations/workflow-read-only-repos.md#run-artifacts-directory).
 
-For now an Agent step can read any run's artifacts, not only its own, when its
-prompt names the path; per-run confinement is planned (KT-1587, 0.15.3). Exec
-outputs kept there are scrubbed of known secrets; reports and screenshots a
-step writes are not.
+Exec outputs kept there are scrubbed of known secrets; reports and screenshots a
+step writes are not, which is why a launch reaches **its own run's directory
+only** (KT-1587). Every native agent launch (`try_spawn_granted`, the ACP runtimes) has
+the whole root closed; the run directory a step was *granted* (its prompt names
+`{{run.artifacts_dir}}`, so `read_only_repos` passes it as `--add-dir` for Claude
+and a `"<dir>"="read"` entry for Codex) is opened again, **read-only**. A launch
+with no grant (a discussion, a task worker, an ACP runtime, a step that does not
+name the path) reads no run at all. The grant is **typed, never parsed**: it is
+the `read_only_dirs` Kronn built for the step, kept by `ReadOnlyRepos`
+(`granted_dirs`) and handed to `try_spawn_granted`: on the direct route by
+`start_agent_with_config`, and on the **default adapted ACP route** (Claude and
+Codex) through `AdapterLaunchOptions::run_artifacts`, which both adapters pass
+to `try_spawn_granted` on every turn (the no-grant `try_spawn` is test-only, so
+no production spawn can drop it). No layer reads it back out of
+an argument vector, which also carries the prompt, the system prompt (the
+repository's instructions, skills, MCP context) and the ticket text, any of which
+can spell `--add-dir <victim run>` or `"<victim run>"="read"`. Every typed grant
+is still vetted (`vetted_grant`): absolute, no `..` component, the directory
+itself not a link (`symlink_metadata`), canonicalised, its canonical parent the
+canonical root, and its name a lowercase hyphenated UUID (the name Kronn gives a
+run), so an uppercase spelling on a case-insensitive volume is never a grant. Only
+the canonical own directory reaches a rule. The same vetting runs **first, on the
+path as given**, when `ReadOnlyRepos::resolve_with_dirs` receives it
+(`artifacts_reach::vet_run_dir`, before `canonicalize` could turn a `..` or a leaf
+link into a plain run directory): a path under the root that fails is no grant at
+all, so it is in neither the typed grant nor the roots and reaches no `--add-dir`
+(Claude) and no read entry (Codex). Read-only directories outside the root keep
+their behaviour. `core/artifacts_reach.rs` builds each runtime's rules:
+
+| Runtime | Root closed | Own run opened |
+|---|---|---|
+| Seatbelt (Codex, every wrapped launch) | `(deny file-read* file-write*)` on the root and its real path, after every other rule | `(allow file-read*)` on the own dir (a later rule wins), plus `file-read-metadata` on the root itself; writes stay denied |
+| bubblewrap | empty tmpfs over the resolved root (the root is created before the launch so the mount has a target) | `--ro-bind` of the own dir on top, after the tmpfs |
+| Claude's own sandbox (policy launches, task workers) | `sandbox.filesystem.denyRead` and `denyWrite` on the root | `sandbox.filesystem.allowRead` on the own dir (an allow inside a denied read path re-opens it) |
+| Claude's Read, Edit and Write tools | `Edit` and `Write` denied on the root; `Read` denied on the whole root with no grant | with a grant, a deny cannot be carved out by an allow, so each *other* entry of the root present at the launch is denied by its literal path. A root with more than 200 other entries (or one that cannot be listed) fails closed: no grant, the whole root denied, no `allowRead`, and no `--add-dir <own>` in the arguments either (`ClaudeReach::withheld`, removed by `fold_vault_into_claude_settings`), so the arguments and the rules agree |
+
+A Claude launch with a grant is **not** wrapped in Kronn's OS sandbox: an OS
+sandbox does not nest (`sandbox_apply` fails inside one) and Claude's own, set
+`failIfUnavailable`, would refuse to start. Its shell is confined by the
+sandbox settings above; its file tools by the permission rules plus
+`permissions.blockReadsOutsideWorkingDirectories`, which the read-only policy
+always sets. Per the settings schema of the installed Claude Code 2.1.285 that
+setting refuses "file-tool reads (Read, Grep, Glob, LSP) outside the working
+directories in every permission mode", and the own run is the only `--add-dir`
+under the root: it is what closes a run created after the launch, and Grep and
+Glob over the root. No `Glob(...)` or `Grep(...)` deny is emitted: the same
+release's settings guidance says path rules use `Read(path)` for reads and that
+`Glob(path)` rules "are not matched by file permission checks", so they would be
+inert.
+
+Like the data-dir rule it follows the owner's vault-protection setting and the
+host's sandbox. Limits: a Claude launch's literal Read denies name the runs that
+exist when it starts (a run created later is closed by the sandbox and by the
+working-directory limit, not by a rule of its own); on Linux the bubblewrap
+mounts were not exercised live, only their arguments are tested; the Claude
+`allowRead` precedence and the working-directory limit are read from the
+installed binary's own text, not exercised in a live Claude run.
+[src: file: backend/src/core/artifacts_reach.rs:1-45]
 
 ## Loopback is not the owner
 
@@ -142,7 +404,7 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
 
 `POST` on `/api/setup/reset`, `/api/config/import`,
 `/api/config/auth-token/regenerate`, `/api/config/recovery/{set,reencrypt}`.
-[src: file: backend/src/core/strong_confirm.rs:43-79#ALWAYS]
+[src: file: backend/src/core/strong_confirm.rs:43-85#ALWAYS]
 
 - The code goes in the `X-Kronn-Confirm` header, a `kronn_confirm` body field or a
   single-use grant; the UI asks for it in `StrongConfirmDialog`.
@@ -155,16 +417,19 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
   (`OWN_PROOF`, owner decision 03/11): a restore needs the recovery passphrase, and
   `start-new-key` only acts while the key is absent (it refuses while the key is in
   use), when the seed that would check a code is unreadable too.
-  [src: file: backend/src/core/strong_confirm.rs:112-121#OWN_PROOF]
+  [src: file: backend/src/core/strong_confirm.rs:126-137#OWN_PROOF]
 - `POST /api/config/auth-token/regenerate` is also in `DESTRUCTIVE_POSTS`
   (`lib.rs`): a remote peer is refused even while auth is off, like a reset.
-  [src: file: backend/src/lib.rs:1231-1247#DESTRUCTIVE_POSTS]
+  [src: file: backend/src/lib.rs:1271-1293#DESTRUCTIVE_POSTS]
 
 ## Files
 
 | Where | What |
 |---|---|
 | `core/vault_guard.rs` | which launches are wrapped, the Claude rules |
+| `core/artifacts_reach.rs` | the run artifacts root closed to a launch but for its granted run (KT-1587) |
+| `core/home_credentials.rs` | the credential stores of the home an agent must not read, and where the environment moves them (KT-1656) |
+| `db/credential_scrub.rs` | every column that can hold agent output, and the two passes that mask it after the fact (KT-1656) |
 | `agents/runner.rs` `try_spawn` | the one spawn point of every native agent |
 | `agents/runner.rs` `claude_task_worker_settings` | `denyRead` and `permissions.deny` of the worker |
 | `api/strong_confirm.rs` `strong_gate` | the code of the vault routes, on every channel |

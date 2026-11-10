@@ -26,7 +26,7 @@ agent, regardless of which named connection backs it. It replaces an inline
 ternary that used to live inside `start_ollama_http`, mirroring
 `acp::resolve_acp_route` being the sole ACP route decision point.
 [src: file: backend/src/http_transport.rs:28-41]
-[src: file: backend/src/agents/runner.rs:9407-9410#resolve_chat_codec] (call site)
+[src: file: backend/src/agents/runner.rs:9697-9700#resolve_chat_codec] (call site)
 
 ### Pre-dispatch capability gate
 
@@ -49,11 +49,11 @@ named-connection model Custom connections use (`external_api_connections`,
 KT-339), but keep their own dedicated `AgentType` — so their fixed UI color
 (`AGENT_COLORS.LiteLlm` / `.Nvidia`) and their per-agent-type concurrency
 limit (`agent_concurrency_limits`'s `REMOTE` array) are untouched by this
-work. [src: file: backend/src/agents/runner.rs:3437-3489#agent_concurrency_limits]
+work. [src: file: backend/src/agents/runner.rs:3542-3594#agent_concurrency_limits]
 [src: file: frontend/src/lib/constants.ts:10-24#AGENT_COLORS] Their credential is resolved
 through `credential_slug` → `TokensConfig.active_key_for`, the same
 indirection every named connection already uses.
-[src: file: backend/src/http_transport.rs:74-93#external_http_runtime]
+[src: file: backend/src/http_transport.rs:111-130#external_http_runtime]
 
 ### Stable target: connection + runtime + model + tier
 
@@ -69,7 +69,7 @@ way:
   the fallback-to-Default-tier-model behavior. It replaced three independent,
   subtly inconsistent copies (discussion dispatch, Quick Prompt, workflow/
   batch-compare retry) — the copies disagreed on whether an empty
-  Economy/Reasoning slot fell back to Default. [src: file: backend/src/http_transport.rs:53-72#connection_tier_model]
+  Economy/Reasoning slot fell back to Default. [src: file: backend/src/http_transport.rs:90-109#connection_tier_model]
 - `http_transport::validate_connection_target` is the single "does this
   connection exist and match the requested agent type" guard, shared by
   Compare's judge/improve launch, multi-agent orchestration, and discussion
@@ -105,7 +105,7 @@ the new `OrchestrationParticipant` type (replacing the bare
 `connection_id`, validated the same way and dispatched through the same
 `enqueue_with_connection`/`external_http_runtime` construction discussion
 dispatch already used. [src: file: backend/src/models/compare.rs:128-156]
-[src: file: backend/src/models/discussions.rs:942-957#OrchestrationParticipant] (`OrchestrationParticipant`)
+[src: file: backend/src/models/discussions.rs:964-979#OrchestrationParticipant] (`OrchestrationParticipant`)
 
 ## Consequences
 
@@ -127,13 +127,13 @@ integrated. [src: file: backend/src/api/discussions/orchestration.rs:66-132#chec
 participant round: [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection],
 synthesis: [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection])
 Workflow Agent steps: the connection resolver
-[src: file: backend/src/workflows/steps.rs:1153-1193#resolve_step_connection],
+[src: file: backend/src/workflows/steps.rs:1171-1211#resolve_step_connection],
 the run-start check
 [src: file: backend/src/workflows/runner.rs:1967-2015#resolve_step_connection],
 the check immediately before dispatch
-[src: file: backend/src/workflows/steps.rs:402-414#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:412-424#preflight_workflow_launch]
 and the preflight on the `http:<connection-id>` target and effective model
-[src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 
 ## Sources
 

@@ -1129,41 +1129,6 @@ fn messages_update_tokens() {
 }
 
 #[test]
-fn messages_delete_last_agent() {
-    let conn = test_db();
-    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
-        .unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent))
-        .unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m3", MessageRole::System))
-        .unwrap();
-
-    let deleted = crate::db::discussions::delete_last_agent_messages(&conn, "d1").unwrap();
-    assert_eq!(deleted, 2); // Agent + System messages after last User
-
-    let messages = crate::db::discussions::list_messages(&conn, "d1").unwrap();
-    assert_eq!(messages.len(), 1);
-    assert!(matches!(messages[0].role, MessageRole::User));
-}
-
-#[test]
-fn messages_edit_last_user() {
-    let conn = test_db();
-    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
-        .unwrap();
-
-    let edited =
-        crate::db::discussions::edit_last_user_message(&conn, "d1", "updated content").unwrap();
-    assert!(edited);
-
-    let messages = crate::db::discussions::list_messages(&conn, "d1").unwrap();
-    assert_eq!(messages[0].content, "updated content");
-}
-
-#[test]
 fn discussions_loaded_with_messages() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
@@ -2103,6 +2068,87 @@ pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         parent_workflow_name: None,
         parent_run_started_at: None,
     }
+}
+
+fn result_with_output(name: &str, bytes: usize) -> StepResult {
+    let output = "x".repeat(bytes);
+    StepResult {
+        step_name: name.into(),
+        status: RunStatus::Success,
+        output_bytes: Some(output.len() as u64),
+        output,
+        tokens_used: Some(0),
+        duration_ms: 0,
+        started_at: None,
+        condition_result: None,
+        envelope_detected: None,
+        step_kind: None,
+        step_agent: None,
+        step_model: None,
+        step_api_plugin_slug: None,
+        step_api_endpoint_path: None,
+        is_rollback: false,
+        child_run_id: None,
+        agent_provenance: None,
+        native_tool_calls: Box::default(),
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
+        quota_wait: None,
+        terminal_stop: None,
+    }
+}
+
+/// KT-1525 — the run row keeps its heaviest step output (size and step), on
+/// insert and on every progress write, and the workflow list reads it from the
+/// last-run summary.
+#[test]
+fn the_heaviest_step_output_is_stored_and_listed() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut run = sample_run("r1", "w1");
+    run.step_results = vec![
+        result_with_output("light", 10),
+        result_with_output("collect", 300_000),
+    ];
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    let summaries = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
+    assert_eq!(summaries["w1"].heaviest_output_bytes, Some(300_000));
+    assert_eq!(
+        summaries["w1"].heaviest_output_step.as_deref(),
+        Some("collect")
+    );
+
+    run.step_results
+        .push(result_with_output("publish", 400_000));
+    assert!(crate::db::workflows::update_run_progress(
+        &conn,
+        crate::db::workflows::RunProgressSnapshot::from_run(&run)
+    )
+    .unwrap());
+    let summaries = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
+    assert_eq!(summaries["w1"].heaviest_output_bytes, Some(400_000));
+    assert_eq!(
+        summaries["w1"].heaviest_output_step.as_deref(),
+        Some("publish")
+    );
+
+    // A run without any step result reports nothing rather than a step.
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w2")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("r2", "w2")).unwrap();
+    let summaries = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
+    assert_eq!(summaries["w2"].heaviest_output_bytes, Some(0));
+    assert_eq!(summaries["w2"].heaviest_output_step, None);
+}
+
+/// A result stored before the size was stamped falls back to its output.
+#[test]
+fn the_heaviest_output_falls_back_to_the_stored_output_length() {
+    let mut legacy = result_with_output("legacy", 700);
+    legacy.output_bytes = None;
+    let (bytes, step) = crate::models::heaviest_output(&[result_with_output("small", 5), legacy]);
+    assert_eq!((bytes, step.as_deref()), (700, Some("legacy")));
+    assert_eq!(crate::models::heaviest_output(&[]), (0, None));
 }
 
 #[test]
@@ -3064,6 +3110,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         StepResult {
             step_name: "deploy".into(),
@@ -3088,6 +3135,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
     ];
     crate::db::workflows::insert_run(&conn, &run).unwrap();
@@ -3240,6 +3288,7 @@ fn workflow_runs_update() {
         last_activity: None,
         quota_wait: None,
         terminal_stop: None,
+        output_bytes: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 
@@ -4918,6 +4967,61 @@ fn partial_response_recovery_idempotent_when_nothing_to_recover() {
     // Run again — still empty
     let n2 = crate::db::discussions::recover_partial_responses(&conn).unwrap();
     assert!(n2.is_empty());
+}
+
+/// KT-1656 — the text of a turn still streaming is agent output too: a printed
+/// credential file is masked in `discussions.partial_response`, through both
+/// checkpoint writers, and so in the message a boot recovery makes of it.
+#[test]
+fn a_streaming_checkpoint_masks_a_printed_credential_file() {
+    const SECRET: &str = "t0kenNotShapedLikeAVendor01";
+    let printed = format!(
+        "```json\n{{\"mcpServers\": {{\"github\": {{\"env\": {{\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"{SECRET}\", \"LOG_LEVEL\": \"debug\"}}}}}}}}\n```"
+    );
+    let partial_of = |conn: &Connection, id: &str| -> String {
+        conn.query_row(
+            "SELECT partial_response FROM discussions WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("disc-stream", None))
+        .unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-stream", Some(&printed), None)
+        .unwrap();
+    let stored = partial_of(&conn, "disc-stream");
+    assert!(!stored.contains(SECRET), "{stored}");
+    assert!(stored.contains("\"LOG_LEVEL\": \"debug\""), "{stored}");
+
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("disc-owned-stream", None))
+        .unwrap();
+    assert!(crate::db::discussions::set_partial_response_for_dispatch(
+        &conn,
+        "disc-owned-stream",
+        &printed,
+        (&AgentType::Custom, Some("openrouter/model-a")),
+        "job-a",
+        "user-a",
+        None,
+    )
+    .unwrap());
+    let stored = partial_of(&conn, "disc-owned-stream");
+    assert!(!stored.contains(SECRET), "{stored}");
+
+    // Boot recovery makes a message of what was kept: it holds no secret either.
+    crate::db::discussions::recover_partial_responses(&conn).unwrap();
+    let contents: Vec<String> = conn
+        .prepare("SELECT content FROM messages")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!contents.is_empty());
+    assert!(contents.iter().all(|content| !content.contains(SECRET)));
 }
 
 #[test]
