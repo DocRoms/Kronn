@@ -583,6 +583,41 @@ pub struct McpConfigDisplay {
     /// config was never tested.
     #[serde(default)]
     pub last_probes: Vec<McpLastProbe>,
+    /// KT-1524 — set while the provider refuses this connection's credentials
+    /// (401/403 auth error, failed token refresh); cleared by the next
+    /// successful call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub auth_failure: Option<McpAuthFailure>,
+}
+
+/// Why an API connection's credentials are refused (KT-1524).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum McpAuthFailureKind {
+    /// HTTP 401: the token is revoked, expired or wrong.
+    Refused,
+    /// HTTP 403 whose answer names a credential problem (not a missing scope
+    /// or a rate limit).
+    Forbidden,
+    /// The OAuth2 / token-exchange call that mints the bearer was refused.
+    RefreshFailed,
+}
+
+/// The last authentication refusal recorded on one API connection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpAuthFailure {
+    pub kind: McpAuthFailureKind,
+    /// HTTP status of the refusal; `None` for a failed token refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub http_status: Option<u16>,
+    /// The provider's own message, scrubbed of credentials and truncated.
+    pub message: String,
+    /// RFC3339 timestamp of the refused call.
+    pub failed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

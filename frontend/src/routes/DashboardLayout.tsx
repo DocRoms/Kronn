@@ -1,4 +1,5 @@
 import { BackendStatus } from '../components/BackendStatus';
+import { AuthFailureBanner } from '../components/AuthFailureBanner';
 import { KeyLockedBanner } from '../components/KeyLockedBanner';
 import { UpdateBanner } from '../components/UpdateBanner';
 import { useAppContext } from '../lib/appContext';
@@ -12,6 +13,7 @@ export function DashboardLayout() {
       <UpdateBanner />
       <BackendStatus />
       <KeyLockedBanner />
+      <AuthFailureBanner />
       {resetError && (
         <div className="set-expose-warn" role="alert" data-testid="reset-error">
           <span>{resetError}</span>

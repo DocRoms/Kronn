@@ -1,0 +1,12 @@
+# cargo-audit configuration for the desktop crate — see https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# Do not add an ignore without a dated rationale and review deadline. CI runs
+# `cargo audit` here (see `.github/workflows/ci-test.yml`, job `security-scan`,
+# and `.github/workflows/dependency-review.yml`). The backend has its own
+# config in `backend/.cargo/audit.toml`; the desktop crate depends on the
+# backend crate, so both lock files share most of the same transitive paths.
+[advisories]
+# RUSTSEC-2026-0459 (libsqlite3-sys) is deliberately NOT ignored: the rusqlite bump
+# to 0.41.1 / libsqlite3-sys 0.39.1 lands with KT-1620 (PR #507), which also updates
+# this lock file.
+ignore = []
