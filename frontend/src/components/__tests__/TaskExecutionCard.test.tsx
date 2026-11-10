@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
-import { TaskExecutionCard, formatStepDuration } from '../TaskExecutionCard';
+import { TaskExecutionCard } from '../TaskExecutionCard';
+import { formatWarmingStepDuration } from '../../lib/warmingStepDuration';
 import { allowedActions } from '../../lib/orch-actions';
 import type { TaskExecutionDetail, TaskExecutionStatus, TaskExecutionUsage } from '../../types/generated';
 
@@ -352,8 +353,8 @@ describe('TaskExecutionCard', () => {
   });
 
   it('floors the seconds, so a step never reads as a full minute it did not take (KT-1637)', () => {
-    expect(formatStepDuration(119_999)).toBe('1 min 59 s');
-    expect(formatStepDuration(59_999)).toBe('59.9 s');
+    expect(formatWarmingStepDuration(119_999)).toBe('1 min 59 s');
+    expect(formatWarmingStepDuration(59_999)).toBe('59.9 s');
   });
 
   it('says the clocks disagree when the steps outlast the total, instead of hiding the gap (KT-1637)', () => {

@@ -3,6 +3,7 @@ import type { TaskExecutionDetail, TaskExecutionUsage, WarmingStepKind } from '.
 import { allowedActions } from '../lib/orch-actions';
 import { isUnlimitedRounds, roundsLimitLabel } from '../lib/reviewRounds';
 import { parseTaskWorkerQueue } from '../lib/taskWorkers';
+import { formatWarmingStepDuration } from '../lib/warmingStepDuration';
 
 /** Tokens the CLI never reported are unknown, not zero. Rendering a total over
  *  partly-unmeasured sessions would read as "this is what it cost". */
@@ -21,15 +22,6 @@ const WARMING_STEP_LABELS: Record<WarmingStepKind, string> = {
   first_build: 'orch.exec.warming.first_build',
   smoke_check: 'orch.exec.warming.smoke_check',
 };
-
-/** `850 ms`, `12.4 s`, `6 min 48 s`: a step is read at the scale it took. */
-export function formatStepDuration(ms: number): string {
-  if (ms < 1000) return `${ms} ms`;
-  if (ms < 60_000) return `${(Math.floor(ms / 100) / 10).toFixed(1)} s`;
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.floor((ms % 60_000) / 1000);
-  return `${minutes} min ${seconds} s`;
-}
 
 interface Props {
   detail: TaskExecutionDetail | null;
@@ -172,23 +164,23 @@ export function TaskExecutionCard({
           <ul>
             {warmingSteps.map(step => (
               <li key={step.step} data-testid={`orch-exec-warming-${step.step}`}>
-                {t(WARMING_STEP_LABELS[step.step])}: {formatStepDuration(step.duration_ms)}
+                {t(WARMING_STEP_LABELS[step.step])}: {formatWarmingStepDuration(step.duration_ms)}
               </li>
             ))}
           </ul>
           {warmingTotal !== null && (
             <p data-testid="orch-exec-warming-total">
-              {t('orch.exec.warming.total', formatStepDuration(warmingTotal))}
+              {t('orch.exec.warming.total', formatWarmingStepDuration(warmingTotal))}
               {warmingTotal > warmingMeasured && (
                 <span className="orch-exec-partial" data-testid="orch-exec-warming-unmeasured">
-                  {t('orch.exec.warming.unmeasured', formatStepDuration(warmingTotal - warmingMeasured))}
+                  {t('orch.exec.warming.unmeasured', formatWarmingStepDuration(warmingTotal - warmingMeasured))}
                 </span>
               )}
               {/* The total is wall-clock, the steps are monotonic: when they
                   disagree, say so instead of hiding the gap. */}
               {warmingMeasured > warmingTotal && (
                 <span className="orch-exec-partial" data-testid="orch-exec-warming-disagree">
-                  {t('orch.exec.warming.disagree', formatStepDuration(warmingMeasured))}
+                  {t('orch.exec.warming.disagree', formatWarmingStepDuration(warmingMeasured))}
                 </span>
               )}
             </p>
