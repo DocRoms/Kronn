@@ -31,8 +31,9 @@ kronn service install --yes           # no questions (reinstall, symlink)
 3. builds it: `cargo build --release` for the backend, then
    `pnpm install --frozen-lockfile && pnpm build` for the frontend;
 4. stages the result as `releases/<version>` and points `current` at it;
-5. writes the unit, loads it and waits until `/api/health` answers with the
-   expected version;
+5. writes the unit with the new release's own CLI (`current/cli/lib/service.sh`,
+   so a reinstall from the service CLI does not render it with the old release),
+   loads it and waits until `/api/health` answers with the expected version;
 6. offers to point `~/.local/bin/kronn` at `current/cli/kronn`, so `kronn`
    follows the installed release. That CLI is not a checkout: its parent is the
    service home, not a directory of repositories. "Continue in CLI" asks once

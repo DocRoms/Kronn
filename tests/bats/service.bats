@@ -686,6 +686,22 @@ $TEST_TMPDIR/n24.14.0/node"
     [[ "$output" == *"http://localhost:1"* ]]
 }
 
+@test "install renders the unit with the new release's CLI, keeping the shell's values" {
+    fake_toolchain
+    make_fake_tree "$TEST_TMPDIR/checkout" 0.15.0
+    # The staged release's CLI writes one more key, like a later release adding
+    # KRONN_DOCS_SIDECAR; the CLI running install does not know it.
+    echo 'eval "_orig_pairs() $(declare -f _service_env_pairs | tail -n +2)"; _service_env_pairs() { _orig_pairs "$@"; printf "KRONN_NEW_KEY=yes\n"; }' \
+        > "$TEST_TMPDIR/checkout/lib/service.sh"
+    git -C "$TEST_TMPDIR/checkout" -c user.name=t -c user.email=t@t commit -qam "new key"
+    KRONN_DIR="$TEST_TMPDIR/checkout"
+    KRONN_DATA_DIR="$TEST_TMPDIR/dev-data" run cmd_service_install --from-checkout --yes
+    [ "$status" -eq 0 ]
+    [ "$(service_unit_env KRONN_NEW_KEY)" = "yes" ]
+    # install reads the shell first: its KRONN_DATA_DIR reaches the unit.
+    [ "$(service_unit_env KRONN_DATA_DIR)" = "$TEST_TMPDIR/dev-data" ]
+}
+
 @test "install --from-checkout gives uncommitted changes their own release name" {
     fake_toolchain
     make_fake_tree "$TEST_TMPDIR/checkout" 0.15.0

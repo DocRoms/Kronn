@@ -313,6 +313,24 @@ service_write_unit() {
     mv -f "$unit.tmp.$$" "$unit"
 }
 
+# Render the unit with the CLI of the release `current` points at, not with the
+# CLI running this command: `kronn` on the PATH is the previous release's, and a
+# key a later release adds (KRONN_DOCS_SIDECAR…) must reach the unit. `install`
+# keeps the shell's values, read first; `update` and `rollback` pass unit_only,
+# so the values chosen at install come from the unit and never from the shell.
+service_write_unit_from_current() { # [unit_only]
+    local lib
+    lib="$(service_home)/current/cli/lib/service.sh"
+    (
+        [[ "${1:-}" != unit_only ]] || unset KRONN_DATA_DIR XDG_CONFIG_HOME KRONN_PORT
+        if [[ -f "$lib" ]]; then
+            # shellcheck source=/dev/null
+            source "$lib" || exit 1
+        fi
+        service_write_unit
+    )
+}
+
 # ─── Releases ───────────────────────────────────────────────────────────────
 
 # A version names a directory: no separators, no leading dot.
@@ -810,7 +828,7 @@ cmd_service_install() {
         success "Staged release $version"
     fi
     service_switch_current "$version" || return 1
-    service_write_unit || return 1
+    service_write_unit_from_current || return 1
     success "Service definition written: $(service_unit_path)"
 
     _service_free_port_for_install || return 1

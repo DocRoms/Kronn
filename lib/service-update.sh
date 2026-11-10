@@ -357,22 +357,10 @@ _su_restore_db() { # <failed_version>
 }
 
 # Rewrite the unit with the CLI of the release `current` now points at, so a
-# key a later release adds (KRONN_DOCS_SIDECAR, KRONN_TEMPLATES_DIR…) reaches
-# the services it updates, and a rollback drops it again. service_load then
-# rereads the unit (a launchd kickstart does not). The values chosen at install
-# come from the unit, never from this shell: an exported KRONN_DATA_DIR must
-# not move the service to another database during an update.
+# key a later release adds reaches the services it updates, and a rollback
+# drops it again; service_load then rereads it (a launchd kickstart does not).
 _su_rewrite_unit() {
-    local lib
-    lib="$(service_home)/current/cli/lib/service.sh"
-    if ! (
-        unset KRONN_DATA_DIR XDG_CONFIG_HOME KRONN_PORT
-        if [[ -f "$lib" ]]; then
-            # shellcheck source=/dev/null
-            source "$lib" || exit 1
-        fi
-        service_write_unit
-    ); then
+    if ! service_write_unit_from_current unit_only; then
         fail "Could not rewrite the service unit for $(service_current_version)."
         return 1
     fi
