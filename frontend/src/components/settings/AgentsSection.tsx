@@ -7,6 +7,7 @@ import { useIsMobile } from '../../hooks/useMediaQuery';
 import { OllamaCard } from './OllamaCard';
 import { ComfyUiCard } from './ComfyUiCard';
 import { ExternalApiSection } from './ExternalApiSection';
+import { ToolsSwitch } from './ToolsSwitch';
 import { ModelCatalogSection } from './ModelCatalogSection';
 import { CompressionSection } from './CompressionSection';
 import { ContextHelp } from '../ContextHelp';
@@ -618,6 +619,31 @@ export function AgentsSection({
           }}
         />
       </label>
+    );
+  };
+
+  /** Kronn tools on an HTTP agent (KT-1600): on unless the operator turned them
+   *  off. "On" clears the setting rather than storing `true`, so the default
+   *  stays the default. */
+  const renderToolsControl = (agentType: AgentType) => {
+    const slot = AGENT_CONCURRENCY[agentType];
+    if (!slot) return null;
+    const enabled = agentAccess?.[slot.key]?.tools_enabled !== false;
+    return (
+      <ToolsSwitch
+        subject={AGENT_LABELS[agentType]}
+        checked={enabled}
+        testId={`agent-tools-${agentType}`}
+        onChange={async next => {
+          try {
+            await configApi.setAgentTools({ agent: agentType, enabled: next ? null : false });
+          } catch (err) {
+            console.warn('Settings action failed:', err);
+            toast(t('common.actionFailed', userError(err)), 'error');
+          }
+          refetchAgentAccess();
+        }}
+      />
     );
   };
 
@@ -1779,7 +1805,12 @@ export function AgentsSection({
                   t={t}
                   modelCostSuffix={modelCostSuffix}
                   title={renderAgentNameControl('Ollama', 'Ollama')}
-                  headerAccessory={renderConcurrencyControl('Ollama')}
+                  headerAccessory={(
+                    <>
+                      {renderToolsControl('Ollama')}
+                      {renderConcurrencyControl('Ollama')}
+                    </>
+                  )}
                 />
               </div>
             ))}
@@ -1793,6 +1824,16 @@ export function AgentsSection({
         {/* KT-339 — unified External API zone: LiteLLM, NVIDIA and any other
             OpenAI-compatible service live here as named connections. KT-586 —
             third of the three modes, so the three sit together. */}
+        {/* KT-1600 — LiteLLM and NVIDIA have no card of their own; their agent
+            slot still decides a run that names no connection. */}
+        <div className="set-agent-tools-defaults" data-testid="external-agent-tools">
+          {EXTERNAL_API_AGENTS.map(agentType => (
+            <span key={agentType} className="set-agent-tools-default">
+              <span className="set-hint">{AGENT_LABELS[agentType]}</span>
+              {renderToolsControl(agentType)}
+            </span>
+          ))}
+        </div>
         <ExternalApiSection
           t={t}
           toast={toast}
