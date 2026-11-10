@@ -486,7 +486,7 @@ each, with their metrics nested, the full native catalogue (51,990 B) and a
 shape is 1,071 B; the model reads the shape, sends one call with
 `$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
 unshortened; the conversation then stands at 21,421 estimated tokens of 36,043
-[src: file: backend/src/agents/runner_test.rs:2989#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
+[src: file: backend/src/agents/runner_test.rs:2994#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
 [src: file: backend/src/agents/runner_test.rs:3001#a_200_kb_response_yields_the_web_vitals].
 
 **The window follows the catalogue (KT-1527).** The three shortening tests
@@ -502,14 +502,14 @@ They now size their window from the catalogue they carry
 messages get the same room whatever the catalogue weighs. With today's catalogue
 that is a ~36K window, not exactly 32K. A test inflates the catalogue by 1.5 KB and
 then 20 KB and replays all three scenarios
-[src: file: backend/src/agents/runner_test.rs:3274#a_catalogue_change_does_not_flip_the_shortening_fixtures].
+[src: file: backend/src/agents/runner_test.rs:3279#a_catalogue_change_does_not_flip_the_shortening_fixtures].
 
 That decoupling drops the signal the old tests gave, badly, when the catalogue
 outgrew the real 32K budget. A guard test keeps it, on its own: a 32K window must
 leave at least 5,000 B for the messages beside the declared catalogue (9,450 B
 today). When it fails, the catalogue outgrew the 32K budget and has to be trimmed,
 or the default Ollama window raised
-[src: file: backend/src/agents/runner_test.rs:3297#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
+[src: file: backend/src/agents/runner_test.rs:3303#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
 
 **When the plain cut does happen, the result stays a valid envelope.** A JSON
 result that nothing smarter could shorten used to be cut as text, handing the model
@@ -520,7 +520,7 @@ excerpt that keeps the envelope inside the budget once embedded in `messages`. A
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
 [src: file: backend/src/agents/runner.rs:7905#truncated_json_envelope]
-[src: file: backend/src/agents/runner_test.rs:3324#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
+[src: file: backend/src/agents/runner_test.rs:3327#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or
 writes a good one unprompted. The "model" in that test reads the shape and follows

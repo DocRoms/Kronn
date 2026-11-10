@@ -1345,7 +1345,7 @@ pub(crate) fn backup_before_migration(
             std::fs::remove_file(&staging)?;
         }
         std::fs::copy(path, &staging)?;
-        std::fs::File::open(&staging)?.sync_all()?;
+        crate::core::durable_file::sync_file(&staging)?;
         std::fs::rename(&staging, &backup_path)
     })();
     if let Err(e) = copied {

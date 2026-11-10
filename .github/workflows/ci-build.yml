@@ -25,6 +25,11 @@ env:
   # onnxruntime-node's postinstall downloads CUDA binaries CI never uses, from
   # a host that times out on GitHub runners (see ci-test.yml).
   ONNXRUNTIME_NODE_INSTALL: skip
+  # Test builds without debug info and without incremental state: the kronn
+  # test binary is huge, and its debug info swaps the 7 GB macOS runner (~94 min).
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # Labels are read live: a re-run replays the original event payload.
@@ -198,7 +203,7 @@ jobs:
           fi
           changed=$(git diff --name-only "$BASE" "$HEAD")
           echo "$changed"
-          suites='^backend/src/(core/worktree|core/fs_guard|core/rooted_fd|api/maintenance|db/orchestration|agents/wsl|acp/secret_files|core/config_copies)'
+          suites='^backend/src/(core/worktree|core/fs_guard|core/rooted_fd|api/maintenance|db/orchestration|agents/wsl|acp/secret_files|core/config_copies|core/durable_file|core/backup|db/migrations)'
           if echo "$changed" | grep -Eq "$suites|^backend/Cargo\.(toml|lock)\$|^rust-toolchain"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
@@ -300,6 +305,10 @@ jobs:
       - name: Sealed config copies (set-aside moves, never replacing)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
         run: cargo test --lib --no-default-features core::config_copies
+
+      - name: Durable copies (backups synced on Windows)
+        if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
+        run: cargo test --lib --no-default-features core::durable_file
 
       - name: Save cargo registry and build (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-portability.outputs.cache-hit != 'true'
