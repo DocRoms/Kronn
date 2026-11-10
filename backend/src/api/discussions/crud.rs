@@ -532,6 +532,20 @@ pub async fn create(
         }
     }
 
+    // KT-1645 — a review (any discussion naming a commit) gets its own detached
+    // worktree before anything is stored; a refusal fails the creation, it never
+    // degrades to the project's main checkout.
+    let review_workspace = if req.review_head.is_some() || req.review_base.is_some() {
+        match provision_review_workspace(&state, &req, &discussion_id).await {
+            Ok(workspace) => Some(workspace),
+            Err(error) => {
+                return Json(ApiResponse::err_coded(ApiErrorCode::Validation, error));
+            }
+        }
+    } else {
+        None
+    };
+
     let language = if req.language.is_empty() {
         let config = state.config.read().await;
         config.language.clone()
@@ -580,7 +594,11 @@ pub async fn create(
         reply_to_message_id: None,
     };
 
-    let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
+    let workspace_mode = if review_workspace.is_some() {
+        crate::core::worktree::REVIEW_WORKSPACE_MODE.to_string()
+    } else {
+        req.workspace_mode.unwrap_or_else(|| "Direct".into())
+    };
     let base_branch = req.base_branch;
 
     let mut initial_participants = vec![req.agent.clone()];
@@ -626,7 +644,7 @@ pub async fn create(
         archived: false,
         pinned: false,
         workspace_mode: workspace_mode.clone(),
-        workspace_path: None,
+        workspace_path: review_workspace.as_ref().map(|w| w.path.clone()),
         worktree_branch: None,
         summary_cache: None,
         summary_up_to_msg_idx: None,
@@ -781,17 +799,179 @@ pub async fn create(
 
             Json(ApiResponse::ok(discussion))
         }
-        Err(e)
+        Err(e) => {
+            // The review's worktree has no discussion to belong to: remove it.
+            if let Some(workspace) = &review_workspace {
+                if let Err(cleanup) = crate::core::worktree::remove_discussion_worktree(
+                    std::path::Path::new(&workspace.repo_path),
+                    &workspace.path,
+                    false,
+                ) {
+                    tracing::warn!(
+                        "Failed to remove the review worktree of discussion {}: {}",
+                        discussion_id,
+                        cleanup
+                    );
+                }
+            }
             if e.is::<crate::db::discussion_effort::UnresolvedQuickPromptEffort>()
-                || e.is::<crate::db::discussion_launch_settings::InvalidLaunchSettings>() =>
-        {
-            Json(ApiResponse::err_coded(
-                ApiErrorCode::Validation,
-                e.to_string(),
-            ))
+                || e.is::<crate::db::discussion_launch_settings::InvalidLaunchSettings>()
+            {
+                Json(ApiResponse::err_coded(
+                    ApiErrorCode::Validation,
+                    e.to_string(),
+                ))
+            } else {
+                Json(ApiResponse::err(format!("DB error: {}", e)))
+            }
         }
-        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+/// The detached worktree a review discussion runs in, and the repository it
+/// hangs off (needed to remove it again).
+struct ReviewWorkspace {
+    path: String,
+    repo_path: String,
+}
+
+/// KT-1645 — pin a review to its commit in a worktree of its own.
+async fn provision_review_workspace(
+    state: &AppState,
+    req: &CreateDiscussionRequest,
+    discussion_id: &str,
+) -> Result<ReviewWorkspace, String> {
+    let Some(head) = req.review_head.as_deref() else {
+        return Err("review_base needs review_head".to_string());
+    };
+    let Some(project_id) = req.project_id.clone() else {
+        return Err("A review discussion needs a project: there is no repository to pin".into());
+    };
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
+        .await
+        .map_err(|e| format!("DB error: {e}"))?
+        .ok_or_else(|| "Project not found".to_string())?;
+    let resolved = crate::core::scanner::resolve_host_path(&project.path);
+    let repo_path = std::path::Path::new(&resolved);
+    let worktree = crate::core::worktree::create_review_worktree(
+        repo_path,
+        &project.name,
+        discussion_id,
+        head,
+        req.review_base.as_deref(),
+    )
+    .map_err(|e| format!("Cannot prepare the review worktree: {e}"))?;
+    Ok(ReviewWorkspace {
+        path: worktree.path,
+        repo_path: resolved.to_string_lossy().into_owned(),
+    })
+}
+
+/// KT-1645 — release the worktree of a finished review discussion.
+///
+/// A review worktree is disposable once the review is over, and every review
+/// creates one, so they would otherwise pile up against the worktree cap. The
+/// checkout is removed only when that loses nothing (detached, clean, every
+/// commit reachable: [`crate::core::worktree::release_review_worktree`]) and no
+/// agent is running in it; then the discussion's pointer to it is cleared, so a
+/// later run is refused rather than started in the main checkout. Anything else
+/// is left in place and reported.
+pub(crate) async fn release_review_worktree(
+    db: &crate::db::Database,
+    discussion_id: &str,
+) -> crate::core::worktree::ReviewRelease {
+    use crate::core::worktree::{ReviewRelease, REVIEW_WORKSPACE_MODE};
+
+    let id = discussion_id.to_string();
+    let found = db
+        .with_conn(move |conn| {
+            let Some(disc) = crate::db::discussions::get_discussion(conn, &id)? else {
+                return Ok(None);
+            };
+            if disc.workspace_mode != REVIEW_WORKSPACE_MODE {
+                return Ok(None);
+            }
+            let (Some(workspace), Some(project_id)) = (disc.workspace_path, disc.project_id) else {
+                return Ok(None);
+            };
+            let running = crate::db::agent_dispatch::find_active_for_discussion(conn, &id)?;
+            let project = crate::db::projects::get_project(conn, &project_id)?;
+            Ok(Some((
+                workspace,
+                project.map(|p| p.path),
+                running.is_some(),
+            )))
+        })
+        .await;
+    let (workspace, project_path, running) = match found {
+        Ok(Some(found)) => found,
+        Ok(None) => return ReviewRelease::Kept("not a review with a worktree".to_string()),
+        Err(error) => return ReviewRelease::Kept(format!("DB error: {error}")),
+    };
+    if running {
+        return ReviewRelease::Kept("an agent is still running in it".to_string());
+    }
+    let Some(project_path) = project_path else {
+        return ReviewRelease::Kept("its project is gone".to_string());
+    };
+
+    let resolved = crate::core::scanner::resolve_host_path(&project_path);
+    let outcome = tokio::task::spawn_blocking({
+        let workspace = workspace.clone();
+        move || crate::core::worktree::release_review_worktree(&resolved, &workspace)
+    })
+    .await
+    .map_err(|error| format!("release task failed: {error}"))
+    .and_then(|outcome| outcome);
+    match outcome {
+        Ok(ReviewRelease::Removed) => {
+            let id = discussion_id.to_string();
+            if let Err(error) = db
+                .with_conn(move |conn| {
+                    crate::db::discussions::clear_discussion_workspace(conn, &id)
+                })
+                .await
+            {
+                tracing::warn!(
+                    "review {discussion_id}: worktree removed but its pointer was not cleared: {error}"
+                );
+            }
+            ReviewRelease::Removed
+        }
+        Ok(kept) => {
+            tracing::info!("review {discussion_id}: worktree kept ({kept:?})");
+            kept
+        }
+        Err(error) => {
+            tracing::warn!("review {discussion_id}: worktree not released: {error}");
+            ReviewRelease::Kept(error)
+        }
+    }
+}
+
+/// KT-1645 — release the worktrees of every archived review that still has one
+/// (archived before this ran, or kept at the time because an agent was live).
+/// Returns how many were removed.
+pub(crate) async fn sweep_archived_review_worktrees(db: &crate::db::Database) -> usize {
+    let ids = match db
+        .with_conn(crate::db::discussions::archived_review_ids_with_workspace)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::warn!("review worktree sweep: {error}");
+            return 0;
+        }
+    };
+    let mut removed = 0;
+    for id in ids {
+        if release_review_worktree(db, &id).await == crate::core::worktree::ReviewRelease::Removed {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// PATCH /api/discussions/:id
@@ -871,7 +1051,9 @@ pub async fn update(
         }
     }
 
-    match state
+    let review_id = id.clone();
+    let archiving = archived == Some(true);
+    let updated = state
         .db
         .with_conn(move |conn| {
             // project_id: None = don't change, Some(None)/Some(Some("")) = unset, Some(Some("id")) = set
@@ -960,9 +1142,15 @@ pub async fn update(
             }
             Ok(updated)
         })
-        .await
-    {
-        Ok(true) => Json(ApiResponse::ok(())),
+        .await;
+    match updated {
+        Ok(true) => {
+            // KT-1645 — a review that is archived is over: give its worktree back.
+            if archiving {
+                release_review_worktree(&state.db, &review_id).await;
+            }
+            Json(ApiResponse::ok(()))
+        }
         Ok(false) => Json(ApiResponse::err(
             "Discussion not found or no fields to update",
         )),
@@ -1126,47 +1314,26 @@ pub async fn share(
             // unwrap_or_default() leaked an empty pseudo (`kronn:@host`).
             let config = state.config.read().await;
             let pseudo = crate::api::contacts::invite_pseudo(&config.server);
-            let invite_code = crate::api::contacts::build_invite_code(&config.server).await;
+            let invite_code = crate::api::contacts::try_build_invite_code(&config.server).await;
             drop(config);
 
-            let _ = state.ws_broadcast.send(WsMessage::DiscussionInvite {
-                shared_discussion_id: shared_id.clone(),
-                title,
-                from_pseudo: pseudo,
-                from_invite_code: invite_code,
-            });
+            // KT-1596 — a declared proxy with no public origin has no safe code:
+            // the share exists, the peers just are not told over the wire yet.
+            match invite_code {
+                Ok(invite_code) => {
+                    let _ = state.ws_broadcast.send(WsMessage::DiscussionInvite {
+                        shared_discussion_id: shared_id.clone(),
+                        title,
+                        from_pseudo: pseudo,
+                        from_invite_code: invite_code,
+                    });
+                }
+                Err(reason) => tracing::warn!("Shared discussion not announced to peers: {reason}"),
+            }
 
             Json(ApiResponse::ok(shared_id))
         }
         Err(e) => Json(ApiResponse::err(format!("{}", e))),
-    }
-}
-
-/// DELETE /api/discussions/:id/messages/last
-pub async fn delete_last_agent_messages(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<ApiResponse<()>> {
-    let id_clone = id.clone();
-    match state
-        .db
-        .with_conn(move |conn| crate::db::discussions::delete_last_agent_messages(conn, &id))
-        .await
-    {
-        Ok(_) => {
-            // Invalidate summary cache since messages were deleted
-            if let Err(e) = state
-                .db
-                .with_conn(move |conn| {
-                    crate::db::discussions::invalidate_summary_cache(conn, &id_clone)
-                })
-                .await
-            {
-                tracing::error!("Failed to invalidate summary cache after delete: {e}");
-            }
-            Json(ApiResponse::ok(()))
-        }
-        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
 
@@ -1289,23 +1456,6 @@ pub async fn delete_message(
             )
                 .into_response()
         }
-    }
-}
-
-/// PATCH /api/discussions/:id/messages/last
-pub async fn edit_last_user_message(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<SendMessageRequest>,
-) -> Json<ApiResponse<()>> {
-    let content = req.content;
-    match state
-        .db
-        .with_conn(move |conn| crate::db::discussions::edit_last_user_message(conn, &id, &content))
-        .await
-    {
-        Ok(_) => Json(ApiResponse::ok(())),
-        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
 

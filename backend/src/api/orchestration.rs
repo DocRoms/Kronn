@@ -792,6 +792,77 @@ pub(crate) async fn return_quota_escalations_past_reset(state: &AppState) -> Vec
     returned
 }
 
+/// KT-1664 — the room line that closes a quota escalation the provider
+/// re-check resolved. Its id carries the refused dispatch the escalation notice
+/// (`provider-quota-escalation:<dispatch>`) is keyed by, so the room shows that
+/// notice as settled and a replay cannot post it twice.
+pub(crate) fn quota_resumed_message_id(refused_dispatch_id: &str) -> String {
+    format!("provider-quota-resumed:{refused_dispatch_id}")
+}
+
+/// KT-1664 — a provider that answered the KT-1657 re-check closes the quota
+/// escalation of `execution_id` (one that announced no reset): the execution
+/// goes back to its own worker, in its kept child discussion and worktree, and
+/// its parent room gets one line saying so. Never another provider. The
+/// reassignment re-checks in its own transaction that the execution is still
+/// parked on that quota, so an owner who acted meanwhile is never overridden.
+pub(crate) async fn resume_quota_escalation_after_probe(
+    state: &AppState,
+    execution_id: &str,
+) -> Result<()> {
+    let id = execution_id.to_string();
+    let (execution, selection) = state
+        .db
+        .with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution vanished before its quota resume")?;
+            let selection = crate::models::CampaignWorkerSelection {
+                target: worker_target_from_execution(&execution)?,
+                model: execution.worker_model.clone(),
+                profile_id: execution.worker_profile_id.clone(),
+            };
+            Ok((execution, selection))
+        })
+        .await?;
+    let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
+    reassign_native_execution_as(
+        state,
+        execution_id,
+        selection,
+        "the provider answers again: the quota is back",
+        ReassignCause::QuotaProbed,
+    )
+    .await?;
+    let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
+    let refused = execution.dispatch_job_id.as_deref().unwrap_or(execution_id);
+    let message = orchestrator_message(
+        quota_resumed_message_id(refused),
+        match lang {
+            RoomLang::Fr => format!(
+                "**Quota rétabli — worker relancé**\n\nLe provider `{provider}` répond de nouveau : Kronn a relancé l'exécution `{execution_id}` sur le même worker, dans sa sous-discussion et son worktree existants. Plus aucune action humaine n'est requise pour cette escalade."
+            ),
+            RoomLang::En => format!(
+                "**Quota back — worker resumed**\n\nProvider `{provider}` answers again: Kronn resumed execution `{execution_id}` on the same worker, in its existing child discussion and worktree. No human action is required for that escalation any more."
+            ),
+        },
+    );
+    let room = execution.parent_discussion_id.clone();
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_message(conn, &room, &message)?;
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!(
+            execution_id,
+            "quota resumed notice could not be persisted: {error}"
+        );
+    }
+    Ok(())
+}
+
 /// Runtime counterpart of boot reconciliation. Four clocks remain distinct in
 /// the journal; review/human waiting can therefore be tuned without pretending
 /// that an agent was inactive, and a total campaign deadline cannot be reset by
@@ -2030,6 +2101,10 @@ async fn provision_task_execution_inner(
     // dispatch vs. CLI control offer), so a Cli worker provisions its sub-discussion
     // and worktree exactly like a native one and diverges only at the final step.
 
+    // KT-1646 — over the worktree cap, free the clean worktrees of finished
+    // executions first, with no connection held, so Phase A does not refuse.
+    reclaim_finished_worktrees_for_launch(db, &input.task_reference, &input.worker).await;
+
     // ── Phase A — validation + idempotent launch → Provisioning (one commit) ──
     let prepared = {
         let task_ref = input.task_reference.clone();
@@ -2199,17 +2274,24 @@ async fn provision_task_execution_inner(
         // (D2) Physical checkout from the EXACT pinned SHA. A prior attempt may
         // already have created it (resume): adopt it only after proving HEAD==base,
         // else create it fresh (fail-closed on any foreign/stale collision).
+        // KT-1637 — only a checkout this launch really makes is timed: adopting
+        // the one a prior attempt made would overwrite its duration with the
+        // few milliseconds of a HEAD check.
+        let mut worktree_created_ms: Option<u64> = None;
         let create_result = if worktree_path.exists() {
             worktree::verify_worktree_head(&worktree_path, &base_sha)
                 .and_then(|_| worktree::materialize_task_submodules(&repo_path, &worktree_path))
         } else {
-            worktree::create_task_worktree(
+            let creating = std::time::Instant::now();
+            let created = worktree::create_task_worktree(
                 &repo_path,
                 &prepared.task_reference,
                 exec_short(&prepared.execution.id),
                 &base_sha,
             )
-            .map(|_| ())
+            .map(|_| ());
+            worktree_created_ms = Some(creating.elapsed().as_millis() as u64);
+            created
         };
 
         if let Err(e) = create_result {
@@ -2254,6 +2336,35 @@ async fn provision_task_execution_inner(
         })
         .await
         .map_err(|e| ProvisionError::Internal(e.to_string()))?;
+        if let Some(duration_ms) = worktree_created_ms {
+            record_warming_step(
+                db,
+                &prepared.execution.id,
+                crate::models::WarmingStepKind::WorktreeCreation,
+                duration_ms,
+            )
+            .await;
+        }
+    }
+
+    // The project's generated, gitignored assets (KT-1438), whatever the worker
+    // kind: a fresh worktree has the tracked tree only. A resume refreshes them.
+    if let Some(duration_ms) = seed_lane_assets(
+        db,
+        &prepared.execution.id,
+        &prepared.project_id,
+        &repo_path,
+        &worktree_path,
+    )
+    .await
+    {
+        record_warming_step(
+            db,
+            &prepared.execution.id,
+            crate::models::WarmingStepKind::LaneSeeds,
+            duration_ms,
+        )
+        .await;
     }
 
     // A prelocalized scope is a mechanical promise, not prose. Validate it
@@ -2632,6 +2743,17 @@ async fn finish_native_provisioning(
             &prepared.execution.id,
         )
         .await;
+        // KT-1649 — what the worker's lock files reference and the host caches
+        // lack is fetched here, outside its sandbox and from the registries of
+        // the lock files only, so the first build and the worker can compile it.
+        record_dependency_fetch(
+            db,
+            &prepared.execution.id,
+            &worktree_path,
+            std::sync::Arc::new(crate::core::task_worker_env::ProcessProbeRunner),
+            warm_cancel.clone(),
+        )
+        .await;
         // KT-1250 — the lane target is seeded from a warm one and its first build
         // runs here, under the host's cap, so the worker starts warm.
         let warm = record_lane_warm_start(
@@ -2656,15 +2778,22 @@ async fn finish_native_provisioning(
                 "cancelled while the lane warmed".into(),
             ));
         }
-        Some(
-            record_toolchain_smoke_check(
-                db,
-                &prepared.execution.id,
-                &worktree_path,
-                worker_probe_runner(&prepared.repo_path, &worktree_path),
-            )
-            .await,
+        let smoke_check = std::time::Instant::now();
+        let capabilities = record_toolchain_smoke_check(
+            db,
+            &prepared.execution.id,
+            &worktree_path,
+            worker_probe_runner(&prepared.repo_path, &worktree_path),
         )
+        .await;
+        record_warming_step(
+            db,
+            &prepared.execution.id,
+            crate::models::WarmingStepKind::SmokeCheck,
+            smoke_check.elapsed().as_millis() as u64,
+        )
+        .await;
+        Some(capabilities)
     } else {
         None
     };
@@ -3369,23 +3498,31 @@ pub async fn run_integration(
     checkpoint(db, exec_id, CheckpointStep::Anchored(target_sha.clone())).await?;
 
     // ── Phase 1: build the candidate in the CHILD worktree ──
-    let merge_sha = match worktree::build_candidate(child, &target_sha) {
-        Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-        Ok(worktree::CandidateOutcome::Conflict { files }) => {
+    let build = match worktree::build_candidate_detailed(child, &target_sha) {
+        Ok(build) => build,
+        Err(error) => {
+            return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
+        }
+    };
+    let merge_sha = match build.outcome {
+        worktree::CandidateOutcome::Built { sha } => sha,
+        worktree::CandidateOutcome::Conflict { files } => {
             send_back(
                 db,
                 exec_id,
-                &ReworkReport::conflict(format!("merge conflict in {}", files.join(", "))),
+                &ReworkReport::conflict(conflict_reason(
+                    "merge conflict",
+                    &files,
+                    build.detail.as_deref(),
+                )),
             )
             .await?;
             return Ok(IntegrationOutcome::SentBack {
                 reason: format!("conflict in {}", files.join(", ")),
             });
         }
-        Err(error) => {
-            return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
-        }
     };
+    note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
     checkpoint(db, exec_id, CheckpointStep::Built(merge_sha.clone())).await?;
 
     // ── Validations: a failure sends the work back, it never blocks the parent ──
@@ -3403,6 +3540,45 @@ pub async fn run_integration(
         },
     )
     .await
+}
+
+/// What the worker reads as the cause of a merge conflict: the files, and for a
+/// bounce on doc citations the exact citations behind it (KT-1669).
+fn conflict_reason(prefix: &str, files: &[String], detail: Option<&str>) -> String {
+    let base = format!("{prefix} in {}", files.join(", "));
+    match detail {
+        Some(detail) => format!("{base}: {detail}"),
+        None => base,
+    }
+}
+
+/// Journal that the candidate merge settled a citation-only doc conflict
+/// itself, for the delivery card. Best effort: the merge exists either way and
+/// a lost note only leaves the card less informative.
+async fn note_citations_settled(
+    db: &Database,
+    exec_id: &str,
+    merge_sha: &str,
+    settled: Option<&crate::core::docs_citations::merge::Settlement>,
+) {
+    let Some(settled) = settled.cloned() else {
+        return;
+    };
+    let (id, sha) = (exec_id.to_string(), merge_sha.to_string());
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_citations_settled(
+                conn,
+                &id,
+                &sha,
+                &settled,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!(execution = %exec_id, %error, "citation settlement not journaled");
+    }
 }
 
 /// Validate, arm and fast-forward a built candidate; the row is `Validating` on
@@ -3425,6 +3601,10 @@ async fn validate_and_apply(
         .ok_or_else(|| ProvisionError::Internal("run has no pinned target branch".into()))?;
     let generic = BlockedReasonCode::IntegrationRefused;
     let reach = ValidationReach::of_run(db, run.project_id.as_deref(), &run.discussion_id).await;
+    // The source may have been regenerated since the worker started (KT-1438).
+    if let Some(project_id) = run.project_id.as_deref() {
+        seed_lane_assets(db, exec_id, project_id, repo, child).await;
+    }
     let mut rebuilds = 0;
     loop {
         if let Some(failure) = run_pending_validations(
@@ -3532,20 +3712,25 @@ async fn validate_and_apply(
             }
         };
         reanchor_candidate(db, exec_id, &tip, "target_advanced").await?;
-        let merge_sha = match worktree::build_candidate(child, &tip) {
-            Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-            Ok(worktree::CandidateOutcome::Conflict { files }) => {
-                let reason = format!(
-                    "merge conflict after the target advanced in {}",
-                    files.join(", ")
-                );
-                send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
-                return Ok(IntegrationOutcome::SentBack { reason });
-            }
+        let build = match worktree::build_candidate_detailed(child, &tip) {
+            Ok(build) => build,
             Err(error) => {
                 return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
             }
         };
+        let merge_sha = match build.outcome {
+            worktree::CandidateOutcome::Built { sha } => sha,
+            worktree::CandidateOutcome::Conflict { files } => {
+                let reason = conflict_reason(
+                    "merge conflict after the target advanced",
+                    &files,
+                    build.detail.as_deref(),
+                );
+                send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
+                return Ok(IntegrationOutcome::SentBack { reason });
+            }
+        };
+        note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
         checkpoint(db, exec_id, CheckpointStep::Built(merge_sha.clone())).await?;
         checkpoint(db, exec_id, CheckpointStep::Validating).await?;
         candidate = AnchoredCandidate {
@@ -3941,17 +4126,25 @@ async fn resume_recovered_integration(
                     }
                 };
             reanchor_candidate(db, exec_id, &target_sha, "rebuild_candidate").await?;
-            let merge_sha = match worktree::build_candidate(child, &target_sha) {
-                Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-                Ok(worktree::CandidateOutcome::Conflict { files }) => {
-                    let reason = format!("merge conflict after recovery in {}", files.join(", "));
-                    send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
-                    return Ok(IntegrationOutcome::SentBack { reason });
-                }
+            let build = match worktree::build_candidate_detailed(child, &target_sha) {
+                Ok(build) => build,
                 Err(error) => {
                     return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
                 }
             };
+            let merge_sha = match build.outcome {
+                worktree::CandidateOutcome::Built { sha } => sha,
+                worktree::CandidateOutcome::Conflict { files } => {
+                    let reason = conflict_reason(
+                        "merge conflict after recovery",
+                        &files,
+                        build.detail.as_deref(),
+                    );
+                    send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
+                    return Ok(IntegrationOutcome::SentBack { reason });
+                }
+            };
+            note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
             checkpoint(db, exec_id, CheckpointStep::Built(merge_sha)).await?;
             checkpoint(db, exec_id, CheckpointStep::Validating).await?;
             backup_ref
@@ -4239,6 +4432,7 @@ async fn interrupt_recovered_apply(
 /// exists. A launch failure never rewrites the already-integrated result: it
 /// parks the campaign durably for inspection instead.
 async fn advance_campaign_after_integration(db: &Database, run: &crate::models::OrchestrationRun) {
+    use crate::db::orchestration::CampaignParkCause;
     use crate::models::{OrchestrationControlState, OrchestrationRunKind};
 
     if run.kind != OrchestrationRunKind::Campaign
@@ -4275,6 +4469,7 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
         park_campaign_for_human(
             db,
             &current.id,
+            CampaignParkCause::ChildDecision,
             "a child execution requires a human decision",
         )
         .await;
@@ -4299,6 +4494,7 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
             park_campaign_for_human(
                 db,
                 &current.id,
+                CampaignParkCause::LaunchFailed,
                 &format!("automatic next-task launch failed: {error:?}"),
             )
             .await;
@@ -4308,25 +4504,26 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
     if attention.active_executions > 0 {
         return;
     }
-    let state = if all_active_done {
-        OrchestrationControlState::Completed
-    } else {
-        OrchestrationControlState::AwaitingHuman
-    };
-    let reason = if all_active_done {
-        "all active plan tasks are complete"
-    } else {
-        "no launchable task remains; the plan is blocked or needs correction"
-    };
+    if !all_active_done {
+        // Parked on a human like the two cases above, so it leaves the same
+        // durable card (KT-650).
+        park_campaign_for_human(
+            db,
+            &current.id,
+            CampaignParkCause::PlanBlocked,
+            "no launchable task remains; the plan is blocked or needs correction",
+        )
+        .await;
+        return;
+    }
     let id = current.id.clone();
-    let reason = reason.to_string();
     if let Err(error) = db
         .with_conn(move |conn| {
             crate::db::orchestration::set_orchestration_control_state(
                 conn,
                 &id,
-                state,
-                Some(&reason),
+                OrchestrationControlState::Completed,
+                Some("all active plan tasks are complete"),
                 &backend_actor(),
             )?;
             Ok(())
@@ -4337,16 +4534,22 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
     }
 }
 
-async fn park_campaign_for_human(db: &Database, run_id: &str, reason: &str) {
+async fn park_campaign_for_human(
+    db: &Database,
+    run_id: &str,
+    cause: crate::db::orchestration::CampaignParkCause,
+    reason: &str,
+) {
     let id = run_id.to_string();
     let reason = reason.to_string();
     if let Err(error) = db
         .with_conn(move |conn| {
-            crate::db::orchestration::set_orchestration_control_state(
+            crate::db::orchestration::park_campaign_awaiting_human(
                 conn,
                 &id,
-                crate::models::OrchestrationControlState::AwaitingHuman,
-                Some(&reason),
+                cause,
+                &reason,
+                None,
                 &backend_actor(),
             )?;
             Ok(())
@@ -4427,19 +4630,9 @@ async fn cleanup_integrated_execution(
 /// gives; a refusal (a build still holding the lock, a symlink) is logged and
 /// audited, and the orphan sweep picks the directory up later.
 async fn reclaim_lane_target(db: &Database, repo_path: &std::path::Path, child_path: &str) {
-    let lane_target =
-        match worktree::lane_target_for_worktree(repo_path, std::path::Path::new(child_path)) {
-            Ok(path) => path,
-            Err(reason) => {
-                tracing::warn!(worktree = %child_path, "lane target reclaim skipped: {reason}");
-                return;
-            }
-        };
-    let outcome = worktree::remove_lane_target(repo_path, &lane_target)
-        .map(|report| (report.bytes_reclaimed, report.bytes_are_partial));
-    if let Err(reason) = &outcome {
-        tracing::warn!(lane_target = %lane_target.display(), "lane target kept: {reason}");
-    }
+    let Some((lane_target, outcome)) = remove_lane_target_outcome(repo_path, child_path) else {
+        return;
+    };
     let canonical = child_path.to_string();
     let target = lane_target.to_string_lossy().to_string();
     if let Err(error) = db
@@ -4450,6 +4643,510 @@ async fn reclaim_lane_target(db: &Database, repo_path: &std::path::Path, child_p
     {
         tracing::warn!(worktree = %child_path, "lane target reclaim audit failed: {error}");
     }
+}
+
+/// The removal half of [`reclaim_lane_target`]: `None` when the worktree names
+/// no lane, else the lane target and what removing it did.
+fn remove_lane_target_outcome(repo_path: &std::path::Path, child_path: &str) -> LaneRemoval {
+    let lane_target =
+        match worktree::lane_target_for_worktree(repo_path, std::path::Path::new(child_path)) {
+            Ok(path) => path,
+            Err(reason) => {
+                tracing::warn!(worktree = %child_path, "lane target reclaim skipped: {reason}");
+                return None;
+            }
+        };
+    let outcome = worktree::remove_lane_target(repo_path, &lane_target)
+        .map(|report| (report.bytes_reclaimed, report.bytes_are_partial));
+    if let Err(reason) = &outcome {
+        tracing::warn!(lane_target = %lane_target.display(), "lane target kept: {reason}");
+    }
+    Some((lane_target, outcome))
+}
+
+/// What [`reclaim_clean_finished_checkout`] did with one finished execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CleanCheckoutReclaim {
+    /// No managed checkout, the execution is not finished and unused, or another
+    /// release already holds it.
+    NotApplicable,
+    /// The clean checkout (or its leftover admin entry) is gone; the branch is kept.
+    Released,
+    /// A finished execution's checkout Kronn must not remove (dirty, on another
+    /// branch, unreadable). `name` is its directory name, never a path.
+    Kept { name: String, reason: String },
+}
+
+/// A finished execution's checkout a release has claimed (KT-1646): everything
+/// the removal and the recording need, read once under the connection so the
+/// removal itself holds none.
+struct ReleaseCandidate {
+    /// Held until the release has recorded its outcome.
+    _claim: crate::core::checkout_release::ReleaseClaim,
+    exec_id: String,
+    repo: std::path::PathBuf,
+    /// The checkout on this host.
+    checkout: String,
+    /// The path as the database stores it: the lane audit and the event key on it.
+    db_path: String,
+    branch: String,
+    head_sha: Option<String>,
+    /// The checkout's directory name, never a path.
+    name: String,
+}
+
+/// What removing a claimed checkout did to its lane build dir: `None` when the
+/// worktree names no lane.
+type LaneRemoval = Option<(std::path::PathBuf, Result<(u64, bool), String>)>;
+
+/// Step 1, under the connection: pick the execution if it is finished and
+/// unused, and claim its checkout so no other release (and no reassign, resume
+/// or review-round extension) takes it until the outcome is recorded.
+/// `Ok(None)` is an execution with nothing to release, or one already claimed.
+fn claim_finished_checkout(
+    conn: &rusqlite::Connection,
+    exec_id: &str,
+) -> Result<Option<ReleaseCandidate>> {
+    if crate::db::orchestration::get_task_execution(conn, exec_id)?.is_none() {
+        return Ok(None);
+    }
+    let Some(workspace) =
+        crate::db::discussion_workspaces::get_managed_for_execution(conn, exec_id)?
+    else {
+        return Ok(None);
+    };
+    let Some(path) = workspace.canonical_path.clone() else {
+        return Ok(None);
+    };
+    // A finished execution, or (KT-1676) an unfinished one whose task was
+    // closed and in whose checkout nothing works any more.
+    if !matches!(
+        crate::db::orchestration::worktree_release_liveness(conn, &path)?,
+        worktree::ExecutionLiveness::Terminal
+    ) {
+        return Ok(None);
+    }
+    let Some(project) = crate::db::projects::get_project(conn, &workspace.project_id)? else {
+        return Ok(None);
+    };
+    let Some(claim) = crate::core::checkout_release::ReleaseClaim::take(exec_id) else {
+        return Ok(None);
+    };
+    let checkout = scanner::resolve_host_path(&path);
+    let name = checkout
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unnamed worktree".to_string());
+    Ok(Some(ReleaseCandidate {
+        _claim: claim,
+        exec_id: exec_id.to_string(),
+        repo: scanner::resolve_host_path(&project.path),
+        checkout: checkout.to_string_lossy().to_string(),
+        db_path: path,
+        branch: workspace.branch,
+        head_sha: workspace.head_sha,
+        name,
+    }))
+}
+
+/// Step 2, with no connection held: the Git checks (branch, `git status`) and
+/// the removal, then the lane build dir. `Err` is the reason the checkout was
+/// kept, with nothing removed.
+fn remove_finished_checkout(candidate: &ReleaseCandidate) -> Result<LaneRemoval, String> {
+    worktree::remove_cancelled_task_worktree(
+        &candidate.repo,
+        &candidate.checkout,
+        &candidate.branch,
+    )?;
+    Ok(remove_lane_target_outcome(
+        &candidate.repo,
+        &candidate.checkout,
+    ))
+}
+
+/// Step 3, under the connection again: record what step 2 did. A removed
+/// checkout retires its workspace row and journals the release; a kept one is
+/// reported back, its reason journaled by the caller.
+fn settle_finished_checkout(
+    conn: &rusqlite::Connection,
+    candidate: &ReleaseCandidate,
+    removal: Result<LaneRemoval, String>,
+) -> Result<CleanCheckoutReclaim> {
+    let exec_id = candidate.exec_id.as_str();
+    match removal {
+        Ok(lane) => {
+            if let Some((lane_target, outcome)) = lane {
+                let target = lane_target.to_string_lossy().to_string();
+                if let Err(error) = crate::db::orchestration::record_lane_target_reclaim(
+                    conn,
+                    &candidate.db_path,
+                    &target,
+                    outcome,
+                ) {
+                    tracing::warn!(
+                        worktree = %candidate.db_path,
+                        "lane target reclaim audit failed: {error}"
+                    );
+                }
+            }
+            let tx = conn.unchecked_transaction()?;
+            crate::db::discussion_workspaces::retire_managed_for_execution(
+                &tx,
+                exec_id,
+                candidate.head_sha.as_deref(),
+            )?;
+            crate::db::orchestration::record_execution_event(
+                &tx,
+                exec_id,
+                "worktree_released",
+                None,
+                None,
+                &backend_actor(),
+                serde_json::json!({
+                    "path": candidate.db_path,
+                    "branch": candidate.branch,
+                    "clean_only": true,
+                }),
+            )?;
+            tx.commit()?;
+            Ok(CleanCheckoutReclaim::Released)
+        }
+        // Recording the reason is the caller's: the sweep leaves a dirty checkout
+        // to its idle-aware pass, which journals its own reason, and the launch
+        // journals it through `record_release_kept`.
+        Err(reason) => Ok(CleanCheckoutReclaim::Kept {
+            name: candidate.name.clone(),
+            reason,
+        }),
+    }
+}
+
+/// Remove the managed checkout of one finished execution when its tree is clean
+/// (KT-1646). The branch is kept; a dirty tree, a foreign branch or any other
+/// refusal keeps the checkout, is reported as [`CleanCheckoutReclaim::Kept`] and
+/// is recorded once as a `worktree_release_kept` event. Unlike the idle-aware
+/// [`release_terminal_worktrees`] this needs no idle window: a clean tree holds
+/// nothing a removal can lose, and only a durably terminal execution with no
+/// live session or lease is touched. "Clean" is `git status` clean: ignored
+/// build output goes with the worktree.
+///
+/// The connection is held for the two short database steps only; the Git checks
+/// and the removal run on a blocking thread in between, so a slow disk never
+/// freezes the API (see [`claim_finished_checkout`]).
+async fn reclaim_clean_finished_checkout(
+    db: &Database,
+    exec_id: &str,
+) -> Result<CleanCheckoutReclaim> {
+    reclaim_clean_finished_checkout_with(db, exec_id, remove_finished_checkout).await
+}
+
+/// [`reclaim_clean_finished_checkout`] with the removal step injected: the
+/// tests observe the moment between the claim and the recording.
+async fn reclaim_clean_finished_checkout_with<R>(
+    db: &Database,
+    exec_id: &str,
+    remove: R,
+) -> Result<CleanCheckoutReclaim>
+where
+    R: FnOnce(&ReleaseCandidate) -> Result<LaneRemoval, String> + Send + 'static,
+{
+    let id = exec_id.to_string();
+    let Some(candidate) = db
+        .with_conn(move |conn| claim_finished_checkout(conn, &id))
+        .await?
+    else {
+        return Ok(CleanCheckoutReclaim::NotApplicable);
+    };
+    let (candidate, removal) = tokio::task::spawn_blocking(move || {
+        let removal = remove(&candidate);
+        (candidate, removal)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("worktree release failed: {error}"))?;
+    // The claim is released when `candidate` drops, after the outcome is recorded.
+    db.with_conn(move |conn| settle_finished_checkout(conn, &candidate, removal))
+        .await
+}
+
+/// What a reclaim over one project's finished executions did.
+#[derive(Debug, Default)]
+pub(crate) struct FinishedWorktreeReclaim {
+    pub(crate) released: usize,
+    /// Directory names of the finished executions' worktrees that were kept.
+    pub(crate) kept: Vec<String>,
+}
+
+/// The finished executions of `project_id` that still hold a managed checkout:
+/// the terminal ones and (KT-1676) those of a task closed by hand, whose
+/// execution never reached a terminal state.
+fn finished_checkout_executions(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> Result<Vec<String>> {
+    let terminal = crate::db::orchestration::terminal_executions_with_checkout(conn)?
+        .into_iter()
+        .map(|(exec_id, _)| exec_id);
+    let closed = crate::db::orchestration::closed_task_executions_with_checkout(conn)?;
+    let mut ids = Vec::new();
+    for exec_id in terminal.chain(closed) {
+        let belongs = crate::db::discussion_workspaces::get_managed_for_execution(conn, &exec_id)?
+            .is_some_and(|workspace| workspace.project_id == project_id);
+        if belongs {
+            ids.push(exec_id);
+        }
+    }
+    Ok(ids)
+}
+
+/// The directory names of the finished executions' worktrees still on disk for
+/// `project_id`: what a human can review and remove (database only, no Git).
+fn finished_checkout_names(conn: &rusqlite::Connection, project_id: &str) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for exec_id in finished_checkout_executions(conn, project_id)? {
+        let path = crate::db::discussion_workspaces::get_managed_for_execution(conn, &exec_id)?
+            .and_then(|workspace| workspace.canonical_path);
+        if let Some(name) = path.as_deref().and_then(|path| {
+            scanner::resolve_host_path(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        }) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// The worktrees that keep `project`'s catalogue over its cap after the reclaim,
+/// each as `name (reason)` (KT-1676): the finished tasks' checkouts Kronn kept,
+/// the checkouts of tasks still running, those a CLI session attached, and the
+/// ones Kronn never created. Directory names only, never a path. `git worktree
+/// list` is read-only; where it fails the finished ones are still named from
+/// the database.
+fn catalogue_blockers(
+    conn: &rusqlite::Connection,
+    project: &crate::models::Project,
+) -> Vec<String> {
+    let dir_of = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+    };
+    let mut blockers = std::collections::BTreeMap::new();
+    for name in finished_checkout_names(conn, &project.id).unwrap_or_default() {
+        blockers.insert(
+            name,
+            "finished task, not clean: uncommitted changes, another branch or unreadable",
+        );
+    }
+    let known: std::collections::HashMap<String, bool> = conn
+        .prepare(
+            "SELECT canonical_path, ownership = 'managed' FROM discussion_workspaces
+              WHERE project_id = ?1 AND canonical_path IS NOT NULL",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([&project.id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(path, managed)| dir_of(&path).map(|name| (name, managed)))
+        .collect();
+    for path in crate::agents::runner::claude_task_worker_catalogue_worktrees(project) {
+        let Some(name) = dir_of(&path.to_string_lossy()) else {
+            continue;
+        };
+        blockers
+            .entry(name.clone())
+            .or_insert(match known.get(&name) {
+                Some(true) => "task still running",
+                Some(false) => "attached by a CLI session, not managed by Kronn",
+                None => "not created by Kronn",
+            });
+    }
+    blockers
+        .into_iter()
+        .map(|(name, reason)| format!("{name} ({reason})"))
+        .collect()
+}
+
+/// Reclaim the clean checkouts of every finished execution of `project_id`
+/// (KT-1646). One execution failing never stops the others.
+async fn reclaim_clean_finished_checkouts(
+    db: &Database,
+    project_id: &str,
+) -> Result<FinishedWorktreeReclaim> {
+    let pid = project_id.to_string();
+    let candidates = db
+        .with_conn(move |conn| finished_checkout_executions(conn, &pid))
+        .await?;
+    Ok(reclaim_clean_checkouts(db, candidates).await)
+}
+
+/// Reclaim the clean checkout of each of `candidates`, each judged on its own:
+/// one that is not finished is skipped, a dirty one is kept and reported.
+async fn reclaim_clean_checkouts(
+    db: &Database,
+    candidates: Vec<String>,
+) -> FinishedWorktreeReclaim {
+    let mut report = FinishedWorktreeReclaim::default();
+    for exec_id in candidates {
+        match reclaim_clean_finished_checkout(db, &exec_id).await {
+            Ok(CleanCheckoutReclaim::Released) => report.released += 1,
+            Ok(CleanCheckoutReclaim::Kept { name, reason }) => {
+                tracing::info!(execution_id = %exec_id, "finished worktree kept: {reason}");
+                record_release_kept(db, &exec_id, &reason).await;
+                report.kept.push(name);
+            }
+            Ok(CleanCheckoutReclaim::NotApplicable) => {}
+            Err(error) => {
+                tracing::warn!(execution_id = %exec_id, "finished worktree reclaim failed: {error}");
+            }
+        }
+    }
+    report.kept.sort();
+    report.kept.dedup();
+    report
+}
+
+/// Closing a task (`done` or `archived`) releases the managed checkouts of its
+/// executions (KT-1676): a clean one is removed, its branch kept; a dirty one,
+/// one on another branch or one a worker still uses is kept, and the first two
+/// are reported by name. Unlike the cancel with `preserve`, which keeps a
+/// checkout on purpose, a closed task has nothing left to preserve it for.
+///
+/// Never fails the caller: the task is already closed, and what stays is the
+/// periodic sweep's to take.
+pub(crate) async fn release_closed_task_checkouts(
+    db: &Database,
+    task_id: &str,
+) -> FinishedWorktreeReclaim {
+    let task = task_id.to_string();
+    let candidates = match db
+        .with_conn(move |conn| {
+            crate::db::orchestration::executions_of_task_with_checkout(conn, &task)
+        })
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(task = %task_id, "closed task checkouts unreadable: {error}");
+            return FinishedWorktreeReclaim::default();
+        }
+    };
+    let report = reclaim_clean_checkouts(db, candidates).await;
+    if report.released + report.kept.len() > 0 {
+        tracing::info!(
+            task = %task_id,
+            released = report.released,
+            kept = ?report.kept,
+            "task closed: released its managed worktrees"
+        );
+    }
+    report
+}
+
+/// How a launch measures the Claude sandbox catalogue of a project: injected so
+/// the reclaim is exercised on any host (the real measure only exists on macOS).
+type CatalogueMeasure =
+    fn(
+        &crate::models::Project,
+    ) -> Result<Option<crate::agents::runner::ClaudeSandboxCatalogueReceipt>, String>;
+
+/// Before a Claude launch is judged (KT-1646): when the project's worktree
+/// catalogue is over a cap, reclaim the clean worktrees of its finished
+/// executions. Runs with no connection held, before the synchronous verdict
+/// [`claude_catalogue_verdict`] re-measures. The cap itself protects the sandbox
+/// and is never raised.
+async fn reclaim_over_catalogue_cap(
+    db: &Database,
+    project: &crate::models::Project,
+    measure: CatalogueMeasure,
+) {
+    let measured = {
+        let project = project.clone();
+        tokio::task::spawn_blocking(move || measure(&project)).await
+    };
+    // A measure that fails or does not apply is the verdict's to report.
+    let Ok(Ok(Some(receipt))) = measured else {
+        return;
+    };
+    if receipt.within_caps() {
+        return;
+    }
+    // KT-1676 — a worktree removed outside Kronn still counts until it is pruned.
+    if let Err(error) = reconcile_missing_managed_checkouts(db).await {
+        tracing::warn!(project = %project.id, "managed checkout reconcile failed: {error}");
+    }
+    let reclaim = match reclaim_clean_finished_checkouts(db, &project.id).await {
+        Ok(reclaim) => reclaim,
+        Err(error) => {
+            tracing::warn!(project = %project.id, "finished worktree reclaim failed: {error}");
+            return;
+        }
+    };
+    tracing::info!(
+        project = %project.id,
+        released = reclaim.released,
+        kept = reclaim.kept.len(),
+        "worktree catalogue over its cap: reclaimed finished worktrees before refusing"
+    );
+}
+
+/// [`reclaim_over_catalogue_cap`] for the launch and preparation boundaries
+/// (KT-1646), which only know the task and the worker: a no-op unless the worker
+/// is a Claude agent and the task has exactly one project.
+pub(crate) async fn reclaim_finished_worktrees_for_launch(
+    db: &Database,
+    task_reference: &str,
+    worker: &MessageTarget,
+) {
+    if worker.kind != MessageTargetKind::Agent || worker.agent_type != AgentType::ClaudeCode {
+        return;
+    }
+    let task_reference = task_reference.trim().to_string();
+    let project = db
+        .with_conn(move |conn| {
+            let Some(task) = crate::db::planning::get_task(conn, &task_reference)? else {
+                return Ok(None);
+            };
+            match task.summary.project_ids.as_slice() {
+                [project_id] => crate::db::projects::get_project(conn, project_id),
+                _ => Ok(None),
+            }
+        })
+        .await;
+    if let Ok(Some(project)) = project {
+        reclaim_over_catalogue_cap(
+            db,
+            &project,
+            crate::agents::runner::claude_task_worker_catalogue_measure,
+        )
+        .await;
+    }
+}
+
+/// The Claude sandbox catalogue verdict for a launch (KT-1646): measure, and when
+/// over a cap refuse, naming the worktrees that block (KT-1676) so a human knows
+/// what to review and remove. Whatever could be reclaimed already was, by
+/// [`reclaim_over_catalogue_cap`], before the connection was taken. The only Git
+/// that runs here is the read-only listing of the registered worktrees.
+fn claude_catalogue_verdict(
+    conn: &rusqlite::Connection,
+    project: &crate::models::Project,
+    measure: CatalogueMeasure,
+) -> Result<(), String> {
+    let Some(receipt) = measure(project)? else {
+        return Ok(());
+    };
+    if receipt.within_caps() {
+        return Ok(());
+    }
+    receipt.validate_listing(&catalogue_blockers(conn, project))
 }
 
 /// Where the evidence of one execution's released checkout is kept.
@@ -4692,6 +5389,130 @@ pub async fn release_finished_worktrees(db: &Database) -> (usize, usize) {
     )
 }
 
+/// The checkouts of executions that never finished although their task was
+/// closed by hand (KT-1676): a clean one goes at once, a dirty one is kept and
+/// its reason recorded once. Executions that are really finished are the
+/// terminal pass's.
+async fn release_closed_task_executions(db: &Database, report: &mut OrchestrationBootReport) {
+    let candidates = match db
+        .with_conn(crate::db::orchestration::closed_task_executions_with_checkout)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("closed task worktree scan: {error}"));
+            return;
+        }
+    };
+    for exec_id in candidates {
+        match reclaim_clean_finished_checkout(db, &exec_id).await {
+            Ok(CleanCheckoutReclaim::Released) => {
+                report.terminal_worktrees_released += 1;
+                report.lane_target_report.push(format!(
+                    "released execution {exec_id} of a closed task: clean checkout removed, branch kept"
+                ));
+            }
+            Ok(CleanCheckoutReclaim::Kept { name, reason }) => {
+                tracing::info!(execution_id = %exec_id, worktree = %name, "closed task worktree kept: {reason}");
+                record_release_kept(db, &exec_id, &reason).await;
+                report.terminal_worktrees_kept += 1;
+            }
+            Ok(CleanCheckoutReclaim::NotApplicable) => {}
+            Err(error) => report.errors.push(format!(
+                "execution {exec_id} closed task checkout reclaim: {error}"
+            )),
+        }
+    }
+}
+
+/// Find the managed checkouts Kronn still records as `attached` although their
+/// directory was removed outside Kronn (`git worktree remove`, `rm -rf`), and
+/// make the record true (KT-1676). Returns how many were gone.
+///
+/// A finished execution's (or closed task's) checkout is released as usual,
+/// which retires the record. One a worker may still use is marked `missing`: the
+/// row, its branch and its lineage stay, so the execution remains resumable,
+/// and the event says what happened. Either way the dead Git entry is pruned, so
+/// it stops counting against the worktree cap. A project whose repository
+/// cannot be found is left alone: an unmounted disk is not a removal.
+pub(crate) async fn reconcile_missing_managed_checkouts(db: &Database) -> Result<usize> {
+    let workspaces = db
+        .with_conn(|conn| {
+            let mut gone = Vec::new();
+            for workspace in
+                crate::db::discussion_workspaces::list_attached_managed_with_path(conn)?
+            {
+                let Some(project) = crate::db::projects::get_project(conn, &workspace.project_id)?
+                else {
+                    continue;
+                };
+                gone.push((workspace, project.path));
+            }
+            Ok(gone)
+        })
+        .await?;
+    let missing = tokio::task::spawn_blocking(move || {
+        workspaces
+            .into_iter()
+            .filter(|(workspace, project_path)| {
+                let checkout = workspace
+                    .canonical_path
+                    .as_deref()
+                    .map(scanner::resolve_host_path);
+                let repo = scanner::resolve_host_path(project_path);
+                matches!(repo.try_exists(), Ok(true))
+                    && checkout.is_some_and(|path| matches!(path.try_exists(), Ok(false)))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("managed checkout scan failed: {error}"))?;
+    let mut gone = 0;
+    for (workspace, project_path) in missing {
+        let Some(exec_id) = workspace.task_execution_id.clone() else {
+            continue;
+        };
+        if crate::core::checkout_release::is_claimed(&exec_id) {
+            continue;
+        }
+        gone += 1;
+        tracing::info!(execution_id = %exec_id, "managed checkout is gone from disk");
+        if reclaim_clean_finished_checkout(db, &exec_id).await? == CleanCheckoutReclaim::Released {
+            continue;
+        }
+        let path = workspace.canonical_path.clone();
+        let branch = workspace.branch.clone();
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            crate::db::discussion_workspaces::mark_missing_for_execution(&tx, &id)?;
+            crate::db::orchestration::record_execution_event(
+                &tx,
+                &id,
+                "worktree_missing",
+                None,
+                None,
+                &backend_actor(),
+                serde_json::json!({ "path": path, "branch": branch }),
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await?;
+        let repo = scanner::resolve_host_path(&project_path);
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::core::cmd::git_cmd()
+                .args(["worktree", "prune"])
+                .current_dir(repo)
+                .output()
+        })
+        .await;
+    }
+    Ok(gone)
+}
+
 /// One pass over the finished executions that still hold a managed checkout
 /// (KT-1397). Only an execution durable state proves terminal, finished at
 /// least `min_idle` ago, whose workspace is Kronn's and unused, is released;
@@ -4701,6 +5522,18 @@ async fn release_terminal_worktrees(
     min_idle: std::time::Duration,
     report: &mut OrchestrationBootReport,
 ) {
+    // KT-1676 — first make the records true: a checkout removed outside Kronn
+    // must not stay `attached`, nor count against the worktree cap.
+    match reconcile_missing_managed_checkouts(db).await {
+        Ok(gone) if gone > 0 => report.lane_target_report.push(format!(
+            "{gone} managed checkout(s) removed outside Kronn: workspace record(s) updated"
+        )),
+        Ok(_) => {}
+        Err(error) => report
+            .errors
+            .push(format!("managed checkout reconcile: {error}")),
+    }
+    release_closed_task_executions(db, report).await;
     let candidates = match db
         .with_conn(crate::db::orchestration::terminal_executions_with_checkout)
         .await
@@ -4715,6 +5548,24 @@ async fn release_terminal_worktrees(
     };
     let now = chrono::Utc::now();
     for (exec_id, finished_at) in candidates {
+        // KT-1646 — a clean checkout of a finished execution goes at once; the
+        // idle window below only guards the dirty ones, whose diff is saved first.
+        match reclaim_clean_finished_checkout(db, &exec_id).await {
+            Ok(CleanCheckoutReclaim::Released) => {
+                report.terminal_worktrees_released += 1;
+                report.lane_target_report.push(format!(
+                    "released finished execution {exec_id}: clean checkout removed, branch kept"
+                ));
+                continue;
+            }
+            Ok(CleanCheckoutReclaim::Kept { name, reason }) => {
+                tracing::info!(execution_id = %exec_id, worktree = %name, "finished worktree kept: {reason}");
+            }
+            Ok(CleanCheckoutReclaim::NotApplicable) => {}
+            Err(error) => report.errors.push(format!(
+                "execution {exec_id} clean checkout reclaim: {error}"
+            )),
+        }
         let recent = finished_at.is_some_and(|at| {
             now.signed_duration_since(at)
                 .to_std()
@@ -5014,18 +5865,28 @@ impl ReworkReport {
 }
 
 /// How much of a failing validation's output travels in a message. The end is
-/// kept: a compiler or a test runner prints its verdict last.
+/// kept, because a compiler or a test runner prints its verdict last, and so is
+/// the start (KT-1438): the first error (a Twig exception, the first failing
+/// test) is what a worker needs, and a wrapper's last lines are only its own
+/// `make: Error 1`.
 const REWORK_OUTPUT_LIMIT: usize = 4_000;
+const REWORK_OUTPUT_HEAD: usize = 1_500;
 
 /// A fenced block that the text itself cannot close early.
 fn fenced_output(output: &str, lang: RoomLang) -> String {
+    // Redacted whole, before the cut: a credential split by it would escape the
+    // patterns, and the head kept since KT-1438 is where errors print theirs.
+    let output = crate::core::redact::redact_stored_text(output);
+    let output = output.as_str();
     let total = output.chars().count();
     let shown: String = if total > REWORK_OUTPUT_LIMIT {
-        let tail: String = output.chars().skip(total - REWORK_OUTPUT_LIMIT).collect();
+        let tail_len = REWORK_OUTPUT_LIMIT - REWORK_OUTPUT_HEAD;
+        let head: String = output.chars().take(REWORK_OUTPUT_HEAD).collect();
+        let tail: String = output.chars().skip(total - tail_len).collect();
         let omitted = total - REWORK_OUTPUT_LIMIT;
         match lang {
-            RoomLang::Fr => format!("[… {omitted} caractères omis]\n{tail}"),
-            RoomLang::En => format!("[… {omitted} characters omitted]\n{tail}"),
+            RoomLang::Fr => format!("{head}\n[… {omitted} caractères omis]\n{tail}"),
+            RoomLang::En => format!("{head}\n[… {omitted} characters omitted]\n{tail}"),
         }
     } else {
         output.to_string()
@@ -5948,6 +6809,9 @@ fn validation_metadata_command(
         cwd: cwd.to_path_buf(),
         env: Vec::new(),
         timeout: std::time::Duration::from_secs(15),
+        // A bounded target-dir lookup that gates a validation's refusal.
+        priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
     };
     // Preserve the validation's manifest and configuration options. Validations
     // are normally launched from the repository root, including commands such
@@ -6122,10 +6986,16 @@ async fn run_one_validation_checked(
             let cancel = tokio_util::sync::CancellationToken::new();
             match launch.confinement() {
                 Some(confinement) => {
-                    crate::core::quick_exec::run_confined(&validated, None, &cancel, confinement)
-                        .await
+                    crate::core::quick_exec::run_confined(
+                        &validated,
+                        None,
+                        &cancel,
+                        confinement,
+                        crate::core::background_priority::Priority::Background,
+                    )
+                    .await
                 }
-                None => crate::core::quick_exec::run(&validated, None, &cancel).await,
+                None => crate::core::quick_exec::run_background(&validated, None, &cancel).await,
             }
         },
     )
@@ -7089,7 +7959,8 @@ async fn deliver_authorized_worker_manifest_inner(
                 Vec::new()
             })
     };
-    let review_request = build_review_request_message(
+    let lang = room_lang(db, &exec.parent_discussion_id).await;
+    let mut review_request = build_review_request_message(
         &exec.id,
         exec.attempt_no,
         &task.summary.reference,
@@ -7098,8 +7969,12 @@ async fn deliver_authorized_worker_manifest_inner(
         &manifest.head_sha,
         &manifest.summary,
         &provider_changes,
-        room_lang(db, &exec.parent_discussion_id).await,
+        lang,
     );
+    if let Some(warning) = delivery_lint_gate_warning(&manifest, lang) {
+        review_request.content.push_str("\n\n");
+        review_request.content.push_str(&warning);
+    }
     // The queryable obligation payload carries the exact TARGETED principal identity (DoD-3).
     let review_requested_changes = serde_json::json!({
         "principal_discussion_id": exec.parent_discussion_id,
@@ -8997,7 +9872,7 @@ fn begin_provisioning(
         }
     };
     if !is_replay {
-        if let Some(reason) = worker_project_refusal(worker, &project) {
+        if let Some(reason) = worker_project_refusal_naming_finished(conn, worker, &project) {
             return Ok(Err(ProvisionError::NotLaunchable(format!(
                 "{}: {}",
                 reason.code, reason.detail
@@ -9486,6 +10361,182 @@ async fn mark_lane_target_for_worker(exec_id: &str, worktree: &std::path::Path) 
     }
 }
 
+/// Seed a task worktree with the project's gitignored assets (KT-1438) and
+/// journal what happened. Run at provisioning and again before the integration
+/// validations, so a source that changed meanwhile is refreshed. Best-effort:
+/// a path that cannot be seeded is recorded with its reason and the worktree
+/// goes on without it; it never fails a launch or an integration.
+///
+/// Returns how long the copy took (KT-1637), `None` when nothing was seeded.
+async fn seed_lane_assets(
+    db: &Database,
+    exec_id: &str,
+    project_id: &str,
+    repo: &std::path::Path,
+    worktree: &std::path::Path,
+) -> Option<u64> {
+    let pid = project_id.to_string();
+    let policy = crate::core::task_worker_lane_seeds::seed_policy();
+    if !policy.copy_enabled {
+        // The owner turned copying off (Settings > Worktrees): nothing is seeded.
+        return None;
+    }
+    // Only what a human declared in Kronn applies, or, when the owner turned
+    // adoption on, Kronn's suggestions for a project that declared nothing. The
+    // `[lane_seeds]` table of `kronn/project.toml` reaches the repository through
+    // a pull request, not through the human gate: it is proposed in the settings,
+    // never seeded here. The secret-looking files a human confirmed travel with
+    // them: a seed that gained one since is held, not copied.
+    let (declared, confirmed) = match db
+        .with_read_conn(move |conn| {
+            Ok((
+                crate::db::projects::lane_seeds(conn, &pid)?,
+                crate::db::projects::lane_seeds_confirmed(conn, &pid)?,
+            ))
+        })
+        .await
+    {
+        Ok(read) => read,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "lane seeds not read: {error}");
+            return None;
+        }
+    };
+    let (repo, worktree) = (repo.to_path_buf(), worktree.to_path_buf());
+    let (record, duration_ms) = match tokio::task::spawn_blocking(move || {
+        let (seeds, _) =
+            match crate::core::task_worker_lane_seeds::effective_seeds(policy, declared, || {
+                crate::core::task_worker_lane_seeds::suggest_seeds(&repo)
+            }) {
+                Ok(effective) => effective,
+                Err(reason) => {
+                    tracing::warn!("lane seed suggestions not read: {reason}");
+                    return None;
+                }
+            };
+        if seeds.is_empty() {
+            return None;
+        }
+        let copying = std::time::Instant::now();
+        let record = crate::core::task_worker_lane_seeds::seed_worktree(
+            &repo,
+            &worktree,
+            &seeds,
+            &confirmed,
+            &crate::core::task_worker_lane_warm::clone_tree,
+        );
+        Some((record, copying.elapsed().as_millis() as u64))
+    })
+    .await
+    {
+        Ok(Some(seeded)) => seeded,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "lane seeding did not complete: {error}");
+            return None;
+        }
+    };
+    for (path, reason) in record.skipped() {
+        tracing::warn!(execution_id = %exec_id, "lane seed `{path}` skipped: {reason}");
+    }
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_lane_seeds(conn, &id, &record, &backend_actor())
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "lane seeds record not persisted: {error}");
+    }
+    Some(duration_ms)
+}
+
+/// Journal how long a sub-step of the warming phase took (KT-1637). Never
+/// raised: a timing that is not recorded only leaves a hole in the breakdown.
+async fn record_warming_step(
+    db: &Database,
+    exec_id: &str,
+    step: crate::models::WarmingStepKind,
+    duration_ms: u64,
+) {
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_warming_step(
+                conn,
+                &id,
+                step,
+                duration_ms,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "warming step {step:?} not recorded: {error}");
+    }
+}
+
+/// Fill the host's dependency caches with what the worker's lock files
+/// reference and they lack (KT-1649), and journal it on the execution. Runs as
+/// Kronn's own process, not under the worker's sandbox (it needs the network),
+/// which is why `core::task_worker_dep_fetch` bounds it to the lock files'
+/// public registries. Never raised: a fetch that fails only leaves the worker
+/// with the cache it had.
+async fn record_dependency_fetch(
+    db: &Database,
+    exec_id: &str,
+    worktree: &std::path::Path,
+    runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let path = worktree.to_path_buf();
+    // The staged projects live under Kronn's data directory, which the worker
+    // cannot read; no data directory, no scratch, no fetch.
+    let scratch_root = match crate::core::task_worker_dep_fetch::scratch_root() {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "dependency fetch skipped: {error}");
+            return;
+        }
+    };
+    let record = tokio::task::spawn_blocking(move || {
+        crate::core::task_worker_dep_fetch::fetch_missing_dependencies(
+            &path,
+            &scratch_root,
+            runner.as_ref(),
+            &cancel,
+        )
+    })
+    .await;
+    let record = match record {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "dependency fetch did not complete: {error}");
+            return;
+        }
+    };
+    if record.steps.is_empty() {
+        return;
+    }
+    for step in &record.steps {
+        tracing::info!(
+            execution_id = %exec_id,
+            lockfile = %step.lockfile,
+            outcome = ?step.outcome,
+            "task worker dependency fetch"
+        );
+    }
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_dependency_fetch(conn, &id, &record, &backend_actor())
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "dependency fetch record not persisted: {error}");
+    }
+}
+
 /// Start a Claude task worker's lane warm (KT-1250): seed its Cargo target with
 /// a copy-on-write clone of a warm one, then run its first build under the
 /// host's concurrency cap, saying so in the worker's room when it has to queue.
@@ -9731,6 +10782,45 @@ fn build_review_request_message(
         format!("orch-review-request:{exec_id}:{attempt_no}"),
         content,
     )
+}
+
+/// KT-1654 — a Rust change is delivered without a passing `clippy --all-targets`
+/// entry: the CI gate is `cargo clippy --all-targets -- -D warnings`, and a
+/// `--lib` / `--lib --tests` run never lints `tests/` (KT-1608 broke clippy that
+/// way). Non-blocking: the delivery is accepted and the principal reads this on
+/// the review request.
+fn delivery_lint_gate_warning(
+    manifest: &crate::models::DeliveryManifestV1,
+    lang: RoomLang,
+) -> Option<String> {
+    let rust_change = manifest.files_touched.iter().any(|file| {
+        file.path.ends_with(".rs")
+            || file.path.ends_with("Cargo.toml")
+            || file.path.ends_with("Cargo.lock")
+    });
+    if !rust_change {
+        return None;
+    }
+    let linted = manifest.tests.iter().any(|test| {
+        let haystack = format!("{} {}", test.name, test.evidence.as_deref().unwrap_or(""));
+        test.status == crate::models::TestStatus::Pass
+            && haystack.contains("clippy")
+            && haystack.contains("--all-targets")
+    });
+    if linted {
+        return None;
+    }
+    Some(match lang {
+        RoomLang::Fr => "⚠️ Gate de lint : cette livraison touche du Rust mais aucune validation \
+             `clippy --all-targets` au statut `pass` n'y figure. Le gate de la CI est `cargo \
+             clippy --all-targets -- -D warnings` (`--lib` ou `--lib --tests` ne lintent pas \
+             `tests/`) : lance-le avant d'approuver."
+            .to_string(),
+        RoomLang::En => "⚠️ Lint gate: this delivery touches Rust but lists no passing \
+             `clippy --all-targets` validation. The CI gate is `cargo clippy --all-targets -- -D \
+             warnings` (`--lib` or `--lib --tests` do not lint `tests/`): run it before approving."
+            .to_string(),
+    })
 }
 
 /// The escalation solicitation posted to the PRINCIPAL in the parent room when the review budget
@@ -10126,8 +11216,13 @@ fn worker_brief_markdown_in(
         "Run the **targeted** tests that cover your change and report each result \
          (`pass`/`fail`/`skipped` + non-empty evidence) in `tests`. A `pass` without a \
          verifiable command or output is refused.\n\
-         The long validations persisted by the principal (often the full suite) are run by \
-         Kronn at integration, after the review: do not replay them in full. The shell tool \
+         The default validations are fmt + clippy + targeted lib tests (`cargo test --lib \
+         <filter>`): the full suite is owned by the PR's CI, never by a local run. For a Rust \
+         change the lint gate is EXACTLY `cargo fmt --check` and `cargo clippy --all-targets -- \
+         -D warnings` (the CI gate: `--lib`, `--lib --tests` or a filtered output do not lint \
+         `tests/`); report each exit code in the evidence of its `tests` entry. The long \
+         validations persisted by the principal are run by Kronn at integration, after the \
+         review: do not replay them in full. The shell tool \
          cuts a long command (Bash: 600 s): never start one in the background to wait for it, \
          because your process ends as soon as you hand the turn back and the execution ends \
          without a delivery. Chain it all in the same turn: targeted tests, commit, then \
@@ -10144,7 +11239,12 @@ fn worker_brief_markdown_in(
         "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
          (`pass`/`fail`/`skipped` + preuve non vide) dans `tests`. Un `pass` sans \
          commande ou sortie vérifiable est refusé.\n\
-         Les validations longues persistées par le principal (souvent la suite complète) sont \
+         Les validations par défaut sont fmt + clippy + tests lib ciblés (`cargo test --lib \
+         <filtre>`) : la suite complète appartient à la CI de la PR, jamais à un run local. \
+         Pour un changement Rust, le gate de lint est EXACTEMENT `cargo fmt --check` et \
+         `cargo clippy --all-targets -- -D warnings` (le gate de la CI : `--lib`, `--lib \
+         --tests` ou une sortie filtrée ne lintent pas `tests/`) ; reporte le code de sortie \
+         de chacun dans la preuve de son entrée `tests`. Les validations longues persistées par le principal sont \
          jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
          L'outil shell coupe une commande longue (Bash : 600 s) : n'en lance jamais une en \
          arrière-plan pour l'attendre, car ton processus s'arrête dès que tu rends la main \
@@ -10460,6 +11560,28 @@ fn worker_brief_markdown_in(
          l'intégration.\n\n"
             .to_string()
     };
+    // KT-1669 — a lane re-anchors only the citations its own gate reads. The
+    // integration settles a conflict that is only citation line numbers, so a
+    // lane never rewrites the target's anchors to avoid one.
+    let citations = if !fr {
+        "## Doc citations\n\
+         Keep the `[src:]` citations of the docs you edit resolving: that is your own \
+         gate. Do not re-anchor the citations of docs you did not edit, nor the anchors a merge \
+         of the target moved. The integration re-anchors every citation your code shift only \
+         moved, in any doc, and takes the target's side when the only conflict is citation line \
+         numbers, without sending your work back. A citation your change breaks for good (its \
+         symbol removed or renamed) is yours to fix: the integration sends it back with the \
+         exact list.\n\n"
+    } else {
+        "## Citations de documentation\n\
+         Garde résolubles les citations `[src:]` des docs que tu modifies : c'est ta \
+         propre porte. Ne ré-ancre pas les citations des docs que tu n'as pas modifiés, ni les \
+         ancres qu'une fusion de la cible a déplacées. L'intégration ré-ancre toute citation que \
+         ton décalage de code a seulement déplacée, dans n'importe quel doc, et prend le côté de \
+         la cible quand le seul conflit porte sur des numéros de ligne de citations, sans te \
+         renvoyer ton travail. Une citation que ton changement casse pour de bon (symbole \
+         supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
+    };
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -10481,6 +11603,7 @@ fn worker_brief_markdown_in(
              is done by Kronn AFTER review.\n\
              - Stay within the DoD's scope.\n\n\
              {target_integration}\
+             {citations}\
              ## Tests\n\
              {tests}\n\n\
              ## Workspace\n\
@@ -10521,6 +11644,7 @@ fn worker_brief_markdown_in(
          protégée est faite par Kronn APRÈS revue.\n\
          - Reste dans le périmètre de la DoD.\n\n\
          {target_integration}\
+         {citations}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -10548,6 +11672,7 @@ fn worker_brief_markdown_in(
         human_arbitration = human_arbitration,
         parent_milestones = parent_milestones,
         target_integration = target_integration,
+        citations = citations,
         delivery_format = delivery_format,
         commit_boundary = commit_boundary,
         first_action = first_action,
@@ -10706,6 +11831,10 @@ pub struct CreateCampaignRequest {
     /// Explicit opt-in to a provider fallback on quota exhaustion (KT-1564).
     #[serde(default)]
     pub quota_fallback: bool,
+    /// KT-1643 — who reviews each delivery. Absent: a configured remote model,
+    /// else the human; never an agent nobody serves.
+    #[serde(default)]
+    pub reviewer: Option<crate::models::CampaignReviewer>,
 }
 
 fn default_campaign_concurrency() -> u32 {
@@ -10757,6 +11886,27 @@ fn worker_project_refusal(
         return crate::agents::runner::claude_task_worker_catalogue_preflight(project)
             .err()
             .map(|detail| preparation_reason("claude_sandbox_catalogue_unsafe", detail));
+    }
+    None
+}
+
+/// [`worker_project_refusal`] for the launch and preparation boundaries, which
+/// hold a connection: a worktree catalogue over its cap refuses naming the
+/// finished worktrees a human can remove (KT-1646). Their async callers run
+/// [`reclaim_finished_worktrees_for_launch`] first, so no Git runs here.
+fn worker_project_refusal_naming_finished(
+    conn: &rusqlite::Connection,
+    worker: &MessageTarget,
+    project: &crate::models::Project,
+) -> Option<crate::models::CampaignTaskReason> {
+    if worker.kind == MessageTargetKind::Agent && worker.agent_type == AgentType::ClaudeCode {
+        return claude_catalogue_verdict(
+            conn,
+            project,
+            crate::agents::runner::claude_task_worker_catalogue_measure,
+        )
+        .err()
+        .map(|detail| preparation_reason("claude_sandbox_catalogue_unsafe", detail));
     }
     None
 }
@@ -10866,6 +12016,116 @@ pub(crate) fn validations_refusal(
         .map(|reason| preparation_reason("invalid_validations", reason))
 }
 
+/// KT-1636 — a validation that replays the whole Rust suite: bare
+/// `cargo test` / `cargo nextest run` (no `--lib`/`--bin`/`--test`/`--doc`/…
+/// target, no name filter after the subcommand or after `--`), or the
+/// `make test-backend` family. Averages ~20 min locally against 3.3 min for
+/// `cargo test --lib` (KT-1630 audit): in the CI gate model the PR owns it.
+/// Split on whitespace exactly as the runner does; not a shell parser.
+fn is_full_suite_validation(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    if let ["make", target, ..] = words.as_slice() {
+        return matches!(*target, "test-backend" | "test-backend-cov");
+    }
+    let Ok(Some(cargo)) = validation_cargo_argv(command) else {
+        return false;
+    };
+    // Global options may precede the subcommand (`cargo --offline test`).
+    let Some(subcommand) = cargo.iter().position(|word| !word.starts_with('-')) else {
+        return false;
+    };
+    let args = &cargo[subcommand + 1..];
+    let args = match cargo[subcommand] {
+        "test" => args,
+        "nextest" => match args {
+            ["run", rest @ ..] => rest,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    // Flags whose next word is their value, not a test-name filter.
+    const VALUE_FLAGS: &[&str] = &[
+        "--manifest-path",
+        "--target-dir",
+        "--config",
+        "--features",
+        "--package",
+        "--profile",
+        "--jobs",
+        "--color",
+        "--message-format",
+        "--cargo-profile",
+        "-p",
+        "-j",
+        "-F",
+        "-Z",
+    ];
+    const NARROWING_FLAGS: &[&str] = &[
+        "--lib",
+        "--bin",
+        "--bins",
+        "--test",
+        "--tests",
+        "--doc",
+        "--example",
+        "--examples",
+        "--bench",
+        "--benches",
+        "--no-run",
+        "--list",
+    ];
+    let mut index = 0;
+    while index < args.len() {
+        let word = args[index];
+        if word == "--" {
+            // Anything after the separator is a filter or a harness flag; a
+            // positional one narrows the run.
+            return !args[index + 1..].iter().any(|rest| !rest.starts_with('-'));
+        }
+        if NARROWING_FLAGS.contains(&word)
+            || NARROWING_FLAGS.iter().any(|flag| {
+                word.strip_prefix(flag)
+                    .is_some_and(|value| value.starts_with('='))
+            })
+        {
+            return false;
+        }
+        if VALUE_FLAGS.contains(&word) {
+            index += 2;
+            continue;
+        }
+        if !word.starts_with('-') {
+            return false; // a test-name filter
+        }
+        index += 1;
+    }
+    true
+}
+
+/// KT-1636 — non-blocking preflight note for each full-suite gate. The PR's CI
+/// owns the full suite; a local integration validation is fmt + clippy +
+/// targeted `--lib` tests. The gate still runs if the principal keeps it.
+pub(crate) fn full_suite_validation_warnings(
+    validations: &[crate::models::ValidationSpec],
+) -> Vec<crate::models::CampaignTaskReason> {
+    validations
+        .iter()
+        .filter(|spec| is_full_suite_validation(&spec.command))
+        .map(|spec| {
+            preparation_reason(
+                "full_suite_ci_owned",
+                format!(
+                    "`{}` replays the whole test suite (about 20 min locally, against 3.3 min for \
+                     `cargo test --lib`): the full suite belongs to the PR's CI. Prefer `cargo fmt \
+                     --check`, `cargo clippy` and targeted lib tests (`cargo test --lib <filter>`) \
+                     as integration validations.",
+                    spec.command.trim()
+                ),
+            )
+        })
+        .collect()
+}
+
 pub(crate) fn worker_scope_refusal(
     worker: &MessageTarget,
     scope: Option<&TaskWorkerScope>,
@@ -10947,7 +12207,9 @@ pub(crate) fn prepare_task_execution(
                     "task project no longer exists",
                 )),
                 Some(project) => {
-                    if let Some(reason) = worker_project_refusal(worker, &project) {
+                    if let Some(reason) =
+                        worker_project_refusal_naming_finished(conn, worker, &project)
+                    {
                         reasons.push(reason);
                     }
                 }
@@ -11063,6 +12325,23 @@ pub async fn create_campaign(
             .effective_max_review_rounds(),
         Err(detail) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, detail)),
     };
+    // A reviewer the caller names is checked now, so nothing is created for one
+    // that cannot review. Without one, the room keeps its own setup and the
+    // campaign records who that makes the reviewer (read inside the transaction).
+    let named_reviewer = match request
+        .reviewer
+        .clone()
+        .map(crate::core::contribution::resolve_reviewer)
+    {
+        Some(Ok(reviewer)) => Some(reviewer),
+        Some(Err(detail)) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, detail)),
+        None => None,
+    };
+    let rounds_text = if max_review_rounds == crate::models::UNLIMITED_REVIEW_ROUNDS {
+        "unlimited".to_string()
+    } else {
+        max_review_rounds.to_string()
+    };
     let resilience = crate::models::OrchestrationResiliencePolicy {
         activity_timeout_secs: request.activity_timeout_secs,
         review_timeout_secs: request.review_timeout_secs,
@@ -11077,9 +12356,26 @@ pub async fn create_campaign(
         .db
         .with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            if crate::db::discussions::get_discussion(&tx, &request.discussion_id)?.is_none() {
+            let Some(room) = crate::db::discussions::get_discussion(&tx, &request.discussion_id)?
+            else {
                 bail!("principal discussion not found");
-            }
+            };
+            let discussion_id = request.discussion_id.clone();
+            let explicit = named_reviewer.is_some();
+            let reviewer = match named_reviewer {
+                Some(reviewer) => reviewer,
+                None => crate::core::contribution::room_reviewer(
+                    &room.agent,
+                    room.model.as_deref(),
+                    room.connection_id.as_deref(),
+                    crate::db::discussions::disc_is_no_agent(&tx, &discussion_id)?,
+                ),
+            };
+            let announcement = crate::core::contribution::room_announcement(
+                &target_branch,
+                &rounds_text,
+                &reviewer,
+            );
             let input = crate::models::OrchestrationRunInput {
                 kind: crate::models::OrchestrationRunKind::Campaign,
                 discussion_id: request.discussion_id,
@@ -11099,9 +12395,18 @@ pub async fn create_campaign(
                 auto_continue: request.auto_continue,
                 quota_fallback: request.quota_fallback,
                 quota_fallback_agents: Vec::new(),
+                reviewer: Some(reviewer.clone()),
             };
             let run = crate::db::orchestration::create_orchestration_run(&tx, &input)?;
             crate::db::orchestration::set_resilience_policy(&tx, &run.id, &resilience)?;
+            if explicit {
+                crate::db::orchestration::reconfigure_room_for_reviewer(
+                    &tx,
+                    &discussion_id,
+                    &reviewer,
+                )?;
+            }
+            crate::db::orchestration::announce_campaign_rules(&tx, &discussion_id, &announcement)?;
             let view = campaign_view(&tx, &run.id)?;
             tx.commit()?;
             Ok(view)
@@ -11497,7 +12802,66 @@ pub(crate) fn execution_detail(
     })
 }
 
+/// The execution's progress, with the timing of its warming sub-steps (KT-1637)
+/// on top of the phase it is in.
 fn execution_progress(
+    conn: &rusqlite::Connection,
+    execution: &crate::models::TaskExecution,
+) -> Result<crate::models::TaskExecutionProgress> {
+    let mut progress = execution_phase_progress(conn, execution)?;
+    let (steps, total_ms) = warming_timings(conn, execution)?;
+    progress.warming_steps = steps;
+    progress.warming_total_ms = total_ms;
+    Ok(progress)
+}
+
+/// How long each warming sub-step took, in the order they run, and the wall time
+/// from the execution's creation to the worker's dispatch (to now while it is
+/// still provisioning). What the steps do not add up to is time nobody measured.
+fn warming_timings(
+    conn: &rusqlite::Connection,
+    execution: &crate::models::TaskExecution,
+) -> Result<(Vec<crate::models::TaskExecutionWarmingStep>, Option<u64>)> {
+    use crate::models::{TaskExecutionWarmingStep, WarmingStepKind};
+    let mut timed = crate::db::orchestration::latest_warming_steps(conn, &execution.id)?;
+    if let Some(record) = crate::db::orchestration::latest_lane_warm_start(conn, &execution.id)? {
+        for (step, duration_ms) in record.timed_steps() {
+            timed.retain(|known| known.step != step);
+            timed.push(TaskExecutionWarmingStep { step, duration_ms });
+        }
+    }
+    const ORDER: [WarmingStepKind; 7] = [
+        WarmingStepKind::WorktreeCreation,
+        WarmingStepKind::LaneSeeds,
+        WarmingStepKind::LaneProvision,
+        WarmingStepKind::SeedClone,
+        WarmingStepKind::GateWait,
+        WarmingStepKind::FirstBuild,
+        WarmingStepKind::SmokeCheck,
+    ];
+    timed.sort_by_key(|known| ORDER.iter().position(|step| *step == known.step));
+
+    // The clock starts with the execution, not with the `lane_warming` event: the
+    // worktree and the lane seeds are timed before that event is written. Only a
+    // deferred warm-up has a total (the others dispatch at once).
+    let deferred =
+        crate::db::orchestration::lane_warming_started_at(conn, &execution.id)?.is_some();
+    let end = match execution.dispatch_job_id.as_deref() {
+        Some(dispatch_id) => {
+            crate::db::agent_dispatch::get(conn, dispatch_id)?.map(|job| job.created_at)
+        }
+        None if execution.status == crate::models::TaskExecutionStatus::Provisioning => {
+            Some(chrono::Utc::now())
+        }
+        None => None,
+    };
+    let total_ms = end
+        .filter(|_| deferred)
+        .map(|end| (end - execution.created_at).num_milliseconds().max(0) as u64);
+    Ok((timed, total_ms))
+}
+
+fn execution_phase_progress(
     conn: &rusqlite::Connection,
     execution: &crate::models::TaskExecution,
 ) -> Result<crate::models::TaskExecutionProgress> {
@@ -11521,6 +12885,8 @@ fn execution_progress(
                 process_alive: None,
                 last_reliable_signal_at: Some(since),
                 telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+                warming_steps: Vec::new(),
+                warming_total_ms: None,
             });
         }
     }
@@ -11533,6 +12899,8 @@ fn execution_progress(
             process_alive: None,
             last_reliable_signal_at: None,
             telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+            warming_steps: Vec::new(),
+            warming_total_ms: None,
         });
     };
     let Some(job) = crate::db::agent_dispatch::get(conn, dispatch_id)? else {
@@ -11544,14 +12912,45 @@ fn execution_progress(
             process_alive: None,
             last_reliable_signal_at: None,
             telemetry_mode: TaskExecutionTelemetryMode::Unavailable,
+            warming_steps: Vec::new(),
+            warming_total_ms: None,
         });
     };
     let (phase, reason, queue_position) = match job.status {
-        DispatchStatus::Pending => (
-            TaskExecutionProgressPhase::Queued,
-            Some("concurrency_limit_or_scheduler".into()),
-            None,
-        ),
+        // KT-1632 — the task-worker cap holds this launch: the claim left the
+        // reason on the job (`task_worker_limit:<running>/<cap>`), so it is
+        // still told after a restart. It is told only while the job is really in
+        // line: one a backoff keeps out has no place, and its stored reason is
+        // stale.
+        DispatchStatus::Pending => {
+            let cap_reason = job
+                .progress_detail
+                .clone()
+                .filter(|detail| {
+                    job.progress_phase.as_deref() == Some("queued")
+                        && detail.starts_with(
+                            crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX,
+                        )
+                })
+                .map(|detail| {
+                    crate::db::agent_dispatch::task_worker_queue_position(conn, &job.id)
+                        .map(|position| position.map(|position| (detail, position)))
+                })
+                .transpose()?
+                .flatten();
+            match cap_reason {
+                Some((detail, position)) => (
+                    TaskExecutionProgressPhase::Queued,
+                    Some(detail),
+                    Some(position),
+                ),
+                None => (
+                    TaskExecutionProgressPhase::Queued,
+                    Some("concurrency_limit_or_scheduler".into()),
+                    None,
+                ),
+            }
+        }
         DispatchStatus::Running if job.agent_started_at.is_none() => (
             TaskExecutionProgressPhase::Queued,
             Some("local_concurrency_limit".into()),
@@ -11596,6 +12995,8 @@ fn execution_progress(
         } else {
             TaskExecutionTelemetryMode::Unavailable
         },
+        warming_steps: Vec::new(),
+        warming_total_ms: None,
     })
 }
 
@@ -12165,6 +13566,13 @@ async fn resume_claimed_execution(
     state: AppState,
     exec_id: String,
 ) -> Json<ApiResponse<ExecutionRecoveryView>> {
+    // KT-1646 — a checkout a release is removing is not put back to use.
+    if let Err(error) = crate::core::checkout_release::ensure_not_being_released(&exec_id) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            error.to_string(),
+        ));
+    }
     let snapshot = {
         let id = exec_id.clone();
         state
@@ -12896,6 +14304,10 @@ pub(crate) enum ReassignCause {
     /// The sweep handing an execution back after the reset. Re-validated
     /// inside the reassignment transaction.
     QuotaReturn,
+    /// The provider re-check (KT-1664) found the provider answering again for
+    /// an escalation that announced no reset. Same worker, same worktree;
+    /// re-validated inside the reassignment transaction.
+    QuotaProbed,
 }
 
 impl ReassignCause {
@@ -12905,7 +14317,33 @@ impl ReassignCause {
     fn rearm_actor(self) -> PlanningActorKind {
         match self {
             Self::Human => PlanningActorKind::Human,
-            Self::QuotaFallback { .. } | Self::QuotaReturn => PlanningActorKind::Backend,
+            Self::QuotaFallback { .. } | Self::QuotaReturn | Self::QuotaProbed => {
+                PlanningActorKind::Backend
+            }
+        }
+    }
+
+    /// Kronn handing an execution back to the worker it was parked on.
+    fn is_quota_return(self) -> bool {
+        matches!(self, Self::QuotaReturn | Self::QuotaProbed)
+    }
+
+    /// The still-valid check a quota return runs before and inside its
+    /// reassignment transaction.
+    fn ensure_return_still_due(
+        self,
+        conn: &rusqlite::Connection,
+        exec_id: &str,
+        provider: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        match self {
+            Self::QuotaProbed => crate::db::orchestration::ensure_probed_quota_return_still_parked(
+                conn, exec_id, provider, now,
+            ),
+            _ => crate::db::orchestration::ensure_quota_return_still_due(
+                conn, exec_id, provider, now,
+            ),
         }
     }
 }
@@ -12931,7 +14369,7 @@ pub(crate) async fn reassign_native_execution_as(
                 .context("execution vanished before worker reassignment")
         })
         .await?;
-    if matches!(cause, ReassignCause::QuotaReturn) {
+    if cause.is_quota_return() {
         // Same check as the one inside the reassignment transaction (which
         // stays authoritative), run first so a return that is already stale
         // does not persist a re-anchored scope for a worker round that will
@@ -12940,14 +14378,7 @@ pub(crate) async fn reassign_native_execution_as(
         let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
         state
             .db
-            .with_conn(move |conn| {
-                crate::db::orchestration::ensure_quota_return_still_due(
-                    conn,
-                    &id,
-                    &provider,
-                    chrono::Utc::now(),
-                )
-            })
+            .with_conn(move |conn| cause.ensure_return_still_due(conn, &id, &provider))
             .await?;
     }
     let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
@@ -12977,16 +14408,11 @@ pub(crate) async fn reassign_native_execution_as(
                 }
             }
             let transaction = conn.unchecked_transaction()?;
-            if matches!(cause, ReassignCause::QuotaReturn) {
+            if cause.is_quota_return() {
                 // The sweep read this execution before the git re-anchoring
                 // above. A person may have moved, paused or finished it since:
                 // refuse here, before anything is written or cancelled.
-                crate::db::orchestration::ensure_quota_return_still_due(
-                    &transaction,
-                    &id,
-                    &provider,
-                    chrono::Utc::now(),
-                )?;
+                cause.ensure_return_still_due(&transaction, &id, &provider)?;
             }
             let before = crate::db::orchestration::get_task_execution(&transaction, &id)?
                 .context("execution vanished before worker reassignment")?;
@@ -13004,7 +14430,7 @@ pub(crate) async fn reassign_native_execution_as(
             let back_on_origin = earlier_origin
                 .as_ref()
                 .is_some_and(|origin| origin.is_worker(&provider, selection.target.tier));
-            let keep_quota_origin = matches!(cause, ReassignCause::QuotaReturn)
+            let keep_quota_origin = cause.is_quota_return()
                 && earlier_origin.is_some()
                 && !back_on_origin;
             let execution = crate::db::orchestration::reassign_execution_worker_keeping_origin(
@@ -14795,6 +16221,7 @@ pub async fn task_exec_prepare(
     let worker = request.worker;
     let scope_refusal = worker_scope_refusal(&worker, request.worker_scope.as_ref());
     let validations_refusal = validations_refusal(&request.validations);
+    let full_suite_warnings = full_suite_validation_warnings(&request.validations);
     let rounds_refusal = match review_rounds_argument(request.max_review_rounds.as_ref()) {
         Ok(_) => None,
         Err(detail) => Some(preparation_reason("invalid_max_review_rounds", detail)),
@@ -14806,6 +16233,7 @@ pub async fn task_exec_prepare(
         .workers
         .effective_max_review_rounds();
     let (catalog_refusal, catalog_warning) = worker_catalog_verdict(&state, &worker).await;
+    reclaim_finished_worktrees_for_launch(&state.db, &task, &worker).await;
     let result = state
         .db
         .with_conn(move |conn| {
@@ -14814,6 +16242,7 @@ pub async fn task_exec_prepare(
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
             preparation.warnings.extend(catalog_warning);
+            preparation.warnings.extend(full_suite_warnings);
             preparation.default_max_review_rounds =
                 Some(crate::models::review_limit_json(default_rounds));
             for reason in [
@@ -14893,6 +16322,7 @@ pub async fn task_exec_launch(
         let task = request.task_reference.trim().to_string();
         let principal = parent.clone();
         let worker = request.worker.clone();
+        reclaim_finished_worktrees_for_launch(&state.db, &task, &worker).await;
         state
             .db
             .with_conn(move |conn| {
@@ -15056,6 +16486,10 @@ pub struct TaskExecutionCompactStatus {
     /// transcripts (KT-911). `view: full` lists them all, attempts included.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub worker_sessions: Vec<String>,
+    /// KT-1632 — why a launch waits for its worker to start: the task-worker
+    /// cap is full. Absent once the worker runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued: Option<String>,
     pub next_action: Option<CompactNextAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait: Option<ExecutionWaitOutcome>,
@@ -15137,6 +16571,26 @@ fn compact_next_action(detail: &crate::models::TaskExecutionDetail) -> Option<Co
         ),
     };
     Some(CompactNextAction { tool, reason })
+}
+
+/// The sentence a queued launch reports in place of a silent `Working`: the
+/// cap that holds it, how full it is and its place in the queue.
+fn task_worker_queue_reason(progress: &crate::models::TaskExecutionProgress) -> Option<String> {
+    if progress.phase != crate::models::TaskExecutionProgressPhase::Queued {
+        return None;
+    }
+    let counts = progress
+        .reason
+        .as_deref()?
+        .strip_prefix(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)?;
+    let (running, cap) = counts.split_once('/')?;
+    let place = progress
+        .queue_position
+        .map(|position| format!(", position {position}"))
+        .unwrap_or_default();
+    Some(format!(
+        "queued: {running} of {cap} local task workers running (max_concurrent_task_workers){place}; starts when a slot frees"
+    ))
 }
 
 fn compact_last_error(detail: &crate::models::TaskExecutionDetail) -> Option<String> {
@@ -15239,6 +16693,7 @@ pub(crate) fn compact_execution_status(
             .iter()
             .map(|session| session.session_id.clone())
             .collect(),
+        queued: task_worker_queue_reason(&detail.progress),
         next_action: compact_next_action(detail),
         wait,
     };
@@ -18061,6 +19516,7 @@ pub(crate) mod tests {
             image_model: image.map(str::to_string),
             video_model: video.map(str::to_string),
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }
@@ -19257,6 +20713,59 @@ pub(crate) mod tests {
         );
     }
 
+    /// KT-1669 — the brief asks a lane to keep only its own citations green and
+    /// says the integration settles a citation-only conflict, whatever the
+    /// transport and language.
+    #[test]
+    fn worker_brief_leaves_citation_only_conflicts_to_the_integration() {
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            for (can_run_shell, projection) in [(true, true), (true, false), (false, true)] {
+                let brief = worker_brief_markdown_in(
+                    lang,
+                    "KT-1669",
+                    "Citations",
+                    "Objective",
+                    &[],
+                    "/wt/kt1669",
+                    "kronn/task/KT-1669",
+                    "abc1234",
+                    can_run_shell,
+                    projection,
+                    None,
+                );
+                let (heading, own_gate, not_target) = match lang {
+                    RoomLang::Fr => (
+                        "## Citations de documentation",
+                        "c'est ta propre porte",
+                        "Ne ré-ancre pas les citations des docs que tu n'as pas modifiés",
+                    ),
+                    RoomLang::En => (
+                        "## Doc citations",
+                        "that is your own gate",
+                        "Do not re-anchor the citations of docs you did not edit",
+                    ),
+                };
+                let (shift, broken_for_good) = match lang {
+                    RoomLang::Fr => (
+                        "ton décalage de code a seulement déplacée",
+                        "Une citation que ton changement casse pour de bon",
+                    ),
+                    RoomLang::En => (
+                        "your code shift only moved",
+                        "A citation your change breaks for good",
+                    ),
+                };
+                for needle in [heading, own_gate, not_target, shift, broken_for_good] {
+                    assert!(brief.contains(needle), "missing `{needle}`: {brief}");
+                }
+                assert!(
+                    !brief.contains("make docs-reanchor"),
+                    "a lane is never asked to run the repository-wide re-anchor: {brief}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware() {
         let joined_cli = worker_brief_markdown(
@@ -20309,6 +21818,127 @@ pub(crate) mod tests {
         );
     }
 
+    /// KT-1632 — a launch held back by the task-worker cap is `Queued` with its
+    /// reason, place and the cap on the execution detail and in the compact
+    /// status a polling principal reads; it reports `Launching` once a slot
+    /// frees, and the reason is gone.
+    #[tokio::test]
+    async fn a_launch_held_by_the_task_worker_cap_reports_why_and_where() {
+        const CAP_ONE: &str = r#"{"__task_workers":1}"#;
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (first_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let second_ref = db
+            .with_conn(move |conn| {
+                Ok(create_todo_task(conn, &project_id, "Second task")
+                    .summary
+                    .reference)
+            })
+            .await
+            .unwrap();
+        let mut launched = Vec::new();
+        for (task_reference, key) in [(first_ref, "cap-first"), (second_ref, "cap-second")] {
+            launched.push(
+                provision_single_task_execution(
+                    &db,
+                    ProvisionInput {
+                        task_reference,
+                        parent_discussion_id: parent_id.clone(),
+                        worker: native_worker(),
+                        base_rev: Some("main".into()),
+                        idempotency_key: Some(key.into()),
+                    },
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let first_dispatch = launched[0].dispatch_job_id.clone().unwrap();
+        let second_dispatch = launched[1].dispatch_job_id.clone().unwrap();
+        db.with_conn({
+            let first_dispatch = first_dispatch.clone();
+            move |conn| {
+                crate::db::agent_dispatch::claim_with_limits(conn, &first_dispatch, Some(CAP_ONE))?
+                    .unwrap();
+                crate::db::agent_dispatch::mark_agent_started(conn, &first_dispatch)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        let held = db
+            .with_conn({
+                let second_dispatch = second_dispatch.clone();
+                move |conn| {
+                    crate::db::agent_dispatch::claim_with_limits(
+                        conn,
+                        &second_dispatch,
+                        Some(CAP_ONE),
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        assert!(held.is_none(), "the one slot is taken");
+
+        let second_id = launched[1].id.clone();
+        let queued = db
+            .with_conn({
+                let id = second_id.clone();
+                move |conn| execution_detail(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            queued.progress.phase,
+            crate::models::TaskExecutionProgressPhase::Queued
+        );
+        assert_eq!(
+            queued.progress.reason.as_deref(),
+            Some("task_worker_limit:1/1")
+        );
+        assert_eq!(queued.progress.queue_position, Some(1));
+        let compact = compact_execution_status(&queued, None);
+        let sentence = compact.queued.clone().expect("a queued launch says why");
+        assert!(sentence.contains("1 of 1 local task workers"), "{sentence}");
+        assert!(sentence.contains("position 1"), "{sentence}");
+        assert!(
+            compact_status_chars(&compact) <= COMPACT_STATUS_MAX_CHARS,
+            "the reason stays inside the compact budget"
+        );
+
+        // The running worker reports no queue reason.
+        let running = db
+            .with_conn({
+                let id = launched[0].id.clone();
+                move |conn| execution_detail(conn, &id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(running.progress.queue_position, None);
+        assert!(compact_execution_status(&running, None).queued.is_none());
+
+        // A freed slot starts it; nothing is left of the reason.
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_completed(conn, &first_dispatch)?;
+            crate::db::agent_dispatch::claim_with_limits(conn, &second_dispatch, Some(CAP_ONE))?
+                .unwrap();
+            crate::db::agent_dispatch::mark_agent_started(conn, &second_dispatch)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let started = db
+            .with_conn(move |conn| execution_detail(conn, &second_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            started.progress.phase,
+            crate::models::TaskExecutionProgressPhase::Launching
+        );
+        assert!(compact_execution_status(&started, None).queued.is_none());
+    }
+
     async fn count(db: &Database, sql: &'static str) -> i64 {
         db.with_conn(move |conn| Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?))
             .await
@@ -21045,7 +22675,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[test]
     fn reap_child_stops_a_group_whose_leader_already_exited() {
         let dir = tempfile::tempdir().unwrap();
@@ -21057,7 +22687,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[test]
     fn reap_child_reads_early_exit_stderr_despite_a_live_descendant() {
         let dir = tempfile::tempdir().unwrap();
@@ -21077,7 +22707,7 @@ pub(crate) mod tests {
         assert_gone(descendant, "the diagnostic read must stop the group first");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn surviving_git_hook_blocks_restart_reap_until_it_exits() {
         let repo = init_repo();
@@ -22605,6 +24235,189 @@ pub(crate) mod tests {
         assert_eq!(resolved, target);
     }
 
+    /// KT-1636 — the full suite is the PR's CI's; fmt, clippy and targeted lib
+    /// tests are the local defaults and raise nothing.
+    #[test]
+    fn full_suite_validations_are_flagged_and_the_default_gates_are_not() {
+        // The table the frontend's `isFullSuiteValidation` test reads too
+        // (`frontend/src/lib/__tests__/fullSuiteValidation.test.ts`): one rule,
+        // two detectors, one list of cases.
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/full_suite_validation_cases.json"
+        ))
+        .unwrap();
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10, "the table must keep its coverage");
+        for case in cases {
+            let command = case["command"].as_str().unwrap();
+            let expected = case["full_suite"].as_bool().unwrap();
+            assert_eq!(
+                is_full_suite_validation(command),
+                expected,
+                "`{command}` full_suite should be {expected}"
+            );
+        }
+        let specs = |commands: &[&str]| -> Vec<crate::models::ValidationSpec> {
+            commands
+                .iter()
+                .map(|command| crate::models::ValidationSpec {
+                    command: (*command).to_string(),
+                    quick_exec_id: None,
+                    timeout_secs: None,
+                })
+                .collect()
+        };
+        assert!(full_suite_validation_warnings(&specs(&[
+            "cargo fmt --check",
+            "cargo test --lib x"
+        ]))
+        .is_empty());
+        let warnings = full_suite_validation_warnings(&specs(&["cargo fmt --check", "cargo test"]));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "full_suite_ci_owned");
+        assert!(warnings[0].detail.contains("`cargo test`"));
+        assert!(warnings[0].detail.contains("CI"));
+        // A warning never refuses: the same command is still a valid gate.
+        assert!(validations_refusal(&specs(&["cargo test"])).is_none());
+    }
+
+    /// KT-1636 — the worker brief names the default gates and who owns the suite.
+    #[test]
+    fn shell_worker_brief_names_the_default_validations_and_the_ci_owned_suite() {
+        let brief = worker_brief_markdown(
+            "KT-1636",
+            "CI owns the suite",
+            "Objective",
+            &[],
+            "/wt/kt1636",
+            "kronn/task/KT-1636",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        assert!(brief.contains("fmt + clippy + tests lib ciblés"), "{brief}");
+        assert!(brief.contains("appartient à la CI de la PR"), "{brief}");
+    }
+
+    /// KT-1654 — both brief languages spell the
+    /// exact lint gate and ask for its exit code, so a worker never guesses.
+    #[test]
+    fn worker_brief_names_the_exact_lint_gate_and_the_exit_code() {
+        let en = worker_brief_markdown_in(
+            RoomLang::En,
+            "KT-1654",
+            "Lint gate",
+            "Objective",
+            &[],
+            "/wt/kt1654",
+            "kronn/task/KT-1654",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        let fr = worker_brief_markdown(
+            "KT-1654",
+            "Lint gate",
+            "Objective",
+            &[],
+            "/wt",
+            "b",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        for brief in [&en, &fr] {
+            assert!(brief.contains("`cargo fmt --check`"), "{brief}");
+            assert!(
+                brief.contains("`cargo clippy --all-targets -- -D warnings`"),
+                "{brief}"
+            );
+        }
+        assert!(en.contains("report each exit code"), "{en}");
+        assert!(fr.contains("reporte le code de sortie"), "{fr}");
+    }
+
+    /// KT-1654 — a Rust delivery with no passing `clippy --all-targets` entry
+    /// raises a non-blocking warning that rides on the review request.
+    #[test]
+    fn delivery_without_a_passing_clippy_all_targets_entry_warns_the_principal() {
+        let manifest = |files: &[&str], tests: &[(&str, crate::models::TestStatus, &str)]| {
+            crate::models::DeliveryManifestV1 {
+                version: "1".into(),
+                task_ref: "KT-1654".into(),
+                head_sha: "abc1234".into(),
+                files_touched: files
+                    .iter()
+                    .map(|path| crate::models::ManifestFile {
+                        path: (*path).into(),
+                        kind: crate::models::FileChangeKind::Modified,
+                    })
+                    .collect(),
+                tests: tests
+                    .iter()
+                    .map(|(name, status, evidence)| crate::models::ManifestTest {
+                        name: (*name).into(),
+                        status: *status,
+                        evidence: Some((*evidence).into()),
+                    })
+                    .collect(),
+                dod_status: vec![],
+                docs: vec![],
+                migrations: vec![],
+                risks: vec![],
+                limitations: vec![],
+                summary: "s".into(),
+                tests_executed: None,
+            }
+        };
+        let rust = ["backend/src/lib.rs"];
+        let lib_only = [(
+            "clippy --lib",
+            crate::models::TestStatus::Pass,
+            "cargo clippy --lib: exit 0",
+        )];
+        let warning = delivery_lint_gate_warning(&manifest(&rust, &lib_only), RoomLang::En)
+            .expect("--lib clippy does not satisfy the gate");
+        assert!(warning.contains("cargo clippy --all-targets -- -D warnings"));
+        assert!(
+            delivery_lint_gate_warning(&manifest(&rust, &lib_only), RoomLang::Fr)
+                .unwrap()
+                .contains("Gate de lint")
+        );
+        // No tests at all, and a failing/skipped entry, both warn.
+        assert!(delivery_lint_gate_warning(&manifest(&rust, &[]), RoomLang::En).is_some());
+        let failed = [(
+            "clippy",
+            crate::models::TestStatus::Fail,
+            "cargo clippy --all-targets -- -D warnings: exit 101",
+        )];
+        assert!(delivery_lint_gate_warning(&manifest(&rust, &failed), RoomLang::En).is_some());
+        // A passing entry, in the name or the evidence, clears it.
+        let ok = [(
+            "cargo clippy --all-targets -- -D warnings",
+            crate::models::TestStatus::Pass,
+            "exit 0",
+        )];
+        assert!(delivery_lint_gate_warning(&manifest(&rust, &ok), RoomLang::En).is_none());
+        let manifest_path = [(
+            "lint",
+            crate::models::TestStatus::Pass,
+            "cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings → 0",
+        )];
+        assert!(
+            delivery_lint_gate_warning(&manifest(&rust, &manifest_path), RoomLang::En).is_none()
+        );
+        // A change with no Rust is never warned.
+        assert!(delivery_lint_gate_warning(
+            &manifest(&["frontend/src/a.ts", "README.md"], &[]),
+            RoomLang::En
+        )
+        .is_none());
+    }
+
     #[test]
     fn validation_cargo_argv_recognises_only_quick_exec_cargo_forms() {
         assert_eq!(
@@ -22682,7 +24495,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn metadata_timeout_kills_and_reaps_the_owned_child() {
         use std::process::Stdio;
@@ -22797,6 +24610,64 @@ pub(crate) mod tests {
             exit_code,
             output: output.into(),
         }
+    }
+
+    /// KT-1438: a long failing output reaches the room and the worker with its
+    /// start (the first error) and its end (the verdict), not only the tail.
+    #[test]
+    fn a_long_failure_output_keeps_its_head_and_its_tail() {
+        let mut output = String::from("Twig\\Error\\LoaderError: Unable to find template\n");
+        output.push_str(&"#1 /app/vendor/twig/Environment.php\n".repeat(400));
+        output.push_str("make: *** [iso-test-class] Error 1\n");
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            let shown = fenced_output(&output, lang);
+            assert!(
+                shown.contains("LoaderError: Unable to find template"),
+                "{shown}"
+            );
+            assert!(
+                shown.contains("make: *** [iso-test-class] Error 1"),
+                "{shown}"
+            );
+            assert!(shown.contains("omi"), "the cut is announced: {shown}");
+            assert!(
+                shown.chars().count() < REWORK_OUTPUT_LIMIT + 200,
+                "bounded: {}",
+                shown.chars().count()
+            );
+        }
+    }
+
+    /// KT-1438: the head kept for the room and the worker is redacted, a secret
+    /// in the first lines included, and one the cut would have split.
+    #[test]
+    fn a_failure_output_is_redacted_before_it_reaches_the_room() {
+        let mut output = String::from(
+            "PDOException: postgres://app:Sup3rS3cretPw@db.internal:5432/kronn refused\n\
+             Authorization: Bearer abc123def456ghi789jkl\n",
+        );
+        output.push_str(&"#1 /app/vendor/doctrine/Connection.php\n".repeat(300));
+        output.push_str("APP_SECRET=61cc0ffee1234abcd5678\nmake: *** [test] Error 1\n");
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            let shown = fenced_output(&output, lang);
+            assert!(shown.contains("PDOException: postgres://app:"), "{shown}");
+            assert!(shown.contains("make: *** [test] Error 1"), "{shown}");
+            for secret in [
+                "Sup3rS3cretPw",
+                "abc123def456ghi789jkl",
+                "61cc0ffee1234abcd5678",
+            ] {
+                assert!(!shown.contains(secret), "{secret} leaked: {shown}");
+            }
+        }
+    }
+
+    /// An output within the limit is shown whole.
+    #[test]
+    fn a_short_failure_output_is_shown_whole() {
+        let shown = fenced_output("one\ntwo\n", RoomLang::En);
+        assert!(shown.contains("one\ntwo"));
+        assert!(!shown.contains("omitted"));
     }
 
     /// KT-1433: a discussion grant widens a sandboxed project to Docker and
@@ -23041,7 +24912,7 @@ pub(crate) mod tests {
     /// KT-1268 review — a timed-out metadata resolution takes the whole group
     /// of the confined launch down, not only its leader: a grandchild of the
     /// worker's `rustc` wrapper must not outlive the timeout.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn metadata_timeout_kills_the_grandchildren_of_a_group_leader() {
         use std::process::Stdio;
@@ -26319,6 +28190,267 @@ pub(crate) mod tests {
         assert_eq!(task.summary.status, PlanningTaskStatus::InProgress);
     }
 
+    const OVERVIEW: &str = "docs/architecture/overview.md";
+
+    fn lib_lines(shift_after: usize, shift: usize) -> String {
+        let mut lines: Vec<String> = (1..=60)
+            .map(|n| match n {
+                10 => "pub fn alpha() {}".to_string(),
+                30 => "pub fn beta() {}".to_string(),
+                n => format!("let v{n} = {n};"),
+            })
+            .collect();
+        for k in 0..shift {
+            lines.insert(shift_after + k, format!("let shifted{k} = 0;"));
+        }
+        lines.join("\n") + "\n"
+    }
+
+    /// Ten lines, `gamma` on the third unless `with_gamma` is false.
+    fn other_lines(with_gamma: bool) -> String {
+        (1..=10)
+            .map(|n| match n {
+                3 if with_gamma => "pub fn gamma() {}".to_string(),
+                n => format!("let o{n} = 0;"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    fn overview(alpha: usize, beta: usize) -> String {
+        format!(
+            "# Overview\n\nAlpha: [src: file: src/lib.rs:{alpha}-{}#alpha]\n\
+             Beta: [src: file: src/lib.rs:{beta}-{}#beta]\n",
+            alpha + 1,
+            beta + 1
+        )
+    }
+
+    fn commit_everything(dir: &Path, message: &str) {
+        for args in [vec!["add", "."], vec!["commit", "-m", message]] {
+            assert!(git(dir, &args).status.success(), "{args:?}");
+        }
+    }
+
+    /// KT-1669 — the worker and the target both shifted `src/lib.rs` and
+    /// re-anchored the same two lines of `overview.md`. With `gone`, the worker
+    /// also cites a function the target deleted, elsewhere in the doc.
+    async fn two_lanes_on_overview(
+        db: &Database,
+        repo: &Path,
+        key: &str,
+        gone: bool,
+    ) -> TaskExecution {
+        const TAIL: &str = "\nNotes.\nOne.\nTwo.\nThree.\nFour.\n";
+        std::fs::create_dir_all(repo.join("docs/architecture")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), lib_lines(0, 0)).unwrap();
+        std::fs::write(repo.join("src/other.rs"), other_lines(true)).unwrap();
+        std::fs::write(repo.join(OVERVIEW), overview(10, 30) + TAIL).unwrap();
+        commit_everything(repo, "base: lib and overview");
+
+        let (execution, _task_ref, child) =
+            approved_execution_with_commit(db, repo, key, "src/lib.rs", &lib_lines(5, 5), vec![])
+                .await;
+        let mut doc = overview(15, 35) + TAIL;
+        if gone {
+            doc.push_str("Gamma: [src: file: src/other.rs:3-4#gamma]\n");
+        }
+        std::fs::write(child.join(OVERVIEW), doc).unwrap();
+        commit_everything(&child, "worker re-anchors overview");
+
+        std::fs::write(repo.join("src/lib.rs"), lib_lines(1, 3)).unwrap();
+        std::fs::write(repo.join(OVERVIEW), overview(13, 33) + TAIL).unwrap();
+        if gone {
+            std::fs::write(repo.join("src/other.rs"), other_lines(false)).unwrap();
+        }
+        commit_everything(repo, "target re-anchors overview");
+        assert!(
+            crate::core::docs_citations::check_corpus(repo).is_empty(),
+            "the target itself is green"
+        );
+        execution
+    }
+
+    #[tokio::test]
+    async fn a_citation_only_conflict_is_settled_by_the_integration_without_the_worker() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-settled", false).await;
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "no worker turn for an anchor-only conflict: {outcome:?}"
+        );
+        // The target side was taken, then re-anchored onto the merge: 3 + 5
+        // lines above both functions, and the docs gate is green on the result.
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(OVERVIEW)).unwrap(),
+            overview(18, 38) + "\nNotes.\nOne.\nTwo.\nThree.\nFour.\n"
+        );
+        assert!(crate::core::docs_citations::check_corpus(repo.path()).is_empty());
+        let id = execution.id.clone();
+        let settled = db
+            .with_conn(move |conn| crate::db::orchestration::citations_settled(conn, &id))
+            .await
+            .unwrap();
+        // The delivery card reads this journal: the doc and how many anchors moved.
+        assert_eq!(
+            settled,
+            vec![crate::core::docs_citations::merge::Settlement {
+                docs: vec![OVERVIEW.to_string()],
+                moved: 2,
+                reanchored: vec![OVERVIEW.to_string()],
+            }]
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_citation_left_unresolved_by_the_settlement_goes_back_with_the_exact_list() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-gone", true).await;
+        let target_before = git_rev(repo.path(), "HEAD");
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::SentBack { ref reason } if reason.contains(OVERVIEW)),
+            "{outcome:?}"
+        );
+        assert_eq!(git_rev(repo.path(), "HEAD"), target_before);
+        let after = exec_of(&db, &execution.id).await;
+        let (_, brief) = message_row(
+            &db,
+            &format!(
+                "orch-integration-rework:{}:{}",
+                execution.id, after.attempt_no
+            ),
+        )
+        .await
+        .expect("the worker is told what is unresolved");
+        assert!(
+            brief.contains("docs/architecture/overview.md:11 [src: file: src/other.rs:3-4#gamma]"),
+            "{brief}"
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            0,
+            "a bounced merge settled nothing"
+        );
+    }
+
+    /// An interrupted execution whose boot recovery decided to rebuild the
+    /// candidate, then the recovery consumed.
+    async fn recover_by_rebuilding(
+        db: &Database,
+        execution: &TaskExecution,
+        repo: &Path,
+    ) -> IntegrationOutcome {
+        checkpoint(
+            db,
+            &execution.id,
+            CheckpointStep::Anchored(git_rev(repo, "main")),
+        )
+        .await
+        .unwrap();
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({ "reason": "backend restart" }),
+            )?;
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution exists")?;
+            let run = crate::db::orchestration::get_orchestration_run(
+                conn,
+                &execution.orchestration_run_id,
+            )?
+            .context("run exists")?;
+            crate::db::orchestration::set_execution_recovery(
+                conn,
+                &execution,
+                &run,
+                ExecutionRecoveryAction::RebuildCandidate,
+                "the target may have moved",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        resume_recovered_integration(db, &execution.id, ExecutionRecoveryAction::RebuildCandidate)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_recovered_rebuild_settles_and_journals_a_citation_only_conflict() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-recovered", false).await;
+
+        let outcome = recover_by_rebuilding(&db, &execution, repo.path()).await;
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "no worker turn for an anchor-only conflict after recovery: {outcome:?}"
+        );
+        assert!(crate::core::docs_citations::check_corpus(repo.path()).is_empty());
+        let id = execution.id.clone();
+        let settled = db
+            .with_conn(move |conn| crate::db::orchestration::citations_settled(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled,
+            vec![crate::core::docs_citations::merge::Settlement {
+                docs: vec![OVERVIEW.to_string()],
+                moved: 2,
+                reanchored: vec![OVERVIEW.to_string()],
+            }],
+            "the delivery card reads what the recovery settled"
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_rebuild_that_leaves_a_citation_unresolved_goes_back_with_the_list() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution =
+            two_lanes_on_overview(&db, repo.path(), "citation-recovered-gone", true).await;
+        let target_before = git_rev(repo.path(), "HEAD");
+
+        let outcome = recover_by_rebuilding(&db, &execution, repo.path()).await;
+
+        let IntegrationOutcome::SentBack { reason } = outcome else {
+            panic!("a citation whose symbol is gone goes back: {outcome:?}");
+        };
+        assert!(reason.contains("merge conflict after recovery"), "{reason}");
+        assert!(
+            reason.contains("docs/architecture/overview.md:11 [src: file: src/other.rs:3-4#gamma]"),
+            "{reason}"
+        );
+        assert_eq!(git_rev(repo.path(), "HEAD"), target_before);
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            0
+        );
+    }
+
     #[tokio::test]
     async fn failed_validation_returns_to_worker_and_records_the_exact_candidate() {
         let repo = init_repo();
@@ -29243,6 +31375,292 @@ pub(crate) mod tests {
         (exec.id, worktree)
     }
 
+    /// KT-1438: a launch seeds the worktree with the project's declared
+    /// gitignored assets, journals the outcome on the execution, and the
+    /// project's settings read that record back with its skip reasons.
+    #[tokio::test]
+    async fn provisioning_seeds_the_declared_assets_and_the_settings_can_read_the_record() {
+        use crate::core::task_worker_lane_seeds::SeedStatus;
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".gitignore"), "gen/\n.kronn/\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "ignore gen"]);
+        std::fs::create_dir_all(repo.path().join("gen")).unwrap();
+        std::fs::write(repo.path().join("gen/asset.txt"), "generated").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let (pid, declared) = (
+            project_id.clone(),
+            vec!["gen".to_string(), "missing".to_string()],
+        );
+        db.with_conn(move |conn| crate::db::projects::set_lane_seeds(conn, &pid, &declared))
+            .await
+            .unwrap();
+
+        let exec = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("lane-seeds".into()),
+            },
+        )
+        .await
+        .expect("provision");
+
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo.path(), &task_ref, exec_short(&exec.id)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("gen/asset.txt")).unwrap(),
+            "generated",
+            "the generated asset is in the fresh worktree"
+        );
+        assert_eq!(
+            git(
+                &worktree,
+                &["status", "--porcelain", "--untracked-files=all"]
+            )
+            .stdout
+            .len(),
+            0,
+            "the seed stays out of git status"
+        );
+        let (id, pid) = (exec.id.clone(), project_id.clone());
+        let (recorded, latest) = db
+            .with_conn(move |conn| {
+                Ok((
+                    crate::db::orchestration::latest_lane_seeds(conn, &id)?,
+                    crate::db::orchestration::latest_lane_seeds_for_project(conn, &pid)?,
+                ))
+            })
+            .await
+            .unwrap();
+        let recorded = recorded.expect("the seeding is journalled on the execution");
+        assert!(matches!(
+            recorded.seeds[0].status,
+            SeedStatus::Seeded { .. }
+        ));
+        let skipped: Vec<_> = recorded
+            .skipped()
+            .map(|(path, _)| path.to_string())
+            .collect();
+        assert_eq!(skipped, ["missing"], "{recorded:?}");
+        let (exec_id, _at, record) = latest.expect("the project's settings find it");
+        assert_eq!(exec_id, exec.id);
+        assert_eq!(record, recorded);
+    }
+
+    /// KT-1438: a `.env` that appeared in an accepted seed after the human's
+    /// review is not copied into the launched worktree, and the journal says why.
+    #[tokio::test]
+    async fn provisioning_holds_back_a_seed_that_gained_an_unconfirmed_secret() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".gitignore"), "gen/\n.kronn/\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "ignore gen"]);
+        std::fs::create_dir_all(repo.path().join("gen")).unwrap();
+        std::fs::write(repo.path().join("gen/asset.txt"), "generated").unwrap();
+        std::fs::write(repo.path().join("gen/.env"), "TOKEN=1").unwrap();
+        std::fs::write(repo.path().join("gen/.env.production"), "TOKEN=2").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        let pid = project_id.clone();
+        db.with_conn(move |conn| {
+            // The human reviewed `gen/.env` only.
+            crate::db::projects::set_lane_seeds_confirmed(
+                conn,
+                &pid,
+                &["gen".to_string()],
+                &crate::core::task_worker_lane_seeds::ConfirmedSecrets::from([(
+                    "gen".to_string(),
+                    vec!["gen/.env".to_string()],
+                )]),
+            )
+        })
+        .await
+        .unwrap();
+
+        let exec = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("lane-seeds-held".into()),
+            },
+        )
+        .await
+        .expect("provision");
+
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo.path(), &task_ref, exec_short(&exec.id)).unwrap();
+        assert!(
+            !worktree.join("gen").exists(),
+            "nothing of the held seed is copied"
+        );
+        let id = exec.id.clone();
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        let skipped: Vec<_> = recorded.skipped().collect();
+        assert_eq!(skipped.len(), 1, "{recorded:?}");
+        assert!(
+            skipped[0].1.starts_with("held:") && skipped[0].1.contains("gen/.env.production"),
+            "{skipped:?}"
+        );
+        assert!(
+            !skipped[0].1.contains("`gen/.env`"),
+            "the confirmed file is not named: {skipped:?}"
+        );
+    }
+
+    /// A repo whose ignored `gen/` is mentioned by tracked code, so it is a
+    /// suggested seed.
+    fn repo_with_a_suggestible_gen() -> tempfile::TempDir {
+        let repo = init_repo();
+        std::fs::write(repo.path().join(".gitignore"), "gen/\n.kronn/\n").unwrap();
+        std::fs::write(
+            repo.path().join("page.twig"),
+            "{% include 'gen/asset.txt' %}",
+        )
+        .unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "gen is referenced"]);
+        std::fs::create_dir_all(repo.path().join("gen")).unwrap();
+        std::fs::write(repo.path().join("gen/asset.txt"), "generated").unwrap();
+        repo
+    }
+
+    async fn provision_for_seeds(
+        db: &Database,
+        repo: &std::path::Path,
+        key: &str,
+        task_ref: String,
+        parent_id: String,
+    ) -> (String, std::path::PathBuf) {
+        let exec = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref.clone(),
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(key.into()),
+            },
+        )
+        .await
+        .expect("provision");
+        let (worktree, _branch) =
+            worktree::task_worktree_layout(repo, &task_ref, exec_short(&exec.id)).unwrap();
+        (exec.id, worktree)
+    }
+
+    /// KT-1438 (DoD 4): with "Copy generated assets into task worktrees" off,
+    /// nothing is seeded anywhere, a declared seed included, and nothing is
+    /// journalled.
+    #[tokio::test]
+    async fn provisioning_seeds_nothing_when_the_owner_turned_copying_off() {
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(false, true);
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, project_id) = seed(&db, repo.path()).await;
+        db.with_conn(move |conn| {
+            crate::db::projects::set_lane_seeds(conn, &project_id, &["gen".to_string()])
+        })
+        .await
+        .unwrap();
+
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "seeds-off", task_ref, parent_id).await;
+
+        assert!(!worktree.join("gen").exists());
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap();
+        assert!(recorded.is_none(), "{recorded:?}");
+    }
+
+    /// KT-1438 (DoD 4): with adoption on, a project that declared nothing is
+    /// seeded with Kronn's suggestion; with it off (the default) it is not.
+    #[tokio::test]
+    async fn provisioning_adopts_suggestions_when_the_owner_turned_adoption_on() {
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(true, true);
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-on", task_ref, parent_id).await;
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("gen/asset.txt")).unwrap(),
+            "generated"
+        );
+        assert_eq!(
+            git(
+                &worktree,
+                &["status", "--porcelain", "--untracked-files=all"]
+            )
+            .stdout
+            .len(),
+            0,
+            "an adopted seed stays out of git status"
+        );
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        assert_eq!(recorded.seeds.len(), 1, "{recorded:?}");
+    }
+
+    /// KT-1438 (DoD 4): adoption is off by default: a project that declared
+    /// nothing is not seeded with a suggestion.
+    #[tokio::test]
+    async fn provisioning_adopts_nothing_by_default() {
+        let repo = repo_with_a_suggestible_gen();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+        assert_eq!(
+            crate::core::task_worker_lane_seeds::seed_policy(),
+            crate::core::task_worker_lane_seeds::SeedPolicy {
+                copy_enabled: true,
+                adopt_suggested: false
+            }
+        );
+        let (_, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-off", task_ref, parent_id).await;
+        assert!(!worktree.join("gen").exists(), "the default adopts nothing");
+    }
+
+    /// KT-1438 (DoD 4): an adopted suggestion holding a secret-looking file is
+    /// held, not copied, until a human confirms the file.
+    #[tokio::test]
+    async fn provisioning_holds_an_adopted_suggestion_that_holds_a_secret() {
+        let _policy = crate::core::task_worker_lane_seeds::TestSeedPolicy::set(true, true);
+        let repo = repo_with_a_suggestible_gen();
+        std::fs::write(repo.path().join("gen/.env"), "TOKEN=1").unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _project_id) = seed(&db, repo.path()).await;
+
+        let (exec_id, worktree) =
+            provision_for_seeds(&db, repo.path(), "adopt-held", task_ref, parent_id).await;
+
+        assert!(!worktree.join("gen").exists());
+        let recorded = db
+            .with_conn(move |conn| crate::db::orchestration::latest_lane_seeds(conn, &exec_id))
+            .await
+            .unwrap()
+            .expect("the seeding is journalled");
+        let skipped: Vec<_> = recorded.skipped().collect();
+        assert_eq!(skipped.len(), 1, "{recorded:?}");
+        assert!(skipped[0].1.starts_with("held:"), "{skipped:?}");
+    }
+
     #[tokio::test]
     async fn a_successful_smoke_check_is_recorded_on_the_execution() {
         let repo = init_repo();
@@ -29278,6 +31696,79 @@ pub(crate) mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// KT-1649 — a launch fetches what the worker's lock file references before
+    /// anything builds, and the step is on the execution's journal with the
+    /// registries it was bounded to.
+    #[tokio::test]
+    async fn the_dependency_fetch_of_a_lock_file_is_journalled_with_its_registries() {
+        use crate::core::task_worker_dep_fetch::{Ecosystem, FetchOutcome};
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+        std::fs::write(
+            worktree.join("backend").join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .unwrap();
+
+        record_dependency_fetch(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let id = exec_id.clone();
+        let record = db
+            .with_conn(move |conn| crate::db::orchestration::latest_dependency_fetch(conn, &id))
+            .await
+            .unwrap()
+            .expect("the fetch is journalled");
+        assert_eq!(record.steps.len(), 1, "{record:?}");
+        let step = &record.steps[0];
+        assert_eq!(step.ecosystem, Ecosystem::Cargo);
+        assert_eq!(step.lockfile, "backend/Cargo.lock");
+        // The probe answers "cached" when the host has a CARGO_HOME to read.
+        let host_has_cargo_home = crate::core::task_worker_env::SharedCaches::discover(None)
+            .cargo_home
+            .is_some();
+        if host_has_cargo_home {
+            assert_eq!(step.outcome, FetchOutcome::Cached);
+            assert_eq!(
+                step.registries,
+                vec!["registry+https://github.com/rust-lang/crates.io-index".to_string()]
+            );
+        } else {
+            assert!(matches!(step.outcome, FetchOutcome::Refused { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_launch_with_no_lock_file_to_fetch_journals_no_dependency_fetch() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+
+        record_dependency_fetch(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let id = exec_id.clone();
+        let record = db
+            .with_conn(move |conn| crate::db::orchestration::latest_dependency_fetch(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(record, None);
     }
 
     #[tokio::test]
@@ -29603,6 +32094,20 @@ pub(crate) mod tests {
             "a stuck warm-up is visible to the principal"
         );
         assert!(detail.progress.queued_since.is_some());
+        // KT-1637 — while the build runs, the steps already behind it are timed
+        // and the warm-up's wall clock is running.
+        let steps: Vec<_> = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.step)
+            .collect();
+        assert_eq!(
+            steps,
+            vec![crate::models::WarmingStepKind::WorktreeCreation],
+            "only the finished steps are reported"
+        );
+        assert!(detail.progress.warming_total_ms.is_some());
 
         runner.release();
         wait_for_status(&db, &launched.id, TaskExecutionStatus::Working).await;
@@ -29635,6 +32140,39 @@ pub(crate) mod tests {
             detail.progress.phase,
             crate::models::TaskExecutionProgressPhase::Warming,
             "the warming phase ends with the warm-up"
+        );
+        // KT-1637 — and the breakdown outlives it, in run order, with the wall
+        // time of the whole warm-up so what is unmeasured can be read off.
+        use crate::models::WarmingStepKind as Step;
+        let steps: Vec<_> = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.step)
+            .collect();
+        assert_eq!(
+            steps,
+            vec![
+                Step::WorktreeCreation,
+                Step::LaneProvision,
+                // No seed step: the test host has no warm target to clone.
+                Step::GateWait,
+                Step::FirstBuild,
+                Step::SmokeCheck,
+            ],
+            "{:?}",
+            detail.progress.warming_steps
+        );
+        let measured: u64 = detail
+            .progress
+            .warming_steps
+            .iter()
+            .map(|step| step.duration_ms)
+            .sum();
+        let total = detail.progress.warming_total_ms.expect("warm-up wall time");
+        assert!(
+            total >= measured,
+            "the wall time ({total} ms) covers the measured steps ({measured} ms)"
         );
     }
 
@@ -33268,6 +35806,502 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    /// KT-1664 — a provider that answers with a fixed verdict and remembers who
+    /// it was asked about, standing in for the KT-1657 agent probe.
+    struct StubQuotaProbe {
+        verdict: Option<bool>,
+        asked: std::sync::Mutex<Vec<AgentType>>,
+    }
+
+    impl StubQuotaProbe {
+        fn new(verdict: Option<bool>) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                verdict,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> Vec<AgentType> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::workflows::quota_wait::QuotaProbe for StubQuotaProbe {
+        async fn quota_is_back(
+            &self,
+            agent: &AgentType,
+            _project_path: &str,
+            _tokens: &crate::models::TokensConfig,
+            _full_access: bool,
+        ) -> Option<bool> {
+            self.asked.lock().unwrap().push(agent.clone());
+            self.verdict
+        }
+    }
+
+    fn rechecker_with(
+        probe: &std::sync::Arc<StubQuotaProbe>,
+    ) -> crate::workflows::quota_wait::QuotaRechecker {
+        crate::workflows::quota_wait::QuotaRechecker::new(
+            probe.clone(),
+            chrono::Duration::minutes(20),
+        )
+    }
+
+    /// The 10/11 incident: Claude Code refused a worker's dispatch with no
+    /// announced reset, so KT-1564's reset sweep never lists it. Every execution
+    /// escalated that way, with its own tier and model.
+    async fn escalate_claude_without_reset(
+        db: &std::sync::Arc<Database>,
+        repo: &Path,
+        count: usize,
+    ) -> Vec<TaskExecution> {
+        let executions = economy_claude_executions(db, repo, count).await;
+        for execution in &executions {
+            escalate_claude_with_reset(db, execution.dispatch_job_id.clone().unwrap(), None).await;
+        }
+        executions
+    }
+
+    async fn messages_of(
+        db: &Database,
+        discussion_id: &str,
+    ) -> Vec<crate::models::DiscussionMessage> {
+        let id = discussion_id.to_string();
+        db.with_conn(move |conn| crate::db::discussions::list_messages(conn, &id))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_quota_escalation_with_no_announced_reset_resumes_on_its_worker_when_the_provider_answers(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let refused = was.dispatch_job_id.clone().unwrap();
+        let parent = was.parent_discussion_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET language = 'en' WHERE id = ?1",
+                [&parent],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+        assert!(
+            return_quota_escalations_past_reset(&quota_test_state(&db))
+                .await
+                .is_empty(),
+            "the reset sweep has nothing to go by"
+        );
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+
+        // Just refused: the provider is not asked about it yet.
+        assert!(rechecker
+            .recheck_pass(&state, t0)
+            .await
+            .executions
+            .is_empty());
+        // Bounded: no new question inside the interval.
+        assert!(rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(10))
+            .await
+            .executions
+            .is_empty());
+        assert!(probe.asked().is_empty());
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+
+        let resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+            .await;
+        assert_eq!(resumed.executions, vec![was.id.clone()]);
+        assert_eq!(probe.asked(), vec![AgentType::ClaudeCode]);
+
+        // Same worker, same room, same worktree; a fresh dispatch carries it.
+        let back = exec_of(&db, &was.id).await;
+        assert_eq!(back.status, TaskExecutionStatus::Working);
+        assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(back.worker_model_tier.as_deref(), Some("economy"));
+        assert_eq!(back.worker_model, was.worker_model);
+        assert_eq!(back.sub_discussion_id, was.sub_discussion_id);
+        assert_eq!(back.workspace_id, was.workspace_id);
+        assert_eq!(back.child_branch, was.child_branch);
+        let dispatch = back.dispatch_job_id.clone().unwrap();
+        assert_ne!(dispatch, refused);
+        assert_eq!(
+            dispatch_of(&db, dispatch).await.agent_override,
+            Some(AgentType::ClaudeCode)
+        );
+        let id = was.id.clone();
+        assert!(db
+            .with_conn(move |conn| crate::db::orchestration::provider_changes(conn, &id))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            !claude_quota_blocked(&db).await,
+            "the provider stops being refused (KT-838)"
+        );
+
+        // The room gets one line, keyed by the refused dispatch the escalation
+        // notice is keyed by.
+        let notices = messages_of(&db, &was.parent_discussion_id)
+            .await
+            .into_iter()
+            .filter(|message| message.id == format!("provider-quota-resumed:{refused}"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].content.contains("Quota back"),
+            "{}",
+            notices[0].content
+        );
+        assert!(notices[0].content.contains("No human action"));
+
+        // Settled: the next passes find nothing left to ask about.
+        assert!(rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(60))
+            .await
+            .executions
+            .is_empty());
+        assert_eq!(probe.asked().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_room_line_of_a_resumed_quota_escalation_speaks_the_rooms_language() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let parent = was.parent_discussion_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET language = 'fr' WHERE id = ?1",
+                [&parent],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        resume_quota_escalation_after_probe(&quota_test_state(&db), &was.id)
+            .await
+            .unwrap();
+        let line = messages_of(&db, &was.parent_discussion_id)
+            .await
+            .into_iter()
+            .find(|message| message.id.starts_with("provider-quota-resumed:"))
+            .expect("one line in the room");
+        assert!(line.content.contains("Quota rétabli"), "{}", line.content);
+        assert!(line.content.contains("Plus aucune action humaine"));
+    }
+
+    #[tokio::test]
+    async fn a_login_or_key_change_asks_the_provider_about_quota_escalations_at_once() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+        assert!(rechecker
+            .recheck_pass(&state, t0)
+            .await
+            .executions
+            .is_empty());
+        assert!(probe.asked().is_empty());
+
+        crate::workflows::quota_wait::request_recheck();
+        let resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(1))
+            .await;
+        assert_eq!(resumed.executions, vec![was.id.clone()]);
+        assert_eq!(probe.asked().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn several_executions_escalated_by_one_outage_all_resume_after_one_successful_probe() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let before = escalate_claude_without_reset(&db, repo.path(), 3).await;
+        assert!(claude_quota_blocked(&db).await);
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+        rechecker.recheck_pass(&state, t0).await;
+        let mut resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+            .await
+            .executions;
+        resumed.sort();
+        let mut expected = before.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(resumed, expected);
+        assert_eq!(
+            probe.asked(),
+            vec![AgentType::ClaudeCode],
+            "one probe for all"
+        );
+        for was in &before {
+            let back = exec_of(&db, &was.id).await;
+            assert_eq!(back.status, TaskExecutionStatus::Working);
+            assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+            assert_eq!(
+                back.worker_model, was.worker_model,
+                "each keeps its own model, not its sibling's"
+            );
+            assert_ne!(back.dispatch_job_id, was.dispatch_job_id);
+        }
+        assert!(!claude_quota_blocked(&db).await);
+    }
+
+    #[tokio::test]
+    async fn a_provider_still_refusing_or_silent_keeps_every_escalation_without_a_dispatch() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let before = escalate_claude_without_reset(&db, repo.path(), 2).await;
+        let state = quota_test_state(&db);
+        let t0 = chrono::Utc::now();
+        for verdict in [Some(false), None] {
+            let probe = StubQuotaProbe::new(verdict);
+            let rechecker = rechecker_with(&probe);
+            rechecker.recheck_pass(&state, t0).await;
+            assert!(rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+                .await
+                .executions
+                .is_empty());
+            assert!(rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(30))
+                .await
+                .executions
+                .is_empty());
+            assert_eq!(probe.asked().len(), 1, "{verdict:?}: asked once in 30 min");
+            rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(42))
+                .await;
+            assert_eq!(
+                probe.asked().len(),
+                2,
+                "{verdict:?}: asked again after 20 min"
+            );
+        }
+        for was in &before {
+            let still = exec_of(&db, &was.id).await;
+            assert_eq!(still.status, TaskExecutionStatus::Escalated);
+            assert_eq!(
+                still.dispatch_job_id, was.dispatch_job_id,
+                "no new dispatch was enqueued"
+            );
+            let child = was.sub_discussion_id.clone().unwrap();
+            let jobs: i64 = db
+                .with_conn(move |conn| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = ?1",
+                        [&child],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(jobs, 1, "only the refused dispatch exists");
+        }
+        assert!(claude_quota_blocked(&db).await);
+        assert!(messages_of(&db, &before[0].parent_discussion_id)
+            .await
+            .iter()
+            .all(|message| !message.id.starts_with("provider-quota-resumed:")));
+    }
+
+    /// How an escalation stops being one the provider re-check may resume.
+    #[derive(Debug, Clone, Copy)]
+    enum Spoiled {
+        AnotherReason,
+        OwnerChangedWorker,
+        RunAwaitsHuman,
+        RunPaused,
+        TaskDone,
+        ResetAnnounced,
+    }
+
+    async fn spoil_the_escalation(
+        db: &std::sync::Arc<Database>,
+        state: &AppState,
+        was: &TaskExecution,
+        how: Spoiled,
+    ) {
+        let id = was.id.clone();
+        match how {
+            Spoiled::AnotherReason => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE task_execution_recovery SET recovery_reason = 'review_wait_timeout' \
+                         WHERE task_execution_id = ?1",
+                        [&id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            Spoiled::OwnerChangedWorker => {
+                reassign_native_execution(
+                    state,
+                    &id,
+                    crate::models::CampaignWorkerSelection {
+                        target: MessageTarget::agent(AgentType::Codex),
+                        model: None,
+                        profile_id: None,
+                    },
+                    "the owner picked Codex",
+                )
+                .await
+                .unwrap();
+            }
+            Spoiled::RunAwaitsHuman => set_run_state(db, &id, "awaiting_human", "active").await,
+            Spoiled::RunPaused => set_run_state(db, &id, "paused", "active").await,
+            Spoiled::TaskDone => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE planning_tasks SET status = 'done' \
+                         WHERE id = (SELECT task_id FROM task_executions WHERE id = ?1)",
+                        [&id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            // The provider announced a reset: the reset sweep owns it, not the probe.
+            Spoiled::ResetAnnounced => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE provider_quota_generations SET reset_at = ?1 \
+                         WHERE provider = 'ClaudeCode'",
+                        [(chrono::Utc::now() + chrono::Duration::hours(2))
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escalation_that_is_not_a_quota_one_or_was_taken_over_is_never_probed_or_resumed() {
+        for how in [
+            Spoiled::AnotherReason,
+            Spoiled::OwnerChangedWorker,
+            Spoiled::RunAwaitsHuman,
+            Spoiled::RunPaused,
+            Spoiled::TaskDone,
+            Spoiled::ResetAnnounced,
+        ] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let state = quota_test_state(&db);
+            let was = escalate_claude_without_reset(&db, repo.path(), 1)
+                .await
+                .remove(0);
+            assert_eq!(
+                db.with_read_conn(
+                    crate::db::orchestration::executions_escalated_on_unannounced_quota
+                )
+                .await
+                .unwrap()
+                .len(),
+                1,
+                "the control: it is listed before being spoiled"
+            );
+            spoil_the_escalation(&db, &state, &was, how).await;
+            let before = exec_of(&db, &was.id).await;
+
+            let probe = StubQuotaProbe::new(Some(true));
+            let rechecker = rechecker_with(&probe);
+            let t0 = chrono::Utc::now();
+            rechecker.recheck_pass(&state, t0).await;
+            let resumed = rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+                .await;
+            assert!(resumed.executions.is_empty(), "{how:?}");
+            assert!(probe.asked().is_empty(), "{how:?}: no provider is asked");
+            let after = exec_of(&db, &was.id).await;
+            assert_eq!(after.status, before.status, "{how:?}");
+            assert_eq!(after.worker_agent_type, before.worker_agent_type, "{how:?}");
+            assert_eq!(after.dispatch_job_id, before.dispatch_job_id, "{how:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resume_never_overrides_an_owner_who_moved_the_worker_after_the_probe() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        // The re-check listed the execution; the owner then moves it to Codex.
+        reassign_native_execution(
+            &state,
+            &was.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "the owner picked Codex",
+        )
+        .await
+        .unwrap();
+        let human = exec_of(&db, &was.id).await;
+        // The re-check's stale selection names Claude Code again.
+        let refused = reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "the provider answers again",
+            ReassignCause::QuotaProbed,
+        )
+        .await
+        .err()
+        .expect("a stale resume must not move an execution its owner moved");
+        assert!(
+            refused.to_string().contains("quota return skipped"),
+            "{refused}"
+        );
+        let still = exec_of(&db, &was.id).await;
+        assert_eq!(still.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(still.dispatch_job_id, human.dispatch_job_id);
+        assert!(resume_quota_escalation_after_probe(&state, &was.id)
+            .await
+            .is_err());
+        assert!(messages_of(&db, &was.parent_discussion_id)
+            .await
+            .iter()
+            .all(|message| !message.id.starts_with("provider-quota-resumed:")));
+    }
+
     #[tokio::test]
     async fn two_executions_escalated_together_each_return_to_their_own_tier_and_model_never_to_an_alternative(
     ) {
@@ -36791,9 +39825,13 @@ pub(crate) mod tests {
         let path = managed_worktree_path(db, &exec_id).await;
         let head = git_rev(Path::new(&path), "HEAD");
         let manifest = clean_manifest_for_execution(db, &exec_id).await;
-        deliver_worker_manifest(db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+        let delivered = deliver_worker_manifest(db, &exec_id, "ClaudeCode", "sess-a", &manifest)
             .await
             .unwrap();
+        assert!(
+            matches!(delivered, DeliverOutcome::Delivered { .. }),
+            "the fixture delivery must land before the review: {delivered:?}"
+        );
         seed_cli_session(db, 102, &parent_id, "sess-b").await;
         (parent_id, child_id, exec_id, head, path)
     }
@@ -37598,7 +40636,7 @@ pub(crate) mod tests {
         let path = managed_worktree_path(db, &exec_id).await;
         let head = git_rev(Path::new(&path), "HEAD");
         let dod_id = dod_id_for_execution(db, &exec_id).await;
-        deliver_worker_manifest(
+        let delivered = deliver_worker_manifest(
             db,
             &exec_id,
             "ClaudeCode",
@@ -37607,6 +40645,10 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        assert!(
+            matches!(delivered, DeliverOutcome::Delivered { .. }),
+            "the fixture delivery must land before the review: {delivered:?}"
+        );
         seed_cli_session(db, 102, &parent_id, "sess-b").await;
         (exec_id, head, dod_id)
     }
@@ -39128,6 +42170,778 @@ pub(crate) mod tests {
         assert_eq!((released, kept), (1, 0));
         assert!(!std::path::Path::new(&path).exists());
         assert!(!lane_target.exists());
+    }
+
+    /// A finished execution's project, as the launch boundary reads it.
+    async fn project_of_execution(db: &Database, exec_id: &str) -> crate::models::Project {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            let workspace = crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)?
+                .expect("managed workspace");
+            Ok(crate::db::projects::get_project(conn, &workspace.project_id)?.expect("project"))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A catalogue measure that runs on any host (the real one is macOS-only,
+    /// see `claude_task_worker_catalogue_measure`): the repository's real
+    /// worktree count plus `EXCESS` worktrees standing for the unrelated ones
+    /// the ticket's repository carried. The cap is 64.
+    fn measure_with_excess<const EXCESS: usize>(
+        project: &crate::models::Project,
+    ) -> Result<Option<crate::agents::runner::ClaudeSandboxCatalogueReceipt>, String> {
+        let listed = git(
+            &scanner::resolve_host_path(&project.path),
+            &["worktree", "list", "--porcelain"],
+        );
+        let real = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count();
+        Ok(Some(crate::agents::runner::ClaudeSandboxCatalogueReceipt {
+            common_dir_count: 1,
+            worktree_count: real + EXCESS,
+            worktree_bytes: 0,
+        }))
+    }
+
+    /// The directory name of a checkout path.
+    fn dir_name(path: &str) -> String {
+        std::path::Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// KT-1646 — a finished execution releases its worktree when it is clean,
+    /// keeping the branch and dropping its lane; the workspace row is retired.
+    #[tokio::test]
+    async fn a_clean_finished_worktree_is_reclaimed_and_its_branch_kept() {
+        for status in ["Done", "Failed", "Cancelled"] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+            let path = managed_worktree_path(&db, &exec_id).await;
+            let branch = exec_of(&db, &exec_id).await.child_branch.expect("branch");
+            let lane_target = seed_lane_target_of(repo.path(), &path);
+            force_status(&db, &exec_id, status).await;
+            worker_session_left(&db).await;
+
+            let outcome = reclaim_clean_finished_checkout(&db, &exec_id)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome, CleanCheckoutReclaim::Released, "{status}");
+            assert!(!std::path::Path::new(&path).exists(), "{status}");
+            assert!(!lane_target.exists(), "{status}: lane purged");
+            assert_eq!(
+                git_rev(repo.path(), &format!("refs/heads/{branch}")).len(),
+                40,
+                "{status}: the branch is kept"
+            );
+            assert_eq!(lane_target_events(&db, "worktree_released").await, 1);
+            assert!(
+                !crate::core::checkout_release::is_claimed(&exec_id),
+                "{status}: the claim ends with the release"
+            );
+        }
+    }
+
+    /// KT-1646 — the sweep takes a clean finished checkout without waiting for
+    /// the idle window, which only guards the dirty ones.
+    #[tokio::test]
+    async fn the_sweep_releases_a_clean_finished_checkout_without_the_idle_window() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        let mut report = OrchestrationBootReport::default();
+        release_terminal_worktrees(
+            &db,
+            std::time::Duration::from_secs(100 * 365 * 24 * 3600),
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    /// KT-1646 — a dirty finished worktree is kept untouched and listed by name;
+    /// an execution still running is never a candidate.
+    #[tokio::test]
+    async fn a_dirty_finished_worktree_is_kept_and_listed() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, lane_target) = finished_dirty_execution(&db, repo.path()).await;
+        let project = project_of_execution(&db, &exec_id).await;
+
+        let report = reclaim_clean_finished_checkouts(&db, &project.id)
+            .await
+            .unwrap();
+
+        assert_eq!(report.released, 0);
+        assert_eq!(report.kept, vec![dir_name(&path)]);
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&path).join("README.md")).unwrap(),
+            "# edited"
+        );
+        assert!(lane_target.exists());
+        assert_eq!(kept_reasons(&db, &exec_id).await.len(), 1);
+
+        force_status(&db, &exec_id, "Working").await;
+        let outcome = reclaim_clean_finished_checkout(&db, &exec_id)
+            .await
+            .unwrap();
+        assert_eq!(outcome, CleanCheckoutReclaim::NotApplicable);
+    }
+
+    /// KT-1646 — the removal (the Git checks and `git worktree remove`) never
+    /// runs while the single database connection is held: a slow disk would
+    /// freeze every API request. The checkout is claimed for the whole span.
+    #[tokio::test]
+    async fn the_removal_holds_no_database_connection_and_keeps_the_claim() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (probe, seen) = (db.clone(), observed.clone());
+        let outcome = reclaim_clean_finished_checkout_with(&db, &exec_id, move |candidate| {
+            *seen.lock().unwrap() = Some((
+                probe.write_connection_is_free(),
+                crate::core::checkout_release::is_claimed(&candidate.exec_id),
+            ));
+            remove_finished_checkout(candidate)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, CleanCheckoutReclaim::Released);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((true, true)),
+            "(connection free, checkout claimed) while the removal runs"
+        );
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(!crate::core::checkout_release::is_claimed(&exec_id));
+    }
+
+    /// KT-1646 — a reassign, a review-round extension or a resume racing a
+    /// release is refused while the checkout is claimed, a second release does
+    /// not take the same checkout, and once released nothing brings it back: a
+    /// finished execution stays finished and its retired workspace has no path.
+    #[tokio::test]
+    async fn a_reassign_racing_a_release_is_refused_and_nothing_is_revived() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        // Step 1 of a release: the checkout is claimed, its removal pending.
+        let id = exec_id.clone();
+        let candidate = db
+            .with_conn(move |conn| claim_finished_checkout(conn, &id))
+            .await
+            .unwrap()
+            .expect("a finished, clean, unused checkout is claimable");
+
+        let reassign = |db: std::sync::Arc<Database>, id: String| async move {
+            db.with_conn(move |conn| {
+                crate::db::orchestration::reassign_execution_worker(
+                    conn,
+                    &id,
+                    &claude_selection(),
+                    "retry",
+                    &backend_actor(),
+                )
+            })
+            .await
+            .map(|_| ())
+            .expect_err("refused")
+            .to_string()
+        };
+        assert!(reassign(db.clone(), exec_id.clone())
+            .await
+            .contains("being released"),);
+        let id = exec_id.clone();
+        let extension = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::extend_review_rounds(
+                    conn,
+                    &id,
+                    crate::db::orchestration::ReviewRoundsExtension::By(1),
+                    &backend_actor(),
+                    "more rounds",
+                )
+            })
+            .await
+            .map(|_| ())
+            .expect_err("refused")
+            .to_string();
+        assert!(extension.contains("being released"), "{extension}");
+        let resumed = resume_claimed_execution(quota_test_state(&db), exec_id.clone())
+            .await
+            .0;
+        assert!(!resumed.success);
+        assert!(
+            resumed.error.unwrap_or_default().contains("being released"),
+            "resume refused while claimed"
+        );
+        assert_eq!(
+            reclaim_clean_finished_checkout(&db, &exec_id)
+                .await
+                .unwrap(),
+            CleanCheckoutReclaim::NotApplicable,
+            "a second release does not take a claimed checkout"
+        );
+        assert!(std::path::Path::new(&path).exists());
+
+        // Steps 2 and 3 of the release.
+        let removal = remove_finished_checkout(&candidate);
+        let outcome = db
+            .with_conn(move |conn| {
+                let outcome = settle_finished_checkout(conn, &candidate, removal)?;
+                Ok(outcome)
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, CleanCheckoutReclaim::Released);
+
+        // Settled: the claim is gone, the execution is still finished, and the
+        // retired workspace claims no path that could be handed out again.
+        assert!(!crate::core::checkout_release::is_claimed(&exec_id));
+        let after = reassign(db.clone(), exec_id.clone()).await;
+        assert!(after.contains("terminal execution"), "{after}");
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Failed
+        );
+        let id = exec_id.clone();
+        let workspace = db
+            .with_conn(move |conn| {
+                crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)
+            })
+            .await
+            .unwrap()
+            .expect("the lineage row survives");
+        assert_eq!(workspace.canonical_path, None);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    /// KT-1646 — over the worktree cap, the launch boundary reclaims the clean
+    /// worktree of a finished execution and no longer refuses. Platform-agnostic:
+    /// the catalogue measure is injected.
+    #[tokio::test]
+    async fn a_launch_over_the_worktree_cap_reclaims_a_clean_finished_worktree() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let project = project_of_execution(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        // main + the execution's worktree + 63 = 65, one over the cap of 64.
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<63>).await;
+        let verdict = db
+            .with_conn(move |conn| {
+                Ok(claude_catalogue_verdict(
+                    conn,
+                    &project,
+                    measure_with_excess::<63>,
+                ))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(verdict, Ok(()));
+        assert!(!std::path::Path::new(&path).exists(), "reclaimed");
+    }
+
+    /// KT-1646 — a catalogue within its caps reclaims nothing: the cleanup is a
+    /// way out of the cap, not a standing sweep of the launch path.
+    #[tokio::test]
+    async fn a_launch_within_the_worktree_cap_reclaims_nothing() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let project = project_of_execution(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<0>).await;
+
+        assert!(std::path::Path::new(&path).exists());
+    }
+
+    /// KT-1646 — when nothing can be reclaimed the refusal stays, and names the
+    /// finished execution's worktree a human can review and remove (its
+    /// directory name, never a path).
+    #[tokio::test]
+    async fn a_refused_launch_names_the_finished_worktrees_a_human_can_remove() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, _lane) = finished_dirty_execution(&db, repo.path()).await;
+        let project = project_of_execution(&db, &exec_id).await;
+
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<64>).await;
+        let verdict = db
+            .with_conn(move |conn| {
+                Ok(claude_catalogue_verdict(
+                    conn,
+                    &project,
+                    measure_with_excess::<64>,
+                ))
+            })
+            .await
+            .unwrap();
+
+        let error = verdict.unwrap_err();
+        assert!(error.contains("reason_code=claude_sandbox_catalogue_unsafe"));
+        assert!(
+            error.contains("max_git_worktrees=64"),
+            "the cap is not raised: {error}"
+        );
+        assert!(error.contains(&dir_name(&path)), "{error}");
+        assert!(!error.contains(repo.path().to_str().unwrap()), "{error}");
+        assert!(std::path::Path::new(&path).exists(), "dirty checkout kept");
+    }
+
+    /// Set the status of the task an execution belongs to, as a human does by
+    /// hand: the execution is left exactly where it was (KT-1676).
+    async fn set_task_status_of(db: &Database, exec_id: &str, status: &'static str) -> String {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            let task_id: String = conn.query_row(
+                "SELECT task_id FROM task_executions WHERE id = ?1",
+                [&id],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "UPDATE planning_tasks SET status = ?2 WHERE id = ?1",
+                rusqlite::params![task_id, status],
+            )?;
+            Ok(task_id)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn workspace_of(
+        db: &Database,
+        exec_id: &str,
+    ) -> crate::db::discussion_workspaces::DiscussionWorkspace {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)
+        })
+        .await
+        .unwrap()
+        .expect("the workspace row survives")
+    }
+
+    /// One more CLI worker, attached to a worktree of the same project as
+    /// [`attached_cli_worker`]'s, in its own task and principal room. Returns
+    /// its execution id and the id of its CLI session.
+    async fn another_attached_worker(db: &Database, project_id: &str, n: i64) -> (String, i64) {
+        let (pid, title) = (project_id.to_string(), format!("Task number {n}"));
+        let parent_id = format!("parent-{n}");
+        let (parent, session_id) = (parent_id.clone(), format!("sess-{n}"));
+        let task_ref = db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_discussion(conn, &plain_discussion(&parent, &pid))?;
+                Ok(create_todo_task(conn, &pid, &title).summary.reference)
+            })
+            .await
+            .unwrap();
+        let session_pk = 100 + n;
+        seed_cli_session(db, session_pk, &parent_id, &session_id).await;
+        {
+            let (parent, durable) = (parent_id.clone(), session_id.clone());
+            db.with_conn(move |conn| {
+                crate::db::disc_source::bind_to_source(conn, &parent, "ClaudeCode", &durable)
+            })
+            .await
+            .unwrap();
+        }
+        let execution = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: MessageTarget::cli(AgentType::ClaudeCode, session_pk),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(format!("cli-run-{n}")),
+            },
+        )
+        .await
+        .unwrap();
+        let eid = execution.id.clone();
+        let offer_id = db
+            .with_conn(move |conn| {
+                crate::db::worker_offers::get_active_offer_for_attempt(conn, &eid, 0)
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let outcome =
+            accept_worker_offer_and_attach(db, &offer_id, "ClaudeCode", &session_id, &session_id)
+                .await
+                .unwrap();
+        match outcome {
+            AcceptAttachOutcome::Attached { execution, .. } => (execution.id, session_pk),
+            other => panic!("expected Attached, got {other:?}"),
+        }
+    }
+
+    async fn leave_session(db: &Database, session_pk: i64) {
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussion_sessions SET status = 'left' WHERE id = ?1",
+                [session_pk],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-1676 — closing a task by hand releases the clean worktree of an
+    /// execution that never reached a terminal state (KT-1605): the checkout
+    /// and its lane go, the branch stays, the record is retired. While the CLI
+    /// worker is still attached nothing is touched, and the execution is not
+    /// rewritten either way.
+    #[tokio::test]
+    async fn closing_a_task_releases_the_clean_worktree_of_its_unfinished_execution() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let branch = exec_of(&db, &exec_id).await.child_branch.expect("branch");
+        let lane_target = seed_lane_target_of(repo.path(), &path);
+
+        // Not closed, still attached: not a candidate.
+        assert_eq!(
+            reclaim_clean_finished_checkout(&db, &exec_id)
+                .await
+                .unwrap(),
+            CleanCheckoutReclaim::NotApplicable
+        );
+
+        let task_id = set_task_status_of(&db, &exec_id, "done").await;
+        let report = release_closed_task_checkouts(&db, &task_id).await;
+        assert_eq!(report.released, 0, "the worker is still attached");
+        assert!(std::path::Path::new(&path).exists());
+
+        worker_session_left(&db).await;
+        let report = release_closed_task_checkouts(&db, &task_id).await;
+
+        assert_eq!(report.released, 1);
+        assert!(report.kept.is_empty());
+        assert!(!std::path::Path::new(&path).exists(), "checkout released");
+        assert!(!lane_target.exists(), "lane build dir purged");
+        assert_eq!(
+            git_rev(repo.path(), &format!("refs/heads/{branch}")).len(),
+            40,
+            "the branch is kept"
+        );
+        let workspace = workspace_of(&db, &exec_id).await;
+        assert_eq!(workspace.state, "detached");
+        assert_eq!(workspace.canonical_path, None);
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Working,
+            "closing a task never rewrites its execution"
+        );
+    }
+
+    /// KT-1676 — a dirty worktree of a closed task is kept untouched and
+    /// reported by name, with the reason recorded once; an archived task counts
+    /// as closed, an open one does not.
+    #[tokio::test]
+    async fn closing_a_task_keeps_and_reports_a_dirty_worktree() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        std::fs::write(std::path::Path::new(&path).join("README.md"), "# edited").unwrap();
+        worker_session_left(&db).await;
+
+        let task_id = set_task_status_of(&db, &exec_id, "in_progress").await;
+        assert_eq!(
+            reclaim_clean_finished_checkout(&db, &exec_id)
+                .await
+                .unwrap(),
+            CleanCheckoutReclaim::NotApplicable,
+            "an open task keeps its worktree"
+        );
+
+        set_task_status_of(&db, &exec_id, "archived").await;
+        for _ in 0..2 {
+            let report = release_closed_task_checkouts(&db, &task_id).await;
+            assert_eq!(report.released, 0);
+            assert_eq!(report.kept, vec![dir_name(&path)]);
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&path).join("README.md")).unwrap(),
+            "# edited"
+        );
+        assert_eq!(workspace_of(&db, &exec_id).await.state, "attached");
+        assert_eq!(kept_reasons(&db, &exec_id).await.len(), 1);
+    }
+
+    /// KT-1676 — a worktree kept by a cancel with `preserve` is released once
+    /// its task is closed, as long as it is clean.
+    #[tokio::test]
+    async fn a_preserved_worktree_is_released_when_its_task_closes() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let outcome = cancelled_with_policy(
+            &db,
+            repo.path(),
+            &exec_id,
+            crate::models::CancellationCleanupPolicy::Preserve,
+        )
+        .await;
+        assert!(!outcome.contains("removed"), "{outcome}");
+        assert!(std::path::Path::new(&path).exists(), "kept on purpose");
+        worker_session_left(&db).await;
+
+        let task_id = set_task_status_of(&db, &exec_id, "done").await;
+        let report = release_closed_task_checkouts(&db, &task_id).await;
+
+        assert_eq!(report.released, 1);
+        assert!(!std::path::Path::new(&path).exists());
+        assert_eq!(workspace_of(&db, &exec_id).await.state, "detached");
+    }
+
+    /// KT-1676 — the periodic and boot sweeps take the worktrees of tasks that
+    /// were closed while no hook ran (a restart, an update from a workflow).
+    #[tokio::test]
+    async fn the_sweep_releases_the_worktree_of_a_task_closed_by_hand() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        worker_session_left(&db).await;
+        let mut report = OrchestrationBootReport::default();
+
+        release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+        assert_eq!(report.terminal_worktrees_released, 0, "the task is open");
+        assert!(std::path::Path::new(&path).exists());
+
+        set_task_status_of(&db, &exec_id, "done").await;
+        release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+
+        assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    /// KT-1676 — a managed worktree removed outside Kronn is no longer recorded
+    /// as attached. A worker's own stays `missing` (lineage and branch kept, so
+    /// the execution is still resumable); a finished one is retired. A worktree
+    /// that is still there is left alone, and the dead Git entry is pruned.
+    #[tokio::test]
+    async fn a_worktree_removed_outside_kronn_is_marked_gone() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, live_exec) = attached_cli_worker(&db, repo.path()).await;
+        let live_path = managed_worktree_path(&db, &live_exec).await;
+        let branch = exec_of(&db, &live_exec).await.child_branch.expect("branch");
+        let project = project_of_execution(&db, &live_exec).await;
+        let (done_exec, done_session) = another_attached_worker(&db, &project.id, 2).await;
+        let done_path = managed_worktree_path(&db, &done_exec).await;
+        let (kept_exec, _) = another_attached_worker(&db, &project.id, 3).await;
+        let kept_path = managed_worktree_path(&db, &kept_exec).await;
+        force_status(&db, &done_exec, "Failed").await;
+        leave_session(&db, done_session).await;
+
+        assert_eq!(reconcile_missing_managed_checkouts(&db).await.unwrap(), 0);
+
+        for path in [&live_path, &done_path] {
+            let removed = git(repo.path(), &["worktree", "remove", "--force", path]);
+            assert!(removed.status.success(), "{removed:?}");
+        }
+        assert_eq!(reconcile_missing_managed_checkouts(&db).await.unwrap(), 2);
+
+        let live = workspace_of(&db, &live_exec).await;
+        assert_eq!(live.state, "missing");
+        assert_eq!(live.branch, branch, "the lineage stays");
+        let done = workspace_of(&db, &done_exec).await;
+        assert_eq!(done.state, "detached");
+        assert_eq!(done.canonical_path, None);
+        assert_eq!(workspace_of(&db, &kept_exec).await.state, "attached");
+        assert!(std::path::Path::new(&kept_path).exists());
+        let id = live_exec.clone();
+        let events = db
+            .with_conn(move |conn| crate::db::orchestration::list_execution_events(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.action == "worktree_missing")
+                .count(),
+            1
+        );
+        assert_eq!(
+            git_rev(repo.path(), &format!("refs/heads/{branch}")).len(),
+            40
+        );
+        let listed =
+            String::from_utf8_lossy(&git(repo.path(), &["worktree", "list"]).stdout).to_string();
+        assert!(!listed.contains(&dir_name(&live_path)), "{listed}");
+
+        // Already settled: a second pass finds nothing to do.
+        assert_eq!(reconcile_missing_managed_checkouts(&db).await.unwrap(), 0);
+    }
+
+    /// KT-1676 — the reported case: 65 worktrees, one over the cap, eight of
+    /// them clean checkouts of finished or closed tasks. The launch reclaims
+    /// them and is accepted; the dirty one and the one a running task uses stay.
+    #[tokio::test]
+    async fn a_launch_at_65_worktrees_reclaims_the_eight_that_are_finished() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, first) = attached_cli_worker(&db, repo.path()).await;
+        let project = project_of_execution(&db, &first).await;
+        let mut reclaimable = vec![(first, 101)];
+        for n in 2..=8 {
+            reclaimable.push(another_attached_worker(&db, &project.id, n).await);
+        }
+        let (dirty_exec, dirty_session) = another_attached_worker(&db, &project.id, 9).await;
+        let (running_exec, _) = another_attached_worker(&db, &project.id, 10).await;
+        let dirty_path = managed_worktree_path(&db, &dirty_exec).await;
+        let running_path = managed_worktree_path(&db, &running_exec).await;
+        std::fs::write(
+            std::path::Path::new(&dirty_path).join("README.md"),
+            "# edited",
+        )
+        .unwrap();
+        let mut paths = Vec::new();
+        for (index, (exec_id, session)) in reclaimable.iter().enumerate() {
+            paths.push(managed_worktree_path(&db, exec_id).await);
+            leave_session(&db, *session).await;
+            match index {
+                // Finished the regular way.
+                0..=3 => {
+                    force_status(&db, exec_id, ["Done", "Failed", "Cancelled", "Done"][index]).await
+                }
+                // Closed by hand, the execution never finished (KT-1605).
+                _ => {
+                    set_task_status_of(&db, exec_id, "done").await;
+                }
+            }
+        }
+        force_status(&db, &dirty_exec, "Cancelled").await;
+        leave_session(&db, dirty_session).await;
+
+        // main + 8 + dirty + running = 11 real worktrees; the rest stand for
+        // the unrelated ones of the ticket's repository: 65 in all.
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<54>).await;
+        let verdict = {
+            let project = project.clone();
+            db.with_conn(move |conn| {
+                Ok(claude_catalogue_verdict(
+                    conn,
+                    &project,
+                    measure_with_excess::<54>,
+                ))
+            })
+            .await
+            .unwrap()
+        };
+
+        assert_eq!(verdict, Ok(()), "57 worktrees are within the cap");
+        for path in &paths {
+            assert!(!std::path::Path::new(path).exists(), "reclaimed: {path}");
+        }
+        assert!(std::path::Path::new(&dirty_path).exists(), "dirty: kept");
+        assert!(
+            std::path::Path::new(&running_path).exists(),
+            "running: kept"
+        );
+    }
+
+    /// KT-1676 — when the sweep cannot bring the count under the cap the
+    /// refusal names every worktree that blocks, why Kronn kept it, and what
+    /// frees it: a dirty finished checkout, one a running task uses and one
+    /// Kronn never created. No path is exposed.
+    #[tokio::test]
+    async fn a_refusal_names_what_blocks_and_how_to_free_it() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (dirty_exec, dirty_path, _lane) = finished_dirty_execution(&db, repo.path()).await;
+        let project = project_of_execution(&db, &dirty_exec).await;
+        let (running_exec, _) = another_attached_worker(&db, &project.id, 2).await;
+        let running_path = managed_worktree_path(&db, &running_exec).await;
+        let foreign = repo.path().join("../kt1676-foreign-worktree");
+        let added = git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "kt1676-foreign",
+                foreign.to_str().unwrap(),
+            ],
+        );
+        assert!(added.status.success(), "{added:?}");
+
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<64>).await;
+        let error = {
+            let project = project.clone();
+            db.with_conn(move |conn| {
+                Ok(claude_catalogue_verdict(
+                    conn,
+                    &project,
+                    measure_with_excess::<64>,
+                ))
+            })
+            .await
+            .unwrap()
+            .unwrap_err()
+        };
+
+        assert!(error.contains("max_git_worktrees=64"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "{} (finished task, not clean",
+                dir_name(&dirty_path)
+            )),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("{} (task still running)", dir_name(&running_path))),
+            "{error}"
+        );
+        assert!(
+            error.contains("kt1676-foreign-worktree (not created by Kronn)"),
+            "{error}"
+        );
+        assert!(error.contains("git worktree remove <name>"), "{error}");
+        assert!(error.contains("close their task"), "{error}");
+        assert!(!error.contains(repo.path().to_str().unwrap()), "{error}");
+        let _ = git(
+            repo.path(),
+            &["worktree", "remove", "--force", foreign.to_str().unwrap()],
+        );
     }
 
     /// KT-1397 — `finished_at` does not prove the checkout idle: a file written
@@ -44643,6 +48457,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: false,
+                    ..Default::default()
                 }),
                 None,
                 9,
@@ -44651,6 +48466,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 None,
                 crate::models::UNLIMITED_REVIEW_ROUNDS,
@@ -44659,6 +48475,7 @@ pub(crate) mod tests {
                 Some(crate::models::WorkersConfig {
                     default_max_review_rounds: 9,
                     review_rounds_unlimited: true,
+                    ..Default::default()
                 }),
                 Some(2),
                 2,
@@ -44872,6 +48689,248 @@ pub(crate) mod tests {
         .await;
         assert!(!refused.success);
         assert_eq!(refused.error_code.as_deref(), Some("validation"));
+    }
+
+    /// KT-1643 — a campaign names its reviewer at creation, so a delivery is
+    /// never addressed to an agent no session serves.
+    mod campaign_reviewer {
+        use super::*;
+        use crate::models::{AgentType, CampaignReviewer, CampaignReviewerKind};
+
+        async fn create(
+            db: &std::sync::Arc<Database>,
+            state: AppState,
+            parent_id: &str,
+            reviewer: Option<serde_json::Value>,
+        ) -> ApiResponse<CampaignView> {
+            let mut request = serde_json::json!({
+                "discussion_id": parent_id,
+                "target_branch": "main",
+                "max_review_rounds": 10,
+            });
+            if let Some(reviewer) = reviewer {
+                request["reviewer"] = reviewer;
+            }
+            let _ = db;
+            let Json(created) =
+                create_campaign(State(state), Json(serde_json::from_value(request).unwrap())).await;
+            created
+        }
+
+        async fn room(
+            db: &Database,
+            parent_id: &str,
+        ) -> (crate::models::Discussion, bool, Vec<String>) {
+            let id = parent_id.to_string();
+            db.with_conn(move |conn| {
+                let disc = crate::db::discussions::get_discussion(conn, &id)?.unwrap();
+                let no_agent = crate::db::discussions::disc_is_no_agent(conn, &id)?;
+                let notices = disc
+                    .messages
+                    .iter()
+                    .filter(|m| m.id.starts_with("orch-campaign-reviewer:"))
+                    .map(|m| m.content.clone())
+                    .collect();
+                Ok((disc, no_agent, notices))
+            })
+            .await
+            .unwrap()
+        }
+
+        async fn orphaned_room(db: &Database, parent_id: &str) {
+            let id = parent_id.to_string();
+            db.with_conn(move |conn| {
+                // How the autoCode issue room was created: nobody answers in it.
+                crate::db::discussions::set_disc_no_agent(conn, &id, true)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_human_only_room_without_a_named_reviewer_records_the_human_and_is_left_as_it_is()
+        {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            orphaned_room(&db, &parent_id).await;
+            let (before, _, _) = room(&db, &parent_id).await;
+
+            let created = create(&db, state_for(&db), &parent_id, None).await;
+            assert!(created.success, "{:?}", created.error);
+            let run = created.data.unwrap().run;
+            let reviewer = run.reviewer.expect("the campaign names its reviewer");
+            assert_eq!(reviewer.kind, CampaignReviewerKind::Human);
+            assert!(reviewer.defaulted);
+
+            let (after, no_agent, notices) = room(&db, &parent_id).await;
+            assert!(no_agent, "a human reviewer keeps the room human-only");
+            assert_eq!(
+                (after.agent, after.model, after.participants),
+                (before.agent, before.model, before.participants),
+                "a room the caller did not ask to change is not changed"
+            );
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(notices[0].contains("`main`") && notices[0].contains("10 review round"));
+            assert!(notices[0].contains("**you**"), "{}", notices[0]);
+
+            // It is stored with the run, not only said once.
+            let stored = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::get_orchestration_run(conn, &run.id)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.reviewer.unwrap().kind, CampaignReviewerKind::Human);
+        }
+
+        /// The room the owner already set up: an agent answers in it. Nothing
+        /// is rewritten when the campaign names no reviewer; that agent is the
+        /// one recorded and announced.
+        async fn served_room(db: &Database, parent_id: &str) {
+            let id = parent_id.to_string();
+            db.with_conn(move |conn| {
+                crate::db::discussions::set_disc_no_agent(conn, &id, false)?;
+                conn.execute(
+                    "UPDATE discussions SET agent = 'Codex', model = 'owner-model', \
+                     participants_json = '[\"Codex\",\"ClaudeCode\"]' WHERE id = ?1",
+                    [&id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_room_served_by_a_local_agent_keeps_its_agent_model_and_participants() {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            served_room(&db, &parent_id).await;
+            let (before, _, _) = room(&db, &parent_id).await;
+
+            // A remote model is configured, and still must not take the room.
+            let state = state_for(&db);
+            {
+                let mut config = state.config.write().await;
+                config.agents.lite_llm.base_url = Some("http://127.0.0.1:4000".into());
+                config.tokens.keys.push(crate::models::ApiKey {
+                    id: "k1".into(),
+                    name: "litellm".into(),
+                    provider: "litellm".into(),
+                    value: "sk-test-not-a-secret".into(),
+                    active: true,
+                });
+            }
+            let created = create(&db, state, &parent_id, None).await;
+            assert!(created.success, "{:?}", created.error);
+
+            let reviewer = created.data.unwrap().run.reviewer.unwrap();
+            assert_eq!(reviewer.kind, CampaignReviewerKind::Agent);
+            assert_eq!(reviewer.agent, Some(AgentType::Codex));
+            assert_eq!(reviewer.model.as_deref(), Some("owner-model"));
+            assert!(reviewer.defaulted);
+
+            let (after, no_agent, notices) = room(&db, &parent_id).await;
+            assert!(!no_agent, "the owner's agent still answers");
+            assert_eq!(after.agent, before.agent);
+            assert_eq!(after.model, before.model);
+            assert_eq!(after.participants, before.participants);
+            assert_eq!(notices.len(), 1);
+            assert!(
+                notices[0].contains("Codex") && notices[0].contains("owner-model"),
+                "{}",
+                notices[0]
+            );
+        }
+
+        #[tokio::test]
+        async fn a_named_remote_model_takes_the_room_and_answers_in_it() {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            orphaned_room(&db, &parent_id).await;
+            let state = state_for(&db);
+            {
+                let mut config = state.config.write().await;
+                config.agents.lite_llm.base_url = Some("http://127.0.0.1:4000".into());
+                config.agents.model_tiers.lite_llm.reasoning = Some("reviewer-model".into());
+                config.tokens.keys.push(crate::models::ApiKey {
+                    id: "k1".into(),
+                    name: "litellm".into(),
+                    provider: "litellm".into(),
+                    value: "sk-test-not-a-secret".into(),
+                    active: true,
+                });
+            }
+
+            let named = serde_json::json!({
+                "kind": "remote_model", "agent": "LiteLlm", "model": "reviewer-model"
+            });
+            let created = create(&db, state, &parent_id, Some(named)).await;
+            assert!(created.success, "{:?}", created.error);
+            let reviewer = created.data.unwrap().run.reviewer.unwrap();
+            assert_eq!(reviewer.kind, CampaignReviewerKind::RemoteModel);
+            assert_eq!(reviewer.agent, Some(AgentType::LiteLlm));
+            assert!(!reviewer.defaulted);
+
+            let (disc, no_agent, notices) = room(&db, &parent_id).await;
+            assert_eq!(
+                disc.agent,
+                AgentType::LiteLlm,
+                "the review request is served"
+            );
+            assert_eq!(disc.model.as_deref(), Some("reviewer-model"));
+            assert!(!no_agent, "the remote model answers in the room");
+            assert!(notices[0].contains("remote model"), "{}", notices[0]);
+        }
+
+        #[tokio::test]
+        async fn an_agent_reviewer_with_its_model_replaces_the_unserved_room_agent() {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            orphaned_room(&db, &parent_id).await;
+
+            let reviewer = serde_json::to_value(CampaignReviewer {
+                kind: CampaignReviewerKind::Agent,
+                agent: Some(AgentType::Codex),
+                model: Some("gpt-review".into()),
+                connection_id: None,
+                defaulted: false,
+            })
+            .unwrap();
+            let created = create(&db, state_for(&db), &parent_id, Some(reviewer)).await;
+            assert!(created.success, "{:?}", created.error);
+            assert!(!created.data.unwrap().run.reviewer.unwrap().defaulted);
+
+            let (disc, no_agent, notices) = room(&db, &parent_id).await;
+            assert_eq!(disc.agent, AgentType::Codex);
+            assert_eq!(disc.model.as_deref(), Some("gpt-review"));
+            assert_eq!(disc.participants, vec![AgentType::Codex]);
+            assert!(!no_agent);
+            assert!(notices[0].contains("gpt-review"), "{}", notices[0]);
+        }
+
+        #[tokio::test]
+        async fn a_reviewer_that_cannot_review_is_refused_and_creates_nothing() {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            let no_model = serde_json::json!({"kind": "agent", "agent": "Codex"});
+            let created = create(&db, state_for(&db), &parent_id, Some(no_model)).await;
+            assert!(!created.success);
+            assert_eq!(created.error_code.as_deref(), Some("validation"));
+            assert_eq!(
+                count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+                0
+            );
+            let (_, _, notices) = room(&db, &parent_id).await;
+            assert!(notices.is_empty());
+        }
     }
 
     /// The prepare and launch bodies tell « no key » from « key: null »: the first inherits

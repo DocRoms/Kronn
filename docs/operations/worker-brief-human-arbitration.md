@@ -5,7 +5,7 @@ the latter stay with a human. A joined CLI checks durable answers before asking,
 publishes a numeric-version `kronn-question` card when needed, verifies its
 recording, and pauses only the affected scope. Narrower native and HTTP worker
 surfaces request that the principal relay the card; neither actor may decide for
-the human. [src: file: backend/src/api/orchestration.rs:9838-9887#human_arbitration]
+the human. [src: file: backend/src/api/orchestration.rs:10920-10969#human_arbitration]
 
 The parent-milestones section is transport-aware, not a single shared string, and
 the two joined-CLI tools do not share one restriction. `disc_append` defaults to
@@ -26,17 +26,17 @@ them to report any other verified notable fact (progress, a blocker, a result)
 through their actually available output and to explicitly ask the principal to
 relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
-[src: file: backend/src/api/orchestration.rs:9891-9944#parent_milestones]
-[src: file: backend/src/db/orchestration.rs:7065-7109#get_execution_lineage]
-[src: file: backend/src/api/orchestration.rs:19260-19413#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
-[src: file: backend/src/models/orchestration.rs:1343-1356#TaskExecutionLineage]
+[src: file: backend/src/api/orchestration.rs:10973-11026#parent_milestones]
+[src: file: backend/src/db/orchestration.rs:7896-7940#get_execution_lineage]
+[src: file: backend/src/api/orchestration.rs:20768-20921#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
+[src: file: backend/src/models/orchestration.rs:1384-1397#TaskExecutionLineage]
 
 The bridge documents that `disc_question_list` reads durable question state and
 that `disc_append` is the live discussion publication tool; its implementation
 shows `disc_append` accepting an explicit `disc_id` (defaulting to the
 runtime-bound one) while `disc_question_list` always resolves `_disc_id()` and
 ignores any id argument.
-[src: file: backend/scripts/disc-introspection-mcp.py:221-223#disc_question_list]
-[src: file: backend/scripts/disc-introspection-mcp.py:677-679#disc_append]
-[src: file: backend/scripts/disc-introspection-mcp.py:5481-5499#call_disc_append]
-[src: file: backend/scripts/disc-introspection-mcp.py:4666-4676#call_disc_question_list]
+[src: file: backend/scripts/disc-introspection-mcp.py:232-234#disc_question_list]
+[src: file: backend/scripts/disc-introspection-mcp.py:688-690#disc_append]
+[src: file: backend/scripts/disc-introspection-mcp.py:5495-5513#call_disc_append]
+[src: file: backend/scripts/disc-introspection-mcp.py:4677-4687#call_disc_question_list]

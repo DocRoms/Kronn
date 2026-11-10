@@ -62,11 +62,136 @@ whole process group (so `rustc` children do not keep compiling), the gate slot
 is freed, `lane_warm_start` records `first_build: cancelled`, and neither the
 smoke check nor the dispatch happens.
 
+## Dependency fetch before the first build (KT-1649)
+
+A worker is offline and reads the host's caches read-only, so a dependency it
+bumped (KT-1647: `utoipa-swagger-ui` 10.0.2 while the cache held 10.0.1) could
+not be compiled or tested, and was delivered blind. Before the first build,
+`record_dependency_fetch` (`api/orchestration.rs`) runs
+`core::task_worker_dep_fetch::fetch_missing_dependencies` as **Kronn's own
+process, outside the worker's sandbox**, and journals a `dependency_fetch`
+event (`db::orchestration::latest_dependency_fetch`): per lock file, the
+registries the step was bounded to, its outcome (`cached`, `fetched`,
+`refused`, `failed`, `cancelled`) and its duration.
+
+What bounds the network:
+
+- **The lock file is the whole input, and it is parsed, never scanned.**
+  `Cargo.lock` is parsed as TOML; every package `source` must be crates.io (git
+  index or sparse), and only lock format 3+ is staged. `pnpm-lock.yaml` is parsed
+  with a YAML parser (`serde_yaml`: anchors, aliases, merge keys, folded and flow
+  scalars resolve before the walk), then every `packages` entry must be a
+  registry package — a key with no `:`/path/space — whose `resolution` is an
+  `integrity` hash plus at most a `tarball` under `https://registry.npmjs.org/`.
+  A `tarball` elsewhere, `type`/`repo`/`commit`/`directory`/`path`, a YAML tag, a
+  non-string, a duplicate key, several documents: **the whole lock is refused**
+  (`refused`). `cargo fetch` fetches all of a lock, so a partial fetch is not
+  possible; git dependencies and alternate registries are never fetched and the
+  worker stays offline for them, as before.
+- **Size caps.** A lock file over `MAX_LOCK_BYTES` (16 MiB) and a
+  `pnpm-workspace.yaml` over `MAX_WORKSPACE_BYTES` (1 MiB) are refused unread
+  (`read_capped` also bounds the read itself, and refuses a symlink). The cap is
+  per file; the YAML parser's own alias-repetition and depth limits bound the rest.
+- **Probe first.** `cargo fetch --offline` (and `pnpm fetch --offline`); a complete
+  cache never touches the network (`cached`).
+- **The command never runs in, or reads, the worktree.** Cargo's configuration is
+  not only discovered from the cwd upwards: the worktree's `Cargo.toml` can carry
+  `[patch]`/`[source]`/`[registries]`, and discovery differs between Cargo
+  versions. So Cargo runs in a private scratch project holding a lock of the
+  registry packages only (`name`/`version`/`source`/`checksum`/`dependencies`,
+  nothing else the worker wrote) and a generated manifest depending on each locked
+  crate at `=version` with default features off, `--manifest-path` pointing at it,
+  no `.cargo/`. (`--locked` is not used: the generated root package is not in the
+  lock, which `--locked` would refuse; the locked versions are kept by the lock
+  copy — the `#[ignore]`d `the_staged_cargo_project_is_accepted_by_the_real_cargo`
+  checks this repository's own lock against the real `cargo`.) pnpm gets the same
+  treatment: a scratch project with the lock **rebuilt from an allow-list**
+  (`lockfileVersion` plus the validated `packages` and `snapshots` fields only —
+  `settings`, `overrides`, `patchedDependencies`, `importers` and any other field
+  are dropped, so what pnpm parses is what Kronn validated, not the worker's text,
+  and a YAML parser differential cannot hide anything), an empty manifest, no
+  `.npmrc`, and a workspace file **rebuilt from an allow-list** (`WORKSPACE_KEYS`:
+  `allowBuilds`, `onlyBuiltDependencies`, `neverBuiltDependencies`, `overrides`,
+  `packageExtensions`, `catalog(s)`, `ignoredOptionalDependencies`,
+  `supportedArchitectures`) whose values must be inert (scalars/lists/maps, no tag,
+  no `${…}`). Everything else — registries, proxies, store/cache dirs, `pnpmfile`,
+  hooks, certificates, `packages` globs — is dropped, not refused. The registry
+  and the store go on the command line (`--registry`, `--store-dir`,
+  `--ignore-scripts`), and the user/global npm config are pointed at an empty file.
+  `cargo fetch` builds nothing, so no `build.rs` or proc-macro runs.
+- **The environment is cleared.** Both commands run with `ProbeCommand::clean_env`
+  (the process runner calls `env_clear`) and get only `FETCH_ENV_NAMES` (`PATH`,
+  locale, `TMPDIR`, the toolchain homes, the operator's proxy and CA variables)
+  plus `CARGO_HOME`/`CARGO_NET_OFFLINE` for Cargo. **No home directory is
+  inherited** (KT-1674): `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and
+  `XDG_CONFIG_HOME` point into the scratch project, so `~/.npmrc`,
+  `~/.config/pnpm/rc` and `~/.cargo` are unreachable; Cargo's `CARGO_HOME` is a
+  staged directory linking only the host's `registry` (and `git`), never
+  `credentials.toml` or `config.toml`. Since a rustup/Volta/corepack shim finds its
+  toolchain under `HOME`, `RUSTUP_HOME`/`VOLTA_HOME`/`COREPACK_HOME` are pinned to
+  their default location under the operator's real home when unset
+  (`toolchain_homes`). The sealed Kronn
+  environment is not enough on its own: it inherits `NPM_CONFIG_*`
+  (`child_env::is_base`). A host `NPM_CONFIG_REGISTRY`, `CARGO_REGISTRIES_*`,
+  `CARGO_HTTP_*` or any token never reaches the child.
+- **Scratch lives under the data dir** (`<data dir>/dep-fetch/kronn-dep-fetch-<uuid>`,
+  mode 0700, which the worker's sandbox hides), is removed when the step ends, and
+  `sweep_stale_scratch` removes what a killed backend left, at startup (`main.rs`).
+- It fills the host's `~/.cargo/registry` and pnpm store, the caches the lane
+  already reads, so the first build and the worker's own `cargo` see the crate.
+
+Limits: best effort (a failed or refused fetch is journalled and the worker
+still starts); cancellable with the warm-up; the pnpm step only fills the
+**store** — a package the main checkout's `node_modules` lacks still needs an
+offline `pnpm install` by whoever uses it, since the lane's `node_modules` links
+the main checkout's. A pnpm workspace whose lock needs a key outside the
+allow-list (`patchedDependencies`, say) is fetched without it. Cargo still walks
+the scratch project's ancestor directories for `.cargo/config.toml`; a data dir
+under the operator's home therefore still exposes `~/.cargo/config.toml` (not
+`credentials.toml`, which is read from `CARGO_HOME` only). Cargo's staged
+project was run against the real `cargo`; the pnpm commands (and the
+`npm_config_userconfig` redirection) were **not** run against pnpm or the live
+registry when this was written (the author's sandbox is offline): the lock and
+workspace guards and the command shape are unit-tested with a fake runner only.
+The proxy/CA variables of the operator are the one piece of host configuration
+the fetch keeps; a proxy URL with credentials in it is passed as set.
+
 ## Known limits
 
-- The gate governs Kronn's first build only. Builds a worker later runs itself
-  are capped by `CARGO_BUILD_JOBS` alone, so several workers compiling at once
-  can still load the host.
+- The gate governs Kronn's first build only. Builds and tests a worker later
+  runs itself are bounded by the same `build_jobs` budget (KT-1634), but several
+  workers compiling at once can still load the host.
+- The budget (`task_worker_env::build_budget_env`) sets `CARGO_BUILD_JOBS`,
+  `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `VITEST_MAX_WORKERS` from the
+  one `build_jobs` value (jest is not used by the project) [src: file:
+  backend/src/core/task_worker_env.rs:109]. `MAKEFLAGS=-jN` is deliberately not
+  part of it: `-j` changes what a Makefile that is not parallel-safe does, so it
+  is not a pure throttle like a thread count. Kronn neither sets nor forwards
+  `MAKEFLAGS`; a project that wants parallel `make` puts `-j` in its own
+  Makefile or scripts.
+- The budget reaches every agent process Kronn starts **on a linked Git
+  worktree**, whatever its role — task workers of any CLI, reviewers and fix
+  agents — not only Claude task workers. A linked worktree is a `.git` *file*
+  whose `gitdir:` line points at `<common>/worktrees/<name>`
+  (`is_linked_worktree`) [src: file: backend/src/core/task_worker_env.rs:129]:
+  an agent on the main checkout (`.git` is a directory), in a submodule
+  (`gitdir: .../.git/modules/<name>`) or in a `--separate-git-dir` clone gets
+  none (`only_a_worktrees_gitdir_makes_a_linked_worktree`). It is applied
+  in `try_spawn` [src: file: backend/src/agents/runner.rs:14608] (the direct
+  route, and the adapted ACP route: `acp/claude_adapter.rs` and
+  `acp/codex_adapter.rs` call `try_spawn` with `SpawnIo::Adapter`, so the process
+  they start is the CLI itself) and in `native_command` (native ACP) [src: file:
+  backend/src/acp.rs:897]. Tests: direct, adapted and no-worktree cases in
+  `agents/runner_test.rs` (`every_agent_on_a_worktree_gets_the_build_and_test_budget`,
+  `an_adapted_acp_cli_gets_the_build_and_test_budget`,
+  `an_agent_outside_a_worktree_gets_no_build_and_test_budget`), native in
+  `acp.rs` (`a_native_launch_receives_its_key_and_contexts_through_the_builder`).
+- A budget variable the launch already carries, or the operator set in the
+  backend's own environment, is never overwritten: the operator's value is
+  forwarded (the agent's environment is an allow-list, so it would otherwise be
+  lost) [src: file: backend/src/core/task_worker_env.rs:152]. The lane's
+  private locations (`CARGO_TARGET_DIR`, `CARGO_HOME`, ...) remain
+  Claude-task-worker only.
 - A lane target is removed with its clean worktree (integration, `RemoveIfClean`
   cancellation) and swept at boot only when it carries `.kronn-lane.json`, its
   execution is finished and its worktree is gone. A lane whose worktree is kept
@@ -107,7 +232,57 @@ The clone itself takes 14-38 s and no disk space.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker |
+| `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker, and the budget of its test and build tools (KT-1634) |
 | `KRONN_WORKER_MAX_CONCURRENT_BUILDS` | 2 | first builds running at once on this backend process |
 | `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 1800 | bound of the first build and of its queue wait |
 | `KRONN_WORKER_PRIVATE_CARGO_HOME` | unset | `1` keeps KT-1246's lane-private `CARGO_HOME` (no seeding) |
+
+## Where the warming time goes (KT-1637)
+
+`task_exec_status` / the execution detail carry `progress.warming_steps` (the
+steps that have finished, in run order, each `{step, duration_ms}`) and
+`progress.warming_total_ms` (execution creation to the worker's dispatch, to
+now while it still provisions). The room card (`TaskExecutionCard`) renders
+them and the part of the total no step explains. They are present in every
+phase, so the breakdown outlives the warming phase.
+
+| Step | Measured around | Journalled in |
+| --- | --- | --- |
+| `worktree_creation` | `git worktree add` (only a checkout this launch really makes; adopting one on resume keeps the original timing) | `lane_warming_step` |
+| `lane_seeds` | copying the project's gitignored assets (KT-1438); absent when nothing is seeded | `lane_warming_step` |
+| `lane_provision` | `prepare_launch` (Cargo home, shared caches) | `lane_warm_start.provision_ms` |
+| `seed_clone` | seeding the lane `debug/` (`clone_ms` is the clone alone); absent when there was no warm target to clone from | `lane_warm_start.seed_ms` |
+| `gate_wait` | waiting for a first-build slot | `lane_warm_start.queued_ms` |
+| `first_build` | `cargo test --no-run`; absent when skipped or cancelled in the queue | `lane_warm_start` |
+| `smoke_check` | the toolchain smoke check that follows the build | `lane_warming_step` |
+
+A step that did not run is absent, never reported as `0`: `provision_ms` and
+`seed_ms` are optional in the row, so a lane that was not provisioned, one with
+no warm target, or a row journalled before KT-1637 leaves them out (an old
+`Cloned` row still reports its `clone_ms`). `warming_total_ms`
+minus the sum of the steps is time no step explains (the brief, the database,
+a restart between two attempts): that is the figure to chase.
+
+Limits: a step is journalled when it ends, so the step in flight is not listed
+(its elapsed time is in the total); a resumed execution shows the latest run of
+each step but a total that spans the restart.
+
+The card clamps the unexplained remainder at zero. The total is wall-clock and
+the steps are monotonic: when the steps add up to more than the total, the card
+says the clocks disagree instead of hiding the gap.
+
+### Reading an execution that predates KT-1637 (KT-1629)
+
+KT-1629 spent 45.8 min in `warming`, 6.8 min of it in the build. A row
+journalled before KT-1637 can only account for `lane_warm_start.queued_ms` (the
+gate wait), the first build's `duration_ms` and `SeedOutcome::Cloned::clone_ms`.
+It has no timing for the worktree, the lane seeds, provisioning or the smoke
+check, so whatever `45.8 min - 6.8 min - queued_ms - clone_ms` leaves is not
+explained by that row, and it is not attributable to a step: the new steps are
+what cover it from now on. Reading that row is the only way to say whether the
+39 minutes were the gate wait (`queued_ms`, bounded by
+`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, 1800 s by default) or an uninstrumented
+gap; this was not done from a sandboxed worker, which cannot read the Kronn
+database. Run the execution's `lane_warm_start` event through
+`WarmStartRecord::timed_steps` (`backend/src/core/task_worker_lane_warm.rs`) and
+subtract it from the 45.8 min.

@@ -25,7 +25,7 @@ orphan sweeper**, a **free-space guard on launch**, and **visibility** (API, MCP
 A lane's env is set in `WorkerLane::for_worktree`: a managed worktree gets `<repo>/target/wt-<lane>`, and the
 worker runs with it as `CARGO_TARGET_DIR`. The scratch dir, the private `CARGO_HOME` and the Vite cache live
 inside the lane or the worktree, so they go with it.
-[src: file: backend/src/core/task_worker_env.rs:112-167#for_worktree]
+[src: file: backend/src/core/task_worker_env.rs:221-276#for_worktree]
 
 **Ownership is a manifest, not a name.** `wt-*` proves nothing: humans and other tooling build in
 `target/wt-0151-integration`. Kronn writes `.kronn-lane.json` (execution id, lane, worktree) when it
@@ -48,6 +48,9 @@ and never touched**.
 | Execution **Cancelled**, `RemoveIfClean`, clean checkout | the lane build dir, with the worktree | `settle_cancelled_workspace` |
 | Execution **Cancelled**, checkout **dirty** or policy `Preserve` | nothing at cancel time: the worker may still be writing | released later by the terminal-checkout release |
 | Boot and **every 30 min**: a **Done, Failed or Cancelled** execution whose managed checkout is still on disk | the checkout (branch kept) and its lane build dir | the terminal-checkout release below |
+| Boot and **every 30 min**, and **before a Claude launch is refused for the worktree cap**: a finished execution whose checkout is **clean** | the checkout (branch kept) and its lane build dir, with no idle window | `reclaim_clean_finished_checkout` (KT-1646) |
+| A task is set to **done or archived** (by hand, or any update), and at boot / every 30 min: an execution of a closed task that never finished, or one kept by a `Preserve` cancel, whose checkout is **clean** and unused | the checkout (branch kept) and its lane build dir; the execution is not rewritten | `release_closed_task_checkouts`, `release_closed_task_executions` (KT-1676) |
+| A managed checkout **removed outside Kronn** (`git worktree remove`, `rm -rf`) | nothing on disk: the workspace record stops being `attached` (`missing` for a worker's, retired for a finished one), the dead Git entry is pruned | `reconcile_missing_managed_checkouts` (KT-1676) |
 | Boot: an orphaned managed checkout removed | its lane build dir, with it | `reconcile_at_boot` |
 | Worktree **kept** (diverged, over the evidence cap, written recently) | nothing: the lane is kept with it | same policy as the worktree |
 | Boot, **every 30 min**, and under pressure | **orphan** lane build dirs | the sweeper rules below |
@@ -75,8 +78,48 @@ worktree's index is only copied, never written. If a patch cannot be written, ex
 holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorded once as a
 `worktree_release_kept` event, a release as `worktree_released`. Evidence patches are not cleaned up by Kronn.
 
-[src: file: backend/src/api/orchestration.rs:4362-4374#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:12561-12572#settle_cancelled_workspace]
+### Worktree cap at launch (KT-1646)
+
+A Claude task worker is refused (`claude_sandbox_catalogue_unsafe`) once the repository lists more than 64 Git
+worktrees: the sandbox policy enumerates them. The cap is not raised. When a launch (or `task_exec_prepare`) is
+over it, Kronn first records the worktrees removed outside Kronn as gone (and prunes their Git entries), then
+removes the **clean** checkouts of finished (Done, Failed, Cancelled) executions of that project **and of
+executions of closed tasks** (KT-1676), branch kept, measures again, and refuses only if it is still over. The
+refusal then names every worktree that blocks, by directory name only, each with its reason, and the action that
+frees it: `finished task, not clean` (uncommitted changes, another branch or unreadable), `task still running`,
+`attached by a CLI session, not managed by Kronn`, `not created by Kronn`. Close the task, or review the
+worktree and run `git worktree remove <name>` (commit or discard uncommitted changes first). Worktrees that
+belong to no finished execution (older lanes, discussion worktrees) are never touched. The catalogue listing
+(`task_worker_catalogue`) is advisory and does not reclaim.
+
+### Closed tasks (KT-1676)
+
+Closing a task (`done` or `archived`) used to leave its worktrees behind when its execution never reached a
+terminal state (a task set to `done` by hand), and a cancel with `preserve` kept its worktree for good. Now the
+task update releases the managed checkouts of the task's executions in the background, and the boot and 30-minute
+sweeps do the same for tasks closed without that hook. The same guards as above apply, plus: the execution is
+not mid-integration (`Provisioning`, `Approved`, `Integrating`, `Validating`, `Applying`), has no pending or
+running dispatch, no unsettled commit lease and no active session. Only a **clean** checkout goes; a dirty one
+is kept and its reason recorded once (`worktree_release_kept`). A preserved checkout therefore waits at most for
+the idle window of the terminal-checkout release, or for its task to close. The execution itself is never
+changed by the release.
+
+**"Clean" means `git status` clean.** Ignored files do not count: a Rust `target/` or `node_modules/` inside a
+checkout that `.gitignore` covers goes with the worktree, and the lane build dir (`target/wt-<lane>`) is purged
+with it. A checkout with any modified or untracked (non-ignored) file is kept.
+
+The release runs in three steps so that a slow removal never freezes the API: under the database connection the
+execution is picked (finished, no live session, no worker lease) and its checkout **claimed**; with no connection
+held, Git checks the branch and `git status` and removes the worktree; under the connection again the outcome is
+recorded (`worktree_released`, workspace row retired). While the claim is held no second release takes the
+checkout, and a reassign, a resume or an extension of the review rounds of that execution is refused ("its
+checkout is being released") until the release has settled. The claim is in memory, not durable: a crash drops it
+and the next sweep judges the checkout again. A finished execution cannot be reassigned or resumed at all
+(`reassign_execution_worker_keeping_origin` and `extend_review_rounds` refuse a terminal one), so there is no
+released checkout to provision again; the claim guards the gap between the check and the removal.
+
+[src: file: backend/src/api/orchestration.rs:4561-4573#cleanup_integrated_execution]
+[src: file: backend/src/api/orchestration.rs:13961-13972#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -118,7 +161,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:791-857#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:9417-9440#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:10291-10314#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.
@@ -143,10 +186,10 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   those entries, and only with `confirm: true`; each is re-judged at deletion time, so a report never
   authorises a delete. **Human / UI only**: the route is deliberately not on `BRIDGE_ROUTES`, so a bridge
   token is refused (403). It deletes host files; even an own-project orphan purge was not worth giving to
-  an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:932-944#run_purge]
+  an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:938-950#run_purge]
 - MCP tool **`disk_usage`** (`project_id`) — the scoped report above, read-only, bounded to the 25 largest
   entries. It never calls the purge; a leftover `purge_orphans: true` argument returns a note that purging
-  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7809-7841#call_disk_usage]
+  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7831-7863#call_disk_usage]
 - **Settings → Disk** — measure on demand (never on page open), totals by kind, the table, **Purge
   orphans**, a per-entry delete behind a confirmation, and the two thresholds.
 

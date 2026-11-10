@@ -11,7 +11,7 @@ use super::ollama_memory::{
     KvShape, MachineFacts, ModelCeiling,
 };
 use super::provenance::{self, AgentProvenanceCapture};
-use crate::core::cmd::async_cmd;
+use crate::core::cmd::{async_cmd, async_cmd_with, Priority};
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
 
 const MAX_CALLS_PER_TOOL: usize = 12;
@@ -1682,6 +1682,65 @@ pub fn parse_claude_worker_stream_line(line: &str) -> StreamJsonEvent {
     )
 }
 
+/// KT-1599 — one line of the headless "no popup" note, injected for CLI agents.
+/// A `--print` run has no permission channel: the model, trained on interactive
+/// Claude Code, otherwise tells the user to click an "Allow" that never appears
+/// (observed 2026-07-01, TD-20260701).
+pub(crate) const HEADLESS_NO_POPUP_NOTE: &str = "=== HEADLESS RUN ===\n\nYou run headless: there is no permission popup and nobody to click Allow, so if a tool is refused, say which one and stop instead of asking the user to approve it.";
+
+/// KT-1599 — the tool names a Claude `result` line reports in
+/// `permission_denials`, deduplicated and in first-seen order. Only the name is
+/// kept: `tool_input` can carry paths, commands or secrets.
+pub fn claude_permission_denials(line: &str) -> Vec<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return Vec::new();
+    };
+    if json.get("type").and_then(serde_json::Value::as_str) != Some("result") {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = Vec::new();
+    for denial in json
+        .get("permission_denials")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let name: String = denial
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown tool")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | ' '))
+            .take(120)
+            .collect();
+        let name = if name.trim().is_empty() {
+            "unknown tool".to_string()
+        } else {
+            name
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// KT-1599 — the System message body for refused tools: names each tool and the
+/// fix, so neither the user nor the model has to guess why the run stalled.
+pub fn permission_denials_message(tools: &[String]) -> String {
+    let listed = tools
+        .iter()
+        .map(|tool| format!("`{tool}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "🔒 **Tool call refused (headless run)**\n\nClaude Code refused {listed}: this run \
+         is non-interactive, so there was no popup to approve it and nothing the agent said \
+         about one is real. To allow it, enable full access for this agent in Settings, or \
+         add the tool to its allowed tools (`--allowedTools`)."
+    )
+}
+
 /// Result of parsing a single stream-json line
 #[derive(Debug)]
 pub enum StreamJsonEvent {
@@ -3193,6 +3252,11 @@ pub struct AgentStartConfig<'a> {
     pub room_agent_context: Option<&'a RoomAgentBridgeContext>,
     /// A workflow step's room capability. Ignored when a worker context is present.
     pub workflow_step_context: Option<&'a WorkflowStepBridgeContext>,
+    /// KT-1633 — how urgently the agent's CLI process wants the CPU. A workflow
+    /// Agent step asks for [`Priority::Background`]; a task worker runs there
+    /// whatever this says; every other launch keeps the default (the backend's
+    /// own priority).
+    pub priority: Priority,
     /// The audit run this agent works for (KT-1324): its processes carry the
     /// run's tag so boot can stop them after a backend stop.
     pub audit_run_id: Option<&'a str>,
@@ -3317,6 +3381,7 @@ impl<'a> AgentStartConfig<'a> {
             task_worker_context: None,
             room_agent_context: None,
             workflow_step_context: None,
+            priority: Priority::Normal,
             audit_run_id: None,
             ollama_format: None,
             model_override: None,
@@ -3339,7 +3404,47 @@ pub struct ExternalHttpRuntime {
     pub display_name: String,
     pub mention_alias: String,
     pub endpoint: String,
+    /// The connection's tool-executor switch (KT-1600): `Some(false)` turns
+    /// the tools off, `None` leaves them on.
+    pub tools_enabled: Option<bool>,
     pub api_key: Option<String>,
+}
+
+/// The executor this HTTP run may use: `config.tools` when the verdict of
+/// `http_transport::http_tools_verdict` says attach, `None` otherwise (KT-1600).
+/// A refusal is logged so a model that "forgot" its tools is explainable.
+pub(crate) fn gate_http_tools(
+    config: &AgentStartConfig<'_>,
+) -> Option<std::sync::Arc<dyn crate::agents::tools::ToolExecutor>> {
+    let executor = config.tools.clone()?;
+    let model = effective_model_flag(
+        config.model_override,
+        config.agent_type,
+        config.tier,
+        config.model_tiers,
+    );
+    let catalogue = model
+        .as_deref()
+        .and_then(|model| crate::core::model_catalog::model_tool_support(config.agent_type, model));
+    // The named connection's own setting when the run has one, else the
+    // agent's slot in the settings.
+    let setting = match config.external_http {
+        Some(runtime) => runtime.tools_enabled,
+        None => config
+            .http_endpoints
+            .and_then(|endpoints| endpoints.tools_setting_for(config.agent_type)),
+    };
+    let verdict = crate::http_transport::http_tools_verdict(config.agent_type, setting, catalogue);
+    if verdict == crate::http_transport::HttpToolsVerdict::Attach {
+        return Some(executor);
+    }
+    tracing::info!(
+        agent = ?config.agent_type,
+        model = model.as_deref().unwrap_or(""),
+        ?verdict,
+        "Kronn tool executor not attached to this HTTP run"
+    );
+    None
 }
 
 /// What an HTTP agent is told about its own capabilities.
@@ -3486,6 +3591,24 @@ pub(crate) fn agent_concurrency_limits(
         }
     }
     serde_json::Value::Object(map).to_string()
+}
+
+/// The limits the dispatcher admits a job under: the per-agent and local-pool
+/// caps of [`agent_concurrency_limits`], plus KT-1632's cap on local task
+/// workers (Settings > Workers), which no per-agent cap can express.
+pub(crate) fn dispatch_concurrency_limits(config: &crate::models::AppConfig) -> String {
+    let mut limits: serde_json::Value = serde_json::from_str(&agent_concurrency_limits(
+        &config.agents,
+        config.server.max_concurrent_agents,
+    ))
+    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(map) = limits.as_object_mut() {
+        map.insert(
+            crate::db::agent_dispatch::TASK_WORKER_LIMIT_KEY.into(),
+            serde_json::json!(config.workers.effective_max_concurrent_task_workers()),
+        );
+    }
+    limits.to_string()
 }
 
 pub(crate) fn is_http_chat_agent(agent_type: &AgentType) -> bool {
@@ -3826,6 +3949,14 @@ pub const NATIVE_ACP_TASK_WORKER_REFUSAL: &str =
 /// Prefix of the refusal of a native ACP launch without full access.
 pub const NATIVE_FULL_ACCESS_REQUIRED: &str = "native_full_access_required";
 
+/// Whether a launch keeps the shared credential stores of the home readable
+/// (`~/.ssh`, `~/.aws`, …, KT-1656): only the owner's full access does, and not
+/// one that carries read-only grants (a read policy is a restricted launch,
+/// whatever the agent's saved setting says). Every route asks this one place.
+pub(crate) fn reach_is_full_access(launch_full_access: bool, has_read_only_grants: bool) -> bool {
+    launch_full_access && !has_read_only_grants
+}
+
 /// Whether `agent` runs only with its full-access setting on: a native ACP
 /// runtime (OpenCode, Vibe, GitHub Copilot, Gemini CLI, Kiro) loads repository
 /// plugins, tools, hooks and MCP servers before any permission check, so no
@@ -4138,14 +4269,24 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         }
     };
 
+    // The tool executor is withheld from a model that cannot use it (KT-1600):
+    // a tool schema sent to a model without the capability is rejected by the
+    // provider or, worse, answered in prose. Decided once here, before the
+    // prompt is built, so the "you have tools" notice and the request's tool
+    // declarations always agree.
+    let http_tools = if is_http_chat_agent(config.agent_type) {
+        gate_http_tools(&config)
+    } else {
+        config.tools.clone()
+    };
+
     // A prelocalized HTTP worker is not a smaller general-purpose agent. Its
     // executor exposes one frozen tool per phase, so injecting user memory,
     // project-wide AGENTS.md and the full general tool tutorial only makes the
     // model repeatedly pay for capabilities it cannot use. Explicit skills,
     // profiles, directives and context files remain honoured below.
     let prelocalized_http_worker = is_http_chat_agent(config.agent_type)
-        && config
-            .tools
+        && http_tools
             .as_ref()
             .and_then(|executor| executor.worker_scope())
             .is_some();
@@ -4156,7 +4297,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     let http_agent_reads_files = http_agent_reads_its_own_files(
         is_http,
         is_http
-            && config.tools.as_ref().is_some_and(|executor| {
+            && http_tools.as_ref().is_some_and(|executor| {
                 executor
                     .catalogue()
                     .iter()
@@ -4271,10 +4412,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         parts.push(if prelocalized_http_worker {
             prelocalized_http_worker_notice().to_string()
         } else {
-            http_agent_tools_notice(config.tools.is_some()).to_string()
+            http_agent_tools_notice(http_tools.is_some()).to_string()
         });
-    } else if !mcp_context.is_empty() {
-        parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context));
+    } else {
+        if !mcp_context.is_empty() {
+            parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context));
+        }
+        parts.push(HEADLESS_NO_POPUP_NOTE.to_string());
     }
     if !directives_prompt.is_empty() {
         parts.push(format!(
@@ -4403,7 +4547,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             },
         );
         // API access policies decide on the model this launch really runs.
-        if let Some(tools) = config.tools.as_ref() {
+        if let Some(tools) = http_tools.as_ref() {
             tools.bind_launch_identity(crate::core::api_access::AgentIdentity {
                 agent_type: config.agent_type.clone(),
                 model: Some(model.to_string()),
@@ -4417,7 +4561,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.ollama_format,
             http_base_url,
             http_api_key,
-            config.tools.clone(),
+            http_tools,
             config.ollama_context_overrides,
             config.http_request_timeout,
             config.cancel_token.as_ref(),
@@ -4521,6 +4665,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     .and_then(|env_key| get_api_key(env_key, config.tokens)),
                 bridge_token: bridge_value.clone(),
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
+                // The runtime starts only with full access, verified above; the
+                // read grants of the launch (none can reach it today: only
+                // Claude Code and Codex hold them) still take it off the shared
+                // credential stores of the home, as on the other routes.
+                full_access: launch_full_access,
+                read_only_grants: read_only_repos.is_some(),
             };
             return start_native_acp(request, launch_full_access, native_env)
                 .await
@@ -4597,11 +4747,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 step_tools: config.step_tools.cloned(),
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
                 bridge_token: bridge_value.clone(),
+                priority: config.priority,
+                run_artifacts: read_only_repos
+                    .as_ref()
+                    .map(|policy| policy.granted_dirs().to_vec())
+                    .unwrap_or_default(),
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
                 request,
-                launch_full_access && read_only_repos.is_none(),
+                reach_is_full_access(launch_full_access, read_only_repos.is_some()),
                 launch,
             )
             .await
@@ -4621,7 +4776,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_command_with_task_worker_policy(
             config.agent_type,
             config.prompt,
-            launch_full_access,
+            // The shared rule: with read-only grants the launch is restricted, so
+            // the command must not carry the global bypass `policy.apply` strips
+            // (it would leave the launch without its `--allowedTools`).
+            reach_is_full_access(launch_full_access, read_only_repos.is_some()),
             &extra_context,
             model_flag.as_deref(),
             reasoning_effort.as_deref(),
@@ -4725,7 +4883,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     let github_env = crate::core::github_connection::env_for_launch(config.project_id).await;
     // Try direct binary first, then npx fallback
-    let mut child = match try_spawn(
+    // KT-1587 — the run directories the step was granted, from the policy Kronn
+    // resolved above; never from `args`, which carry the prompt.
+    let run_artifacts: Vec<PathBuf> = read_only_repos
+        .as_ref()
+        .map(|policy| policy.granted_dirs().to_vec())
+        .unwrap_or_default();
+    let mut child = match try_spawn_granted(
         binary,
         None,
         &args,
@@ -4740,6 +4904,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.audit_run_id,
         &github_env,
         bridge_value.as_deref(),
+        config.priority,
+        reach_is_full_access(launch_full_access, read_only_repos.is_some()),
+        &run_artifacts,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4758,7 +4925,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     runtime.command,
                     runtime.version,
                 );
-                try_spawn(
+                try_spawn_granted(
                     "npx",
                     Some(pkg),
                     &args,
@@ -4773,6 +4940,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.audit_run_id,
                     &github_env,
                     bridge_value.as_deref(),
+                    config.priority,
+                    reach_is_full_access(launch_full_access, read_only_repos.is_some()),
+                    &run_artifacts,
                 )
                 .map_err(|error| {
                     format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
@@ -4785,40 +4955,19 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     let (tx, rx) = mpsc::channel::<String>(256);
     let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+    let usage = Arc::new(Mutex::new(AgentUsage::default()));
     let mut stderr_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Always stream stdout
     if let Some(stdout) = child.stdout.take() {
-        let tx_out = tx.clone();
-        let provenance = config.provenance.clone();
-        let observe_claude = *config.agent_type == AgentType::ClaudeCode;
-        tokio::spawn(async move {
-            let mut lines = lossy_lines(stdout);
-            // Don't conflate a read error with EOF: the stream is truncated
-            // either way, but truncation must be visible in the logs.
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        if observe_claude {
-                            if let Some(model) = provenance::claude_observed_model(&line) {
-                                provenance::observe_model(provenance.as_ref(), &model);
-                            }
-                            if let Some(session_id) = provenance::claude_session_id(&line) {
-                                provenance::observe_session(provenance.as_ref(), &session_id);
-                            }
-                        }
-                        if tx_out.send(line).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        tracing::warn!("agent stdout read error (output truncated): {}", e);
-                        break;
-                    }
-                }
-            }
-        });
+        tokio::spawn(pump_stdout(
+            stdout,
+            tx.clone(),
+            (*config.agent_type == AgentType::ClaudeCode).then(|| config.provenance.clone()),
+            (*config.agent_type == AgentType::GeminiCli).then(GeminiStreamAdapter::default),
+            usage.clone(),
+            stderr_capture.clone(),
+        ));
     }
 
     if let Some(stderr) = child.stderr.take() {
@@ -4892,7 +5041,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_type: config.agent_type.clone(),
         rx,
         stderr_capture,
-        usage: Arc::new(Mutex::new(AgentUsage::default())),
+        usage,
         stderr_task: stderr_handle,
         http_cancel: None,
         pgid,
@@ -4901,6 +5050,56 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         bridge_token: bridge,
         resume_fallback: None,
     })
+}
+
+/// Read the agent's stdout line by line into `tx` until EOF. `claude_provenance`
+/// (set for Claude Code) records the model and session its stream announces;
+/// `gemini` turns Gemini's stream-json events back into reply lines as they
+/// arrive, keeping its usage in `usage` and its errors in `stderr_capture`.
+async fn pump_stdout<R: tokio::io::AsyncRead + Unpin>(
+    stdout: R,
+    tx: mpsc::Sender<String>,
+    claude_provenance: Option<Option<AgentProvenanceCapture>>,
+    mut gemini: Option<GeminiStreamAdapter>,
+    usage: Arc<Mutex<AgentUsage>>,
+    stderr_capture: Arc<Mutex<Vec<String>>>,
+) {
+    let mut lines = lossy_lines(stdout);
+    // Don't conflate a read error with EOF: the stream is truncated
+    // either way, but truncation must be visible in the logs.
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let lines = match gemini.as_mut() {
+                    Some(adapter) => adapter.push(line, &usage, &stderr_capture),
+                    None => vec![line],
+                };
+                for line in lines {
+                    if let Some(capture) = claude_provenance.as_ref() {
+                        if let Some(model) = provenance::claude_observed_model(&line) {
+                            provenance::observe_model(capture.as_ref(), &model);
+                        }
+                        if let Some(session_id) = provenance::claude_session_id(&line) {
+                            provenance::observe_session(capture.as_ref(), &session_id);
+                        }
+                    }
+                    if tx.send(line).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Ok(None) => {
+                if let Some(held) = gemini.as_mut().and_then(|adapter| adapter.flush()) {
+                    let _ = tx.send(held).await;
+                }
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("agent stdout read error (output truncated): {}", e);
+                return;
+            }
+        }
+    }
 }
 
 /// Mint the launch's bridge token, bound to its own discussions, its task
@@ -5002,6 +5201,12 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) github_env: Vec<(String, String)>,
     /// The launch's scoped bridge token (layer B); revoked with the launch.
     pub(crate) bridge_token: Option<String>,
+    /// KT-1633 — see [`AgentStartConfig::priority`].
+    pub(crate) priority: Priority,
+    /// KT-1587 — the run directories the step was granted: the typed
+    /// `ReadOnlyRepos::granted_dirs`, handed to the spawn of every turn (the
+    /// adapters spawn the CLI themselves, so the grant cannot be lost here).
+    pub(crate) run_artifacts: Vec<PathBuf>,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -6214,6 +6419,25 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
 
 /// Resolve the path to vibe-runner.py.
 /// Searches: env override → Docker bundle → next to executable → Tauri resource → cargo manifest (dev).
+/// KT-1599 — Gemini CLI policy (policy-engine TOML, `mcpName` rule) that allows
+/// every tool of the `kronn-internal` MCP server and nothing else. `toolName`
+/// is required alongside `mcpName`: gemini 0.66.0 rejects the rule without it
+/// (`Field "rule.0.toolName": Invalid input`), despite its docs.
+const GEMINI_KRONN_POLICY: &str = "[[rule]]\nmcpName = \"kronn-internal\"\ntoolName = \"*\"\ndecision = \"allow\"\npriority = 100\n";
+
+/// Path of the policy file for `--policy`, written under the Kronn data
+/// directory when missing or stale. `None` when it cannot be written: the run
+/// then degrades to Gemini's default confirmation behaviour, never to `--yolo`.
+fn gemini_kronn_policy_path() -> Option<String> {
+    let dir = crate::core::config::config_dir().ok()?.join("policies");
+    let path = dir.join("gemini-kronn-internal.toml");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(GEMINI_KRONN_POLICY) {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&path, GEMINI_KRONN_POLICY).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
 fn vibe_runner_path() -> String {
     // 0. Explicit override (allows custom deployments)
     if let Ok(custom) = crate::core::child_env::var("KRONN_VIBE_RUNNER") {
@@ -7785,6 +8009,62 @@ fn is_protected_protocol_tool_result(message: &serde_json::Value) -> bool {
         })
 }
 
+/// The last resort for a JSON tool result nothing smarter could shorten: its
+/// leading text inside a valid JSON envelope, marked as truncated. `None` for
+/// content that is not JSON — that one is cut as plain text — so the plain cut
+/// can never hand the model half a JSON document.
+///
+/// The prefix is the largest that keeps the envelope within `max_encoded_len`
+/// once embedded as a JSON string in `messages`, but never under `min_kept`.
+fn truncated_json_envelope(
+    content: &str,
+    max_encoded_len: usize,
+    min_kept: usize,
+) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    // Already an envelope of ours that could not shrink further: keep the size
+    // it reports, which is the response's and not this envelope's.
+    let original_bytes = if parsed["kronn_shortened"] == true {
+        parsed["original_bytes"]
+            .as_u64()
+            .map_or(content.len(), |bytes| bytes as usize)
+    } else {
+        content.len()
+    };
+    let render = |kept: usize| {
+        let mut cut = kept.min(content.len());
+        while !content.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        serde_json::json!({
+            "kronn_shortened": true,
+            "truncated": true,
+            "original_bytes": original_bytes,
+            "excerpt": &content[..cut],
+            "note": format!(
+                "Truncated by Kronn: {} bytes dropped so this result fits the context window; \
+                 `excerpt` is the start of the original text, cut mid-way and not parseable on \
+                 its own. Calling the same tool again returns the same result, cut the same \
+                 way — ask for a part you have not seen instead.",
+                content.len() - cut
+            ),
+        })
+        .to_string()
+    };
+    let fits = |text: &str| serde_json::to_string(text).is_ok_and(|e| e.len() <= max_encoded_len);
+    let mut low = min_kept.min(content.len());
+    let mut high = content.len();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if fits(&render(mid)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Some(render(low))
+}
+
 pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u64) {
     // Trim against the window this request will ACTUALLY get, not the ceiling it
     // could have had. Ollama fixes `n_ctx_slot` when it loads the model and does
@@ -7906,6 +8186,16 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
         // Compact before truncating so retrying cannot keep returning the same cut result.
         if let Some(shortened) = compact_tool_result(&content, max_encoded_len, hints.get(&idx)) {
             messages[idx]["content"] = serde_json::json!(shortened);
+            continue;
+        }
+        // A JSON result cut mid-text is no longer JSON, and the model cannot read
+        // it at all. Keep an envelope instead: the cut prefix as a string beside
+        // a marker, the original size and the same warning.
+        if let Some(replacement) = truncated_json_envelope(&content, max_encoded_len, MIN_KEPT) {
+            if replacement.len() >= len {
+                return;
+            }
+            messages[idx]["content"] = serde_json::json!(replacement);
             continue;
         }
         let note = |dropped: usize| {
@@ -12725,6 +13015,55 @@ pub fn discussion_scratch_dir(discussion_id: &str) -> Result<PathBuf, String> {
     discussion_scratch_dir_under(home.home_dir(), discussion_id)
 }
 
+/// Test guard: the home a discussion folder is created under must be a scratch
+/// directory strictly inside `temp`. Both sides are canonicalised so macOS's
+/// `/var` -> `/private/var` link cannot make a scratch home look foreign.
+#[cfg(test)]
+fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let (home_real, temp_real) = (canonical(home), canonical(temp));
+    if home_real != temp_real && home_real.starts_with(&temp_real) {
+        return Ok(());
+    }
+    Err(format!(
+        "test attempted to create a discussion working directory under the real home {} — \
+         enter a `ScratchHome` (HOME pointed at a tempdir, test marked #[serial]) first",
+        home.display()
+    ))
+}
+
+/// Points `HOME` at a fresh tempdir for one test and puts it back on drop, even
+/// on a panic. `HOME` is process-wide: callers must be `#[serial]`.
+#[cfg(test)]
+pub(crate) struct ScratchHome {
+    dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl ScratchHome {
+    pub(crate) fn enter() -> Self {
+        let dir = tempfile::tempdir().expect("scratch home");
+        let previous = crate::core::child_env::var_os("HOME");
+        crate::core::child_env::set_var("HOME", dir.path());
+        Self { dir, previous }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScratchHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::core::child_env::set_var("HOME", value),
+            None => crate::core::child_env::remove_var("HOME"),
+        }
+    }
+}
+
 fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
     // The id becomes a path segment: anything but a plain id could escape it.
     if discussion_id.is_empty()
@@ -12733,6 +13072,12 @@ fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<Path
             .all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err("Invalid discussion id for its working directory".into());
+    }
+    // A test creating this under the developer's real home would litter (or, in
+    // a worker sandbox, fail to create) `~/.kronn/discussions`: fail loudly.
+    #[cfg(test)]
+    if let Err(error) = scratch_home_guard(home, &std::env::temp_dir()) {
+        panic!("{error}");
     }
     let dir = home.join(".kronn").join("discussions").join(discussion_id);
     std::fs::create_dir_all(&dir)
@@ -12964,16 +13309,44 @@ pub(crate) struct ClaudeSandboxCatalogueReceipt {
 
 impl ClaudeSandboxCatalogueReceipt {
     fn validate(self) -> Result<(), String> {
-        if self.worktree_count <= MAX_CLAUDE_SANDBOX_WORKTREES
+        self.validate_listing(&[])
+    }
+
+    /// Whether the catalogue is within both caps.
+    pub(crate) fn within_caps(self) -> bool {
+        self.worktree_count <= MAX_CLAUDE_SANDBOX_WORKTREES
             && self.worktree_bytes <= MAX_CLAUDE_SANDBOX_WORKTREE_BYTES
-        {
+    }
+
+    /// [`Self::validate`], naming the worktrees that keep the catalogue over
+    /// its cap (directory names only, never a path), each with why Kronn did
+    /// not reclaim it, and the action that frees them (KT-1646, KT-1676).
+    /// `blockers` holds one `name (reason)` entry per worktree.
+    pub(crate) fn validate_listing(self, blockers: &[String]) -> Result<(), String> {
+        if self.within_caps() {
             return Ok(());
         }
+        let removable = if blockers.is_empty() {
+            String::new()
+        } else {
+            const LISTED: usize = 20;
+            let mut names: Vec<&str> = blockers.iter().map(String::as_str).take(LISTED).collect();
+            if blockers.len() > LISTED {
+                names.push("...");
+            }
+            format!(
+                " Worktrees Kronn could not reclaim: {}. Kronn only removes the clean worktrees \
+                 of finished tasks it manages. To free the others, close their task or review \
+                 them and run `git worktree remove <name>` (commit or discard uncommitted \
+                 changes first).",
+                names.join(", ")
+            )
+        };
         Err(format!(
             "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unsafe; \
              git_common_dir_count={}, git_worktree_count={}, git_worktree_bytes={}, \
              max_git_worktrees={}, max_git_worktree_bytes={}. No repository or worktree path was \
-             logged. Use `task_exec_reassign` to \
+             logged.{removable} Use `task_exec_reassign` to \
              move this execution to another available worker.",
             self.common_dir_count,
             self.worktree_count,
@@ -13080,6 +13453,61 @@ pub(crate) fn claude_task_worker_catalogue_preflight(
         return Ok(());
     }
     claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project))?.validate()
+}
+
+/// The catalogue measured for `project`; `None` where the sandbox catalogue
+/// does not apply (not macOS). The launch boundary measures, reclaims finished
+/// worktrees when over a cap, then measures again (KT-1646).
+pub(crate) fn claude_task_worker_catalogue_measure(
+    project: &crate::models::Project,
+) -> Result<Option<ClaudeSandboxCatalogueReceipt>, String> {
+    if !super::host_is_macos() {
+        return Ok(None);
+    }
+    claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project)).map(Some)
+}
+
+/// The registered worktrees of every Git root of `project`, the main checkout of
+/// each repository left out: what a refusal names so a human knows which ones
+/// keep the catalogue over its cap (KT-1676). Best effort, read-only: a root
+/// Git cannot list contributes nothing, the refusal itself is the measure's.
+pub(crate) fn claude_task_worker_catalogue_worktrees(
+    project: &crate::models::Project,
+) -> Vec<PathBuf> {
+    let mut common_dirs = std::collections::BTreeSet::new();
+    let mut worktrees = Vec::new();
+    for root in claude_sandbox_catalogue_roots(project) {
+        let Ok(common) = crate::core::cmd::git_cmd()
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(&root.path)
+            .output()
+        else {
+            continue;
+        };
+        let Ok(common_dir) =
+            PathBuf::from(String::from_utf8_lossy(&common.stdout).trim()).canonicalize()
+        else {
+            continue;
+        };
+        if !common_dirs.insert(common_dir) {
+            continue;
+        }
+        let Ok(listed) = crate::core::cmd::git_cmd()
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&root.path)
+            .output()
+        else {
+            continue;
+        };
+        worktrees.extend(
+            String::from_utf8_lossy(&listed.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .skip(1)
+                .map(PathBuf::from),
+        );
+    }
+    worktrees
 }
 
 async fn run_claude_task_worker_auth_probe(
@@ -13769,7 +14197,21 @@ fn agent_command_with_task_worker_policy(
             }
             if full_access && !task_worker {
                 args.push("--yolo".into());
+            } else if !task_worker {
+                // KT-1599 — headless Gemini cannot ask, so it refuses any MCP
+                // tool it would have to confirm. A policy file allows Kronn's own
+                // server without the blanket `--yolo`.
+                if let Some(policy) = gemini_kronn_policy_path() {
+                    args.push("--policy".into());
+                    args.push(policy);
+                }
             }
+            // `stream-json` (listed by `gemini --help` on 0.66.0) emits the reply
+            // as incremental events and ends with a `result` event carrying the
+            // run's token usage; the text output carries none. `GeminiStreamAdapter`
+            // turns the events back into reply lines as they arrive.
+            args.push("--output-format".into());
+            args.push("stream-json".into());
             // Gemini CLI has no system prompt flag — prepend context to prompt
             let full_prompt = if mcp_context.is_empty() {
                 prompt.into()
@@ -14277,6 +14719,20 @@ pub(crate) fn claude_auto_memory_opted_in() -> bool {
         == Ok("1")
 }
 
+/// The priority of one agent launch: a task worker runs in the background
+/// whatever the caller asked, any other launch at the priority its caller asked
+/// for (a workflow Agent step: background; a discussion turn: the backend's own).
+fn agent_launch_priority(
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    requested: Priority,
+) -> Priority {
+    if task_worker_context.is_some() {
+        Priority::Background
+    } else {
+        requested
+    }
+}
+
 fn is_claude_code_launch(binary: &str, npx_package: Option<&str>) -> bool {
     Path::new(binary)
         .file_name()
@@ -14336,6 +14792,16 @@ fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> Str
 /// args, env, cwd, stdin) plus four Kronn-specific feed-throughs
 /// (npx_package, api_key, discussion_id, task-worker capability). Allow-listed rather than
 /// refactored.
+///
+/// `full_access` is the launch's real trust level (KT-1656): `true` only for
+/// a launch the owner opened in full access. Any other launch, a task worker
+/// included whatever it passes, also loses the shared credential stores of
+/// the home (`~/.ssh`, `~/.aws`, `gh`, …), whichever agent it runs.
+///
+/// Tests only (KT-1587): a production launch always goes through
+/// [`try_spawn_granted`], so none can drop the run artifacts grant by calling
+/// this no-grant form.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_spawn(
     binary: &str,
@@ -14352,7 +14818,79 @@ pub(crate) fn try_spawn(
     audit_run_id: Option<&str>,
     github_env: &[(String, String)],
     bridge_token: Option<&str>,
+    priority: Priority,
+    full_access: bool,
 ) -> Result<tokio::process::Child, String> {
+    // KT-1587 — a launch that is not handed a run artifacts grant reads none.
+    try_spawn_granted(
+        binary,
+        npx_package,
+        args,
+        work_dir,
+        env_key,
+        api_key,
+        io,
+        discussion_id,
+        task_worker_context,
+        room_agent_context,
+        workflow_step_context,
+        audit_run_id,
+        github_env,
+        bridge_token,
+        priority,
+        full_access,
+        &[],
+    )
+}
+
+/// Tests: the run artifacts grant each spawn was handed, by program.
+#[cfg(test)]
+pub(crate) mod spawn_grants {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<(String, Vec<PathBuf>)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn record(binary: &str, granted: &[PathBuf]) {
+        SEEN.lock()
+            .unwrap()
+            .push((binary.to_owned(), granted.to_vec()));
+    }
+
+    /// The grant of the last spawn of `binary`; `None` when it never spawned.
+    pub(crate) fn last_for(binary: &str) -> Option<Vec<PathBuf>> {
+        let seen = SEEN.lock().unwrap();
+        let (_, granted) = seen.iter().rev().find(|(name, _)| name == binary)?;
+        Some(granted.clone())
+    }
+}
+
+/// [`try_spawn`] for a launch granted the run directories `run_artifacts`
+/// (KT-1587): the typed grant Kronn built for the step
+/// (`ReadOnlyRepos::granted_dirs`), never read back out of `args`, whose prompt
+/// and system prompt carry text no one vetted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_spawn_granted(
+    binary: &str,
+    npx_package: Option<&str>,
+    args: &[String],
+    work_dir: &Path,
+    env_key: &str,
+    api_key: Option<&str>,
+    io: SpawnIo<'_>,
+    discussion_id: Option<&str>,
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
+    workflow_step_context: Option<&WorkflowStepBridgeContext>,
+    audit_run_id: Option<&str>,
+    github_env: &[(String, String)],
+    bridge_token: Option<&str>,
+    priority: Priority,
+    full_access: bool,
+    run_artifacts: &[PathBuf],
+) -> Result<tokio::process::Child, String> {
+    #[cfg(test)]
+    spawn_grants::record(binary, run_artifacts);
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
         SpawnIo::Adapter(_) => None,
@@ -14422,10 +14960,20 @@ pub(crate) fn try_spawn(
         let roots = crate::core::vault_guard::LaunchRoots::discover(
             Path::new(&effective_work_dir),
             npx_package.is_some() && cmd_name != binary,
-        );
+        )
+        // KT-1587 — the run artifacts root, but for the run directory granted.
+        .with_run_artifacts(run_artifacts);
+        // KT-1656 — and the credential files of the home that this agent does
+        // not own (`~/.gemini` for a Claude, `~/.codex` for a Gemini, …).
+        let sandbox = crate::core::vault_guard::launch_sandbox(binary, npx_package, args);
+        let family = crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key);
+        // The launch's trust level, not the kind of its sandbox: a task worker
+        // never has the owner's full access, whatever agent it runs.
+        let owner_full_access = full_access && task_worker_context.is_none();
         let (program, wrapped_args, outcome) = crate::core::vault_guard::wrap_launch(
-            crate::core::vault_guard::launch_confinement().as_ref(),
-            crate::core::vault_guard::launch_sandbox(binary, npx_package, args),
+            crate::core::vault_guard::launch_confinement_for(family, sandbox, owner_full_access)
+                .as_ref(),
+            sandbox,
             &roots,
             final_cmd,
             final_args,
@@ -14445,7 +14993,14 @@ pub(crate) fn try_spawn(
     let route = crate::core::child_env::ChildRoute::Agent(
         crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key),
     );
-    let mut cmd = async_cmd(&final_cmd, route);
+    // KT-1633 — a task worker (and its re-dispatch after a review) and a workflow
+    // Agent step build for minutes: they yield to the owner's interactive
+    // applications. A room principal or a plain discussion turn is the owner's own work.
+    let mut cmd = async_cmd_with(
+        &final_cmd,
+        route,
+        agent_launch_priority(task_worker_context, priority),
+    );
     // Built, never inherited: the backend's own environment holds secrets.
     crate::core::child_env::reset(cmd.as_std_mut(), route);
     let inherited = crate::core::child_env::names_of(cmd.as_std());
@@ -14519,6 +15074,12 @@ pub(crate) fn try_spawn(
         api_key: api_key.map(|key| (env_key, key)),
     };
     crate::core::child_env::apply_agent_launch(cmd.as_std_mut(), work_dir, &launch, backend_url)?;
+    // KT-1645 — no agent moves the owner's main checkout (checkout, switch, reset,
+    // stash) without the human's confirmation. Not for an agent in WSL, whose
+    // `PATH` is the Linux side's.
+    if !(runs_in_wsl || resolved_via_wsl) {
+        crate::core::git_guard::apply(cmd.as_std_mut(), work_dir);
+    }
 
     // In Docker, HOME=/home/kronn (the container user) and EVERY agent's auth
     // dir is mounted there by docker-compose: `${HOME}/.claude → /home/kronn/.claude`,
@@ -14602,6 +15163,10 @@ pub(crate) fn try_spawn(
             cmd.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
         }
     }
+    // KT-1634 — every agent process on a project worktree, whatever its CLI and
+    // role (task worker, reviewer, fix agent), builds and tests under the same
+    // parallelism budget; the lane below only adds its private locations.
+    crate::core::task_worker_env::apply_build_budget(cmd.as_std_mut(), work_dir);
     // KT-1246 — a Claude task worker builds and tests in its own lane: private
     // Cargo target and home, offline Cargo, a scratch Kronn data dir, and the
     // main checkout's frontend dependencies linked read-only. Other runtimes
@@ -14971,12 +15536,16 @@ pub fn clean_kiro_line(line: &str) -> Option<String> {
 /// Parse token usage from agent output.
 /// Codex outputs "tokens used\nN,NNN" on stderr (StdoutOnly mode captures it).
 /// Kiro outputs "Credits: 0.05 • Time: 3s" on stderr.
+/// Gemini CLI reports through its `--output-format stream-json` result event, which
+/// `GeminiStreamAdapter` records on the process (never in the reply text).
+/// Vibe through the `vibe_tokens:<prompt>:<completion>` stderr marker `vibe-runner.py` prints.
 /// Returns (cleaned_response, tokens_used) — token lines are stripped if found in response.
+/// `None` means UNMEASURED: no count was reported, which is not the same as a free run.
 pub fn parse_token_usage(
     agent_type: &AgentType,
     response: &str,
     stderr_lines: &[String],
-) -> (String, u64) {
+) -> (String, Option<u64>) {
     match agent_type {
         AgentType::Kiro => {
             // Kiro outputs "Credits: X.XX" or "▸ Credits: X.XX" on stderr.
@@ -14993,7 +15562,7 @@ pub fn parse_token_usage(
                         .trim();
                     if let Ok(credits) = credits_str.parse::<f64>() {
                         let tokens = (credits * 10000.0) as u64;
-                        return (response.to_string(), tokens);
+                        return (response.to_string(), Some(tokens));
                     } else {
                         tracing::warn!("Kiro credits parse failed for: {:?}", credits_str);
                     }
@@ -15005,7 +15574,7 @@ pub fn parse_token_usage(
                     stderr_lines.len()
                 );
             }
-            (response.to_string(), 0)
+            (response.to_string(), None)
         }
         AgentType::Codex => {
             // Codex writes `tokens used` followed by the count. Newer releases
@@ -15013,7 +15582,7 @@ pub fn parse_token_usage(
             // the penultimate stderr line anymore. Scan every adjacent pair and
             // prefer the latest valid measurement.
             if let Some(count) = codex_token_usage(stderr_lines.iter().map(String::as_str)) {
-                return (response.to_string(), count);
+                return (response.to_string(), Some(count));
             }
             // Fallback: check stdout (some versions may put it there)
             let lines: Vec<&str> = response.lines().collect();
@@ -15027,10 +15596,10 @@ pub fn parse_token_usage(
                         .map(|(_, line)| *line)
                         .collect::<Vec<_>>()
                         .join("\n");
-                    return (clean, count);
+                    return (clean, Some(count));
                 }
             }
-            (response.to_string(), 0)
+            (response.to_string(), None)
         }
         AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
             // Both HTTP backends put "ollama_tokens:prompt:eval" in stderr_capture
@@ -15042,7 +15611,7 @@ pub fn parse_token_usage(
             // marker per turn. KT-408 — this used to `return` on the FIRST
             // match, silently reporting only turn one's cost for any run that
             // used tools; the real total is the SUM across every turn.
-            let mut total = 0u64;
+            let mut total: Option<u64> = None;
             for line in stderr_lines {
                 let Some(rest) = line.strip_prefix("ollama_tokens:") else {
                     continue;
@@ -15057,7 +15626,7 @@ pub fn parse_token_usage(
                 else {
                     continue;
                 };
-                total += prompt + eval;
+                total = Some(total.unwrap_or(0) + prompt + eval);
             }
             (response.to_string(), total)
         }
@@ -15072,9 +15641,9 @@ pub fn parse_token_usage(
             // lines that occasionally leak into stdout. The MCP failure itself
             // is still logged via stderr_capture for debugging.
             //
-            // Token usage isn't available on Gemini CLI 0.32 stdout (no
-            // `tokens used` marker) — return 0, the auth_mode field still
-            // disambiguates `override` vs `local auth` in the UI.
+            // The reply text carries no usage: `GeminiStreamAdapter` records it
+            // on the process from the stream's `result` event, and a run without
+            // one (an older CLI, a failed run) is unmeasured, not zero.
             const MCP_ISSUES_MARKER: &str = "MCP issues detected. Run /mcp list for status.";
             // Step 1 — drop debug noise lines. We keep blank lines so paragraph
             // breaks in the agent's actual reply survive intact.
@@ -15094,11 +15663,137 @@ pub fn parse_token_usage(
             // to the next chunk (handled by the same `replacen` since the
             // marker is unique).
             let cleaned = cleaned.replacen(MCP_ISSUES_MARKER, "", 1);
-            (cleaned.trim_start().to_string(), 0)
+            (cleaned.trim_start().to_string(), None)
         }
+        // `vibe-runner.py` prints `vibe_tokens:<prompt>:<completion>` on stderr
+        // when the Mistral API reports usage. No marker → unmeasured.
+        AgentType::Vibe => (response.to_string(), vibe_token_usage(stderr_lines)),
         // Claude Code: tokens parsed inline via parse_claude_stream_line() in discussions.rs
-        // TODO: Vibe — not yet supported
-        _ => (response.to_string(), 0),
+        _ => (response.to_string(), None),
+    }
+}
+
+/// Usage `vibe-runner.py` reported (`vibe_tokens:<prompt>:<completion>`), the
+/// latest valid marker winning. `None` when it printed none or only malformed
+/// ones: the Vibe SDK path and a Mistral stream without a usage chunk report
+/// nothing, and that is unmeasured, never 0.
+fn vibe_token_usage(stderr_lines: &[String]) -> Option<u64> {
+    stderr_lines.iter().rev().find_map(|line| {
+        let clean = strip_ansi(line);
+        let rest = clean.trim().strip_prefix("vibe_tokens:")?;
+        let (prompt, completion) = rest.split_once(':')?;
+        let prompt = prompt.trim().parse::<u64>().ok()?;
+        let completion = completion.trim().parse::<u64>().ok()?;
+        Some(prompt.saturating_add(completion))
+    })
+}
+
+/// What Gemini CLI's `result` event reports for one run, summed over the
+/// models it used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GeminiUsage {
+    /// Prompt tokens, cached share included.
+    prompt: u64,
+    /// The CLI's own total (prompt + candidates + thoughts + tool).
+    total: u64,
+    cached: Option<u64>,
+}
+
+/// The usage in a `result` event's `stats`
+/// (`{"total_tokens", "input_tokens", "cached", ...}`, `convertToStreamStats` in
+/// the Gemini CLI 0.66.0 bundle). `None` when it carries no tokens: a run that
+/// made no request reports zeros, and nothing was measured.
+fn gemini_stream_usage(stats: &serde_json::Value) -> Option<GeminiUsage> {
+    let field = |name: &str| stats.get(name).and_then(serde_json::Value::as_u64);
+    let total = field("total_tokens").filter(|total| *total > 0)?;
+    Some(GeminiUsage {
+        prompt: field("input_tokens")?,
+        total,
+        cached: field("cached"),
+    })
+}
+
+/// Turns Gemini CLI's `--output-format stream-json` events back into the reply
+/// lines consumers read in `OutputMode::Text`, one line as soon as it is
+/// complete, and keeps the usage of the final `result` event for
+/// `AgentProcess::reported_token_usage`. The prompt echo (`role: "user"`), the
+/// `init` and tool events are dropped; an `error` event goes to the stderr
+/// capture, where the text output's `[ERROR]` line used to land. Anything that
+/// is not an event (a warning, an older CLI's plain text) passes through.
+#[derive(Default)]
+struct GeminiStreamAdapter {
+    /// Reply text received but not yet ended by a newline.
+    partial: String,
+}
+
+impl GeminiStreamAdapter {
+    /// The lines to emit now (possibly none) for one stdout line.
+    fn push(
+        &mut self,
+        line: String,
+        usage: &Mutex<AgentUsage>,
+        stderr: &Mutex<Vec<String>>,
+    ) -> Vec<String> {
+        let event = line
+            .trim_start()
+            .starts_with('{')
+            .then(|| serde_json::from_str::<serde_json::Value>(&line).ok())
+            .flatten()
+            .filter(|event| event.get("type").is_some_and(serde_json::Value::is_string));
+        let Some(event) = event else {
+            let mut out: Vec<String> = self.flush().into_iter().collect();
+            out.push(line);
+            return out;
+        };
+        let text = |key: &str| event.get(key).and_then(serde_json::Value::as_str);
+        let mut out = Vec::new();
+        match text("type") {
+            Some("message") if text("role") == Some("assistant") => {
+                self.partial.push_str(text("content").unwrap_or_default());
+                while let Some(end) = self.partial.find('\n') {
+                    out.push(self.partial[..end].trim_end_matches('\r').to_string());
+                    self.partial.drain(..=end);
+                }
+            }
+            Some("error") => {
+                let message = text("message").unwrap_or("unknown error");
+                let severity = text("severity").unwrap_or("error").to_uppercase();
+                if let Ok(mut buf) = stderr.lock() {
+                    buf.push(format!("[{severity}] {message}"));
+                }
+            }
+            Some("result") => {
+                out.extend(self.flush());
+                if text("status") == Some("error") {
+                    let message = event
+                        .pointer("/error/message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown error");
+                    if let Ok(mut buf) = stderr.lock() {
+                        buf.push(format!("[ERROR] {message}"));
+                    }
+                }
+                record_gemini_usage(usage, event.get("stats").and_then(gemini_stream_usage));
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// The reply's last line, when the stream ends without a closing newline.
+    fn flush(&mut self) -> Option<String> {
+        (!self.partial.is_empty()).then(|| std::mem::take(&mut self.partial))
+    }
+}
+
+fn record_gemini_usage(usage: &Mutex<AgentUsage>, reported: Option<GeminiUsage>) {
+    let Some(reported) = reported else {
+        return;
+    };
+    if let Ok(mut usage) = usage.lock() {
+        usage.input_tokens = reported.prompt;
+        usage.output_tokens = reported.total.saturating_sub(reported.prompt);
+        usage.prompt_cache.cached_prompt_tokens = reported.cached;
     }
 }
 

@@ -16,6 +16,7 @@ pub mod dependencies;
 pub mod docker;
 pub mod docs_location;
 pub mod git;
+pub mod lane_seeds;
 pub mod migrate;
 pub mod resource_links;
 pub mod resource_prewarm;
@@ -661,7 +662,7 @@ mod tests {
         assert!(!not_a_dir.join("linked-repos.md").exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn sync_linked_repos_doc_in_never_writes_through_a_swapped_docs_folder() {
         use crate::core::fs_guard::swap_probe;

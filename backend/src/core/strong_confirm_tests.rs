@@ -19,12 +19,14 @@ fn every_route_of_the_inventory_is_protected() {
         ("POST", "/api/setup/reset"),
         ("POST", "/api/config/import"),
         ("PUT", "/api/projects/{id}/validations-access"),
+        ("PUT", "/api/projects/{id}/lane-seeds"),
         ("POST", "/api/agents/uninstall"),
         // The sensitive deletions, an explicit list.
         ("DELETE", "/api/projects/{id}"),
         ("DELETE", "/api/mcps/configs/{id}"),
         ("DELETE", "/api/external-api/connections/{id}"),
         ("DELETE", "/api/config/api-keys/{id}"),
+        ("DELETE", "/api/config/recovery/set-aside-files/{name}"),
         ("POST", "/api/human-credentials/revoke"),
         ("POST", "/api/human-credentials/enrol"),
         ("POST", "/api/human-credentials/admin/rotate"),
@@ -268,6 +270,8 @@ const OPEN_ON_PURPOSE: &[(&str, &str)] = &[
         "/api/orchestration/provider-quotas/{provider}/rearm",
     ),
     ("POST", "/api/audit-runs/cleanup"),
+    // KT-1656: masks credentials in the stored text of one discussion; returns none.
+    ("POST", "/api/maintenance/redact-discussion"),
     ("POST", "/api/rtk/deactivate"),
     ("POST", "/api/config/embed-origins"),
     ("POST", "/api/projects/{id}/context-audit/baseline"),
@@ -279,7 +283,6 @@ const OPEN_ON_PURPOSE: &[(&str, &str)] = &[
     ("DELETE", "/api/directives/{id}"),
     ("DELETE", "/api/discussions/{id}"),
     ("DELETE", "/api/discussions/{id}/context-files/{file_id}"),
-    ("DELETE", "/api/discussions/{id}/messages/last"),
     ("DELETE", "/api/discussions/{id}/messages/{message_id}"),
     ("DELETE", "/api/lite-llm/model-failures"),
     ("DELETE", "/api/live-page-actions/{id}/trust"),
@@ -386,9 +389,35 @@ fn a_maintenance_route_is_open_and_an_instance_operation_asks() {
         ("POST", "/api/config/import"),
         ("POST", "/api/config/recovery/reencrypt"),
         ("PUT", "/api/projects/{id}/validations-access"),
+        ("PUT", "/api/projects/{id}/lane-seeds"),
         ("POST", "/api/agents/uninstall"),
         ("POST", "/api/pages/import"),
     ] {
         assert_eq!(protection(method, pattern), Protection::Always, "{pattern}");
     }
+}
+
+/// KT-1438: only the lane-seeds save is governed by the owner's setting, and a
+/// GET of the same path is not that call.
+#[test]
+fn only_the_lane_seeds_save_is_waivable_by_the_setting() {
+    assert!(is_lane_seeds_save("PUT", "/api/projects/{id}/lane-seeds"));
+    assert!(is_lane_seeds_save("put", "/api/projects/{id}/lane-seeds"));
+    assert!(!is_lane_seeds_save("GET", "/api/projects/{id}/lane-seeds"));
+    assert!(!is_lane_seeds_save(
+        "PUT",
+        "/api/projects/{id}/lane-seeds/candidates"
+    ));
+    assert!(!is_lane_seeds_save(
+        "PUT",
+        "/api/projects/{id}/validations-access"
+    ));
+    assert_eq!(
+        protection("PUT", "/api/projects/{id}/lane-seeds"),
+        Protection::Always
+    );
+    assert_eq!(
+        protection("GET", "/api/projects/{id}/lane-seeds"),
+        Protection::Open
+    );
 }
