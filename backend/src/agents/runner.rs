@@ -14714,7 +14714,9 @@ pub(crate) fn try_spawn(
         let roots = crate::core::vault_guard::LaunchRoots::discover(
             Path::new(&effective_work_dir),
             npx_package.is_some() && cmd_name != binary,
-        );
+        )
+        // KT-1587 — the run artifacts root, but for the run directory granted.
+        .with_run_artifacts(args);
         let (program, wrapped_args, outcome) = crate::core::vault_guard::wrap_launch(
             crate::core::vault_guard::launch_confinement().as_ref(),
             crate::core::vault_guard::launch_sandbox(binary, npx_package, args),

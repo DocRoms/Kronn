@@ -127,10 +127,29 @@ else the platform cache directory. A base inside a protected directory, or one
 that contains it, is refused and the default is used. Details:
 [workflow-read-only-repos.md](../operations/workflow-read-only-repos.md#run-artifacts-directory).
 
-For now an Agent step can read any run's artifacts, not only its own, when its
-prompt names the path; per-run confinement is planned (KT-1587, 0.15.3). Exec
-outputs kept there are scrubbed of known secrets; reports and screenshots a
-step writes are not.
+Exec outputs kept there are scrubbed of known secrets; reports and screenshots a
+step writes are not, which is why a launch reaches **its own run's directory
+only** (KT-1587). Every native agent launch (`try_spawn`, the ACP runtimes) has
+the whole root closed; the run directory a step was *granted* (its prompt names
+`{{run.artifacts_dir}}`, so `read_only_repos` passes it as `--add-dir` for Claude
+and a `"<dir>"="read"` entry for Codex) is opened again, **read-only**. A launch
+with no grant (a discussion, a task worker, an ACP runtime, a step that does not
+name the path) reads no run at all. `core/artifacts_reach.rs` derives the grant
+from the launch arguments themselves and builds each runtime's rules:
+
+| Runtime | Root closed | Own run opened |
+|---|---|---|
+| Seatbelt (Codex, every wrapped launch) | `(deny file-read* file-write*)` on the root and its real path, after every other rule | `(allow file-read*)` on the own dir (a later rule wins), plus `file-read-metadata` on the root itself; writes stay denied |
+| bubblewrap | empty tmpfs over the resolved root (the root is created before the launch so the mount has a target) | `--ro-bind` of the own dir on top, after the tmpfs |
+| Claude's own sandbox (policy launches, task workers) | `sandbox.filesystem.denyRead` and `denyWrite` on the root | `sandbox.filesystem.allowRead` on the own dir (an allow inside a denied read path re-opens it) |
+| Claude's Read, Edit and Write tools | `Edit` and `Write` denied on the root; `Read` denied on the whole root with no grant | with a grant, a deny cannot be carved out by an allow, so each *other* entry of the root present at the launch is denied by its literal path (at most 200; the sandbox and `blockReadsOutsideWorkingDirectories` still hold beyond) |
+
+Like the data-dir rule it follows the owner's vault-protection setting and the
+host's sandbox. Limits: a Claude launch's literal Read denies name the runs that
+exist when it starts (a run created later is closed by the sandbox and by the
+working-directory limit, not by a rule of its own); on Linux the bubblewrap
+mounts were not exercised live, only their arguments are tested.
+[src: file: backend/src/core/artifacts_reach.rs:1-35]
 
 ## Loopback is not the owner
 
@@ -165,6 +184,7 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
 | Where | What |
 |---|---|
 | `core/vault_guard.rs` | which launches are wrapped, the Claude rules |
+| `core/artifacts_reach.rs` | the run artifacts root closed to a launch but for its granted run (KT-1587) |
 | `agents/runner.rs` `try_spawn` | the one spawn point of every native agent |
 | `agents/runner.rs` `claude_task_worker_settings` | `denyRead` and `permissions.deny` of the worker |
 | `api/strong_confirm.rs` `strong_gate` | the code of the vault routes, on every channel |

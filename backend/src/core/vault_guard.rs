@@ -46,6 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::artifacts_reach::ArtifactsReach;
 use crate::core::task_worker_sandbox::{real_path, seatbelt_literal, Mechanism};
 use crate::core::trust_sandbox::{self, LevelConfinement};
 
@@ -95,6 +96,9 @@ pub struct LaunchRoots {
     pub npm_cache: Option<PathBuf>,
     /// The temporary directories, which both Codex modes write.
     pub temp: Vec<PathBuf>,
+    /// KT-1587 — what the launch reaches under the run artifacts root. `None`
+    /// leaves the root as it is (protection off); [`Self::default`] is that.
+    pub artifacts: Option<ArtifactsReach>,
 }
 
 impl LaunchRoots {
@@ -125,7 +129,20 @@ impl LaunchRoots {
                 None
             },
             temp,
+            artifacts: None,
         }
+    }
+
+    /// KT-1587 — closes the run artifacts root to the launch `args`, but for
+    /// the run directory they grant.
+    pub fn with_run_artifacts(mut self, args: &[String]) -> Self {
+        self.artifacts = ArtifactsReach::for_launch(args);
+        if self.artifacts.is_some() {
+            // A mount hides a directory that exists: a run created while the
+            // agent lives must find the root already covered.
+            let _ = crate::workflows::run_artifacts::ensure_root();
+        }
+        self
     }
 }
 
@@ -263,6 +280,9 @@ pub fn codex_seatbelt_profile(
         profile.push_str(")\n");
     }
     profile.push_str(&trust_sandbox::seatbelt_hide_rules(protected));
+    if let Some(artifacts) = &roots.artifacts {
+        profile.push_str(&artifacts.seatbelt_rules());
+    }
     profile
 }
 
@@ -307,6 +327,9 @@ pub fn codex_bubblewrap_args(
     }
     for dir in trust_sandbox::bubblewrap_mount_points(protected) {
         args.extend(["--tmpfs".to_string(), dir]);
+    }
+    if let Some(artifacts) = &roots.artifacts {
+        args.extend(artifacts.bubblewrap_mounts());
     }
     args.extend(
         ["--share-net", "--die-with-parent", "--"]
@@ -372,7 +395,28 @@ pub fn wrap_launch(
     }
     let (launcher, mut wrapped) = confinement.wrap(&program, &args);
     wrapped.retain(|arg| arg != "--new-session");
+    if let Some(artifacts) = &roots.artifacts {
+        close_artifacts(confinement.mechanism(), artifacts, &mut wrapped);
+    }
     (launcher, wrapped, Confined::Wrapped)
+}
+
+/// KT-1587 — the run artifacts root closed in a wrapped launch: its Seatbelt
+/// profile gets the rules last, its `bwrap` mounts come before the `--` that
+/// ends the options.
+fn close_artifacts(mechanism: Mechanism, artifacts: &ArtifactsReach, wrapped: &mut Vec<String>) {
+    match mechanism {
+        Mechanism::Seatbelt => {
+            if let Some(profile) = wrapped.get_mut(1) {
+                profile.push_str(&artifacts.seatbelt_rules());
+            }
+        }
+        Mechanism::Bubblewrap => {
+            if let Some(end) = wrapped.iter().position(|arg| arg == "--") {
+                wrapped.splice(end..end, artifacts.bubblewrap_mounts());
+            }
+        }
+    }
 }
 
 /// The confinement an agent launch gets on this host: `None` when the owner
@@ -392,7 +436,7 @@ pub fn launch_confinement() -> Option<LevelConfinement> {
 
 /// The data directory as Claude's rules name it: `Read(//abs/path/**)`, the
 /// double slash being Claude's spelling of a path from the filesystem root.
-fn claude_rule(tool: &str, dir: &Path) -> String {
+pub(crate) fn claude_rule(tool: &str, dir: &Path) -> String {
     format!(
         "{tool}(/{}/**)",
         dir.to_string_lossy().trim_end_matches('/')
@@ -413,23 +457,42 @@ fn hidden_dirs() -> Vec<PathBuf> {
 /// `permissions.deny` for every Claude launch: the Read, Edit and Write tools
 /// refuse the data directory, `--dangerously-skip-permissions` included (a deny
 /// rule is checked before the permission mode).
+///
+/// KT-1587 — plus the run artifacts root, whole: this launch has no grant.
 pub fn claude_permission_deny() -> Vec<String> {
-    hidden_dirs()
+    claude_permission_deny_for(&[])
+}
+
+/// [`claude_permission_deny`] for a launch with `args`: a run directory they
+/// grant is left out of the Read rule (a deny beats an allow) and the other run
+/// directories are named one by one.
+fn claude_permission_deny_for(args: &[String]) -> Vec<String> {
+    let mut rules: Vec<String> = hidden_dirs()
         .iter()
         .flat_map(|dir| {
             ["Read", "Edit", "Write"]
                 .into_iter()
                 .map(|tool| claude_rule(tool, dir))
         })
-        .collect()
+        .collect();
+    if let Some(artifacts) = ArtifactsReach::for_launch(args) {
+        rules.extend(artifacts.claude_permission_deny());
+    }
+    rules
 }
 
-/// `sandbox.filesystem.denyRead` of Claude's own sandbox (the task workers).
+/// `sandbox.filesystem.denyRead` of Claude's own sandbox (the task workers),
+/// the run artifacts root included (KT-1587): a granted run directory is
+/// re-opened by `allowRead`.
 pub fn claude_sandbox_deny_read() -> Vec<String> {
-    hidden_dirs()
+    let mut dirs: Vec<String> = hidden_dirs()
         .iter()
         .map(|dir| dir.to_string_lossy().into_owned())
-        .collect()
+        .collect();
+    if let Some(artifacts) = ArtifactsReach::for_launch(&[]) {
+        dirs.extend(artifacts.claude_sandbox_deny());
+    }
+    dirs
 }
 
 /// The `--settings` value every Claude launch without a sandbox of its own
@@ -476,13 +539,20 @@ pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
     };
     push_unique(
         &mut settings["permissions"]["deny"],
-        claude_permission_deny(),
+        claude_permission_deny_for(args),
     );
     if settings["sandbox"]["enabled"] == true {
         push_unique(
             &mut settings["sandbox"]["filesystem"]["denyRead"],
             claude_sandbox_deny_read(),
         );
+        // KT-1587 — the run directory the launch was granted.
+        if let Some(artifacts) = ArtifactsReach::for_launch(args) {
+            push_unique(
+                &mut settings["sandbox"]["filesystem"]["allowRead"],
+                artifacts.claude_sandbox_allow_read(),
+            );
+        }
         // KT-1491 — a checkout opened for editing (a `code` grant) must not reach
         // the data directory through the shell's writes either.
         push_unique(

@@ -253,10 +253,14 @@ async executor.
 [src: file: backend/src/workflows/run_artifacts.rs:407-425#move_into]
 [src: file: backend/src/workflows/run_artifacts.rs:432-464#sweep_root]
 
-Access across runs (decided for now, KT-1587 in 0.15.3 confines it): run
-artifacts sit outside the data directory, so agents can read them, and an
-Agent step can read **any** run's artifacts, not only its own, when its prompt
-names that path. An Exec stdout kept there is scrubbed of the secrets Kronn
+Access across runs (KT-1587): run artifacts sit outside the data directory, so
+the vault protection does not hide them; a rule of their own does. An Agent step
+reads **its own run's** artifacts, read-only, when its prompt names that path,
+and no other run's. A launch that was not granted the path (a discussion, a task
+worker, an ACP runtime, a step that does not name it) reads none. The rules per
+runtime are in [agent-vault-protection.md](../architecture/agent-vault-protection.md#run-artifacts-sit-outside-the-vault-kt-1585).
+With the vault protection turned off, or on a host with no sandbox, the root is
+open as it was. An Exec stdout kept there is scrubbed of the secrets Kronn
 knows; reports, screenshots and other files a step writes are not.
 
 ### A cut Exec stdout (KT-1570)

@@ -348,8 +348,14 @@ Release notes for 0.9.3 and earlier are available in the
   a `kronn-run-artifacts/<key>` directory of Kronn's own; a base inside or
   containing the data directory is refused. Docker uses a new
   `kronn-run-artifacts` volume. Existing live run directories are moved at
-  startup, dead ones deleted. Any Agent step can still read any run's
-  artifacts; per-run confinement is KT-1587.
+  startup, dead ones deleted. Per-run confinement follows (KT-1587, below).
+- An agent step reads its own run's artifacts and no other run's (KT-1587). The
+  run artifacts root is closed to every native agent launch (Seatbelt deny, a
+  bubblewrap tmpfs, Claude `denyRead` and the Read/Edit/Write rules) and the run
+  directory the step was granted is opened again, read-only (a later Seatbelt
+  rule, a read-only bind, Claude `allowRead`, literal Read denies on the other
+  runs). A launch with no grant reads no run's artifacts. Follows the vault
+  protection setting: off, or no sandbox on the host, leaves the root open.
 - A task worker can edit its project's own `.cargo/audit.toml` and
   `.cargo/config.toml`, and a refused tool call is no longer silent (KT-1541).
   Claude Code's built-in sensitive-directory check asks on any path under

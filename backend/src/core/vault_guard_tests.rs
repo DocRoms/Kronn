@@ -138,6 +138,7 @@ fn codex_roots() -> LaunchRoots {
         codex_home: Some(PathBuf::from("/home/u/.codex")),
         npm_cache: None,
         temp: vec![PathBuf::from("/tmp")],
+        artifacts: None,
     }
 }
 
@@ -192,6 +193,7 @@ fn the_bubblewrap_replacement_binds_the_disk_read_only_and_hides_the_data_dir_la
         codex_home: Some(home.path().to_path_buf()),
         npm_cache: None,
         temp: Vec::new(),
+        artifacts: None,
     };
     let protected = vec![data.path().to_path_buf()];
     let read_only = codex_bubblewrap_args(CodexMode::ReadOnly, &roots, &protected);
@@ -445,6 +447,7 @@ fn a_shell_under_the_codex_replacement_keeps_the_mode_and_loses_the_data_dir() {
         codex_home: Some(home.path().to_path_buf()),
         npm_cache: None,
         temp: vec![temp.path().to_path_buf()],
+        artifacts: None,
     };
     let protected = vec![
         data.path().to_path_buf(),
@@ -509,6 +512,7 @@ fn a_work_dir_next_to_the_data_dir_is_not_closed_by_any_profile() {
         codex_home: None,
         npm_cache: None,
         temp: vec![root.clone()],
+        artifacts: None,
     };
     let profiles = [
         crate::core::trust_sandbox::seatbelt_profile(&protected),
