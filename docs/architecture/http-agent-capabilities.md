@@ -1,7 +1,7 @@
 # HTTP-agent capabilities — what API-mode agents may and may not do
 
 > Scope: the agents Kronn drives over an HTTP chat API rather than a local CLI process —
-> `Ollama`, `LiteLlm`, `Nvidia` and `Custom` connections [src: file: backend/src/agents/runner.rs:3487-3492#is_http_chat_agent].
+> `Ollama`, `LiteLlm`, `Nvidia` and `Custom` connections [src: file: backend/src/agents/runner.rs:3614-3619#is_http_chat_agent].
 > This file is the boundary future capability requests are judged against (KT-338).
 
 ## The rule that governs everything Kronn injects
@@ -50,8 +50,8 @@ MCP bridge. HTTP agents have none of that: they are a request/response loop, and
 capability they appear to have is a **tool Kronn executes server-side on their behalf**.
 
 The MCP bridge is deliberately not one of those capabilities. The HTTP path returns before
-any MCP environment is built [src: file: backend/src/agents/runner.rs:4395-4416#start_ollama_http_with_idle], and
-`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4639-4656#insert_claude_mcp_config].
+any MCP environment is built [src: file: backend/src/agents/runner.rs:4539-4560#start_ollama_http_with_idle], and
+`--mcp-config` is a CLI-only argument [src: file: backend/src/agents/runner.rs:4807-4824#insert_claude_mcp_config].
 So "add a tool to the MCP server" never reaches an HTTP agent. Anything they must be able to
 do has to exist as a **native tool in Kronn's own catalogue**.
 
@@ -76,19 +76,19 @@ The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_worksp
 | `git_commit` | Commit named files, only for the active native worker in its task worktree |
 
 Plus Kronn's internal catalogue — plan and task tools, `qa_list`/`qa_run`, and `api_call`
-against configured REST plugins [src: file: backend/src/api/agent_tools.rs:585-1106#build_tool_catalogue].
+against configured REST plugins [src: file: backend/src/api/agent_tools.rs:606-1127#build_tool_catalogue].
 
 And, since 0.13.0, media generation: `media_generate` and `media_job_status`
-[src: file: backend/src/api/agent_tools.rs:1247-1342#orchestration_tool_catalogue]. These sit in the orchestration
+[src: file: backend/src/api/agent_tools.rs:1268-1363#orchestration_tool_catalogue]. These sit in the orchestration
 catalogue, so an HTTP agent replying in a discussion has them, and a bounded worker keeps
 them — they are deliberately absent from the principal-only list a worker room strips
-[src: file: backend/src/api/agent_tools.rs:1597-1650#NOT_FOR_A_WORKER].
+[src: file: backend/src/api/agent_tools.rs:1620-1673#NOT_FOR_A_WORKER].
 
 Since 0.15.3 a Workflow Agent step on an HTTP or local agent (Ollama, LiteLLM, OpenRouter…)
 has these two tools as well, and **only** these two: every other orchestration tool
 (`agent_list`, `task_exec_*`, `agent_job_start`, `agent_schedule_wake`…) stays out of its
 catalogue and is refused when named
-[src: file: backend/src/api/agent_tools.rs:1569-1596#workflow_tool_catalogue]. The step runs the
+[src: file: backend/src/api/agent_tools.rs:1591-1618#workflow_tool_catalogue]. The step runs the
 very same handler as a discussion — one body, so the validation, the request guard, the
 connection resolution and the idempotency key cannot drift
 [src: file: backend/src/api/agent_media_tools.rs:58-72#generate_media] — and differs only in where
@@ -105,7 +105,7 @@ the asset goes:
   `<run artifacts dir>/<job id>.<ext>` and returns `asset.artifact_path` beside the context file
   id. The directory is the one `{{run.artifacts_dir}}` names, so a later Exec step or an Agent step
   reading it read-only can use the file; it lives as long as the run
-  [src: file: backend/src/workflows/run_artifacts.rs:250-262#keeps_directory]. The copy is written through
+  [src: file: backend/src/workflows/run_artifacts.rs:259-271#keeps_directory]. The copy is written through
   the run directory's file descriptor (KT-1585), because an Exec step can write there: a link
   planted at `<job id>.<ext>` is replaced, never written through
   [src: file: backend/src/api/agent_media_tools.rs:1051-1081#copy_into_run].
@@ -181,7 +181,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3370-3437#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3420-3487#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -227,7 +227,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3695-3743#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3723-3771#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -277,7 +277,7 @@ rest of the discussion, or keep the partial answer.
 * **In a discussion, the round ceiling is no longer a failure.** The round's calls are
   refused, the model answers with what it has, and the question follows. A workflow step or
   a worker still fails with its reason: there is no one there to answer.
-  [src: file: backend/src/agents/runner.rs:11006-11115#ask_on_ceiling]
+  [src: file: backend/src/agents/runner.rs:11285-11394#ask_on_ceiling]
   [src: file: backend/src/api/discussions/ceilings.rs:117-205#ceiling_question]
 
 ## Saved Quick Prompt generation settings (KT-670)
@@ -301,7 +301,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:9748#apply_http]
+[src: file: backend/src/agents/runner.rs:10038#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -312,17 +312,17 @@ with an instruction to clear the setting or choose an HTTP provider. An explicit
 effort on an unsupported transport is also refused. The runner applies the same
 validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:571-624#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:591-644#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
-[src: file: backend/src/workflows/steps.rs:1377-1381#reasoning_effort_override]
-[src: file: backend/src/agents/runner.rs:3947-3951#validate]
+[src: file: backend/src/workflows/steps.rs:1395-1399#reasoning_effort_override]
+[src: file: backend/src/agents/runner.rs:4078-4082#validate]
 
 The HTTP regression launches through the native QP tool and the discussion
 stream, edits the template while the job is queued, then inspects both requests
 received by a loopback provider. A separate Ollama fixture checks the actual
 request after context fitting. These fixtures prove transport and persistence,
 not live hosted-provider availability or model quality.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:491-569#quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:506-584#quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit]
 [src: file: backend/src/agents/generation_settings.rs:119-188#ollama_generation_controls_reach_the_actual_http_request_after_context_fitting]
 
 ## Full catalogue by default; progressive loading is experimental (KT-685)
@@ -331,8 +331,8 @@ HTTP discussion agents receive the full native catalogue by default. Explicitly
 setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
-[src: file: backend/src/api/agent_tools.rs:407-487#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2661-2669#tools_load]
+[src: file: backend/src/api/agent_tools.rs:428-508#TOOL_FAMILIES]
+[src: file: backend/src/api/agent_tools.rs:2696-2704#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -347,8 +347,8 @@ Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
-[src: file: backend/src/agents/runner.rs:7071-7101#reachable_tools_bytes]
-[src: file: backend/src/agents/runner_test.rs:1686-1724#the_window_does_not_move_when_a_run_loads_a_tool_family]
+[src: file: backend/src/agents/runner.rs:7295-7325#reachable_tools_bytes]
+[src: file: backend/src/agents/runner_test.rs:1724-1762#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
 
@@ -377,7 +377,7 @@ agent is spawned exactly as before. An HTTP agent gets a
 `KronnToolExecutor::audit_arc_for_step`, scoped to the project directory the pipeline
 already resolved (`resolve_host_path`, so it is right inside a container) rather
 than a workspace row or a project looked up by id
-[src: file: backend/src/api/agent_tools.rs:318-341#audit_arc_for_step]. The bounds are KT-338's, unchanged:
+[src: file: backend/src/api/agent_tools.rs:338-361#audit_arc_for_step]. The bounds are KT-338's, unchanged:
 every path is canonicalised against that root and refused when it leaves it, by
 `..`, by an absolute path or by a symlink; there is no shell; a truncated read
 says so.
@@ -385,13 +385,13 @@ says so.
 **What the audit's tools are.** Narrower than a workflow Agent step's:
 `read_file`, `list_files`, `find_files`, `search_text`, `git_status`, `git_diff`,
 `git_log` to read, and `write_file`, `edit_file`, `edit_lines`,
-`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:358-375#AUDIT_TOOLS].
+`insert_after_line` to write [src: file: backend/src/api/agent_tools.rs:379-396#AUDIT_TOOLS].
 No `web_fetch` (it would send the model off the project), no `git_commit` (the
 audit never commits), no plan, REST-plugin or discussion tools. A call to any
 other name is refused before a handler sees it, and so is a write to the
 target document of another step of the chain (the consolidation step excepted)
-[src: file: backend/src/api/agent_tools.rs:1846-1860#AUDIT_TOOLS]
-[src: file: backend/src/api/agent_tools.rs:260-291#foreign_step_target_refusal].
+[src: file: backend/src/api/agent_tools.rs:1872-1886#AUDIT_TOOLS]
+[src: file: backend/src/api/agent_tools.rs:279-311#foreign_step_target_refusal].
 
 **What the audit prompt says about other repos (KT-926).** An audit's file tools
 cannot leave the project, and the prompt goes to the model provider. It used to
@@ -460,8 +460,8 @@ shipping it. Three things changed:
   is accepted as its `path`. An empty or malformed value is refused with a working
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
-  [src: file: backend/src/api/agent_tools.rs:934-962#extract]
-  [src: file: backend/src/api/agent_tools.rs:4837-4861#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:955-983#extract]
+  [src: file: backend/src/api/agent_tools.rs:4886-4910#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -473,20 +473,54 @@ shipping it. Three things changed:
   on a later turn keeps it. A result that was already an extract gets no paths,
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
-  [src: file: backend/src/agents/runner.rs:7327-7355#shape_of]
-  [src: file: backend/src/agents/runner.rs:7357-7397#working_extract_examples].
+  [src: file: backend/src/agents/runner.rs:7551-7579#shape_of]
+  [src: file: backend/src/agents/runner.rs:7581-7621#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
   identical call is still replayed once and then refused, and a call with another
   `extract`, page or period runs [src: file: backend/src/agents/runner.rs:922-933#tool_call_signature].
 
 Measured by the test that plays the whole exchange on a hundred runs of about 2 KB
-each, with their metrics nested, the full native catalogue (44,634 B) and a 32,768
-token window: the 198,119 B answer is shortened to 8,005 B, of which the shape is
-1,071 B; the model reads the shape, sends one call with
+each, with their metrics nested, the full native catalogue (51,990 B) and a
+36,043 token window: the 198,119 B answer is shortened to 8,005 B, of which the
+shape is 1,071 B; the model reads the shape, sends one call with
 `$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
-unshortened; the conversation then stands at 19,319 estimated tokens of 32,768
-[src: file: backend/src/agents/runner_test.rs:2906-3014#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window].
+unshortened; the conversation then stands at 21,421 estimated tokens of 36,043
+[src: file: backend/src/agents/runner_test.rs:2994#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
+[src: file: backend/src/agents/runner_test.rs:3001#a_200_kb_response_yields_the_web_vitals].
+
+**The window follows the catalogue (KT-1527).** The three shortening tests
+(`a_shortened_api_response_announces_its_shape_and_how_to_ask_for_a_part`, the one
+above, and `shortening_a_result_twice_keeps_its_note_and_shape_and_still_shrinks`)
+used to sit about 100 B from the edge of a literal 32K window, so ~200 B of new tool
+schema text pushed them onto the plain-text cut and they stopped being valid JSON.
+They now size their window from the catalogue they carry
+(`discussion_body_sized_to_catalogue`): 32,768 tokens at minimum, otherwise
+`(declared catalogue + FIXTURE_MESSAGE_ROOM) / 2 + 2,048`, the same arithmetic as
+`clamp_ollama_tool_results` (2 bytes a token, 2,048 tokens kept for the reply).
+`FIXTURE_MESSAGE_ROOM` is 16 KB against the ~9.4 KB the messages need today, so the
+messages get the same room whatever the catalogue weighs. With today's catalogue
+that is a ~36K window, not exactly 32K. A test inflates the catalogue by 1.5 KB and
+then 20 KB and replays all three scenarios
+[src: file: backend/src/agents/runner_test.rs:3279#a_catalogue_change_does_not_flip_the_shortening_fixtures].
+
+That decoupling drops the signal the old tests gave, badly, when the catalogue
+outgrew the real 32K budget. A guard test keeps it, on its own: a 32K window must
+leave at least 5,000 B for the messages beside the declared catalogue (9,450 B
+today). When it fails, the catalogue outgrew the 32K budget and has to be trimmed,
+or the default Ollama window raised
+[src: file: backend/src/agents/runner_test.rs:3303#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
+
+**When the plain cut does happen, the result stays a valid envelope.** A JSON
+result that nothing smarter could shorten used to be cut as text, handing the model
+half a document. `truncated_json_envelope` now wraps its leading text instead:
+`{"kronn_shortened": true, "truncated": true, "original_bytes": <size of the
+response>, "excerpt": "<start of the original>", "note": "…"}`, with the largest
+excerpt that keeps the envelope inside the budget once embedded in `messages`. An
+envelope shortened again keeps the original size it reports. Content that is not
+JSON keeps the plain cut and its note
+[src: file: backend/src/agents/runner.rs:8019#truncated_json_envelope]
+[src: file: backend/src/agents/runner_test.rs:3327#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or
 writes a good one unprompted. The "model" in that test reads the shape and follows
@@ -504,24 +538,24 @@ writes are scoped to general workflows plus the current discussion's project.
 Create inherits that project unless an explicit null requests a general draft.
 Update preserves the existing project and all omitted fields; supplied arrays
 replace their stored array. Workers and workflow Agent steps cannot use this
-authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:124-231#execute_workflow_tool]
+authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:142-249#execute_workflow_tool]
 
 Authoring always leaves the workflow disabled. Updating an enabled workflow
 returns an explicit alternative: disable it in the Workflows UI or create a new
 disabled draft. Neither enabling, triggering nor deletion is exposed here.
 Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
-[src: file: backend/src/api/agent_workflow_tools.rs:65-122#draft_patch]
-[src: file: backend/src/api/agent_workflow_tools.rs:215-217#enabled]
-[src: file: backend/src/api/workflows.rs:2808-2868#validate_step_references]
+[src: file: backend/src/api/agent_workflow_tools.rs:80-137#draft_patch]
+[src: file: backend/src/api/agent_workflow_tools.rs:228-230#enabled]
+[src: file: backend/src/api/workflows.rs:2817-2877#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same
 contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
-[src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9673-9675#call_workflow_step_schema]
+[src: file: backend/src/api/workflow_step_schema.json:1-457#fields_by_type]
+[src: file: backend/scripts/disc-introspection-mcp.py:9693-9695#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON
@@ -532,8 +566,8 @@ undergo the existing clamping. This protects a protocol contract;
 it does not establish model authoring quality. The measured attempts and their
 execution checks are recorded in
 [`native-workflow-2026-09-22.md`](../research/native-workflow-2026-09-22.md).
-[src: file: backend/src/agents/runner.rs:7770-7787#workflow_step_schema]
-[src: file: backend/src/agents/runner_test.rs:2376-2443#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
+[src: file: backend/src/agents/runner.rs:7998-8015#workflow_step_schema]
+[src: file: backend/src/agents/runner_test.rs:2414-2481#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 
 ### Further capabilities
 
