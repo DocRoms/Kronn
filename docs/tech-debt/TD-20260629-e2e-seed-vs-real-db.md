@@ -34,7 +34,7 @@ accessibility baselines or audit preconditions state-relative.
 
 ## Shipped mitigation (0.9.3)
 
-- Automation page objects finish navigation through the active-runs popover
+- Automation page objects finish navigation through the active-runs popover (since KT-1658 the activity bell panel)
   when a real workflow is running, so a busy operator instance no longer turns
   the suite into retries.
 - Audit lifecycle/card scenarios own their route-mocked state, and billed

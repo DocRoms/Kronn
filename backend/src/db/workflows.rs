@@ -2908,7 +2908,23 @@ pub fn active_run_summary(
         started_at: run.started_at,
         parent_run_id: run.parent_run_id.clone(),
         quota,
+        last_activity_at: Some(last_run_activity(run)),
     }
+}
+
+/// When the run last showed life: the end of its latest finished step (a step
+/// without a recorded start does not date anything), else the run's start.
+fn last_run_activity(run: &WorkflowRun) -> chrono::DateTime<Utc> {
+    run.step_results
+        .iter()
+        .filter_map(|step| {
+            let started = step.started_at?;
+            let ended = started
+                + chrono::Duration::milliseconds(step.duration_ms.min(i64::MAX as u64) as i64);
+            Some(ended)
+        })
+        .max()
+        .map_or(run.started_at, |ended| ended.max(run.started_at))
 }
 
 // ─── Tracker reconciliation ─────────────────────────────────────────────────

@@ -2,8 +2,7 @@ import { useRef, useState } from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
-import { ActiveAuditsPopover } from '../ActiveAuditsPopover';
-import { ActiveRunsPopover } from '../workflows/ActiveRunsPopover';
+import { ActivityPanel } from '../activity/ActivityPanel';
 
 vi.mock('../../lib/api', async () => {
   const { buildApiMock } = await import('../../test/apiMock');
@@ -12,17 +11,23 @@ vi.mock('../../lib/api', async () => {
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-describe.each(['audits', 'runs'] as const)('%s activity disclosure interactions', kind => {
+// The panel is portaled and positioned by `useActivityPopover`: keyboard, pointer
+// and viewport behaviour is the panel's, whatever it lists.
+describe('activity panel interactions', () => {
   function Harness({ onClose = vi.fn() }: { onClose?: () => void }) {
     const [open, setOpen] = useState(false);
     const triggerRef = useRef<HTMLButtonElement>(null);
-    const props = { triggerRef, onClose: () => { onClose(); setOpen(false); } };
     return <I18nProvider>
       <button ref={triggerRef} onClick={() => setOpen(value => !value)}>Activity</button>
       <button>Outside</button>
-      {open && (kind === 'audits'
-        ? <ActiveAuditsPopover {...props} audits={[]} projects={[]} onNavigateToProject={vi.fn()} onViewAllProjects={vi.fn()} />
-        : <ActiveRunsPopover {...props} workflows={[]} onNavigateToWorkflow={vi.fn()} onViewAllWorkflows={vi.fn()} />)}
+      {open && (
+        <ActivityPanel
+          overview={null}
+          triggerRef={triggerRef}
+          onClose={() => { onClose(); setOpen(false); }}
+          onOpenLink={vi.fn()}
+        />
+      )}
     </I18nProvider>;
   }
 

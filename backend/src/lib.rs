@@ -2086,6 +2086,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/audit-status",
             get(api::audit::audit_status),
         )
+        // KT-1658 — the attention center: everything running in Kronn, one list.
+        .route("/api/activity", get(api::activity::overview))
         // 0.8.3 (#288) — fleet-wide view of every running audit.
         .route("/api/audit-status", get(api::audit::audit_status_all))
         .route("/api/audit/steps", get(api::audit::audit_steps))

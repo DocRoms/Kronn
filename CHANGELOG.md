@@ -13,6 +13,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- UI: one permanent bell for everything running in Kronn (KT-1658, phase 1 of
+  the KT-334 attention center). It replaces the spinner next to Config, the
+  « N en cours » text that jumped to the discussions and the audits popover. The
+  bell rings while something runs (a run paused on a provider quota does not make
+  it ring) and carries a counter for what will wait for you. Its panel has an
+  « En cours » compartment listing agent turns, workflow runs (including
+  quota-paused ones, with « resumes at <time> » and « Resume now »), audits and
+  task workers, each with elapsed time, a « no activity for … » hint past 15
+  minutes, a link to open it and its existing stop / cancel / resume action. The
+  layout already reserves « Attend une décision » and « Terminé non-vu » for the
+  next phase. `GET /api/activity` derives these generic rows (type / state /
+  source) on read from `agent_dispatch_jobs`, `workflow_runs`, `task_executions`
+  and the audit tracker: there is no notification store, and a new kind of row
+  is one new source with no panel change.
 - Workflows: a run paused on a provider quota is shown as paused everywhere,
   resumes as soon as the quota is back, and never blocks a launch silently
   (KT-1657). A refused launch (`Concurrency limit reached`) now names the run
@@ -24,7 +38,7 @@ Release notes for 0.9.3 and earlier are available in the
   « Paused — provider quota, resumes automatically at <time> » with a
   « Resume now » reachable without opening the run, and the active-runs
   popover lists paused runs apart from the running ones (no new header
-  indicator: the global view is the notification bell). A paused run no longer
+  indicator: the global view is the activity bell, KT-1658). A paused run no longer
   waits blindly for the announced reset: about every 20 minutes, and at once
   after a key, agent or login change, Kronn asks the provider with a minimal
   request and resumes the run as soon as it answers; the refused step can be

@@ -567,11 +567,12 @@ pass (a frequent schedule adds no fire during the repeated hour).
   next resume and the re-check use it. The UI reads one label for the state,
   « Paused — provider quota, resumes automatically at <time> », on the
   workflow list, the card and the run page, each with « Resume now »; the
-  existing active-runs popover lists paused runs apart from running ones. The
-  paused state has no header indicator of its own: the shape the notification
-  bell (KT-1658) aggregates is the `ActiveRunSummary` of the active-runs board
-  (`status: WaitingQuota`, `quota.wake_at`), read in the UI through
-  `useQuotaPausedRuns` and `lib/quotaPause.ts`.
+  header's activity bell (KT-1658) lists paused runs apart from running ones
+  (« En pause », the wake time, « Resume now »). The paused state has no header
+  indicator of its own and does not make the bell ring: the bell's `GET
+  /api/activity` reads the `ActiveRunSummary` of the active-runs board
+  (`status: WaitingQuota`, `quota.wake_at`) as a `paused` row. The workflow
+  pages still read it through `useQuotaPausedRuns` and `lib/quotaPause.ts`.
 - **A quota-escalated task worker resumes on its own (KT-1664).** An execution
   escalated on `quota_exhausted:<provider>` whose refusal announced no reset is
   never closed by the KT-1564 reset sweep. The same `QuotaRechecker` pass as

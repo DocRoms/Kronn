@@ -109,7 +109,12 @@ parent_run_id?: string,
 /**
  * The quota wait, for a `WaitingQuota` run.
  */
-quota?: ActiveRunQuota, };
+quota?: ActiveRunQuota,
+/**
+ * The last sign of life the run records: the end of its latest finished
+ * step, else its start. A step in progress records nothing until it ends.
+ */
+last_activity_at?: string, };
 
 export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string,
 /**
@@ -126,11 +131,100 @@ progress_run_id?: string,
 preparing?: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
+ * An existing action a row offers. `id` names the UI handler that performs it
+ * with `args` (the same call the page's own button makes).
+ */
+export type ActivityAction = { id: string, kind: ActivityActionKind, args: { [key in string]: string }, };
+
+/**
+ * How an action reads on its button. The label follows this, never the row's type.
+ */
+export type ActivityActionKind = "stop" | "cancel" | "resume_now";
+
+/**
  * What kind of action an agent's tool call is, from a fixed table
  * (`agents::activity::category_of`). The only description of a call that
  * leaves the agent's run: its name, arguments and targets never do.
  */
 export type ActivityCategory = "Read" | "Search" | "Edit" | "Execute" | "Web" | "Mcp" | "Kronn" | "Think" | "Other";
+
+/**
+ * Where a row sits in the panel. Phase 1 fills `Running` only; the other two
+ * are the KT-334 compartments the next phase fills, reserved so adding them
+ * reworks neither the endpoint nor the panel.
+ */
+export type ActivityCompartment = "running" | "needs_decision" | "unseen_done";
+
+export type ActivityLink = { target: ActivityLinkTarget, id: string, run_id?: string, };
+
+/**
+ * The kinds of place a row's deep link can open. Resolved to an address by the
+ * UI's route table, so a path is never spelled in the backend.
+ */
+export type ActivityLinkTarget = "discussion" | "workflow" | "project" | "planning_task";
+
+/**
+ * `GET /api/activity`.
+ */
+export type ActivityOverview = { rows: Array<ActivityRow>,
+/**
+ * Inactivity after which a running row is flagged `stalled`.
+ */
+stall_after_secs: number, generated_at: string,
+/**
+ * Sources that could not be read this time: the list is partial, and says so.
+ */
+unavailable_sources: Array<string>, };
+
+/**
+ * One thing in the attention center.
+ */
+export type ActivityRow = {
+/**
+ * `<source>:<native id>`: stable across polls, unique across sources.
+ */
+id: string,
+/**
+ * What the row is (`agent_turn`, `workflow_run`, `audit`, `task_worker`, …).
+ * An open set: the panel shows a type it does not know without special-casing.
+ */
+type: string, compartment: ActivityCompartment, state: ActivityState,
+/**
+ * The state the row is derived from (`workflow_runs`, `agent_dispatch_jobs`,
+ * `task_executions`, `audit_tracker`).
+ */
+source: string, title: string,
+/**
+ * A second line of context that is data, not prose (project, step, progress).
+ */
+detail?: string,
+/**
+ * The project it belongs to, when it has one.
+ */
+project_name?: string,
+/**
+ * Elapsed time is `now - started_at`, counted by the UI.
+ */
+started_at: string,
+/**
+ * The last sign of life Kronn has for the row. `None` is "no continuous
+ * signal" and is never read as a stall.
+ */
+last_activity_at?: string,
+/**
+ * A running row whose last sign of life is older than the overview's
+ * `stall_after_secs`. A hint to look, not a verdict: the row may be thinking.
+ */
+stalled: boolean,
+/**
+ * When a `Paused` row resumes on its own; `None` while it waits for a person.
+ */
+wake_at?: string, link?: ActivityLink, actions: Array<ActivityAction>, };
+
+/**
+ * What a `Running`-compartment row is doing right now.
+ */
+export type ActivityState = "running" | "queued" | "paused";
 
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.

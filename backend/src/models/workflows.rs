@@ -2733,6 +2733,11 @@ pub struct ActiveRunSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub quota: Option<ActiveRunQuota>,
+    /// The last sign of life the run records: the end of its latest finished
+    /// step, else its start. A step in progress records nothing until it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_activity_at: Option<DateTime<Utc>>,
 }
 
 /// What a `WaitingQuota` run is parked on.
