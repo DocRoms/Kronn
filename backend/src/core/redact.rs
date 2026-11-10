@@ -374,7 +374,10 @@ fn apply_patterns(input: &str, patterns: &[Pattern], prefilter: &Prefilter) -> (
 /// UTF-8 safe: `regex_lite::Regex::replace_all` works on `&str` so all
 /// boundary handling is delegated to the regex engine.
 pub fn redact_secrets(input: &str) -> String {
-    apply_patterns(input, PATTERNS.as_slice(), &VENDOR_PREFILTER).0
+    redact_json_aware(input, |text| {
+        apply_patterns(text, PATTERNS.as_slice(), &VENDOR_PREFILTER)
+    })
+    .0
 }
 
 /// Boolean version: returns `true` if ANY pattern would match. Used by
@@ -522,6 +525,10 @@ fn assignment_gate(text: &str, quote: Option<u8>) -> bool {
 /// Anchored on the secret NAME, so ordinary hex checksums/digests are left
 /// intact — verified by the `audit_artifact_*` tests.
 pub fn redact_for_audit_artifact(input: &str) -> (String, usize) {
+    redact_json_aware(input, redact_for_audit_artifact_text)
+}
+
+fn redact_for_audit_artifact_text(input: &str) -> (String, usize) {
     let (out, vendor_count) = apply_patterns(input, PATTERNS.as_slice(), &VENDOR_PREFILTER);
     let (out, assignment_count) =
         apply_patterns(&out, ASSIGNMENT.as_slice(), &ASSIGNMENT_PREFILTER);
@@ -562,7 +569,102 @@ pub fn strip_url_secrets(text: &str) -> String {
 /// excerpts): URL queries and userinfo dropped, then the vendor and
 /// secret-assignment heuristics. It cannot catch a bare secret by value.
 pub fn redact_stored_text(text: &str) -> String {
-    redact_for_audit_artifact(&strip_url_secrets(text)).0
+    redact_json_aware(text, |text| {
+        redact_for_audit_artifact_text(&strip_url_secrets(text))
+    })
+    .0
+}
+
+/// Object keys whose string value is a credential, whatever it holds. Same
+/// names as the `"password": "…"` pattern of [`RAW_PATTERNS`], which stops at
+/// the first `"` and so cannot read a value that carries an escaped one.
+const JSON_CREDENTIAL_KEYS: &[&str] = &[
+    "password",
+    "token",
+    "api_key",
+    "apiKey",
+    "secret",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "private_key",
+];
+
+/// Runs `redact` on `input`, one JSON string at a time when `input` is a JSON
+/// document (an object or an array), on the whole text otherwise.
+///
+/// The text patterns read a string's *encoded* form, where a value is followed
+/// by a backslash and a quote: a value class that takes the backslash for a
+/// secret character leaves the closing quote unescaped and the document no
+/// longer parses (KT-1526). Here each string is decoded, redacted as the text
+/// it holds, and written back encoded, so a pattern never reads the escapes
+/// around a secret. A string `redact` leaves alone keeps its original bytes,
+/// as does everything between the strings.
+fn redact_json_aware(input: &str, redact: impl Fn(&str) -> (String, usize)) -> (String, usize) {
+    let trimmed = input.trim_start();
+    let is_container = trimmed.starts_with('{') || trimmed.starts_with('[');
+    if !is_container || serde_json::from_str::<serde::de::IgnoredAny>(input).is_err() {
+        return redact(input);
+    }
+
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut count = 0usize;
+    let mut copied = 0usize;
+    // The key of the member whose value is read next: set by a string followed
+    // by `:`, cleared by anything but whitespace and the `:` itself.
+    let mut key: Option<String> = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                let end = (index + 1).min(bytes.len());
+                index = end;
+                let Ok(decoded) = serde_json::from_str::<String>(&input[start..end]) else {
+                    continue;
+                };
+                let is_key = input[end..].trim_start().starts_with(':');
+                let (clean, changed) = if is_key {
+                    key = Some(decoded.clone());
+                    redact(&decoded)
+                } else if key
+                    .take()
+                    .is_some_and(|key| JSON_CREDENTIAL_KEYS.contains(&key.as_str()))
+                    && !decoded.is_empty()
+                {
+                    let masked = "***REDACTED***";
+                    (masked.to_string(), usize::from(decoded != masked))
+                } else {
+                    redact(&decoded)
+                };
+                if changed > 0 {
+                    out.push_str(&input[copied..start]);
+                    out.push_str(&encode_json_string(&clean));
+                    copied = end;
+                    count = count.saturating_add(changed);
+                }
+            }
+            byte if byte.is_ascii_whitespace() || byte == b':' => index += 1,
+            _ => {
+                key = None;
+                index += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return (input.to_string(), 0);
+    }
+    out.push_str(&input[copied..]);
+    (out, count)
+}
+
+fn encode_json_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"***REDACTED***\"".to_string())
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -576,6 +678,172 @@ mod tests {
             strip_url_secrets(nested),
             r#"{\"avatar_url\": \"https://avatars.example.com/u/1\", \"next\": \"https://api.example.com/x\"}"#
         );
+    }
+
+    // ── KT-1526: JSON documents stay JSON ─────────────────────────────
+
+    const TOKEN: &str = "s3cr3tTokenValue9876";
+
+    /// A Jira-like document: the description holds a curl header example.
+    fn jira_document(header: &str) -> String {
+        let description = format!("Call it with: curl {header} https://x.example/api");
+        serde_json::json!({
+            "issues": [{"key": "KT-1", "fields": {"description": description, "n": 3}}],
+            "total": 1
+        })
+        .to_string()
+    }
+
+    fn assert_masked_and_valid(out: &str, secret: &str) {
+        let parsed: serde_json::Value =
+            serde_json::from_str(out).unwrap_or_else(|e| panic!("invalid JSON ({e}): {out}"));
+        assert!(!out.contains(secret), "secret survived: {out}");
+        assert!(out.contains("REDACTED"), "nothing masked: {out}");
+        let description = parsed["issues"][0]["fields"]["description"]
+            .as_str()
+            .expect("description stays a string");
+        assert!(
+            description.contains("curl -H "),
+            "text around lost: {description}"
+        );
+        assert!(
+            description.ends_with("https://x.example/api"),
+            "{description}"
+        );
+        assert_eq!(parsed["total"], 1);
+        assert_eq!(parsed["issues"][0]["fields"]["n"], 3);
+    }
+
+    fn headers() -> Vec<String> {
+        vec![
+            format!(r#"-H "X-Api-Token: {TOKEN}""#),
+            format!(r#"-H "Authorization: Bearer {TOKEN}""#),
+            format!(r#"-H "X-Auth-Secret: {TOKEN}""#),
+            format!(r#"-H 'X-Api-Token: {TOKEN}'"#),
+        ]
+    }
+
+    #[test]
+    fn redact_secrets_keeps_a_json_document_valid() {
+        for header in headers() {
+            let doc = jira_document(&header);
+            assert!(doc.contains(r#"\""#) || header.contains('\''), "{doc}");
+            let out = redact_secrets(&doc);
+            // The vendor pass has no bare-assignment pattern: only a header
+            // shape it knows is masked, and the output stays valid either way.
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+                "{out}"
+            );
+            if header.contains("Authorization") {
+                assert_masked_and_valid(&out, TOKEN);
+            }
+        }
+    }
+
+    #[test]
+    fn redact_stored_text_keeps_a_json_document_valid_and_masks_the_token() {
+        for header in headers() {
+            let out = redact_stored_text(&jira_document(&header));
+            assert_masked_and_valid(&out, TOKEN);
+        }
+    }
+
+    #[test]
+    fn redact_for_audit_artifact_keeps_a_json_document_valid_and_masks_the_token() {
+        for header in headers() {
+            let (out, count) = redact_for_audit_artifact(&jira_document(&header));
+            assert!(count > 0);
+            assert_masked_and_valid(&out, TOKEN);
+        }
+    }
+
+    #[test]
+    fn the_escaped_closing_quote_of_a_header_survives() {
+        // The shape of the 31/10 incident, byte for byte.
+        let doc = format!(r#"{{"d":"-H \"X-Api-Token: {TOKEN}\" done"}}"#);
+        let out = redact_stored_text(&doc);
+        assert_eq!(out, r#"{"d":"-H \"X-Api-Token: ***REDACTED***\" done"}"#);
+    }
+
+    #[test]
+    fn a_json_document_with_nothing_to_hide_is_returned_byte_for_byte() {
+        let doc = "{ \"a\" : \"caf\\u00e9\",\n  \"b\": [1, 2.50, null, \"x\"] }";
+        assert_eq!(redact_stored_text(doc), doc);
+        assert_eq!(redact_for_audit_artifact(doc), (doc.to_string(), 0));
+        assert_eq!(redact_secrets(doc), doc);
+    }
+
+    #[test]
+    fn untouched_parts_of_a_redacted_json_document_keep_their_bytes() {
+        let doc = format!(r#"{{ "keep" : "café" , "d":"apikey={TOKEN}" }}"#);
+        let out = redact_stored_text(&doc);
+        assert!(out.starts_with(r#"{ "keep" : "café" , "d":"#), "{out}");
+        assert!(!out.contains(TOKEN));
+        assert!(serde_json::from_str::<serde_json::Value>(&out).is_ok());
+    }
+
+    #[test]
+    fn a_credential_key_masks_its_value_even_with_escaped_quotes() {
+        let doc = r#"{"password":"a\"b\\c","user":"alice","nested":{"token":"x\"yz-secret"}}"#;
+        let out = redact_stored_text(doc);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["password"], "***REDACTED***");
+        assert_eq!(parsed["nested"]["token"], "***REDACTED***");
+        assert_eq!(parsed["user"], "alice");
+        assert!(!out.contains("yz-secret"));
+        assert!(!out.contains("a\\\"b"));
+    }
+
+    #[test]
+    fn json_redaction_is_idempotent() {
+        let once = redact_stored_text(&jira_document(&headers()[0]));
+        assert_eq!(redact_stored_text(&once), once);
+    }
+
+    #[test]
+    fn plain_text_that_only_looks_like_json_still_gets_the_text_patterns() {
+        let out = redact_stored_text(&format!("[INFO] apikey={TOKEN}"));
+        assert_eq!(out, "[INFO] apikey=***REDACTED***");
+    }
+
+    #[test]
+    fn a_page_dataset_payload_keeps_its_shape_and_loses_the_token() {
+        // A dataset point: an object of rows, one string field quoting a header.
+        let point = serde_json::json!({
+            "tickets": [
+                {"key": "KT-1", "note": format!("-H \"X-Api-Token: {TOKEN}\""), "points": 5},
+                {"key": "KT-2", "note": "plain", "points": 8},
+            ],
+            "summary": {"owner": "ana", "api_key": TOKEN}
+        })
+        .to_string();
+        let out = redact_stored_text(&point);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(!out.contains(TOKEN), "{out}");
+        assert_eq!(
+            parsed["tickets"][1],
+            serde_json::json!({"key": "KT-2", "note": "plain", "points": 8})
+        );
+        assert_eq!(parsed["tickets"][0]["points"], 5);
+        assert_eq!(parsed["summary"]["owner"], "ana");
+    }
+
+    #[test]
+    fn a_large_json_output_stays_valid_after_redaction() {
+        let items: Vec<_> = (0..4_000)
+            .map(|i| {
+                serde_json::json!({
+                    "key": format!("KT-{i}"),
+                    "description": format!("curl -H \"X-Api-Token: {TOKEN}{i}\" -d '{{\"a\": 1}}'"),
+                })
+            })
+            .collect();
+        let doc = serde_json::to_string(&items).unwrap();
+        let out = redact_stored_text(&doc);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.len(), 4_000);
+        assert!(!out.contains(TOKEN));
     }
 
     // ── Per-pattern positive tests (each MUST match + redact) ─────────
