@@ -93,7 +93,7 @@ The old CI catalogue failure was a 220-byte increase in the media tool
 declaration. Compact guidance retains the source, ordering, limit and slot
 contracts; the measured catalogue is now 84,389 bytes, 61 bytes below this
 base's ceiling. The ceiling is lowered to that measurement.
-[src: file: backend/scripts/ci/mcp_surface_budget.py:178#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:180#CATALOGUE_MAX_BYTES]
 [src: file: backend/scripts/disc-introspection-mcp.py:2378]
 
 The October 21 video evidence is historical; no new real generation was run

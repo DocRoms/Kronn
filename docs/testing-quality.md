@@ -231,7 +231,7 @@ aggregates accept those skips only for a push. A save runs only on
 `success()`: a half-built tree saved under the exact key would be restored
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
-[src: file: .github/workflows/ci-test.yml:225-235#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:762-789#cache-e2e-dev]
+[src: file: .github/workflows/ci-test.yml:226-236#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:762-789#cache-e2e-dev]
 [src: file: .github/workflows/ci-build.yml:238-279#cache-portability] [src: file: .github/workflows/ci-build.yml:315-340#cache-release]
 
 The backend performance observer publishes the duration for every eligible run
@@ -276,7 +276,7 @@ for seconds, classname, name in sorted(cases, reverse=True)[:10]:
 PY
 ```
 
-[src: file: .github/workflows/ci-test.yml:365-376#junit]
+[src: file: .github/workflows/ci-test.yml:366-377#junit]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -339,7 +339,7 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:90#timeout-minutes] [src: file: .github/workflows/ci-test.yml:385#timeout-minutes] [src: file: .github/workflows/ci-test.yml:744#timeout-minutes] [src: file: .github/workflows/ci-build.yml:229-233#timeout-minutes] [src: file: .github/workflows/ci-build.yml:330#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:91#timeout-minutes] [src: file: .github/workflows/ci-test.yml:386#timeout-minutes] [src: file: .github/workflows/ci-test.yml:745#timeout-minutes] [src: file: .github/workflows/ci-build.yml:230-234#timeout-minutes] [src: file: .github/workflows/ci-build.yml:331#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:971-1013#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Test placement
