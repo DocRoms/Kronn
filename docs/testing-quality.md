@@ -164,6 +164,16 @@ leaves the merge as it was) rather than sweep unnamed work in progress into the
 commit. A staged path that is neither the merge's nor named in `files` is
 refused before any doc is touched.
 
+The integration (KT-1669) also re-anchors on every candidate, merge conflict or
+not, and for a branch that already descends from the target in a commit of its
+own, so a lane's code shift never leaves citations stale in docs it did not edit.
+It then compares the citations unresolved in the candidate with those unresolved
+on the target: one that resolved on the target and does not now (its symbol is
+gone, say) undoes the merge and sends the work back with the exact
+`doc:line [src: …] reason` list, while a citation already broken on the target
+never blocks. What was settled or moved is recorded on the delivery report. See
+[`task-orchestration.md`](guides/task-orchestration.md).
+
 Both land in the merge commit, which carries the sign-off of the configured git
 identity and a line counting what was settled. The same step runs inside the
 worker's `task_exec_commit` merge, so a worker needs no `make docs-reanchor` in

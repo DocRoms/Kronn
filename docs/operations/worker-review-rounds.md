@@ -8,7 +8,7 @@ way to set the limit, so every principal-driven lane was capped at the SQL defau
 
 A task execution gets `max_review_rounds` rounds of `request_changes`. `N` allows `N` re-offers and
 escalates on the `N+1`-th (`new_rounds > max_review_rounds`).
-`[src: file: backend/src/db/orchestration.rs:4644-4740#commit_review_checkpoint]`
+`[src: file: backend/src/db/orchestration.rs:4714-4810#commit_review_checkpoint]`
 
 - **Integer:** 1 to 1000. `0` is refused at every boundary.
   `[src: file: backend/src/models/setup.rs:219-240#parse_review_rounds_arg]`
@@ -96,14 +96,14 @@ The browser's « Extend rounds » button on the execution card calls
   A token that owns both rooms (a principal that adopted the child room) is refused as well; that principal
   extends from a token owning only the parent room, or from the UI.
 - The limit changes on that execution only, and the change is journaled (`review_rounds_extended`: actor,
-  reason, previous and new limit). `[src: file: backend/src/db/orchestration.rs:7501#extend_review_rounds]`
+  reason, previous and new limit). `[src: file: backend/src/db/orchestration.rs:7571#extend_review_rounds]`
 - At the cap but still `AwaitingReview`, extending is all it takes: the next `request_changes` is
   accepted instead of escalating.
 - An execution **the limit itself escalated** is also re-offered: the stored findings (the exhausted
   `request_changes` never delivered them) are posted to its worker's room, then it takes the ordinary
   reassignment to the *same* worker, unless the campaign's token budget is spent (see above). Only the
   LATEST entry into `Escalated` counts: a watchdog or quota stall after an older budget escalation is
-  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:16748#extend_execution_review_rounds]`
+  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:16833#extend_execution_review_rounds]`
 - Refused once the execution is Done, Failed or Cancelled, when it already has no cap, and without a reason.
 
 The escalation message posted to the principal names this option.
