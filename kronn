@@ -416,6 +416,8 @@ cmd_start_dev() {
 cmd_repos() {
     step "Repository scan"
 
+    ensure_scan_path || return 1
+
     info "Scanning: $SCAN_PATH"
     scan_repos "$SCAN_PATH"
 
@@ -623,6 +625,10 @@ cmd_mcp() {
     case "$subcmd" in
         sync)
             load_config
+            if [[ -z "$SCAN_PATH" ]]; then
+                scan_path_missing_hint
+                return 1
+            fi
             scan_repos "$SCAN_PATH"
             sync_mcp_all
             ;;
@@ -681,6 +687,11 @@ cmd_status() {
     detect_agents
     show_detected_agents || warn "No agent detected"
 
+    if [[ -z "$SCAN_PATH" ]]; then
+        step "Repositories"
+        scan_path_missing_hint
+        return
+    fi
     step "Repositories ($SCAN_PATH)"
     scan_repos "$SCAN_PATH"
 
@@ -908,15 +919,21 @@ cmd_doctor() {
     primary_repos="${KRONN_REPOS_DIR:-$(_kronn_env_value KRONN_REPOS_DIR 2>/dev/null || true)}"
     [[ -z "$primary_repos" ]] && primary_repos="$SCAN_PATH"
     extra_repos="${KRONN_EXTRA_REPOS:-$(_kronn_env_value KRONN_EXTRA_REPOS 2>/dev/null || true)}"
-    local rw_roots=("$primary_repos")
+    # Never an empty root: _path_under_root puts every absolute path under "".
+    local rw_roots=() extra_roots=() extra
+    [[ -n "$primary_repos" ]] && rw_roots+=("$primary_repos")
     if [[ -n "$extra_repos" ]]; then
-        local old_ifs="$IFS" extra
+        local old_ifs="$IFS"
         IFS=':'
-        for extra in $extra_repos; do [[ -n "$extra" ]] && rw_roots+=("$extra"); done
+        for extra in $extra_repos; do [[ -n "$extra" ]] && extra_roots+=("$extra"); done
         IFS="$old_ifs"
     fi
+    rw_roots+=(${extra_roots[@]+"${extra_roots[@]}"})
 
-    if [[ ! -d "$primary_repos" ]]; then
+    if [[ -z "$primary_repos" ]]; then
+        scan_path_missing_hint
+        total_issues=$((total_issues + 1))
+    elif [[ ! -d "$primary_repos" ]]; then
         warn "Primary repositories directory does not exist: $primary_repos"
         printf "    ${DIM}Set KRONN_REPOS_DIR to an existing parent directory, then restart Kronn.${RESET}\n"
         total_issues=$((total_issues + 1))
@@ -927,7 +944,7 @@ cmd_doctor() {
     else
         success "Primary rw directory: $primary_repos"
     fi
-    for extra in "${rw_roots[@]:1}"; do
+    for extra in ${extra_roots[@]+"${extra_roots[@]}"}; do
         if [[ -d "$extra" ]]; then
             success "Additional rw directory: $extra"
         else
@@ -939,8 +956,9 @@ cmd_doctor() {
     local project_paths=() project_path inside root
     while IFS= read -r project_path; do
         [[ -n "$project_path" ]] && project_paths+=("$project_path")
-    done < <(_doctor_project_paths "${rw_roots[@]}")
-    for project_path in "${project_paths[@]}"; do
+    done < <(_doctor_project_paths ${rw_roots[@]+"${rw_roots[@]}"})
+    for project_path in ${project_paths[@]+"${project_paths[@]}"}; do
+        [[ ${#rw_roots[@]} -gt 0 ]] || break
         inside=0
         for root in "${rw_roots[@]}"; do
             if _path_under_root "$project_path" "$root"; then inside=1; break; fi
@@ -955,7 +973,7 @@ cmd_doctor() {
     done
 
     if grep -qiE "microsoft|wsl" /proc/version 2>/dev/null; then
-        for root in "${rw_roots[@]}"; do
+        for root in ${rw_roots[@]+"${rw_roots[@]}"}; do
             if [[ "$root" == /mnt/[a-zA-Z]/* ]]; then
                 warn "WSL performance: $root is on the Windows filesystem; prefer a path under $HOME"
             fi

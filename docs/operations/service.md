@@ -34,7 +34,11 @@ kronn service install --yes           # no questions (reinstall, symlink)
 5. writes the unit, loads it and waits until `/api/health` answers with the
    expected version;
 6. offers to point `~/.local/bin/kronn` at `current/cli/kronn`, so `kronn`
-   follows the installed release;
+   follows the installed release. That CLI is not a checkout: its parent is the
+   service home, not a directory of repositories. "Continue in CLI" asks once
+   where your repositories are and saves the answer (`scan_path` in `cli.toml`);
+   until then `kronn mcp sync`, `kronn status` and `kronn doctor` say that no
+   repositories directory is configured instead of scanning the release;
 7. prints the URL.
 
 Releases are built from source for now; prebuilt archives are future work.

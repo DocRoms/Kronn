@@ -91,6 +91,62 @@ EOF
 }
 
 @test "load_config defaults SCAN_PATH to parent of KRONN_DIR when nothing stored" {
+    touch "$KRONN_DIR/Makefile"   # a checkout
     load_config
     [ "$SCAN_PATH" = "$(dirname "$KRONN_DIR")" ]
+}
+
+# ─── A CLI run from a service release (current/cli) ──────────────────────────
+
+@test "load_config leaves SCAN_PATH empty for a service release CLI, not the service home" {
+    # No Makefile: KRONN_DIR is ~/.kronn/service/current/cli, its parent the release.
+    load_config
+    [ -z "$SCAN_PATH" ]
+}
+
+@test "load_config keeps a saved scan_path for a service release CLI" {
+    printf 'scan_path = "/from/cli"\n' > "$KRONN_CONFIG_DIR/cli.toml"
+    load_config
+    [ "$SCAN_PATH" = "/from/cli" ]
+}
+
+@test "ensure_scan_path without a terminal says so, fails and saves nothing" {
+    _load_lib "ui.sh"
+    _load_lib "config.sh"
+    SCAN_PATH=""
+    _scan_path_can_ask() { return 1; }
+    run ensure_scan_path
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"No repositories directory configured"* ]]
+    [ ! -e "$KRONN_CONFIG_DIR/cli.toml" ]
+}
+
+@test "ensure_scan_path asks once, expands ~ and saves the directory to cli.toml" {
+    _load_lib "ui.sh"
+    _load_lib "config.sh"
+    export HOME="$TEST_TMPDIR/home"
+    mkdir -p "$HOME/Repositories"
+    SCAN_PATH=""
+    _scan_path_can_ask() { return 0; }
+    ensure_scan_path < <(printf '%s\n' "$TEST_TMPDIR/missing" "~/Repositories") > "$TEST_TMPDIR/out"
+    [ "$SCAN_PATH" = "$HOME/Repositories" ]
+    grep -q "Not a directory: $TEST_TMPDIR/missing" "$TEST_TMPDIR/out"
+    grep -q "^scan_path = \"$HOME/Repositories\"" "$KRONN_CONFIG_DIR/cli.toml"
+    # Next run: read back, nothing asked.
+    SCAN_PATH=""
+    _scan_path_can_ask() { echo "asked" >&2; return 1; }
+    load_config
+    ensure_scan_path
+    [ "$SCAN_PATH" = "$HOME/Repositories" ]
+}
+
+@test "ensure_scan_path takes HOME on an empty answer" {
+    _load_lib "ui.sh"
+    _load_lib "config.sh"
+    export HOME="$TEST_TMPDIR/home"
+    mkdir -p "$HOME"
+    SCAN_PATH=""
+    _scan_path_can_ask() { return 0; }
+    ensure_scan_path < <(printf '\n') > /dev/null
+    [ "$SCAN_PATH" = "$HOME" ]
 }
