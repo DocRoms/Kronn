@@ -30,6 +30,14 @@ describe('AuthLockedScreen', () => {
     expect(screen.queryByTestId('recovery-restore-panel')).toBeNull();
   });
 
+  it('links a remote caller to the TLS-proxy recovery runbook (KT-1596)', async () => {
+    config.getRecoveryStatus.mockRejectedValue(new ApiRequestError('locked', 'auth_locked'));
+    render(<AuthLockedScreen onRestored={vi.fn()} />);
+    const link = await screen.findByTestId('auth-locked-proxy-doc');
+    expect(link.getAttribute('href')).toContain('docs/operations/auth-and-tls.md');
+    expect(link.getAttribute('rel')).toContain('noopener');
+  });
+
   it('shows the restore form when the key is lost', async () => {
     config.getRecoveryStatus.mockResolvedValue({ key_locked: true });
     render(<AuthLockedScreen onRestored={vi.fn()} />);

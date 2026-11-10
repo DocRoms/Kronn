@@ -87,6 +87,45 @@ async fn without_a_domain_only_local_origins_are_allowed() {
     }
 }
 
+/// KT-1596 — a declared TLS proxy serves the UI from its public origin: CORS
+/// grants exactly that origin, read live (the declaration is made from Settings
+/// without a restart), and still refuses every other page.
+#[tokio::test]
+async fn a_declared_proxy_origin_is_allowed_exactly_and_live() {
+    let mut config = kronn::core::config::default_config();
+    config.server.port = PORT;
+    config.server.runtime_port = None;
+    let config = Arc::new(RwLock::new(config));
+    let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());
+    let app = build_router_with_auth(
+        AppState::new_defaults(config.clone(), db, DEFAULT_MAX_CONCURRENT_AGENTS),
+        false,
+    );
+    // Undeclared: the proxy's origin is just another foreign page.
+    assert_refused(&app, "https://kronn.example.com").await;
+
+    {
+        let mut live = config.write().await;
+        live.server.tls_terminated_by_proxy = true;
+        live.server.public_origin = Some("https://kronn.example.com".into());
+    }
+    assert_allowed(&app, "https://kronn.example.com").await;
+    for foreign in [
+        "http://kronn.example.com",
+        "https://kronn.example.com:8443",
+        "https://kronn.example.com.evil.example",
+        "https://evil.example",
+        "null",
+    ] {
+        assert_refused(&app, foreign).await;
+    }
+    // The local origins keep working next to it.
+    assert_allowed(&app, &format!("http://localhost:{PORT}")).await;
+
+    config.write().await.server.tls_terminated_by_proxy = false;
+    assert_refused(&app, "https://kronn.example.com").await;
+}
+
 #[tokio::test]
 async fn with_a_domain_only_that_domain_is_allowed() {
     let app = router(Some("kronn.example"));
