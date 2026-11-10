@@ -37,7 +37,8 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-use crate::core::cmd::async_cmd;
+use crate::core::background_priority::{self, Priority};
+use crate::core::cmd::async_cmd_planned;
 use crate::models::*;
 
 use super::steps::StepOutcome;
@@ -68,6 +69,31 @@ pub const LEGACY_TRUNCATION_MARKER_PREFIX: &str = "[... output tronqué — limi
 /// Added to a failed `gh` step whose project gave it no GitHub token.
 pub const GH_NOT_CONNECTED_HINT: &str = " — this project is not connected to GitHub in Kronn, so the step received no GitHub token (Projects → Overview → GitHub)";
 
+/// KT-1633 — an Exec step (an autoCode build, `cargo test`, `npm install`) runs
+/// in the background: it yields to the owner's interactive applications.
+const EXEC_STEP_PRIORITY: Priority = Priority::Background;
+
+/// The command of an Exec step child at [`EXEC_STEP_PRIORITY`], behind the
+/// host's priority launcher unless the owner turned that off.
+fn step_command(program: &str) -> tokio::process::Command {
+    // Behind the launcher a missing program would be the launcher's exit 127,
+    // not the spawn error the step reports.
+    let plan = if which::which(program).is_ok() {
+        background_priority::plan_here(EXEC_STEP_PRIORITY)
+    } else {
+        background_priority::Plan::default()
+    };
+    step_command_planned(program, plan)
+}
+
+fn step_command_planned(program: &str, plan: background_priority::Plan) -> tokio::process::Command {
+    async_cmd_planned(
+        program.as_ref(),
+        crate::core::child_env::ChildRoute::WorkflowExec,
+        plan,
+    )
+}
+
 /// An Exec step child (setup or main command): the program with its built
 /// environment (KT-1006) and the project's GitHub variables only when the
 /// project is connected (D2); callers only add argv, cwd and stdio.
@@ -77,7 +103,14 @@ fn exec_child(
     github_env: &[(String, String)],
     refs: &[(String, String)],
 ) -> tokio::process::Command {
-    let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
+    isolated_exec_child(step_command(program), github_env, refs)
+}
+
+fn isolated_exec_child(
+    mut command: tokio::process::Command,
+    github_env: &[(String, String)],
+    refs: &[(String, String)],
+) -> tokio::process::Command {
     crate::core::child_env::isolate_with_github_values_and_refs(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
@@ -117,7 +150,7 @@ fn approved_script_child(
     copy_dir: &Path,
 ) -> tokio::process::Command {
     use crate::core::approved_scripts::{SCRIPTS_DIR_ENV, WORKTREE_ENV};
-    let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
+    let mut command = step_command(program);
     crate::core::child_env::isolate_with_github_values_and_refs(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
@@ -394,6 +427,22 @@ pub fn static_refusals(step: &WorkflowStep, allowlist: &[String]) -> Vec<(String
         }
     }
     found
+}
+
+/// What a step that could not start says. A missing `python3` (the shipped
+/// autoCode Issue steps are `python3` scripts, KT-1643) gets the prerequisite
+/// message that names what to install, not a raw OS error; any other failure
+/// keeps the raw spawn error.
+pub(crate) fn spawn_failure(step_name: &str, command: &str, error: &std::io::Error) -> String {
+    if command == crate::core::contribution::PYTHON_PROGRAM
+        && error.kind() == std::io::ErrorKind::NotFound
+    {
+        return format!(
+            "Exec step `{step_name}`: {}",
+            crate::core::contribution::python_missing_message()
+        );
+    }
+    format!("Exec step `{step_name}`: failed to spawn `{command}`: {error}")
 }
 
 fn needs_gh_hint(raw_command: &str, success: bool, github_env: &[(String, String)]) -> bool {
@@ -771,14 +820,7 @@ async fn execute_exec_step_inner(
         match tokio::time::timeout(Duration::from_secs(main_timeout_secs), output_future).await {
             Ok(Ok(out)) => Ok(out),
             Ok(Err(e)) => {
-                return fail(
-                    step,
-                    start,
-                    format!(
-                        "Exec step `{}`: failed to spawn `{}`: {}",
-                        step.name, raw_command, e
-                    ),
-                );
+                return fail(step, start, spawn_failure(&step.name, raw_command, &e));
             }
             Err(_) => Err(()), // timeout
         };
@@ -924,6 +966,7 @@ async fn execute_exec_step_inner(
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action,
     }
@@ -960,6 +1003,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }
@@ -1328,6 +1372,39 @@ mod tests {
                 !env.iter().any(|name| name == gone),
                 "{gone} reached the step"
             );
+        }
+    }
+
+    /// KT-1633: an Exec step starts at background priority — behind the host's
+    /// launcher, whichever of the main command and the approved-script command
+    /// it is — and keeps its built environment. The owner's switch and a host
+    /// without the launcher both leave the program itself.
+    #[cfg(unix)] // asserts the taskpolicy/nice launchers, POSIX only
+    #[test]
+    fn an_exec_step_child_runs_behind_the_priority_launcher() {
+        use background_priority::{plan, HostOs};
+        assert_eq!(EXEC_STEP_PRIORITY, Priority::Background);
+        for (os, launcher, flags) in [
+            (HostOs::MacOs, "/usr/sbin/taskpolicy", vec!["-b"]),
+            (HostOs::Linux, "/usr/bin/nice", vec!["-n", "10"]),
+        ] {
+            let background = plan(EXEC_STEP_PRIORITY, true, os, |_| true);
+            let command = isolated_exec_child(step_command_planned("cargo", background), &[], &[]);
+            let command = command.as_std();
+            assert_eq!(command.get_program(), launcher, "{os:?}");
+            let args: Vec<_> = command.get_args().collect();
+            let mut expected = flags;
+            expected.push("cargo");
+            assert_eq!(args, expected, "{os:?}");
+            assert!(
+                command.get_envs().any(|(name, _)| name == "PATH"),
+                "the launcher must not cost the step its built environment"
+            );
+
+            let off = plan(EXEC_STEP_PRIORITY, false, os, |_| true);
+            let command = step_command_planned("cargo", off);
+            assert_eq!(command.as_std().get_program(), "cargo");
+            assert_eq!(command.as_std().get_args().count(), 0);
         }
     }
 
@@ -1706,7 +1783,7 @@ mod tests {
 
     /// A link planted where the copy goes is replaced, never written through;
     /// a linked output directory is refused.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn the_full_copy_never_writes_through_a_planted_link() {
         let (_artifacts_base, artifacts) = run_dir();
@@ -1904,7 +1981,7 @@ mod tests {
     // because Windows CI doesn't have `echo` as a discrete binary
     // (it's a cmd.exe builtin), and the cross-platform discipline is
     // already enforced by the allowlist + cmd::async_cmd helpers.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs `echo` as a program, which Windows lacks (a cmd.exe builtin there)
     #[tokio::test]
     async fn echoes_simple_args() {
         let step = exec_step("greet", Some("echo"), vec!["hello", "world"], None);
@@ -1916,7 +1993,7 @@ mod tests {
         assert!(outcome.result.output.contains("hello world"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn arg_with_shell_metas_passed_as_literal_does_not_execute() {
         // Critical security test: an arg containing `; rm -rf /` MUST
@@ -1937,7 +2014,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn template_in_arg_renders_then_passes_literal() {
         // The {{steps.X.summary}} template is rendered FIRST, then the
@@ -1958,7 +2035,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn nonzero_exit_yields_failed_status() {
         // `false` is the canonical "exit 1" binary on Unix. Status
@@ -2049,7 +2126,7 @@ mod tests {
     // Without these, the runner saw `Failed` and short-circuited to
     // rollback — defeating the point of declaring an `on_result` rule.
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn success_appends_signal_ok_and_exit_0() {
         let step = exec_step("greet", Some("echo"), vec!["hi"], None);
@@ -2059,7 +2136,7 @@ mod tests {
         assert!(outcome.result.output.contains("[SIGNAL: exit_0]"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn nonzero_exit_appends_signal_error_and_exit_code() {
         let step = exec_step("fail", Some("false"), vec![], None);
@@ -2069,7 +2146,7 @@ mod tests {
         assert!(outcome.result.output.contains("[SIGNAL: exit_1]"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn on_result_goto_fires_when_signal_matches_on_failure() {
         // The whole point of the feature: `false` exits 1, status = Failed,
@@ -2104,7 +2181,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn on_result_no_match_leaves_condition_action_none() {
         // User declared `contains "TIMEOUT"` but exec exited 1.
@@ -2136,7 +2213,7 @@ mod tests {
     /// assert wall-clock is far below the sleep duration. If someone
     /// later removes `kill_on_drop(true)`, this test fails with a
     /// 30-second timeout instead of completing in milliseconds.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn cancel_drops_future_and_kills_long_running_child() {
         let step = exec_step("long_sleep", Some("sleep"), vec!["30"], Some(60));
@@ -2326,7 +2403,7 @@ mod tests {
 
     /// R5-04: a trusted script shape runs only a regular file, never a link
     /// to a device such as stdin.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn a_script_linked_to_a_device_is_refused_at_run_time() {
         let dir = tempfile::tempdir().unwrap();
@@ -2358,7 +2435,7 @@ mod tests {
 
     /// R6-08: an approved line whose stdin feeds a script runs only a regular
     /// file, never a link to stdin.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn an_approved_stdin_fed_script_linked_to_stdin_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -2390,7 +2467,7 @@ mod tests {
 
     /// F-03: a program file read by `awk -f` while a templated stdin feeds
     /// it must be a regular file too.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; relies on POSIX process groups and signals
     #[tokio::test]
     async fn an_awk_program_file_linked_to_stdin_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -2443,7 +2520,7 @@ mod tests {
     /// The documented recipe for a templated value next to inline code: a
     /// separate argv entry the interpreter never parses. A hostile issue
     /// title must come back verbatim and nothing in it may run.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_hostile_issue_title_never_executes_through_the_documented_recipes() {
         let title = "a'b\"c $(touch pwned1) ; touch pwned2 `touch pwned3` \\ é🦀";
@@ -2497,7 +2574,7 @@ mod tests {
     /// A saved step that interpolates a value into inline code fails before
     /// spawning anything, main command or setup, with the step, the
     /// placeholder and the fix in its error.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn a_step_interpolating_into_inline_code_is_refused_before_running() {
         let mut ctx = TemplateContext::new();
@@ -2540,7 +2617,7 @@ mod tests {
 
     /// Review findings, executed: a shell script after `-cx`, and a
     /// templated stdin given to a program that runs stdin, never run.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_clustered_c_script_and_a_stdin_program_are_refused_before_running() {
         let mut ctx = TemplateContext::new();
@@ -2575,7 +2652,7 @@ mod tests {
 
     /// A value reaching a program Kronn does not model is refused before it
     /// runs, unless a human approved the step.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn an_unmodelled_program_runs_only_with_a_human_approval() {
         let mut ctx = TemplateContext::new();
@@ -2611,7 +2688,7 @@ mod tests {
     }
 
     /// The envelope escapes stdout; markers must still come back as printed.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs POSIX utilities (echo, false, sleep, cat) that Windows lacks as programs
     #[tokio::test]
     async fn multi_line_markers_come_back_without_literal_escapes() {
         let mut step = exec_step("sortie", Some("cat"), vec![], None);

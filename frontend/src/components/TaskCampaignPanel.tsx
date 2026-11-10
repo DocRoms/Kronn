@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import type { CampaignView } from '../lib/api';
 import { readCollapsed, writeCollapsed } from '../lib/orch-panel-state';
+import { roundsLimitLabel } from '../lib/reviewRounds';
 
 interface Props {
   view: CampaignView | null;
@@ -41,6 +42,23 @@ export function TaskCampaignPanel({ view, onLaunch, busyTaskReference }: Props) 
   const candidates = view?.candidates ?? [];
   const launchable = candidates.filter(c => c.launchable);
   const attention = view?.principal_attention;
+  const run = view?.run;
+  // KT-1643 — the rules a contributor reads before the first delivery: where it
+  // integrates, how many review rounds, and who reviews (never left implicit).
+  const reviewer = run?.reviewer;
+  const reviewerLabel = !reviewer
+    ? null
+    : reviewer.kind === 'human'
+      ? t('orch.reviewer.human')
+      : t(
+          reviewer.kind === 'agent' ? 'orch.reviewer.agent' : 'orch.reviewer.remote_model',
+          reviewer.agent ?? '',
+          reviewer.model ?? '—',
+        );
+  const rules =
+    run?.target_branch && reviewerLabel
+      ? t('orch.rules', run.target_branch, roundsLimitLabel(run.max_review_rounds), reviewerLabel)
+      : null;
   const live =
     (attention?.active_executions ?? 0) +
     (attention?.awaiting_review ?? 0) +
@@ -66,6 +84,12 @@ export function TaskCampaignPanel({ view, onLaunch, busyTaskReference }: Props) 
 
       {collapsed ? null : (
       <div id="orch-campaign-body">
+      {rules && (
+        <p className="orch-campaign-rules" data-testid="orch-campaign-rules">
+          {rules}
+          {reviewer?.defaulted ? ` (${t('orch.reviewer.default')})` : ''}
+        </p>
+      )}
       {attention && live > 0 && (
         <p className="orch-campaign-attention" data-testid="orch-campaign-attention">
           {t('orch.attention', attention.active_executions, attention.awaiting_review, attention.awaiting_human)}

@@ -612,6 +612,7 @@ pub async fn settle_errored_run(
         last_activity: None,
         quota_wait: None,
         terminal_stop: None,
+        output_bytes: None,
     });
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let run_id = run.id.clone();
@@ -746,6 +747,7 @@ fn workspace_failure_result(msg: &str) -> StepResult {
         last_activity: None,
         quota_wait: None,
         terminal_stop: None,
+        output_bytes: None,
     }
 }
 
@@ -1547,6 +1549,7 @@ async fn execute_run_body(
                                 last_activity: None,
                                 quota_wait: None,
                                 terminal_stop: None,
+                                output_bytes: None,
                             });
                             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                             let db_w = db.clone();
@@ -1623,6 +1626,7 @@ async fn execute_run_body(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1661,6 +1665,7 @@ async fn execute_run_body(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1792,6 +1797,18 @@ async fn execute_run_body(
     // After trigger fields and variables, so neither can stand in for the run.
     ctx.set_builtin("run.id", run.id.clone());
     ctx.set_builtin("run.variant", super::shadow::variant(run).to_string());
+    // KT-1643 — the instance's own address, as a step it spawns reaches it, so
+    // a shared workflow carries no literal `localhost:3140`.
+    let listening_port = state.config.read().await.server.listening_port();
+    ctx.set_builtin(
+        "run.kronn_url",
+        crate::core::contribution::kronn_url(
+            crate::core::child_env::var("KRONN_BACKEND_URL")
+                .ok()
+                .as_deref(),
+            listening_port,
+        ),
+    );
     ctx.set_refs(&workflow.refs);
     // KT-910 — Exec steps write here, Agent steps that name it read it.
     match super::run_artifacts::ensure(&run.id) {
@@ -1966,6 +1983,7 @@ async fn execute_run_body(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -2053,6 +2071,7 @@ async fn execute_run_body(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -2158,6 +2177,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             all_success = false;
             break;
@@ -2192,6 +2212,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             break;
         }
@@ -2237,6 +2258,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             stopped_by_guard = true;
             break;
@@ -2295,6 +2317,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             stopped_by_guard = true;
             break;
@@ -2359,6 +2382,7 @@ async fn execute_run_body(
                 last_activity: None,
                 quota_wait: None,
                 terminal_stop: None,
+                output_bytes: None,
             });
             stopped_by_guard = true;
             break;
@@ -2433,6 +2457,7 @@ async fn execute_run_body(
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         };
         apply_step_snapshot(
             step,
@@ -2618,6 +2643,7 @@ async fn execute_run_body(
                                 last_activity: None,
                                 quota_wait: None,
                                 terminal_stop: None,
+                                output_bytes: None,
                             },
                             condition_action: None,
                         }
@@ -2636,11 +2662,12 @@ async fn execute_run_body(
                         let step = &hydrated;
                         let step_room = step_room.ok().flatten();
                         let full_access = agents_config.full_access_for(&step.agent);
-                        let native_tools = Some(KronnToolExecutor::workflow_arc(
+                        let native_tools = Some(KronnToolExecutor::workflow_room_arc(
                             state.clone(),
                             workflow.project_id.clone(),
                             run.id.clone(),
                             step.name.clone(),
+                            step_room.as_ref().and_then(|room| room.member().cloned()),
                         ));
                         // Live-progress wiring — without this the user gets a
                         // "step is running" pulse with no visible content until
@@ -2989,6 +3016,7 @@ async fn execute_run_body(
                         last_activity: None,
                         quota_wait: None,
                         terminal_stop: None,
+                        output_bytes: None,
                     },
                     condition_action: None,
                 }
@@ -3038,6 +3066,7 @@ async fn execute_run_body(
                         last_activity: None,
                         quota_wait: None,
                         terminal_stop: None,
+                        output_bytes: None,
                     },
                     condition_action: None,
                 }
@@ -3832,11 +3861,12 @@ async fn execute_run_body(
                             ),
                             Ok(step_room) => {
                                 let full_access = agents_config.full_access_for(&rb_step.agent);
-                                let native_tools = Some(KronnToolExecutor::workflow_arc(
+                                let native_tools = Some(KronnToolExecutor::workflow_room_arc(
                                     state.clone(),
                                     workflow.project_id.clone(),
                                     run.id.clone(),
                                     rb_step.name.clone(),
+                                    step_room.as_ref().and_then(|room| room.member().cloned()),
                                 ));
                                 // KT-1252 — the room's bubble follows a rollback
                                 // step as it does a step of the main path. No
@@ -4548,6 +4578,7 @@ fn budget_unrecorded_row(error: &anyhow::Error) -> StepResult {
         last_activity: None,
         quota_wait: None,
         terminal_stop: Some(reason),
+        output_bytes: None,
     }
 }
 
@@ -4952,6 +4983,8 @@ pub(crate) fn apply_step_snapshot(
         StepType::TaskBoard => "TaskBoard",
     };
     result.step_kind = Some(kind.into());
+    // KT-1525 — what the step left in the run: the run view grades it.
+    result.output_bytes = Some(result.output.len() as u64);
     if matches!(step.step_type, StepType::Agent) {
         if let Some(provenance) = &result.agent_provenance {
             let selected = provenance
@@ -5384,6 +5417,7 @@ mod tests {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         }
     }
 
@@ -5741,7 +5775,24 @@ mod tests {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         }
+    }
+
+    /// KT-1525 — the size of what the step left in the run is stamped on its
+    /// result, in bytes (not characters), whatever the step kind.
+    #[test]
+    fn snapshot_stamps_the_output_size_in_bytes() {
+        for kind in [StepType::Agent, StepType::ApiCall, StepType::CollectApiData] {
+            let step = mk_step_for_snapshot(kind);
+            let mut r = empty_result();
+            r.output = "é".repeat(1000);
+            apply_step_snapshot(&step, &mut r, None);
+            assert_eq!(r.output_bytes, Some(2000));
+        }
+        let mut empty = empty_result();
+        apply_step_snapshot(&mk_step_for_snapshot(StepType::Agent), &mut empty, None);
+        assert_eq!(empty.output_bytes, Some(0));
     }
 
     #[test]
@@ -5874,6 +5925,7 @@ mod tests {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         }
     }
 
@@ -6870,7 +6922,7 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // uses a POSIX FIFO; relies on POSIX process groups and signals
     #[tokio::test]
     async fn two_non_isolated_runs_of_one_project_started_together_both_succeed_in_turn() {
         let (state, tokens, agents) = test_state_and_configs();
@@ -6977,7 +7029,7 @@ mod tests {
             .contains("run-holding-the-tree"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // its Exec step runs `sleep 0.4` as a program, which Windows lacks
     #[tokio::test]
     async fn a_workflow_declared_read_only_on_the_main_tree_skips_the_lock() {
         let (state, tokens, agents) = test_state_and_configs();
@@ -7984,7 +8036,7 @@ mod tests {
     /// agent, whether or not the project has a linked repo. The step is run by
     /// the real `execute_run` on a scripted `claude`, and the test reads the
     /// prompt that agent was handed on stdin.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses a POSIX FIFO; relies on POSIX process groups and signals
     #[tokio::test]
     async fn an_agent_step_prompt_names_no_unlinked_kronn_project() {
         use crate::api::other_projects_fixture as fixture;
@@ -8104,7 +8156,7 @@ mod tests {
     /// activity in that room's live progress, as a step of the main path does.
     /// Run by the real `execute_run` on a scripted `claude` that makes one
     /// tool call; the test reads the frames the room's socket receives.
-    #[cfg(unix)]
+    #[cfg(unix)] // uses a POSIX FIFO; relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_rollback_agent_step_feeds_its_rooms_live_progress() {
         use crate::api::other_projects_fixture as fixture;
@@ -11069,8 +11121,10 @@ mod tests {
 
     mod gate_guard_runs;
     mod native_full_access_runs;
+    mod quota_recheck_runs;
     mod quota_wait_foreach_runs;
     mod quota_wait_runs;
+    mod quota_wait_subworkflow_runs;
     mod run_effect_runs;
     mod run_pin_runs;
     mod shadow_runs;

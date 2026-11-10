@@ -18,6 +18,7 @@ vi.mock('../../lib/api', () => ({
   pages: mocks,
   workflows: { get: catalog.getWorkflow },
   agents: { detect: catalog.detect },
+  config: { getAgentAccess: () => Promise.resolve({}) },
 }));
 vi.mock('../AgentSwitchPicker', () => ({
   AgentSwitchPicker: ({ currentAgent, availableAgents, onChange, ariaLabel }: {
