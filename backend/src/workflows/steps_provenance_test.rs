@@ -638,10 +638,22 @@ async fn a_native_reviewer_never_inherits_its_author_s_full_access() {
         )
         .await
         .result;
-        let review = &result.agent_provenance.as_ref().unwrap().attempts[1];
-        assert_eq!(review.role, WorkflowAgentAttemptRole::Review);
-        assert_eq!(review.agent, AgentType::OpenCode);
-        assert_eq!(review.succeeded, saved, "saved {saved}");
+        let attempts = &result.agent_provenance.as_ref().unwrap().attempts;
+        if saved {
+            let review = &attempts[1];
+            assert_eq!(review.role, WorkflowAgentAttemptRole::Review);
+            assert_eq!(review.agent, AgentType::OpenCode);
+            assert!(review.succeeded);
+        } else {
+            // Refused before the author spends a turn (KT-1150).
+            assert_eq!(result.status, RunStatus::Failed);
+            assert!(
+                result.output.starts_with("native_full_access_required:"),
+                "{}",
+                result.output
+            );
+            assert!(attempts.is_empty(), "never launched: {attempts:?}");
+        }
         assert_eq!(
             out.path().join("config.json").exists(),
             saved,
