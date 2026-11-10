@@ -727,6 +727,7 @@ pub fn refused_outcome(step: &WorkflowStep, error: String, duration_ms: u64) -> 
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }

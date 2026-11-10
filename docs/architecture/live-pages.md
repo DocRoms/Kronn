@@ -230,6 +230,15 @@ often grows the database by its size on each save. The revision list
 (`GET /api/pages/{id}/revisions`) carries sizes, not HTML; the editor loads the
 one revision it compares from `GET /api/pages/{id}/revisions/{revision_id}`.
 
+The datasets a Page receives are graded the same way (KT-1525), whoever
+publishes them (a workflow's PublishPageData step, an agent, the UI): the sum of
+`LivePageDatasetView.data_size_bytes` is flagged in the Page header, and each
+dataset in the sync panel, above 256 KiB (heavy) and 1 MiB (very heavy), with
+the fix (select fields, limit or paginate in the publishing workflow). The
+workflow side is graded per step: see « Heavy step outputs » in
+`docs/operations/workflow-heavy-outputs.md`.
+`[src: file: frontend/src/lib/live-page-weight.ts:15-26]`
+
 JSON is the dataset payload format. Snapshot and collection values are stored
 as one JSON value. Time-series observations are stored as individual rows so a
 new point does not rewrite the full history.

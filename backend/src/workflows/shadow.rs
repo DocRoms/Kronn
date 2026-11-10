@@ -288,6 +288,7 @@ pub fn skipped(step: &WorkflowStep) -> StepOutcome {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }

@@ -726,6 +726,7 @@ pub async fn execute_sub_workflow_step(
             last_activity: None,
             quota_wait,
             terminal_stop: crate::workflows::safety::run_terminal_stop(&child_run),
+            output_bytes: None,
         },
         condition_action,
     }
@@ -1754,6 +1755,7 @@ async fn execute_foreach(
             last_activity: None,
             quota_wait: child_quota_wait,
             terminal_stop: foreach_terminal_stop,
+            output_bytes: None,
         },
         condition_action,
     }
@@ -1811,6 +1813,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }

@@ -45,6 +45,7 @@ describe('WorkersSection (KT-1345)', () => {
       review_rounds_unlimited: false,
       max_concurrent_task_workers: 2,
       background_priority: true,
+      heavy_output_kb: 256,
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentRounds(8)'));
@@ -68,6 +69,7 @@ describe('WorkersSection (KT-1345)', () => {
       review_rounds_unlimited: true,
       max_concurrent_task_workers: 2,
       background_priority: true,
+      heavy_output_kb: 256,
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentUnlimited'));
@@ -121,6 +123,7 @@ describe('WorkersSection (KT-1345)', () => {
       review_rounds_unlimited: false,
       max_concurrent_task_workers: 3,
       background_priority: true,
+      heavy_output_kb: 256,
     }));
     await waitFor(() => expect(screen.getByTestId('workers-cap-current'))
       .toHaveTextContent('config.workers.maxConcurrentCurrent(3)'));
@@ -164,6 +167,7 @@ describe('WorkersSection (KT-1345)', () => {
       review_rounds_unlimited: false,
       max_concurrent_task_workers: 2,
       background_priority: false,
+      heavy_output_kb: 256,
     }));
     await waitFor(() => expect(box).not.toBeChecked());
     expect(screen.getByTestId('workers-save')).toBeDisabled();
@@ -182,5 +186,29 @@ describe('WorkersSection (KT-1345)', () => {
     const legacy = await screen.findByTestId('workers-background-priority');
     await waitFor(() => expect(screen.getByTestId('workers-rounds-input')).toHaveValue(5));
     expect(legacy).toBeChecked();
+  });
+
+  it('KT-1525 — shows the heavy-output threshold, saves a new one and refuses 0 or too many', async () => {
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256 };
+    getMock.mockResolvedValue(saved);
+    saveMock.mockResolvedValue({ ...saved, heavy_output_kb: 512 });
+    render(<WorkersSection t={t} />);
+    const input = await screen.findByTestId('workers-heavy-input');
+    await waitFor(() => expect(input).toHaveValue(256));
+    expect(screen.getByTestId('workers-heavy-current')).toHaveTextContent('config.workers.heavyOutputCurrent(256)');
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+
+    for (const bad of ['0', '102401']) {
+      fireEvent.change(input, { target: { value: bad } });
+      expect(screen.getByTestId('workers-heavy-invalid')).toHaveTextContent('config.workers.heavyOutputInvalid(1,102400)');
+      expect(screen.getByTestId('workers-save')).toBeDisabled();
+    }
+
+    fireEvent.change(input, { target: { value: '512' } });
+    expect(screen.queryByTestId('workers-heavy-invalid')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('workers-save'));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, heavy_output_kb: 512 }));
+    await waitFor(() => expect(screen.getByTestId('workers-heavy-current'))
+      .toHaveTextContent('config.workers.heavyOutputCurrent(512)'));
   });
 });

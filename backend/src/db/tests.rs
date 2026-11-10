@@ -2070,6 +2070,87 @@ pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
     }
 }
 
+fn result_with_output(name: &str, bytes: usize) -> StepResult {
+    let output = "x".repeat(bytes);
+    StepResult {
+        step_name: name.into(),
+        status: RunStatus::Success,
+        output_bytes: Some(output.len() as u64),
+        output,
+        tokens_used: Some(0),
+        duration_ms: 0,
+        started_at: None,
+        condition_result: None,
+        envelope_detected: None,
+        step_kind: None,
+        step_agent: None,
+        step_model: None,
+        step_api_plugin_slug: None,
+        step_api_endpoint_path: None,
+        is_rollback: false,
+        child_run_id: None,
+        agent_provenance: None,
+        native_tool_calls: Box::default(),
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
+        quota_wait: None,
+        terminal_stop: None,
+    }
+}
+
+/// KT-1525 — the run row keeps its heaviest step output (size and step), on
+/// insert and on every progress write, and the workflow list reads it from the
+/// last-run summary.
+#[test]
+fn the_heaviest_step_output_is_stored_and_listed() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut run = sample_run("r1", "w1");
+    run.step_results = vec![
+        result_with_output("light", 10),
+        result_with_output("collect", 300_000),
+    ];
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    let summaries = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
+    assert_eq!(summaries["w1"].heaviest_output_bytes, Some(300_000));
+    assert_eq!(
+        summaries["w1"].heaviest_output_step.as_deref(),
+        Some("collect")
+    );
+
+    run.step_results
+        .push(result_with_output("publish", 400_000));
+    assert!(crate::db::workflows::update_run_progress(
+        &conn,
+        crate::db::workflows::RunProgressSnapshot::from_run(&run)
+    )
+    .unwrap());
+    let summaries = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
+    assert_eq!(summaries["w1"].heaviest_output_bytes, Some(400_000));
+    assert_eq!(
+        summaries["w1"].heaviest_output_step.as_deref(),
+        Some("publish")
+    );
+
+    // A run without any step result reports nothing rather than a step.
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w2")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("r2", "w2")).unwrap();
+    let summaries = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
+    assert_eq!(summaries["w2"].heaviest_output_bytes, Some(0));
+    assert_eq!(summaries["w2"].heaviest_output_step, None);
+}
+
+/// A result stored before the size was stamped falls back to its output.
+#[test]
+fn the_heaviest_output_falls_back_to_the_stored_output_length() {
+    let mut legacy = result_with_output("legacy", 700);
+    legacy.output_bytes = None;
+    let (bytes, step) = crate::models::heaviest_output(&[result_with_output("small", 5), legacy]);
+    assert_eq!((bytes, step.as_deref()), (700, Some("legacy")));
+    assert_eq!(crate::models::heaviest_output(&[]), (0, None));
+}
+
 #[test]
 fn workflow_runs_insert_and_list() {
     let conn = test_db();
@@ -3029,6 +3110,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         StepResult {
             step_name: "deploy".into(),
@@ -3053,6 +3135,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
     ];
     crate::db::workflows::insert_run(&conn, &run).unwrap();
@@ -3205,6 +3288,7 @@ fn workflow_runs_update() {
         last_activity: None,
         quota_wait: None,
         terminal_stop: None,
+        output_bytes: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 

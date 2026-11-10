@@ -100,6 +100,7 @@ fn refusal_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }
@@ -308,6 +309,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -407,6 +409,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -454,6 +457,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -832,6 +836,7 @@ pub async fn execute_step(
                                         last_activity: None,
                                         quota_wait: None,
                                         terminal_stop: None,
+                                        output_bytes: None,
                                     },
                                     condition_action: None,
                                 };
@@ -976,6 +981,7 @@ pub async fn execute_step(
                         last_activity: None,
                         quota_wait: None,
                         terminal_stop: None,
+                        output_bytes: None,
                     },
                     condition_action,
                 };
@@ -1016,6 +1022,7 @@ pub async fn execute_step(
                             last_activity: None,
                             quota_wait: Some(quota),
                             terminal_stop: None,
+                            output_bytes: None,
                         },
                         condition_action: None,
                     };
@@ -1058,6 +1065,7 @@ pub async fn execute_step(
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action,
     }
@@ -2157,6 +2165,7 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     })

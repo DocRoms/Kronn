@@ -13,6 +13,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Workflows: a heavy step output no longer goes unnoticed (KT-1525). Each step
+  result records its output size, a Collect API data step records the payload of
+  each source, and the run view flags a step above the threshold (256 KB by
+  default, Settings > Workers) with its name and the fix (select fields, limit,
+  paginate); the workflow card names the heaviest step of its last run. The
+  Page header and sync panel grade the weight of the datasets a Page receives,
+  whoever publishes them, like its HTML weight.
+
 - Workflows: the design doctrine now reaches the agents that author them over
   MCP. One short file (decision tree, "at equal cost, choose for
   maintainability" rules, ApiCall limits) is served as `authoring_doctrine` by
