@@ -77,7 +77,7 @@ pub struct DbCompaction {
 /// Current export schema version. Bump when a new table/field is added to
 /// `DbExport` so import can WARN when restoring an older backup (whose missing
 /// tables must NOT wipe newer data — see `do_import_db`'s selective clear).
-pub const CURRENT_EXPORT_VERSION: u32 = 7;
+pub const CURRENT_EXPORT_VERSION: u32 = 8;
 
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -135,6 +135,39 @@ pub struct DbExport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub trust_seal: Option<String>,
+    /// v8 (KT-1602) — uploaded context files: the rows only. The bytes travel
+    /// as `context-files/<id>` entries of the ZIP, not inside this JSON. An
+    /// older archive has none: the local context files are left as they are.
+    #[serde(default)]
+    pub context_files: Vec<ContextFileRecord>,
+}
+
+/// A `context_files` row as exported. The bytes are a separate, optional ZIP
+/// entry (`has_blob`), and the source machine's `disk_path` is kept out of the
+/// archive: an import writes the bytes under its own context-file store.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContextFileRecord {
+    pub id: String,
+    pub discussion_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub original_size: u64,
+    pub extracted_text: String,
+    pub extracted_size: u64,
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub extracted_from_asset_id: Option<String>,
+    /// The column as stored (`YYYY-MM-DD HH:MM:SS`), kept verbatim.
+    pub created_at: String,
+    /// The file's bytes are in the archive as `context-files/<id>`.
+    #[serde(default)]
+    pub has_blob: bool,
+    /// Where the bytes live on THIS machine, for the exporter only: never
+    /// written to the archive, never read back from one.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub disk_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

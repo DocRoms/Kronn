@@ -104,6 +104,8 @@ describe('AuditTimeline', () => {
     // One request for the whole timeline (FE-12), not one per run.
     expect(projectsApi.auditTimeline).toHaveBeenCalledWith('p1');
     expect(projectsApi.auditRunSteps).not.toHaveBeenCalled();
+    // KT-1603 — the plan's labels follow this project's docs root.
+    expect(projectsApi.auditSteps).toHaveBeenCalledWith('p1');
   });
 
   it('shows each step its tokens, the live step its running count (KT-994)', async () => {
