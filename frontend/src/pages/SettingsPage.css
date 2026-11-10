@@ -5016,7 +5016,12 @@
   background: rgba(var(--kr-warning-rgb), 0.07);
   font-size: var(--kr-fs-xs);
   line-height: 1.5;
-  color: var(--kr-warning, #b45309);
+  /* Warning hue on its own tint is below 4.5:1 in light; the icon and border carry it. */
+  color: var(--kr-text-primary);
+}
+
+.set-expose-warn > svg {
+  color: var(--kr-warning);
 }
 
 /* P2 — the what3words example link in the mnemonic tip. Theme-aware via
