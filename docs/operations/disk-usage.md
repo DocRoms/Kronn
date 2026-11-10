@@ -102,7 +102,7 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
 [src: file: backend/src/api/orchestration.rs:4409-4421#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:13379-13390#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:13429-13440#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -172,7 +172,7 @@ provisioning and builds; see [worktree-build-artifacts.md](worktree-build-artifa
   an agent, which can tell the user instead. [src: file: backend/src/api/disk.rs:938-950#run_purge]
 - MCP tool **`disk_usage`** (`project_id`) — the scoped report above, read-only, bounded to the 25 largest
   entries. It never calls the purge; a leftover `purge_orphans: true` argument returns a note that purging
-  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7809-7841#call_disk_usage]
+  is a human action in Settings > Disk. [src: file: backend/scripts/disc-introspection-mcp.py:7822-7854#call_disk_usage]
 - **Settings → Disk** — measure on demand (never on page open), totals by kind, the table, **Purge
   orphans**, a per-entry delete behind a confirmation, and the two thresholds.
 

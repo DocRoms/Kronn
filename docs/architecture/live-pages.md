@@ -277,7 +277,7 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:654-664#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:689-700#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:8068-8075#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:8079-8086#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
@@ -608,10 +608,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1189-1212#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:14012-14201#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:15316-15358#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:15553-15595#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:15497-15567#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:14062-14251#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:15366-15408#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:15603-15645#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:15547-15617#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -651,8 +651,8 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
 `[src: file: backend/scripts/disc-introspection-mcp.py:10127-10162#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10482-10491#page_update_html]`
-`[src: file: backend/src/skills/workflow-architect.md:384-391#data-kronn-action-state]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10496-10505#page_update_html]`
+`[src: file: backend/src/skills/workflow-architect.md:392-399#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
 both the action's result-discussion anchor and the existing Page-to-discussion
@@ -690,7 +690,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4854-4862#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4869-4877#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -738,7 +738,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:4980-4990#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:4989-4999#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 

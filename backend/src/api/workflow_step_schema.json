@@ -1,22 +1,6 @@
 {
   "shape": "Each step's type-specific fields sit at the TOP LEVEL (never under a sub-object); `name` is required on every step. BUT `step_type` is a TAGGED OBJECT `{\"type\":\"Agent\"}`, NOT a bare string (serde internally-tagged); same for `output_format` (`{\"type\":\"Structured\"}`) and the workflow `trigger` (`{\"type\":\"Manual\"}`). `workflow_create_draft`/`workflow_update` also accept a bare-string `step_type` and wrap it, but the canonical form `workflow_get` returns is the tagged object. Every step also takes `external_effect` (bool, default false): set it to true on each step that acts outside Kronn (posts a comment, sends a message or a mail, deploys, pushes, moves a ticket, writes to a third-party API); a shadow run skips those steps (and every Gate), so an unmarked one acts twice. A step that writes inside Kronn (PublishPageData to a Page people read, a launch, a task) runs in the shadow too: mark it when the shadow must not do it.",
-  "step_types_closed_set": [
-    "Agent",
-    "ApiCall",
-    "BatchApiCall",
-    "BatchQuickPrompt",
-    "Exec",
-    "Gate",
-    "Notify",
-    "JsonData",
-    "CollectApiData",
-    "TransformData",
-    "PublishPageData",
-    "SubWorkflow",
-    "TriggerWorkflow",
-    "DelegateSubtasks",
-    "TaskBoard"
-  ],
+  "read_first": "`authoring_doctrine` (this result, same text as the workflow-architect guide's « Authoring doctrine » section) says which step type to PREFER when several can do the job: HTTP calls to a service with a plugin go through ApiCall/BatchApiCall/CollectApiData, Exec is for logic only, one script is shared and never copied, state passes through step outputs. Read it before composing or editing. `step_types_closed_set` (generated from the code) is the complete list of step types.",
   "fields_by_type": {
     "Agent": {
       "required": [
@@ -142,7 +126,8 @@
         "api_query",
         "api_body",
         "api_extract",
-        "api_response ({\"type\":\"Binary\",\"accept\":[\"image/*\"],\"max_bytes\":262144} for a file: data {content_type,size,base64,data_uri}; extract $.data_uri for a Page <img>. Cap max 2097152; an undeclared type or a larger body fails the step)"
+        "api_response ({\"type\":\"Binary\",\"accept\":[\"image/*\"],\"max_bytes\":262144} for a file: data {content_type,size,base64,data_uri}; extract $.data_uri for a Page <img>. Cap max 2097152; an undeclared type or a larger body fails the step)",
+        "api_pagination (`{\"type\":\"Auto\"}` issues ONE request and does NOT walk; to walk name the strategy: `{\"type\":\"LinkHeader\",\"page_size_param\":\"per_page\",\"page_size\":100}` (GitHub REST), `{\"type\":\"Offset\",\"start_param\",\"limit_param\",\"limit\",\"total_path\"}`, `{\"type\":\"Cursor\",\"cursor_param\",\"next_path\"}` or `{\"type\":\"Page\",\"page_param\",\"page_size_param\",\"page_size\",\"has_more_path\"}`; each takes `max_pages`, default 50. Items merge back into one response, so api_extract is written as for one page)"
       ],
       "note": "plugin_slug + config_id MUST exist in mcp_list. endpoint_path is INDICATIVE — any valid path on the API works; set api_method explicitly for a non-GET on an unlisted path.",
       "example": {
@@ -157,7 +142,9 @@
         "api_query": {
           "jql": "..."
         }
-      }
+      },
+      "pagination_limits": "Past `max_pages` (default 50) the walk neither fails nor truncates silently: the items gathered so far are returned, the step stays a success and its output carries the signal `PAGINATION_TRUNCATED`. When completeness matters, branch on it (`on_result: [{\"contains\":\"PAGINATION_TRUNCATED\",\"action\":{\"type\":\"Stop\"}}]`), raise `max_pages` or narrow the filter. The walk finds the array of a top-level object (the longest one) or a bare top-level array; nothing nested is merged.",
+      "graphql": "One GraphQL query is an ordinary ApiCall: `api_method: POST`, `api_endpoint_path: /graphql` on a plugin whose base URL serves it (GitHub: `https://api.github.com`), `api_body: {\"query\":\"...\",\"variables\":{...}}`. Write GraphQL braces with a space (`{ a { b } }`): `{{` is template syntax. A plugin access policy, when set, can restrict the path. Kronn does NOT paginate GraphQL: `Cursor` writes the cursor into the query string, not into `variables`, and nested connections (`data.x.edges`) are not merged, so a cursor-paged query returns its first page. Prefer the REST endpoint with `LinkHeader`; when only GraphQL has the data and all of it is needed, tell the user and give that one query a single targeted Exec step (see authoring_doctrine)."
     },
     "Exec": {
       "required": [
@@ -169,7 +156,7 @@
         "exec_stdin (piped to stdin — use for LARGE input instead of a huge arg, no argv size limit)",
         "exec_script_files ([{path, sha256}] — repository files the command runs: the entry script and the modules it loads, relative to the home project's repository; an empty sha256 is pinned to the current content at save. The command runs from a verified copy (cwd = the copy, env KRONN_WORKTREE = the run's checkout) and fails before running, naming the file, when one changed since approval)"
       ],
-      "note": "exec_command binary MUST be in the workflow `exec_allowlist`. Each exec_args entry is one literal argv string, but an interpreter's inline code (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included) is parsed as code: it accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses, e.g. `bash` + `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{issue.title}}\"]`, or `sys.argv[1]` in Python, or `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{issue.title}}\"]` in Node (the `--` is required: Node, Perl, Ruby and PHP keep reading options after their code), or via exec_stdin. A value must never sit where the interpreter still reads options (before the inline code or a `--`): `[\"{{mode}}\", …]` is refused. Saving refuses anything else, and a saved step that still does it is refused at run time. Code and data are separate: the inline code or script is the program, a run value is data it reads (`sys.argv`, `process.argv`, `\"$1\"`, or exec_stdin read with `json.load(sys.stdin)`); exec_stdin is never code (`bash` without `-c` or `python3 -` reading it is refused). An Exec line an agent writes that takes any run value (args, stdin, setup or a source) is saved but refused at run time until a human approves it in the workflow editor, even in a data-only shape; an agent cannot give, imply or bypass that approval. The save result's `kronn_readiness` lists each such line as a `human_only` blocker: tell the user which steps to approve, never call the workflow ready.",
+      "note": "Exec is for LOGIC on data already in the run, not for reaching a service that has a plugin (use ApiCall/BatchApiCall/CollectApiData: an Exec `gh`/`curl` bypasses the plugin's credentials, the API call log and the inferred no-change classification). Never copy one script into several steps: share it through `exec_script_files` or a saved Quick Exec (CollectApiData source) and pass the variant as an argument. exec_command binary MUST be in the workflow `exec_allowlist`. Each exec_args entry is one literal argv string, but an interpreter's inline code (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included) is parsed as code: it accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses, e.g. `bash` + `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{issue.title}}\"]`, or `sys.argv[1]` in Python, or `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{issue.title}}\"]` in Node (the `--` is required: Node, Perl, Ruby and PHP keep reading options after their code), or via exec_stdin. A value must never sit where the interpreter still reads options (before the inline code or a `--`): `[\"{{mode}}\", …]` is refused. Saving refuses anything else, and a saved step that still does it is refused at run time. Code and data are separate: the inline code or script is the program, a run value is data it reads (`sys.argv`, `process.argv`, `\"$1\"`, or exec_stdin read with `json.load(sys.stdin)`); exec_stdin is never code (`bash` without `-c` or `python3 -` reading it is refused). An Exec line an agent writes that takes any run value (args, stdin, setup or a source) is saved but refused at run time until a human approves it in the workflow editor, even in a data-only shape; an agent cannot give, imply or bypass that approval. The save result's `kronn_readiness` lists each such line as a `human_only` blocker: tell the user which steps to approve, never call the workflow ready.",
       "example": {
         "name": "Tests",
         "step_type": {

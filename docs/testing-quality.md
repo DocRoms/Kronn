@@ -239,7 +239,7 @@ statistics use only successful same-branch pull-request runs whose job records
 a verified restored compiled cache. The v3 key cannot restore the former
 debug layout, so the first run is an explicit warmup.
 [src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:166-191#main] [src: file: scripts/ci/backend_ci_slo.mjs:100-104#effectiveMeasurementMode] [src: file: scripts/ci/backend_ci_slo.mjs:83-94#comparableSuccessfulHotRuns]
-[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1022-1042#backend-ci-performance]
+[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1022-1052#backend-ci-performance]
 The observer's Node unit test runs in the blocking `test-python` gate.
 [src: file: .github/workflows/ci-test.yml:622-629#SLO]
 

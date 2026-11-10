@@ -15,7 +15,7 @@ fails when that provider is rate-limited, unavailable, or unhealthy. A quota or
 session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
-[src: file: backend/src/models/workflows.rs:1704-1710#RetryConfig]
+[src: file: backend/src/models/workflows.rs:1754-1760#RetryConfig]
 [src: file: backend/src/workflows/steps.rs:482-498#RETRY_BACKOFF_UNIT]
 [src: file: backend/src/workflows/steps.rs:983-990#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
@@ -120,7 +120,7 @@ three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 presentation helper that scans raw output after execution; it is not a routing
 contract. [src: file: backend/src/agents/runner.rs:3928#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
-[src: file: backend/src/api/discussions/orchestration.rs:1664-1804#detect_agent_error_hint]
+[src: file: backend/src/api/discussions/orchestration.rs:1683-1823#detect_agent_error_hint]
 
 Fallback first needs a runner-level, provider-normalized error such as:
 
@@ -280,7 +280,7 @@ property of each surface, not of an agent being installed. [src: file: backend/s
 `DiscussionMessage` already persists the actual `agent_type`, `model_tier`, and
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
 Run Detail renders them. [src: file: backend/src/models/discussions.rs:324-372#DiscussionMessage]
-[src: file: backend/src/models/workflows.rs:2214-2227#step_agent]
+[src: file: backend/src/models/workflows.rs:2265-2278#step_agent]
 [src: file: frontend/src/components/workflows/RunDetail.tsx:1101-1108#StepModelBadge]
 
 Workflow Agent steps also keep a per-attempt trail (`StepResult.agent_provenance`:
@@ -289,7 +289,7 @@ resolved model, success, duration and `cost_usd`), and `step_agent`/`step_model`
 are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
-[src: file: backend/src/models/workflows.rs:2021-2100#WorkflowAgentProvenance]
+[src: file: backend/src/models/workflows.rs:2072-2151#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1405-1429#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:4953-4975#selected_attempt]
 
@@ -327,7 +327,7 @@ Required UI:
 Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
 attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
 cross-provider cost display therefore needs additive persistence of that total,
-not only a frontend estimate. [src: file: backend/src/models/workflows.rs:1821-1830#tokens_used] [src: file: backend/src/models/workflows.rs:2091-2099#cost_usd]
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:1871-1880#tokens_used] [src: file: backend/src/models/workflows.rs:2141-2149#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.

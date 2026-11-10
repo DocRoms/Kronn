@@ -550,3 +550,49 @@ async fn a_litellm_run_refused_as_too_large_leaves_a_card_with_the_size_and_the_
     assert!(!summary.contains("introuvable"), "{summary}");
     assert_eq!(cards[0]["status"], 400);
 }
+
+/// KT-1517 — the quota card quotes the provider, names the way out, and says when
+/// the limit resets only if the provider announced it.
+#[test]
+fn a_quota_card_quotes_the_provider_and_names_the_way_out() {
+    let message = "You've hit your usage limit. Upgrade to Pro or try again at 3:05 PM.";
+    let reset: DateTime<Utc> = "2026-11-10T15:05:00Z".parse().unwrap();
+    for (language, other_agent, retry) in [
+        ("en", "another agent", "retry"),
+        ("fr", "Changez l'agent", "relancez"),
+        ("es", "Cambia el agente", "reintenta"),
+        ("zh", "更换", "重试"),
+    ] {
+        let card = payload(&quota_exhausted_card(
+            language,
+            "Codex",
+            message,
+            Some(reset),
+            ModelTier::Default,
+            Some("job-1"),
+        ));
+        let summary = card["summary"].as_str().unwrap();
+        assert!(summary.contains("Codex"), "{language}: {summary}");
+        assert!(summary.contains(message), "{language}: {summary}");
+        assert!(summary.contains(other_agent), "{language}: {summary}");
+        assert!(summary.contains(retry), "{language}: {summary}");
+        assert!(
+            summary.contains("2026-11-10 15:05 UTC"),
+            "{language}: {summary}"
+        );
+        assert_eq!(card["kind"], "agent_error");
+        assert_eq!(card["detail"], message);
+        assert_eq!(card["retry_dispatch_id"], "job-1");
+    }
+    let unannounced = payload(&quota_exhausted_card(
+        "en",
+        "Codex",
+        message,
+        None,
+        ModelTier::Default,
+        None,
+    ));
+    let summary = unannounced["summary"].as_str().unwrap();
+    assert!(!summary.contains("UTC"), "{summary}");
+    assert!(unannounced["retry_dispatch_id"].is_null());
+}

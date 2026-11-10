@@ -71,7 +71,7 @@ touches an execution that exists.
 `target_ref` used to be ignored by `task_exec_launch`, which silently launched from `main`. Both principal
 channels now refuse an argument the tool does not declare, naming it and listing the accepted ones:
 the Python bridge checks against its own `inputSchema` and the native tool layer against its catalogue.
-`[src: file: backend/scripts/disc-introspection-mcp.py:6124#_refuse_unknown_arguments]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:6135#_refuse_unknown_arguments]`
 `[src: file: backend/src/api/agent_tools.rs:1453#unknown_argument_refusal]`
 Note that `task_exec_prepare` does not declare `base_rev` / `idempotency_key`: those belong to the launch.
 
@@ -103,7 +103,7 @@ The browser's « Extend rounds » button on the execution card calls
   `request_changes` never delivered them) are posted to its worker's room, then it takes the ordinary
   reassignment to the *same* worker, unless the campaign's token budget is spent (see above). Only the
   LATEST entry into `Escalated` counts: a watchdog or quota stall after an older budget escalation is
-  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:16479#extend_execution_review_rounds]`
+  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:16529#extend_execution_review_rounds]`
 - Refused once the execution is Done, Failed or Cancelled, when it already has no cap, and without a reason.
 
 The escalation message posted to the principal names this option.
@@ -114,7 +114,7 @@ Every declaration is paid for on every session. The new arguments are `{"type": 
 with their contract in the `task_exec_prepare` / `task_exec_reassign` manuals; the bytes were found by
 moving the return shape of `workflow_run_status` into its manual and tightening three descriptions, and
 `CATALOGUE_MAX_BYTES` went **down** by 33 B (84,450 → 84,417).
-`[src: file: backend/scripts/ci/mcp_surface_budget.py:173#CATALOGUE_MAX_BYTES]`
+`[src: file: backend/scripts/ci/mcp_surface_budget.py:178#CATALOGUE_MAX_BYTES]`
 
 ## Tests
 

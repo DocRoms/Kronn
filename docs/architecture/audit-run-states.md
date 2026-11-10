@@ -205,7 +205,7 @@ this degrades and continues.
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:568#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1415-1418#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1425-1446#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:568#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1516-1519#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1526-1547#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
@@ -309,7 +309,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 - **One name on every surface.** The MCP descriptions and manuals say
   “Verify docs” like the English label, present the full audit as an advanced
   option, and carry none of the retired CTA names.
-  [src: file: backend/scripts/test_disc_introspection_mcp.py:8485-8511#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:8527-8553#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
 - **Header layout.** The compact header keeps the status, one next action, the
   doc-state summary and the « Détails » disclosure without overlap at 360, 768
   and 1440 px, closed and open.
@@ -679,7 +679,7 @@ not assign them an audit step.
 [src: file: backend/src/core/template_manifest.rs:82-109#check]
 [src: file: backend/src/api/audit/helpers.rs:173-178#template_update]
 [src: file: frontend/src/components/TemplateUpdateNotice.tsx:34-40#installTemplate]
-[src: file: backend/scripts/disc-introspection-mcp.py:2735-2743#audit_prepare]
+[src: file: backend/scripts/disc-introspection-mcp.py:2746-2754#audit_prepare]
 
 A rename requires a unique match between a removed recorded template hash and
 an added upstream file. The move keeps the project's bytes; an occupied target

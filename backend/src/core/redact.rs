@@ -147,17 +147,26 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
     //
     // Authorization headers — case-insensitive header, scheme keyword,
     // value to whitespace. Captures Bearer / Basic / Token / Digest.
+    //
+    // The value never takes a `"` or a lone backslash: in JSON text the
+    // header is followed by `\"` (inside a string) or `"` (ending it), and a
+    // value that swallowed that backslash or quote would leave the document
+    // unparseable (KT-1526). A backslash is part of the value only with the
+    // character it escapes (`\\`, `\n`), so an escape is taken whole or not at
+    // all. A value that opens with an escaped quote keeps it (group 3).
     (
-        r"(?i)(authorization\s*:\s*)(bearer|basic|token|digest)\s+\S+",
-        "$1$2 ***REDACTED***",
+        r#"(?i)(authorization\s*:\s*)(bearer|basic|token|digest)\s+(\\")?(?:[^\s\\"]|\\[^\s"])+"#,
+        "$1$2 $3***REDACTED***",
         Gate::ContainsAsciiCi(&["authorization"]),
     ),
     // JSON-encoded credentials. `"password": "..."`, `"token": "..."`,
     // `"api_key"`, `"apiKey"`, `"secret"`, `"access_token"`, `"refresh_token"`,
     // `"client_secret"`, `"private_key"`. Ported from FE bug-report.ts
-    // (one entry there) + expanded.
+    // (one entry there) + expanded. The value reads an escaped quote (`\"`)
+    // as part of it, and a lone backslash as a last resort so a value cut
+    // right after one still ends on the closing quote.
     (
-        r#"("(?:password|token|api_key|apiKey|secret|access_token|refresh_token|client_secret|private_key)"\s*:\s*")[^"]+(")"#,
+        r#"("(?:password|token|api_key|apiKey|secret|access_token|refresh_token|client_secret|private_key)"\s*:\s*")(?:\\.|[^"\\]|\\)+(")"#,
         "$1***REDACTED***$2",
         Gate::Contains(&[
             "\"password\"",
@@ -374,7 +383,10 @@ fn apply_patterns(input: &str, patterns: &[Pattern], prefilter: &Prefilter) -> (
 /// UTF-8 safe: `regex_lite::Regex::replace_all` works on `&str` so all
 /// boundary handling is delegated to the regex engine.
 pub fn redact_secrets(input: &str) -> String {
-    apply_patterns(input, PATTERNS.as_slice(), &VENDOR_PREFILTER).0
+    redact_json_aware(input, |text| {
+        apply_patterns(text, PATTERNS.as_slice(), &VENDOR_PREFILTER)
+    })
+    .0
 }
 
 /// Boolean version: returns `true` if ANY pattern would match. Used by
@@ -407,8 +419,16 @@ pub fn looks_like_secret(input: &str) -> bool {
 //   1. quoted:   NAME [:=] "…"  → keep the quotes, mask the inside. Each
 //      delimiter has its own pattern so a different quote inside the secret
 //      cannot terminate the match early and leak the remaining suffix.
-//   2. unquoted: NAME [:=] token → mask the token up to the next whitespace
-//      / quote / separator.
+//   2. escaped-quoted: NAME [:=] \"…\" → the same inside JSON text, where the
+//      quotes around a value are written `\"`. Keep the escaped quotes, mask
+//      what they hold.
+//   3. unquoted: NAME [:=] token → mask the token up to the next whitespace
+//      / quote / separator. The token never ends in a backslash that escapes a
+//      quote: in JSON text it would take the escape of the closing quote and
+//      the document would no longer parse (KT-1526). A backslash belongs to the
+//      token only with the character it escapes, so an escape is taken whole or
+//      not at all. A token may open with an escaped quote (a value cut before
+//      its closing one), which is kept.
 // Anchored on the secret NAME, so ordinary path-keyed hex checksums (no NAME)
 // are never touched. Quoted MUST run before unquoted (the unquoted value class
 // excludes quotes, so it can't consume a quoted value itself).
@@ -419,11 +439,13 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let quoted_dq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)\"((?:\\\\.|[^\"\\\\])+)\"");
     let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\.|[^'\\\\])+)'");
     let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\.|[^`\\\\])+)`");
-    let unquoted = format!(r#"(?i)(\b{name}\b\s*[:=]\s*)([^\s"'`,;]+)"#);
+    let quoted_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
+    let unquoted = format!(r#"(?i)(\b{name}\b\s*[:=]\s*(?:\\")?)((?:[^\s\\"'`,;]|\\[^\s"'`])+)"#);
     [
         (quoted_dq, "$1\"***REDACTED***\"", Some(b'"')),
         (quoted_sq, "$1'***REDACTED***'", Some(b'\'')),
         (quoted_bt, "$1`***REDACTED***`", Some(b'`')),
+        (quoted_escaped, "$1***REDACTED***$3", Some(b'\\')),
         (unquoted, "$1***REDACTED***", None),
     ]
     .into_iter()
@@ -522,6 +544,10 @@ fn assignment_gate(text: &str, quote: Option<u8>) -> bool {
 /// Anchored on the secret NAME, so ordinary hex checksums/digests are left
 /// intact — verified by the `audit_artifact_*` tests.
 pub fn redact_for_audit_artifact(input: &str) -> (String, usize) {
+    redact_json_aware(input, redact_for_audit_artifact_text)
+}
+
+fn redact_for_audit_artifact_text(input: &str) -> (String, usize) {
     let (out, vendor_count) = apply_patterns(input, PATTERNS.as_slice(), &VENDOR_PREFILTER);
     let (out, assignment_count) =
         apply_patterns(&out, ASSIGNMENT.as_slice(), &ASSIGNMENT_PREFILTER);
@@ -562,7 +588,111 @@ pub fn strip_url_secrets(text: &str) -> String {
 /// excerpts): URL queries and userinfo dropped, then the vendor and
 /// secret-assignment heuristics. It cannot catch a bare secret by value.
 pub fn redact_stored_text(text: &str) -> String {
-    redact_for_audit_artifact(&strip_url_secrets(text)).0
+    redact_json_aware(text, |text| {
+        redact_for_audit_artifact_text(&strip_url_secrets(text))
+    })
+    .0
+}
+
+/// Object keys whose string value is a credential, whatever it holds. Same
+/// names as the `"password": "…"` pattern of [`RAW_PATTERNS`], which stops at
+/// the first `"` and so cannot read a value that carries an escaped one.
+const JSON_CREDENTIAL_KEYS: &[&str] = &[
+    "password",
+    "token",
+    "api_key",
+    "apiKey",
+    "secret",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "private_key",
+];
+
+/// Runs `redact` on `input`, one JSON string at a time when `input` is a JSON
+/// document (an object or an array), on the whole text otherwise.
+///
+/// The text patterns read a string's *encoded* form, where a value is followed
+/// by a backslash and a quote: a value class that takes the backslash for a
+/// secret character leaves the closing quote unescaped and the document no
+/// longer parses (KT-1526). Here each string is decoded, redacted as the text
+/// it holds, and written back encoded, so a pattern never reads the escapes
+/// around a secret. A string `redact` leaves alone keeps its original bytes,
+/// as does everything between the strings.
+///
+/// An object key keeps its exact bytes when no secret pattern matches anywhere
+/// in it, so a key that merely looks like an assignment (`mode=fast`) is never
+/// renamed. When a pattern does match (a map keyed by `Bearer <token>` or
+/// `see token=abc here`), the key is redacted like a string value: decoded,
+/// redacted, re-encoded, and the document stays valid. Text that is not a JSON
+/// document as a whole (NDJSON, an excerpt cut mid-document) takes `redact`
+/// as it is: its patterns keep the escapes around a value themselves.
+fn redact_json_aware(input: &str, redact: impl Fn(&str) -> (String, usize)) -> (String, usize) {
+    let trimmed = input.trim_start();
+    let is_container = trimmed.starts_with('{') || trimmed.starts_with('[');
+    if !is_container || serde_json::from_str::<serde::de::IgnoredAny>(input).is_err() {
+        return redact(input);
+    }
+
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut count = 0usize;
+    let mut copied = 0usize;
+    // The key of the member whose value is read next: set by a string followed
+    // by `:`, cleared by anything but whitespace and the `:` itself.
+    let mut key: Option<String> = None;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'"' {
+                    index += if bytes[index] == b'\\' { 2 } else { 1 };
+                }
+                let end = (index + 1).min(bytes.len());
+                index = end;
+                let Ok(decoded) = serde_json::from_str::<String>(&input[start..end]) else {
+                    continue;
+                };
+                let is_key = input[end..].trim_start().starts_with(':');
+                let (clean, changed) = if is_key {
+                    let redacted = redact(&decoded);
+                    key = Some(decoded);
+                    redacted
+                } else if key
+                    .take()
+                    .is_some_and(|key| JSON_CREDENTIAL_KEYS.contains(&key.as_str()))
+                    && !decoded.is_empty()
+                {
+                    let masked = "***REDACTED***";
+                    (masked.to_string(), usize::from(decoded != masked))
+                } else {
+                    redact(&decoded)
+                };
+                if changed > 0 {
+                    out.push_str(&input[copied..start]);
+                    out.push_str(&encode_json_string(&clean));
+                    copied = end;
+                    count = count.saturating_add(changed);
+                }
+            }
+            byte if byte.is_ascii_whitespace() || byte == b':' => index += 1,
+            _ => {
+                key = None;
+                index += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return (input.to_string(), 0);
+    }
+    out.push_str(&input[copied..]);
+    (out, count)
+}
+
+fn encode_json_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"***REDACTED***\"".to_string())
 }
 
 #[cfg(all(test, feature = "full-tests"))]
@@ -576,6 +706,398 @@ mod tests {
             strip_url_secrets(nested),
             r#"{\"avatar_url\": \"https://avatars.example.com/u/1\", \"next\": \"https://api.example.com/x\"}"#
         );
+    }
+
+    // ── KT-1526: JSON documents stay JSON ─────────────────────────────
+
+    const TOKEN: &str = "s3cr3tTokenValue9876";
+
+    /// A Jira-like document: the description holds a curl header example.
+    fn jira_document(header: &str) -> String {
+        let description = format!("Call it with: curl {header} https://x.example/api");
+        serde_json::json!({
+            "issues": [{"key": "KT-1", "fields": {"description": description, "n": 3}}],
+            "total": 1
+        })
+        .to_string()
+    }
+
+    fn assert_masked_and_valid(out: &str, secret: &str) {
+        let parsed: serde_json::Value =
+            serde_json::from_str(out).unwrap_or_else(|e| panic!("invalid JSON ({e}): {out}"));
+        assert!(!out.contains(secret), "secret survived: {out}");
+        assert!(out.contains("REDACTED"), "nothing masked: {out}");
+        let description = parsed["issues"][0]["fields"]["description"]
+            .as_str()
+            .expect("description stays a string");
+        assert!(
+            description.contains("curl -H "),
+            "text around lost: {description}"
+        );
+        assert!(
+            description.ends_with("https://x.example/api"),
+            "{description}"
+        );
+        assert_eq!(parsed["total"], 1);
+        assert_eq!(parsed["issues"][0]["fields"]["n"], 3);
+    }
+
+    fn headers() -> Vec<String> {
+        vec![
+            format!(r#"-H "X-Api-Token: {TOKEN}""#),
+            format!(r#"-H "Authorization: Bearer {TOKEN}""#),
+            format!(r#"-H "X-Auth-Secret: {TOKEN}""#),
+            format!(r#"-H 'X-Api-Token: {TOKEN}'"#),
+        ]
+    }
+
+    #[test]
+    fn redact_secrets_keeps_a_json_document_valid() {
+        for header in headers() {
+            let doc = jira_document(&header);
+            assert!(doc.contains(r#"\""#) || header.contains('\''), "{doc}");
+            let out = redact_secrets(&doc);
+            // The vendor pass has no bare-assignment pattern: only a header
+            // shape it knows is masked, and the output stays valid either way.
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+                "{out}"
+            );
+            if header.contains("Authorization") {
+                assert_masked_and_valid(&out, TOKEN);
+            }
+        }
+    }
+
+    #[test]
+    fn redact_stored_text_keeps_a_json_document_valid_and_masks_the_token() {
+        for header in headers() {
+            let out = redact_stored_text(&jira_document(&header));
+            assert_masked_and_valid(&out, TOKEN);
+        }
+    }
+
+    #[test]
+    fn redact_for_audit_artifact_keeps_a_json_document_valid_and_masks_the_token() {
+        for header in headers() {
+            let (out, count) = redact_for_audit_artifact(&jira_document(&header));
+            assert!(count > 0);
+            assert_masked_and_valid(&out, TOKEN);
+        }
+    }
+
+    #[test]
+    fn the_escaped_closing_quote_of_a_header_survives() {
+        // The shape of the 31/10 incident, byte for byte.
+        let doc = format!(r#"{{"d":"-H \"X-Api-Token: {TOKEN}\" done"}}"#);
+        let out = redact_stored_text(&doc);
+        assert_eq!(out, r#"{"d":"-H \"X-Api-Token: ***REDACTED***\" done"}"#);
+    }
+
+    #[test]
+    fn a_json_document_with_nothing_to_hide_is_returned_byte_for_byte() {
+        let doc = "{ \"a\" : \"caf\\u00e9\",\n  \"b\": [1, 2.50, null, \"x\"] }";
+        assert_eq!(redact_stored_text(doc), doc);
+        assert_eq!(redact_for_audit_artifact(doc), (doc.to_string(), 0));
+        assert_eq!(redact_secrets(doc), doc);
+    }
+
+    #[test]
+    fn untouched_parts_of_a_redacted_json_document_keep_their_bytes() {
+        let doc = format!(r#"{{ "keep" : "café" , "d":"apikey={TOKEN}" }}"#);
+        let out = redact_stored_text(&doc);
+        assert!(out.starts_with(r#"{ "keep" : "café" , "d":"#), "{out}");
+        assert!(!out.contains(TOKEN));
+        assert!(serde_json::from_str::<serde_json::Value>(&out).is_ok());
+    }
+
+    #[test]
+    fn a_credential_key_masks_its_value_even_with_escaped_quotes() {
+        let doc = r#"{"password":"a\"b\\c","user":"alice","nested":{"token":"x\"yz-secret"}}"#;
+        let out = redact_stored_text(doc);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["password"], "***REDACTED***");
+        assert_eq!(parsed["nested"]["token"], "***REDACTED***");
+        assert_eq!(parsed["user"], "alice");
+        assert!(!out.contains("yz-secret"));
+        assert!(!out.contains("a\\\"b"));
+    }
+
+    #[test]
+    fn json_redaction_is_idempotent() {
+        let once = redact_stored_text(&jira_document(&headers()[0]));
+        assert_eq!(redact_stored_text(&once), once);
+    }
+
+    #[test]
+    fn plain_text_that_only_looks_like_json_still_gets_the_text_patterns() {
+        let out = redact_stored_text(&format!("[INFO] apikey={TOKEN}"));
+        assert_eq!(out, "[INFO] apikey=***REDACTED***");
+    }
+
+    #[test]
+    fn a_page_dataset_payload_keeps_its_shape_and_loses_the_token() {
+        // A dataset point: an object of rows, one string field quoting a header.
+        let point = serde_json::json!({
+            "tickets": [
+                {"key": "KT-1", "note": format!("-H \"X-Api-Token: {TOKEN}\""), "points": 5},
+                {"key": "KT-2", "note": "plain", "points": 8},
+            ],
+            "summary": {"owner": "ana", "api_key": TOKEN}
+        })
+        .to_string();
+        let out = redact_stored_text(&point);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(!out.contains(TOKEN), "{out}");
+        assert_eq!(
+            parsed["tickets"][1],
+            serde_json::json!({"key": "KT-2", "note": "plain", "points": 8})
+        );
+        assert_eq!(parsed["tickets"][0]["points"], 5);
+        assert_eq!(parsed["summary"]["owner"], "ana");
+    }
+
+    #[test]
+    fn a_large_json_output_stays_valid_after_redaction() {
+        let items: Vec<_> = (0..4_000)
+            .map(|i| {
+                serde_json::json!({
+                    "key": format!("KT-{i}"),
+                    "description": format!("curl -H \"X-Api-Token: {TOKEN}{i}\" -d '{{\"a\": 1}}'"),
+                })
+            })
+            .collect();
+        let doc = serde_json::to_string(&items).unwrap();
+        let out = redact_stored_text(&doc);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.len(), 4_000);
+        assert!(!out.contains(TOKEN));
+    }
+
+    // ── KT-1526: text that is not a JSON document as a whole ──────────
+    //
+    // NDJSON, an excerpt cut mid-document and a JSON string inside a log line
+    // take the text patterns: they must keep every escape around a secret.
+
+    type TextRedactor = (&'static str, Box<dyn Fn(&str) -> String>);
+
+    /// Every entry point, by name.
+    fn text_redactors() -> Vec<TextRedactor> {
+        vec![
+            ("redact_secrets", Box::new(redact_secrets)),
+            ("redact_stored_text", Box::new(redact_stored_text)),
+            (
+                "redact_for_audit_artifact",
+                Box::new(|text| redact_for_audit_artifact(text).0),
+            ),
+        ]
+    }
+
+    /// `input` is not one JSON document. After redaction the token is gone,
+    /// something was masked, `survivors` are intact and a second pass changes
+    /// nothing. `assignments_only` skips `redact_secrets`, which has no bare
+    /// `NAME: value` pattern.
+    fn assert_text_masked(input: &str, survivors: &[&str], assignments_only: bool) {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(input).is_err(),
+            "the sample must not be one JSON document: {input}"
+        );
+        for (name, redact) in text_redactors() {
+            if assignments_only && name == "redact_secrets" {
+                continue;
+            }
+            let out = redact(input);
+            assert!(!out.contains(TOKEN), "{name}: secret survived: {out}");
+            assert!(out.contains("REDACTED"), "{name}: nothing masked: {out}");
+            for survivor in survivors {
+                assert!(out.contains(survivor), "{name}: lost {survivor:?}: {out}");
+            }
+            assert_eq!(redact(&out), out, "{name}: not idempotent");
+        }
+    }
+
+    #[test]
+    fn the_incident_bytes_in_a_truncated_excerpt_keep_their_escapes() {
+        // An excerpt cut inside the next record: not parseable.
+        let header = format!(
+            r#"{{"issues":[{{"description":"-H \"X-Api-Token: {TOKEN}\" https://x.example/api"}},{{"key":"KT-2","descr"#
+        );
+        assert_text_masked(
+            &header,
+            &[r#"X-Api-Token: ***REDACTED***\" https://x.example/api"#],
+            true,
+        );
+        let authorization =
+            format!(r#"{{"description":"curl -H \"Authorization: Bearer {TOKEN}\" -d x","next":"#);
+        assert_text_masked(&authorization, &[r#"Bearer ***REDACTED***\" -d x"#], false);
+    }
+
+    #[test]
+    fn the_incident_bytes_in_an_ndjson_line_keep_their_escapes() {
+        let header = format!(
+            "{{\"key\":\"KT-1\",\"d\":\"-H \\\"X-Api-Token: {TOKEN}\\\" ok\"}}\n{{\"key\":\"KT-2\",\"d\":\"plain\"}}\n"
+        );
+        assert_text_masked(
+            &header,
+            &[
+                r#"X-Api-Token: ***REDACTED***\" ok"#,
+                r#"{"key":"KT-2","d":"plain"}"#,
+            ],
+            true,
+        );
+        let authorization = format!(
+            "{{\"d\":\"Authorization: Bearer {TOKEN}\"}}\n{{\"d\":\"Authorization: Basic {TOKEN}\\\" end\"}}\n"
+        );
+        assert_text_masked(
+            &authorization,
+            &[
+                r#"Bearer ***REDACTED***"}"#,
+                r#"Basic ***REDACTED***\" end"}"#,
+            ],
+            false,
+        );
+        // Every line of the NDJSON is still a JSON document.
+        for (name, redact) in text_redactors() {
+            for text in [&header, &authorization] {
+                for line in redact(text).lines() {
+                    assert!(
+                        serde_json::from_str::<serde_json::Value>(line).is_ok(),
+                        "{name}: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_json_string_inside_a_log_line_keeps_its_escapes() {
+        let line = format!(r#"[WARN] step out: "-H \"X-Api-Token: {TOKEN}\"" (truncated"#);
+        assert_text_masked(&line, &[r#"X-Api-Token: ***REDACTED***\""#], true);
+    }
+
+    #[test]
+    fn a_value_never_takes_the_backslash_that_escapes_a_quote() {
+        for (input, expected) in [
+            (
+                format!(r#"x-api-token: {TOKEN}\" tail"#),
+                r#"x-api-token: ***REDACTED***\" tail"#,
+            ),
+            // An escaped backslash belongs to the value, the escaped quote after it does not.
+            (
+                format!(r#"x-api-token: {TOKEN}\\\" tail"#),
+                r#"x-api-token: ***REDACTED***\" tail"#,
+            ),
+            // `\\` then a raw quote: the quote ends the value.
+            (
+                format!(r#"x-api-token: {TOKEN}\\" tail"#),
+                r#"x-api-token: ***REDACTED***" tail"#,
+            ),
+            // A value written between escaped quotes is masked whole.
+            (
+                format!(r#"x-api-token: \"{TOKEN}\" tail"#),
+                r#"x-api-token: \"***REDACTED***\" tail"#,
+            ),
+            (
+                format!(r#"x-api-token: \"two words {TOKEN}\" tail"#),
+                r#"x-api-token: \"***REDACTED***\" tail"#,
+            ),
+            // Cut before the closing escaped quote, or right after a backslash.
+            (
+                format!(r#"x-api-token: \"{TOKEN}"#),
+                r#"x-api-token: \"***REDACTED***"#,
+            ),
+            (
+                format!(r#"x-api-token: {TOKEN}\"#),
+                r#"x-api-token: ***REDACTED***\"#,
+            ),
+        ] {
+            let out = redact_for_audit_artifact(&input).0;
+            assert_eq!(out, expected, "from {input}");
+            assert!(!out.contains(TOKEN), "secret survived: {out}");
+        }
+    }
+
+    #[test]
+    fn an_authorization_value_stops_before_a_quote_and_keeps_an_opening_escaped_one() {
+        for (input, expected) in [
+            (
+                format!(r#"Authorization: Bearer {TOKEN}"}}"#),
+                r#"Authorization: Bearer ***REDACTED***"}"#,
+            ),
+            (
+                format!(r#"Authorization: Bearer \"{TOKEN}\" x"#),
+                r#"Authorization: Bearer \"***REDACTED***\" x"#,
+            ),
+            (
+                format!("Authorization: Bearer {TOKEN}\\\\\\\" x"),
+                "Authorization: Bearer ***REDACTED***\\\" x",
+            ),
+        ] {
+            let out = redact_secrets(&input);
+            assert_eq!(out, expected, "from {input}");
+            assert!(!out.contains(TOKEN), "secret survived: {out}");
+        }
+    }
+
+    #[test]
+    fn a_credential_field_value_with_an_escaped_quote_is_masked_whole() {
+        // Two documents: the text pattern reads the first value.
+        let ndjson = "{\"password\":\"a\\\"b-SECRET-tail\",\"user\":\"alice\"}\n{\"n\":1}\n";
+        for (name, redact) in text_redactors() {
+            let out = redact(ndjson);
+            assert!(!out.contains("SECRET-tail"), "{name}: {out}");
+            let first = out.lines().next().unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(first)
+                .unwrap_or_else(|e| panic!("{name}: invalid line ({e}): {first}"));
+            assert_eq!(parsed["password"], "***REDACTED***", "{name}");
+            assert_eq!(parsed["user"], "alice", "{name}");
+        }
+        // Cut right after an escaped quote: the value still ends on a quote.
+        let cut = "{\"password\":\"abc\\\"";
+        assert_eq!(redact_secrets(cut), "{\"password\":\"***REDACTED***\"");
+    }
+
+    #[test]
+    fn an_object_key_keeps_its_bytes_unless_a_secret_matches_inside_it() {
+        let vendor = "sk-abcdefghijklmnopqrstuvwxyz1234";
+        let doc = format!(
+            r#"{{"mode=fast":"a","password":"x","Bearer {TOKEN}":1,"see {vendor} here":2,"say \"hi\"":3,"see token={TOKEN} here":4}}"#
+        );
+        for (name, redact) in text_redactors() {
+            let out = redact(&doc);
+            let parsed: serde_json::Value = serde_json::from_str(&out)
+                .unwrap_or_else(|e| panic!("{name}: invalid JSON ({e}): {out}"));
+            let keys: Vec<&String> = parsed.as_object().unwrap().keys().collect();
+            // No pattern matches: the key keeps its exact bytes, even when it
+            // is shaped like an assignment.
+            for kept in ["mode=fast", "password", "say \"hi\""] {
+                assert!(
+                    keys.iter().any(|key| *key == kept),
+                    "{name}: {kept}: {keys:?}"
+                );
+            }
+            assert!(out.contains(r#""say \"hi\"":3"#), "{name}: {out}");
+            // A secret that is only part of a key is masked, the key re-encoded.
+            assert!(!out.contains(vendor), "{name}: {out}");
+            assert!(
+                keys.iter().any(|key| *key == "see sk-***REDACTED*** here"),
+                "{name}: {keys:?}"
+            );
+            assert!(
+                keys.iter().any(|key| *key == "Bearer ***REDACTED***"),
+                "{name}: {keys:?}"
+            );
+            // `token=…` inside a key is a secret for the assignment pass only.
+            let masked = keys
+                .iter()
+                .any(|key| *key == "see token=***REDACTED*** here");
+            assert_eq!(masked, name != "redact_secrets", "{name}: {keys:?}");
+            assert_eq!(
+                !out.contains(TOKEN),
+                name != "redact_secrets",
+                "{name}: {out}"
+            );
+        }
     }
 
     // ── Per-pattern positive tests (each MUST match + redact) ─────────
@@ -1067,7 +1589,7 @@ mod tests {
             RAW_PATTERNS.len(),
             "a pattern failed to compile"
         );
-        assert_eq!(ASSIGNMENT.len(), 4);
+        assert_eq!(ASSIGNMENT.len(), 5);
         assert!(
             matches!(&*VENDOR_PREFILTER, Prefilter::Triples(_)),
             "a gate literal shorter than three bytes turns the vendor prefilter off"
@@ -1159,6 +1681,10 @@ mod tests {
             "é_PIN=7",
             "HMAC_KEY\n=\nAb3x",
             "clientsecret=Ab3x",
+            r#"x-api-token: \"Ab3x Z9\" done"#,
+            r#"token: \"Ab3xZ9"#,
+            r#"Authorization: Bearer \"Ab3xZ9Qw7Lm2Ns5Pt8Rv\""#,
+            r#"{"password":"a\"b"}"#,
         ] {
             let matching: Vec<_> = every_pattern()
                 .filter(|pat| pat.re.is_match(sample))
@@ -1291,22 +1817,33 @@ mod tests {
         // value pattern has anything to do.
         assert_eq!(
             admitted("curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com"),
-            [false, false, false, true]
+            [false, false, false, false, true]
         );
         assert_eq!(
             admitted("password: \"hunter2\""),
-            [true, false, false, true]
+            [true, false, false, false, true]
         );
-        assert_eq!(admitted("token =\n  'hunter2'"), [false, true, false, true]);
-        assert_eq!(admitted("secret=`hunter2`"), [false, false, true, true]);
+        assert_eq!(
+            admitted("token =\n  'hunter2'"),
+            [false, true, false, false, true]
+        );
+        assert_eq!(
+            admitted("secret=`hunter2`"),
+            [false, false, true, false, true]
+        );
+        assert_eq!(
+            admitted(r#"token: \"hunter2\""#),
+            [false, false, false, true, true]
+        );
         // No assignment at all: nothing runs, whatever quotes the text holds.
-        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 4]);
+        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 5]);
         // Each pattern that is turned away really has no match to make.
         for text in [
             "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com",
             "password: \"hunter2\"",
             "token =\n  'hunter2'",
             "secret=`hunter2`",
+            r#"token: \"hunter2\""#,
         ] {
             for pat in ASSIGNMENT.iter().filter(|pat| !pat.gate.admits(text)) {
                 assert!(!pat.re.is_match(text), "{} on {text:?}", pat.re.as_str());

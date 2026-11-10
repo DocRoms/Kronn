@@ -7814,6 +7814,62 @@ fn is_protected_protocol_tool_result(message: &serde_json::Value) -> bool {
         })
 }
 
+/// The last resort for a JSON tool result nothing smarter could shorten: its
+/// leading text inside a valid JSON envelope, marked as truncated. `None` for
+/// content that is not JSON — that one is cut as plain text — so the plain cut
+/// can never hand the model half a JSON document.
+///
+/// The prefix is the largest that keeps the envelope within `max_encoded_len`
+/// once embedded as a JSON string in `messages`, but never under `min_kept`.
+fn truncated_json_envelope(
+    content: &str,
+    max_encoded_len: usize,
+    min_kept: usize,
+) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    // Already an envelope of ours that could not shrink further: keep the size
+    // it reports, which is the response's and not this envelope's.
+    let original_bytes = if parsed["kronn_shortened"] == true {
+        parsed["original_bytes"]
+            .as_u64()
+            .map_or(content.len(), |bytes| bytes as usize)
+    } else {
+        content.len()
+    };
+    let render = |kept: usize| {
+        let mut cut = kept.min(content.len());
+        while !content.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        serde_json::json!({
+            "kronn_shortened": true,
+            "truncated": true,
+            "original_bytes": original_bytes,
+            "excerpt": &content[..cut],
+            "note": format!(
+                "Truncated by Kronn: {} bytes dropped so this result fits the context window; \
+                 `excerpt` is the start of the original text, cut mid-way and not parseable on \
+                 its own. Calling the same tool again returns the same result, cut the same \
+                 way — ask for a part you have not seen instead.",
+                content.len() - cut
+            ),
+        })
+        .to_string()
+    };
+    let fits = |text: &str| serde_json::to_string(text).is_ok_and(|e| e.len() <= max_encoded_len);
+    let mut low = min_kept.min(content.len());
+    let mut high = content.len();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if fits(&render(mid)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Some(render(low))
+}
+
 pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u64) {
     // Trim against the window this request will ACTUALLY get, not the ceiling it
     // could have had. Ollama fixes `n_ctx_slot` when it loads the model and does
@@ -7935,6 +7991,16 @@ pub(crate) fn clamp_ollama_tool_results(body: &mut serde_json::Value, ctx_cap: u
         // Compact before truncating so retrying cannot keep returning the same cut result.
         if let Some(shortened) = compact_tool_result(&content, max_encoded_len, hints.get(&idx)) {
             messages[idx]["content"] = serde_json::json!(shortened);
+            continue;
+        }
+        // A JSON result cut mid-text is no longer JSON, and the model cannot read
+        // it at all. Keep an envelope instead: the cut prefix as a string beside
+        // a marker, the original size and the same warning.
+        if let Some(replacement) = truncated_json_envelope(&content, max_encoded_len, MIN_KEPT) {
+            if replacement.len() >= len {
+                return;
+            }
+            messages[idx]["content"] = serde_json::json!(replacement);
             continue;
         }
         let note = |dropped: usize| {

@@ -149,6 +149,17 @@ _BRIDGE_SCRIPT_SHA256_AT_LOAD = (
     os.environ.get(_BRIDGE_ARTIFACT_SHA_ENV) or _source_sha256_at_load
 )
 
+# KT-1216 — the closed set of workflow step types, in the order of
+# `StepType::ALL` (backend/src/models/workflows.rs). A backend test fails when
+# this tuple drifts from the enum, and a bridge test fails when the greeting or
+# the `workflow_create_draft` description (literals: the TOOLS budget gate
+# reads them without executing this module) stop naming exactly these.
+STEP_TYPES = (
+    "Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec", "Gate",
+    "Notify", "JsonData", "CollectApiData", "TransformData", "PublishPageData",
+    "SubWorkflow", "TriggerWorkflow", "DelegateSubtasks", "TaskBoard",
+)
+
 TOOLS = [
     {
         "name": "kronn_intro",
@@ -1707,18 +1718,18 @@ TOOLS = [
     {
         "name": "workflow_create_draft",
         "description": (
-            "Create a disabled draft for explicit user review. Discovery first, "
-            "never guessing: plugin/config ids with `mcp_list`, bindings with "
-            "their list tools, Quick APIs with `qa_list`, Quick Execs with "
-            "`qe_list`, Pages with `page_list`. `step_type` is a tagged object, "
-            "closed set is: **Agent, ApiCall, BatchApiCall, "
-            "BatchQuickPrompt, Exec, Gate, Notify, JsonData, "
-            "CollectApiData, TransformData, PublishPageData, SubWorkflow, "
-            "TriggerWorkflow**. "
-            "Call `workflow_step_schema` before composing steps. Prefer adapting a real "
-            "workflow via `workflow_get`/`workflow_clone`. Full authoring contract: "
+            "Create a disabled draft for explicit user review. Never guess ids: "
+            "`mcp_list` (plugins, configs), list tools (bindings), `qa_list`, "
+            "`qe_list`, `page_list`. `step_type` is a tagged object of the closed "
+            "set **Agent, ApiCall, BatchApiCall, BatchQuickPrompt, Exec, Gate, Notify, "
+            "JsonData, CollectApiData, TransformData, PublishPageData, SubWorkflow, "
+            "TriggerWorkflow, DelegateSubtasks, TaskBoard**. "
+            "Read `authoring_doctrine` in `workflow_step_schema` before composing: "
+            "it says which type to prefer. Adapt a real workflow via "
+            "`workflow_get`/`workflow_clone`. Contract: "
             "`tool_manual({tool: \"workflow_create_draft\"})`. Returns the created JSON; "
-            "its `kronn_readiness` says if it can start: never claim ready otherwise."
+            "`kronn_readiness` says if it can start (never claim ready otherwise); "
+            "its `warnings` flag drift."
         ),
         "inputSchema": {
             "type": "object",
@@ -1726,11 +1737,11 @@ TOOLS = [
                 "name": {"type": "string", "description": "Workflow name (1-200 chars)."},
                 "trigger": {
                     "type": "object",
-                    "description": "Tagged Manual/Cron/Tracker trigger; scheduled runs default to concurrency 1.",
+                    "description": "Tagged Manual/Cron/Tracker trigger.",
                 },
                 "steps": {
                     "type": "array",
-                    "description": "1-20 top-level typed steps. Call workflow_step_schema for fields and examples.",
+                    "description": "1-20 typed steps; fields in workflow_step_schema.",
                 },
                 "project_id": {"type": "string", "description": "Optional Kronn project id to bind the workflow to."},
                 "variables": {"type": "array", "description": "PromptVariable declarations: `{name,label?,placeholder?,description?,required?,pattern?,source?,source_ref?,allow_manual_override?,control?}`. `source` is `user_input` (default), `project_env` (`source_ref:'<env.NAME>'`, project required), or `kronn_context` (`source_ref:'<context.key>'`). Store references only; values resolve at each launch."},
@@ -1825,9 +1836,9 @@ TOOLS = [
         "name": "workflow_update",
         "description": (
             "Patch a workflow in place: an omitted field keeps its value. "
-            "Same shapes as `workflow_create_draft`. `steps` is replaced "
-            "whole: fetch it with `workflow_get`, edit, send it all back. "
-            "Read `kronn_readiness` in the result."
+            "Same shapes as `workflow_create_draft`; read its `authoring_doctrine` "
+            "first. `steps` is replaced whole: `workflow_get`, edit, send it all "
+            "back. Read `kronn_readiness` in the result."
         ),
         "inputSchema": {
             "type": "object",
@@ -2177,10 +2188,10 @@ TOOLS = [
         "name": "workflow_step_schema",
         "description": (
             "The canonical WorkflowStep schema as an untruncated result: the "
-            "closed set of `step_type`s, required and optional fields per type, "
-            "the runtime contracts that break a run when missed, and the "
-            "`time.now` grammar. Call it before authoring or editing a workflow "
-            "rather than inferring the schema from one `workflow_get` sample."
+            "closed set of `step_type`s, fields per type, the runtime contracts "
+            "that break a run when missed, the `time.now` grammar and "
+            "`authoring_doctrine` (which type to prefer: read it first). Call it "
+            "before authoring or editing a workflow, not one `workflow_get` sample."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -10049,7 +10060,7 @@ def call_kronn_intro(_args):
             "## 🔀 Workflows — des pipelines multi-étapes que tu crées en discutant\n"
             "Agents, appels API, conditions, boucles, gates d'approbation humaine, batchs — jusqu'à 20 steps.\n"
             "→ 'Crée un workflow : récupère les PRs ouvertes, review chacune, poste un résumé' "
-            "(workflow_create_draft — je connais le schéma canonique des 12 types de steps)\n"
+            "(workflow_create_draft — je connais le schéma canonique des " + str(len(STEP_TYPES)) + " types de steps)\n"
             "→ 'Lance le PR-review sur la 123' (workflow_trigger) · 'Qu'est-ce qui tourne ?' (workflow_active_runs)\n\n"
             "## 📄 Pages vivantes — des rapports HTML alimentés par les workflows\n"
             "Je peux réutiliser ou créer une Page, puis composer CollectApiData → TransformData → "
@@ -10471,8 +10482,11 @@ TOOL_MANUALS = {
         "is still required."
     ),
     "page_create": (
-        "Before composing, read the workflow guide: tool_manual({tool: \"workflow-architect\"}), "
-        "then the sections you need. "
+        "Before composing, read `authoring_doctrine` (in `workflow_step_schema`, the same text "
+        "as the guide's Authoring doctrine section): which step type to prefer, e.g. HTTP to a "
+        "service with a plugin through ApiCall, Exec for logic only, one script never copied, "
+        "state through step outputs. Then the workflow guide: "
+        "tool_manual({tool: \"workflow-architect\"}), and the sections you need. "
         "Live Page HTML is a complete, self-contained document rendered without network "
         "access. Declare named datasets as snapshot, time_series or collection contracts; "
         "an empty array creates standalone HTML, while `initial` values support mock design "
@@ -12238,7 +12252,7 @@ def _handle(req):
                     "• Rich room output: messages are Markdown. A `mermaid` fence renders a diagram; `kronn-doc-preview` renders sandboxed HTML with PDF/DOCX actions (a plain `html` fence is only code); `kronn-doc-data` exposes CSV/XLSX/PPTX export. Use visual output only when it materially helps.\n"
                     "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_unlink_discussion`/`task_add_blocker`/`task_remove_blocker`/`task_assign` (yourself, when taking a task). Read the relevant plan first. Immediately before any direct `task_create`, call `plan_get` again so a peer's recent write is visible. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Human-gated Automation proposals: after resolving a real QP/QA/QE/Workflow id and its declared variables through the catalogue/get tools, an agent may emit one `kronn-action` fence with `{\"kind\":\"quick_prompt|quick_api|quick_exec|workflow\",\"target_id\":\"<real id>\",\"project_id\":\"<optional id>\",\"values\":[{\"name\":\"<declared variable>\",\"value\":\"<editable suggestion>\",\"provenance\":\"agent_suggestion\",\"suggested_by\":\"<your alias>\"}]}`. This proposes only: Kronn validates and persists the card, and the human click launches it. Never invent ids/variables or include secret/resolved values.\n"
-                    "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
+                    "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed " + str(len(STEP_TYPES)) + " `step_type`s, per-type fields, runtime contracts and `authoring_doctrine`, which step type to prefer; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected). Quick Execs: `qe_list`/`qe_run`/`qe_create_draft`/`qe_update` for saved shell-free CLI collectors.\n"
                     "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset` · `page_delete_dataset`. Resolve or create the Page before authoring a `PublishPageData` step. A Page button can launch a real QP/QA/QE/Workflow for each data row and shows that row's live state and outcome: `tool_manual({tool: \"page_create\"})`.\n"

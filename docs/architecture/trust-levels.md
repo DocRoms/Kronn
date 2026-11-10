@@ -17,7 +17,7 @@ journalled, confined by an OS sandbox, and taken back when the level is lowered.
   agents its steps launch (the run is on the bridge token). A room that merely
   edits a workflow never takes that workflow's level: an agent in a room with no
   level, editing a Full workflow, gets no approval from it.
-  [src: file: backend/src/api/workflows.rs:2380-2395#approve_exec_steps_by_trust]
+  [src: file: backend/src/api/workflows.rs:2391-2406#approve_exec_steps_by_trust]
 - **Storage**: `trust_settings` (one row per scope, no row = inherit), the journal
   `trust_audit_log` (migrations 278 to 282), and two marks on the objects a
   level approved: `quick_execs.approved_by_trust` and the step field

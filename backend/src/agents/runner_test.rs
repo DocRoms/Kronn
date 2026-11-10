@@ -2375,8 +2375,8 @@ fi
 
     #[test]
     fn authoring_schemas_survive_clamping_when_tool_history_fills_the_window() {
-        let workflow_schema: serde_json::Value =
-            serde_json::from_str(include_str!("../api/workflow_step_schema.json")).unwrap();
+        // What the tool serves, doctrine included (KT-1216).
+        let workflow_schema = crate::api::workflows::canonical_step_schema();
         for (name, schema) in [
             ("workflow_step_schema", workflow_schema),
             (
@@ -2799,6 +2799,48 @@ fi
     /// the user's question, the full native catalogue, and the window Ollama
     /// already fixed when it loaded the model.
     fn discussion_body(window: u64) -> serde_json::Value {
+        discussion_body_with(window, crate::api::agent_tools::full_discussion_catalogue())
+    }
+
+    /// The bytes the messages (system, question, tool results) get beside the
+    /// declared catalogue in the shortening fixtures. Measured at ~9.4 KB with
+    /// today's catalogue at 32K; the rest is deliberate headroom, so a few
+    /// hundred bytes of new tool-schema text cannot push a fixture over the edge.
+    const FIXTURE_MESSAGE_ROOM: usize = 16_000;
+
+    /// The catalogue as it stands, plus `extra` bytes of declaration text.
+    fn catalogue_inflated_by(extra: usize) -> Vec<serde_json::Value> {
+        let mut catalogue = crate::api::agent_tools::full_discussion_catalogue();
+        if extra > 0 {
+            catalogue.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "padding_tool",
+                    "description": "x".repeat(extra),
+                    "parameters": { "type": "object", "properties": {} },
+                },
+            }));
+        }
+        catalogue
+    }
+
+    /// A discussion body whose window is derived from the catalogue it carries:
+    /// 32K while that leaves `FIXTURE_MESSAGE_ROOM`, more once the catalogue
+    /// grows. Same arithmetic as `clamp_ollama_tool_results` (2 bytes a token,
+    /// 2 048 tokens kept for the reply), so the messages get the same room
+    /// whatever the catalogue weighs.
+    fn discussion_body_sized_to_catalogue(
+        extra_catalogue_bytes: usize,
+    ) -> (serde_json::Value, u64) {
+        let catalogue = catalogue_inflated_by(extra_catalogue_bytes);
+        let declared = serde_json::Value::Array(catalogue.clone())
+            .to_string()
+            .len();
+        let window = (((declared + FIXTURE_MESSAGE_ROOM) / 2) as u64 + 2_048).max(32_768);
+        (discussion_body_with(window, catalogue), window)
+    }
+
+    fn discussion_body_with(window: u64, catalogue: Vec<serde_json::Value>) -> serde_json::Value {
         let system = format!(
             "{}\n\n{}",
             http_agent_identity_context(&AgentType::Ollama, "qwen3.8:27b-mlx"),
@@ -2812,8 +2854,7 @@ fi
             window,
             None,
         );
-        body["tools"] =
-            serde_json::Value::Array(crate::api::agent_tools::full_discussion_catalogue());
+        body["tools"] = serde_json::Value::Array(catalogue);
         body["options"]["num_ctx"] = serde_json::json!(window);
         body
     }
@@ -2840,12 +2881,16 @@ fi
 
     #[test]
     fn a_shortened_api_response_announces_its_shape_and_how_to_ask_for_a_part() {
+        shortened_api_response_announces_its_shape(0);
+    }
+
+    fn shortened_api_response_announces_its_shape(extra_catalogue_bytes: usize) {
         let response = speedcurve_tests_page(100);
         assert!(
             response.to_string().len() > 195_000,
             "the fixture stands for a ~200 KB answer"
         );
-        let mut body = discussion_body(32_768);
+        let (mut body, window) = discussion_body_sized_to_catalogue(extra_catalogue_bytes);
         push_api_call_round(
             &mut body,
             "c1",
@@ -2857,7 +2902,7 @@ fi
             response.clone(),
         );
 
-        clamp_ollama_tool_results(&mut body, 32_768);
+        clamp_ollama_tool_results(&mut body, window);
 
         let shortened: serde_json::Value =
             serde_json::from_str(&last_tool_content(&body)).expect("still valid JSON");
@@ -2909,9 +2954,15 @@ fi
     /// exactly the four metrics of every run, unshortened, inside the window.
     #[test]
     fn a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window() {
-        const WINDOW: u64 = 32_768;
+        a_200_kb_response_yields_the_web_vitals(0);
+    }
+
+    /// The window is 32K while the catalogue leaves the messages their room, and
+    /// grows with the catalogue past that, so a catalogue change moves the
+    /// window and not the outcome.
+    fn a_200_kb_response_yields_the_web_vitals(extra_catalogue_bytes: usize) {
         let response = speedcurve_tests_page(100);
-        let mut body = discussion_body(WINDOW);
+        let (mut body, window) = discussion_body_sized_to_catalogue(extra_catalogue_bytes);
         push_api_call_round(
             &mut body,
             "c1",
@@ -2925,13 +2976,13 @@ fi
         let unclamped = estimated_chat_history_tokens(&body);
         let response_bytes = last_tool_content(&body).len();
         assert!(
-            unclamped > WINDOW,
+            unclamped > window,
             "unclamped, the answer does not fit the window"
         );
 
-        clamp_ollama_tool_results(&mut body, WINDOW);
+        clamp_ollama_tool_results(&mut body, window);
 
-        assert!(estimated_chat_history_tokens(&body) <= WINDOW);
+        assert!(estimated_chat_history_tokens(&body) <= window);
         let first: serde_json::Value = serde_json::from_str(&last_tool_content(&body)).unwrap();
         let shortened_bytes = last_tool_content(&body).len();
         assert!(
@@ -2977,10 +3028,10 @@ fi
             part,
         );
 
-        clamp_ollama_tool_results(&mut body, WINDOW);
+        clamp_ollama_tool_results(&mut body, window);
 
         assert!(
-            estimated_chat_history_tokens(&body) <= WINDOW,
+            estimated_chat_history_tokens(&body) <= window,
             "the targeted answer fits beside the rest of the conversation"
         );
         let answer: serde_json::Value = serde_json::from_str(&last_tool_content(&body))
@@ -3009,7 +3060,7 @@ fi
         println!(
             "\nresponse {response_bytes} B ({unclamped} tokens estimated with the conversation) \
              -> shortened {shortened_bytes} B, shape {} B -> targeted answer {} B, \
-             conversation {} tokens of {WINDOW} (catalogue {} B)",
+             conversation {} tokens of {window} (catalogue {} B)",
             first["shape"].to_string().len(),
             last_tool_content(&body).len(),
             estimated_chat_history_tokens(&body),
@@ -3153,15 +3204,19 @@ fi
 
     #[test]
     fn shortening_a_result_twice_keeps_its_note_and_shape_and_still_shrinks() {
+        shortening_a_result_twice(0);
+    }
+
+    fn shortening_a_result_twice(extra_catalogue_bytes: usize) {
         let response = speedcurve_tests_page(100);
-        let mut body = discussion_body(32_768);
+        let (mut body, window) = discussion_body_sized_to_catalogue(extra_catalogue_bytes);
         push_api_call_round(
             &mut body,
             "c1",
             serde_json::json!({ "api_plugin_slug": "api-speedcurve", "endpoint_path": "/v1/tests" }),
             response,
         );
-        clamp_ollama_tool_results(&mut body, 32_768);
+        clamp_ollama_tool_results(&mut body, window);
         let once = last_tool_content(&body);
 
         // Another result arrives and the same message has to give up more.
@@ -3176,6 +3231,103 @@ fi
         );
         assert_eq!(twice["shape"]["collection"]["path"], "$.data");
         assert!(twice["note"].as_str().unwrap().contains("`extract`"));
+    }
+
+    /// KT-1527: the three fixtures above sat ~100 B from the window's edge, so
+    /// ~200 B of new tool-schema text flipped them to a plain-text cut. Their
+    /// window now follows the catalogue they carry: inflating it by 1.5 KB, then
+    /// by 20 KB, must leave every outcome as it was.
+    #[test]
+    fn a_catalogue_change_does_not_flip_the_shortening_fixtures() {
+        for extra in [1_500, 20_000] {
+            let (body, window) = discussion_body_sized_to_catalogue(extra);
+            let (plain, plain_window) = discussion_body_sized_to_catalogue(0);
+            assert!(
+                body["tools"].to_string().len() >= plain["tools"].to_string().len() + extra,
+                "the catalogue really grew by {extra} B"
+            );
+            assert!(
+                window >= plain_window,
+                "the window follows the catalogue: {window} against {plain_window}"
+            );
+            shortened_api_response_announces_its_shape(extra);
+            a_200_kb_response_yields_the_web_vitals(extra);
+            shortening_a_result_twice(extra);
+        }
+    }
+
+    /// KT-1527: the shortening fixtures no longer pin the real 32K window, so
+    /// this is the one place that watches it. A 32K Ollama window must leave the
+    /// messages (system, question, tool results) enough room beside the declared
+    /// catalogue; when the catalogue eats it, this fails on its own, without
+    /// touching the shortening fixtures.
+    #[test]
+    fn the_declared_catalogue_leaves_a_32k_window_enough_message_room() {
+        // Same arithmetic as `clamp_ollama_tool_results`: 2 bytes a token, 2 048
+        // tokens kept for the reply, the declarations paid out of the rest.
+        const WINDOW_TOKENS: usize = 32_768;
+        // Measured with today's catalogue: 9 450 B. The floor sits
+        // ~4.4 KB under it, so ordinary schema growth does not trip it, but a
+        // catalogue that squeezes a 32K run well below today's room does.
+        const MIN_MESSAGE_ROOM: usize = 5_000;
+        let declared =
+            serde_json::Value::Array(crate::api::agent_tools::full_discussion_catalogue())
+                .to_string()
+                .len();
+        let room = ((WINDOW_TOKENS - 2_048) * 2).saturating_sub(declared);
+        assert!(
+            room >= MIN_MESSAGE_ROOM,
+            "the declared tool catalogue ({declared} B) outgrew the 32K budget: a 32K window \
+             leaves {room} B for the messages, under the {MIN_MESSAGE_ROOM} B this guard \
+             requires. Trim the tool declarations or raise the default Ollama window."
+        );
+    }
+
+    /// KT-1527: when nothing smarter shortens a JSON result and it falls to the
+    /// plain cut, the model must still get valid JSON, marked as truncated.
+    #[test]
+    fn the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope() {
+        // No scalar fact, no long string and no single collection to project:
+        // nothing to compact, only the cut is left. The quotes in the keys make
+        // the embedded envelope pay for its escapes.
+        let empties = || vec![serde_json::json!([]); 8_000];
+        let blob = serde_json::json!({ "a\"é": empties(), "b\\": empties() }).to_string();
+        assert!(compact_tool_result(&blob, 1_000, None).is_none());
+        let mut body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "go"},
+                {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": blob},
+            ],
+            "options": {"num_ctx": 4_096},
+        });
+        let before = serde_json::to_string(&body["messages"]).unwrap().len();
+        clamp_ollama_tool_results(&mut body, 4_096);
+        let kept = body["messages"][1]["content"].as_str().unwrap();
+
+        let envelope: serde_json::Value =
+            serde_json::from_str(kept).expect("a cut JSON result must stay valid JSON");
+        assert!(kept.len() < blob.len(), "it must actually shrink");
+        assert_eq!(envelope["truncated"], true);
+        assert_eq!(envelope["kronn_shortened"], true);
+        assert_eq!(envelope["original_bytes"], blob.len());
+        assert!(
+            blob.starts_with(envelope["excerpt"].as_str().unwrap()),
+            "the excerpt is the start of the original"
+        );
+        assert!(envelope["note"]
+            .as_str()
+            .unwrap()
+            .contains("returns the same result"));
+        let after = serde_json::to_string(&body["messages"]).unwrap().len();
+        assert!(after < before);
+        let budget = (4_096 - 2_048) * 2;
+        assert!(after <= budget, "{after} B against a {budget} B budget");
+
+        // Clamping again changes nothing and keeps it valid.
+        let once = kept.to_string();
+        clamp_ollama_tool_results(&mut body, 4_096);
+        let again = body["messages"][1]["content"].as_str().unwrap();
+        assert_eq!(again, once);
     }
 
     #[test]

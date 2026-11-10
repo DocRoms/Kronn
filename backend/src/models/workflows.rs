@@ -1382,6 +1382,56 @@ pub enum StepType {
     TaskBoard,
 }
 
+impl StepType {
+    /// Every step type, in the order authors are shown them. The one list the
+    /// authoring surfaces render (`workflow_step_schema`, the workflow guide,
+    /// the MCP greeting): a variant added to the enum fails `name` to compile
+    /// until it is named, and a test fails until it is listed here.
+    pub const ALL: [StepType; 15] = [
+        StepType::Agent,
+        StepType::ApiCall,
+        StepType::BatchApiCall,
+        StepType::BatchQuickPrompt,
+        StepType::Exec,
+        StepType::Gate,
+        StepType::Notify,
+        StepType::JsonData,
+        StepType::CollectApiData,
+        StepType::TransformData,
+        StepType::PublishPageData,
+        StepType::SubWorkflow,
+        StepType::TriggerWorkflow,
+        StepType::DelegateSubtasks,
+        StepType::TaskBoard,
+    ];
+
+    /// The tag a step's `step_type` carries (`{"type": "<name>"}`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            StepType::Agent => "Agent",
+            StepType::ApiCall => "ApiCall",
+            StepType::BatchQuickPrompt => "BatchQuickPrompt",
+            StepType::Notify => "Notify",
+            StepType::Gate => "Gate",
+            StepType::Exec => "Exec",
+            StepType::BatchApiCall => "BatchApiCall",
+            StepType::JsonData => "JsonData",
+            StepType::CollectApiData => "CollectApiData",
+            StepType::TransformData => "TransformData",
+            StepType::PublishPageData => "PublishPageData",
+            StepType::SubWorkflow => "SubWorkflow",
+            StepType::TriggerWorkflow => "TriggerWorkflow",
+            StepType::DelegateSubtasks => "DelegateSubtasks",
+            StepType::TaskBoard => "TaskBoard",
+        }
+    }
+
+    /// The names of [`StepType::ALL`].
+    pub fn names() -> Vec<&'static str> {
+        Self::ALL.iter().map(StepType::name).collect()
+    }
+}
+
 /// What a `TaskBoard` step does before returning the board's rows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -2572,6 +2622,31 @@ pub struct BlockedQuickExec {
     pub program: String,
 }
 
+/// A sign that a workflow drifts from the authoring doctrine (KT-1216).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowWarningKind {
+    /// The same script or inline code sits in several Exec steps.
+    DuplicatedExecScript,
+    /// An Exec runs `gh`/`curl` against a service that has a configured plugin.
+    ExecBypassesPlugin,
+}
+
+/// An advisory finding: the workflow can still start, but it was built against
+/// the doctrine served by `workflow_step_schema` (`authoring_doctrine`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowWarning {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    /// The steps that show it, in workflow order.
+    pub steps: Vec<String>,
+    pub kind: WorkflowWarningKind,
+    pub message: String,
+    pub action: String,
+}
+
 /// Whether a saved workflow can start, as far as Kronn can tell before a run
 /// (KT-1138). Saving and enabling are separate facts, not proof of readiness.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -2585,6 +2660,10 @@ pub struct WorkflowReadiness {
     pub ready: bool,
     pub blockers: Vec<WorkflowBlocker>,
     pub human_approval_count: u32,
+    /// Design drift (KT-1216): advisory, never a blocker, never part of `ready`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<WorkflowWarning>>")]
+    pub warnings: Vec<WorkflowWarning>,
     /// The workflows checked: this one, then its sub-workflows.
     pub checked_workflow_ids: Vec<String>,
     /// One line for an agent or a human to read first.

@@ -4511,9 +4511,10 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
         ("qp_get", QP_GET_MANUAL),
         (
             "workflow_create_draft",
-            "Before composing, read the workflow guide: tool_manual({tool: \"workflow-architect\"}), then the sections you need. \
+            "Before composing, read `authoring_doctrine` (workflow_step_schema, same text as the guide's Authoring doctrine section): it says which step type to prefer, e.g. HTTP to a service with a plugin through ApiCall, Exec for logic only, one script never copied, state through step outputs. \
+             Then the workflow guide: tool_manual({tool: \"workflow-architect\"}), and the sections you need. \
              Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
-             Shared templating and data pipeline contracts are available by section. \
+             Shared templating, data pipeline and doctrine contracts are available by section. \
              Read workflow_get on an accessible example. Send name, trigger (e.g. {type: Manual}) \
              and 1–20 steps; each has name and step_type:{type: ...}. Optional authoring fields: \
              actions, safety, workspace_config, guards, artifacts, on_failure (0–20 steps), \
@@ -4526,7 +4527,7 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
         ),
         (
             "workflow_update",
-            "Read workflow_get first. Pass workflow_id and only changed authoring fields from \
+            "Read workflow_get first, and `authoring_doctrine` (workflow_step_schema) before changing steps. Pass workflow_id and only changed authoring fields from \
              workflow_create_draft. Omitted fields survive; supplied arrays replace the whole \
              array, so include all intended steps when editing steps. The project never moves \
              and enabled cannot be set. Only disabled workflows can be updated; disable an \
@@ -4625,7 +4626,10 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              --pretty false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` \
              (there is no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n\
              • `timeout_secs` defaults to 600 and is capped at 1800.\n\n\
-             **Default gates** — propose `cargo fmt --manifest-path backend/Cargo.toml --all -- \
+             **Default gates** — the CI lint gate is EXACTLY `cargo fmt --check` and `cargo \
+             clippy --all-targets -- -D warnings` (never `--lib` or `--lib --tests`, which skip \
+             `tests/`); the worker must report each exit code in its delivery. From the worktree \
+             root propose `cargo fmt --manifest-path backend/Cargo.toml --all -- \
              --check`, `cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D \
              warnings` and targeted lib tests (`cargo test --lib --manifest-path \
              backend/Cargo.toml <filter>`). The FULL suite (bare `cargo test`, `cargo nextest \
@@ -6168,6 +6172,10 @@ mod tests {
             "cargo test --manifest-path backend/Cargo.toml --target-dir",
             "invalid_validations",
             "task_exec_reassign",
+            // KT-1654 — the CI lint gate verbatim, and the exit code asked for.
+            "`cargo fmt --check`",
+            "`cargo clippy --all-targets -- -D warnings`",
+            "report each exit code",
         ] {
             assert!(
                 text.contains(fact),

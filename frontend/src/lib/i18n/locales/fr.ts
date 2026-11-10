@@ -4524,7 +4524,7 @@ const fr: TranslationDict = {
   'orch.config.reviewRoundsUnavailable': 'Impossible de lire Réglages > Workers : sans valeur saisie ici, le serveur applique sa propre valeur par défaut.',
   'orch.config.validations': 'Commandes de validation (une par ligne)',
   'orch.config.validationsHint': 'ex. cargo fmt --check',
-  'orch.config.validationsDefault': 'Validations par défaut : fmt + clippy + tests lib ciblés (ex. cargo test --lib <filtre>). La suite complète appartient à la CI de la PR.',
+  'orch.config.validationsDefault': 'Validations par défaut : cargo fmt --check + cargo clippy --all-targets -- -D warnings + tests lib ciblés (ex. cargo test --lib <filtre>). Reporte le code de sortie de chacun. La suite complète appartient à la CI de la PR.',
   'orch.config.validationsFullSuite': 'Une validation de suite complète (environ 20 min en local contre 3,3 min pour --lib) appartient à la CI de la PR, pas à une validation d\'intégration locale. Préfère fmt, clippy et des tests lib ciblés.',
   'orch.config.fallbacks': 'Agents de repli autorisés',
   'orch.config.autoContinue': 'Lancer automatiquement la prochaine tâche prête',
