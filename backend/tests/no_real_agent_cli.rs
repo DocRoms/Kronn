@@ -155,7 +155,7 @@ fn a_real_agent_started_in_a_detached_task_fails_the_run() {
 #[test]
 fn the_os_sandbox_of_the_machine_needs_an_opt_in() {
     use kronn::core::cmd::REAL_SANDBOX_ENV;
-    if std::env::var(REAL_SANDBOX_ENV).is_ok_and(|value| value == "1") {
+    if kronn::core::child_env::var(REAL_SANDBOX_ENV).is_ok_and(|value| value == "1") {
         return;
     }
     let refusal = kronn::core::task_worker_sandbox::Mechanism::usable_on_host()
