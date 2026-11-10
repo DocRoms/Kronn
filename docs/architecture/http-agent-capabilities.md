@@ -277,7 +277,7 @@ rest of the discussion, or keep the partial answer.
 * **In a discussion, the round ceiling is no longer a failure.** The round's calls are
   refused, the model answers with what it has, and the question follows. A workflow step or
   a worker still fails with its reason: there is no one there to answer.
-  [src: file: backend/src/agents/runner.rs:11024-11133#ask_on_ceiling]
+  [src: file: backend/src/agents/runner.rs:11090-11199#ask_on_ceiling]
   [src: file: backend/src/api/discussions/ceilings.rs:117-205#ceiling_question]
 
 ## Saved Quick Prompt generation settings (KT-670)
@@ -301,7 +301,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:9777#apply_http]
+[src: file: backend/src/agents/runner.rs:9843#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -481,12 +481,46 @@ shipping it. Three things changed:
   `extract`, page or period runs [src: file: backend/src/agents/runner.rs:922-933#tool_call_signature].
 
 Measured by the test that plays the whole exchange on a hundred runs of about 2 KB
-each, with their metrics nested, the full native catalogue (44,634 B) and a 32,768
-token window: the 198,119 B answer is shortened to 8,005 B, of which the shape is
-1,071 B; the model reads the shape, sends one call with
+each, with their metrics nested, the full native catalogue (51,990 B) and a
+36,043 token window: the 198,119 B answer is shortened to 8,005 B, of which the
+shape is 1,071 B; the model reads the shape, sends one call with
 `$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
-unshortened; the conversation then stands at 19,319 estimated tokens of 32,768
-[src: file: backend/src/agents/runner_test.rs:2906-3014#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window].
+unshortened; the conversation then stands at 21,421 estimated tokens of 36,043
+[src: file: backend/src/agents/runner_test.rs:2956#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
+[src: file: backend/src/agents/runner_test.rs:2963#a_200_kb_response_yields_the_web_vitals].
+
+**The window follows the catalogue (KT-1527).** The three shortening tests
+(`a_shortened_api_response_announces_its_shape_and_how_to_ask_for_a_part`, the one
+above, and `shortening_a_result_twice_keeps_its_note_and_shape_and_still_shrinks`)
+used to sit about 100 B from the edge of a literal 32K window, so ~200 B of new tool
+schema text pushed them onto the plain-text cut and they stopped being valid JSON.
+They now size their window from the catalogue they carry
+(`discussion_body_sized_to_catalogue`): 32,768 tokens at minimum, otherwise
+`(declared catalogue + FIXTURE_MESSAGE_ROOM) / 2 + 2,048`, the same arithmetic as
+`clamp_ollama_tool_results` (2 bytes a token, 2,048 tokens kept for the reply).
+`FIXTURE_MESSAGE_ROOM` is 16 KB against the ~9.4 KB the messages need today, so the
+messages get the same room whatever the catalogue weighs. With today's catalogue
+that is a ~36K window, not exactly 32K. A test inflates the catalogue by 1.5 KB and
+then 20 KB and replays all three scenarios
+[src: file: backend/src/agents/runner_test.rs:3241#a_catalogue_change_does_not_flip_the_shortening_fixtures].
+
+That decoupling drops the signal the old tests gave, badly, when the catalogue
+outgrew the real 32K budget. A guard test keeps it, on its own: a 32K window must
+leave at least 5,000 B for the messages beside the declared catalogue (9,450 B
+today). When it fails, the catalogue outgrew the 32K budget and has to be trimmed,
+or the default Ollama window raised
+[src: file: backend/src/agents/runner_test.rs:3265#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
+
+**When the plain cut does happen, the result stays a valid envelope.** A JSON
+result that nothing smarter could shorten used to be cut as text, handing the model
+half a document. `truncated_json_envelope` now wraps its leading text instead:
+`{"kronn_shortened": true, "truncated": true, "original_bytes": <size of the
+response>, "excerpt": "<start of the original>", "note": "…"}`, with the largest
+excerpt that keeps the envelope inside the budget once embedded in `messages`. An
+envelope shortened again keeps the original size it reports. Content that is not
+JSON keeps the plain cut and its note
+[src: file: backend/src/agents/runner.rs:7824#truncated_json_envelope]
+[src: file: backend/src/agents/runner_test.rs:3289#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or
 writes a good one unprompted. The "model" in that test reads the shape and follows

@@ -305,7 +305,7 @@ This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3515-3520#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4419-4440#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:4636-4649#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:13968-13977#Ollama]
+[src: file: backend/src/agents/runner.rs:14034-14043#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -342,7 +342,7 @@ launch (`crud.rs` stamps `discussions.model` from the QP).
 
 ## "Stable output", NOT bit-exact determinism
 
-`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:8054-8114#build_ollama_chat_body] sends
+`build_ollama_chat_body` [src: file: backend/src/agents/runner.rs:8120-8180#build_ollama_chat_body] sends
 `temperature:0, top_k:1, seed:42` as INTERNAL constants (no per-step knob).
 On Apple Metal the float reduction order isn't guaranteed, so two logits within
 epsilon can flip the argmax (more so under Q4 quant) → output is *greedy-stable*,
@@ -466,8 +466,8 @@ gets depends on who runs the model, not only on the machine:
 
 These rows are computed by the functions a run calls, and the test pins them, the
 override cases included
-[src: file: backend/src/agents/runner_test.rs:3310-3376#the_window_qwen38_mlx_gets_on_a_64_gb_mac_depends_on_who_is_running_it], and the KT-943 row beside
-them [src: file: backend/src/agents/runner_test.rs:3253-3308#once_its_cache_cost_is_known_qwen38_mlx_gets_its_whole_window_on_a_64_gb_mac]. They are not an
+[src: file: backend/src/agents/runner_test.rs:3462-3528#the_window_qwen38_mlx_gets_on_a_64_gb_mac_depends_on_who_is_running_it], and the KT-943 row beside
+them [src: file: backend/src/agents/runner_test.rs:3405-3460#once_its_cache_cost_is_known_qwen38_mlx_gets_its_whole_window_on_a_64_gb_mac]. They are not an
 observation of a running Ollama: the band, the trained window and the 64 GiB are
 inputs, and `GET /api/ollama/models` (`context_ceiling`, `context_origin`) and
 the `kronn::ollama` log line give what a given machine actually resolved. Once
@@ -637,8 +637,8 @@ policy is unchanged: `Fail` rejects output that remains invalid, while
 `Continue` may keep invalid raw output. Prompt-based output is not a guarantee
 of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
-`[src: file: backend/src/agents/runner.rs:9098-9132#rejects_structured_output]`
-`[src: file: backend/src/agents/runner.rs:9849-9913#format_fallback_notice]`
+`[src: file: backend/src/agents/runner.rs:9164-9198#rejects_structured_output]`
+`[src: file: backend/src/agents/runner.rs:9915-9979#format_fallback_notice]`
 `[src: file: backend/src/workflows/steps.rs:1091-1114#ollama_envelope_format]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)

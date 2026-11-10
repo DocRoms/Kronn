@@ -383,6 +383,56 @@ pub(crate) fn unexplained_end_card(
     )
 }
 
+/// KT-1517 — the card for a turn the provider refused because the account is out
+/// of quota or credits. It quotes the provider's own message (a human reads that,
+/// not a paraphrase), says when the limit resets if the provider announced it, and
+/// names the two ways out: another agent for this room, or a retry once the quota
+/// is back.
+pub(crate) fn quota_exhausted_card(
+    language: &str,
+    provider: &str,
+    provider_message: &str,
+    reset_at: Option<DateTime<Utc>>,
+    tier: ModelTier,
+    retry_dispatch_id: Option<&str>,
+) -> String {
+    let shown: String = provider_message.chars().take(400).collect();
+    let when = reset_at.map(stamp);
+    let summary = match language {
+        "fr" => format!(
+            "{provider} n'a plus de quota ou de crédits : « {shown} ».{} Changez l'agent de cette \
+             room, ou relancez le tour une fois le quota revenu ou des crédits ajoutés.",
+            when.map(|at| format!(" Le fournisseur annonce la réinitialisation à {at}."))
+                .unwrap_or_default()
+        ),
+        "es" => format!(
+            "{provider} se quedó sin cuota o créditos: «{shown}».{} Cambia el agente de esta sala, \
+             o reintenta el turno cuando vuelva la cuota o se añadan créditos.",
+            when.map(|at| format!(" El proveedor anuncia el reinicio a las {at}."))
+                .unwrap_or_default()
+        ),
+        "zh" => format!(
+            "{provider} 的配额或额度已用尽：“{shown}”。{}请更换此房间的智能体，或在配额恢复或充值后重试该轮。",
+            when.map(|at| format!("服务商宣布将于 {at} 重置。"))
+                .unwrap_or_default()
+        ),
+        _ => format!(
+            "{provider} is out of quota or credits: “{shown}”.{} Switch this room to another \
+             agent, or retry the turn once the quota is back or credits are added.",
+            when.map(|at| format!(" The provider announces the limit resets at {at}."))
+                .unwrap_or_default()
+        ),
+    };
+    card(
+        "agent_error",
+        None,
+        &summary,
+        provider_message,
+        tier,
+        retry_dispatch_id,
+    )
+}
+
 /// Who a refused start belongs to, for the System card it leaves.
 pub(crate) struct RefusedStart<'a> {
     pub discussion_id: &'a str,
