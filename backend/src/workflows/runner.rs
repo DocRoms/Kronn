@@ -11073,6 +11073,7 @@ mod tests {
     mod native_full_access_runs;
     mod quota_wait_foreach_runs;
     mod quota_wait_runs;
+    mod quota_wait_subworkflow_runs;
     mod run_effect_runs;
     mod run_pin_runs;
     mod shadow_runs;

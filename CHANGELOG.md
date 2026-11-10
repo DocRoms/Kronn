@@ -354,6 +354,15 @@ Release notes for 0.9.3 and earlier are available in the
   sweep (no duplicate PR comments). Claude's short "limit · resets …" wordings
   are classified as quota; "Context limit: reset the conversation" is not. The
   run page no longer offers Resume on a sub-workflow child.
+- A single sub-workflow child refused for quota, at any depth, waits through
+  its parent instead of failing it (KT-1119). The parent goes to
+  `WaitingQuota` with the wait it mirrored, and its resume reclaims the same
+  child at the refused step: neither the parent's nor the child's earlier steps
+  are replayed. A foreach under a single sub-workflow waits through the whole
+  chain. A batch step whose children were all refused for quota waits too and
+  re-runs at the reset; a batch with at least one success keeps its partial
+  verdict. Cancellation never wakes the chain, and a wait only claims the child
+  it mirrored.
 - A quota pause no longer spends a run's Timeout guard, which now measures
   active runner time (persisted, so a restart keeps it). A reset announced past
   the old deadline schedules a wake like any other instead of leaving the run
