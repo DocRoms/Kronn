@@ -166,7 +166,7 @@ without a reload.
 * Agents: `media_generate` and `media_job_status`, by two independent routes —
   CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
   native orchestration catalogue
-  [src: file: backend/src/api/agent_tools.rs:1264-1304#media_generate]. The bridge route came
+  [src: file: backend/src/api/agent_tools.rs:1285-1325#media_generate]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
 * A workflow Agent step on an HTTP or local agent has the same two tools since 0.15.3, through
   the same handler. Its asset lands in a room opened for the run (linked to it) and, when the

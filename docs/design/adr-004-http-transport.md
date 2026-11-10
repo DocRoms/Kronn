@@ -105,7 +105,7 @@ the new `OrchestrationParticipant` type (replacing the bare
 `connection_id`, validated the same way and dispatched through the same
 `enqueue_with_connection`/`external_http_runtime` construction discussion
 dispatch already used. [src: file: backend/src/models/compare.rs:128-156]
-[src: file: backend/src/models/discussions.rs:954-969#OrchestrationParticipant] (`OrchestrationParticipant`)
+[src: file: backend/src/models/discussions.rs:964-979#OrchestrationParticipant] (`OrchestrationParticipant`)
 
 ## Consequences
 

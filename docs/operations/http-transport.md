@@ -181,6 +181,34 @@ under an unrelated agent.
   `AgentType`, so two different named connections can both appear in one
   debate without colliding on `AgentType::Custom`.
 
+## Workflow Agent steps with a `room_id` (KT-1244)
+
+An HTTP Agent step (`Ollama`, `LiteLlm`, `Nvidia`, `Custom` — any provider on
+this transport, OpenRouter included) accepts `room_id`, at save and at launch,
+like a Claude Code or Codex step: the provider stays a free choice. It has no
+bridge process, so there is no `KRONN_WORKFLOW_STEP_CONTEXT` exchange; the
+orchestrator, which already runs this agent's tools in-process, makes the step a
+member of the room itself when it activates it. The membership is the KT-793
+one: the same `workflow_step_room_sessions` row, ended with the step and
+revoked at backend boot, and the room shows the step working (KT-883).
+`[src: file: backend/src/workflows/step_room.rs:574-607#join_http_step]`
+`[src: file: backend/src/api/workflows.rs:773-780#validate_step_required_fields]`
+
+Only then does the step's native catalogue carry three room tools, bound to that
+room: `disc_read`, `disc_append` (main channel; this is also how a
+`kronn-question` card is published) and `disc_question_list` (the same contract
+as the bridge's: pending questions or the answer of an exact `key`; absence is
+not consent). The schemas are closed: a `discussion_id` naming any other
+discussion, or any undeclared field, is refused, and the bridge-token gate
+decides the two writing/asking tools on the room the step owns. What the
+step posts is authored by the step's provider, not by the room's agent. A step
+without a `room_id` is offered exactly the workflow catalogue it had before,
+because every tool declaration costs a small model context. The model-facing
+behaviour is the same as for a joined CLI; see
+[kronn-internal.md](mcp-servers/kronn-internal.md) for the full contract.
+`[src: file: backend/src/api/agent_tools.rs:1803-1805#catalogue]`
+`[src: file: backend/src/api/agent_room_tools.rs:19-65#declarations]`
+
 ## Known limitations
 
 - **Preflight remains caller-owned.** Each launch surface must pass the actual
@@ -285,7 +313,7 @@ without a project. This exception grants no directory listing or writing rights;
 `.kronn/context-files` remains read-only inside a project too. Symlink
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
-[src: file: backend/src/api/agent_tools.rs:3589-3621#read_attached_file]
+[src: file: backend/src/api/agent_tools.rs:3605-3637#read_attached_file]
 [src: file: backend/src/api/agent_workspace_tools.rs:1297-1341#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an

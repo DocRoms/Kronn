@@ -72,7 +72,7 @@ touches an execution that exists.
 channels now refuse an argument the tool does not declare, naming it and listing the accepted ones:
 the Python bridge checks against its own `inputSchema` and the native tool layer against its catalogue.
 `[src: file: backend/scripts/disc-introspection-mcp.py:6124#_refuse_unknown_arguments]`
-`[src: file: backend/src/api/agent_tools.rs:1432#unknown_argument_refusal]`
+`[src: file: backend/src/api/agent_tools.rs:1453#unknown_argument_refusal]`
 Note that `task_exec_prepare` does not declare `base_rev` / `idempotency_key`: those belong to the launch.
 
 **Absent is not `null`.** Omitting `max_review_rounds` takes the setting; an explicit `null` is refused
