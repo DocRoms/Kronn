@@ -173,7 +173,7 @@ and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
 [src: file: backend/src/agents/runner.rs:5986-5996#acp_failure_diagnostic]
 [src: file: backend/src/agents/runner.rs:15866-16147#run_acp_session_streams_usage_through_agent_process]
-[src: file: backend/src/core/redact.rs:551-579#redact_for_audit_artifact]
+[src: file: backend/src/core/redact.rs:568-596#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
 

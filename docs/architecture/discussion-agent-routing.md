@@ -123,7 +123,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1313-1333#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:997-1146#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3582-3584#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3584-3586#DispatchInProgress]
 [src: file: backend/src/api/discussions/messaging.rs:1105-1113#DispatchInProgress]
 [src: file: backend/src/db/discussions.rs:3532-3794#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]

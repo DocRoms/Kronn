@@ -192,7 +192,7 @@ managed candidates and their refusal reason. An operator may request a manual,
 path-specific reclaim only after the inventory's ownership and terminal-state
 checks; this document does not authorise a broad purge or deletion of unknown,
 active, or leased targets. [src: file: backend/src/core/worktree.rs:1100-1135#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
-[src: file: backend/src/api/maintenance.rs:77-142#list_build_artifacts]
+[src: file: backend/src/api/maintenance.rs:125-190#list_build_artifacts]
 [src: file: backend/src/db/orchestration.rs:419-532#worktree_cleanup_liveness]
 
 ## KT-638 profile benchmark record
