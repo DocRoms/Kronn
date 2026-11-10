@@ -2960,6 +2960,7 @@ const fr: TranslationDict = {
   'disc.orchestrator': 'Orchestrateur',
   'disc.orchestratorKind': 'suivi automatisé',
   'disc.orchestratorUpdate': 'Mise à jour de l’orchestrateur',
+  'disc.orchestratorQuotaResumed': 'Quota rétabli · worker relancé',
   'disc.orchestratorShowDetails': 'Voir les détails',
   'disc.orchestratorHideDetails': 'Masquer les détails',
   'disc.reply': 'Répondre',

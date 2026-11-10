@@ -238,7 +238,7 @@ nothing in the panel**: a backend test injects one, and a frontend test renders 
 type no locale file names.
 [src: file: backend/src/models/activity.rs:87-139#ActivityRow]
 [src: file: backend/src/api/activity.rs:61-90#collect_activity]
-[src: file: backend/src/api/activity_tests.rs:383-405#a_new_row_type_is_one_new_source_and_nothing_else]
+[src: file: backend/src/api/activity_tests.rs:382-405#a_new_row_type_is_one_new_source_and_nothing_else]
 [src: file: frontend/src/lib/activity.ts:116-135#ACTIVITY_ACTION_HANDLERS]
 
 What each source counts, and leaves out (so nothing is listed twice and nothing that

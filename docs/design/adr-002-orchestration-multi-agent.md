@@ -420,15 +420,15 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:296-396#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:7826-7897#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:7917-7988#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
-dead worker `[src: file: backend/src/api/orchestration.rs:795-966#start_resilience_watchdog]`.
+dead worker `[src: file: backend/src/api/orchestration.rs:866-1037#start_resilience_watchdog]`.
 
 Cancellation and reassignment preserve the same lineage. Cancellation first cancels live processes and
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:13681-13834#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:8958-9004#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14192-14381#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8616-8923#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:13752-13905#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9049-9095#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14281-14470#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8707-9014#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -560,9 +560,9 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
 - **Reconcile of the TaskExecution tree at boot (incl. the §4bis integration-saga reconciliation),
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:293-393#reconcile_at_boot]`
-  `[src: file: backend/src/api/orchestration.rs:795-966#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:13681-13834#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:14192-14381#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:866-1037#start_resilience_watchdog]`
+  `[src: file: backend/src/api/orchestration.rs:13752-13905#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:14281-14470#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.
