@@ -174,7 +174,7 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
     // value (maybe right after a backslash) has no closing quote: the value
     // then runs to the end of the text.
     (
-        r#"("(?:password|token|api_key|apiKey|secret|access_token|refresh_token|client_secret|private_key)"\s*:\s*")(?:\\[\s\S]|[^"\\])+\\?("|$)"#,
+        r#"("(?:password|token|api_key|apiKey|secret|access_token|refresh_token|client_secret|private_key)"\s*:\s*")(?:(?:\\[\s\S]|[^"\\])+\\?|\\)("|$)"#,
         "$1***REDACTED***$2",
         Gate::Contains(&[
             "\"password\"",
@@ -529,6 +529,19 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\.|[^'\\\\])+)'");
     let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\.|[^`\\\\])+)`");
     let quoted_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
+    // A quoted value cut before its closing quote: the closed shapes above ran
+    // first, so no closing quote is left to find — mask to the end of the text.
+    // A lone backslash ending the text is part of the value (`\\?`); the quote
+    // that opens it is kept, nothing is appended.
+    let truncated = |quote: &str| {
+        format!(r#"(?i)(\b{name}\b\s*[:=]\s*){quote}((?:\\[\s\S]|[^{quote}\\])+\\?|\\)$"#)
+    };
+    let truncated_dq = truncated("\"");
+    let truncated_sq = truncated("'");
+    let truncated_bt = truncated("`");
+    // The escaped-quote form (`\"…`) lives in JSON text, so the string it opens
+    // may end at its own bare closing quote: stop there, and keep that quote.
+    let truncated_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\?$|")"#);
     let unquoted = format!(
         r#"(?i)(\b{name}\b\s*[:=]\s*(?:\\")?)((?:[^\s\\"'`,;]|\\[^\s"]|\\"[^\s\\"'`,;}}\])])+)"#
     );
@@ -542,6 +555,10 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         (quoted_sq, "$1'***REDACTED***'", Gate::Assignment(Some(b'\''))),
         (quoted_bt, "$1`***REDACTED***`", Gate::Assignment(Some(b'`'))),
         (quoted_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\'))),
+        (truncated_dq, "$1\"***REDACTED***", Gate::Assignment(Some(b'"'))),
+        (truncated_sq, "$1'***REDACTED***", Gate::Assignment(Some(b'\''))),
+        (truncated_bt, "$1`***REDACTED***", Gate::Assignment(Some(b'`'))),
+        (truncated_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\'))),
         (unquoted, "$1***REDACTED***", Gate::Assignment(None)),
         (json_key_dq, "$1\"***REDACTED***\"", Gate::JsonKey(b'"')),
         (json_key_escaped, "$1***REDACTED***$3", Gate::JsonKey(b'\\')),
@@ -1643,6 +1660,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_quoted_assignment_cut_before_its_closing_quote_is_masked_to_the_end() {
+        for (input, expected) in [
+            (
+                r#"client_secret: "my long s3cr3t phrase"#,
+                r#"client_secret: "***REDACTED***"#,
+            ),
+            (
+                "client_secret: 'my long s3cr3t phrase",
+                "client_secret: '***REDACTED***",
+            ),
+            (
+                "client_secret: `my long s3cr3t phrase",
+                "client_secret: `***REDACTED***",
+            ),
+            (
+                r#"x-api-token: \"two words s3cr3t"#,
+                r#"x-api-token: \"***REDACTED***"#,
+            ),
+            // The cut text may end on a lone backslash or an escaped quote.
+            (
+                r#"password = "two words s3cr3t\"#,
+                r#"password = "***REDACTED***"#,
+            ),
+            (
+                r#"password = "two words s3cr3t\""#,
+                r#"password = "***REDACTED***"#,
+            ),
+            // Several lines: nothing is left after the opening quote.
+            (
+                "secret: \"line one s3cr3t\nline two s3cr3t",
+                "secret: \"***REDACTED***",
+            ),
+        ] {
+            for (name, redact) in text_redactors() {
+                if name == "redact_secrets" {
+                    continue;
+                }
+                let out = redact(input);
+                assert_eq!(out, expected, "{name}: {input}");
+                assert!(!out.contains("s3cr3t"), "{name}: {out}");
+                assert_eq!(redact(&out), out, "{name}: not idempotent");
+            }
+        }
+        // A closing quote that exists is kept: the text after it stays.
+        for (input, expected) in [
+            (
+                r#"client_secret: "my s3cr3t phrase" and more"#,
+                r#"client_secret: "***REDACTED***" and more"#,
+            ),
+            (
+                "client_secret: 'my s3cr3t phrase' and more",
+                "client_secret: '***REDACTED***' and more",
+            ),
+            (
+                r#"x-api-token: \"two words s3cr3t\" ok"#,
+                r#"x-api-token: \"***REDACTED***\" ok"#,
+            ),
+            // The escaped form cut inside a JSON string: its own bare closing
+            // quote stays, so the document keeps parsing.
+            (
+                r#"{"note":"x-api-token: \"two words s3cr3t"}"#,
+                r#"{"note":"x-api-token: \"***REDACTED***"}"#,
+            ),
+        ] {
+            let out = redact_for_audit_artifact(input).0;
+            assert_eq!(out, expected, "{input}");
+            assert_eq!(redact_for_audit_artifact(&out).0, out, "not idempotent");
+        }
+    }
+
+    #[test]
+    fn a_json_document_keeps_parsing_when_a_value_ends_on_an_escaped_quote() {
+        // Reviewer scenarios, pinned: valid JSON in, valid JSON out, no leak.
+        let document = r#"{"password":"secret\"","user":"alice"}"#;
+        for (name, redact) in text_redactors() {
+            let out = redact(document);
+            assert_eq!(
+                out, r#"{"password":"***REDACTED***","user":"alice"}"#,
+                "{name}"
+            );
+            assert!(serde_json::from_str::<serde_json::Value>(&out).is_ok());
+        }
+        let headers = r#"x-api-token: \"head\"s3cr3tTail\" ok"#;
+        for (name, redact) in text_redactors() {
+            if name == "redact_secrets" {
+                continue;
+            }
+            let out = redact(headers);
+            assert_eq!(out, r#"x-api-token: \"***REDACTED***\" ok"#, "{name}");
+        }
+        for (input, expected) in [
+            (r#"{"password":"\"#, r#"{"password":"***REDACTED***"#),
+            (r#"{"password":"\""#, r#"{"password":"***REDACTED***"#),
+        ] {
+            for (name, redact) in text_redactors() {
+                assert_eq!(redact(input), expected, "{name}: {input}");
+            }
+        }
+    }
+
     // ── Per-pattern positive tests (each MUST match + redact) ─────────
 
     #[test]
@@ -2490,7 +2608,7 @@ mod tests {
             RAW_PATTERNS.len(),
             "a pattern failed to compile"
         );
-        assert_eq!(ASSIGNMENT.len(), 7);
+        assert_eq!(ASSIGNMENT.len(), 11);
         assert!(
             matches!(&*VENDOR_PREFILTER, Prefilter::Triples(_)),
             "a gate literal shorter than three bytes turns the vendor prefilter off"
@@ -2710,8 +2828,8 @@ mod tests {
 
     #[test]
     fn quoted_assignment_patterns_wait_for_their_own_quote() {
-        // ASSIGNMENT is ordered: double quote, single quote, backtick, escaped, bare, then the two
-        // quoted-key shapes (KT-1656).
+        // ASSIGNMENT is ordered: double quote, single quote, backtick, escaped, the same four cut
+        // before their closing quote, bare, then the two quoted-key shapes (KT-1656).
         let admitted = |text: &str| -> Vec<bool> {
             ASSIGNMENT.iter().map(|pat| pat.gate.admits(text)).collect()
         };
@@ -2719,26 +2837,26 @@ mod tests {
         // value pattern has anything to do.
         assert_eq!(
             admitted("curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com"),
-            [false, false, false, false, true, false, false]
+            [false, false, false, false, false, false, false, false, true, false, false]
         );
         assert_eq!(
             admitted("password: \"hunter2\""),
-            [true, false, false, false, true, false, false]
+            [true, false, false, false, true, false, false, false, true, false, false]
         );
         assert_eq!(
             admitted("token =\n  'hunter2'"),
-            [false, true, false, false, true, false, false]
+            [false, true, false, false, false, true, false, false, true, false, false]
         );
         assert_eq!(
             admitted("secret=`hunter2`"),
-            [false, false, true, false, true, false, false]
+            [false, false, true, false, false, false, true, false, true, false, false]
         );
         assert_eq!(
             admitted(r#"token: \"hunter2\""#),
-            [false, false, false, true, true, false, false]
+            [false, false, false, true, false, false, false, true, true, false, false]
         );
         // No assignment at all: nothing runs, whatever quotes the text holds.
-        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 7]);
+        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 11]);
         // Each pattern that is turned away really has no match to make.
         for text in [
             "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com",
