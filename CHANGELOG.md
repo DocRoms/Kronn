@@ -156,6 +156,39 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Security
 
+- An agent can no longer read another agent's login from the owner's home
+  (KT-1656). A task worker that probed Gemini CLI printed `~/.gemini/settings.json`
+  with its tokens into its transcript, which is stored and sent to the model
+  provider. Every confined launch now denies the credential stores of the other
+  agents (`~/.gemini`, `~/.codex`, `~/.claude.json`, `~/.claude/settings.json`,
+  `~/.copilot`, `~/.vibe`, …), whatever the « Protect the Kronn vault » setting
+  says, and any restricted launch, whichever agent it runs (Claude, Codex,
+  Gemini, Kiro, Copilot, Vibe, an ACP adapter), also `~/.ssh`, `~/.aws`,
+  `~/.config/gh`, `~/.npmrc`, `~/.cargo/credentials*` and the other tools' files;
+  the agent's own store stays open, and a launch you opened in full access keeps
+  the tools of your terminal (owner decision). A
+  store the environment moves (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `GNUPGHOME`, `AWS_*_FILE`, `KUBECONFIG`,
+  `DOCKER_CONFIG`, `CARGO_HOME`, `NPM_CONFIG_USERCONFIG`, `GH_CONFIG_DIR`,
+  `CLOUDSDK_CONFIG`, the Gemini CLI home) is denied where it really is.
+  What an agent writes is stored masked when it holds a credential (a settings
+  file printed whole, an `env` block keyed by `*_TOKEN` / `*_API_KEY` /
+  `SECRET_KEY`, Google OAuth `ya29.` / `1//0`, `github_pat_` and AWS `ASIA`
+  tokens), while code and prose that only name a token are left as written; the
+  cards ingested from a message, the streaming checkpoint and the peers of a
+  shared discussion see the masked text too; a room invitation an agent posts
+  (`kr-join-` and 32 lowercase hex characters, the whole value) is left as
+  written, or the invite would no longer work. A camelCase word, a path, a value
+  equal to its name or a short number under a secret name is masked all the same
+  (it can be a real password or PIN). The upgrade (migration 293)
+  masks the vendor-shaped tokens already held by agent messages and by the other
+  tables that carry agent output (deleted and edited copies, summaries, task
+  executions, workflow step results, run logs). **Rotate the Gemini tokens that
+  were in that file, and the credentials of any other file an agent printed: the
+  backups taken before the upgrade (`kronn.db.backup`, `kronn-auto-*.db`, manual
+  copies) keep the clear text.** For one discussion known to be exposed, the owner
+  runs the full audit redaction once, by id:
+  `POST /api/maintenance/redact-discussion` (`docs/operations/db-backup.md`).
 - Kronn is no longer exposed over plain HTTP. The Settings « Allow connections
   from other devices » toggle now refuses (409, with what is needed) unless a
   TLS-terminating proxy on the machine (nginx, Caddy, `tailscale serve`) is
