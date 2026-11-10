@@ -4812,7 +4812,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     let github_env = crate::core::github_connection::env_for_launch(config.project_id).await;
     // Try direct binary first, then npx fallback
-    let mut child = match try_spawn(
+    // KT-1587 — the run directories the step was granted, from the policy Kronn
+    // resolved above; never from `args`, which carry the prompt.
+    let run_artifacts: Vec<PathBuf> = read_only_repos
+        .as_ref()
+        .map(|policy| policy.granted_dirs().to_vec())
+        .unwrap_or_default();
+    let mut child = match try_spawn_granted(
         binary,
         None,
         &args,
@@ -4828,6 +4834,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         &github_env,
         bridge_value.as_deref(),
         config.priority,
+        &run_artifacts,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4846,7 +4853,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     runtime.command,
                     runtime.version,
                 );
-                try_spawn(
+                try_spawn_granted(
                     "npx",
                     Some(pkg),
                     &args,
@@ -4862,6 +4869,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     &github_env,
                     bridge_value.as_deref(),
                     config.priority,
+                    &run_artifacts,
                 )
                 .map_err(|error| {
                     format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
@@ -14645,6 +14653,50 @@ pub(crate) fn try_spawn(
     bridge_token: Option<&str>,
     priority: Priority,
 ) -> Result<tokio::process::Child, String> {
+    // KT-1587 — a launch that is not handed a run artifacts grant reads none.
+    try_spawn_granted(
+        binary,
+        npx_package,
+        args,
+        work_dir,
+        env_key,
+        api_key,
+        io,
+        discussion_id,
+        task_worker_context,
+        room_agent_context,
+        workflow_step_context,
+        audit_run_id,
+        github_env,
+        bridge_token,
+        priority,
+        &[],
+    )
+}
+
+/// [`try_spawn`] for a launch granted the run directories `run_artifacts`
+/// (KT-1587): the typed grant Kronn built for the step
+/// (`ReadOnlyRepos::granted_dirs`), never read back out of `args`, whose prompt
+/// and system prompt carry text no one vetted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_spawn_granted(
+    binary: &str,
+    npx_package: Option<&str>,
+    args: &[String],
+    work_dir: &Path,
+    env_key: &str,
+    api_key: Option<&str>,
+    io: SpawnIo<'_>,
+    discussion_id: Option<&str>,
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
+    workflow_step_context: Option<&WorkflowStepBridgeContext>,
+    audit_run_id: Option<&str>,
+    github_env: &[(String, String)],
+    bridge_token: Option<&str>,
+    priority: Priority,
+    run_artifacts: &[PathBuf],
+) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
         SpawnIo::Adapter(_) => None,
@@ -14716,7 +14768,7 @@ pub(crate) fn try_spawn(
             npx_package.is_some() && cmd_name != binary,
         )
         // KT-1587 — the run artifacts root, but for the run directory granted.
-        .with_run_artifacts(args);
+        .with_run_artifacts(run_artifacts);
         let (program, wrapped_args, outcome) = crate::core::vault_guard::wrap_launch(
             crate::core::vault_guard::launch_confinement().as_ref(),
             crate::core::vault_guard::launch_sandbox(binary, npx_package, args),

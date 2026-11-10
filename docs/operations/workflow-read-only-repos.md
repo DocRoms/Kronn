@@ -257,7 +257,10 @@ Access across runs (KT-1587): run artifacts sit outside the data directory, so
 the vault protection does not hide them; a rule of their own does. An Agent step
 reads **its own run's** artifacts, read-only, when its prompt names that path,
 and no other run's. A launch that was not granted the path (a discussion, a task
-worker, an ACP runtime, a step that does not name it) reads none. The rules per
+worker, an ACP runtime, a step that does not name it) reads none. The grant is
+the typed `read_only_dirs` Kronn built for the step, never text found in the
+prompt or the launch arguments, and a run directory is only granted when it is a
+direct, non-link, lowercase-UUID child of the artifacts root. The rules per
 runtime are in [agent-vault-protection.md](../architecture/agent-vault-protection.md#run-artifacts-sit-outside-the-vault-kt-1585).
 With the vault protection turned off, or on a host with no sandbox, the root is
 open as it was. An Exec stdout kept there is scrubbed of the secrets Kronn

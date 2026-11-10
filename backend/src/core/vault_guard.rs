@@ -46,7 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::artifacts_reach::ArtifactsReach;
+use crate::core::artifacts_reach::{ArtifactsReach, ClaudeReach};
 use crate::core::task_worker_sandbox::{real_path, seatbelt_literal, Mechanism};
 use crate::core::trust_sandbox::{self, LevelConfinement};
 
@@ -133,10 +133,11 @@ impl LaunchRoots {
         }
     }
 
-    /// KT-1587 — closes the run artifacts root to the launch `args`, but for
-    /// the run directory they grant.
-    pub fn with_run_artifacts(mut self, args: &[String]) -> Self {
-        self.artifacts = ArtifactsReach::for_launch(args);
+    /// KT-1587 — closes the run artifacts root to the launch, but for the run
+    /// directories `granted`: the typed grant Kronn built for this step, never
+    /// something read back out of the arguments.
+    pub fn with_run_artifacts(mut self, granted: &[PathBuf]) -> Self {
+        self.artifacts = ArtifactsReach::for_launch(granted);
         if self.artifacts.is_some() {
             // A mount hides a directory that exists: a run created while the
             // agent lives must find the root already covered.
@@ -460,25 +461,31 @@ fn hidden_dirs() -> Vec<PathBuf> {
 ///
 /// KT-1587 — plus the run artifacts root, whole: this launch has no grant.
 pub fn claude_permission_deny() -> Vec<String> {
-    claude_permission_deny_for(&[])
+    claude_reach(&[]).permission_deny
 }
 
-/// [`claude_permission_deny`] for a launch with `args`: a run directory they
-/// grant is left out of the Read rule (a deny beats an allow) and the other run
-/// directories are named one by one.
-fn claude_permission_deny_for(args: &[String]) -> Vec<String> {
-    let mut rules: Vec<String> = hidden_dirs()
-        .iter()
-        .flat_map(|dir| {
-            ["Read", "Edit", "Write"]
-                .into_iter()
-                .map(|tool| claude_rule(tool, dir))
-        })
-        .collect();
-    if let Some(artifacts) = ArtifactsReach::for_launch(args) {
-        rules.extend(artifacts.claude_permission_deny());
+/// What Claude's settings carry for a launch granted the run directories
+/// `granted`: the data directory denied whole, and the run artifacts root
+/// either denied whole (no grant) or closed but for the grant (a deny beats an
+/// allow, so the other run directories are named one by one).
+fn claude_reach(granted: &[PathBuf]) -> ClaudeReach {
+    let mut reach = ClaudeReach {
+        permission_deny: hidden_dirs()
+            .iter()
+            .flat_map(|dir| {
+                ["Read", "Edit", "Write"]
+                    .into_iter()
+                    .map(|tool| claude_rule(tool, dir))
+            })
+            .collect(),
+        sandbox_allow_read: Vec::new(),
+    };
+    if let Some(artifacts) = ArtifactsReach::for_launch(granted) {
+        let artifacts = artifacts.claude_reach();
+        reach.permission_deny.extend(artifacts.permission_deny);
+        reach.sandbox_allow_read = artifacts.sandbox_allow_read;
     }
-    rules
+    reach
 }
 
 /// `sandbox.filesystem.denyRead` of Claude's own sandbox (the task workers),
@@ -509,7 +516,10 @@ pub fn claude_vault_settings() -> Option<String> {
 /// replaces the standalone vault one: two `--settings` flags are not merged by
 /// Claude, so the vault rules are folded into the policy's own document instead.
 /// Does nothing when the protection is off or no policy document is present.
-pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
+///
+/// `granted` is the typed run artifacts grant of the policy (KT-1587): never
+/// derived from `args`, which carry the prompt.
+pub fn fold_vault_into_claude_settings(args: &mut Vec<String>, granted: &[PathBuf]) {
     let Some(vault) = claude_vault_settings() else {
         return;
     };
@@ -537,20 +547,18 @@ pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
             }
         }
     };
-    push_unique(
-        &mut settings["permissions"]["deny"],
-        claude_permission_deny_for(args),
-    );
+    let reach = claude_reach(granted);
+    push_unique(&mut settings["permissions"]["deny"], reach.permission_deny);
     if settings["sandbox"]["enabled"] == true {
         push_unique(
             &mut settings["sandbox"]["filesystem"]["denyRead"],
             claude_sandbox_deny_read(),
         );
         // KT-1587 — the run directory the launch was granted.
-        if let Some(artifacts) = ArtifactsReach::for_launch(args) {
+        if !reach.sandbox_allow_read.is_empty() {
             push_unique(
                 &mut settings["sandbox"]["filesystem"]["allowRead"],
-                artifacts.claude_sandbox_allow_read(),
+                reach.sandbox_allow_read,
             );
         }
         // KT-1491 — a checkout opened for editing (a `code` grant) must not reach

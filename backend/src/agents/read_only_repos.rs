@@ -23,6 +23,10 @@ pub(crate) struct ReadOnlyRepos {
     /// This is enabled only when the mandatory absolute-path policy would exceed
     /// the room-wide settings byte budget.
     compact_paths: bool,
+    /// KT-1587 — the plain `dirs` Kronn granted this launch (a workflow step's
+    /// run artifacts directory), canonical. The typed source of the run
+    /// artifacts grant: nothing reads it back out of the arguments.
+    granted_dirs: Vec<PathBuf>,
 }
 
 /// What stays out of the agent's reach inside a checkout it may edit: the
@@ -683,6 +687,7 @@ impl ReadOnlyRepos {
         check_platform(agent)?;
         let work_dir = canonical_directory(work_dir)?;
         let mut roots = Vec::new();
+        let mut granted_dirs = Vec::new();
         for location in dirs {
             let path = Path::new(location);
             if !path.is_absolute() {
@@ -698,6 +703,7 @@ impl ReadOnlyRepos {
                     work_dir.display()
                 ));
             }
+            push_unique(&mut granted_dirs, root.clone());
             push_unique(&mut roots, root);
         }
         for location in declared {
@@ -772,6 +778,7 @@ impl ReadOnlyRepos {
             code_hooks: Vec::new(),
             guard_secrets: false,
             compact_paths: false,
+            granted_dirs,
         }))
     }
 
@@ -835,6 +842,7 @@ impl ReadOnlyRepos {
             code_hooks,
             guard_secrets: true,
             compact_paths: false,
+            granted_dirs: Vec::new(),
         };
         policy.fit_scanned_to_room_budget(&work_dir, scans)?;
         Ok(Some(policy))
@@ -976,8 +984,14 @@ impl ReadOnlyRepos {
         });
         args.extend(self.args(agent, work_dir));
         // KT-1495 — one `--settings` document: the vault rules join the policy's.
-        crate::core::vault_guard::fold_vault_into_claude_settings(args);
+        crate::core::vault_guard::fold_vault_into_claude_settings(args, &self.granted_dirs);
         args.push(prompt);
+    }
+
+    /// KT-1587 — the directories this launch was granted besides its
+    /// checkouts: the typed grant of the run artifacts directory.
+    pub(crate) fn granted_dirs(&self) -> &[PathBuf] {
+        &self.granted_dirs
     }
 
     fn scanned_for(&self, root: &Path) -> &[String] {
@@ -1068,7 +1082,10 @@ impl ReadOnlyRepos {
                     // Budget the document the process receives, including vault
                     // paths. `apply` folds again only to remove the standalone
                     // vault flag built before this policy; the merge is idempotent.
-                    crate::core::vault_guard::fold_vault_into_claude_settings(&mut args);
+                    crate::core::vault_guard::fold_vault_into_claude_settings(
+                        &mut args,
+                        &self.granted_dirs,
+                    );
                 }
                 for root in self.roots.iter().chain(&self.code_roots) {
                     args.extend(["--add-dir".into(), root.display().to_string()]);

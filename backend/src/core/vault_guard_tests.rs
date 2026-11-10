@@ -591,7 +591,7 @@ fn the_vault_rules_fold_into_the_policy_settings_document() {
     let mut args = strings(&["--print"]);
     args.extend(["--settings".into(), claude_vault_settings().unwrap()]);
     args.extend(["--settings".into(), own, "prompt".into()]);
-    fold_vault_into_claude_settings(&mut args);
+    fold_vault_into_claude_settings(&mut args, &[]);
     let documents: Vec<&String> = args
         .windows(2)
         .filter(|pair| pair[0] == "--settings")
@@ -611,13 +611,13 @@ fn the_vault_rules_fold_into_the_policy_settings_document() {
     );
     // Folding twice adds nothing.
     let once = args.clone();
-    fold_vault_into_claude_settings(&mut args);
+    fold_vault_into_claude_settings(&mut args, &[]);
     assert_eq!(args, once);
 
     // Without a policy document the standalone vault flag stays as it was.
     let mut alone = strings(&["--print", "--settings"]);
     alone.push(claude_vault_settings().unwrap());
     let before = alone.clone();
-    fold_vault_into_claude_settings(&mut alone);
+    fold_vault_into_claude_settings(&mut alone, &[]);
     assert_eq!(alone, before);
 }

@@ -134,22 +134,48 @@ the whole root closed; the run directory a step was *granted* (its prompt names
 `{{run.artifacts_dir}}`, so `read_only_repos` passes it as `--add-dir` for Claude
 and a `"<dir>"="read"` entry for Codex) is opened again, **read-only**. A launch
 with no grant (a discussion, a task worker, an ACP runtime, a step that does not
-name the path) reads no run at all. `core/artifacts_reach.rs` derives the grant
-from the launch arguments themselves and builds each runtime's rules:
+name the path) reads no run at all. The grant is **typed, never parsed**: it is
+the `read_only_dirs` Kronn built for the step, kept by `ReadOnlyRepos`
+(`granted_dirs`) and handed to `try_spawn_granted`; no layer reads it back out of
+an argument vector, which also carries the prompt, the system prompt (the
+repository's instructions, skills, MCP context) and the ticket text, any of which
+can spell `--add-dir <victim run>` or `"<victim run>"="read"`. Every typed grant
+is still vetted (`vetted_grant`): absolute, no `..` component, the directory
+itself not a link (`symlink_metadata`), canonicalised, its canonical parent the
+canonical root, and its name a lowercase hyphenated UUID (the name Kronn gives a
+run), so an uppercase spelling on a case-insensitive volume is never a grant. Only
+the canonical own directory reaches a rule. `core/artifacts_reach.rs` builds each
+runtime's rules:
 
 | Runtime | Root closed | Own run opened |
 |---|---|---|
 | Seatbelt (Codex, every wrapped launch) | `(deny file-read* file-write*)` on the root and its real path, after every other rule | `(allow file-read*)` on the own dir (a later rule wins), plus `file-read-metadata` on the root itself; writes stay denied |
 | bubblewrap | empty tmpfs over the resolved root (the root is created before the launch so the mount has a target) | `--ro-bind` of the own dir on top, after the tmpfs |
 | Claude's own sandbox (policy launches, task workers) | `sandbox.filesystem.denyRead` and `denyWrite` on the root | `sandbox.filesystem.allowRead` on the own dir (an allow inside a denied read path re-opens it) |
-| Claude's Read, Edit and Write tools | `Edit` and `Write` denied on the root; `Read` denied on the whole root with no grant | with a grant, a deny cannot be carved out by an allow, so each *other* entry of the root present at the launch is denied by its literal path (at most 200; the sandbox and `blockReadsOutsideWorkingDirectories` still hold beyond) |
+| Claude's Read, Edit and Write tools | `Edit` and `Write` denied on the root; `Read` denied on the whole root with no grant | with a grant, a deny cannot be carved out by an allow, so each *other* entry of the root present at the launch is denied by its literal path. A root with more than 200 other entries (or one that cannot be listed) fails closed: no grant, the whole root denied and no `allowRead` |
+
+A Claude launch with a grant is **not** wrapped in Kronn's OS sandbox: an OS
+sandbox does not nest (`sandbox_apply` fails inside one) and Claude's own, set
+`failIfUnavailable`, would refuse to start. Its shell is confined by the
+sandbox settings above; its file tools by the permission rules plus
+`permissions.blockReadsOutsideWorkingDirectories`, which the read-only policy
+always sets. Per the settings schema of the installed Claude Code 2.1.285 that
+setting refuses "file-tool reads (Read, Grep, Glob, LSP) outside the working
+directories in every permission mode", and the own run is the only `--add-dir`
+under the root: it is what closes a run created after the launch, and Grep and
+Glob over the root. No `Glob(...)` or `Grep(...)` deny is emitted: the same
+release's settings guidance says path rules use `Read(path)` for reads and that
+`Glob(path)` rules "are not matched by file permission checks", so they would be
+inert.
 
 Like the data-dir rule it follows the owner's vault-protection setting and the
 host's sandbox. Limits: a Claude launch's literal Read denies name the runs that
 exist when it starts (a run created later is closed by the sandbox and by the
 working-directory limit, not by a rule of its own); on Linux the bubblewrap
-mounts were not exercised live, only their arguments are tested.
-[src: file: backend/src/core/artifacts_reach.rs:1-35]
+mounts were not exercised live, only their arguments are tested; the Claude
+`allowRead` precedence and the working-directory limit are read from the
+installed binary's own text, not exercised in a live Claude run.
+[src: file: backend/src/core/artifacts_reach.rs:1-45]
 
 ## Loopback is not the owner
 

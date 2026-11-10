@@ -152,7 +152,7 @@ fn safe_run_id(run_id: &str) -> bool {
 
 /// What the sweep and the migration may touch: a directory named exactly as
 /// Kronn names a run (a hyphenated lowercase UUID).
-fn is_run_dir_name(name: &str) -> bool {
+pub(crate) fn is_run_dir_name(name: &str) -> bool {
     uuid::Uuid::parse_str(name).is_ok_and(|id| id.hyphenated().to_string() == name)
 }
 
