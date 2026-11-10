@@ -160,10 +160,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:10661-10665#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:10667-10716#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:9072-9096#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:39369-39470#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:10721-10725#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:10727-10776#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:9132-9156#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:39768-39869#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -209,8 +209,8 @@ delivery manifest and diff, then choose one of:
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
   [src: file: backend/src/core/worktree.rs:2301-2329#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:2564-2584#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:2509-2561#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2723-2743#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:2668-2721#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -224,12 +224,60 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2481-2488#integration_target]
+[src: file: backend/src/core/worktree.rs:2640-2647#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
 keeps local workers useful without asking the model that produced the change to
 be its own quality gate.
+
+### Who settles a doc-citation conflict
+
+Two lanes that touch the same cited file both re-anchor the same
+citation lines of the same doc, and the integration merge
+of the target into the candidate then conflicts on text that differs only by line
+numbers. That conflict is Kronn's to settle, not the worker's and not the
+principal's (KT-1669). When **every** conflict hunk is in a doc the citation gate
+reads (`docs/` and `backend/docs/`, release notes aside) and its two sides differ
+only inside those markers, the integration, without a worker turn, takes the
+target's side for those hunks.
+
+The re-anchoring itself does not wait for a conflict. On **every** candidate,
+conflicted or not, the integration:
+
+1. re-anchors the citations of every doc onto the merged files, the same
+   computation `make docs-reanchor BASE=merge` runs mid-merge, and stages the
+   result into the merge commit. A branch that already descends from the target
+   (nothing to merge) gets the same re-anchoring in a commit of its own;
+2. compares the citations that do not resolve in the candidate with those that
+   did not resolve on the target, doc by doc, and requires that no citation that
+   resolved on the target is unresolved now. A citation already broken on the
+   target never blocks a merge;
+3. records it. The merge commit body counts what was settled, the journal keeps
+   how many anchors moved, and the accepted delivery report carries an
+   `integration:` attention point naming the docs, so a reviewer sees the worker
+   was not asked.
+
+Everything else still goes back to the worker, as for any merge conflict: a
+conflict on prose or code, even beside citation-only hunks, and a citation the
+candidate leaves unresolved that resolved on the target (its symbol is gone, it
+moved too far to be guessed, two occurrences are equally near, or the doc to
+rewrite has unstaged changes). That bounce undoes the merge (or the
+re-anchoring commit) and names the exact citations (`doc:line [src: …] reason`)
+in the worker's message and in the principal's notice.
+
+A lane therefore keeps only the citations of the docs it edits resolving, which
+is its own gate, and never rewrites the target's anchors to dodge a conflict: the
+integration moves every anchor its code shift only displaced, in any doc, so the
+integration branch stays green on the strict `docs_citations_resolve_in_the_repo`
+test without a release-time sweep. A citation the lane breaks for good (symbol
+removed or renamed) is the lane's to fix; the worker brief says so. The merge a
+worker finishes with `task_exec_commit` runs the same settlement.
+[src: file: backend/src/core/worktree.rs:2378-2482#build_candidate_detailed]
+[src: file: backend/src/core/worktree.rs:2517-2580#settle_branch_docs]
+[src: file: backend/src/core/docs_citations/merge.rs:306-322#resolve_anchor_only_conflicts]
+[src: file: backend/src/core/docs_citations/merge.rs:685-745#newly_unresolved]
+[src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]
 
 ### A DoD item the principal checks live, after integration
 

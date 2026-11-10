@@ -20,7 +20,7 @@ the target checkout's uncommitted files. Immediately before fast-forwarding,
 HEAD and cleanliness. A changed HEAD or dirty target is refused; unrelated
 files in the primary checkout are neither cleaned nor used as a blocker.
 Backup refs, review evidence and durable saga checkpoints remain unchanged.
-[src: file: backend/src/core/worktree.rs:2564-2584#fast_forward_target_to]
+[src: file: backend/src/core/worktree.rs:2722-2742#fast_forward_target_to]
 
 ## Regression evidence
 

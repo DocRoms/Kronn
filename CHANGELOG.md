@@ -13,6 +13,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Orchestration: an integration whose only conflicts are doc-citation line
+  numbers no longer goes back to the worker (KT-1669). The integration takes the
+  target's side. Every candidate, conflicted or not, is re-anchored across all
+  docs (a branch already on the target gets a commit of its own) and must leave
+  no citation unresolved that resolved on the target; a citation already broken
+  there never blocks. The accepted delivery report carries an `integration:`
+  attention point with the docs and how many anchors moved. Any other conflict,
+  or a citation the candidate newly leaves unresolved (its symbol is gone), still
+  goes back with the exact `doc:line [src: …]` list. The worker brief now asks a
+  lane to keep only its own docs' citations resolving.
 - UI: one permanent bell for everything running in Kronn (KT-1658, phase 1 of
   the KT-334 attention center). It replaces the spinner next to Config, the
   « N en cours » text that jumped to the discussions and the audits popover. The

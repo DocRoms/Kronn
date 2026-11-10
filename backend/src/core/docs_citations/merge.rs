@@ -15,7 +15,7 @@
 
 use super::diff_map::DiffMap;
 use super::{
-    file_citation_anchored, is_checked_doc, markers_at, reanchor_doc, suggested_span,
+    check_doc, file_citation_anchored, is_checked_doc, markers_at, reanchor_doc, suggested_span,
     DocCitationFailure, ReanchorOutcome,
 };
 use crate::core::anti_halluc::{anchor_miss, anchor_miss_in};
@@ -66,7 +66,39 @@ impl From<String> for SettleError {
     }
 }
 
+/// What the integration did to the doc citations without the worker (KT-1669):
+/// what the delivery card says so a reviewer knows it was not asked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settlement {
+    /// The docs whose conflicts were only citation anchors (none for a merge
+    /// that had no conflict).
+    pub docs: Vec<String>,
+    /// Citations re-anchored onto the merged files.
+    pub moved: usize,
+    /// The docs those citations are in.
+    pub reanchored: Vec<String>,
+}
+
+/// The distinct doc paths, sorted.
+fn sorted_names<'a>(docs: impl Iterator<Item = &'a PathBuf>) -> Vec<String> {
+    let names: BTreeSet<String> = docs.map(|doc| doc.to_string_lossy().into_owned()).collect();
+    names.into_iter().collect()
+}
+
 impl MergeDocs {
+    /// The settlement to report; `None` unless a conflict was settled or a
+    /// citation was moved, whether the merge conflicted or not.
+    pub fn settlement(&self) -> Option<Settlement> {
+        if self.resolved.is_empty() && self.outcome.rewritten.is_empty() {
+            return None;
+        }
+        Some(Settlement {
+            docs: sorted_names(self.resolved.iter()),
+            moved: self.outcome.rewritten.len(),
+            reanchored: sorted_names(self.outcome.rewritten.iter().map(|(doc, ..)| doc)),
+        })
+    }
+
     /// Every doc the settling changed or staged.
     pub fn touched(&self) -> BTreeSet<PathBuf> {
         self.resolved
@@ -81,11 +113,18 @@ impl MergeDocs {
         if self.resolved.is_empty() && self.outcome.rewritten.is_empty() {
             return None;
         }
-        Some(format!(
-            "Doc citations: {} anchor-only conflict(s) resolved to the target's text, {} citation(s) re-anchored.",
-            self.resolved.len(),
+        let mut parts = Vec::new();
+        if !self.resolved.is_empty() {
+            parts.push(format!(
+                "{} anchor-only conflict(s) resolved to the target's text",
+                self.resolved.len()
+            ));
+        }
+        parts.push(format!(
+            "{} citation(s) re-anchored",
             self.outcome.rewritten.len()
-        ))
+        ));
+        Some(format!("Doc citations: {}.", parts.join(", ")))
     }
 }
 
@@ -432,17 +471,23 @@ fn path_set(root: &Path, args: &[&str]) -> Result<BTreeSet<String>, String> {
 /// target's, or a merge base) to the merged file, and only a citation whose
 /// cited file the merge changed is considered.
 fn plan_reanchor(root: &Path) -> Result<Plan, String> {
-    let theirs = git_lines(root, &["rev-parse", "MERGE_HEAD"])?
+    plan_reanchor_against(root, "MERGE_HEAD")
+}
+
+/// [`plan_reanchor`] with `theirs` the revision the branch is compared with: the
+/// merge in progress's `MERGE_HEAD`, or the target tip a branch already
+/// descends from (no merge, and the branch's own code shift is the evidence).
+fn plan_reanchor_against(root: &Path, theirs: &str) -> Result<Plan, String> {
+    let theirs = git_lines(root, &["rev-parse", &format!("{theirs}^{{commit}}")])?
         .into_iter()
         .next()
-        .ok_or("MERGE_HEAD does not resolve")?;
+        .ok_or("the target does not resolve")?;
     let ours = git_lines(root, &["rev-parse", "HEAD"])?
         .into_iter()
         .next()
         .ok_or("HEAD does not resolve")?;
     let mut revs = vec![theirs.clone(), ours.clone()];
-    for base in git_lines(root, &["merge-base", "--all", "HEAD", "MERGE_HEAD"]).unwrap_or_default()
-    {
+    for base in git_lines(root, &["merge-base", "--all", "HEAD", &theirs]).unwrap_or_default() {
         if !revs.contains(&base) {
             revs.push(base);
         }
@@ -556,7 +601,17 @@ pub fn reanchor_merge_in_progress(root: &Path) -> Result<ReanchorOutcome, Settle
 /// citation the merge broke and the evidence cannot place is not guessed: it
 /// fails the step, again writing nothing.
 pub fn reanchor_and_stage(root: &Path, resolved: Vec<PathBuf>) -> Result<MergeDocs, SettleError> {
-    let plan = plan_reanchor(root)?;
+    stage_plan(root, plan_reanchor(root)?, resolved)
+}
+
+/// [`reanchor_and_stage`] for a branch that already descends from `target`, so
+/// there is no merge to finish: the citations its own code shift moved are
+/// re-anchored and staged, the caller commits them.
+pub fn reanchor_branch_and_stage(root: &Path, target: &str) -> Result<MergeDocs, SettleError> {
+    stage_plan(root, plan_reanchor_against(root, target)?, Vec::new())
+}
+
+fn stage_plan(root: &Path, plan: Plan, resolved: Vec<PathBuf>) -> Result<MergeDocs, SettleError> {
     refuse_unclean(&plan)?;
     if !plan.unplaced.is_empty() {
         let docs: BTreeSet<String> = plan
@@ -602,6 +657,106 @@ pub fn reanchor_and_stage(root: &Path, resolved: Vec<PathBuf>) -> Result<MergeDo
 pub fn settle_merge_docs(root: &Path) -> Result<MergeDocs, SettleError> {
     let resolved = resolve_anchor_only_conflicts(root)?;
     reanchor_and_stage(root, resolved)
+}
+
+/// A scratch directory, removed on drop.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Result<Self, String> {
+        let dir = std::env::temp_dir().join(format!("kronn-citations-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The citations of the checked docs in `root`'s working tree that do not
+/// resolve although they resolved on `target`, as `(doc, "doc:line [src: …]
+/// reason")`: what the candidate broke. Whether one failed already is read from
+/// the target's own doc against the target's own cited files, so a break that
+/// predates the merge never blocks it. A doc the target did not have is all new.
+pub fn newly_unresolved(root: &Path, target: &str) -> Result<Vec<(String, String)>, String> {
+    let failures = super::check_corpus(root);
+    if failures.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The cited files as the target holds them: only those the failing
+    // citations name, under the same relative paths.
+    let scratch = Scratch::new()?;
+    let mut written = BTreeSet::new();
+    for (_, failure) in &failures {
+        let Some((path, ..)) = file_citation_anchored(&failure.citation) else {
+            continue;
+        };
+        if Path::new(&path).has_root() || path.contains("..") || !written.insert(path.clone()) {
+            continue;
+        }
+        if let Some(text) = blob(root, target, &path) {
+            let at = scratch.0.join(&path);
+            if let Some(parent) = at.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+            }
+            std::fs::write(&at, text)
+                .map_err(|error| format!("cannot write {}: {error}", at.display()))?;
+        }
+    }
+    let mut broke_before: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut had: BTreeSet<String> = BTreeSet::new();
+    for (doc, _) in &failures {
+        let name = doc.to_string_lossy().into_owned();
+        if !had.insert(name.clone()) {
+            continue;
+        }
+        if let Some(text) = blob(root, target, &name) {
+            for failure in check_doc(&text, &scratch.0) {
+                broke_before.insert((name.clone(), failure.citation));
+            }
+        } else {
+            had.remove(&name);
+        }
+    }
+    Ok(failures
+        .into_iter()
+        .filter(|(doc, failure)| {
+            let name = doc.to_string_lossy().into_owned();
+            !(had.contains(&name) && broke_before.contains(&(name, failure.citation.clone())))
+        })
+        .map(|(doc, failure)| {
+            (
+                doc.to_string_lossy().into_owned(),
+                format!(
+                    "{}:{} [src: {}] {}",
+                    doc.display(),
+                    failure.line,
+                    failure.citation,
+                    failure.reason
+                ),
+            )
+        })
+        .collect())
+}
+
+/// Puts the docs [`reanchor_branch_and_stage`] staged back as `HEAD` has them.
+pub fn undo_staged(root: &Path, docs: &MergeDocs) -> Result<(), String> {
+    let touched: Vec<String> = docs
+        .touched()
+        .iter()
+        .map(|doc| doc.to_string_lossy().into_owned())
+        .collect();
+    if touched.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["checkout", "HEAD", "--"];
+    args.extend(touched.iter().map(String::as_str));
+    git_stdout(root, &args).map(drop)
 }
 
 #[cfg(test)]
