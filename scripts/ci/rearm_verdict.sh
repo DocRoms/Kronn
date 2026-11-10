@@ -8,11 +8,21 @@
 # when CI Tests or CI Build completes for a pull-request head.
 #
 # Only the newest CI Verdict run of that head is looked at, and only its gate
-# job for the completed workflow, and only when that job was cut short (a
-# cancelled or timed-out conclusion, or a cancelled step). A job that passed or
-# failed already told the truth and is left alone. The re-run job reads the
-# upstream result itself: this script never decides a verdict, so an unknown
-# result can never turn green here.
+# job for the completed workflow. That job is re-run when
+#   - it was cut short (a cancelled or timed-out conclusion, or a cancelled
+#     step), or
+#   - it failed: a verdict that ran on the label event before the upstream run
+#     existed, or against an earlier attempt of it, is red for a result that has
+#     since changed (KT-1523). So is one whose label guard failed on a label
+#     list that has since changed: the guard reads the labels live
+#     (require_label.sh), so the re-run judges the pull request as it is now
+#     (the #507 reopen case). A job that repeated the right failure just repeats
+#     it again: the re-run is cheap and idempotent.
+# A job that passed already told the truth and is left alone. A failed gate is
+# re-armed at most REARM_MAX_ATTEMPTS attempts, so a verdict that keeps
+# re-running its upstream run, or a label that really is absent, cannot loop.
+# The re-run job reads the upstream result itself: this script never decides a
+# verdict, so an unknown result can never turn green here.
 #
 # The run must be completed before one of its jobs can be re-run, and its
 # sibling gate may still be polling: the script waits for that (REARM_WAIT_SECONDS).
@@ -24,7 +34,8 @@
 #
 # Environment: GH_TOKEN, GITHUB_REPOSITORY, UPSTREAM_NAME ("CI Tests" or
 # "CI Build"), HEAD_SHA; optional REARM_WAIT_SECONDS (default 900),
-# REARM_POLL_SECONDS (default 15), VERDICT_WORKFLOW (default ci-verdict.yml).
+# REARM_POLL_SECONDS (default 15), REARM_MAX_ATTEMPTS (default 3),
+# VERDICT_WORKFLOW (default ci-verdict.yml).
 set -uo pipefail
 
 : "${GITHUB_REPOSITORY:?}" "${UPSTREAM_NAME:?}" "${HEAD_SHA:?}"
@@ -46,6 +57,10 @@ fi
 
 deadline=$(( $(date +%s) + ${REARM_WAIT_SECONDS:-900} ))
 poll="${REARM_POLL_SECONDS:-15}"
+max_attempts="${REARM_MAX_ATTEMPTS:-3}"
+if ! [[ "$max_attempts" =~ ^[0-9]+$ ]]; then
+  max_attempts=3
+fi
 
 if ! run="$(gh api "$repo/actions/workflows/$workflow/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
   --jq "[.workflow_runs[] | select(.head_sha == \"$HEAD_SHA\")] | sort_by(.id) | last | .id // empty")"; then
@@ -64,8 +79,11 @@ while :; do
     job="$(gh api "$repo/actions/runs/$run/jobs?per_page=100" \
       --jq "[.jobs[] | select(.name == \"$gate\")] | last
         | if . == null then \"\"
-          else \"\(.id) \(.status == \"completed\" and (.conclusion == \"cancelled\" or .conclusion == \"timed_out\"
-            or (.conclusion == \"failure\" and ([.steps[]? | select(.conclusion == \"cancelled\")] | length) > 0)))\"
+          else (.status == \"completed\") as \$done
+            | ([.steps[]? | select(.conclusion == \"cancelled\")] | length > 0) as \$cut
+            | (\$done and (.conclusion == \"cancelled\" or .conclusion == \"timed_out\" or (.conclusion == \"failure\" and \$cut))
+                or (\$done and .conclusion == \"failure\" and (.run_attempt // 1) < $max_attempts)) as \$rearm
+            | \"\(.id) \(\$rearm)\"
           end" 2>/dev/null)" || job=""
     if [ "${job##* }" != "true" ]; then
       echo "Run $run did not give up on $gate: nothing to re-arm."

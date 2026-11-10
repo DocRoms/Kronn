@@ -96,7 +96,7 @@ fn a_secret_file_cited_by_line_gets_its_presence_form() {
     assert_eq!(fixed.fixes[0].kind, "secret_presence");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlink_to_a_secret_file_gets_its_presence_form() {
     // `key-view.txt -> .ssh/deploy-key`: the written name hides the key.
@@ -119,7 +119,7 @@ fn a_symlink_to_a_secret_file_gets_its_presence_form() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_directory_link_chain_to_a_secret_gets_its_presence_form() {
     // `keys -> .aws -> vault`: the canonical file `vault/review-key` lost `.aws`.

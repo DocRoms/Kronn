@@ -76,6 +76,7 @@ async fn run(step: &WorkflowStep, replies: Vec<(u16, serde_json::Value)>) -> Ste
         None,
         Some(&tiers),
         Some(&crate::models::setup::HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some(server.uri()),
             nvidia: None,
         }),
@@ -554,6 +555,7 @@ fn step_cache_totals_sum_reporting_attempts_and_stay_unknown_otherwise() {
 /// full-access setting is off is refused, though its LiteLLM author ran with
 /// full access, and OpenCode is never started; with the setting on it runs.
 #[cfg(unix)]
+// puts a python3-shebang fake opencode on PATH (test_support::write_fake_opencode), which Windows cannot exec
 #[tokio::test]
 #[serial_test::serial(acp_adapter_env_toggle)]
 async fn a_native_reviewer_never_inherits_its_author_s_full_access() {
@@ -626,6 +628,7 @@ async fn a_native_reviewer_never_inherits_its_author_s_full_access() {
             None,
             Some(&tiers),
             Some(&crate::models::setup::HttpEndpoints {
+                tools: Default::default(),
                 lite_llm: Some(server.uri()),
                 nvidia: None,
             }),
@@ -637,10 +640,22 @@ async fn a_native_reviewer_never_inherits_its_author_s_full_access() {
         )
         .await
         .result;
-        let review = &result.agent_provenance.as_ref().unwrap().attempts[1];
-        assert_eq!(review.role, WorkflowAgentAttemptRole::Review);
-        assert_eq!(review.agent, AgentType::OpenCode);
-        assert_eq!(review.succeeded, saved, "saved {saved}");
+        let attempts = &result.agent_provenance.as_ref().unwrap().attempts;
+        if saved {
+            let review = &attempts[1];
+            assert_eq!(review.role, WorkflowAgentAttemptRole::Review);
+            assert_eq!(review.agent, AgentType::OpenCode);
+            assert!(review.succeeded);
+        } else {
+            // Refused before the author spends a turn (KT-1150).
+            assert_eq!(result.status, RunStatus::Failed);
+            assert!(
+                result.output.starts_with("native_full_access_required:"),
+                "{}",
+                result.output
+            );
+            assert!(attempts.is_empty(), "never launched: {attempts:?}");
+        }
         assert_eq!(
             out.path().join("config.json").exists(),
             saved,

@@ -1384,7 +1384,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn a_skill_md_behind_a_symbolic_link_is_not_read() {
         let outside = tempfile::tempdir().unwrap();

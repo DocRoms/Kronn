@@ -383,7 +383,7 @@ mod tests {
         cleanup(&tmp);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn json_merge_refuses_symlinked_parent_directory() {
         use std::os::unix::fs::symlink;
@@ -404,7 +404,7 @@ mod tests {
         cleanup(&outside);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn json_merge_refuses_symlinked_parent_before_creating_nested_directories() {
         use std::os::unix::fs::symlink;
@@ -428,7 +428,7 @@ mod tests {
         cleanup(&outside);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn atomic_write_never_follows_the_legacy_predictable_temp_symlink() {
         use std::os::unix::fs::symlink;
@@ -3196,7 +3196,7 @@ args = ["@example/old-mcp"]
     // so we can drive it from this test module.
     use crate::core::mcp_scanner::{CodexSync, CopilotSync, HostMcpSync};
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; runs a POSIX shell script fixture
     #[test]
     #[serial]
     fn host_mcp_command_available_respects_the_host_container_boundary() {
@@ -3345,7 +3345,7 @@ args = ["@example/old-mcp"]
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     #[serial]
     fn docker_host_bin_uvx_survives_the_codex_plan() {

@@ -389,7 +389,7 @@ fn oss_standards_are_quiet_on_a_complete_project() {
 }
 
 // ── bounds and safety ──
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn symlinks_are_never_followed() {
     let outside = proj();

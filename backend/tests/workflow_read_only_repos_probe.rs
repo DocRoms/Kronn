@@ -1,5 +1,5 @@
 //! Run explicitly on an authenticated host with OS sandbox privileges.
-#![cfg(unix)]
+#![cfg(unix)] // live probe of the claude and codex OS sandboxes (sandbox-exec/bwrap), run by hand on a POSIX host
 
 use kronn::agents::runner::{start_agent_with_config, AgentStartConfig};
 use kronn::models::AgentType;

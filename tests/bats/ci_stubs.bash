@@ -58,3 +58,33 @@ sleeps() {
 posted() {
     grep -qxF "POST $1" "$FIXTURES/calls.log" 2>/dev/null
 }
+
+# The negative checks below fail by an explicit `return 1`. Never write `! cmd`
+# in the middle of a test: bats does not fail on a negated command that
+# succeeds, so the check would pass whatever the script did.
+
+# Fails when the stubbed `gh` was asked to POST <url>.
+not_posted() {
+    if posted "$1"; then
+        echo "unexpected POST $1" >&2
+        return 1
+    fi
+}
+
+# Fails when the stubbed `gh` POSTed anything.
+no_post() {
+    if grep -q '^POST' "$FIXTURES/calls.log" 2>/dev/null; then
+        echo "unexpected POST:" >&2
+        grep '^POST' "$FIXTURES/calls.log" >&2
+        return 1
+    fi
+}
+
+# Fails when a call of the stubbed `gh` or `sleep` matches the fixed string <text>.
+no_call() {
+    if grep -qF -- "$1" "$FIXTURES/calls.log" 2>/dev/null; then
+        echo "unexpected call matching '$1':" >&2
+        grep -F -- "$1" "$FIXTURES/calls.log" >&2
+        return 1
+    fi
+}

@@ -72,7 +72,7 @@ fn the_seed_and_the_codes_are_not_stored_in_clear() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
 #[test]
 fn the_record_is_private_to_its_owner() {
     use std::os::unix::fs::PermissionsExt;

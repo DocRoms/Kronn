@@ -265,7 +265,7 @@ fn two_runs_in_the_same_second_keep_separate_backup_folders() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlinked_target_refuses_the_whole_reinstall_before_any_write() {
     let (tmp, project, template) = fixture();

@@ -488,12 +488,30 @@ fn every_declared_principal_tool_has_an_arm_in_its_selected_dispatcher() {
     }
 }
 
+/// KT-1651 — a launched discussion without a project makes its working folder
+/// under the home; here that home is the test's scratch one, never `~/.kronn`.
+fn assert_discussion_dir_is_scratch(home: &crate::agents::runner::ScratchHome, child: &str) {
+    let folder = home.path().join(".kronn/discussions").join(child);
+    assert!(folder.is_dir(), "{} was not created", folder.display());
+    assert!(
+        folder
+            .canonicalize()
+            .unwrap()
+            .starts_with(std::env::temp_dir().canonicalize().unwrap()),
+        "{} is outside the temp dir",
+        folder.display()
+    );
+}
+
 #[tokio::test]
+#[serial_test::serial] // HOME is process-wide: the discussion folder must land in a scratch home
 async fn quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit() {
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let home = crate::agents::runner::ScratchHome::enter();
 
     let provider = MockServer::start().await;
     Mock::given(method("POST")).and(path("/v1/chat/completions"))
@@ -543,7 +561,8 @@ async fn quick_prompt_saved_http_settings_reach_each_provider_turn_after_templat
         })
         .await
         .unwrap();
-    let stream = crate::api::discussions::streaming::make_agent_stream(state, child, None).await;
+    let stream =
+        crate::api::discussions::streaming::make_agent_stream(state, child.clone(), None).await;
     let body = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         stream.into_response().into_body().collect(),
@@ -554,6 +573,7 @@ async fn quick_prompt_saved_http_settings_reach_each_provider_turn_after_templat
     .to_bytes();
     let events = String::from_utf8_lossy(&body);
     assert!(events.contains("Saved settings applied."), "{events}");
+    assert_discussion_dir_is_scratch(&home, &child);
     let requests = provider.received_requests().await.unwrap();
     let chats: Vec<Value> = requests
         .iter()
@@ -716,10 +736,13 @@ async fn qp_run_estimates_count_only_the_principal_s_project() {
 /// The saved effort reaches launch, where a case mismatch is refused with the
 /// catalogue's spelling rather than the generic "absent" reason.
 #[tokio::test]
+#[serial_test::serial] // HOME is process-wide: the discussion folder must land in a scratch home
 #[serial_test::serial(model_catalog_reasoning_modes)]
 async fn quick_prompt_native_run_names_a_mistyped_case_override_at_launch() {
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
+
+    let home = crate::agents::runner::ScratchHome::enter();
 
     let state = state_with_prompts().await;
     let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode);
@@ -778,7 +801,8 @@ async fn quick_prompt_native_run_names_a_mistyped_case_override_at_launch() {
     assert!(run.ok, "{}", run.content);
     let child = run.content["disc_id"].as_str().unwrap().to_string();
 
-    let stream = crate::api::discussions::streaming::make_agent_stream(state, child, None).await;
+    let stream =
+        crate::api::discussions::streaming::make_agent_stream(state, child.clone(), None).await;
     let body = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         stream.into_response().into_body().collect(),
@@ -792,6 +816,7 @@ async fn quick_prompt_native_run_names_a_mistyped_case_override_at_launch() {
         events.contains("the catalogue lists 'high', not 'High'"),
         "the refusal must name the actual mismatch, not the generic catalogue-absence reason: {events}"
     );
+    assert_discussion_dir_is_scratch(&home, &child);
 }
 
 #[tokio::test]

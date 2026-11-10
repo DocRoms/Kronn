@@ -2346,7 +2346,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_leaving_the_workspace_is_refused() {
         // The textual path looks innocent; only canonicalisation catches it.
@@ -3387,7 +3387,6 @@ mod tests {
 
     /// Build a throwaway repo so the git tools are exercised for real rather than
     /// mocked: the point of these tools is that they talk to an actual repository.
-    #[cfg(unix)]
     fn tiny_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
@@ -3406,7 +3405,6 @@ mod tests {
         dir
     }
 
-    #[cfg(unix)]
     #[test]
     fn git_status_reports_branch_and_uncommitted_work() {
         // The production gap: an agent read .git/HEAD by hand to find the branch,
@@ -3430,7 +3428,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn git_diff_returns_uncommitted_work_and_can_narrow_to_one_file() {
         let repo = tiny_repo();
@@ -3450,7 +3448,7 @@ mod tests {
         assert!(narrowed["diff"].as_str().unwrap().contains("a.txt"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_revision_cannot_smuggle_an_option_and_a_path_cannot_escape() {
         // The model supplies these two strings, so they are the attack surface: an
@@ -3462,7 +3460,7 @@ mod tests {
         assert!(!std::path::Path::new("/tmp/pwned").exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn git_log_is_bounded_and_parsed() {
         let repo = tiny_repo();
@@ -3474,7 +3472,7 @@ mod tests {
         assert!(huge["count"].as_u64().unwrap() <= 100);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn git_log_path_restricts_history_to_the_touched_path() {
         let repo = tiny_repo();
@@ -3505,7 +3503,7 @@ mod tests {
         assert!(refused.contains("outside"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn git_commit_requires_a_message_and_named_paths_before_staging_anything() {
         let repo = tiny_repo();
@@ -3542,7 +3540,7 @@ mod tests {
         assert_eq!(removed.len(), 1);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn worker_commit_keeps_only_the_configured_sign_off() {
         let repo = tiny_repo();
@@ -3581,7 +3579,7 @@ mod tests {
         .contains("empty"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn git_commit_advances_head_for_only_the_explicitly_named_files() {
         let repo = tiny_repo();
@@ -3639,7 +3637,7 @@ mod tests {
         repo.join(".git/MERGE_HEAD").exists()
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn worker_commit_finishes_a_merge_with_both_parents() {
         let repo = tiny_repo();
@@ -3676,7 +3674,7 @@ mod tests {
         assert_eq!(resolved, "main and target\n");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn worker_commit_names_unresolved_conflicts_and_leaves_the_merge_alone() {
         let repo = tiny_repo();
@@ -3705,7 +3703,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn worker_commit_refuses_a_stray_staged_path_while_finishing_a_clean_merge() {
         let repo = tiny_repo();
@@ -3780,7 +3778,7 @@ mod tests {
         assert_eq!(shallow["count"], json!(1));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_workspace_reached_through_a_symlink_still_reports_relative_paths() {
         // The defect this pins: `resolve_in_workspace` canonicalises, the caller's
