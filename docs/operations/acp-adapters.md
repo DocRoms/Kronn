@@ -47,10 +47,10 @@ with a resume hint, and `full_access` cannot override their worker policy.
 The common process launcher supplies delivery context and worktree-local
 temporary files. It removes inherited worker context from ordinary turns and
 the permissive container marker from workers.
-[src: file: backend/src/agents/runner.rs:5114-5142#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5133-5161#adapter_task_worker_args]
 [src: file: backend/src/agents/runner.rs:3974-3992#task_worker_route_policy]
 [src: file: backend/src/agents/runner.rs:4573#acp_resume_id]
-[src: file: backend/src/agents/runner.rs:14910-14920#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:15003-15013#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/tests/adapter_worker_policy.rs:335-446#worker]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -62,8 +62,8 @@ redacted runner diagnostic as prompt failures, never as a clean success.
 [src: file: backend/src/acp/adapter_process.rs:171-232#AdapterTurn]
 [src: file: backend/src/acp/adapter_process.rs:235-254#install]
 [src: file: backend/src/acp/adapter_process.rs:292-302#cancel]
-[src: file: backend/src/agents/runner.rs:6062-6078#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:6126-6136#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:6078-6094#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:6142-6152#acp_failure_diagnostic]
 
 ## Packaged desktop bridge
 
@@ -76,7 +76,7 @@ The desktop resolves it through Tauri's resource directory and sets
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
 [src: file: desktop/src-tauri/src/main.rs:1153-1170#KRONN_INTERNAL_MCP_EXECUTABLE]
-[src: file: backend/src/agents/runner.rs:6470-6489#resolve_internal_mcp_command]
+[src: file: backend/src/agents/runner.rs:6489-6508#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`
 before starting agent dispatch and MCP configuration sync. Generated desktop
@@ -90,7 +90,7 @@ with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:13370-13378#claude_task_worker_platform_check]
+[src: file: backend/src/agents/runner.rs:13386-13394#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
@@ -114,7 +114,7 @@ to the displayed reply. Thought, tool-content and unknown labelled updates do
 not become answer text; tool and usage events still follow their own paths.
 Older runtimes with unlabelled content retain their compatibility path.
 An echo without an agent message therefore supplies no answer text.
-[src: file: backend/src/acp.rs:1526-1533#is_answer]
+[src: file: backend/src/acp.rs:1527-1534#is_answer]
 [ACP session updates](https://agentclientprotocol.com/protocol/v1/prompt-turn#session-updates)
 
 Native tool banners retain the reported tool name, a bounded redacted input
@@ -189,7 +189,7 @@ re-seeds the adapter and resumes the same CLI conversation, but a different
 project path never reuses that identifier.
 [src: file: backend/src/db/acp_runtime_sessions.rs:7-13#SessionKey]
 [src: file: backend/src/agents/runner.rs:2932-2948#session_key]
-[src: file: backend/src/agents/runner.rs:5753-5762#persist]
+[src: file: backend/src/agents/runner.rs:5769-5778#persist]
 [src: file: backend/src/acp/codex_adapter.rs:566-570#NativeSessionId]
 
 ## Security model
@@ -289,7 +289,7 @@ project path never reuses that identifier.
   injection without putting values in adapter argv/payloads yet, so they omit
   such an entry. A credential in any entry's arguments omits that entry. The
   omission is per entry: every other authorized entry of the project stays.
-  [src: file: backend/src/agents/runner.rs:6204-6277#acp_project_mcp_servers]
+  [src: file: backend/src/agents/runner.rs:6223-6296#acp_project_mcp_servers]
   [src: file: backend/src/acp/claude_adapter.rs:123-247#initialize]
   [src: file: backend/src/acp/codex_adapter.rs:139-245#codex_project_mcp_override]
 - **Kronn's normalized ACP usage event retains token counts, not cost.** This
@@ -323,7 +323,7 @@ workflow Agent step is launched with. Undeclared, the argv is unchanged.
   [src: file: backend/src/acp/codex_adapter.rs:139-168#codex_project_mcp_override]
   [src: file: backend/src/models/workflows.rs:1677-1698#validate]
 - Native ACP agents: `session/new` offers only the narrowed bridge, or no
-  server. [src: file: backend/src/agents/runner.rs:6181-6202#declared_mcp_servers]
+  server. [src: file: backend/src/agents/runner.rs:6200-6221#declared_mcp_servers]
 - The bridge, given `--step-tools=`, lists and dispatches only those tools
   and sends no catalogue instructions on `initialize` (only the decision-card bullet when `disc_append` is declared).
   [src: file: backend/scripts/disc-introspection-mcp.py:5956-5971#_declared_step_tools]

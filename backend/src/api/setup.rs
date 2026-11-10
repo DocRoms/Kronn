@@ -1320,9 +1320,9 @@ fn exposure_refused(status: StatusCode, message: impl Into<String>) -> ExposureR
 /// a trap for the owner, who would find no way back in the UI. What carries the
 /// exposure is a TLS-terminating proxy on this machine, declared together with
 /// its public `https://` origin. Declaring one withdraws the loopback bypass
-/// (every proxied request is a loopback request), so the reply hands the token
-/// over for the local UI to keep. Takes effect on the next restart (the host is
-/// only bound at boot).
+/// (every proxied request is a loopback request), so the reply hands over a token
+/// minted by that very call (never the standing one) for the local UI to keep.
+/// Takes effect on the next restart (the host is only bound at boot).
 pub async fn set_network_exposure(
     State(state): State<AppState>,
     Json(req): Json<SetNetworkExposureRequest>,
@@ -1340,6 +1340,7 @@ pub async fn set_network_exposure(
         // Change a copy, adopt it only once saved: a failed save must not leave
         // a live token or host that was never stored.
         let mut next = config.clone();
+        let proxy_declared_before = crate::core::net_expose::proxy_declared_for(&config.server);
         if let Some(origin) = req.public_origin.as_deref() {
             let origin = origin.trim();
             next.server.public_origin = if origin.is_empty() {
@@ -1384,15 +1385,27 @@ pub async fn set_network_exposure(
         };
         // A proxy fronting Kronn puts the network behind a loopback peer: it
         // needs the token as much as a direct LAN bind does.
+        //
+        // The plaintext token leaves this route only when THIS call made it: a
+        // loopback caller before the proxy is declared (strict_localhost still
+        // off) must not be able to read the standing one. Without a token one is
+        // minted; on the transition to a declared proxy the standing one is
+        // rotated, as the local UI has to be handed a token to keep once the
+        // loopback bypass is withdrawn.
+        let mut issued = None;
         if req.exposed || declared {
             next.server.auth_enabled = true;
-            if next.server.auth_token.as_deref().unwrap_or("").is_empty() {
+            let no_token = next.server.auth_token.as_deref().unwrap_or("").is_empty();
+            let proxy_transition = declared && !proxy_declared_before;
+            if no_token || proxy_transition {
                 if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
                     return exposure_refused(StatusCode::CONFLICT, locked);
                 }
-                next.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+                let token = uuid::Uuid::new_v4().to_string();
+                next.server.auth_token = Some(token.clone());
                 next.server.auth_token_session_only = false;
                 next.server.auth_locked = false;
+                issued = Some(token);
             }
         }
         if let Err(e) = config::save(&next).await {
@@ -1403,9 +1416,6 @@ pub async fn set_network_exposure(
         }
         // The recovery proof the owner will need behind this proxy, ready now.
         crate::core::net_expose::arm_local_proof(&next.server);
-        let issued = (req.tls_terminated_by_proxy == Some(true))
-            .then(|| next.server.auth_token.clone())
-            .flatten();
         *config = next;
         issued
     };

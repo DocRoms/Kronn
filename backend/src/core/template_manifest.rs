@@ -20,6 +20,7 @@ const LEGACY_SPEC_SHA256: &[&str] = &[
     "c51a1c6a9cfbd6732c0b3fe87c7a29c1f546abdb87fbffa8e1f5e2cb6669aa3a", // 66ce8fb48
     "392b2001c9fe86a543dc35717b44098bef68b0cb511943ac4092b77b50489a02", // 1fa3fe163
     "d0d39859a2cf31968de74b1737bd2c47d0bb6e587c3b6f5e3371682ce7a448de", // 913658a85
+    "fdee567d41a0fd0b01f5887f1d06fb1ce4c2000200fcd97d65f606409784f78a", // b30260a25
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

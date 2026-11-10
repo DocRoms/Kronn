@@ -55,8 +55,8 @@ How the choice is made, in one place: every native agent process goes through
 own OS sandbox. A Claude launch whose `--settings` enable it keeps it (and tells
 it the data directory); a Codex launch that did not turn its sandbox off has it
 replaced; everything else is wrapped as it is.
-[src: file: backend/src/core/vault_guard.rs:132-142#launch_sandbox]
-[src: file: backend/src/core/vault_guard.rs:319-338#wrap_launch]
+[src: file: backend/src/core/vault_guard.rs:150-160#launch_sandbox]
+[src: file: backend/src/core/vault_guard.rs:343-362#wrap_launch]
 
 - macOS wraps with `sandbox-exec` (allow by default, one deny on the data
   directory). Linux wraps with `bwrap`: the data directory is replaced by an empty
@@ -69,7 +69,7 @@ replaced; everything else is wrapped as it is.
 - Claude's rules name the directory as `Read(//abs/path/**)` (two slashes: a path
   from the filesystem root), for `Read`, `Edit` and `Write`. A deny rule is checked
   before the permission mode, so the bypass flag does not lift it.
-  [src: file: backend/src/core/vault_guard.rs:416-426#claude_vault_permission_deny]
+  [src: file: backend/src/core/vault_guard.rs:461-470#claude_vault_permission_deny]
   `sandbox.filesystem.denyRead` is a documented field of Claude Code's sandbox
   settings ("paths to deny reading within the sandbox, merged with paths from
   `Read(...)` deny permission rules", read from the installed 2.1.285 binary's
@@ -89,7 +89,7 @@ therefore starts Codex with `--sandbox=danger-full-access` (dropping any
 | `read-only` (Codex's default for `exec`) | the temp directories, `CODEX_HOME` (else `~/.codex`), `/dev`; `~/.npm` for an `npx` launch | everything | denied, read and write |
 | `workspace-write` (the task worker) | the same, plus the worktree; the worktree's `.git` stays read-only | everything | denied, read and write |
 
-[src: file: backend/src/core/vault_guard.rs:242-275#codex_seatbelt_profile]
+[src: file: backend/src/core/vault_guard.rs:260-293#codex_seatbelt_profile]
 
 macOS is allow-by-default with a broad `file-write*` deny, the allowed roots, the
 `.git` deny, and the data-directory deny last (the last matching rule wins). Linux
@@ -155,7 +155,7 @@ exist on the host, as given and with their links resolved, in two tiers:
   `runner::reach_is_full_access(launch_full_access, has_read_only_grants)`. No
   native agent can hold such grants today (`read_only_repos` is refused for any
   agent but Claude Code and Codex), so on that route it is defense in depth.
-  [src: file: backend/src/core/vault_guard.rs:548-554#launch_reach]
+  [src: file: backend/src/core/vault_guard.rs:642-648#launch_reach]
 - Owner decision (2026-11-10): the owner's rule above holds for an agent in full
   access: `~/.ssh`, `~/.aws`, `gh` stay reachable, as in the owner's terminal.
   Only the restricted launches lose them. The validations keep the shared files
@@ -164,7 +164,7 @@ exist on the host, as given and with their links resolved, in two tiers:
   `trust_sandbox::credential_confinement` still builds a confinement, which hides
   the stores and no Kronn data; it is `None` only when the host has no sandbox, or
   when the setting is off and there is no store to hide.
-  [src: file: backend/src/core/vault_guard.rs:566-581#launch_confinement_for]
+  [src: file: backend/src/core/vault_guard.rs:651-666#launch_confinement_for]
 - A path that does not exist is not listed (bubblewrap cannot mount over it);
   a store created after the launch is not covered until the next one. A `HOME`
   other than the user's is not followed.
@@ -335,10 +335,64 @@ else the platform cache directory. A base inside a protected directory, or one
 that contains it, is refused and the default is used. Details:
 [workflow-read-only-repos.md](../operations/workflow-read-only-repos.md#run-artifacts-directory).
 
-For now an Agent step can read any run's artifacts, not only its own, when its
-prompt names the path; per-run confinement is planned (KT-1587, 0.15.3). Exec
-outputs kept there are scrubbed of known secrets; reports and screenshots a
-step writes are not.
+Exec outputs kept there are scrubbed of known secrets; reports and screenshots a
+step writes are not, which is why a launch reaches **its own run's directory
+only** (KT-1587). Every native agent launch (`try_spawn_granted`, the ACP runtimes) has
+the whole root closed; the run directory a step was *granted* (its prompt names
+`{{run.artifacts_dir}}`, so `read_only_repos` passes it as `--add-dir` for Claude
+and a `"<dir>"="read"` entry for Codex) is opened again, **read-only**. A launch
+with no grant (a discussion, a task worker, an ACP runtime, a step that does not
+name the path) reads no run at all. The grant is **typed, never parsed**: it is
+the `read_only_dirs` Kronn built for the step, kept by `ReadOnlyRepos`
+(`granted_dirs`) and handed to `try_spawn_granted`: on the direct route by
+`start_agent_with_config`, and on the **default adapted ACP route** (Claude and
+Codex) through `AdapterLaunchOptions::run_artifacts`, which both adapters pass
+to `try_spawn_granted` on every turn (the no-grant `try_spawn` is test-only, so
+no production spawn can drop it). No layer reads it back out of
+an argument vector, which also carries the prompt, the system prompt (the
+repository's instructions, skills, MCP context) and the ticket text, any of which
+can spell `--add-dir <victim run>` or `"<victim run>"="read"`. Every typed grant
+is still vetted (`vetted_grant`): absolute, no `..` component, the directory
+itself not a link (`symlink_metadata`), canonicalised, its canonical parent the
+canonical root, and its name a lowercase hyphenated UUID (the name Kronn gives a
+run), so an uppercase spelling on a case-insensitive volume is never a grant. Only
+the canonical own directory reaches a rule. The same vetting runs **first, on the
+path as given**, when `ReadOnlyRepos::resolve_with_dirs` receives it
+(`artifacts_reach::vet_run_dir`, before `canonicalize` could turn a `..` or a leaf
+link into a plain run directory): a path under the root that fails is no grant at
+all, so it is in neither the typed grant nor the roots and reaches no `--add-dir`
+(Claude) and no read entry (Codex). Read-only directories outside the root keep
+their behaviour. `core/artifacts_reach.rs` builds each runtime's rules:
+
+| Runtime | Root closed | Own run opened |
+|---|---|---|
+| Seatbelt (Codex, every wrapped launch) | `(deny file-read* file-write*)` on the root and its real path, after every other rule | `(allow file-read*)` on the own dir (a later rule wins), plus `file-read-metadata` on the root itself; writes stay denied |
+| bubblewrap | empty tmpfs over the resolved root (the root is created before the launch so the mount has a target) | `--ro-bind` of the own dir on top, after the tmpfs |
+| Claude's own sandbox (policy launches, task workers) | `sandbox.filesystem.denyRead` and `denyWrite` on the root | `sandbox.filesystem.allowRead` on the own dir (an allow inside a denied read path re-opens it) |
+| Claude's Read, Edit and Write tools | `Edit` and `Write` denied on the root; `Read` denied on the whole root with no grant | with a grant, a deny cannot be carved out by an allow, so each *other* entry of the root present at the launch is denied by its literal path. A root with more than 200 other entries (or one that cannot be listed) fails closed: no grant, the whole root denied, no `allowRead`, and no `--add-dir <own>` in the arguments either (`ClaudeReach::withheld`, removed by `fold_vault_into_claude_settings`), so the arguments and the rules agree |
+
+A Claude launch with a grant is **not** wrapped in Kronn's OS sandbox: an OS
+sandbox does not nest (`sandbox_apply` fails inside one) and Claude's own, set
+`failIfUnavailable`, would refuse to start. Its shell is confined by the
+sandbox settings above; its file tools by the permission rules plus
+`permissions.blockReadsOutsideWorkingDirectories`, which the read-only policy
+always sets. Per the settings schema of the installed Claude Code 2.1.285 that
+setting refuses "file-tool reads (Read, Grep, Glob, LSP) outside the working
+directories in every permission mode", and the own run is the only `--add-dir`
+under the root: it is what closes a run created after the launch, and Grep and
+Glob over the root. No `Glob(...)` or `Grep(...)` deny is emitted: the same
+release's settings guidance says path rules use `Read(path)` for reads and that
+`Glob(path)` rules "are not matched by file permission checks", so they would be
+inert.
+
+Like the data-dir rule it follows the owner's vault-protection setting and the
+host's sandbox. Limits: a Claude launch's literal Read denies name the runs that
+exist when it starts (a run created later is closed by the sandbox and by the
+working-directory limit, not by a rule of its own); on Linux the bubblewrap
+mounts were not exercised live, only their arguments are tested; the Claude
+`allowRead` precedence and the working-directory limit are read from the
+installed binary's own text, not exercised in a live Claude run.
+[src: file: backend/src/core/artifacts_reach.rs:1-45]
 
 ## Loopback is not the owner
 
@@ -373,6 +427,7 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
 | Where | What |
 |---|---|
 | `core/vault_guard.rs` | which launches are wrapped, the Claude rules |
+| `core/artifacts_reach.rs` | the run artifacts root closed to a launch but for its granted run (KT-1587) |
 | `core/home_credentials.rs` | the credential stores of the home an agent must not read, and where the environment moves them (KT-1656) |
 | `db/credential_scrub.rs` | every column that can hold agent output, and the two passes that mask it after the fact (KT-1656) |
 | `agents/runner.rs` `try_spawn` | the one spawn point of every native agent |

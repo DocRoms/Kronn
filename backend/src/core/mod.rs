@@ -5,6 +5,7 @@ pub mod anti_halluc;
 pub mod api_access;
 pub mod approved_scripts;
 pub mod argv_roles;
+pub mod artifacts_reach;
 pub mod audit_baseline;
 pub mod audit_detectors;
 pub mod audit_documents;

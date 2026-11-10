@@ -70,7 +70,7 @@ Three Docker services behind nginx gateway:
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8701-8811#LeadingThinkingFilter]
+  [src: file: backend/src/agents/runner.rs:8720-8830#LeadingThinkingFilter]
   [src: file: backend/src/api/discussions/streaming.rs:5467-5468#strip_leading_thinking_blocks]
 
 ### Discussions
@@ -221,7 +221,7 @@ killed on client-requested cancellation. Partial responses retain an explicit
 timeout notice.
 [src: file: backend/src/models/setup.rs:396-403#agent_global_timeout_min]
 [src: file: backend/src/models/setup.rs:600-613#MAX_AGENT_GLOBAL_TIMEOUT_MIN]
-[src: file: backend/src/api/setup.rs:1706-1708#clamp_stall_timeout_min]
+[src: file: backend/src/api/setup.rs:1716-1718#clamp_stall_timeout_min]
 [src: file: backend/src/api/discussions/streaming.rs:4501-4525#agent_stall_timeout_min]
 [src: file: backend/src/api/discussions/orchestration.rs:389-403#configured_agent_global_timeout]
 
@@ -257,7 +257,7 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5843-5851#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5946-5961#begin_tool]
+[src: file: backend/src/agents/runner.rs:5859-5867#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5965-5980#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
 
