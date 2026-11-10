@@ -5,6 +5,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use super::prompt_limit::PromptLimit;
 use crate::core::endpoint_reachability::{StartRefusal, UnreachableReason, SHARED, START_BUDGET};
 use crate::models::setup::HttpEndpoints;
 use crate::models::{
@@ -286,6 +287,97 @@ pub(crate) fn preflight_refusal_card(
         detail_http_status(&failure.detail),
         summary,
         &crate::core::model_catalog::preflight_refusal_diagnostic(failure),
+        tier,
+        retry_dispatch_id,
+    )
+}
+
+/// KT-1607 — the card for a prompt a model cannot take: the provider refused
+/// it as too large (HTTP 413, or a 400/422 naming the context window). It
+/// states the size, the limit it is held against and what to do, instead of the
+/// "model not found" a bare 400 used to read as.
+pub(crate) fn prompt_too_large_card(
+    language: &str,
+    status: Option<u16>,
+    prompt_bytes: usize,
+    limit: &PromptLimit,
+    detail: &str,
+    tier: ModelTier,
+    retry_dispatch_id: Option<&str>,
+) -> String {
+    let model = limit.model.as_str();
+    let (bytes, window) = (limit.bytes, limit.window_tokens);
+    let code = |separator: &str| {
+        status
+            .map(|status| format!("HTTP {status}{separator}"))
+            .unwrap_or_default()
+    };
+    let summary = match language {
+        "fr" => format!(
+            "« {model} » a refusé la requête ({}prompt trop long) : {prompt_bytes} octets envoyés, \
+             alors que l'estimation de Kronn pour ce modèle est de {bytes} octets (fenêtre d'environ \
+             {window} tokens). Joignez le contenu en fichier pour que l'agent le lise par morceaux, \
+             raccourcissez le prompt, ou choisissez un modèle à plus grande fenêtre.",
+            code(", ")
+        ),
+        "es" => format!(
+            "«{model}» rechazó la solicitud ({}prompt demasiado largo): {prompt_bytes} bytes enviados, \
+             cuando la estimación de Kronn para este modelo es de {bytes} bytes (ventana de unos \
+             {window} tokens). Adjunta el contenido como archivo para que el agente lo lea por partes, \
+             acorta el prompt o elige un modelo con una ventana mayor.",
+            code(", ")
+        ),
+        "zh" => format!(
+            "“{model}”拒绝了该请求（{}提示过长）：发送了 {prompt_bytes} 字节，而 Kronn 对该模型的估计上限为 \
+             {bytes} 字节（约 {window} 个 token 的上下文窗口）。请将内容作为文件附上，让智能体分段读取，\
+             或缩短提示，或选择上下文窗口更大的模型。",
+            code("，")
+        ),
+        _ => format!(
+            "“{model}” refused the request ({}prompt too long): {prompt_bytes} bytes sent, while \
+             Kronn's estimate for this model is {bytes} bytes (a ~{window}-token context window). \
+             Attach the content as a file for the agent to read in parts, shorten the prompt, or \
+             pick a model with a larger context window.",
+            code(", ")
+        ),
+    };
+    card(
+        "agent_error",
+        status,
+        &summary,
+        detail,
+        tier,
+        retry_dispatch_id,
+    )
+}
+
+/// KT-1607 — the card for a run that ended with nothing written to the
+/// discussion: no reply and no refusal card of its own. `reason` is the
+/// diagnostic the dispatch settled on.
+pub(crate) fn unexplained_end_card(
+    language: &str,
+    reason: &str,
+    tier: ModelTier,
+    retry_dispatch_id: Option<&str>,
+) -> String {
+    let shown: String = reason.chars().take(300).collect();
+    let summary = match language {
+        "fr" => format!(
+            "Le run s'est terminé sans réponse : {shown}. Relancez-le, ou choisissez un autre modèle ou agent."
+        ),
+        "es" => format!(
+            "La ejecución terminó sin respuesta: {shown}. Vuelve a lanzarla o elige otro modelo o agente."
+        ),
+        "zh" => format!("运行结束但没有回复：{shown}。请重试，或选择其他模型或智能体。"),
+        _ => format!(
+            "The run ended without a reply: {shown}. Retry it, or pick another model or agent."
+        ),
+    };
+    card(
+        "agent_error",
+        None,
+        &summary,
+        reason,
         tier,
         retry_dispatch_id,
     )

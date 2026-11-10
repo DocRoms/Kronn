@@ -259,7 +259,7 @@ Ollama `/api/show` and LiteLLM `/model/info` may confirm vision for the exact
 model. A missing declaration never causes an image to be sent speculatively.
 [src: file: backend/src/agents/vision.rs:520-551#attach_to_chat_body]
 [src: file: backend/src/agents/vision.rs:145-169#ollama_show_vision]
-[src: file: backend/src/api/discussions/streaming.rs:2739-2780#http_context_images]
+[src: file: backend/src/api/discussions/streaming.rs:2772-2813#http_context_images]
 
 Every withheld image is named in the model's context with an explicit instruction
 not to describe its contents, and a way for the user to supply the information.

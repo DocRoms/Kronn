@@ -8,7 +8,7 @@ human-gated proposal cards and delta-only prompt notifications are implemented.
 `[src: file: backend/src/api/planning.rs:223-264#get_discussion_plan]` `[src: file: backend/src/api/planning.rs:311-358#decide_proposal_item]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:326-650#plan_get]`
 `[src: file: frontend/src/pages/PlanningPage.tsx:191-216#withDiscussion]`
-`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3739-3770#planning_change_count]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:786-998#plan-panel-list]` `[src: file: backend/src/api/discussions/streaming.rs:3771-3802#planning_change_count]`
 
 This document is the implementation brief for a future Planning workspace and
 the smaller discussion-plan panel that exposes the same task data inside a
@@ -171,7 +171,7 @@ Planning state changes, agents also receive a compact change notification and
 then pull only the required details. This prevents unrelated agents from paying
 for unused task content while ensuring “create the discussion plan” works on a
 new room. `[src: file: backend/src/api/disc_prompts.rs:491-538#planning_notice]`
-`[src: file: backend/src/api/discussions/streaming.rs:3739-3770#planning_change_count]`
+`[src: file: backend/src/api/discussions/streaming.rs:3771-3802#planning_change_count]`
 
 The intended read surface is:
 

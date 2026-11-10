@@ -2352,6 +2352,23 @@ pub fn clear_discussion_workspace(conn: &Connection, id: &str) -> Result<bool> {
     Ok(affected > 0)
 }
 
+/// Ids of the archived review discussions (KT-1645) that still point at a
+/// worktree: the ones whose checkout is due for release.
+pub fn archived_review_ids_with_workspace(conn: &Connection) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM discussions
+          WHERE archived = 1 AND workspace_mode = ?1 AND workspace_path IS NOT NULL
+          ORDER BY updated_at",
+    )?;
+    let ids = statement
+        .query_map(
+            params![crate::core::worktree::REVIEW_WORKSPACE_MODE],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
 /// Set or clear the two test-mode tracking fields together.
 ///
 /// `restore_branch = Some(...)` + `stash_ref = Option<...>`: user just entered

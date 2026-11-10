@@ -104,7 +104,7 @@ the same policy at every launch, so a revoke applies from the next turn; revokin
 a `code` grant (or lowering the trust level that gave it) also stops the room's
 running turn, which still holds the checkout open.
 [src: file: backend/src/agents/read_only_repos.rs:785-841#resolve_room]
-[src: file: backend/src/api/discussions/messaging.rs:1432-1461#stop_running_turn]
+[src: file: backend/src/api/discussions/messaging.rs:1499-1528#stop_running_turn]
 
 A writable root never opens what a later program runs or what is secret, whether
 or not the path exists when the turn starts:
