@@ -449,7 +449,7 @@ stored as the JSON value; if it does not parse, the step fails the same way.
 Other text is published as a string. The Exec output is scrubbed of the
 project's GitHub token before it reaches the run record or a Page.
 `[src: file: backend/src/workflows/exec_step.rs:60-62#MAX_PUBLISH_OUTPUT_BYTES]`
-`[src: file: backend/src/workflows/exec_step.rs:437-442#secrets]`
+`[src: file: backend/src/workflows/exec_step.rs:453-458#secrets]`
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
@@ -616,11 +616,11 @@ tokens. Recheck the selected target with execution preflight before launching,
 preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
-[src: file: backend/src/models/orchestration.rs:1189-1212#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:14145-14334#reassign_execution]
+[src: file: backend/src/models/orchestration.rs:1230-1253#TaskWorkerTier]
+[src: file: backend/src/api/orchestration.rs:14192-14381#reassign_execution]
 [src: file: backend/src/api/orchestration.rs:15449-15491#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:15686-15728#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:15630-15700#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:15733-15775#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:15677-15747#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -699,7 +699,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4869-4877#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4957-4965#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -747,7 +747,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:4989-4999#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5077-5087#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 

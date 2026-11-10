@@ -2114,6 +2114,27 @@ mod tests {
         assert!(error.to_string().contains("adobe"));
     }
 
+    /// KT-1643 — the instance's own address is a built-in: a workflow that
+    /// calls back to Kronn writes `{{run.kronn_url}}`, never a port, and no
+    /// variable or trigger field of that name can redirect the call.
+    #[test]
+    fn the_kronn_url_is_a_built_in_no_variable_can_replace() {
+        let mut ctx = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 5));
+        assert!(
+            ctx.render_strict("{{run.kronn_url}}/api/contribution/preflight")
+                .is_err(),
+            "unset outside a run"
+        );
+        ctx.set_builtin("run.kronn_url", "http://127.0.0.1:23140");
+        ctx.set("run.kronn_url", "http://attacker.example");
+        assert_eq!(
+            ctx.render_strict("{{run.kronn_url}}/api/contribution/preflight")
+                .unwrap(),
+            "http://127.0.0.1:23140/api/contribution/preflight"
+        );
+        assert!(is_reserved_name("run.kronn_url"));
+    }
+
     /// `run.id` and `time.now` are trusted for their origin: a variable,
     /// trigger field or source variable of that name never shadows them.
     #[test]

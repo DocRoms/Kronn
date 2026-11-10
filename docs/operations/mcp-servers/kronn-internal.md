@@ -530,7 +530,7 @@ before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
 `[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:302-349#check_command_line]`
-`[src: file: backend/src/api/orchestration.rs:11596-11606#validations_refusal]`
+`[src: file: backend/src/api/orchestration.rs:11600-11610#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls
 `task_exec_reassign({task_execution_id, validations, reason})` — `validations`
@@ -541,14 +541,14 @@ the reason and the previous set); nothing is relaunched and earlier validation
 results stay as evidence. It is refused while the execution is Integrating,
 Validating or Applying, once it is Done, Failed or Cancelled, and for an
 execution of a campaign run, whose gates are the campaign's shared policy.
-`[src: file: backend/src/db/orchestration.rs:7170-7263#replace_execution_validations]`
+`[src: file: backend/src/db/orchestration.rs:7259-7352#replace_execution_validations]`
 The swap is a change of `task_exec_reassign` and not a tool of its own because
 every declaration is paid for on every session (`mcp_surface_budget.py`), and
 because that tool is already the principal's amendment of a live execution:
 principal-only, reason-journaled, room and evidence kept. `task_exec_review` would
 have let a self-reviewing worker weaken its own gates and ties the swap to the
 persisted `ReviewDecision v1`; `task_exec_prepare` is documented as mutation-free.
-`[src: file: backend/src/api/orchestration.rs:14518-14529#ExecutionAmendment]`
+`[src: file: backend/src/api/orchestration.rs:14565-14576#ExecutionAmendment]`
 
 **Review-round limit (KT-1345).** `task_exec_prepare` and `task_exec_launch` take an optional
 `max_review_rounds`: an integer from 1 to 1000, or `"unlimited"` (no cap; a worker looping on a review
@@ -561,7 +561,7 @@ paid for inside the catalogue budget; on an execution the limit itself escalated
 back to its worker, unless the campaign's `token_budget` is spent: the answer then says `stop_reason:
 token_budget_exhausted` and nothing is scheduled (a `request_changes` or a worker reassignment is stopped the same way). The whole contract, the sentinel and the UI are in
 [worker review rounds](../worker-review-rounds.md).
-`[src: file: backend/src/api/orchestration.rs:16612#extend_execution_review_rounds]`
+`[src: file: backend/src/api/orchestration.rs:16659#extend_execution_review_rounds]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played
@@ -578,9 +578,9 @@ decision, or an approved integration held on a coded cause. The principal may th
 the parent checkout and recorded SHAs, refuses dirty or unrelated states, and
 returns the existing terminal result when the same successful resume is
 retried. The tool cannot advance provisioning- or review-owned checkpoints.
-[src: file: backend/src/api/orchestration.rs:16041-16095#compact_next_action]
-[src: file: backend/src/api/orchestration.rs:12888-12996#resume_blocked_apply]
-[src: file: backend/src/api/orchestration.rs:16031-16075#task_exec_resume]
+[src: file: backend/src/api/orchestration.rs:16088-16142#compact_next_action]
+[src: file: backend/src/api/orchestration.rs:12935-13043#resume_blocked_apply]
+[src: file: backend/src/api/orchestration.rs:16078-16122#task_exec_resume]
 [src: file: backend/scripts/disc-introspection-mcp.py:6299-6377#call_task_exec_status]
 
 An approved delivery the integration sends back (a red validation, a merge
@@ -597,8 +597,8 @@ candidate are not run again. The relaunched worker is stood down first, and the
 call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
-[src: file: backend/src/api/orchestration.rs:5671-5808#send_back] [src: file: backend/src/api/orchestration.rs:13023-13100#revalidate_sent_back_execution]
-[src: file: backend/src/db/orchestration.rs:5051-5124#reopen_approval_after_rework]
+[src: file: backend/src/api/orchestration.rs:5671-5808#send_back] [src: file: backend/src/api/orchestration.rs:13070-13147#revalidate_sent_back_execution]
+[src: file: backend/src/db/orchestration.rs:5140-5213#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
 review rounds, delivered `head_sha`, last error, the latest candidate's
@@ -616,7 +616,7 @@ A rework starts a new attempt and a relaunched dispatch starts a new process;
 both keep their earlier entries. Only the execution's current dispatch may add
 one, so a replaced worker cannot relabel it. `view: "compact"` carries the
 `session_id` of the latest two. An HTTP worker has no CLI session and lists none.
-[src: file: backend/src/db/orchestration.rs:2241-2315#record_worker_cli_session]
+[src: file: backend/src/db/orchestration.rs:2333-2407#record_worker_cli_session]
 [src: file: backend/src/api/delivery_publication.rs:266-398#ServedModelRecorder]
 
 `task_exec_status({task_execution_id, wait_for, timeout_secs})` blocks until
@@ -629,8 +629,8 @@ integration refusal, campaign pause, undelivered worker, terminal state)
 address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
-`[src: file: backend/src/api/orchestration.rs:15918-15970#EXEC_WAIT_DEFAULT_SECS]`
-`[src: file: backend/src/db/orchestration.rs:6003-6045#pin_principal_cli_session]`
+`[src: file: backend/src/api/orchestration.rs:15965-16017#EXEC_WAIT_DEFAULT_SECS]`
+`[src: file: backend/src/db/orchestration.rs:6092-6134#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native
@@ -647,7 +647,7 @@ catalogue, and no agent could delegate to it or learn that image and video
 generation existed at all. `media` lists one entry per configured model and
 stays absent otherwise, so reading it is enough — an agent is never told about a
 modality the generation request would then refuse.
-[src: file: backend/src/api/orchestration.rs:15184-15249#MediaModality]
+[src: file: backend/src/api/orchestration.rs:15231-15296#MediaModality]
 
 `agent_list` answers in every discussion, a room or not (0.13.2). Reading the
 catalogue is not a delegation: nothing in it is secret or scoped to one party.
@@ -761,8 +761,8 @@ event rows separately persist `actor_session_id` (the CLI session id, or
 of the same provider remain distinguishable in the audit trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5812-5827#_task_exec_identity]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5903-5912#_task_exec_principal]`
-`[src: file: backend/src/api/orchestration.rs:14567-14577#principal_cli_is_authorized]`
-`[src: file: backend/src/api/orchestration.rs:14605-14643#room_agent_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:14614-14624#principal_cli_is_authorized]`
+`[src: file: backend/src/api/orchestration.rs:14652-14690#room_agent_is_authorized]`
 `[src: file: backend/src/api/agent_tools.rs:4103-4139#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
@@ -794,14 +794,14 @@ input schema — the model supplies only `offer_id`; there is no fallback to
 agent-type/alias matching or any other permissive resolution if either is missing.
 [src: file: backend/src/api/orchestration.rs:6854-7196#accept_worker_offer_and_attach]
 [src: file: backend/src/api/orchestration.rs:6994-7012#worker_cli_session_id]
-[src: file: backend/src/api/orchestration.rs:16839-16900#source_binding_session_id]
+[src: file: backend/src/api/orchestration.rs:16886-16947#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6433-6479#call_task_exec_accept_worker_offer]
 
 `task_exec_deliver` does not perform a room return: the execution transitions to
 `AwaitingReview` while the CLI is already in its principal room. The legacy
 terminal return remains only as compatibility for executions accepted by older
 bridges that physically moved a session into a child room.
-[src: file: backend/src/api/orchestration.rs:32936-33066#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
+[src: file: backend/src/api/orchestration.rs:32983-33113#every_terminal_state_keeps_execution_scoped_cli_in_its_origin]
 [src: file: backend/src/db/cli_worker_bindings.rs:75-188#return_to_origin]
 
 Collapsing the live and reload-stable identities, as an earlier revision did,
@@ -812,7 +812,7 @@ and fails the request explicitly (`source_agent, source_session_id, and
 source_binding_session_id are required`), not silently with a stale or wrong
 attach. If `task_exec_accept_worker_offer` refuses this way, reconnect the
 `kronn-internal` MCP server for that session before retrying.
-`[src: file: backend/src/api/orchestration.rs:16839-16900#source_binding_session_id]`
+`[src: file: backend/src/api/orchestration.rs:16886-16947#source_binding_session_id]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:6423-6448#source_binding_session_id]`
 
 `task_exec_reassign(reason)` persists the reason and includes it verbatim in
@@ -889,7 +889,7 @@ required by `task_exec_deliver` without turning the HTTP tool catalogue into
 arbitrary Git access.
 `[src: file: backend/src/api/agent_workspace_tools.rs:567-574#git_commit_payload] [src: file: backend/src/api/agent_workspace_tools.rs:615-692#git_commit_payload_with_data_dir_lock]`
 `[src: file: backend/src/api/agent_tools.rs:3699-3771#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1580-1591#DISCUSSION_ONLY]`
-`[src: file: backend/src/db/orchestration.rs:947-979#managed_working_execution_for_workspace]`
+`[src: file: backend/src/db/orchestration.rs:956-988#managed_working_execution_for_workspace]`
 
 ## Rich discussion output
 

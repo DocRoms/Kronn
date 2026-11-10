@@ -102,7 +102,7 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
 [src: file: backend/src/api/orchestration.rs:4430-4442#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:13512-13523#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:13559-13570#settle_cancelled_workspace]
 
 ### The sweeper's rules
 

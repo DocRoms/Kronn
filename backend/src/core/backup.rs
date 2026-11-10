@@ -173,7 +173,7 @@ pub fn snapshot_database(
             std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600))?;
         }
         // SQLite does not sync a VACUUM INTO target.
-        std::fs::File::open(&staged)?.sync_all()?;
+        crate::core::durable_file::sync_file(&staged)?;
         std::fs::rename(&staged, dest)?;
         Ok(std::fs::metadata(dest)?.len())
     })();

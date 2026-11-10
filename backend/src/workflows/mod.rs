@@ -10,6 +10,7 @@ pub mod api_call_ratelimit;
 pub mod api_call_security;
 pub mod api_call_step;
 pub mod authoring_doctrine;
+pub mod autocode_issue_template;
 pub mod batch_apicall_step;
 pub mod batch_step;
 pub mod big_ticket_template;

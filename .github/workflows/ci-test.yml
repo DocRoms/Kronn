@@ -40,6 +40,11 @@ env:
   # build-frontend at `pnpm install`. Documented knob of the package's install
   # script; also set in frontend/Dockerfile + frontend/.npmrc.
   ONNXRUNTIME_NODE_INSTALL: skip
+  # Test builds without debug info and without incremental state: the kronn
+  # test binary is huge, and its debug info swaps the 7 GB macOS runner (~94 min).
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # Anti green-by-skip: every other job is gated on the `ci-test` label, so an

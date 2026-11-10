@@ -765,8 +765,47 @@ pub struct OrchestrationRun {
     /// for a campaign, which falls back among `allowed_agents`.
     #[serde(default)]
     pub quota_fallback_agents: Vec<AgentType>,
+    /// KT-1643 — who reviews each delivery of this campaign, named when it was
+    /// created. `None` only for a campaign that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<CampaignReviewer>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Who reviews the deliveries of a campaign (KT-1643).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CampaignReviewerKind {
+    /// A local agent with the model it reviews with.
+    Agent,
+    /// A model served over HTTP (LiteLLM, NVIDIA, Ollama, a named connection).
+    RemoteModel,
+    /// Nobody answers for the room: the human decides from the UI.
+    Human,
+}
+
+/// The reviewer a campaign names at creation. A delivery is never addressed to
+/// an agent no session serves: `agent` and `model` are what the campaign room
+/// is configured with, `Human` leaves the room to the person.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CampaignReviewer {
+    pub kind: CampaignReviewerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent: Option<AgentType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    /// The named connection of a `Custom` remote model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
+    /// The campaign did not ask for this reviewer: Kronn chose it.
+    #[serde(default)]
+    pub defaulted: bool,
 }
 
 /// The durable unit of work (ADR §1, §3, §4bis).
@@ -1085,6 +1124,7 @@ pub struct OrchestrationRunInput {
     pub auto_continue: bool,
     pub quota_fallback: bool,
     pub quota_fallback_agents: Vec<AgentType>,
+    pub reviewer: Option<CampaignReviewer>,
 }
 
 impl OrchestrationRunInput {
@@ -1109,6 +1149,7 @@ impl OrchestrationRunInput {
             auto_continue: false,
             quota_fallback: false,
             quota_fallback_agents: Vec::new(),
+            reviewer: None,
         }
     }
 }

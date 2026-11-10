@@ -28,7 +28,7 @@ executes only the worktree, maintenance, orchestration and Windows-to-WSL
 launch test groups. An
 unconditional Unix import/chmod in the ACP fixture helper and an unconditional
 Unix symlink in the source-explorer test therefore blocked that Windows job.
-[src: file: .github/workflows/ci-build.yml:215-270#test-backend-portability]
+[src: file: .github/workflows/ci-build.yml:220-275#test-backend-portability]
 [src: url: https://github.com/DocRoms/Kronn/actions/runs/34250607216/job/102143783376]
 
 Only the Unix permissions operation (and the warm-up exec that follows it) is

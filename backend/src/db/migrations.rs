@@ -1063,6 +1063,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "291_workflow_runs_heaviest_output",
         include_str!("sql/291_workflow_runs_heaviest_output.sql"),
     ),
+    (
+        "292_campaign_reviewer",
+        include_str!("sql/292_campaign_reviewer.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
@@ -1345,7 +1349,7 @@ pub(crate) fn backup_before_migration(
             std::fs::remove_file(&staging)?;
         }
         std::fs::copy(path, &staging)?;
-        std::fs::File::open(&staging)?.sync_all()?;
+        crate::core::durable_file::sync_file(&staging)?;
         std::fs::rename(&staging, &backup_path)
     })();
     if let Err(e) = copied {

@@ -30,6 +30,26 @@ Release notes for 0.9.3 and earlier are available in the
   request and resumes the run as soon as it answers; the refused step can be
   moved to another installed agent from the paused run
   (`POST /api/workflow-runs/{id}/quota-agent`).
+- Workflows: the autoCode Issue workflow can run on any Kronn (KT-1643). The
+  instance's address is a built-in, `{{run.kronn_url}}`; `GET
+  /api/contribution/preflight` finds the project by the repository's remote
+  (no fixed id), checks `gh` (installed, logged in, `repo` scope), the clone
+  and a local worker with the command that fixes each failure, and says whether
+  the branch goes straight to the repository or through the contributor's fork
+  (the pull request always targets the repository). The workflows ship with
+  Kronn: `POST /api/workflows/templates/autocode-issue` installs « start the
+  campaign » (preflight, take the issue, task, room, campaign, launch) and
+  « publish the pull request » (fork when needed, push, `gh pr create`) on any
+  instance, with the repository, the target branch (default `main`) and the
+  review rounds (default 10) as launch variables. A campaign records who
+  reviews each delivery and announces it in its room: the reviewer it was
+  created with, else the agent the room already has, else the human. A room is
+  reconfigured only for a reviewer passed explicitly, and the shipped workflow
+  passes the instance's configured remote model when it has one, announced by
+  the preflight and replaceable with the workflow's `reviewer` variable. The
+  steps are `python3` scripts: the install call is refused with what to install
+  while `python3` is not on the PATH, and a run that cannot start it says the
+  same. See [the guide](docs/guides/autocode-issue-workflow.md).
 - API connections: a revoked or expired token is surfaced before the next run
   fails on it (KT-1524). A 401 (or a 403 that names the credential, or a failed
   OAuth refresh) flags the connection until its next successful call: the card
@@ -164,6 +184,8 @@ Release notes for 0.9.3 and earlier are available in the
   `.cargo/config.toml`, a `[patch]`, an `.npmrc`, a workspace registry) and no
   host registry setting or token reaches it; leftovers are swept at startup
   (KT-1649).
+- Windows: Kronn could not start after an upgrade with a pending migration ("Access denied (os error 5)"), and scheduled backups failed. The backup copy was flushed through a read-only handle, which Windows refuses; it is now opened for writing first, and the Windows CI job runs the test (KT-1625, #509).
+
 - An interrupted task execution no longer stays stuck on "recovery decision
   already consumed": it can always resume or deliver, and a resume never
   consumes the decision of a newer interruption (KT-1537, #492).
