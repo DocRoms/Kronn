@@ -7681,6 +7681,27 @@
 /* 2026-06-10 — on_failure compensation fence in the run step list. A green
    rollback step right after the failed one used to read as "the run
    continued"; this banner + the row tint make compensation unmistakable. */
+/* KT-1524 — a run or step that stopped on a refused token. */
+.wf-auth-refused {
+  margin: 10px 0 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  font-size: var(--kr-fs-sm);
+  border-radius: var(--kr-r-md);
+}
+
+.wf-auth-refused strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--kr-error);
+}
+
+.wf-auth-refused p {
+  margin: 4px 0 0;
+}
+
 .wf-rollback-separator {
   margin: 10px 0 6px;
   padding: 6px 10px;
