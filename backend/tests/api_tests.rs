@@ -22574,10 +22574,6 @@ mod cold_api_handlers_tests {
         "/api/discussions/nope/messages",
         serde_json::json!({ "content": "hi" })
     );
-    envelope_delete!(
-        disc_delete_last_agent_messages_unknown,
-        "/api/discussions/nope/messages/last"
-    );
 
     // api/disc_git.rs (was 26 % Lines)
     envelope_get!(disc_git_status_unknown, "/api/discussions/nope/git-status");

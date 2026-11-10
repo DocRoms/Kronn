@@ -692,8 +692,46 @@ describe('discussions.sendMessageStream / reviseMessageStream / runAgent', () =>
       message_id: 'user-message',
       idempotency_key: 'revision-key',
     });
-    expect(onRevised).toHaveBeenCalledWith(receipt);
+    expect(onRevised).toHaveBeenCalledWith({ ...receipt, dropped_targets: 0 });
     expect(onChunk).toHaveBeenCalledWith('new reply');
+  });
+
+  it('reviseMessageStream reports how many departed targets the server dropped', async () => {
+    mockStreamingFetch([
+      sse('message_revised', {
+        event_id: 'e', message_id: 'm', sort_order: 3, revision: 'r',
+        dispatch_job_id: null, duplicate: false, dropped_targets: 2,
+      }),
+      sse('done', {}),
+    ]);
+    const { discussions } = await import('../api');
+    const onRevised = vi.fn();
+    await discussions.reviseMessageStream(
+      'd-1',
+      { message_id: 'm', content: 'x', expected_revision: 'r', idempotency_key: 'k' } as never,
+      vi.fn(), vi.fn(), vi.fn(), undefined, undefined, undefined, onRevised,
+    );
+    expect(onRevised).toHaveBeenCalledWith(expect.objectContaining({ dropped_targets: 2 }));
+  });
+
+  it.each([
+    ['a plain-text reason is appended', { error: 'An agent response is already in progress' }, 'HTTP 409: An agent response is already in progress'],
+    ['a JSON-encoded reason is left out', { error: '{"error":"revision_conflict"}' }, 'HTTP 409'],
+    ['no reason leaves the bare status', { success: false }, 'HTTP 409'],
+  ])('a refused revise: %s', async (_name, body, expected) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(body), {
+      status: 409,
+      headers: { 'content-type': 'application/json' },
+    })));
+    const { discussions } = await import('../api');
+    const onError = vi.fn();
+    await discussions.reviseMessageStream(
+      'd-1',
+      { message_id: 'm', content: 'x', expected_revision: 'r', idempotency_key: 'k' } as never,
+      vi.fn(), vi.fn(), onError,
+    );
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expected);
   });
 
   it('forwards log events to onLog', async () => {

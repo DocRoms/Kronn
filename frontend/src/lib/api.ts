@@ -433,6 +433,21 @@ export function getApiBase(): string {
  * Extracts the duplicated ReadableStream SSE parsing loop used by
  * auditStream, partialAuditStream, fullAuditStream, _streamSSE, etc.
  */
+/** `HTTP <status>`, plus the backend's own plain-text reason when the refusal
+ *  carried one (an `ApiResponse` body). A JSON-encoded reason (e.g. a revision
+ *  conflict payload) is not a sentence for a human, so it is left out. */
+async function sseHttpError(res: Response): Promise<string> {
+  const base = `HTTP ${res.status}`;
+  if (res.ok) return base;
+  try {
+    const body = await res.clone().json() as { error?: unknown };
+    const reason = typeof body?.error === 'string' ? body.error.trim() : '';
+    return reason && !reason.startsWith('{') ? `${base}: ${reason}` : base;
+  } catch {
+    return base;
+  }
+}
+
 async function parseSSEStream(
   res: Response,
   handlers: {
@@ -442,7 +457,7 @@ async function parseSSEStream(
   },
 ) {
   if (!res.ok || !res.body) {
-    handlers.onError(`HTTP ${res.status}`);
+    handlers.onError(await sseHttpError(res));
     return;
   }
 
@@ -2250,6 +2265,7 @@ export const discussions = {
             event_id?: string;
             revision?: string;
             dispatch_job_id?: string | null;
+            dropped_targets?: number;
           };
           if (type === 'chunk' && parsed.text !== undefined) {
             onChunk(parsed.text);
@@ -2279,6 +2295,7 @@ export const discussions = {
               sort_order: parsed.sort_order,
               duplicate: parsed.duplicate ?? false,
               dispatch_job_id: parsed.dispatch_job_id ?? null,
+              dropped_targets: parsed.dropped_targets ?? 0,
             });
           } else if (type === 'done') {
             done();
@@ -2397,9 +2414,6 @@ export const discussions = {
     if (!json.success) throw new Error(json.error ?? 'Upload failed');
     return json.data;
   },
-
-  /** Delete trailing agent/system messages (for retry/edit). */
-  deleteLastAgentMessages: (id: string) => api<void>('DELETE', `/discussions/${id}/messages/last`),
 
   /** KT-580 — the notes of a discussion, for a human. The route existed to
    *  serve `disc_note_list` to agents; nothing on this side ever called it,
@@ -2527,9 +2541,6 @@ export const discussions = {
     'DELETE',
     `/discussions/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`,
   ),
-
-  /** Edit the last user message content. */
-  editLastUserMessage: (id: string, content: string) => api<void>('PATCH', `/discussions/${id}/messages/last`, { content } as SendMessageRequest),
 
   /** Atomically edit a User turn, archive its trailing replies and resend. */
   reviseMessageStream: (

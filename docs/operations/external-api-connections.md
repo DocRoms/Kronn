@@ -141,7 +141,7 @@ Mention the saved alias, such as `@nvidia` or `@company-proxy`, in the message.
 Kronn resolves named connection mentions before canonicalizing the requested
 agent targets, and carries the exact connection identifier in that target.
 [src: file: backend/src/db/external_api_connections.rs:201-235#target_for_connection]
-[src: file: backend/src/api/discussions/messaging.rs:526-558#resolve_connection_mentions]
+[src: file: backend/src/api/discussions/messaging.rs:571-603#resolve_connection_mentions]
 
 The new-discussion form merges configured OpenRouter/Other aliases with native
 agent aliases. Each alias exposes its Economy, Default and Reasoning model in
