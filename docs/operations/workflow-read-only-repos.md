@@ -35,7 +35,7 @@ extending `:workspace`, with explicit `read` entries and approval policy `never`
 It keeps the standard broad filesystem read access; the declared directories
 are never added as writable roots, including when they live under a temporary
 directory. `--strict-config` rejects unsupported Codex settings.
-[src: file: backend/src/agents/read_only_repos.rs:990-1107#args]
+[src: file: backend/src/agents/read_only_repos.rs:1025-1142#args]
 [Claude permission rules](https://code.claude.com/docs/en/permissions)
 [Claude sandbox](https://code.claude.com/docs/en/sandboxing)
 [Codex permissions](https://learn.chatgpt.com/docs/permissions)
@@ -48,11 +48,11 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4703-4707#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4737-4739#read_only_repos]
-[src: file: backend/src/agents/read_only_repos.rs:972-979#apply]
-[src: file: backend/src/agents/runner.rs:14678-14683#sandbox_required]
-[src: file: backend/src/agents/runner.rs:14910-14920#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:4706-4711#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4732-4734#read_only_repos]
+[src: file: backend/src/agents/read_only_repos.rs:1001-1010#apply]
+[src: file: backend/src/agents/runner.rs:14808-14813#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15043-15054#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14610-14629#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14681-14695#is_codex]
+[src: file: backend/src/agents/runner.rs:14664-14683#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:14821-14835#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -103,7 +103,7 @@ two launch routes (the direct CLI and the ACP adapter) build their arguments fro
 the same policy at every launch, so a revoke applies from the next turn; revoking
 a `code` grant (or lowering the trust level that gave it) also stops the room's
 running turn, which still holds the checkout open.
-[src: file: backend/src/agents/read_only_repos.rs:785-841#resolve_room]
+[src: file: backend/src/agents/read_only_repos.rs:806-862#resolve_room]
 [src: file: backend/src/api/discussions/messaging.rs:1556-1585#stop_running_turn]
 
 A writable root never opens what a later program runs or what is secret, whether
@@ -171,7 +171,7 @@ Claude Code or Codex Agent step whose rendered prompt contains that path gets
 it as a read-only directory under the policy above, without the Git checkout
 requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
-[src: file: backend/src/workflows/run_artifacts.rs:192-201#ensure]
+[src: file: backend/src/workflows/run_artifacts.rs:202-211#ensure]
 [src: file: backend/src/workflows/steps.rs:126-147#artifacts_read_only_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:672-702#resolve_with_dirs]
 
@@ -190,7 +190,7 @@ is removed when the run ends, the same moment as its worktree, and at startup
 for a run that ended, was deleted, or stayed interrupted past that TTL.
 A gate rejection ends the run without executing it again: its directory goes
 at the next startup.
-[src: file: backend/src/workflows/run_artifacts.rs:250-271#keeps_directory]
+[src: file: backend/src/workflows/run_artifacts.rs:259-280#keeps_directory]
 
 Location (KT-1585): each run directory (`<root>/<run id>`, owner-only) lives
 **outside** the Kronn data directory. The vault protection (KT-1495) denies
@@ -247,16 +247,23 @@ async executor.
 [src: file: backend/src/workflows/run_artifacts.rs:74-122#resolve_root]
 [src: file: backend/src/workflows/run_artifacts.rs:124-140#refusal]
 [src: file: backend/src/workflows/run_artifacts.rs:161-190#open_root]
-[src: file: backend/src/workflows/run_artifacts.rs:238-248#open_run_dir]
+[src: file: backend/src/workflows/run_artifacts.rs:247-257#open_run_dir]
 [src: file: backend/src/core/rooted_fd.rs:362-400#remove_child]
-[src: file: backend/src/workflows/run_artifacts.rs:341-382#migrate_from]
-[src: file: backend/src/workflows/run_artifacts.rs:407-425#move_into]
-[src: file: backend/src/workflows/run_artifacts.rs:432-464#sweep_root]
+[src: file: backend/src/workflows/run_artifacts.rs:350-391#migrate_from]
+[src: file: backend/src/workflows/run_artifacts.rs:416-434#move_into]
+[src: file: backend/src/workflows/run_artifacts.rs:441-473#sweep_root]
 
-Access across runs (decided for now, KT-1587 in 0.15.3 confines it): run
-artifacts sit outside the data directory, so agents can read them, and an
-Agent step can read **any** run's artifacts, not only its own, when its prompt
-names that path. An Exec stdout kept there is scrubbed of the secrets Kronn
+Access across runs (KT-1587): run artifacts sit outside the data directory, so
+the vault protection does not hide them; a rule of their own does. An Agent step
+reads **its own run's** artifacts, read-only, when its prompt names that path,
+and no other run's. A launch that was not granted the path (a discussion, a task
+worker, an ACP runtime, a step that does not name it) reads none. The grant is
+the typed `read_only_dirs` Kronn built for the step, never text found in the
+prompt or the launch arguments, and a run directory is only granted when it is a
+direct, non-link, lowercase-UUID child of the artifacts root. The rules per
+runtime are in [agent-vault-protection.md](../architecture/agent-vault-protection.md#run-artifacts-sit-outside-the-vault-kt-1585).
+With the vault protection turned off, or on a host with no sandbox, the root is
+open as it was. An Exec stdout kept there is scrubbed of the secrets Kronn
 knows; reports, screenshots and other files a step writes are not.
 
 ### A cut Exec stdout (KT-1570)
@@ -334,7 +341,7 @@ path, since the cwd is the copy. The copy goes with the artifacts directory.
 The automated policy and dispatch regressions use temporary repositories and
 fake CLI processes. They verify declarations and arguments; they do not prove
 vendor sandbox enforcement.
-[src: file: backend/src/agents/read_only_repos.rs:1144-1165#fixture]
+[src: file: backend/src/agents/read_only_repos.rs:1182-1203#fixture]
 [src: file: backend/tests/adapter_worker_policy.rs:41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 The dispatch regression checks initial and resumed Codex adapter arguments:
@@ -346,7 +353,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test.rs:12081-12142#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test.rs:12301-12362#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

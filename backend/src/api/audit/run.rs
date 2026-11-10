@@ -5,7 +5,7 @@
 // is the only launch path besides `partial_audit`.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 
@@ -59,10 +59,44 @@ pub async fn audit_status_all(
     Json(ApiResponse::ok(snapshot))
 }
 
-/// GET /api/audit/steps — the Full audit's steps in run order, from the same
-/// chain the pipeline executes, so the UI never keeps its own copy.
-pub async fn audit_steps() -> Json<ApiResponse<Vec<AuditStepInfo>>> {
-    let steps = super::assemble_chained_steps(crate::models::AuditKind::Full)
+/// `?project_id=` of `GET /api/audit/steps`.
+#[derive(Debug, serde::Deserialize)]
+pub struct AuditStepsQuery {
+    /// The project whose docs root the labels follow; without it, `docs/`.
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// GET /api/audit/steps[?project_id=] — the Full audit's steps in run order,
+/// from the same chain the pipeline executes, so the UI never keeps its own
+/// copy. With a project, each target sits under that project's docs root
+/// (KT-1192) exactly as the run writes it; without one, under `docs/`.
+pub async fn audit_steps(
+    State(state): State<AppState>,
+    Query(query): Query<AuditStepsQuery>,
+) -> Json<ApiResponse<Vec<AuditStepInfo>>> {
+    let docs_root = match query.project_id {
+        None => crate::core::docs_location::DocsRoot::default_root(),
+        Some(id) => {
+            let project = state
+                .db
+                .with_read_conn(move |conn| crate::db::projects::get_project(conn, &id))
+                .await;
+            let project = match project {
+                Ok(Some(project)) => project,
+                Ok(None) => return Json(ApiResponse::err("Project not found")),
+                Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
+            };
+            // A broken override refuses, as the run itself would.
+            match crate::core::docs_location::DocsRoot::for_project(
+                &crate::core::scanner::resolve_host_path(&project.path),
+            ) {
+                Ok(docs_root) => docs_root,
+                Err(reason) => return Json(ApiResponse::err(reason)),
+            }
+        }
+    };
+    let steps = super::steps_for(crate::models::AuditKind::Full, &docs_root)
         .into_iter()
         .enumerate()
         .map(|(i, step)| AuditStepInfo {
@@ -584,7 +618,13 @@ mod resumable_tests {
 mod audit_steps_tests {
     #[tokio::test]
     async fn lists_the_full_chain_in_run_order() {
-        let steps = super::audit_steps().await.0.data.expect("steps");
+        let state = crate::api::audit::run::run_states_tests::state();
+        let query = super::AuditStepsQuery { project_id: None };
+        let steps = super::audit_steps(axum::extract::State(state), axum::extract::Query(query))
+            .await
+            .0
+            .data
+            .expect("steps");
         assert_eq!(steps.len(), 16);
         assert!(steps
             .iter()
@@ -661,6 +701,10 @@ mod audit_status_tests {
         assert_eq!(agent.current_tool_call_count, Some(1), "the counts stay");
     }
 }
+
+#[cfg(test)]
+#[path = "audit_steps_root_tests.rs"]
+mod audit_steps_root_tests;
 
 #[cfg(test)]
 #[path = "run_states_tests.rs"]

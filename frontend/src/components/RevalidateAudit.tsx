@@ -89,7 +89,7 @@ export function RevalidateAudit({
     try {
       const [nextPlan, auditSteps, timeline] = await Promise.all([
         projectsApi.revalidationPlan(project.id),
-        projectsApi.auditSteps().catch(() => []),
+        projectsApi.auditSteps(project.id).catch(() => []),
         projectsApi.auditTimeline(project.id).catch(() => null),
       ]);
       setPlan(nextPlan);

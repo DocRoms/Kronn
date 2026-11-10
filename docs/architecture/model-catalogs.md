@@ -128,9 +128,9 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5773-5827#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5837-5891#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1948-1957#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1957-1988#select_model]
+[src: file: backend/src/acp.rs:1963-1994#select_model]
 
 ## Launch safety and UI
 
@@ -217,11 +217,11 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13804-13821#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13920-13951#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13833-13850#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13965-13996#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5114-5142#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5162-5190#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is

@@ -70,8 +70,8 @@ Three Docker services behind nginx gateway:
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8701-8811#LeadingThinkingFilter]
-  [src: file: backend/src/api/discussions/streaming.rs:5467-5468#strip_leading_thinking_blocks]
+  [src: file: backend/src/agents/runner.rs:8749-8859#LeadingThinkingFilter]
+  [src: file: backend/src/api/discussions/streaming.rs:5469-5470#strip_leading_thinking_blocks]
 
 ### Discussions
 - `Discussion.project_id` is `Option<String>` (Rust) / `string | null` (TS).
@@ -88,7 +88,7 @@ Three Docker services behind nginx gateway:
   [src: file: backend/src/api/disc_portability.rs:527-562#import_bundle]
   [src: file: backend/src/api/disc_portability.rs:849-866#discussion_imports]
   [src: file: backend/src/db/sql/093_discussion_imports.sql:1-15#discussion_imports]
-- Agent runs in its own folder, `~/.kronn/discussions/<id>`, for global discussions (no project context). Native final messages can attach linked files from the run/project folder: at most eight new files and 64 MiB read per message, excluding known credential paths and the Kronn data directory. Link destinations are rewritten to exact asset IDs before initial message persistence; failed insertion cleans up staged files. This is an attachment filter, not a filesystem sandbox. [src: file: backend/src/api/discussions/context.rs:281-286#attach_files_linked_in_message] [src: file: backend/src/api/discussions/context.rs:364-367#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:11-12#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:65-99#resolve_attachable] [src: file: backend/src/core/message_file_links.rs:249-276#is_sensitive] [src: file: backend/src/api/discussions/streaming.rs:5707-5721#attach_files_linked_in_message] [src: file: backend/src/api/discussions/streaming.rs:5816-5823#discard_uncommitted_message_files]
+- Agent runs in its own folder, `~/.kronn/discussions/<id>`, for global discussions (no project context). Native final messages can attach linked files from the run/project folder: at most eight new files and 64 MiB read per message, excluding known credential paths and the Kronn data directory. Link destinations are rewritten to exact asset IDs before initial message persistence; failed insertion cleans up staged files. This is an attachment filter, not a filesystem sandbox. [src: file: backend/src/api/discussions/context.rs:281-286#attach_files_linked_in_message] [src: file: backend/src/api/discussions/context.rs:364-367#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:11-12#MAX_LINKED_FILE_BYTES] [src: file: backend/src/core/message_file_links.rs:65-99#resolve_attachable] [src: file: backend/src/core/message_file_links.rs:249-276#is_sensitive] [src: file: backend/src/api/discussions/streaming.rs:5707-5721#attach_files_linked_in_message] [src: file: backend/src/api/discussions/streaming.rs:5825-5832#discard_uncommitted_message_files]
 - **Room project scope reaches the native agent (KT-1406)**: a project a human granted to a discussion (read or write, `discussion_project_grants`, [room scope design](../design/discussion-project-scope.md)) is, from the next turn, a read-only directory (`--add-dir`) of a Claude Code agent that is not in full access, through a room read policy derived from `read_only_repos`; a write grant stays read-only on disk. Revoking, the last grant included, removes it at the next turn. A Codex agent keeps its default sandbox (it reads the disk as it is, granted projects included, and writes only in its working directory): nothing is opened for it and no read isolation is claimed (KT-1409). The directory is always the registered checkout of a granted project, validated once and checked again at the launch (a symbolic-link path is never opened, a swapped checkout is refused), and one the validation refuses is not opened. The agent's context names the granted projects (path, access) and the registered ones it can ask for (name only), with `room_scope({project, access, reason})` as the way to ask. `[src: file: backend/src/agents/room_reach.rs:48]` `[src: file: backend/src/db/discussion_scope.rs:195]`
 - `CreateDiscussionRequest.project_id` is also optional; frontend offers "Aucun projet" option.
 - **Discussion search/filter**: sidebar includes a search input (`discSearchFilter` state) that filters discussions by title (case-insensitive substring match). When a search term is active, collapsed groups are auto-expanded and only matching discussions are shown. A clear button resets the filter.
@@ -221,7 +221,7 @@ killed on client-requested cancellation. Partial responses retain an explicit
 timeout notice.
 [src: file: backend/src/models/setup.rs:396-403#agent_global_timeout_min]
 [src: file: backend/src/models/setup.rs:600-613#MAX_AGENT_GLOBAL_TIMEOUT_MIN]
-[src: file: backend/src/api/setup.rs:1706-1708#clamp_stall_timeout_min]
+[src: file: backend/src/api/setup.rs:1716-1718#clamp_stall_timeout_min]
 [src: file: backend/src/api/discussions/streaming.rs:4501-4525#agent_stall_timeout_min]
 [src: file: backend/src/api/discussions/orchestration.rs:389-403#configured_agent_global_timeout]
 
@@ -257,7 +257,7 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5843-5851#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5946-5961#begin_tool]
+[src: file: backend/src/agents/runner.rs:5888-5896#IdleWatchdog] [src: file: backend/src/agents/runner.rs:5994-6009#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
 

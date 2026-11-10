@@ -680,7 +680,7 @@ impl SharedCaches {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum LinkState {
+pub(crate) enum LinkState {
     Created,
     AlreadyLinked,
 }
@@ -688,7 +688,7 @@ enum LinkState {
 /// Link `destination` to `source`, replacing a link that points elsewhere. A
 /// real file or directory at `destination` is never touched: it is the
 /// operator's (or the worker's) own and is reported as an error.
-fn ensure_symlink(source: &Path, destination: &Path) -> Result<LinkState, String> {
+pub(crate) fn ensure_symlink(source: &Path, destination: &Path) -> Result<LinkState, String> {
     match std::fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             if std::fs::read_link(destination).is_ok_and(|current| current == source) {

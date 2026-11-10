@@ -65,9 +65,9 @@ session-creation failures, and no longer discards its own cleanup error. A
 scripted transport counts its shutdowns, so "did this path clean up?" is
 asserted on all three outcomes rather than read off the source — and a failing
 cleanup never replaces the failure that caused it.
-[src: file: backend/src/agents/runner.rs:6147-6156#acp_start_failure]
-[src: file: backend/src/agents/runner.rs:5640-5651#acp_start_failure]
-[src: file: backend/src/agents/runner.rs:5650-5658#acp_start_failure]
+[src: file: backend/src/agents/runner.rs:6192-6201#acp_start_failure]
+[src: file: backend/src/agents/runner.rs:5685-5696#acp_start_failure]
+[src: file: backend/src/agents/runner.rs:5695-5703#acp_start_failure]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-120#discover_with_transport]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:287-298#ScriptedTransport]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:382-422#discovery_shuts_the_transport_down_when_initialize_fails]

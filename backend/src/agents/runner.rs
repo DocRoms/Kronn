@@ -4698,6 +4698,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
                 bridge_token: bridge_value.clone(),
                 priority: config.priority,
+                run_artifacts: read_only_repos
+                    .as_ref()
+                    .map(|policy| policy.granted_dirs().to_vec())
+                    .unwrap_or_default(),
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
@@ -4829,7 +4833,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     let github_env = crate::core::github_connection::env_for_launch(config.project_id).await;
     // Try direct binary first, then npx fallback
-    let mut child = match try_spawn(
+    // KT-1587 — the run directories the step was granted, from the policy Kronn
+    // resolved above; never from `args`, which carry the prompt.
+    let run_artifacts: Vec<PathBuf> = read_only_repos
+        .as_ref()
+        .map(|policy| policy.granted_dirs().to_vec())
+        .unwrap_or_default();
+    let mut child = match try_spawn_granted(
         binary,
         None,
         &args,
@@ -4846,6 +4856,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         bridge_value.as_deref(),
         config.priority,
         reach_is_full_access(launch_full_access, read_only_repos.is_some()),
+        &run_artifacts,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4864,7 +4875,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     runtime.command,
                     runtime.version,
                 );
-                try_spawn(
+                try_spawn_granted(
                     "npx",
                     Some(pkg),
                     &args,
@@ -4881,6 +4892,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     bridge_value.as_deref(),
                     config.priority,
                     reach_is_full_access(launch_full_access, read_only_repos.is_some()),
+                    &run_artifacts,
                 )
                 .map_err(|error| {
                     format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
@@ -5141,6 +5153,10 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) bridge_token: Option<String>,
     /// KT-1633 — see [`AgentStartConfig::priority`].
     pub(crate) priority: Priority,
+    /// KT-1587 — the run directories the step was granted: the typed
+    /// `ReadOnlyRepos::granted_dirs`, handed to the spawn of every turn (the
+    /// adapters spawn the CLI themselves, so the grant cannot be lost here).
+    pub(crate) run_artifacts: Vec<PathBuf>,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -14686,6 +14702,11 @@ fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> Str
 /// a launch the owner opened in full access. Any other launch, a task worker
 /// included whatever it passes, also loses the shared credential stores of
 /// the home (`~/.ssh`, `~/.aws`, `gh`, …), whichever agent it runs.
+///
+/// Tests only (KT-1587): a production launch always goes through
+/// [`try_spawn_granted`], so none can drop the run artifacts grant by calling
+/// this no-grant form.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_spawn(
     binary: &str,
@@ -14705,6 +14726,76 @@ pub(crate) fn try_spawn(
     priority: Priority,
     full_access: bool,
 ) -> Result<tokio::process::Child, String> {
+    // KT-1587 — a launch that is not handed a run artifacts grant reads none.
+    try_spawn_granted(
+        binary,
+        npx_package,
+        args,
+        work_dir,
+        env_key,
+        api_key,
+        io,
+        discussion_id,
+        task_worker_context,
+        room_agent_context,
+        workflow_step_context,
+        audit_run_id,
+        github_env,
+        bridge_token,
+        priority,
+        full_access,
+        &[],
+    )
+}
+
+/// Tests: the run artifacts grant each spawn was handed, by program.
+#[cfg(test)]
+pub(crate) mod spawn_grants {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<(String, Vec<PathBuf>)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn record(binary: &str, granted: &[PathBuf]) {
+        SEEN.lock()
+            .unwrap()
+            .push((binary.to_owned(), granted.to_vec()));
+    }
+
+    /// The grant of the last spawn of `binary`; `None` when it never spawned.
+    pub(crate) fn last_for(binary: &str) -> Option<Vec<PathBuf>> {
+        let seen = SEEN.lock().unwrap();
+        let (_, granted) = seen.iter().rev().find(|(name, _)| name == binary)?;
+        Some(granted.clone())
+    }
+}
+
+/// [`try_spawn`] for a launch granted the run directories `run_artifacts`
+/// (KT-1587): the typed grant Kronn built for the step
+/// (`ReadOnlyRepos::granted_dirs`), never read back out of `args`, whose prompt
+/// and system prompt carry text no one vetted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_spawn_granted(
+    binary: &str,
+    npx_package: Option<&str>,
+    args: &[String],
+    work_dir: &Path,
+    env_key: &str,
+    api_key: Option<&str>,
+    io: SpawnIo<'_>,
+    discussion_id: Option<&str>,
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
+    workflow_step_context: Option<&WorkflowStepBridgeContext>,
+    audit_run_id: Option<&str>,
+    github_env: &[(String, String)],
+    bridge_token: Option<&str>,
+    priority: Priority,
+    full_access: bool,
+    run_artifacts: &[PathBuf],
+) -> Result<tokio::process::Child, String> {
+    #[cfg(test)]
+    spawn_grants::record(binary, run_artifacts);
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
         SpawnIo::Adapter(_) => None,
@@ -14774,7 +14865,9 @@ pub(crate) fn try_spawn(
         let roots = crate::core::vault_guard::LaunchRoots::discover(
             Path::new(&effective_work_dir),
             npx_package.is_some() && cmd_name != binary,
-        );
+        )
+        // KT-1587 — the run artifacts root, but for the run directory granted.
+        .with_run_artifacts(run_artifacts);
         // KT-1656 — and the credential files of the home that this agent does
         // not own (`~/.gemini` for a Claude, `~/.codex` for a Gemini, …).
         let sandbox = crate::core::vault_guard::launch_sandbox(binary, npx_package, args);
