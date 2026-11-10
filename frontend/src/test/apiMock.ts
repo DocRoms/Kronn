@@ -421,6 +421,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     agents: {
+      detect: resolve([]),
       listAll: resolve([]),
       versionCheck: resolve([]),
       reachability: resolve([]),
@@ -562,6 +563,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       deleteRun: resolve(undefined),
       deleteAllRuns: resolve(undefined),
       cancelRun: resolve({ run_cancelled: false, child_discs_cancelled: 0 }),
+      resumeRun: resolve({ run_id: '', new_status: 'Running' }),
+      activeRuns: resolve([]),
+      switchQuotaAgent: resolve({ run_id: '', step_name: '', agent: 'ClaudeCode' }),
       testBatchStep: resolve({ eligible_items: [], sample_rendered_prompts: [], warnings: [] }),
       suggestions: resolve([]),
       listBatchRunSummaries: resolve([]),

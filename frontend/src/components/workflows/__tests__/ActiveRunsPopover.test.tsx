@@ -2,7 +2,8 @@ import { useRef, useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../../lib/I18nContext';
-import type { WorkflowSummary } from '../../../types/generated';
+import type { ActiveRunSummary, WorkflowSummary } from '../../../types/generated';
+import { workflows as workflowsApi } from '../../../lib/api';
 import { ActiveRunsPopover } from '../ActiveRunsPopover';
 
 const { cancelRunMock } = vi.hoisted(() => ({ cancelRunMock: vi.fn() }));
@@ -170,5 +171,40 @@ describe('ActiveRunsPopover', () => {
     expect(screen.getByRole('dialog')).toHaveFocus();
     fireEvent.keyDown(document.activeElement ?? document, { key: 'Escape' });
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// KT-1657 — a run paused on a provider quota is listed with its wake time and
+// can be resumed from here, without opening the run.
+describe('ActiveRunsPopover — runs paused on a provider quota', () => {
+  const paused = (over: Partial<ActiveRunSummary> = {}): ActiveRunSummary => ({
+    run_id: 'run-paused', workflow_id: 'wf-review', workflow_name: 'PR Review v3.4', project_id: null,
+    status: 'WaitingQuota', started_at: '2026-11-09T16:19:00Z',
+    quota: { step_name: 'Agent', agent: 'ClaudeCode', wake_at: '2026-11-11T02:02:00Z', reset_at: '2026-11-11T02:00:00Z' },
+    ...over,
+  });
+
+  it('lists a paused run, labelled paused with its wake time, never as an empty board', () => {
+    render(<I18nProvider><ActiveRunsPopover workflows={[]} quotaRuns={[paused()]} onClose={vi.fn()} onNavigateToWorkflow={vi.fn()} onViewAllWorkflows={vi.fn()} /></I18nProvider>);
+    const item = screen.getByTestId('quota-paused-item');
+    expect(item).toHaveTextContent('PR Review v3.4');
+    expect(item).toHaveTextContent(`En pause — quota du fournisseur, reprise automatique à ${new Date('2026-11-11T02:02:00Z').toLocaleString()}`);
+    expect(screen.queryByText('Aucun run en cours')).not.toBeInTheDocument();
+  });
+
+  it('resumes it from the list, through its parent when it is a sub-workflow child', async () => {
+    const resume = vi.mocked(workflowsApi.resumeRun).mockResolvedValue({ run_id: 'parent-1', new_status: 'Running' });
+    const onAfterResume = vi.fn();
+    render(<I18nProvider><ActiveRunsPopover workflows={[]} quotaRuns={[paused({ parent_run_id: 'parent-1' })]} onAfterResume={onAfterResume} onClose={vi.fn()} onNavigateToWorkflow={vi.fn()} onViewAllWorkflows={vi.fn()} /></I18nProvider>);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Reprendre maintenant' })); });
+    expect(resume).toHaveBeenCalledWith('parent-1');
+    expect(onAfterResume).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the workflow of a paused run from its row', () => {
+    const onNavigate = vi.fn();
+    render(<I18nProvider><ActiveRunsPopover workflows={[]} quotaRuns={[paused()]} onClose={vi.fn()} onNavigateToWorkflow={onNavigate} onViewAllWorkflows={vi.fn()} /></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: /PR Review v3.4/ }));
+    expect(onNavigate).toHaveBeenCalledWith('wf-review');
   });
 });

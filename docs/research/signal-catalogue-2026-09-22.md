@@ -10,7 +10,7 @@ prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
 [src: file: backend/src/api/agent_tools.rs:4691-4693#signals]
-[src: file: backend/scripts/disc-introspection-mcp.py:10944-10945#signals]
+[src: file: backend/scripts/disc-introspection-mcp.py:10953-10954#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:24-72]
@@ -129,7 +129,7 @@ cap. Discovery covers Automation cards in version 1; historical Planning, audit
 and QP-improvement parsers remain separate.
 [src: file: backend/tests/api_tests.rs:1133-1251#discussion_action_ingests_all_four_target_families_through_the_real_message_transaction]
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:67-94#native_signal_manual_reads_the_shared_registry_without_creating_an_action]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:13421-13426#test_signal_catalogue_is_read_from_the_running_server_without_launching]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:13431-13436#test_signal_catalogue_is_read_from_the_running_server_without_launching]
 [src: file: backend/tests/api_tests.rs:1037-1131#discussion_action_http_contract_is_durable_and_idempotent]
 [src: file: backend/tests/api_tests.rs:1502-1557#discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction]
 [src: file: backend/tests/api_tests.rs:1402-1497#discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api]

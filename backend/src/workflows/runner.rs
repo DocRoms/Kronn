@@ -11121,6 +11121,7 @@ mod tests {
 
     mod gate_guard_runs;
     mod native_full_access_runs;
+    mod quota_recheck_runs;
     mod quota_wait_foreach_runs;
     mod quota_wait_runs;
     mod quota_wait_subworkflow_runs;

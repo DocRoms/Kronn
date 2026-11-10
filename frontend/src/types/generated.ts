@@ -74,6 +74,43 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
+/**
+ * What a `WaitingQuota` run is parked on.
+ */
+export type ActiveRunQuota = {
+/**
+ * The step that was refused.
+ */
+step_name: string,
+/**
+ * The agent the refused step runs on, when it is an Agent step.
+ */
+agent?: AgentType,
+/**
+ * When the engine resumes the run on its own; `None` while parked.
+ */
+wake_at?: string,
+/**
+ * The reset the provider announced.
+ */
+reset_at?: string, parked?: QuotaParkReason, };
+
+/**
+ * One run that is not finished (KT-1657): the board `workflow_active_runs`
+ * and the UI's active-run indicators read. A run paused on a provider quota
+ * is listed with its wake time, so it is never mistaken for a run that is
+ * working, nor invisible while it still holds a concurrency slot.
+ */
+export type ActiveRunSummary = { run_id: string, workflow_id: string, workflow_name: string, project_id: string | null, status: RunStatus, started_at: string,
+/**
+ * The sub-workflow's parent run; a child's wait is resumed through it.
+ */
+parent_run_id?: string,
+/**
+ * The quota wait, for a `WaitingQuota` run.
+ */
+quota?: ActiveRunQuota, };
+
 export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string,
 /**
  * KT-1252 — the `run_id` of the room's live `AgentRunProgress` frames for
@@ -10538,6 +10575,16 @@ tokens_used: number, };
  * from the agent or from a human reopening a long room — writes into it.
  */
 export type SummaryStrategy = "OnDemand" | "Off";
+
+/**
+ * Response for [`switch_quota_agent`].
+ */
+export type SwitchQuotaAgentResponse = {
+/**
+ * The run that owns the refused step (a sub-workflow child, when the
+ * wait is mirrored from one).
+ */
+run_id: string, step_name: string, agent: AgentType, };
 
 export type TaskBoardConfig = {
 /**

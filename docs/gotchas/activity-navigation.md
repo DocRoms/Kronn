@@ -46,9 +46,9 @@ parent's snapshot after settlement; they never navigate from the Stop button.
 [src: file: frontend/src/components/ActiveAuditsPopover.tsx:83-105#handleCancel]
 [src: file: frontend/src/components/ActiveAuditsPopover.tsx:161-173#stopPropagation]
 [src: file: frontend/src/components/ActiveAuditsPopover.tsx:180#cancelError]
-[src: file: frontend/src/components/workflows/ActiveRunsPopover.tsx:58-80#handleCancel]
-[src: file: frontend/src/components/workflows/ActiveRunsPopover.tsx:142#stopPropagation]
-[src: file: frontend/src/components/workflows/ActiveRunsPopover.tsx:157#cancelError]
+[src: file: frontend/src/components/workflows/ActiveRunsPopover.tsx:65-87#handleCancel]
+[src: file: frontend/src/components/workflows/ActiveRunsPopover.tsx:149#stopPropagation]
+[src: file: frontend/src/components/workflows/ActiveRunsPopover.tsx:185#cancelError]
 
 ## Regression evidence
 

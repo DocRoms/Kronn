@@ -3,8 +3,10 @@ import { newTabClickProps } from '../../lib/newTabNavigation';
 import { workflowPath } from '../../lib/routes';
 import { createPortal } from 'react-dom';
 import { useActivityPopover } from '../../hooks/useActivityPopover';
-import { Loader2, Square, X, ChevronRight } from 'lucide-react';
-import type { WorkflowSummary } from '../../types/generated';
+import { Clock, Loader2, Square, X, ChevronRight } from 'lucide-react';
+import type { ActiveRunSummary, WorkflowSummary } from '../../types/generated';
+import { quotaResumeTarget } from '../../lib/quotaPause';
+import { QuotaPauseNotice } from './QuotaPauseControls';
 import { workflows as workflowsApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import './ActiveRunsPopover.css';
@@ -15,6 +17,9 @@ export interface ActiveRunsPopoverProps {
   onNavigateToWorkflow: (workflowId: string) => void;
   onViewAllWorkflows: () => void;
   onAfterCancel?: () => void;
+  /** KT-1657 — runs paused on a provider quota: listed with their wake time and a "Resume now". */
+  quotaRuns?: ActiveRunSummary[];
+  onAfterResume?: () => void;
   triggerRef?: RefObject<HTMLButtonElement | null>;
   focusFallbackRef?: RefObject<HTMLElement | null>;
 }
@@ -34,6 +39,8 @@ export function ActiveRunsPopover({
   onNavigateToWorkflow,
   onViewAllWorkflows,
   onAfterCancel,
+  quotaRuns = [],
+  onAfterResume,
   triggerRef,
   focusFallbackRef,
 }: ActiveRunsPopoverProps) {
@@ -101,7 +108,7 @@ export function ActiveRunsPopover({
         </button>
       </div>
 
-      {activeRuns.length === 0 ? (
+      {activeRuns.length === 0 && quotaRuns.length === 0 ? (
         <div className="wf-active-runs-empty">{t('wf.activeRunsEmpty')}</div>
       ) : (
         <ul className="wf-active-runs-list">
@@ -151,6 +158,27 @@ export function ActiveRunsPopover({
               </li>
             );
           })}
+          {quotaRuns.map(run => (
+            <li key={run.run_id} className="wf-active-runs-item" data-testid="quota-paused-item">
+              <div className="wf-active-runs-item-text">
+                <button
+                  type="button"
+                  className="wf-active-runs-item-body"
+                  title={t('wf.quota.openRun')}
+                  {...newTabClickProps(workflowPath(run.workflow_id))}
+                  onClick={() => onNavigateToWorkflow(run.workflow_id)}
+                >
+                  <Clock size={12} className="text-warning" aria-hidden />
+                  <div className="wf-active-runs-item-name">{run.workflow_name}</div>
+                </button>
+                <QuotaPauseNotice
+                  quota={run.quota}
+                  resumeRunId={quotaResumeTarget(run)}
+                  onResumed={onAfterResume}
+                />
+              </div>
+            </li>
+          ))}
         </ul>
       )}
 

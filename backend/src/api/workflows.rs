@@ -6653,6 +6653,106 @@ pub(crate) async fn resume_interrupted_as(
     }))
 }
 
+/// GET /api/workflows/active-runs
+///
+/// Every run that is not finished (KT-1657), a run parked on a provider quota
+/// included with the wake time of its wait. A bridge token sees the runs its
+/// own project owns, like the workflow list.
+pub async fn active_runs(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Json<ApiResponse<Vec<ActiveRunSummary>>> {
+    let visibility = run_visibility(&bridge);
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::workflows::list_active_runs(conn, visibility.as_ref())
+        })
+        .await
+    {
+        Ok(runs) => Json(ApiResponse::ok(runs)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// Response for [`switch_quota_agent`].
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct SwitchQuotaAgentResponse {
+    /// The run that owns the refused step (a sub-workflow child, when the
+    /// wait is mirrored from one).
+    pub run_id: String,
+    pub step_name: String,
+    pub agent: AgentType,
+}
+
+/// POST /api/workflow-runs/:run_id/quota-agent
+///
+/// Switches the agent of the Agent step a `WaitingQuota` run is parked on to
+/// another installed agent (KT-1657). The choice is stored on the run like a
+/// launch-time one, so the next resume (the operator's, or the engine's as
+/// soon as the new provider answers) runs the step on it. Operator-only: not
+/// on the bridge-token list.
+pub async fn switch_quota_agent(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    Json(choice): Json<StepAgentOverride>,
+) -> Json<ApiResponse<SwitchQuotaAgentResponse>> {
+    match switch_quota_agent_inner(&state, run_id, choice).await {
+        Ok(switched) => Json(ApiResponse::ok(switched)),
+        Err(message) => Json(ApiResponse::err(message)),
+    }
+}
+
+pub(crate) async fn switch_quota_agent_inner(
+    state: &AppState,
+    run_id: String,
+    choice: StepAgentOverride,
+) -> Result<SwitchQuotaAgentResponse, String> {
+    use crate::workflows::step_agents;
+    let run = state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
+        .await
+        .map_err(|error| format!("DB error: {error}"))?
+        .ok_or_else(|| "Run not found".to_string())?;
+    if run.status != RunStatus::WaitingQuota {
+        return Err(format!(
+            "Run {} is {:?}: only a run paused on a provider quota can switch the agent of its waiting step.",
+            run.id, run.status
+        ));
+    }
+    let leaf = state
+        .db
+        .with_conn(move |conn| crate::workflows::quota_wait::waiting_leaf(conn, run))
+        .await
+        .map_err(|error| error.to_string())?;
+    let key = step_agents::step_key(&leaf.step);
+    let requested: StepAgents = std::iter::once((key.clone(), choice.clone())).collect();
+    let resolved = admit_step_agents(state, &leaf.workflow, &requested).await?;
+    // Back on the step's own agent (nothing resolved): the stored choice goes away.
+    let context = step_agents::context_with_choice(&leaf.run, &key, resolved.get(&key))
+        .map_err(|error| error.to_string())?;
+    let leaf_id = leaf.run.id.clone();
+    let changed = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::set_quota_waiting_trigger_context(conn, &leaf_id, &context)
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))?;
+    if !changed {
+        return Err("The run resumed or ended while its agent was being switched.".into());
+    }
+    // The new provider may answer right away: ask it on the next engine pass.
+    crate::workflows::quota_wait::request_recheck();
+    Ok(SwitchQuotaAgentResponse {
+        run_id: leaf.run.id,
+        step_name: leaf.step.name,
+        agent: choice.agent,
+    })
+}
+
 /// Response for [`delete_batch_run`].
 #[derive(Debug, serde::Serialize)]
 pub struct DeletedBatchResponse {

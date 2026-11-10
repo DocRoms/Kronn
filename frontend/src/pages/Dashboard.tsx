@@ -31,6 +31,7 @@ import type { DashboardOutletContext, DiscussionPrefill } from '../lib/dashboard
 import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { PRELOADED_ROUTES } from '../routes/lazyRoutes';
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
+import { useQuotaPausedRuns } from '../hooks/useQuotaPausedRuns';
 import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
 import {
   Folder, FolderOpen, Puzzle,
@@ -228,6 +229,11 @@ export function Dashboard({ onReset }: DashboardProps) {
     const interval = setInterval(tick, 5000);
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
+
+  // KT-1657 — runs paused on a provider quota, listed (never counted as
+  // running) by the existing active-runs popover. No header indicator of
+  // their own: the global view is the notification bell (KT-1658).
+  const { runs: quotaPausedRuns, refetch: refetchQuotaRuns } = useQuotaPausedRuns();
 
   // Poll workflows — fast when running, slow otherwise
   const runningWorkflows = useMemo(() =>
@@ -880,6 +886,8 @@ export function Dashboard({ onReset }: DashboardProps) {
                     requestAnimationFrame(() => workflowsTabRef.current?.focus());
                   }}
                   onAfterCancel={() => { refetchWorkflows(); }}
+                  quotaRuns={quotaPausedRuns}
+                  onAfterResume={() => { refetchWorkflows(); refetchQuotaRuns(); }}
                 />
               )}
             </div>

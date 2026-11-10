@@ -13,6 +13,23 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Workflows: a run paused on a provider quota is shown as paused everywhere,
+  resumes as soon as the quota is back, and never blocks a launch silently
+  (KT-1657). A refused launch (`Concurrency limit reached`) now names the run
+  that holds the slot (workflow, state, and for a quota wait the wake time) and
+  the actions: resume it now, open it, cancel it, or switch the agent of its
+  waiting step. `workflow_active_runs` and `GET /api/workflows/active-runs`
+  list every unfinished run, a `WaitingQuota` one with its wake time; the
+  workflow list, card and run page read
+  « Paused — provider quota, resumes automatically at <time> » with a
+  « Resume now » reachable without opening the run, and the active-runs
+  popover lists paused runs apart from the running ones (no new header
+  indicator: the global view is the notification bell). A paused run no longer
+  waits blindly for the announced reset: about every 20 minutes, and at once
+  after a key, agent or login change, Kronn asks the provider with a minimal
+  request and resumes the run as soon as it answers; the refused step can be
+  moved to another installed agent from the paused run
+  (`POST /api/workflow-runs/{id}/quota-agent`).
 - Workflows: the autoCode Issue workflow can run on any Kronn (KT-1643). The
   instance's address is a built-in, `{{run.kronn_url}}`; `GET
   /api/contribution/preflight` finds the project by the repository's remote

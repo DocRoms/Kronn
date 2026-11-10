@@ -2712,6 +2712,52 @@ pub struct WorkflowRunSummary {
     pub heaviest_output_step: Option<String>,
 }
 
+/// One run that is not finished (KT-1657): the board `workflow_active_runs`
+/// and the UI's active-run indicators read. A run paused on a provider quota
+/// is listed with its wake time, so it is never mistaken for a run that is
+/// working, nor invisible while it still holds a concurrency slot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ActiveRunSummary {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub project_id: Option<String>,
+    pub status: RunStatus,
+    pub started_at: DateTime<Utc>,
+    /// The sub-workflow's parent run; a child's wait is resumed through it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent_run_id: Option<String>,
+    /// The quota wait, for a `WaitingQuota` run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub quota: Option<ActiveRunQuota>,
+}
+
+/// What a `WaitingQuota` run is parked on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ActiveRunQuota {
+    /// The step that was refused.
+    pub step_name: String,
+    /// The agent the refused step runs on, when it is an Agent step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent: Option<AgentType>,
+    /// When the engine resumes the run on its own; `None` while parked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub wake_at: Option<DateTime<Utc>>,
+    /// The reset the provider announced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reset_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parked: Option<QuotaParkReason>,
+}
+
 /// Compact summary of a batch workflow run, with its parent linear run
 /// resolved to a human-friendly (workflow name + run sequence number) label.
 /// Consumed by the discussion sidebar to render a clickable pastille on each

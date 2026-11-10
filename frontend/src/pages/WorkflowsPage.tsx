@@ -30,6 +30,9 @@ import {
   PlugZap, MessageSquareText, TerminalSquare, Sparkles,
 } from 'lucide-react';
 import { WatchStatusLine } from '../components/workflows/WatchStatusLine';
+import { QuotaPauseNotice } from '../components/workflows/QuotaPauseControls';
+import { useQuotaPausedRuns } from '../hooks/useQuotaPausedRuns';
+import { quotaResumeTarget } from '../lib/quotaPause';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { AutoDisabledReview } from '../components/workflows/AutoDisabledReview';
@@ -347,7 +350,8 @@ const WORKFLOW_RUN_STATUS_KEYS: Record<RunStatus, string> = {
   WaitingApproval: 'run.status.waiting_approval',
   StoppedByGuard: 'run.status.stopped_by_guard',
   Interrupted: 'run.status.interrupted',
-  WaitingQuota: 'run.status.quota',
+  // KT-1657 — paused, not running: it resumes by itself or by hand.
+  WaitingQuota: 'wf.quota.pausedShort',
 };
 
 const RUN_FETCH_PAGE_SIZE = 10;
@@ -413,6 +417,14 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     refetchWorkflowList();
     refetchAutoDisabled();
   }, [refetchWorkflowList, refetchAutoDisabled]);
+  // KT-1657 — runs paused on a provider quota, by workflow: a paused run is
+  // labelled as such on its card, with the wake time and a "Resume now".
+  const { runs: quotaPausedRuns, refetch: refetchQuotaRuns } = useQuotaPausedRuns();
+  const quotaPausedByWorkflow = useMemo(() => {
+    const byWorkflow = new Map<string, (typeof quotaPausedRuns)[number]>();
+    for (const run of quotaPausedRuns) if (!byWorkflow.has(run.workflow_id)) byWorkflow.set(run.workflow_id, run);
+    return byWorkflow;
+  }, [quotaPausedRuns]);
   const autoDisabled = useMemo(() => autoDisabledList ?? [], [autoDisabledList]);
   const autoDisabledById = useMemo(
     () => new Map(autoDisabled.map(item => [item.id, item])),
@@ -2902,6 +2914,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                   // glance in long workflow lists.
                   const live = liveRun && liveRun.workflowId === wf.id && !liveRun.finished ? liveRun : null;
                   const lastStatus = wf.last_run?.status;
+                  const quotaPaused = quotaPausedByWorkflow.get(wf.id);
                   const isRunning = !!live || lastStatus === 'Running' || lastStatus === 'Pending';
                   const storedRunIsActive = lastStatus === 'Running' || lastStatus === 'Pending';
                   const runIdToCancel = live?.runId
@@ -3008,6 +3021,13 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                     </div>
                     {wf.watch && <WatchStatusLine status={wf.watch} />}
 
+                    {(quotaPaused || lastStatus === 'WaitingQuota') && wf.last_run && (
+                      <QuotaPauseNotice
+                        quota={quotaPaused?.quota}
+                        resumeRunId={quotaPaused ? quotaResumeTarget(quotaPaused) : wf.last_run.id}
+                        onResumed={() => { refetch(); refetchQuotaRuns(); }}
+                      />
+                    )}
                     <div className="wf-card-footer">
                       <div className="wf-card-run-summary">
                         {wf.last_run && (
@@ -3017,7 +3037,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                               data-status={wf.last_run.status}
                               data-current="true"
                             >
-                              {wf.last_run.status}
+                              {wf.last_run.status === 'WaitingQuota' ? t('wf.quota.pausedShort') : wf.last_run.status}
                             </span>
                             <span className="wf-card-run-date">
                               {new Date(wf.last_run.started_at).toLocaleString()}

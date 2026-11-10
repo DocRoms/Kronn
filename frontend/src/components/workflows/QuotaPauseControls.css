@@ -1,0 +1,64 @@
+/* KT-1657 — a run paused on a provider quota: label, "Resume now", agent switch.
+ * Loaded with the component so the global indicator (Dashboard nav) is styled
+ * on every page, not only once the Workflows page has been opened. */
+
+.wf-quota-pause {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-warning);
+}
+
+.wf-quota-pause-label {
+  min-width: 0;
+}
+
+.wf-quota-resume {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wf-quota-resume-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.4);
+  border-radius: 10px;
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-2xs);
+  cursor: pointer;
+}
+
+.wf-quota-resume-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.wf-quota-resume-error {
+  color: var(--kr-error);
+  font-size: var(--kr-fs-2xs);
+}
+
+.wf-quota-switch {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: var(--kr-fs-2xs);
+}
+
+.wf-quota-switch select {
+  max-width: 220px;
+  font-size: var(--kr-fs-2xs);
+}
+
+.wf-quota-switch-ok {
+  color: var(--kr-text-secondary);
+}

@@ -96,6 +96,45 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe('Dashboard — runs paused on a provider quota (KT-1657)', () => {
+  const pausedRun = {
+    run_id: 'run-paused', workflow_id: 'wf-review', workflow_name: 'PR Review v3.4', project_id: null,
+    status: 'WaitingQuota' as const, started_at: '2026-11-09T16:19:00Z',
+    quota: { step_name: 'Agent', agent: 'ClaudeCode' as const, wake_at: '2026-11-11T02:02:00Z', reset_at: '2026-11-11T02:00:00Z' },
+  };
+
+  it('lists the paused run in the existing active-runs popover with its wake time and a Resume now, apart from the running ones', async () => {
+    vi.mocked(workflowsApi.list).mockResolvedValue([{
+      id: 'wf-live', name: 'Live workflow', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0, enabled: true, pinned: false,
+      last_run: { id: 'run-live', status: 'Running', started_at: '2026-01-01T00:00:00Z', finished_at: null, tokens_used: 0 },
+      created_at: '2026-01-01T00:00:00Z',
+    }]);
+    vi.mocked(workflowsApi.activeRuns).mockResolvedValue([pausedRun]);
+    vi.mocked(workflowsApi.resumeRun).mockResolvedValue({ run_id: 'run-paused', new_status: 'Running' });
+    await renderDashboard('/discussions');
+
+    // The paused run is not counted as running.
+    const trigger = await screen.findByTestId('active-runs-trigger');
+    expect(trigger).toHaveAccessibleName('Voir et arrêter 1 exécution en cours');
+    await act(async () => { fireEvent.click(trigger); });
+
+    const item = await screen.findByTestId('quota-paused-item');
+    expect(item).toHaveTextContent('PR Review v3.4');
+    expect(item).toHaveTextContent('En pause — quota du fournisseur, reprise automatique à');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Reprendre maintenant' })); });
+    expect(workflowsApi.resumeRun).toHaveBeenCalledWith('run-paused');
+  });
+
+  it('adds no header indicator of its own: the global view is the notification bell (KT-1658)', async () => {
+    vi.mocked(workflowsApi.activeRuns).mockResolvedValue([pausedRun]);
+    await renderDashboard('/discussions');
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    expect(screen.queryByTestId('active-runs-trigger')).toBeNull();
+    expect(document.querySelector('.dash-nav-live')).toBeNull();
+  });
+});
+
 describe('Dashboard navigation', () => {
   it('always navigates Projects and Automation while activity disclosures remain separate buttons', async () => {
     vi.mocked(workflowsApi.list).mockResolvedValue([{
