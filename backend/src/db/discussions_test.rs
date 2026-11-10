@@ -1298,7 +1298,7 @@ mod tests {
         // the state a note correction must not consume or invalidate.
         conn.query_row(
             "SELECT json_object(
-                'messages', (SELECT json_group_array(json_array(id, content, timestamp, sort_order, channel)) FROM (SELECT * FROM messages ORDER BY sort_order)),
+                'messages', json((SELECT json_group_array(json_array(id, content, timestamp, sort_order, channel)) FROM (SELECT * FROM messages ORDER BY sort_order))),
                 'sequence', next_message_seq, 'summary', summary_cache,
                 'message_count', message_count, 'updated_at', updated_at,
                 'awaiting', awaiting_agent,
