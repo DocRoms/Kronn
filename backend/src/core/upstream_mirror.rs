@@ -23,6 +23,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -88,27 +89,52 @@ pub fn refresh(mirror: &Path, url: &str, branches: &[String]) -> Result<Vec<Stri
     Ok(tips)
 }
 
-/// Create the bare repository `dir` unless it exists. Callers hold `FETCH_LOCK`.
+/// Create the bare repository `dir` unless it exists. Callers hold `FETCH_LOCK`,
+/// which only serialises this process: another Kronn process (or a test binary
+/// run one process per test) may create the same directory at the same moment.
+/// The repository is therefore initialised in a private sibling and published
+/// with one rename, so no process ever sees a half-built `dir` nor fails on a
+/// `git init` that lost the race.
 fn ensure_bare(dir: &Path) -> Result<(), String> {
     if dir.join("HEAD").is_file() {
         return Ok(());
     }
-    if let Some(parent) = dir.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create the upstream mirror directory: {error}"))?;
-    }
+    let parent = dir
+        .parent()
+        .ok_or_else(|| "the upstream mirror has no parent directory".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create the upstream mirror directory: {error}"))?;
+    static STAGING: AtomicU64 = AtomicU64::new(0);
+    let staging = parent.join(format!(
+        ".init-{}-{}",
+        std::process::id(),
+        STAGING.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&staging);
     let init = crate::core::cmd::git_cmd()
         .args(["init", "--bare", "--quiet"])
-        .arg(dir)
+        .arg(&staging)
         .output()
         .map_err(|error| format!("git init failed for the upstream mirror: {error}"))?;
     if !init.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
         return Err(format!(
             "cannot create the upstream mirror: {}",
             String::from_utf8_lossy(&init.stderr).trim()
         ));
     }
-    Ok(())
+    match std::fs::rename(&staging, dir) {
+        Ok(()) => Ok(()),
+        // Another process published `dir` first: its repository is as good as ours.
+        Err(_) if dir.join("HEAD").is_file() => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(format!("cannot create the upstream mirror: {error}"))
+        }
+    }
 }
 
 /// The private repository every identity scan can run in, under `data_dir`. It
@@ -503,5 +529,32 @@ mod tests {
         assert!(
             commit_messages_outside(work.path(), &mirror, &base, &head, &["-x".into()]).is_err()
         );
+    }
+
+    /// KT-1648 — two processes creating the shared scan repository at the same
+    /// moment (one nextest process per test, one data directory) must both
+    /// succeed: the loser of `git init` used to fail with `cannot mkdir ...:
+    /// File exists`, and the delivery it served was refused.
+    #[test]
+    fn concurrent_creators_of_the_same_bare_repository_all_succeed() {
+        for _ in 0..8 {
+            let data = tempfile::tempdir().unwrap();
+            let scan = scan_dir(data.path());
+            let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+                let workers: Vec<_> = (0..8).map(|_| scope.spawn(|| ensure_bare(&scan))).collect();
+                workers.into_iter().map(|w| w.join().unwrap()).collect()
+            });
+            assert!(results.iter().all(Result::is_ok), "{results:?}");
+            assert!(scan.join("HEAD").is_file());
+            let leftovers: Vec<_> = std::fs::read_dir(scan.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                leftovers.len(),
+                1,
+                "no staging directory is left: {leftovers:?}"
+            );
+        }
     }
 }
