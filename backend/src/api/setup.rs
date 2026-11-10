@@ -287,6 +287,8 @@ pub async fn save_api_key(
     match config::save(&config).await {
         Ok(_) => {
             *live = config;
+            // A new or changed key may lift a provider quota (KT-1657).
+            crate::workflows::quota_wait::request_recheck();
             Json(ApiResponse::ok(ApiKeyDisplay {
                 id: key.id,
                 name: key.name,
@@ -363,6 +365,8 @@ pub async fn activate_api_key(
         match config::save(&config).await {
             Ok(_) => {
                 *live = config;
+                // Another account may not be out of quota (KT-1657).
+                crate::workflows::quota_wait::request_recheck();
                 Json(ApiResponse::ok(()))
             }
             Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),

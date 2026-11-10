@@ -4,6 +4,8 @@ import { workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch, QuotaWait } from '../../types/generated';
+import { quotaPauseLabel } from '../../lib/quotaPause';
+import { QuotaAgentSwitch } from './QuotaPauseControls';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle, Clock } from 'lucide-react';
 import { AGENT_LABELS, agentTextColor } from '../../lib/constants';
 import { AgentProvenanceDetails, StepModelBadge } from './AgentProvenance';
@@ -53,19 +55,25 @@ function pendingQuotaWait(run: WorkflowRun): QuotaWait | null {
 export function QuotaWaitNotice({ wait }: { wait: QuotaWait }) {
   const { t } = useT();
   const at = (iso: string) => new Date(iso).toLocaleString();
-  let message: string;
-  if (wait.wake_at) message = t('wf.quota.waitingUntil', at(wait.wake_at));
-  else if (wait.parked === 'after_deadline') message = t('wf.quota.parked.afterDeadline');
-  else if (wait.parked === 'too_many_attempts') message = t('wf.quota.parked.tooManyAttempts', wait.attempt - 1);
-  else if (wait.parked === 'not_resumable') message = t('wf.quota.parked.notResumable', wait.detail ?? '');
-  else message = t('wf.quota.parked.noResetTime');
+  // KT-1657 — always labelled paused; the parked reason says what a human must do.
+  let detail: string | null = null;
+  if (!wait.wake_at) {
+    if (wait.parked === 'after_deadline') detail = t('wf.quota.parked.afterDeadline');
+    else if (wait.parked === 'too_many_attempts') detail = t('wf.quota.parked.tooManyAttempts', wait.attempt - 1);
+    else if (wait.parked === 'not_resumable') detail = t('wf.quota.parked.notResumable', wait.detail ?? '');
+    else detail = t('wf.quota.parked.noResetTime');
+  }
+  // The engine asks the provider on its own, except where a human must decide.
+  const rechecked = !wait.parked || wait.parked === 'no_reset_time';
   return (
     <div className="wf-quota-notice" data-testid="wf-quota-notice" data-parked={wait.wake_at ? undefined : 'true'}>
       <Clock size={12} aria-hidden />
-      <span>{message}</span>
+      <span data-testid="wf-quota-paused-label">{quotaPauseLabel(t, wait)}</span>
+      {detail && <span>{detail}</span>}
       {wait.reset_at && (
         <span className="wf-quota-notice-reset">{t('wf.quota.reset', at(wait.reset_at))}</span>
       )}
+      {rechecked && <span className="wf-quota-notice-reset">{t('wf.quota.recheckHint')}</span>}
     </div>
   );
 }
@@ -112,7 +120,7 @@ export function RunStatusTrail({
           >
             {status === 'StoppedByGuard'
               ? t('wf.guards.stoppedBy.title')
-              : status === 'WaitingQuota' ? t('run.status.quota') : status}
+              : status === 'WaitingQuota' ? t('wf.quota.pausedShort') : status}
           </span>
         </span>
       ))}
@@ -818,7 +826,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
               : quotaWait ? t('wf.quota.resumeHint') : t('wf.resumeRunHint')}
           >
             {uncertainEffect ? <AlertTriangle size={10} /> : <RotateCcw size={10} />}
-            {uncertainEffect ? t('wf.resumeUncertain') : t('wf.resumeRun')}
+            {uncertainEffect ? t('wf.resumeUncertain') : quotaWait ? t('wf.quota.resumeNow') : t('wf.resumeRun')}
           </button>
         )}
         <button
@@ -831,6 +839,12 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
       </div>
 
       {quotaWait && <QuotaWaitNotice wait={quotaWait} />}
+      {quotaWait && (
+        <QuotaAgentSwitch
+          runId={run.id}
+          current={run.step_results[run.step_results.length - 1]?.step_agent}
+        />
+      )}
 
       {/* Worktree path — surfaces the actual filesystem location of the run's
           isolated git worktree. The wizard chips promise isolation; this row

@@ -13,6 +13,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Workflows: a run paused on a provider quota is shown as paused everywhere,
+  resumes as soon as the quota is back, and never blocks a launch silently
+  (KT-1657). A refused launch (`Concurrency limit reached`) now names the run
+  that holds the slot (workflow, state, and for a quota wait the wake time) and
+  the actions: resume it now, open it, cancel it, or switch the agent of its
+  waiting step. `workflow_active_runs` and `GET /api/workflows/active-runs`
+  list every unfinished run, a `WaitingQuota` one with its wake time; the
+  workflow list, card, run page and the nav's active-runs indicator read
+  « Paused — provider quota, resumes automatically at <time> » with a
+  « Resume now » reachable without opening the run. A paused run no longer
+  waits blindly for the announced reset: about every 20 minutes, and at once
+  after a key, agent or login change, Kronn asks the provider with a minimal
+  request and resumes the run as soon as it answers; the refused step can be
+  moved to another installed agent from the paused run
+  (`POST /api/workflow-runs/{id}/quota-agent`).
 - API connections: a revoked or expired token is surfaced before the next run
   fails on it (KT-1524). A 401 (or a 403 that names the credential, or a failed
   OAuth refresh) flags the connection until its next successful call: the card

@@ -156,7 +156,13 @@ pub async fn toggle(
     }
     let enabled = was_disabled; // toggled: if was disabled, now enabled
     match crate::core::config::save(&config).await {
-        Ok(_) => Json(ApiResponse::ok(enabled)),
+        Ok(_) => {
+            if enabled {
+                // An agent back in play may answer where a paused run waits (KT-1657).
+                crate::workflows::quota_wait::request_recheck();
+            }
+            Json(ApiResponse::ok(enabled))
+        }
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
 }
@@ -194,6 +200,11 @@ pub async fn readiness(
         );
         (config.tokens.clone(), std::hash::Hasher::finish(&hasher))
     };
+    // A forced check is the operator's "I signed in again": quota-paused runs
+    // ask their provider on the next engine pass (KT-1657).
+    if request.force {
+        crate::workflows::quota_wait::request_recheck();
+    }
     let context = agents::readiness::ProbeContext {
         project_id: request.project_id,
         project_path,

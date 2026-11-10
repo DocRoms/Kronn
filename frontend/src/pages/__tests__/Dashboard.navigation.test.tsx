@@ -96,6 +96,38 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe('Dashboard — runs paused on a provider quota (KT-1657)', () => {
+  it('shows a global indicator on any page, with the paused label and a Resume now, and never counts the run as running', async () => {
+    vi.mocked(workflowsApi.activeRuns).mockResolvedValue([{
+      run_id: 'run-paused', workflow_id: 'wf-review', workflow_name: 'PR Review v3.4', project_id: null,
+      status: 'WaitingQuota', started_at: '2026-11-09T16:19:00Z',
+      quota: { step_name: 'Agent', agent: 'ClaudeCode', wake_at: '2026-11-11T02:02:00Z', reset_at: '2026-11-11T02:00:00Z' },
+    }]);
+    vi.mocked(workflowsApi.resumeRun).mockResolvedValue({ run_id: 'run-paused', new_status: 'Running' });
+    await renderDashboard('/discussions');
+
+    const trigger = await screen.findByTestId('active-runs-trigger');
+    expect(trigger).toHaveAccessibleName('1 run en pause sur un quota fournisseur');
+    expect(trigger).toHaveAttribute('data-quota-paused', 'true');
+    expect(screen.getByTestId('quota-paused-count')).toHaveTextContent('1');
+    // Nothing is running: no LIVE badge, no running count on the Automation tab.
+    expect(document.querySelector('.dash-nav-live')).toBeNull();
+
+    await act(async () => { fireEvent.click(trigger); });
+    const item = screen.getByTestId('quota-paused-item');
+    expect(item).toHaveTextContent('PR Review v3.4');
+    expect(item).toHaveTextContent('En pause — quota du fournisseur, reprise automatique à');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Reprendre maintenant' })); });
+    expect(workflowsApi.resumeRun).toHaveBeenCalledWith('run-paused');
+  });
+
+  it('shows no indicator when no run is paused or running', async () => {
+    vi.mocked(workflowsApi.activeRuns).mockResolvedValue([]);
+    await renderDashboard('/discussions');
+    expect(screen.queryByTestId('active-runs-trigger')).toBeNull();
+  });
+});
+
 describe('Dashboard navigation', () => {
   it('always navigates Projects and Automation while activity disclosures remain separate buttons', async () => {
     vi.mocked(workflowsApi.list).mockResolvedValue([{

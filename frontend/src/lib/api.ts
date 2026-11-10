@@ -229,6 +229,9 @@ import type {
   DecideRunRequest,
   DecideRunResponse,
   ResumeInterruptedRequest,
+  ActiveRunSummary,
+  StepAgentOverride,
+  SwitchQuotaAgentResponse,
   ImportWorkflowRequest,
   WorkflowImportPreview,
   ImportQuickPromptRequest,
@@ -2983,6 +2986,14 @@ export const workflows = {
     api<{ run_id: string; new_status: string }>(
       'POST', `/workflow-runs/${runId}/resume`, request
     ),
+  /** KT-1657 — every unfinished run; a run paused on a provider quota
+   *  carries `quota.wake_at`. */
+  activeRuns: () => api<ActiveRunSummary[]>('GET', '/workflows/active-runs'),
+  /** KT-1657 — move the refused step of a quota-paused run to another
+   *  installed agent (the run keeps waiting; resume it or let the provider
+   *  re-check wake it). */
+  switchQuotaAgent: (runId: string, choice: StepAgentOverride) =>
+    api<SwitchQuotaAgentResponse>('POST', `/workflow-runs/${runId}/quota-agent`, choice),
   /** 0.7.0 Phase 4 — submit operator's decision on a paused (Gate) run.
    *  `decision` ∈ "approve" | "request_changes" | "reject".
    *  `comment` is required for request_changes (the agent needs feedback).

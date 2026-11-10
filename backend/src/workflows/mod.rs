@@ -81,6 +81,8 @@ pub struct WorkflowEngine {
     last_trigger_check: tokio::sync::Mutex<chrono::DateTime<Utc>>,
     /// Outbound policy of Watch polls; tests point it at a local server.
     api_policy: api_call_executor::SecurityPolicy,
+    /// Asks the providers of quota-paused runs whether they answer again.
+    quota_rechecker: quota_wait::QuotaRechecker,
 }
 
 impl WorkflowEngine {
@@ -89,6 +91,7 @@ impl WorkflowEngine {
             state,
             last_trigger_check: tokio::sync::Mutex::new(Utc::now()),
             api_policy: api_call_executor::SecurityPolicy::production(),
+            quota_rechecker: quota_wait::QuotaRechecker::production(),
         }
     }
 
@@ -119,6 +122,9 @@ impl WorkflowEngine {
                 tracing::error!("Workflow engine tick error: {}", e);
             }
             quota_wait::wake_due_runs(&self.state, Utc::now()).await;
+            self.quota_rechecker
+                .recheck_due(&self.state, Utc::now())
+                .await;
             crate::core::citation_drift::scheduled_tick(&self.state).await;
         }
     }

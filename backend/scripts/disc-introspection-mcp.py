@@ -1437,9 +1437,9 @@ TOOLS = [
     {
         "name": "workflow_active_runs",
         "description": (
-            "Unfinished runs (Running, WaitingApproval, Pending), latest per "
-            "workflow: [{workflow_id, workflow_name, project_id, run_id, status, "
-            "started_at}]. Check before acting; drill down: `workflow_run_status`."
+            "Unfinished runs (incl. WaitingQuota: paused, holds a slot): "
+            "[{workflow_id, workflow_name, project_id, run_id, status, "
+            "started_at, quota?{agent, wake_at}}]; see `workflow_run_status`."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -7797,25 +7797,34 @@ def call_workflow_validate(args):
 
 
 def call_workflow_active_runs(_args):
-    # In-flight board (2026-06-11). Reuses `GET /api/workflows` (each summary
-    # carries its latest run) and keeps only the ones whose last run is still
-    # in flight — zero extra endpoint. The agent gets "what is running /
-    # awaiting approval right now" in one call; for the live step of a run it
-    # drills down via `workflow_run_status(run_id)`.
-    active = {"Running", "WaitingApproval", "Pending"}
-    data = _unwrap(_http("GET", "/api/workflows")) or []
+    # In-flight board. KT-1657: reads `GET /api/workflows/active-runs`, every
+    # unfinished run (not only the latest of each workflow), so a run paused
+    # on a provider quota (WaitingQuota) shows up with its wake time and the
+    # agent of its refused step instead of silently holding a concurrency
+    # slot. For the live step of a run: `workflow_run_status(run_id)`.
+    data = _unwrap(_http("GET", "/api/workflows/active-runs")) or []
     out = []
-    for w in data:
-        lr = w.get("last_run") or {}
-        if lr.get("status") in active:
-            out.append({
-                "workflow_id": w.get("id"),
-                "workflow_name": w.get("name"),
-                "project_id": w.get("project_id"),
-                "run_id": lr.get("id"),
-                "status": lr.get("status"),
-                "started_at": lr.get("started_at"),
-            })
+    for r in data:
+        row = {
+            "workflow_id": r.get("workflow_id"),
+            "workflow_name": r.get("workflow_name"),
+            "project_id": r.get("project_id"),
+            "run_id": r.get("run_id"),
+            "status": r.get("status"),
+            "started_at": r.get("started_at"),
+        }
+        if r.get("parent_run_id"):
+            row["parent_run_id"] = r.get("parent_run_id")
+        quota = r.get("quota")
+        if quota:
+            row["quota"] = {
+                "step": quota.get("step_name"),
+                "agent": quota.get("agent"),
+                "wake_at": quota.get("wake_at"),
+                "reset_at": quota.get("reset_at"),
+                "parked": quota.get("parked"),
+            }
+        out.append(row)
     return out
 
 

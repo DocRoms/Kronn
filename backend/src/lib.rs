@@ -2564,6 +2564,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/workflows/step-schema",
             get(api::workflows::step_schema),
         )
+        // KT-1657 — every unfinished run, a quota-paused one with its wake time.
+        .route(
+            "/api/workflows/active-runs",
+            get(api::workflows::active_runs),
+        )
         .route(
             "/api/workflows",
             get(api::workflows::list).post(api::workflows::create),
@@ -2803,6 +2808,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/workflow-runs/{run_id}/resume",
             post(api::workflows::resume_interrupted),
+        )
+        // KT-1657 — human-only: switch the agent of a quota-paused step.
+        .route(
+            "/api/workflow-runs/{run_id}/quota-agent",
+            post(api::workflows::switch_quota_agent),
         )
         // ── Quick Prompts ──
         .route(

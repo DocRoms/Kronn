@@ -27,6 +27,8 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   deleteRun: vi.fn(),
   deleteAllRuns: vi.fn(),
   cancelRun: vi.fn(),
+  resumeRun: vi.fn(),
+  activeRuns: vi.fn(),
   triggerStream: vi.fn(),
   importWorkflow: vi.fn(),
   previewImport: vi.fn(),
@@ -41,6 +43,8 @@ const applyWorkflowsApiDefaults = vi.hoisted(() => () => {
   mockWorkflowsApi.listRuns.mockResolvedValue([]);
   mockWorkflowsApi.countRuns.mockResolvedValue(0);
   mockWorkflowsApi.cancelRun.mockResolvedValue({ run_cancelled: true, child_discs_cancelled: 0 });
+  mockWorkflowsApi.resumeRun.mockResolvedValue({ run_id: 'run-paused', new_status: 'Running' });
+  mockWorkflowsApi.activeRuns.mockResolvedValue([]);
   mockWorkflowsApi.previewImport.mockResolvedValue({ skills: [], missing_skills: [] });
   mockWorkflowsApi.autoDisabled.mockResolvedValue([]);
   mockWorkflowsApi.reenable.mockResolvedValue([]);
@@ -315,6 +319,36 @@ describe('WorkflowsPage', () => {
     expect(badges[0]).toHaveTextContent('collect_jira');
     expect(badges[0]).toHaveTextContent('1.1 MB');
     expect(badges[0].getAttribute('title')).toMatch(/collect_jira/);
+  });
+
+  it('KT-1657 — a workflow whose run waits on a provider quota reads paused, with its wake time and a Resume now', async () => {
+    const wake = '2026-11-11T02:02:00Z';
+    mockWorkflowsApi.list.mockResolvedValue([{
+      id: 'wf-review', name: 'PR Review v3.4', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 2, misconfigured_step_count: 0, unsafe_step_count: 0,
+      enabled: true, pinned: false, created_at: '2026-01-01T00:00:00Z',
+      last_run: { id: 'run-paused', status: 'WaitingQuota', started_at: '2026-11-09T16:19:00Z', finished_at: null, tokens_used: 0 },
+    }] as WorkflowSummary[]);
+    mockWorkflowsApi.activeRuns.mockResolvedValue([{
+      run_id: 'run-paused', workflow_id: 'wf-review', workflow_name: 'PR Review v3.4', project_id: null,
+      status: 'WaitingQuota', started_at: '2026-11-09T16:19:00Z',
+      quota: { step_name: 'Agent', agent: 'ClaudeCode', wake_at: wake, reset_at: '2026-11-11T02:00:00Z' },
+    }]);
+    await wrap(<WorkflowsPage projects={[]} />);
+
+    // The workflow card: paused, not running, with the wake time.
+    const notice = await screen.findByTestId('quota-pause-notice');
+    expect(notice).toHaveTextContent(`En pause — quota du fournisseur, reprise automatique à ${new Date(wake).toLocaleString()}`);
+    const card = notice.closest('.wf-card') as HTMLElement;
+    expect(card).toHaveAttribute('data-running', 'false');
+    expect(card.querySelector('.wf-run-status-chip')).toHaveTextContent('En pause — quota');
+    // The sidebar list row says so too.
+    const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
+    expect(within(sidebar).getAllByText(/En pause — quota/).length).toBeGreaterThan(0);
+
+    // Resume now, straight from the card, without opening the run.
+    await act(async () => { fireEvent.click(within(card).getByTestId('quota-resume-now')); });
+    expect(mockWorkflowsApi.resumeRun).toHaveBeenCalledWith('run-paused');
   });
 
   it('collapses to the shared Discussions-style rail and reopens the sidebar', async () => {
@@ -2289,6 +2323,36 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     const [msg, kind] = toast.mock.calls[0];
     expect(String(msg)).toMatch(/Concurrency limit/);
     expect(kind).toBe('error');
+  });
+
+  it('KT-1657 — the launch toast carries the blocking run, its state, its wake time and the actions, whole', async () => {
+    const refusal = 'Concurrency limit reached (1/1). Blocked by: run 5d917cf0 (child of run f50d2fe6) of "PR Review v3.4" is WaitingQuota: paused on a provider quota, resumes automatically at 2026-11-11 02:02 UTC. Actions: resume it now (POST /api/workflow-runs/f50d2fe6-bbbb/resume), open the run, cancel it, or switch the agent of its waiting step (POST /api/workflow-runs/5d917cf0-aaaa/quota-agent).';
+    mockWorkflowsApi.triggerStream.mockClear();
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow({
+      variables: [],
+      steps: [
+        { name: 'prnum', agent: 'ClaudeCode', prompt_template: 'Review the PR', mode: { type: 'Normal' } } as never,
+      ],
+    } as Partial<Workflow>));
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.triggerStream.mockImplementation(
+      async (_id: string, _s: unknown, _d: unknown, _done: unknown, onError: (e: string) => void) => {
+        onError(refusal);
+      },
+    );
+    const toast = vi.fn();
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} toast={toast} />);
+    await act(async () => { fireEvent.click(screen.getAllByText('Lancer')[0]); });
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const [msg, kind] = toast.mock.calls[0];
+    expect(kind).toBe('error');
+    expect(String(msg)).toBe(`Échec du lancement : ${refusal}`);
+    for (const part of ['run 5d917cf0', 'PR Review v3.4', 'WaitingQuota', '2026-11-11 02:02 UTC', 'resume it now', 'open the run', 'cancel it', 'switch the agent']) {
+      expect(String(msg)).toContain(part);
+    }
   });
 
   it('carte désactivée : Lancer est inerte MAIS porte le tooltip explicatif', async () => {
