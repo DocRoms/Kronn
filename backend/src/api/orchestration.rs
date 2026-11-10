@@ -4290,6 +4290,7 @@ async fn interrupt_recovered_apply(
 /// exists. A launch failure never rewrites the already-integrated result: it
 /// parks the campaign durably for inspection instead.
 async fn advance_campaign_after_integration(db: &Database, run: &crate::models::OrchestrationRun) {
+    use crate::db::orchestration::CampaignParkCause;
     use crate::models::{OrchestrationControlState, OrchestrationRunKind};
 
     if run.kind != OrchestrationRunKind::Campaign
@@ -4326,6 +4327,7 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
         park_campaign_for_human(
             db,
             &current.id,
+            CampaignParkCause::ChildDecision,
             "a child execution requires a human decision",
         )
         .await;
@@ -4350,6 +4352,7 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
             park_campaign_for_human(
                 db,
                 &current.id,
+                CampaignParkCause::LaunchFailed,
                 &format!("automatic next-task launch failed: {error:?}"),
             )
             .await;
@@ -4359,25 +4362,26 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
     if attention.active_executions > 0 {
         return;
     }
-    let state = if all_active_done {
-        OrchestrationControlState::Completed
-    } else {
-        OrchestrationControlState::AwaitingHuman
-    };
-    let reason = if all_active_done {
-        "all active plan tasks are complete"
-    } else {
-        "no launchable task remains; the plan is blocked or needs correction"
-    };
+    if !all_active_done {
+        // Parked on a human like the two cases above, so it leaves the same
+        // durable card (KT-650).
+        park_campaign_for_human(
+            db,
+            &current.id,
+            CampaignParkCause::PlanBlocked,
+            "no launchable task remains; the plan is blocked or needs correction",
+        )
+        .await;
+        return;
+    }
     let id = current.id.clone();
-    let reason = reason.to_string();
     if let Err(error) = db
         .with_conn(move |conn| {
             crate::db::orchestration::set_orchestration_control_state(
                 conn,
                 &id,
-                state,
-                Some(&reason),
+                OrchestrationControlState::Completed,
+                Some("all active plan tasks are complete"),
                 &backend_actor(),
             )?;
             Ok(())
@@ -4388,16 +4392,22 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
     }
 }
 
-async fn park_campaign_for_human(db: &Database, run_id: &str, reason: &str) {
+async fn park_campaign_for_human(
+    db: &Database,
+    run_id: &str,
+    cause: crate::db::orchestration::CampaignParkCause,
+    reason: &str,
+) {
     let id = run_id.to_string();
     let reason = reason.to_string();
     if let Err(error) = db
         .with_conn(move |conn| {
-            crate::db::orchestration::set_orchestration_control_state(
+            crate::db::orchestration::park_campaign_awaiting_human(
                 conn,
                 &id,
-                crate::models::OrchestrationControlState::AwaitingHuman,
-                Some(&reason),
+                cause,
+                &reason,
+                None,
                 &backend_actor(),
             )?;
             Ok(())
