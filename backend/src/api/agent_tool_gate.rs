@@ -154,6 +154,14 @@ pub(super) const UNGATED_TOOLS: &[(&str, &str)] = &[
         "page_list",
         "filtered to the run's project; the bridge has no list route",
     ),
+    (
+        "disc_append",
+        "an HTTP step's own room only: the member session and the live step are checked on every call",
+    ),
+    (
+        "disc_question_list",
+        "an HTTP step's own room only: the member session and the live step are checked on every call",
+    ),
     ("agent_list", "the room's own agents and connections"),
     (
         "task_exec_status",
@@ -655,6 +663,7 @@ mod tests {
         let mut all = full_discussion_catalogue();
         all.extend(workflow_tool_catalogue(true));
         all.extend(workflow_workspace_tool_catalogue());
+        all.extend(room_tools::declarations());
         all.push(tools_load_declaration());
         let mut names: Vec<String> = all
             .iter()

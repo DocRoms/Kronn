@@ -770,9 +770,11 @@ pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), Stri
                 s.name
             ));
         }
-        if !matches!(s.agent, AgentType::ClaudeCode | AgentType::Codex) {
+        if !matches!(s.agent, AgentType::ClaudeCode | AgentType::Codex)
+            && !crate::agents::runner::is_http_chat_agent(&s.agent)
+        {
             return Err(format!(
-                "Step Agent « {} » : `room_id` demande Claude Code ou Codex, seuls agents dont le bridge Kronn porte la capacité de room.",
+                "Step Agent « {} » : `room_id` demande Claude Code, Codex ou un agent HTTP (LiteLLM, Ollama, connexion custom), seuls agents que Kronn peut faire entrer dans une room.",
                 s.name
             ));
         }
@@ -11711,10 +11713,14 @@ mod tests {
         );
         let mut local = mk_step("orchestrate", StepType::Agent);
         local.prompt_template = "Orchestrate the ticket".into();
-        local.agent = AgentType::Ollama;
-        local.room_id = Some("disc-1".into());
-        let bridgeless = validate_step_required_fields(&local).expect_err("CLI agents only");
-        assert!(bridgeless.contains("Claude Code ou Codex"), "{bridgeless}");
+        for http in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Custom] {
+            local.agent = http;
+            local.room_id = Some("disc-1".into());
+            validate_step_required_fields(&local).expect("an HTTP agent is joined by Kronn");
+        }
+        local.agent = AgentType::GeminiCli;
+        let bridgeless = validate_step_required_fields(&local).expect_err("no room for this CLI");
+        assert!(bridgeless.contains("Claude Code, Codex"), "{bridgeless}");
         let mut exec = mk_step("sortie", StepType::Exec);
         exec.room_id = Some("disc-1".into());
         let misplaced = validate_step_required_fields(&exec).expect_err("Agent only");

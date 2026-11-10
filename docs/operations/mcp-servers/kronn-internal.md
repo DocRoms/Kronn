@@ -452,7 +452,9 @@ runs in the room, for the same provider, and never for a delegated worker's
 dispatch.
 A Claude Code or Codex workflow Agent step with a `room_id` (a template
 rendering to a discussion id) is principal of that room without a `kr-join`
-token; other providers have no bridge to carry it, so the step is refused. On
+token; an HTTP agent (LiteLLM, Ollama, NVIDIA, a custom connection such as
+OpenRouter) is joined by the orchestrator instead (below); any other CLI has no
+bridge to carry it, so the step is refused. On
 every launch and every resume the runner injects `KRONN_WORKFLOW_STEP_CONTEXT`
 (room, run, step, capability); before the first Kronn tool, the bridge
 exchanges it at
@@ -467,6 +469,38 @@ Its untargeted `disc_append` reports to the room without waking the room's
 native agent; target that agent explicitly to ask it something (KT-1253).
 `[src: file: backend/src/workflows/step_room.rs:211-225#matches]`
 `[src: file: backend/src/db/workflow_step_rooms.rs:178-293#join]`
+
+**An HTTP Agent step with a `room_id` (KT-1244).** An HTTP agent has no bridge
+process and nothing to exchange the capability with, so it does not use
+`workflow-step-join`: `activate` joins the step itself, in the same
+`workflow_step_room_sessions` table, as a session of the step's provider
+(`LiteLlm`, `Custom`, …) with a `kronn-step-…` id, and hands the executor a
+`StepRoomMember` (room, capability, session). The membership has the lifetime
+of a bridge's: it leaves with the step (finished, failed, cancelled or dropped)
+and `revoke_all_after_restart` revokes it at boot. The room shows the step
+working (KT-883) and what it posts is authored by the step's agent, with the
+workflow-step provenance of any step message; it is never exposed as a CLI N.
+`[src: file: backend/src/workflows/step_room.rs:574-607#join_http_step]`
+`[src: file: backend/src/workflows/step_room.rs:285-287#joined_by_orchestrator]`
+
+Only for such a step, the native workflow catalogue gains three tools, bound to
+THAT room and named as their bridge equivalents: `disc_read` (the tail of the
+room, `limit` 1–200, default 40), `disc_append` (a message on the `main`
+channel; a closed `kronn-question` fence in `content` publishes a decision card,
+and a card that could not be recorded comes back in `invalid_cards` to be
+reposted) and `disc_question_list` (pending questions, or the durable answer of
+an exact `key`; same result shape and the same 50-row cap as the bridge's). They
+declare no room argument: a `discussion_id` or `disc_id` naming another
+discussion is refused, not ignored. Every call also checks that the step still
+runs in this process and that its session is still active, so a finished,
+replaced or restarted step is refused with "membership has ended". A step with no
+`room_id` keeps exactly the catalogue it had (no extra tool in a small model's
+context), and cannot call these names. No other room tool is added: the step is
+already a member, so there is no `disc_join` or `disc_wait_for_peer`.
+`[src: file: backend/src/api/agent_room_tools.rs:15-60#declarations]`
+`[src: file: backend/src/api/agent_room_tools.rs:63-85#execute_step_room_tool]`
+`[src: file: backend/src/api/agent_room_tools.rs:231-244#foreign_room_refusal]`
+`[src: file: backend/src/api/agent_tools.rs:1803-1805#catalogue]`
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery

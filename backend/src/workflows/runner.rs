@@ -2636,11 +2636,12 @@ async fn execute_run_body(
                         let step = &hydrated;
                         let step_room = step_room.ok().flatten();
                         let full_access = agents_config.full_access_for(&step.agent);
-                        let native_tools = Some(KronnToolExecutor::workflow_arc(
+                        let native_tools = Some(KronnToolExecutor::workflow_room_arc(
                             state.clone(),
                             workflow.project_id.clone(),
                             run.id.clone(),
                             step.name.clone(),
+                            step_room.as_ref().and_then(|room| room.member().cloned()),
                         ));
                         // Live-progress wiring — without this the user gets a
                         // "step is running" pulse with no visible content until
@@ -3832,11 +3833,12 @@ async fn execute_run_body(
                             ),
                             Ok(step_room) => {
                                 let full_access = agents_config.full_access_for(&rb_step.agent);
-                                let native_tools = Some(KronnToolExecutor::workflow_arc(
+                                let native_tools = Some(KronnToolExecutor::workflow_room_arc(
                                     state.clone(),
                                     workflow.project_id.clone(),
                                     run.id.clone(),
                                     rb_step.name.clone(),
+                                    step_room.as_ref().and_then(|room| room.member().cloned()),
                                 ));
                                 // KT-1252 — the room's bubble follows a rollback
                                 // step as it does a step of the main path. No
