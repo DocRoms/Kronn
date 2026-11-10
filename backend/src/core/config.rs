@@ -982,6 +982,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                tools_enabled: None,
             },
             codex: AgentConfig {
                 concurrency: None,
@@ -991,6 +992,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                tools_enabled: None,
             },
             open_code: AgentConfig::default(),
             gemini_cli: AgentConfig::default(),

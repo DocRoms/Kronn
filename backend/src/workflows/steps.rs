@@ -2504,6 +2504,7 @@ mod tests {
                 image_model: None,
                 video_model: None,
                 decision_model: None,
+                tools_enabled: None,
                 media_endpoint: None,
             }
         }
@@ -2553,6 +2554,7 @@ mod tests {
             image_model: None,
             video_model: None,
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }
@@ -3439,6 +3441,7 @@ mod http_native_tool_step_tests {
             image_model: None,
             video_model: None,
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }
@@ -3812,6 +3815,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().to_string_lossy();
         let endpoints = crate::models::setup::HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some(fallback.uri()),
             nvidia: None,
         };
@@ -3863,6 +3867,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().to_string_lossy();
         let endpoints = crate::models::setup::HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some(fallback.uri()),
             nvidia: None,
         };
@@ -3961,6 +3966,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             None,
             None,
             Some(&crate::models::setup::HttpEndpoints {
+                tools: Default::default(),
                 lite_llm: Some(server.uri()),
                 nvidia: None,
             }),

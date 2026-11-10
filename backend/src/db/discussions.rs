@@ -4264,6 +4264,81 @@ pub fn insert_context_file(
     Ok(())
 }
 
+/// Every context file row, for the whole-DB export (KT-1602). `disk_path` is
+/// read so the exporter can find the bytes; it never reaches the archive.
+pub fn list_context_file_records(
+    conn: &Connection,
+) -> Result<Vec<crate::models::db::ContextFileRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_text,
+                extracted_size, message_id, extracted_from_asset_id, created_at, disk_path
+         FROM context_files
+         ORDER BY created_at, rowid",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::models::db::ContextFileRecord {
+            id: row.get(0)?,
+            discussion_id: row.get(1)?,
+            filename: row.get(2)?,
+            mime_type: row.get(3)?,
+            original_size: row.get::<_, i64>(4)?.max(0) as u64,
+            extracted_text: row.get(5)?,
+            extracted_size: row.get::<_, i64>(6)?.max(0) as u64,
+            message_id: row.get(7)?,
+            extracted_from_asset_id: row.get(8)?,
+            created_at: row.get(9)?,
+            has_blob: false,
+            disk_path: row.get(10)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Restore a context file row verbatim (KT-1602). `disk_path` is where the
+/// imported bytes were written here, not the exporter's. The asset a frame was
+/// taken from is linked afterwards (`link_context_file_source`): it may come
+/// later in the archive.
+pub fn insert_context_file_record(
+    conn: &Connection,
+    record: &crate::models::db::ContextFileRecord,
+    disk_path: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO context_files
+         (id, discussion_id, filename, mime_type, original_size, extracted_text,
+          extracted_size, disk_path, message_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            record.id,
+            record.discussion_id,
+            record.filename,
+            record.mime_type,
+            record.original_size as i64,
+            record.extracted_text,
+            record.extracted_size as i64,
+            disk_path,
+            record.message_id,
+            record.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Point a restored picture at the clip it was taken from, when that clip was
+/// restored too (otherwise the link stays empty rather than dangling).
+pub fn link_context_file_source(
+    conn: &Connection,
+    file_id: &str,
+    source_asset_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE context_files SET extracted_from_asset_id = ?2
+         WHERE id = ?1 AND EXISTS (SELECT 1 FROM context_files WHERE id = ?2)",
+        rusqlite::params![file_id, source_asset_id],
+    )?;
+    Ok(())
+}
+
 /// True if a context file with this id already exists locally. Idempotency
 /// guard for the F8 federated-file fetch (the host's file_id is reused on the
 /// peer, so a re-received FileAttached is a no-op).

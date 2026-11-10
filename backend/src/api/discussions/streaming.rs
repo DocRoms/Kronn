@@ -3763,6 +3763,7 @@ pub(super) async fn make_agent_stream_inner(
                 display_name: connection.display_name.clone(),
                 mention_alias: connection.mention_alias.clone(),
                 endpoint: endpoint.clone(),
+                tools_enabled: connection.tools_enabled,
                 api_key: tokens
                     .active_key_for(&connection.credential_slug)
                     .filter(|key| !key.trim().is_empty())

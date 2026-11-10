@@ -57,6 +57,12 @@ pub struct UpsertConnectionRequest {
     /// quality tier, like the media slots.
     #[serde(default)]
     pub decision_model: Option<String>,
+    /// Tool-executor switch for this connection (KT-1600): `false` turns the
+    /// tools off, `true` or omitted leaves them on. Omitted on an update, it
+    /// keeps the stored value, so a client that does not know the field cannot
+    /// silently reset it.
+    #[serde(default)]
+    pub tools_enabled: Option<bool>,
     /// Override for providers serving media from another host. Empty derives
     /// it from `endpoint`.
     #[serde(default)]
@@ -1895,6 +1901,7 @@ pub async fn create(
         video_model: clean(req.video_model),
         decision_model: clean(req.decision_model),
         media_endpoint: clean(req.media_endpoint),
+        tools_enabled: req.tools_enabled,
     };
 
     if connection.origin_preset == ExternalApiConnectionPreset::LiteLlm {
@@ -2046,6 +2053,7 @@ async fn update_inner(
         video_model: clean(req.video_model),
         decision_model: clean(req.decision_model),
         media_endpoint: clean(req.media_endpoint),
+        tools_enabled: req.tools_enabled.or(existing.tools_enabled),
     };
 
     let tier_checks = if updated.origin_preset == ExternalApiConnectionPreset::LiteLlm {
@@ -2251,6 +2259,7 @@ mod tests {
             image_model: None,
             video_model: None,
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         };
         assert_eq!(

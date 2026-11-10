@@ -76,6 +76,7 @@ async fn run(step: &WorkflowStep, replies: Vec<(u16, serde_json::Value)>) -> Ste
         None,
         Some(&tiers),
         Some(&crate::models::setup::HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some(server.uri()),
             nvidia: None,
         }),
@@ -627,6 +628,7 @@ async fn a_native_reviewer_never_inherits_its_author_s_full_access() {
             None,
             Some(&tiers),
             Some(&crate::models::setup::HttpEndpoints {
+                tools: Default::default(),
                 lite_llm: Some(server.uri()),
                 nvidia: None,
             }),

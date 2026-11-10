@@ -3696,6 +3696,61 @@ mod tests {
             .is_none());
     }
 
+    /// KT-1600 — the per-agent tools switch persists for an HTTP agent, clears
+    /// back to the default, and is refused for a CLI agent (which brings its own
+    /// tools) and for `Custom` (whose setting lives on its connection).
+    #[tokio::test]
+    #[serial]
+    async fn config_agent_tools_switch_persists_clears_and_refuses_non_http_agents() {
+        isolate_config_dir();
+        let state = test_state();
+        let post = |body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/config/agent-tools")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            post(serde_json::json!({ "agent": "Ollama", "enabled": false })),
+        )
+        .await;
+        assert_eq!(body["success"], true, "{body}");
+        assert_eq!(
+            state.config.read().await.agents.ollama.tools_enabled,
+            Some(false)
+        );
+        let persisted = crate::core::config::load()
+            .await
+            .expect("load persisted config")
+            .expect("saved config exists");
+        assert_eq!(persisted.agents.ollama.tools_enabled, Some(false));
+        assert_eq!(persisted.agents.lite_llm.tools_enabled, None, "per agent");
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            post(serde_json::json!({ "agent": "Ollama", "enabled": null })),
+        )
+        .await;
+        assert_eq!(body["success"], true, "{body}");
+        assert_eq!(state.config.read().await.agents.ollama.tools_enabled, None);
+
+        for agent in ["ClaudeCode", "Custom"] {
+            let (_, body) = send(
+                state.clone(),
+                false,
+                post(serde_json::json!({ "agent": agent, "enabled": false })),
+            )
+            .await;
+            assert_eq!(body["success"], false, "{agent}: {body}");
+        }
+    }
+
     #[tokio::test]
     async fn config_scan_paths_get() {
         let state = test_state();

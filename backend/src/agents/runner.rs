@@ -3404,7 +3404,47 @@ pub struct ExternalHttpRuntime {
     pub display_name: String,
     pub mention_alias: String,
     pub endpoint: String,
+    /// The connection's tool-executor switch (KT-1600): `Some(false)` turns
+    /// the tools off, `None` leaves them on.
+    pub tools_enabled: Option<bool>,
     pub api_key: Option<String>,
+}
+
+/// The executor this HTTP run may use: `config.tools` when the verdict of
+/// `http_transport::http_tools_verdict` says attach, `None` otherwise (KT-1600).
+/// A refusal is logged so a model that "forgot" its tools is explainable.
+pub(crate) fn gate_http_tools(
+    config: &AgentStartConfig<'_>,
+) -> Option<std::sync::Arc<dyn crate::agents::tools::ToolExecutor>> {
+    let executor = config.tools.clone()?;
+    let model = effective_model_flag(
+        config.model_override,
+        config.agent_type,
+        config.tier,
+        config.model_tiers,
+    );
+    let catalogue = model
+        .as_deref()
+        .and_then(|model| crate::core::model_catalog::model_tool_support(config.agent_type, model));
+    // The named connection's own setting when the run has one, else the
+    // agent's slot in the settings.
+    let setting = match config.external_http {
+        Some(runtime) => runtime.tools_enabled,
+        None => config
+            .http_endpoints
+            .and_then(|endpoints| endpoints.tools_setting_for(config.agent_type)),
+    };
+    let verdict = crate::http_transport::http_tools_verdict(config.agent_type, setting, catalogue);
+    if verdict == crate::http_transport::HttpToolsVerdict::Attach {
+        return Some(executor);
+    }
+    tracing::info!(
+        agent = ?config.agent_type,
+        model = model.as_deref().unwrap_or(""),
+        ?verdict,
+        "Kronn tool executor not attached to this HTTP run"
+    );
+    None
 }
 
 /// What an HTTP agent is told about its own capabilities.
@@ -4229,14 +4269,24 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         }
     };
 
+    // The tool executor is withheld from a model that cannot use it (KT-1600):
+    // a tool schema sent to a model without the capability is rejected by the
+    // provider or, worse, answered in prose. Decided once here, before the
+    // prompt is built, so the "you have tools" notice and the request's tool
+    // declarations always agree.
+    let http_tools = if is_http_chat_agent(config.agent_type) {
+        gate_http_tools(&config)
+    } else {
+        config.tools.clone()
+    };
+
     // A prelocalized HTTP worker is not a smaller general-purpose agent. Its
     // executor exposes one frozen tool per phase, so injecting user memory,
     // project-wide AGENTS.md and the full general tool tutorial only makes the
     // model repeatedly pay for capabilities it cannot use. Explicit skills,
     // profiles, directives and context files remain honoured below.
     let prelocalized_http_worker = is_http_chat_agent(config.agent_type)
-        && config
-            .tools
+        && http_tools
             .as_ref()
             .and_then(|executor| executor.worker_scope())
             .is_some();
@@ -4247,7 +4297,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     let http_agent_reads_files = http_agent_reads_its_own_files(
         is_http,
         is_http
-            && config.tools.as_ref().is_some_and(|executor| {
+            && http_tools.as_ref().is_some_and(|executor| {
                 executor
                     .catalogue()
                     .iter()
@@ -4362,7 +4412,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         parts.push(if prelocalized_http_worker {
             prelocalized_http_worker_notice().to_string()
         } else {
-            http_agent_tools_notice(config.tools.is_some()).to_string()
+            http_agent_tools_notice(http_tools.is_some()).to_string()
         });
     } else {
         if !mcp_context.is_empty() {
@@ -4497,7 +4547,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             },
         );
         // API access policies decide on the model this launch really runs.
-        if let Some(tools) = config.tools.as_ref() {
+        if let Some(tools) = http_tools.as_ref() {
             tools.bind_launch_identity(crate::core::api_access::AgentIdentity {
                 agent_type: config.agent_type.clone(),
                 model: Some(model.to_string()),
@@ -4511,7 +4561,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.ollama_format,
             http_base_url,
             http_api_key,
-            config.tools.clone(),
+            http_tools,
             config.ollama_context_overrides,
             config.http_request_timeout,
             config.cancel_token.as_ref(),

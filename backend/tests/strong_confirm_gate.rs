@@ -998,6 +998,7 @@ async fn an_external_connection_asks_when_its_endpoint_changes() {
         video_model: None,
         media_endpoint: None,
         decision_model: None,
+        tools_enabled: None,
     };
     harness
         .state

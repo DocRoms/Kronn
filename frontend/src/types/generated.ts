@@ -374,7 +374,15 @@ mention_color?: string | null,
  * under the `litellm` provider, never here — this struct is serialised
  * to the frontend.
  */
-base_url?: string | null, };
+base_url?: string | null,
+/**
+ * Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
+ * Tools are on by default: `Some(false)` withholds them from every model
+ * of this agent (for one that cannot take tool calls); `None` and
+ * `Some(true)` leave them on, Ollama's catalogue still withholding them
+ * from a model it lists without `tools`. Ignored by CLI agents.
+ */
+tools_enabled?: boolean | null, };
 
 /**
  * One agent's effective context.
@@ -4622,7 +4630,14 @@ media_endpoint?: string | null,
  * The model Decision steps call on this connection (KT-1366). A
  * capability like the media slots, not a quality tier.
  */
-decision_model?: string | null, };
+decision_model?: string | null,
+/**
+ * Operator switch for the Kronn tool executor on runs on this connection
+ * (KT-1600). Tools are on by default: `None` and `Some(true)` attach
+ * them, `Some(false)` withholds them, for a model that cannot take tool
+ * calls.
+ */
+tools_enabled?: boolean | null, };
 
 export type ExternalApiConnectionPreset = "lite_llm" | "nvidia" | "open_router" | "other";
 
@@ -9873,6 +9888,12 @@ export type SetAgentMentionColorRequest = { agent: AgentType,
  * `None` or an empty string restores the built-in color.
  */
 color?: string | null, };
+
+export type SetAgentToolsRequest = { agent: AgentType,
+/**
+ * `None` clears the operator switch (tools on); see `AgentConfig::tools_enabled`.
+ */
+enabled?: boolean | null, };
 
 /**
  * `PUT /api/mcps/servers/{id}/access-policy`; `policy: null` removes it.

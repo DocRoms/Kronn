@@ -13,16 +13,16 @@ overrides are imported before marking completion. Subsequent starts rebuild
 the runtime cache from durable rows, without reseeding deleted models. The
 `migrated_default` helper is test-only, not a production fallback.
 [src: file: backend/src/main.rs:309-313#migrate_hardcoded_catalog_once]
-[src: file: backend/src/core/model_catalog/mod.rs:107-110#migrated_default]
-[src: file: backend/src/core/model_catalog/mod.rs:112-138#refresh_runtime_cache]
-[src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
+[src: file: backend/src/core/model_catalog/mod.rs:151-154#migrated_default]
+[src: file: backend/src/core/model_catalog/mod.rs:156-198#refresh_runtime_cache]
+[src: file: backend/src/core/model_catalog/mod.rs:200-320#migrate_hardcoded_catalog_once]
 
 Normal resolution prefers explicit configuration and then available durable
 tier assignments. HTTP agents may use their explicit/durable default tier;
 they do not revive the old embedded model list. Frontend display fallback is
 also configuration/caller supplied, rather than a second embedded catalogue.
-[src: file: backend/src/agents/runner.rs:3614-3665#configured_model_flag]
-[src: file: backend/src/agents/runner.rs:3667-3686#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3654-3705#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3707-3726#resolve_model_flag]
 [src: file: frontend/src/lib/constants.ts:60-75#modelForAgentTier]
 
 The production-library migration tests cover file-backed reopen, deletion
@@ -57,8 +57,8 @@ reads a snapshot once; typing filters locally, without provider discovery.
 | QP and workflow authoring, including compensation and review | `AgentSwitchPicker` plus `ModelCatalogPicker`/`SearchableSelect` where a model or reasoning override is editable. [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:246#AgentSwitchPicker] [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:312#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:308#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4451#ModelCatalogPicker] [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4515#AgentSwitchPicker] [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1371#AgentSwitchPicker] [src: file: frontend/src/pages/WorkflowsPage.tsx:3295#AgentSwitchPicker] [src: file: frontend/src/components/AgentCompareSelector.tsx:85#AgentSwitchPicker] |
 | Planning launch/reassignment | The same agent and model controls, without clearing unrelated execution policy/history. [src: file: frontend/src/components/TaskLaunchDialog.tsx:258-275#AgentSwitchPicker] [src: file: frontend/src/components/DiscussionPlanPanel.tsx:1161-1178#AgentSwitchPicker] |
 | Comparison rerun/reviewer | Shared target picker for new selections; historical identity stays recorded/attested/unknown rather than being replaced by current settings. [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:343#AgentSwitchPicker] [src: file: frontend/src/components/BatchCompareDetailsPanel.tsx:412#AgentSwitchPicker] See [comparison identity](compare-model-identity.md). |
-| Agent and Ollama settings | Shared `catalogModelOptions`, exact runtime target and searchable model choices. [src: file: frontend/src/components/settings/AgentsSection.tsx:1310#catalogModelOptions] [src: file: frontend/src/components/settings/OllamaCard.tsx:653#catalogModelOptions] See [tier settings](agent-tier-catalogue-settings.md). |
-| HTTP connection draft | Searchable choices come from that draft's test result; missing/untested saved IDs remain visible but unverified. A changed endpoint cannot borrow another saved target's verified catalogue. [src: file: frontend/src/components/settings/ExternalApiSection.tsx:236-244#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:403-413#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:656-662#changeConnection] See [HTTP probe isolation](http-probe-catalogue-isolation.md). |
+| Agent and Ollama settings | Shared `catalogModelOptions`, exact runtime target and searchable model choices. [src: file: frontend/src/components/settings/AgentsSection.tsx:1336#catalogModelOptions] [src: file: frontend/src/components/settings/OllamaCard.tsx:653#catalogModelOptions] See [tier settings](agent-tier-catalogue-settings.md). |
+| HTTP connection draft | Searchable choices come from that draft's test result; missing/untested saved IDs remain visible but unverified. A changed endpoint cannot borrow another saved target's verified catalogue. [src: file: frontend/src/components/settings/ExternalApiSection.tsx:244-252#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:418-428#catalogModels] [src: file: frontend/src/components/settings/ExternalApiSection.tsx:671-677#changeConnection] See [HTTP probe isolation](http-probe-catalogue-isolation.md). |
 | Manual catalogue management | Searchable runtime target, model/ID/source filtering and shared derived provenance. Failed refresh/reload retains identities as cached; manual provenance is preserved. [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:104-114#visibleRows] [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:272-289#SearchableSelect] [src: file: frontend/src/components/settings/ModelCatalogSection.tsx:92-102#rows] |
 
 `ModelCatalogPicker` additionally preserves an unrecognized saved reasoning
@@ -87,7 +87,7 @@ fallbacks. The OpenRouter GLM preset selects only a model actually returned by
 its test and preserves an existing choice; it is not an unconditional runtime
 fallback. Neither is removed by this inventory.
 [src: file: frontend/src/components/settings/OllamaCard.tsx:568-598#suggestions]
-[src: file: frontend/src/components/settings/ExternalApiSection.tsx:682-691#open_router]
+[src: file: frontend/src/components/settings/ExternalApiSection.tsx:697-706#open_router]
 
 This closes the catalogue migration/consumer audit only after its final gates
 pass and the exact change is integrated. It does not qualify KT-619/635,
