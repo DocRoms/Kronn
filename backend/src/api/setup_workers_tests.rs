@@ -294,3 +294,25 @@ async fn the_background_priority_switch_defaults_on_round_trips_and_reaches_the_
     // Restored for the tests that follow: the setting is process-wide.
     background_priority::set_enabled(true);
 }
+
+/// KT-1525 — the heavy-output threshold defaults to 256 KB, survives an older
+/// config without it, and the Settings form cannot persist 0 or an absurd one.
+#[test]
+fn the_heavy_output_threshold_defaults_and_is_bounded() {
+    assert_eq!(WorkersConfig::default().heavy_output_kb, 256);
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert_eq!(partial.heavy_output_kb, 256);
+    for (kb, valid) in [
+        (0, false),
+        (1, true),
+        (256, true),
+        (102_400, true),
+        (102_401, false),
+    ] {
+        let candidate = WorkersConfig {
+            heavy_output_kb: kb,
+            ..Default::default()
+        };
+        assert_eq!(candidate.validate().is_ok(), valid, "{kb} KB");
+    }
+}

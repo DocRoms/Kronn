@@ -629,6 +629,12 @@ fn finish(step: &WorkflowStep, started: Instant, results: Vec<SourceResult>) -> 
     });
 
     for result in results {
+        // KT-1525 — what this source adds to the step output, so the heavy
+        // one is obvious; a failed source holds nothing.
+        let output_bytes = result
+            .value
+            .as_ref()
+            .map_or(0, |value| value.to_string().len());
         if let Some(value) = result.value {
             sources.insert(result.alias.clone(), value);
         } else {
@@ -647,6 +653,7 @@ fn finish(step: &WorkflowStep, started: Instant, results: Vec<SourceResult>) -> 
             "summary": result.summary,
             "error": result.error,
             "duration_ms": result.duration_ms,
+            "output_bytes": output_bytes,
         }));
     }
     let total = sources.len();
@@ -730,6 +737,7 @@ fn outcome(
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action,
     }
@@ -902,6 +910,47 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("billing: timeout"));
+    }
+
+    /// KT-1525 — each source reports what it adds to the step output, so the
+    /// heavy one is obvious; a failed source adds nothing.
+    #[test]
+    fn each_source_reports_its_payload_size() {
+        let step = WorkflowStep {
+            name: "collect".into(),
+            step_type: StepType::CollectApiData,
+            ..WorkflowStep::default()
+        };
+        let heavy = json!({ "issues": "x".repeat(5000) });
+        let light = json!({ "total": 42 });
+        let mk = |index: usize, alias: &str, value: Value| SourceResult {
+            index,
+            alias: alias.into(),
+            required: true,
+            value: Some(value),
+            status: "OK".into(),
+            summary: "ok".into(),
+            error: None,
+            duration_ms: 1,
+            source_kind: "quick_api",
+            source_id: None,
+        };
+        let outcome = finish(
+            &step,
+            Instant::now(),
+            vec![
+                mk(0, "jira", heavy.clone()),
+                mk(1, "usage", light.clone()),
+                SourceResult::failed(2, "billing".into(), false, "timeout".into()),
+            ],
+        );
+        let envelope =
+            super::super::step_output_format::parse_envelope_for_test(&outcome.result.output);
+        let meta = &envelope["data"]["meta"]["sources"];
+        assert_eq!(meta[0]["output_bytes"], heavy.to_string().len());
+        assert_eq!(meta[1]["output_bytes"], light.to_string().len());
+        assert_eq!(meta[2]["output_bytes"], 0);
+        assert!(meta[0]["output_bytes"].as_u64() > meta[1]["output_bytes"].as_u64());
     }
 
     #[test]

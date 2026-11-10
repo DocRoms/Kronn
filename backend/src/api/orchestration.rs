@@ -2672,6 +2672,17 @@ async fn finish_native_provisioning(
             &prepared.execution.id,
         )
         .await;
+        // KT-1649 — what the worker's lock files reference and the host caches
+        // lack is fetched here, outside its sandbox and from the registries of
+        // the lock files only, so the first build and the worker can compile it.
+        record_dependency_fetch(
+            db,
+            &prepared.execution.id,
+            &worktree_path,
+            std::sync::Arc::new(crate::core::task_worker_env::ProcessProbeRunner),
+            warm_cancel.clone(),
+        )
+        .await;
         // KT-1250 — the lane target is seeded from a warm one and its first build
         // runs here, under the host's cap, so the worker starts warm.
         let warm = record_lane_warm_start(
@@ -4290,6 +4301,7 @@ async fn interrupt_recovered_apply(
 /// exists. A launch failure never rewrites the already-integrated result: it
 /// parks the campaign durably for inspection instead.
 async fn advance_campaign_after_integration(db: &Database, run: &crate::models::OrchestrationRun) {
+    use crate::db::orchestration::CampaignParkCause;
     use crate::models::{OrchestrationControlState, OrchestrationRunKind};
 
     if run.kind != OrchestrationRunKind::Campaign
@@ -4326,6 +4338,7 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
         park_campaign_for_human(
             db,
             &current.id,
+            CampaignParkCause::ChildDecision,
             "a child execution requires a human decision",
         )
         .await;
@@ -4350,6 +4363,7 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
             park_campaign_for_human(
                 db,
                 &current.id,
+                CampaignParkCause::LaunchFailed,
                 &format!("automatic next-task launch failed: {error:?}"),
             )
             .await;
@@ -4359,25 +4373,26 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
     if attention.active_executions > 0 {
         return;
     }
-    let state = if all_active_done {
-        OrchestrationControlState::Completed
-    } else {
-        OrchestrationControlState::AwaitingHuman
-    };
-    let reason = if all_active_done {
-        "all active plan tasks are complete"
-    } else {
-        "no launchable task remains; the plan is blocked or needs correction"
-    };
+    if !all_active_done {
+        // Parked on a human like the two cases above, so it leaves the same
+        // durable card (KT-650).
+        park_campaign_for_human(
+            db,
+            &current.id,
+            CampaignParkCause::PlanBlocked,
+            "no launchable task remains; the plan is blocked or needs correction",
+        )
+        .await;
+        return;
+    }
     let id = current.id.clone();
-    let reason = reason.to_string();
     if let Err(error) = db
         .with_conn(move |conn| {
             crate::db::orchestration::set_orchestration_control_state(
                 conn,
                 &id,
-                state,
-                Some(&reason),
+                OrchestrationControlState::Completed,
+                Some("all active plan tasks are complete"),
                 &backend_actor(),
             )?;
             Ok(())
@@ -4388,16 +4403,22 @@ async fn advance_campaign_after_integration(db: &Database, run: &crate::models::
     }
 }
 
-async fn park_campaign_for_human(db: &Database, run_id: &str, reason: &str) {
+async fn park_campaign_for_human(
+    db: &Database,
+    run_id: &str,
+    cause: crate::db::orchestration::CampaignParkCause,
+    reason: &str,
+) {
     let id = run_id.to_string();
     let reason = reason.to_string();
     if let Err(error) = db
         .with_conn(move |conn| {
-            crate::db::orchestration::set_orchestration_control_state(
+            crate::db::orchestration::park_campaign_awaiting_human(
                 conn,
                 &id,
-                crate::models::OrchestrationControlState::AwaitingHuman,
-                Some(&reason),
+                cause,
+                &reason,
+                None,
                 &backend_actor(),
             )?;
             Ok(())
@@ -6413,6 +6434,7 @@ fn validation_metadata_command(
         timeout: std::time::Duration::from_secs(15),
         // A bounded target-dir lookup that gates a validation's refusal.
         priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
     };
     // Preserve the validation's manifest and configuration options. Validations
     // are normally launched from the repository root, including commands such
@@ -10074,6 +10096,67 @@ async fn record_warming_step(
         .await
     {
         tracing::warn!(execution_id = %exec_id, "warming step {step:?} not recorded: {error}");
+    }
+}
+
+/// Fill the host's dependency caches with what the worker's lock files
+/// reference and they lack (KT-1649), and journal it on the execution. Runs as
+/// Kronn's own process, not under the worker's sandbox (it needs the network),
+/// which is why `core::task_worker_dep_fetch` bounds it to the lock files'
+/// public registries. Never raised: a fetch that fails only leaves the worker
+/// with the cache it had.
+async fn record_dependency_fetch(
+    db: &Database,
+    exec_id: &str,
+    worktree: &std::path::Path,
+    runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let path = worktree.to_path_buf();
+    // The staged projects live under Kronn's data directory, which the worker
+    // cannot read; no data directory, no scratch, no fetch.
+    let scratch_root = match crate::core::task_worker_dep_fetch::scratch_root() {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "dependency fetch skipped: {error}");
+            return;
+        }
+    };
+    let record = tokio::task::spawn_blocking(move || {
+        crate::core::task_worker_dep_fetch::fetch_missing_dependencies(
+            &path,
+            &scratch_root,
+            runner.as_ref(),
+            &cancel,
+        )
+    })
+    .await;
+    let record = match record {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "dependency fetch did not complete: {error}");
+            return;
+        }
+    };
+    if record.steps.is_empty() {
+        return;
+    }
+    for step in &record.steps {
+        tracing::info!(
+            execution_id = %exec_id,
+            lockfile = %step.lockfile,
+            outcome = ?step.outcome,
+            "task worker dependency fetch"
+        );
+    }
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_dependency_fetch(conn, &id, &record, &backend_actor())
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "dependency fetch record not persisted: {error}");
     }
 }
 
@@ -30831,6 +30914,79 @@ pub(crate) mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// KT-1649 — a launch fetches what the worker's lock file references before
+    /// anything builds, and the step is on the execution's journal with the
+    /// registries it was bounded to.
+    #[tokio::test]
+    async fn the_dependency_fetch_of_a_lock_file_is_journalled_with_its_registries() {
+        use crate::core::task_worker_dep_fetch::{Ecosystem, FetchOutcome};
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+        std::fs::write(
+            worktree.join("backend").join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .unwrap();
+
+        record_dependency_fetch(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let id = exec_id.clone();
+        let record = db
+            .with_conn(move |conn| crate::db::orchestration::latest_dependency_fetch(conn, &id))
+            .await
+            .unwrap()
+            .expect("the fetch is journalled");
+        assert_eq!(record.steps.len(), 1, "{record:?}");
+        let step = &record.steps[0];
+        assert_eq!(step.ecosystem, Ecosystem::Cargo);
+        assert_eq!(step.lockfile, "backend/Cargo.lock");
+        // The probe answers "cached" when the host has a CARGO_HOME to read.
+        let host_has_cargo_home = crate::core::task_worker_env::SharedCaches::discover(None)
+            .cargo_home
+            .is_some();
+        if host_has_cargo_home {
+            assert_eq!(step.outcome, FetchOutcome::Cached);
+            assert_eq!(
+                step.registries,
+                vec!["registry+https://github.com/rust-lang/crates.io-index".to_string()]
+            );
+        } else {
+            assert!(matches!(step.outcome, FetchOutcome::Refused { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_launch_with_no_lock_file_to_fetch_journals_no_dependency_fetch() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+
+        record_dependency_fetch(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let id = exec_id.clone();
+        let record = db
+            .with_conn(move |conn| crate::db::orchestration::latest_dependency_fetch(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(record, None);
     }
 
     #[tokio::test]

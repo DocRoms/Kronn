@@ -20,6 +20,13 @@ Release notes for 0.9.3 and earlier are available in the
   a dashboard banner lists every connection that needs a new token. A workflow
   step, collector or Quick API that fails on it now opens with one plain
   sentence naming the connection, and the run page says so at run level.
+- Workflows: a heavy step output no longer goes unnoticed (KT-1525). Each step
+  result records its output size, a Collect API data step records the payload of
+  each source, and the run view flags a step above the threshold (256 KB by
+  default, Settings > Workers) with its name and the fix (select fields, limit,
+  paginate); the workflow card names the heaviest step of its last run. The
+  Page header and sync panel grade the weight of the datasets a Page receives,
+  whoever publishes them, like its HTML weight.
 
 - Workflows: the design doctrine now reaches the agents that author them over
   MCP. One short file (decision tree, "at equal cost, choose for
@@ -118,6 +125,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A task worker that bumps a dependency is no longer delivered uncompiled: before
+  the lane's first build, Kronn fetches the crates (and npm packages) its lock
+  files reference and the host cache lacks, outside the worker's sandbox, from
+  crates.io / the npm registry only. A lock naming a git dependency, another
+  registry or a tarball URL is refused whole and fetches nothing; the worker
+  gets no network of its own. Each fetch is journalled on the execution
+  (`dependency_fetch`). The lock files are parsed (TOML, YAML) rather than
+  scanned, and the fetch runs in a private scratch project under Kronn's data
+  directory with a cleared environment, so nothing the worker wrote (a
+  `.cargo/config.toml`, a `[patch]`, an `.npmrc`, a workspace registry) and no
+  host registry setting or token reaches it; leftovers are swept at startup
+  (KT-1649).
 - An interrupted task execution no longer stays stuck on "recovery decision
   already consumed": it can always resume or deliver, and a resume never
   consumes the decision of a newer interruption (KT-1537, #492).

@@ -1059,6 +1059,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "290_mcp_auth_failures",
         include_str!("sql/290_mcp_auth_failures.sql"),
     ),
+    (
+        "291_workflow_runs_heaviest_output",
+        include_str!("sql/291_workflow_runs_heaviest_output.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

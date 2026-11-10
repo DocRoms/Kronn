@@ -533,6 +533,7 @@ fn build_command(
                 env: Vec::new(),
                 timeout: std::time::Duration::from_secs(spec.timeout_secs),
                 priority,
+                clean_env: false,
             },
             route,
         ),

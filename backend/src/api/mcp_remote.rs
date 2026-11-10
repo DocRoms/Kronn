@@ -1292,6 +1292,7 @@ mod tests {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         }
     }
 

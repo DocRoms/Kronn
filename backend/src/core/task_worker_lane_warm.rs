@@ -841,6 +841,7 @@ pub fn warm_lane_cancellable(
             timeout: settings.first_build_timeout,
             // The lane's first build compiles the whole dependency graph.
             priority: Priority::Background,
+            clean_env: false,
         },
         cancel,
     );

@@ -280,6 +280,7 @@ fn succeed(
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action,
     }
@@ -310,6 +311,7 @@ fn fail(step: &WorkflowStep, started: Instant, error: impl std::fmt::Display) ->
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }
@@ -817,6 +819,7 @@ mod tests {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         };
         super::super::runner::record_step_completion(&step, &mut result, context, None);
         result

@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2888-2956#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:3007-3064#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:2903-2971#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:3022-3079#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -639,7 +639,7 @@ of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
 `[src: file: backend/src/agents/runner.rs:9164-9198#rejects_structured_output]`
 `[src: file: backend/src/agents/runner.rs:9915-9979#format_fallback_notice]`
-`[src: file: backend/src/workflows/steps.rs:1101-1124#ollama_envelope_format]`
+`[src: file: backend/src/workflows/steps.rs:1109-1132#ollama_envelope_format]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
 TypedSchema step still fails validation after the repair attempt, it retries

@@ -127,13 +127,13 @@ integrated. [src: file: backend/src/api/discussions/orchestration.rs:66-132#chec
 participant round: [src: file: backend/src/api/discussions/orchestration.rs:814-822#checked_launch_connection],
 synthesis: [src: file: backend/src/api/discussions/orchestration.rs:1049-1057#checked_launch_connection])
 Workflow Agent steps: the connection resolver
-[src: file: backend/src/workflows/steps.rs:1163-1203#resolve_step_connection],
+[src: file: backend/src/workflows/steps.rs:1171-1211#resolve_step_connection],
 the run-start check
 [src: file: backend/src/workflows/runner.rs:1967-2015#resolve_step_connection],
 the check immediately before dispatch
 [src: file: backend/src/workflows/steps.rs:412-424#preflight_workflow_launch]
 and the preflight on the `http:<connection-id>` target and effective model
-[src: file: backend/src/workflows/steps.rs:1205-1258#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 
 ## Sources
 

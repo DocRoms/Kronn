@@ -469,6 +469,7 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
         env,
         timeout: probe.timeout,
         priority: probe.priority,
+        clean_env: probe.clean_env,
     }
 }
 

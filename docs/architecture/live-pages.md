@@ -230,6 +230,15 @@ often grows the database by its size on each save. The revision list
 (`GET /api/pages/{id}/revisions`) carries sizes, not HTML; the editor loads the
 one revision it compares from `GET /api/pages/{id}/revisions/{revision_id}`.
 
+The datasets a Page receives are graded the same way (KT-1525), whoever
+publishes them (a workflow's PublishPageData step, an agent, the UI): the sum of
+`LivePageDatasetView.data_size_bytes` is flagged in the Page header, and each
+dataset in the sync panel, above 256 KiB (heavy) and 1 MiB (very heavy), with
+the fix (select fields, limit or paginate in the publishing workflow). The
+workflow side is graded per step: see « Heavy step outputs » in
+`docs/operations/workflow-heavy-outputs.md`.
+`[src: file: frontend/src/lib/live-page-weight.ts:15-26]`
+
 JSON is the dataset payload format. Snapshot and collection values are stored
 as one JSON value. Time-series observations are stored as individual rows so a
 new point does not rewrite the full history.
@@ -608,10 +617,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1189-1212#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:14062-14251#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:15366-15408#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:15603-15645#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:15547-15617#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:14145-14334#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:15449-15491#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:15686-15728#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:15630-15700#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -1010,9 +1019,9 @@ list deliberately omits outputs; expanding a run fetches its full detail and
 reports a failed detail read with a retry action. A focused navigation keeps
 the full run even when the compact list already contains its id.
 [src: file: backend/src/workflows/collect_api_data_step.rs:604-625#source_id]
-[src: file: backend/src/workflows/collect_api_data_step.rs:947-990#missing_required_api_keeps_its_alias_id_and_cause]
+[src: file: backend/src/workflows/collect_api_data_step.rs:1075-1118#missing_required_api_keeps_its_alias_id_and_cause]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1033-1043#focusedRun]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1037-1047#focusedRun]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

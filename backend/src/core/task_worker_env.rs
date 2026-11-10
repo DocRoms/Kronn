@@ -837,6 +837,11 @@ pub struct ProbeCommand {
     /// (the plain one and, beneath the OS sandbox, the confined one), so a
     /// worker's build yields to the owner's applications whichever way it runs.
     pub priority: Priority,
+    /// KT-1649: start from an empty environment and give the command only
+    /// `env`, instead of the sealed environment its route inherits. For a
+    /// command that must not see the host's registry settings or tokens
+    /// (`NPM_CONFIG_*`, a user-level credential variable).
+    pub clean_env: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -886,6 +891,9 @@ impl ProbeRunner for ProcessProbeRunner {
             probe.priority,
         );
         command.args(&probe.args).current_dir(&probe.cwd);
+        if probe.clean_env {
+            command.env_clear();
+        }
         for (name, value) in &probe.env {
             command.env(name, value);
         }
@@ -1086,6 +1094,7 @@ fn check_rust(
         env: env.to_vec(),
         timeout,
         priority: Priority::Normal,
+        clean_env: false,
     };
     let nextest = runner.run(&probe(&["nextest", "--version"], NEXTEST_TIMEOUT));
     if !nextest.success {
@@ -1142,6 +1151,7 @@ pub(crate) fn check_frontend(
                 env: env.to_vec(),
                 timeout: VITEST_TIMEOUT,
                 priority: Priority::Normal,
+                clean_env: false,
             });
             if !outcome.success {
                 return Capability::no(format!("`vitest --version` failed: {}", outcome.detail));
@@ -1161,6 +1171,7 @@ pub(crate) fn check_frontend(
                 env: env.to_vec(),
                 timeout: VITEST_CONFIG_TIMEOUT,
                 priority: Priority::Normal,
+                clean_env: false,
             });
             if config.success {
                 Capability::yes(format!(

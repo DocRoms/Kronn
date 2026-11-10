@@ -10358,7 +10358,14 @@ quota_wait?: QuotaWait | null,
  * Why the run ends at this step for good: no `on_failure`, no quota wait,
  * no recovery rule (a Security limit, a counter failure).
  */
-terminal_stop?: string | null, };
+terminal_stop?: string | null,
+/**
+ * KT-1525 — UTF-8 bytes of `output`, stamped when the step completes. A
+ * heavy output slows every run, the run storage and the page it feeds;
+ * the run view grades it against the configured threshold. `None` on a
+ * run recorded before this field existed.
+ */
+output_bytes?: number | null, };
 
 /**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
@@ -12117,7 +12124,13 @@ background_priority: boolean,
  * count. `max_concurrent_agents` counts agent processes, not the builds
  * behind them, so it cannot bound the machine load on its own.
  */
-max_concurrent_task_workers: number, };
+max_concurrent_task_workers: number,
+/**
+ * KT-1525 — a workflow step output above this many KB is shown as a
+ * « heavy output » warning in the run view and on the workflow card.
+ * The run itself is never refused.
+ */
+heavy_output_kb: number, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
@@ -12554,7 +12567,13 @@ parent_workflow_id?: string | null, parent_workflow_name?: string | null, parent
  */
 export type WorkflowRunOutcome = "no_op" | "changed";
 
-export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: string, finished_at: string | null, tokens_used: number, };
+export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: string, finished_at: string | null, tokens_used: number,
+/**
+ * KT-1525 — bytes of the run's heaviest step output (0 when unknown) and
+ * that step's name, so the workflow card can warn without reading the
+ * run's payload. The UI grades it against the configured threshold.
+ */
+heaviest_output_bytes?: number | null, heaviest_output_step?: string | null, };
 
 export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_lines?: number | null, require_approval: boolean, };
 

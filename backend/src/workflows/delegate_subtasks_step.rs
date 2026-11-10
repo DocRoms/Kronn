@@ -1830,6 +1830,7 @@ pub(crate) fn finish(step: &WorkflowStep, start: Instant, report: DelegationRepo
             last_activity: None,
             quota_wait: report.quota_wait,
             terminal_stop: report.terminal_stop,
+            output_bytes: None,
         },
         condition_action,
     }

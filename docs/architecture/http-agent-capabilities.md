@@ -314,7 +314,7 @@ validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
 [src: file: backend/src/api/agent_quick_prompt_tests.rs:591-644#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
-[src: file: backend/src/workflows/steps.rs:1387-1391#reasoning_effort_override]
+[src: file: backend/src/workflows/steps.rs:1395-1399#reasoning_effort_override]
 [src: file: backend/src/agents/runner.rs:3971-3975#validate]
 
 The HTTP regression launches through the native QP tool and the discussion

@@ -464,6 +464,91 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
   });
 });
 
+describe('RunDetail — heavy step outputs (KT-1525)', () => {
+  const collectOutput = (sources: { alias: string; output_bytes: number }[]) =>
+    `---STEP_OUTPUT---\n${JSON.stringify({ data: { sources: {}, meta: { sources } }, status: 'OK', summary: 'collected' })}\n---END_STEP_OUTPUT---`;
+
+  it('shows each step\'s output size, and no warning below the threshold', async () => {
+    const run = mkRun({ step_results: [mkResult({ step_name: 'light', output_bytes: 2048 })] });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.queryByTestId('wf-heavy-output-badge')).toBeNull();
+    await act(async () => { screen.getByText('light').click(); });
+    expect(screen.getByTestId('wf-step-output-size').textContent).toContain('2.0 KB');
+    expect(screen.queryByTestId('wf-heavy-output')).toBeNull();
+  });
+
+  it('flags a step above 256 KB with its name, its size and the fix', async () => {
+    const run = mkRun({
+      step_results: [
+        mkResult({ step_name: 'prepare', output_bytes: 300 }),
+        mkResult({ step_name: 'collect_jira', output_bytes: 1_153_434 }),
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    // One badge, on the heavy step's row only.
+    const badges = screen.getAllByTestId('wf-heavy-output-badge');
+    expect(badges).toHaveLength(1);
+    expect(badges[0].textContent).toContain('1.1 MB');
+    await act(async () => { screen.getByText('collect_jira').click(); });
+    expect(screen.getByTestId('wf-heavy-output').textContent)
+      .toContain('wf.heavyOutput.title:collect_jira,1.1 MB');
+    expect(screen.getByTestId('wf-heavy-output').textContent).toContain('wf.heavyOutput.fix');
+  });
+
+  it('grades a threshold exactly at the limit as fine, one byte above as heavy', () => {
+    const limit = 256 * 1024;
+    const run = mkRun({
+      step_results: [
+        mkResult({ step_name: 'at_limit', output_bytes: limit }),
+        mkResult({ step_name: 'over_limit', output_bytes: limit + 1 }),
+      ],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.getAllByTestId('wf-heavy-output-badge')).toHaveLength(1);
+  });
+
+  it('measures a run recorded before the size was stamped from its output', () => {
+    const run = mkRun({ step_results: [mkResult({ step_name: 'legacy', output: 'x'.repeat(300 * 1024) })] });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.getAllByTestId('wf-heavy-output-badge')).toHaveLength(1);
+  });
+
+  it('lists the payload of each CollectApiData source, the heavy one first', async () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        step_name: 'collect',
+        step_kind: 'CollectApiData',
+        output_bytes: 600 * 1024,
+        output: collectOutput([
+          { alias: 'usage', output_bytes: 1500 },
+          { alias: 'jira', output_bytes: 590 * 1024 },
+        ]),
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    await act(async () => { screen.getByText('collect').click(); });
+    const items = within(screen.getByTestId('wf-heavy-output-sources')).getAllByRole('listitem');
+    expect(items.map(item => item.textContent)).toEqual(['jira · 590.0 KB', 'usage · 1.5 KB']);
+  });
+
+  it('shows the per-source payload of a light CollectApiData step too', async () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        step_name: 'collect',
+        step_kind: 'CollectApiData',
+        output_bytes: 3000,
+        output: collectOutput([{ alias: 'usage', output_bytes: 1500 }, { alias: 'billing', output_bytes: 0 }]),
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    await act(async () => { screen.getByText('collect').click(); });
+    const weights = screen.getByTestId('wf-source-weights').textContent ?? '';
+    expect(weights).toContain('usage: 1.5 KB');
+    expect(weights).toContain('billing: 0 B');
+    expect(screen.queryByTestId('wf-heavy-output')).toBeNull();
+  });
+});
+
 describe('RunDetail — status chips and interrupted resume trail', () => {
   it('keeps the interruption visible after the resumed run succeeds', () => {
     const run = mkRun({

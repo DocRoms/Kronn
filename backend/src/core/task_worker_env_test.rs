@@ -962,6 +962,7 @@ fn the_process_runner_reports_success_failure_and_a_missing_program() {
         env: Vec::new(),
         timeout: Duration::from_secs(10),
         priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
     };
     let runner = ProcessProbeRunner;
 

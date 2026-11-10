@@ -19,8 +19,8 @@ The workflow envelope defines `data`, `status`, and `summary`, requires only
 `data` and `status`, and omits `additionalProperties`. It embeds the author's
 schema unchanged. The existing regression fixture also contains an object
 with an optional string field and no `additionalProperties` restriction.
-[src: file: backend/src/workflows/steps.rs:1101-1124#ollama_envelope_format]
-[src: file: backend/src/workflows/steps.rs:2293-2331#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:1109-1132#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:2312-2350#ollama_envelope_format]
 
 Inference from that code and the official contract: this envelope is invalid
 under OpenAI strict mode, independently of whether a proxy accepts it.
@@ -43,7 +43,7 @@ their actual type to the authored string type.
 Ollama still receives the same envelope through its native `format` field,
 with a non-streaming request. No change to its decoding schema is required.
 [src: file: backend/src/agents/runner.rs:8120-8174#build_ollama_chat_body]
-[src: file: backend/src/workflows/steps.rs:1344-1346#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:1352-1354#ollama_envelope_format]
 
 ## Guarantees and regression coverage
 
@@ -53,7 +53,7 @@ the envelope, validates `data`, attempts repair, and applies `on_invalid`.
 That local validator supports a subset of JSON Schema; it is not a replacement
 for full provider-enforced validation. For example, it does not enforce
 `additionalProperties` or resolve `$ref`.
-[src: file: backend/src/workflows/steps.rs:542-565#validate_envelope_against_schema]
+[src: file: backend/src/workflows/steps.rs:556-579#validate_envelope_against_schema]
 [src: file: backend/src/workflows/steps.rs:773-791#on_invalid]
 [src: file: backend/src/workflows/template.rs:1366-1386#validate_envelope_against_schema]
 

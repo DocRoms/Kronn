@@ -10,6 +10,10 @@ import { AgentProvenanceDetails, StepModelBadge } from './AgentProvenance';
 import { StepTokensBadge } from './StepTokens';
 import { stepTokensUnknown } from './stepTokenStatus';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
+import { collectSourceWeights, isHeavyOutput, stepOutputBytes } from '../../lib/heavyOutput';
+import { formatBytes } from '../../lib/live-page-weight';
+import { useHeavyOutputThreshold } from '../../hooks/useHeavyOutputThreshold';
+import { HeavyOutputBadge, HeavyOutputNotice, SourceWeights } from './HeavyOutput';
 import { CopyIdPill } from '../CopyIdPill';
 import { authRefusalSentence, runAuthRefusals } from '../../lib/authRefusal';
 import {
@@ -691,6 +695,7 @@ function ProducedBranchesPanel({
 
 export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
   const { t } = useT();
+  const heavyOutputKb = useHeavyOutputThreshold();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const statusTimeline = runStatusTimeline(run);
   const uncertainEffect = uncertainSideEffectIntent(run);
@@ -1015,6 +1020,10 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             const childWorkflowId = foreach
               ? workflowSteps?.find(ws => ws.name === sr.step_name)?.sub_workflow_id ?? null
               : null;
+            // KT-1525 — what the step left in the run, and whether it is heavy.
+            const outputBytes = stepOutputBytes(sr);
+            const heavyOutput = isHeavyOutput(outputBytes, heavyOutputKb);
+            const sourceWeights = sr.step_kind === 'CollectApiData' ? collectSourceWeights(sr.output) : [];
             return (
               <div key={i} className="wf-step-result" data-expanded={isExpanded} data-rollback={sr.is_rollback ? 'true' : undefined}>
                 {isFirstRollback && (
@@ -1126,6 +1135,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                   <span className="text-ghost">
                     {sr.duration_ms > 0 ? `${(sr.duration_ms / 1000).toFixed(1)}s` : ''}
                   </span>
+                  {heavyOutput && <HeavyOutputBadge bytes={outputBytes} />}
                   {sr.condition_result && (
                     <span className="wf-condition-badge" data-action={sr.condition_result === 'Stop' ? 'stop' : 'other'}>
                       {conditionLabel(sr.condition_result)}
@@ -1236,12 +1246,17 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                         <div className="wf-auth-refused" role="note" data-testid="wf-step-auth-refused">{sentence}</div>
                       );
                     })()}
+                    {heavyOutput && (
+                      <HeavyOutputNotice stepName={sr.step_name} bytes={outputBytes} sources={sourceWeights} />
+                    )}
+                    {!heavyOutput && <SourceWeights sources={sourceWeights} />}
                     <div className="wf-step-output-code">
                       {sr.output || t('wf.noOutput')}
                     </div>
                     <div className="flex-row gap-6 mt-3 text-xs text-faint">
                       <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}>{sr.status}</span></span>
                       {sr.duration_ms > 0 && <span>{t('wf.duration')}: {(sr.duration_ms / 1000).toFixed(1)}s</span>}
+                      <span data-testid="wf-step-output-size">{t('wf.heavyOutput.size')}: {formatBytes(outputBytes)}</span>
                       {stepTokensUnknown(sr)
                         ? <span>Tokens: {t('wf.stepTokensUnknown')}</span>
                         : (sr.tokens_used ?? 0) > 0 && <span>Tokens: {sr.tokens_used}</span>}

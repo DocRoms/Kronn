@@ -27282,6 +27282,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         };
         let run_for_update = run_id.clone();
         state
