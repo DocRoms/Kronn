@@ -11321,16 +11321,20 @@ fn worker_brief_markdown_in(
         "## Doc citations\n\
          Keep the `[src:]` citations of the docs you edit resolving: that is your own \
          gate. Do not re-anchor the citations of docs you did not edit, nor the anchors a merge \
-         of the target moved. When the only conflict between your branch and the target is \
-         citation line numbers, the integration takes the target's side and re-anchors them \
-         itself, without sending your work back.\n\n"
+         of the target moved. The integration re-anchors every citation your code shift only \
+         moved, in any doc, and takes the target's side when the only conflict is citation line \
+         numbers, without sending your work back. A citation your change breaks for good (its \
+         symbol removed or renamed) is yours to fix: the integration sends it back with the \
+         exact list.\n\n"
     } else {
         "## Citations de documentation\n\
          Garde résolubles les citations `[src:]` des docs que tu modifies : c'est ta \
          propre porte. Ne ré-ancre pas les citations des docs que tu n'as pas modifiés, ni les \
-         ancres qu'une fusion de la cible a déplacées. Quand le seul conflit entre ta branche et \
-         la cible porte sur des numéros de ligne de citations, l'intégration prend le côté de la \
-         cible et les ré-ancre elle-même, sans te renvoyer ton travail.\n\n"
+         ancres qu'une fusion de la cible a déplacées. L'intégration ré-ancre toute citation que \
+         ton décalage de code a seulement déplacée, dans n'importe quel doc, et prend le côté de \
+         la cible quand le seul conflit porte sur des numéros de ligne de citations, sans te \
+         renvoyer ton travail. Une citation que ton changement casse pour de bon (symbole \
+         supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
     };
     if !fr {
         return format!(
@@ -20494,7 +20498,17 @@ pub(crate) mod tests {
                         "Do not re-anchor the citations of docs you did not edit",
                     ),
                 };
-                for needle in [heading, own_gate, not_target] {
+                let (shift, broken_for_good) = match lang {
+                    RoomLang::Fr => (
+                        "ton décalage de code a seulement déplacée",
+                        "Une citation que ton changement casse pour de bon",
+                    ),
+                    RoomLang::En => (
+                        "your code shift only moved",
+                        "A citation your change breaks for good",
+                    ),
+                };
+                for needle in [heading, own_gate, not_target, shift, broken_for_good] {
                     assert!(brief.contains(needle), "missing `{needle}`: {brief}");
                 }
                 assert!(
@@ -28042,6 +28056,7 @@ pub(crate) mod tests {
             vec![crate::core::docs_citations::merge::Settlement {
                 docs: vec![OVERVIEW.to_string()],
                 moved: 2,
+                reanchored: vec![OVERVIEW.to_string()],
             }]
         );
         assert_eq!(
@@ -28082,6 +28097,110 @@ pub(crate) mod tests {
             event_count(&db, &execution.id, "integration_citations_settled").await,
             0,
             "a bounced merge settled nothing"
+        );
+    }
+
+    /// An interrupted execution whose boot recovery decided to rebuild the
+    /// candidate, then the recovery consumed.
+    async fn recover_by_rebuilding(
+        db: &Database,
+        execution: &TaskExecution,
+        repo: &Path,
+    ) -> IntegrationOutcome {
+        checkpoint(
+            db,
+            &execution.id,
+            CheckpointStep::Anchored(git_rev(repo, "main")),
+        )
+        .await
+        .unwrap();
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({ "reason": "backend restart" }),
+            )?;
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution exists")?;
+            let run = crate::db::orchestration::get_orchestration_run(
+                conn,
+                &execution.orchestration_run_id,
+            )?
+            .context("run exists")?;
+            crate::db::orchestration::set_execution_recovery(
+                conn,
+                &execution,
+                &run,
+                ExecutionRecoveryAction::RebuildCandidate,
+                "the target may have moved",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        resume_recovered_integration(db, &execution.id, ExecutionRecoveryAction::RebuildCandidate)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_recovered_rebuild_settles_and_journals_a_citation_only_conflict() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-recovered", false).await;
+
+        let outcome = recover_by_rebuilding(&db, &execution, repo.path()).await;
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "no worker turn for an anchor-only conflict after recovery: {outcome:?}"
+        );
+        assert!(crate::core::docs_citations::check_corpus(repo.path()).is_empty());
+        let id = execution.id.clone();
+        let settled = db
+            .with_conn(move |conn| crate::db::orchestration::citations_settled(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled,
+            vec![crate::core::docs_citations::merge::Settlement {
+                docs: vec![OVERVIEW.to_string()],
+                moved: 2,
+                reanchored: vec![OVERVIEW.to_string()],
+            }],
+            "the delivery card reads what the recovery settled"
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_rebuild_that_leaves_a_citation_unresolved_goes_back_with_the_list() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution =
+            two_lanes_on_overview(&db, repo.path(), "citation-recovered-gone", true).await;
+        let target_before = git_rev(repo.path(), "HEAD");
+
+        let outcome = recover_by_rebuilding(&db, &execution, repo.path()).await;
+
+        let IntegrationOutcome::SentBack { reason } = outcome else {
+            panic!("a citation whose symbol is gone goes back: {outcome:?}");
+        };
+        assert!(reason.contains("merge conflict after recovery"), "{reason}");
+        assert!(
+            reason.contains("docs/architecture/overview.md:11 [src: file: src/other.rs:3-4#gamma]"),
+            "{reason}"
+        );
+        assert_eq!(git_rev(repo.path(), "HEAD"), target_before);
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            0
         );
     }
 

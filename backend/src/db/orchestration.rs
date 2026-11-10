@@ -3268,6 +3268,7 @@ pub fn record_citations_settled(
             "merge_sha": merge_sha,
             "docs": settled.docs,
             "moved": settled.moved,
+            "reanchored": settled.reanchored,
         }),
     )
 }
@@ -3293,14 +3294,21 @@ pub fn citations_settled(
         .into_iter()
         .filter_map(|json| {
             let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+            let names = |key: &str| -> Option<Vec<String>> {
+                Some(
+                    value
+                        .get(key)?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|doc| doc.as_str().map(str::to_owned))
+                        .collect(),
+                )
+            };
             Some(crate::core::docs_citations::merge::Settlement {
-                docs: value
-                    .get("docs")?
-                    .as_array()?
-                    .iter()
-                    .filter_map(|doc| doc.as_str().map(str::to_owned))
-                    .collect(),
+                docs: names("docs")?,
                 moved: usize::try_from(value.get("moved")?.as_u64()?).ok()?,
+                // Absent from a row journaled before clean merges were reported.
+                reanchored: names("reanchored").unwrap_or_default(),
             })
         })
         .collect())

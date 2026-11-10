@@ -86,25 +86,40 @@ impl ExecutionFacts {
 }
 
 /// The attention point of a delivery whose integration settled citation-only
-/// conflicts itself; `None` when none was.
+/// conflicts itself or re-anchored citations a code shift moved; `None` when
+/// it did neither.
 fn citations_settled_point(
     settled: &[crate::core::docs_citations::merge::Settlement],
 ) -> Option<String> {
     if settled.is_empty() {
         return None;
     }
-    let mut docs: Vec<&str> = settled
-        .iter()
-        .flat_map(|one| one.docs.iter().map(String::as_str))
-        .collect();
-    docs.sort_unstable();
-    docs.dedup();
+    let distinct = |pick: fn(&crate::core::docs_citations::merge::Settlement) -> &[String]| {
+        let mut docs: Vec<&str> = settled
+            .iter()
+            .flat_map(|one| pick(one).iter().map(String::as_str))
+            .collect();
+        docs.sort_unstable();
+        docs.dedup();
+        docs
+    };
+    let conflicts = distinct(|one| &one.docs);
     let moved: usize = settled.iter().map(|one| one.moved).sum();
-    Some(format!(
-        "integration: a citation-only conflict in {} was settled by the integration (target side \
-         taken, citations re-anchored, docs gate green); {moved} anchor(s) moved",
-        docs.join(", ")
-    ))
+    let mut point = String::from("integration: ");
+    if !conflicts.is_empty() {
+        point.push_str(&format!(
+            "a citation-only conflict in {} was settled by the integration (target side taken, \
+             citations re-anchored, no citation newly unresolved); {moved} anchor(s) moved",
+            conflicts.join(", ")
+        ));
+    } else {
+        point.push_str(&format!(
+            "{moved} doc citation(s) moved by a code shift were re-anchored by the integration \
+             (no citation newly unresolved) in {}",
+            distinct(|one| &one.reanchored).join(", ")
+        ));
+    }
+    Some(point)
 }
 
 /// How the worker was actually reached. Named for a human reading a report,
@@ -1187,6 +1202,7 @@ mod tests {
             Settlement {
                 docs: vec!["docs/architecture/overview.md".into()],
                 moved: 2,
+                reanchored: vec!["docs/architecture/overview.md".into()],
             },
             Settlement {
                 docs: vec![
@@ -1194,6 +1210,7 @@ mod tests {
                     "docs/testing-quality.md".into(),
                 ],
                 moved: 3,
+                reanchored: Vec::new(),
             },
         ];
 
@@ -1215,6 +1232,24 @@ mod tests {
             .attention_points
             .iter()
             .any(|point| point.starts_with("integration:")));
+
+        // A clean merge that only re-anchored moved citations says so too.
+        let mut clean = facts();
+        clean.citations_settled = vec![Settlement {
+            docs: Vec::new(),
+            moved: 4,
+            reanchored: vec!["docs/a.md".into(), "docs/b.md".into()],
+        }];
+        let point = report(&clean)
+            .attention_points
+            .into_iter()
+            .find(|point| point.starts_with("integration:"))
+            .expect("a re-anchored citation is an attention point");
+        assert!(!point.contains("conflict"), "{point}");
+        assert!(
+            point.contains("4 doc citation(s)") && point.contains("docs/a.md, docs/b.md"),
+            "{point}"
+        );
     }
 
     #[test]

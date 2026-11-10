@@ -2390,9 +2390,7 @@ pub fn build_candidate_detailed(
     if !crate::core::docs_citations::merge::merge_in_progress(worktree_path) {
         // Fast-forwarded, already up to date, or refused before any merge state.
         if out.status.success() {
-            return Ok(CandidateBuild::of(CandidateOutcome::Built {
-                sha: git_head(worktree_path)?,
-            }));
+            return settle_branch_docs(worktree_path, base_sha);
         }
         return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
             files: Vec::new(),
@@ -2451,25 +2449,11 @@ pub fn build_candidate_detailed(
         }
     };
     let settled = docs.as_ref().and_then(|docs| docs.settlement());
-    if let Some(docs) = docs.as_ref().filter(|_| settled.is_some()) {
-        // The conflict was settled without the worker: the result must be what
-        // the docs gate accepts, or the worker gets the exact list.
-        let unresolved = docs.unresolved(worktree_path);
-        if !unresolved.is_empty() {
-            let mut files: Vec<String> = unresolved.iter().map(|(doc, _)| doc.clone()).collect();
-            files.dedup();
-            let listed: Vec<&str> = unresolved.iter().map(|(_, line)| line.as_str()).collect();
-            tracing::warn!("citation-only conflict left unresolved citations: {files:?}");
-            abort_merge(worktree_path);
-            return Ok(CandidateBuild::bounced_on_docs(
-                files,
-                format!(
-                    "the merge settled a citation-only conflict but these citations do not \
-                     resolve in the merged tree: {}. Point each at its new place by hand.",
-                    listed.join("; ")
-                ),
-            ));
-        }
+    // Conflict or not, the merge must not leave a citation unresolved that
+    // resolved on the target; the worker gets the exact list otherwise.
+    if let Some(bounce) = unresolved_bounce(worktree_path, base_sha) {
+        abort_merge(worktree_path);
+        return Ok(bounce);
     }
     // Repositories that enforce DCO reject an unsigned merge commit.
     let mut commit = crate::core::cmd::git_cmd();
@@ -2487,6 +2471,104 @@ pub fn build_candidate_detailed(
         return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
             files: Vec::new(),
         }));
+    }
+    Ok(CandidateBuild {
+        outcome: CandidateOutcome::Built {
+            sha: git_head(worktree_path)?,
+        },
+        settled,
+        detail: None,
+    })
+}
+
+/// The candidate leaves a doc citation unresolved that resolved on the target:
+/// the bounce the worker reads, with the exact citations. `None` when the docs
+/// gate has nothing new to reject (a citation already broken on the target never
+/// blocks a merge) or the comparison could not be made.
+fn unresolved_bounce(worktree_path: &Path, target: &str) -> Option<CandidateBuild> {
+    let newly = match crate::core::docs_citations::merge::newly_unresolved(worktree_path, target) {
+        Ok(newly) => newly,
+        Err(error) => {
+            tracing::warn!("doc citations not compared with the target: {error}");
+            return None;
+        }
+    };
+    if newly.is_empty() {
+        return None;
+    }
+    let mut files: Vec<String> = newly.iter().map(|(doc, _)| doc.clone()).collect();
+    files.dedup();
+    let listed: Vec<&str> = newly.iter().map(|(_, line)| line.as_str()).collect();
+    tracing::warn!("candidate leaves unresolved citations: {files:?}");
+    Some(CandidateBuild::bounced_on_docs(
+        files,
+        format!(
+            "these citations resolved on the target and do not in the merged tree, after the \
+             merge re-anchored what it safely could: {}. Point each at its new place by hand.",
+            listed.join("; ")
+        ),
+    ))
+}
+
+/// The branch already descends from the target (fast-forwarded, up to date, or
+/// merged by its worker): no merge commit carries the re-anchoring, so the
+/// citations the branch's own code shift moved are re-anchored into a commit of
+/// their own, under the same rules as a merge (KT-1669).
+fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateBuild, String> {
+    use crate::core::docs_citations::merge::{self, SettleError};
+    let head = git_head(worktree_path)?;
+    if head == base_sha {
+        return Ok(CandidateBuild::of(CandidateOutcome::Built { sha: head }));
+    }
+    let docs = match merge::reanchor_branch_and_stage(worktree_path, base_sha) {
+        Ok(docs) => Some(docs),
+        Err(SettleError::Failed(error)) => {
+            tracing::warn!("doc citations not re-anchored on the branch: {error}");
+            None
+        }
+        Err(
+            SettleError::Refused {
+                paths: files,
+                message,
+            }
+            | SettleError::Unplaced {
+                docs: files,
+                message,
+            },
+        ) => {
+            tracing::warn!("doc citations left to the worker: {files:?}");
+            return Ok(CandidateBuild::bounced_on_docs(files, message));
+        }
+    };
+    if let Some(bounce) = unresolved_bounce(worktree_path, base_sha) {
+        if let Some(docs) = &docs {
+            if let Err(error) = merge::undo_staged(worktree_path, docs) {
+                tracing::warn!("re-anchored docs not restored: {error}");
+            }
+        }
+        return Ok(bounce);
+    }
+    let settled = docs.as_ref().and_then(|docs| docs.settlement());
+    if let Some(note) = docs.as_ref().and_then(|docs| docs.summary()) {
+        let committed = crate::core::cmd::git_cmd()
+            .args([
+                "commit",
+                "--signoff",
+                "--cleanup=strip",
+                "-m",
+                "Re-anchor doc citations moved by the branch's code",
+                "-m",
+                &note,
+            ])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| format!("git commit failed: {e}"))?;
+        if !committed.status.success() {
+            return Err(format!(
+                "cannot commit the re-anchored docs: {}",
+                String::from_utf8_lossy(&committed.stderr).trim()
+            ));
+        }
     }
     Ok(CandidateBuild {
         outcome: CandidateOutcome::Built {

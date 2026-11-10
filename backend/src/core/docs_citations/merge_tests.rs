@@ -836,6 +836,7 @@ fn two_lanes_re_anchoring_the_same_overview_line_are_settled_and_reported() {
         Some(merge::Settlement {
             docs: vec!["docs/architecture/overview.md".to_string()],
             moved: 2,
+            reanchored: vec!["docs/architecture/overview.md".to_string()],
         })
     );
     assert_eq!(
@@ -847,16 +848,267 @@ fn two_lanes_re_anchoring_the_same_overview_line_are_settled_and_reported() {
     assert_eq!(git(dir, &["status", "--porcelain"]), "");
 }
 
-/// A merge with no conflict settles nothing, so the card says nothing.
+/// A merge with no conflict still reports the citation it moved, and says no
+/// conflict was settled.
 #[test]
-fn a_clean_merge_reports_no_settlement() {
+fn a_clean_merge_reports_the_citation_it_moved_and_no_conflict() {
     let (repo, target) = shifted_citation_repo();
     let dir = repo.path();
 
     let build = build_candidate_detailed(dir, &target).unwrap();
 
     assert!(matches!(build.outcome, CandidateOutcome::Built { .. }));
+    let settled = build.settled.expect("a moved citation is reported");
+    assert_eq!((settled.docs.len(), settled.moved), (0, 1), "{settled:?}");
+    assert_eq!(settled.reanchored.len(), 1);
+}
+
+/// A merge that has nothing to move reports nothing.
+#[test]
+fn a_merge_with_no_citation_to_move_reports_nothing() {
+    let repo = scratch_repo();
+    let dir = repo.path();
+    fs::write(dir.join("a.txt"), "a\n").unwrap();
+    commit_all(dir, "base");
+    git(dir, &["checkout", "-q", "-b", "child"]);
+    fs::write(dir.join("child.txt"), "c\n").unwrap();
+    commit_all(dir, "child");
+    git(dir, &["checkout", "-q", "main"]);
+    fs::write(dir.join("target.txt"), "t\n").unwrap();
+    let target = commit_all(dir, "target");
+    git(dir, &["checkout", "-q", "child"]);
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert!(matches!(build.outcome, CandidateOutcome::Built { .. }));
+    assert_eq!((build.settled, build.detail), (None, None));
+}
+
+// ── KT-1669: every candidate is re-anchored, whatever the merge conflicted on ──
+
+const STALE_DOC: &str = "Gone: [src: file: src/lib.rs:50-51#vanished]\n";
+
+/// The child shifts `src/lib.rs` by 5 lines (and, with `delete_beta`, removes
+/// `beta`) and leaves `docs/api.md` alone, as the lane brief says. A doc the
+/// target already had broken (`docs/stale.md`) sits beside it. With `diverged`
+/// the target moves too (a real merge); without, the branch already descends
+/// from the target tip. Ends on `child`.
+fn code_shift_repo(diverged: bool, delete_beta: bool) -> (tempfile::TempDir, String) {
+    let repo = scratch_repo();
+    let dir = repo.path();
+    let base = source(&[(10, ALPHA), (30, BETA)]);
+    write_lines(dir, "src/lib.rs", &base);
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(dir.join("docs/api.md"), api_doc(10, 30)).unwrap();
+    fs::write(dir.join("docs/stale.md"), STALE_DOC).unwrap();
+    let base_sha = commit_all(dir, "base");
+
+    git(dir, &["checkout", "-q", "-b", "child"]);
+    let mut lines = base;
+    insert_after(&mut lines, 5, 5, "child");
+    if delete_beta {
+        lines[35 - 1] = "let beta_gone = 0;".to_string();
+    }
+    write_lines(dir, "src/lib.rs", &lines);
+    commit_all(dir, "child shifts the file and leaves the doc");
+
+    git(dir, &["checkout", "-q", "main"]);
+    let target = if diverged {
+        fs::write(dir.join("other.txt"), "target\n").unwrap();
+        commit_all(dir, "target touches something else")
+    } else {
+        base_sha
+    };
+    git(dir, &["checkout", "-q", "child"]);
+    (repo, target)
+}
+
+#[test]
+fn a_clean_merge_re_anchors_an_untouched_doc_the_code_shift_moved() {
+    let (repo, target) = code_shift_repo(true, false);
+    let dir = repo.path();
+    assert_ne!(
+        broken(dir),
+        Vec::<String>::new(),
+        "the lane left the doc stale"
+    );
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert!(matches!(build.outcome, CandidateOutcome::Built { .. }));
+    assert_eq!(build.detail, None);
+    assert_eq!(parents(dir), 2);
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/api.md")).unwrap(),
+        api_doc(15, 35)
+    );
+    assert_eq!(
+        build.settled,
+        Some(merge::Settlement {
+            docs: Vec::new(),
+            moved: 2,
+            reanchored: vec!["docs/api.md".to_string()],
+        })
+    );
+    // The re-anchoring is in the merge commit, and the broken-before doc is not.
+    let in_merge = git(dir, &["diff", "--name-only", "HEAD^1", "HEAD"]);
+    assert!(
+        in_merge.lines().any(|path| path == "docs/api.md"),
+        "{in_merge}"
+    );
+    assert!(!in_merge.contains("stale.md"), "{in_merge}");
+    // Only the doc that was broken before the merge is left broken.
+    let left = broken(dir);
+    assert!(
+        left.len() == 1 && left[0].starts_with("docs/stale.md:1 "),
+        "{left:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/stale.md")).unwrap(),
+        STALE_DOC
+    );
+    assert_eq!(git(dir, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_branch_already_on_the_target_gets_its_citations_re_anchored_in_a_commit() {
+    let (repo, target) = code_shift_repo(false, false);
+    let dir = repo.path();
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    let CandidateOutcome::Built { sha } = build.outcome else {
+        panic!("nothing to merge, nothing to bounce: {:?}", build.outcome);
+    };
+    assert_eq!(git(dir, &["rev-parse", "HEAD"]), sha);
+    assert_eq!(parents(dir), 1, "no merge: a commit of its own");
+    assert_eq!(
+        git(dir, &["rev-list", "--count", &format!("{target}..HEAD")]),
+        "2",
+        "the lane's commit and the re-anchoring"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/api.md")).unwrap(),
+        api_doc(15, 35)
+    );
+    assert_eq!(
+        build.settled.map(|s| (s.docs.len(), s.moved, s.reanchored)),
+        Some((0, 2, vec!["docs/api.md".to_string()]))
+    );
+    let body = git(dir, &["log", "-1", "--format=%B"]);
+    assert!(body.contains("2 citation(s) re-anchored"), "{body}");
+    assert!(
+        body.contains("Signed-off-by: Dev <dev@example.com>"),
+        "{body}"
+    );
+    assert_eq!(git(dir, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_branch_with_nothing_to_re_anchor_is_left_as_it_is() {
+    let (repo, target) = code_shift_repo(false, false);
+    let dir = repo.path();
+    build_candidate_detailed(dir, &target).unwrap();
+    let head = git(dir, &["rev-parse", "HEAD"]);
+
+    let again = build_candidate_detailed(dir, &target).unwrap();
+
+    assert_eq!(again.outcome, CandidateOutcome::Built { sha: head });
+    assert_eq!(again.settled, None);
+}
+
+#[test]
+fn a_merge_that_leaves_a_citation_newly_unresolvable_bounces_with_the_list() {
+    let (repo, target) = code_shift_repo(true, true);
+    let dir = repo.path();
+    let head = git(dir, &["rev-parse", "HEAD"]);
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert_eq!(
+        build.outcome,
+        CandidateOutcome::Conflict {
+            files: vec!["docs/api.md".to_string()]
+        }
+    );
+    let detail = build.detail.expect("the worker is told which citations");
+    assert!(
+        detail.contains("docs/api.md:4 [src: file: src/lib.rs:30-31#beta]"),
+        "{detail}"
+    );
+    assert!(!detail.contains("stale.md"), "broken before: {detail}");
+    assert!(
+        !detail.contains("#alpha"),
+        "alpha was re-anchored: {detail}"
+    );
     assert_eq!(build.settled, None);
+    assert_eq!(
+        git(dir, &["rev-parse", "HEAD"]),
+        head,
+        "the merge is undone"
+    );
+    assert!(!merge::merge_in_progress(dir));
+    assert_eq!(git(dir, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_branch_on_the_target_that_breaks_a_citation_bounces_and_restores_the_docs() {
+    let (repo, target) = code_shift_repo(false, true);
+    let dir = repo.path();
+    let head = git(dir, &["rev-parse", "HEAD"]);
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert_eq!(
+        build.outcome,
+        CandidateOutcome::Conflict {
+            files: vec!["docs/api.md".to_string()]
+        }
+    );
+    let detail = build.detail.expect("the worker is told which citations");
+    assert!(
+        detail.contains("docs/api.md:4 [src: file: src/lib.rs:30-31#beta]"),
+        "{detail}"
+    );
+    assert!(!detail.contains("stale.md"), "{detail}");
+    assert_eq!(git(dir, &["rev-parse", "HEAD"]), head, "no commit was made");
+    assert_eq!(git(dir, &["status", "--porcelain"]), "");
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/api.md")).unwrap(),
+        api_doc(10, 30),
+        "the lane's doc is as it left it"
+    );
+}
+
+#[test]
+fn a_citation_broken_on_the_target_never_blocks_a_merge() {
+    let repo = scratch_repo();
+    let dir = repo.path();
+    write_lines(dir, "src/lib.rs", &source(&[]));
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(dir.join("docs/stale.md"), STALE_DOC).unwrap();
+    commit_all(dir, "base");
+    git(dir, &["checkout", "-q", "-b", "child"]);
+    let mut lines = source(&[]);
+    insert_after(&mut lines, 5, 5, "child");
+    write_lines(dir, "src/lib.rs", &lines);
+    commit_all(dir, "child edits the cited file");
+    git(dir, &["checkout", "-q", "main"]);
+    fs::write(dir.join("other.txt"), "x\n").unwrap();
+    let target = commit_all(dir, "target");
+    git(dir, &["checkout", "-q", "child"]);
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert!(
+        matches!(build.outcome, CandidateOutcome::Built { .. }),
+        "{build:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/stale.md")).unwrap(),
+        STALE_DOC
+    );
+    assert_eq!(build.detail, None);
 }
 
 const GAMMA: &str = "pub fn gamma() {}";
