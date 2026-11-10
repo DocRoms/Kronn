@@ -383,11 +383,9 @@ fn apply_patterns(input: &str, patterns: &[Pattern], prefilter: &Prefilter) -> (
 /// UTF-8 safe: `regex_lite::Regex::replace_all` works on `&str` so all
 /// boundary handling is delegated to the regex engine.
 pub fn redact_secrets(input: &str) -> String {
-    redact_json_aware(
-        input,
-        |text| apply_patterns(text, PATTERNS.as_slice(), &VENDOR_PREFILTER),
-        |key| is_whole_secret(key, false),
-    )
+    redact_json_aware(input, |text| {
+        apply_patterns(text, PATTERNS.as_slice(), &VENDOR_PREFILTER)
+    })
     .0
 }
 
@@ -546,9 +544,7 @@ fn assignment_gate(text: &str, quote: Option<u8>) -> bool {
 /// Anchored on the secret NAME, so ordinary hex checksums/digests are left
 /// intact — verified by the `audit_artifact_*` tests.
 pub fn redact_for_audit_artifact(input: &str) -> (String, usize) {
-    redact_json_aware(input, redact_for_audit_artifact_text, |key| {
-        is_whole_secret(key, true)
-    })
+    redact_json_aware(input, redact_for_audit_artifact_text)
 }
 
 fn redact_for_audit_artifact_text(input: &str) -> (String, usize) {
@@ -592,11 +588,9 @@ pub fn strip_url_secrets(text: &str) -> String {
 /// excerpts): URL queries and userinfo dropped, then the vendor and
 /// secret-assignment heuristics. It cannot catch a bare secret by value.
 pub fn redact_stored_text(text: &str) -> String {
-    redact_json_aware(
-        text,
-        |text| redact_for_audit_artifact_text(&strip_url_secrets(text)),
-        |key| is_whole_secret(key, true),
-    )
+    redact_json_aware(text, |text| {
+        redact_for_audit_artifact_text(&strip_url_secrets(text))
+    })
     .0
 }
 
@@ -615,21 +609,6 @@ const JSON_CREDENTIAL_KEYS: &[&str] = &[
     "private_key",
 ];
 
-/// True when a secret pattern matches `text` from its first byte to its last:
-/// the text *is* a secret (a token used as a map key), not text that holds one.
-/// `with_assignment` adds the `NAME=value` patterns of the audit-artifact pass.
-fn is_whole_secret(text: &str, with_assignment: bool) -> bool {
-    let whole = |pat: &Pattern| {
-        pat.gate.admits(text)
-            && pat
-                .re
-                .find(text)
-                .is_some_and(|found| found.start() == 0 && found.end() == text.len())
-    };
-    (VENDOR_PREFILTER.admits(text) && PATTERNS.iter().any(whole))
-        || (with_assignment && ASSIGNMENT_PREFILTER.admits(text) && ASSIGNMENT.iter().any(whole))
-}
-
 /// Runs `redact` on `input`, one JSON string at a time when `input` is a JSON
 /// document (an object or an array), on the whole text otherwise.
 ///
@@ -641,16 +620,14 @@ fn is_whole_secret(text: &str, with_assignment: bool) -> bool {
 /// around a secret. A string `redact` leaves alone keeps its original bytes,
 /// as does everything between the strings.
 ///
-/// An object key is an identifier, not a value: it stays byte-identical, so a
-/// key shaped like an assignment (`token=x`) is never renamed, unless
-/// `key_is_secret` says the whole key is a secret. Text that is not a JSON
+/// An object key keeps its exact bytes when no secret pattern matches anywhere
+/// in it, so a key that merely looks like an assignment (`mode=fast`) is never
+/// renamed. When a pattern does match (a map keyed by `Bearer <token>` or
+/// `see token=abc here`), the key is redacted like a string value: decoded,
+/// redacted, re-encoded, and the document stays valid. Text that is not a JSON
 /// document as a whole (NDJSON, an excerpt cut mid-document) takes `redact`
 /// as it is: its patterns keep the escapes around a value themselves.
-fn redact_json_aware(
-    input: &str,
-    redact: impl Fn(&str) -> (String, usize),
-    key_is_secret: impl Fn(&str) -> bool,
-) -> (String, usize) {
+fn redact_json_aware(input: &str, redact: impl Fn(&str) -> (String, usize)) -> (String, usize) {
     let trimmed = input.trim_start();
     let is_container = trimmed.starts_with('{') || trimmed.starts_with('[');
     if !is_container || serde_json::from_str::<serde::de::IgnoredAny>(input).is_err() {
@@ -680,11 +657,7 @@ fn redact_json_aware(
                 };
                 let is_key = input[end..].trim_start().starts_with(':');
                 let (clean, changed) = if is_key {
-                    let redacted = if key_is_secret(&decoded) {
-                        redact(&decoded)
-                    } else {
-                        (decoded.clone(), 0)
-                    };
+                    let redacted = redact(&decoded);
                     key = Some(decoded);
                     redacted
                 } else if key
@@ -1085,32 +1058,45 @@ mod tests {
     }
 
     #[test]
-    fn an_object_key_keeps_its_bytes_unless_the_whole_key_is_a_secret() {
+    fn an_object_key_keeps_its_bytes_unless_a_secret_matches_inside_it() {
         let vendor = "sk-abcdefghijklmnopqrstuvwxyz1234";
         let doc = format!(
-            r#"{{"mode=fast":"a","see token={TOKEN} here":1,"token={TOKEN}":2,"password":"x","{vendor}":3}}"#
+            r#"{{"mode=fast":"a","password":"x","Bearer {TOKEN}":1,"see {vendor} here":2,"say \"hi\"":3,"see token={TOKEN} here":4}}"#
         );
         for (name, redact) in text_redactors() {
             let out = redact(&doc);
             let parsed: serde_json::Value = serde_json::from_str(&out)
                 .unwrap_or_else(|e| panic!("{name}: invalid JSON ({e}): {out}"));
             let keys: Vec<&String> = parsed.as_object().unwrap().keys().collect();
-            // Identifiers keep their bytes, even a name that smells secret.
-            for kept in ["mode=fast", "password", &format!("see token={TOKEN} here")] {
+            // No pattern matches: the key keeps its exact bytes, even when it
+            // is shaped like an assignment.
+            for kept in ["mode=fast", "password", "say \"hi\""] {
                 assert!(
                     keys.iter().any(|key| *key == kept),
                     "{name}: {kept}: {keys:?}"
                 );
             }
-            // A key that is wholly a secret is masked.
+            assert!(out.contains(r#""say \"hi\"":3"#), "{name}: {out}");
+            // A secret that is only part of a key is masked, the key re-encoded.
             assert!(!out.contains(vendor), "{name}: {out}");
             assert!(
-                keys.iter().any(|key| *key == "sk-***REDACTED***"),
+                keys.iter().any(|key| *key == "see sk-***REDACTED*** here"),
                 "{name}: {keys:?}"
             );
-            // `token=…` as a whole key is a secret for the assignment pass only.
-            let masked = keys.iter().any(|key| *key == "token=***REDACTED***");
+            assert!(
+                keys.iter().any(|key| *key == "Bearer ***REDACTED***"),
+                "{name}: {keys:?}"
+            );
+            // `token=…` inside a key is a secret for the assignment pass only.
+            let masked = keys
+                .iter()
+                .any(|key| *key == "see token=***REDACTED*** here");
             assert_eq!(masked, name != "redact_secrets", "{name}: {keys:?}");
+            assert_eq!(
+                !out.contains(TOKEN),
+                name != "redact_secrets",
+                "{name}: {out}"
+            );
         }
     }
 
