@@ -44,6 +44,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
 toml = "1"
+# A strict YAML parser: it proves the front matter Kronn writes is valid YAML
+# (KT-1309, tests) and reads the pnpm lock a dependency fetch validates (KT-1649).
+serde_yaml = "0.9"
 csv = "1"
 
 # Database (embedded)
@@ -128,12 +131,12 @@ ts-rs = { version = "12", features = ["chrono-impl", "uuid-impl", "serde-json-im
 # embedded Swagger UI served at /api/docs. utoipa-swagger-ui ships an
 # axum integration we use directly; we don't run an external swagger
 # binary in production.
-utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
+utoipa = { version = "6", features = ["chrono", "uuid", "axum_extras"] }
 # `vendored` ships the Swagger UI assets inside the crate so the build
 # doesn't need network or `curl` at compile time. Without it, the
 # build script tries to fetch the SWAGGER_UI_DOWNLOAD_URL via curl,
 # which fails inside slim Docker builders that don't ship curl.
-utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum", "vendored"] }
 html5ever = "0.40.1"
 
 # rooted_io reads a file's link count through its handle on Windows.
@@ -151,9 +154,6 @@ tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serial_test = "3"
-# A strict YAML parser: it proves the front matter Kronn writes is valid YAML,
-# not just readable by Kronn's own lenient reader (KT-1309). Dev-only.
-serde_yaml = "0.9"
 tempfile = "3"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
