@@ -68,3 +68,59 @@ async fn a_native_step_without_full_access_fails_typed_without_retry_or_quota() 
     assert_eq!(rollback.status, RunStatus::Success);
     assert_eq!(fx.prompt_markers(), vec!["prepare", "other"]);
 }
+
+#[tokio::test]
+async fn a_native_debate_reviewer_without_full_access_fails_the_step_typed_without_retry() {
+    let _off = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, false);
+    // Claude authors and would answer: only the Copilot reviewer can refuse.
+    let mut fx = fixture("native-reviewer", SESSION_LIMIT, 0, 3600).await;
+    let analyse = &mut fx.workflow.steps[1];
+    analyse.retry = Some(RetryConfig {
+        max_retries: 2,
+        backoff: "exponential".into(),
+    });
+    analyse.multi_agent_review = Some(crate::models::MultiAgentReviewConfig {
+        reviewer_agent: AgentType::CopilotCli,
+        reviewer_tier: None,
+        debate_prompt: "Challenge the plan.".into(),
+        max_rounds: Some(1),
+    });
+
+    let (_, tokens, agents) = test_state_and_configs();
+    let mut run = pending_run("run-native-reviewer", &fx.workflow.id);
+    insert_wf_and_run(&fx.state, &fx.workflow, &run).await;
+    execute_run(
+        fx.state.clone(),
+        &fx.workflow,
+        &mut run,
+        &tokens,
+        &agents,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the run ends, it does not error");
+    let ended = stored(&fx.state, "run-native-reviewer").await;
+
+    assert_eq!(ended.status, RunStatus::Failed, "{:?}", ended.step_results);
+    let refused = ended
+        .step_results
+        .iter()
+        .find(|r| r.step_name == "analyse")
+        .expect("the debate step ran");
+    assert_eq!(refused.status, RunStatus::Failed);
+    assert_eq!(
+        refused.output,
+        "native_full_access_required: GitHub Copilot runs only with full access. Enable it in \
+         Config › Agents › GitHub Copilot › Full access, or choose another agent."
+    );
+    assert_eq!(refused.quota_wait, None, "not a quota refusal");
+    assert_eq!(refused.terminal_stop, None, "an ordinary failure");
+    let attempts = &refused.agent_provenance.as_ref().unwrap().attempts;
+    assert!(
+        attempts.is_empty(),
+        "the author never spent a turn, nothing was retried: {attempts:?}"
+    );
+    assert_eq!(fx.prompt_markers(), vec!["prepare"]);
+}

@@ -480,7 +480,14 @@ pub fn list_all_skills() -> Vec<Skill> {
     let mut skills = Vec::new();
 
     for builtin in BUILTIN_SKILLS {
-        if let Some(skill) = parse_skill_markdown(builtin.id, builtin.content, true) {
+        // A guide marks where Kronn writes what the code owns (the authoring
+        // doctrine, the step types); every other skill is taken as it is.
+        let rendered = builtin
+            .content
+            .contains("<!-- kronn:")
+            .then(|| crate::workflows::authoring_doctrine::render_guide(builtin.content));
+        let content = rendered.as_deref().unwrap_or(builtin.content);
+        if let Some(skill) = parse_skill_markdown(builtin.id, content, true) {
             skills.push(skill);
         }
     }

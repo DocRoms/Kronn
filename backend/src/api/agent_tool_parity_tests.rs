@@ -24,7 +24,6 @@ const MCP_ONLY: &[(&str, &str)] = &[
     ("disc_link", SESSION),
     ("disc_unlink", SESSION),
     ("disc_invite_peer", SESSION),
-    ("disc_append", SESSION),
     (
         "disc_workspace_get",
         "an HTTP agent's file tools are bound to its workspace already",
@@ -65,7 +64,6 @@ const MCP_ONLY: &[(&str, &str)] = &[
     ("disc_get_message", DEFERRED),
     ("disc_meta", DEFERRED),
     ("disc_note_list", DEFERRED),
-    ("disc_question_list", DEFERRED),
     ("disc_search", DEFERRED),
     ("disc_summarize", DEFERRED),
     ("disc_update", DEFERRED),
@@ -145,6 +143,8 @@ fn http_tools() -> BTreeSet<String> {
     let mut all = full_discussion_catalogue();
     all.extend(workflow_tool_catalogue(true));
     all.extend(workflow_workspace_tool_catalogue());
+    // KT-1244 — an HTTP step that works in a room.
+    all.extend(room_tools::declarations());
     all.extend(audit_tool_catalogue());
     all.push(tools_load_declaration());
     all.iter()

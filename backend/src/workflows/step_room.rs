@@ -5,6 +5,12 @@
 //! The capability lives only in this process, so it is valid exactly while
 //! the step runs here: a finished step, another step, another run or a
 //! restarted backend holds nothing the join endpoint accepts.
+//!
+//! An HTTP agent (KT-1244) has no bridge to exchange the capability: the
+//! orchestrator that executes its tools in-process joins the step to the room
+//! itself, at activation, and hands the executor the resulting
+//! [`StepRoomMember`]. The membership is the same row with the same lifetime:
+//! it leaves with the step, and a restart revokes it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -255,6 +261,31 @@ impl WorkflowStepRooms {
     }
 }
 
+/// What an HTTP Agent step's tools need to act in the step's room (KT-1244):
+/// the capability naming that room, and the session the orchestrator joined
+/// for the step, so what the step posts is authored by its agent.
+#[derive(Clone)]
+pub struct StepRoomMember {
+    pub context: WorkflowStepBridgeContext,
+    pub agent_type: AgentType,
+    pub session_id: String,
+}
+
+impl std::fmt::Debug for StepRoomMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepRoomMember")
+            .field("context", &self.context)
+            .field("agent_type", &self.agent_type)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An agent the orchestrator joins to its room itself, because it runs no
+/// bridge process that could exchange the capability.
+fn joined_by_orchestrator(agent: &AgentType) -> bool {
+    crate::agents::runner::is_http_chat_agent(agent)
+}
+
 /// One running step's capability. Dropping it (step end, cancellation) ends
 /// the step's room membership.
 pub struct StepRoomActivation {
@@ -263,6 +294,7 @@ pub struct StepRoomActivation {
     context: WorkflowStepBridgeContext,
     capability_hash: String,
     released: bool,
+    member: Option<StepRoomMember>,
     /// The step's live progress in the room (KT-1252). Dropping the step
     /// without a verdict stops it as failed, so no bubble keeps counting.
     progress: RunProgress,
@@ -277,6 +309,12 @@ impl StepRoomActivation {
     /// What the step reports for the room's live bubble.
     pub fn progress(&self) -> &RunProgress {
         &self.progress
+    }
+
+    /// The room membership of an HTTP step, for its tools; `None` for a CLI
+    /// step, whose bridge joins by itself.
+    pub fn member(&self) -> Option<&StepRoomMember> {
+        self.member.as_ref()
     }
 
     /// End the membership now and wait for it, rather than from `Drop`.
@@ -394,10 +432,13 @@ pub async fn activate(
     else {
         return Ok(None);
     };
-    // Only their bridges receive the capability (direct CLI and ACP adapter).
-    if !matches!(step.agent, AgentType::ClaudeCode | AgentType::Codex) {
+    // Their bridges receive the capability (direct CLI and ACP adapter); an
+    // HTTP agent is joined by the orchestrator itself (KT-1244).
+    if !matches!(step.agent, AgentType::ClaudeCode | AgentType::Codex)
+        && !joined_by_orchestrator(&step.agent)
+    {
         return Err(format!(
-            "room_id: a {:?} step has no Kronn bridge to carry the room capability; use Claude Code or Codex",
+            "room_id: a {:?} step has no Kronn bridge to carry the room capability; use Claude Code, Codex or an HTTP agent (LiteLLM, Ollama, a custom connection)",
             step.agent
         ));
     }
@@ -488,6 +529,19 @@ pub async fn activate(
         return Err(format!("room_id: could not record step activity: {error}"));
     }
     revoke(db.clone(), replaced).await;
+    let member = if joined_by_orchestrator(&step.agent) {
+        match join_http_step(rooms, db, run_id, step, &context, &capability_hash).await {
+            Ok(member) => Some(member),
+            Err(error) => {
+                // Nothing of the step stays in the room: no activity, no session.
+                let sessions = rooms.release(run_id, &capability_hash).unwrap_or_default();
+                finish_activity(rooms.clone(), db, context, sessions).await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     // Readable by a room opened from now on, before the first frame is out.
     rooms.live_runs.insert(identity.clone(), progress.clone());
     let ws = rooms.ws.clone();
@@ -509,9 +563,47 @@ pub async fn activate(
         context,
         capability_hash,
         released: false,
+        member,
         _progress_stop: StopOnDrop(progress.clone()),
         progress,
     }))
+}
+
+/// Join an HTTP step to its room as its bridge would have, and tie the session
+/// to the step so it leaves with it.
+async fn join_http_step(
+    rooms: &Arc<WorkflowStepRooms>,
+    db: &Arc<Database>,
+    run_id: &str,
+    step: &WorkflowStep,
+    context: &WorkflowStepBridgeContext,
+    capability_hash: &str,
+) -> Result<StepRoomMember, String> {
+    let session_id = format!("kronn-step-{}", uuid::Uuid::new_v4().simple());
+    let joined = {
+        let (run, key, room) = (
+            run_id.to_string(),
+            context.step_key.clone(),
+            context.discussion_id.clone(),
+        );
+        let (agent, session) = (format!("{:?}", step.agent), session_id.clone());
+        db.with_conn(move |conn| {
+            crate::db::workflow_step_rooms::join(conn, &run, &key, &room, &agent, &session)
+        })
+        .await
+    };
+    let joined = joined.map_err(|error| format!("room_id: could not join the room: {error}"))?;
+    if !rooms.attach(context, joined.session_pk) {
+        // A later activation of the run replaced this one while it joined.
+        let _ = rooms.release(run_id, capability_hash);
+        revoke(db.clone(), vec![joined.session_pk]).await;
+        return Err("room_id: the step was replaced while it joined the room".into());
+    }
+    Ok(StepRoomMember {
+        context: context.clone(),
+        agent_type: step.agent.clone(),
+        session_id,
+    })
 }
 
 /// Keeps a run's room — the one its next Agent step will enter — told which
@@ -557,7 +649,8 @@ impl RoomTargetWatch {
                 continue;
             };
             if !matches!(step.step_type, StepType::Agent)
-                || !matches!(step.agent, AgentType::ClaudeCode | AgentType::Codex)
+                || !(matches!(step.agent, AgentType::ClaudeCode | AgentType::Codex)
+                    || joined_by_orchestrator(&step.agent))
             {
                 continue;
             }
@@ -634,6 +727,7 @@ pub fn refused_outcome(step: &WorkflowStep, error: String, duration_ms: u64) -> 
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }
@@ -788,19 +882,123 @@ mod tests {
         )
         .await;
         assert!(matches!(&unrendered, Err(error) if error.starts_with("room_id:")));
-        let mut http_step = agent_step(Some("{{room}}"));
-        http_step.agent = AgentType::Ollama;
+        let mut cli_step = agent_step(Some("{{room}}"));
+        cli_step.agent = AgentType::GeminiCli;
         let bridgeless = activate(
             &rooms,
             &db,
             "run",
             None,
-            &http_step,
+            &cli_step,
             &ctx_with_room("room-a"),
         )
         .await;
-        assert!(matches!(&bridgeless, Err(error) if error.contains("Claude Code or Codex")));
+        assert!(matches!(&bridgeless, Err(error) if error.contains("Claude Code, Codex")));
         assert!(rooms.live().is_empty());
+    }
+
+    async fn session_statuses(db: &Arc<Database>) -> Vec<(String, String)> {
+        db.with_read_conn(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT s.agent_type, s.status FROM discussion_sessions s
+                   JOIN workflow_step_room_sessions l ON l.session_pk = s.id
+                  ORDER BY s.id",
+            )?;
+            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+        .unwrap()
+    }
+
+    /// KT-1244 — an HTTP step has no bridge: the orchestrator joins it, with
+    /// the lifetime of a bridge's join (step end, restart).
+    #[tokio::test]
+    async fn an_http_step_is_joined_by_the_orchestrator_for_its_own_lifetime() {
+        let db = db_with_room().await;
+        let rooms = Arc::new(WorkflowStepRooms::default());
+        let ctx = ctx_with_room("room-a");
+        for agent in [
+            AgentType::LiteLlm,
+            AgentType::Custom,
+            AgentType::Ollama,
+            AgentType::Nvidia,
+        ] {
+            let mut http_step = agent_step(Some("{{room}}"));
+            http_step.agent = agent.clone();
+            let active = activate(&rooms, &db, "run-1", None, &http_step, &ctx)
+                .await
+                .unwrap()
+                .unwrap();
+            let member = active.member().expect("an HTTP step is a member");
+            assert_eq!(member.agent_type, agent);
+            assert_eq!(member.context.discussion_id, "room-a");
+            assert!(rooms.authorize(&member.context));
+            assert_eq!(
+                session_statuses(&db).await,
+                vec![(format!("{agent:?}"), "active".to_string())]
+            );
+            active.finish().await;
+            assert_eq!(
+                session_statuses(&db).await,
+                vec![(format!("{agent:?}"), "left".to_string())]
+            );
+            db.with_conn(|conn| {
+                conn.execute("DELETE FROM workflow_step_room_sessions", [])?;
+                conn.execute("DELETE FROM discussion_sessions", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        // A CLI step joins through its own bridge: nothing is joined for it.
+        let cli = activate(
+            &rooms,
+            &db,
+            "run-1",
+            None,
+            &agent_step(Some("{{room}}")),
+            &ctx,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(cli.member().is_none());
+        assert!(session_statuses(&db).await.is_empty());
+        cli.finish().await;
+
+        // Dropped, a step's membership goes with it; a restart revokes the rest.
+        let mut http_step = agent_step(Some("{{room}}"));
+        http_step.agent = AgentType::LiteLlm;
+        let dropped = activate(&rooms, &db, "run-1", None, &http_step, &ctx)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(dropped);
+        for _ in 0..100 {
+            if session_statuses(&db)
+                .await
+                .iter()
+                .all(|(_, status)| status == "left")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(session_statuses(&db).await[0].1, "left");
+        let running = activate(&rooms, &db, "run-1", None, &http_step, &ctx)
+            .await
+            .unwrap()
+            .unwrap();
+        db.with_conn(crate::db::workflow_step_rooms::revoke_all_after_restart)
+            .await
+            .unwrap();
+        assert!(session_statuses(&db)
+            .await
+            .iter()
+            .all(|(_, status)| status == "left"));
+        drop(running);
     }
 
     /// B4-01 — a rendered room outside the run's project refuses the launch
