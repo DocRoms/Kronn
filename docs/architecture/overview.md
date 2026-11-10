@@ -522,9 +522,24 @@ pass (a frequent schedule adds no fire during the repeated hour).
   parent's, spends no active time, so a reset past either Timeout still
   resumes. A waiting child whose parent
   has ended is failed by the engine tick so it frees its concurrency slot.
-  Single-mode sub-workflow children, batches and `on_failure` compensations
-  are not resumed; such a child ends `Failed` with the quota classification
-  on its step.
+  A single (non-foreach) sub-workflow child waits the same way (KT-1119), at
+  any depth: the parent's step mirrors the child's wait and records the child
+  and wait it mirrored; the resume reclaims that child at its refused step
+  (compare-and-set on the wait id, the parent's own deadline) and does not
+  replay the parent's or the child's earlier steps. The parent follows its child
+  by identity: a child woken and refused again parks under a new wait, which the
+  parent re-mirrors, and the claim compares-and-sets on the wait it reads. A
+  child cancelled while its parent waited ends the step as a clear failure, with
+  no fresh child; a record naming no child of this parent starts a fresh one.
+  The resumed child keeps its trigger context and pinned variable snapshot, and
+  its own Timeout counts its own active time. A foreach
+  under a single sub-workflow waits through the whole chain. A `BatchQuickPrompt`
+  whose children were ALL refused for quota (dispatch `failure_kind =
+  quota_exhausted` or a quota refusal in `last_error`) makes its step wait; the
+  resume runs the batch again, which replays no success since none existed. A
+  batch with one success keeps its partial verdict, and its refused items stay
+  failed. `on_failure` compensations are not resumed; such a step ends `Failed`
+  with the quota classification.
   [src: file: backend/src/workflows/quota_wait.rs:255-285#plan_wait]
   [src: file: backend/src/workflows/quota_wait.rs:306-340#park]
   [src: file: backend/src/workflows/quota_wait.rs:342-382#wake_due_runs]

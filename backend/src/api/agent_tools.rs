@@ -4626,7 +4626,10 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              --pretty false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` \
              (there is no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n\
              • `timeout_secs` defaults to 600 and is capped at 1800.\n\n\
-             **Default gates** — propose `cargo fmt --manifest-path backend/Cargo.toml --all -- \
+             **Default gates** — the CI lint gate is EXACTLY `cargo fmt --check` and `cargo \
+             clippy --all-targets -- -D warnings` (never `--lib` or `--lib --tests`, which skip \
+             `tests/`); the worker must report each exit code in its delivery. From the worktree \
+             root propose `cargo fmt --manifest-path backend/Cargo.toml --all -- \
              --check`, `cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D \
              warnings` and targeted lib tests (`cargo test --lib --manifest-path \
              backend/Cargo.toml <filter>`). The FULL suite (bare `cargo test`, `cargo nextest \
@@ -6169,6 +6172,10 @@ mod tests {
             "cargo test --manifest-path backend/Cargo.toml --target-dir",
             "invalid_validations",
             "task_exec_reassign",
+            // KT-1654 — the CI lint gate verbatim, and the exit code asked for.
+            "`cargo fmt --check`",
+            "`cargo clippy --all-targets -- -D warnings`",
+            "report each exit code",
         ] {
             assert!(
                 text.contains(fact),

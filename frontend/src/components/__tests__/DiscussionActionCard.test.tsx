@@ -18,6 +18,7 @@ vi.mock('../../lib/api', () => ({
   discussionActions: mocks,
   workflows: { get: catalog.getWorkflow },
   agents: { detect: catalog.detect },
+  config: { getAgentAccess: () => Promise.resolve({}) },
   runsApi: {
     outcome: vi.fn(() => Promise.resolve({ discussion_count: 0, discussions: [] })),
     discussionOutcome: vi.fn((id: string) => Promise.resolve({ discussion_count: 1, discussions: [{ id, title: 'Result', agent: 'ClaudeCode', agent_status: 'answered', answer_excerpt: null, answer_truncated: false, answered_at: null, diagnostic: null, updated_at: '2026-09-18T10:00:00Z' }] })),

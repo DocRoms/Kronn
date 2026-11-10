@@ -11,17 +11,17 @@ const ITEMS: [&str; 3] = ["T1", "T2", "T3"];
 
 /// Answers every child prompt, except T2's review while `refusals` remain and
 /// the `failing` prompt, which always fails like a broken agent.
-struct ReviewRefused {
-    refusal: String,
-    refusals: Mutex<usize>,
-    failing: Option<&'static str>,
-    resumed_probe: Option<ActiveTimeProbe>,
-    prompts: Arc<Mutex<Vec<String>>>,
+pub(super) struct ReviewRefused {
+    pub(super) refusal: String,
+    pub(super) refusals: Mutex<usize>,
+    pub(super) failing: Option<&'static str>,
+    pub(super) resumed_probe: Option<ActiveTimeProbe>,
+    pub(super) prompts: Arc<Mutex<Vec<String>>>,
 }
 
 /// Holds T2's answered review for `hold`, then reads the active time its
 /// child row holds while that step is still in flight.
-struct ActiveTimeProbe {
+pub(super) struct ActiveTimeProbe {
     db: Arc<crate::db::Database>,
     root_id: String,
     hold: std::time::Duration,
@@ -54,7 +54,10 @@ fn item_of(run: &WorkflowRun) -> Option<&str> {
 }
 
 /// Every sub-workflow run under `root`, at any depth.
-fn descendants(conn: &rusqlite::Connection, root: &str) -> anyhow::Result<Vec<WorkflowRun>> {
+pub(super) fn descendants(
+    conn: &rusqlite::Connection,
+    root: &str,
+) -> anyhow::Result<Vec<WorkflowRun>> {
     let mut found = Vec::new();
     let mut parents = vec![root.to_string()];
     while let Some(parent) = parents.pop() {
@@ -181,7 +184,7 @@ impl Tree {
 struct Shape {
     failing: Option<&'static str>,
     resumed_hold: Option<std::time::Duration>,
-    /// The foreach runs inside a single-mode sub-workflow, which cannot wait.
+    /// The foreach runs inside a single-mode sub-workflow.
     under_single_mode: bool,
     child_timeout_seconds: Option<u64>,
 }
@@ -658,31 +661,53 @@ fn a_child_with_the_default_timeout_resumes_after_a_reset_past_it() {
     });
 }
 
-/// A foreach whose run cannot wait (here inside a single-mode sub-workflow)
-/// keeps the old behaviour: the refused child fails and the sweep goes on.
+/// A foreach inside a single sub-workflow waits too: the whole chain waits and
+/// resumes through the root, the refused item at its step.
 #[test]
-fn a_child_of_a_run_that_cannot_wait_still_fails_on_quota() {
+fn a_foreach_child_under_a_single_sub_workflow_waits_through_the_whole_chain() {
     on_big_stack(async {
         let shape = Shape {
             under_single_mode: true,
             ..Shape::default()
         };
         let tree = tree_shaped("subrun-quota-single", SESSION_LIMIT, 1, shape).await;
-        let root = wait_until_settled(&tree.state, &tree.root_id).await;
-        assert_ne!(root.status, RunStatus::WaitingQuota);
-        let refused = tree.child("T2").await;
-        assert_eq!(refused.status, RunStatus::Failed);
-        let step = &refused.step_results[1];
-        assert_eq!(step.status, RunStatus::Failed);
-        let wait = step.quota_wait.clone().expect("classified as quota");
-        assert_eq!(wait.wake_at, None);
-        assert_eq!(tree.child("T3").await.status, RunStatus::Success);
+        let root = stored(&tree.state, &tree.root_id).await;
+        assert_eq!(root.status, RunStatus::WaitingQuota);
+        let waiting = tree.child("T2").await;
+        assert_eq!(waiting.status, RunStatus::WaitingQuota);
+        let middle = tree
+            .state
+            .db
+            .with_conn({
+                let root_id = tree.root_id.clone();
+                move |conn| crate::db::workflows::subworkflow_children(conn, &root_id)
+            })
+            .await
+            .unwrap();
+        assert_eq!(middle.len(), 1);
+        assert_eq!(middle[0].status, RunStatus::WaitingQuota);
+        assert_eq!(
+            tree.prompts(),
+            names(&["PREP-T1", "REVIEW-T1", "PREP-T2", "REVIEW-T2"])
+        );
+
+        let state = restarted(&tree.state);
+        assert_eq!(
+            crate::workflows::quota_wait::wake_due_runs(&state, wake_of(&root)).await,
+            vec![tree.root_id.clone()]
+        );
+        let done = wait_until_settled(&state, &tree.root_id).await;
+        assert_eq!(done.status, RunStatus::Success, "{:?}", done.step_results);
+        let resumed = tree.child("T2").await;
+        assert_eq!(resumed.id, waiting.id);
+        assert_eq!(resumed.status, RunStatus::Success);
         assert_eq!(
             tree.prompts(),
             names(&[
                 "PREP-T1",
                 "REVIEW-T1",
                 "PREP-T2",
+                "REVIEW-T2",
                 "REVIEW-T2",
                 "PREP-T3",
                 "REVIEW-T3"

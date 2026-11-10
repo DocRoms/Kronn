@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { RotateCcw } from 'lucide-react';
-import { agents as agentsApi, workflows as workflowsApi } from '../lib/api';
+import { agents as agentsApi, config as configApi, workflows as workflowsApi } from '../lib/api';
+import { requiresFullAccessToRun } from '../lib/agentFullAccess';
 import { AGENT_LABELS } from '../lib/constants';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
-import type { AgentDetection, AgentType, StepAgentOverride, WorkflowStep } from '../types/generated';
+import type { AgentDetection, AgentsConfig, AgentType, StepAgentOverride, WorkflowStep } from '../types/generated';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 import { ModelCatalogPicker } from './ModelCatalogPicker';
 
@@ -48,12 +49,20 @@ export function WorkflowStepAgents({ workflowId, value, onChange, disabled = fal
   const [steps, setSteps] = useState<WorkflowStep[] | null>(null);
   const [available, setAvailable] = useState<AgentType[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Unknown (null) hides the badge: the backend refuses on its own.
+  const [access, setAccess] = useState<AgentsConfig | null>(null);
 
   useEffect(() => {
     let active = true;
-    Promise.all([workflowsApi.get(workflowId), agentsApi.detect()])
-      .then(([workflow, detections]) => {
+    Promise.all([
+      workflowsApi.get(workflowId),
+      agentsApi.detect(),
+      // Best effort: without the settings the badge is simply not shown.
+      Promise.resolve().then(() => configApi.getAgentAccess()).catch(() => null),
+    ])
+      .then(([workflow, detections, agentAccess]) => {
         if (!active) return;
+        setAccess(agentAccess);
         setSteps(workflow.steps.filter(step => step.step_type.type === 'Agent'));
         setAvailable(detections.filter(usable).map(detection => detection.agent_type));
       })
@@ -122,6 +131,7 @@ export function WorkflowStepAgents({ workflowId, value, onChange, disabled = fal
                   disabled={disabled}
                   title={t('disc.action.stepAgents.agentFor', step.name)}
                   ariaLabel={t('disc.action.stepAgents.agentFor', step.name)}
+                  needsFullAccess={agent => requiresFullAccessToRun(access, agent)}
                 />
                 <ModelCatalogPicker
                   agent={current.agent}
