@@ -509,6 +509,16 @@ impl Database {
         Self::run_on(self.conn.clone(), self.assistant_guard.clone(), f).await
     }
 
+    /// Whether no closure currently holds the write connection: lets a test
+    /// assert that slow work runs outside `with_conn` (KT-1646).
+    #[cfg(test)]
+    pub(crate) fn write_connection_is_free(&self) -> bool {
+        !matches!(
+            self.conn.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     /// Shared executor for both connections: spawn_blocking + poison
     /// recovery + panic containment (0.8.11 hardening semantics).
     async fn run_on<F, T>(

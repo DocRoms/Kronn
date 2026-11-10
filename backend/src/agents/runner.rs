@@ -12993,16 +12993,42 @@ pub(crate) struct ClaudeSandboxCatalogueReceipt {
 
 impl ClaudeSandboxCatalogueReceipt {
     fn validate(self) -> Result<(), String> {
-        if self.worktree_count <= MAX_CLAUDE_SANDBOX_WORKTREES
+        self.validate_listing(&[])
+    }
+
+    /// Whether the catalogue is within both caps.
+    pub(crate) fn within_caps(self) -> bool {
+        self.worktree_count <= MAX_CLAUDE_SANDBOX_WORKTREES
             && self.worktree_bytes <= MAX_CLAUDE_SANDBOX_WORKTREE_BYTES
-        {
+    }
+
+    /// [`Self::validate`], naming the worktrees (directory names only, never a
+    /// path) of finished executions that Kronn could not reclaim and a human
+    /// can review and remove (KT-1646).
+    pub(crate) fn validate_listing(self, removable: &[String]) -> Result<(), String> {
+        if self.within_caps() {
             return Ok(());
         }
+        let removable = if removable.is_empty() {
+            String::new()
+        } else {
+            const LISTED: usize = 20;
+            let mut names: Vec<&str> = removable.iter().map(String::as_str).take(LISTED).collect();
+            if removable.len() > LISTED {
+                names.push("...");
+            }
+            format!(
+                " Worktrees of finished executions Kronn could not reclaim because they have \
+                 uncommitted changes, sit on another branch or are still in use (review, then \
+                 `git worktree remove`): {}.",
+                names.join(", ")
+            )
+        };
         Err(format!(
             "Claude task worker refused before provisioning: reason_code=claude_sandbox_catalogue_unsafe; \
              git_common_dir_count={}, git_worktree_count={}, git_worktree_bytes={}, \
              max_git_worktrees={}, max_git_worktree_bytes={}. No repository or worktree path was \
-             logged. Use `task_exec_reassign` to \
+             logged.{removable} Use `task_exec_reassign` to \
              move this execution to another available worker.",
             self.common_dir_count,
             self.worktree_count,
@@ -13109,6 +13135,18 @@ pub(crate) fn claude_task_worker_catalogue_preflight(
         return Ok(());
     }
     claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project))?.validate()
+}
+
+/// The catalogue measured for `project`; `None` where the sandbox catalogue
+/// does not apply (not macOS). The launch boundary measures, reclaims finished
+/// worktrees when over a cap, then measures again (KT-1646).
+pub(crate) fn claude_task_worker_catalogue_measure(
+    project: &crate::models::Project,
+) -> Result<Option<ClaudeSandboxCatalogueReceipt>, String> {
+    if !super::host_is_macos() {
+        return Ok(None);
+    }
+    claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project)).map(Some)
 }
 
 async fn run_claude_task_worker_auth_probe(

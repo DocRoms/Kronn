@@ -38,12 +38,12 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   the worker, and escalates (`Escalated`, principal solicited) when the budget
   is spent. `[src: file: backend/src/models/orchestration.rs:1963-1969#ReviewVerdict]`
   `[src: file: backend/src/models/orchestration.rs:2006-2029#ReviewDecisionV1]`
-  `[src: file: backend/src/api/orchestration.rs:7872-7879#decide_review]`
+  `[src: file: backend/src/api/orchestration.rs:8278-8285#decide_review]`
   `[src: file: backend/src/db/orchestration.rs:4291-4300#ReviewCheckpoint]`
   `[src: file: backend/src/db/orchestration.rs:4322-4334#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:13576-13588#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:17232-17241#human_review]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:14012-14024#reassign_execution]`
+  `[src: file: backend/src/api/orchestration.rs:17670-17679#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
@@ -72,15 +72,15 @@ branch. Checked against the code:
   `[src: file: backend/src/models/orchestration.rs:721-728#OrchestrationRun]`
 - Integration targets `run.target_branch`: through the unique worktree that has
   it checked out, or by moving the ref when no worktree has it; the run needs a
-  `project_id`. `[src: file: backend/src/api/orchestration.rs:3091-3147#integration_target]`
+  `project_id`. `[src: file: backend/src/api/orchestration.rs:3095-3151#integration_target]`
 - Every principal `task_exec_*` route requires the caller to be that
   discussion's principal (`principal_is_authorized`): an active CLI session of
   the discussion, or the room's native agent during its own running turn. The
   review obligation and the escalation are messages posted to the principal of
   that discussion.
-  `[src: file: backend/src/api/orchestration.rs:14061-14074#principal_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:14046-14088#room_agent_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:6809-6816#deliver_worker_manifest]`
+  `[src: file: backend/src/api/orchestration.rs:14497-14510#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:14482-14524#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:7215-7222#deliver_worker_manifest]`
   `[src: file: backend/src/db/orchestration.rs:4238-4245#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
   `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
@@ -142,7 +142,7 @@ Behaviour:
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
-   `[src: file: backend/src/api/orchestration.rs:15361-15399#wait_for_execution_status]`
+   `[src: file: backend/src/api/orchestration.rs:15799-15837#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP

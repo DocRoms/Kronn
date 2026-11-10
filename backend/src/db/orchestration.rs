@@ -7046,6 +7046,8 @@ pub fn extend_review_rounds(
     in_savepoint(conn, |conn| {
         let execution = get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("execution not found or caller is not its principal"))?;
+        // KT-1646 — raising the limit re-offers the execution to its worker.
+        crate::core::checkout_release::ensure_not_being_released(exec_id)?;
         if execution.status.is_terminal() {
             bail!(
                 "execution is {}: its review-round limit can no longer change",
@@ -8265,6 +8267,8 @@ pub fn reassign_execution_worker_keeping_origin(
     in_savepoint(conn, |conn| {
         let mut execution = get_task_execution(conn, exec_id)?
             .ok_or_else(|| anyhow::anyhow!("unknown task execution"))?;
+        // KT-1646 — a checkout a release is removing is not handed to a worker.
+        crate::core::checkout_release::ensure_not_being_released(exec_id)?;
         if execution.status.is_terminal() {
             bail!("a terminal execution cannot be reassigned");
         }

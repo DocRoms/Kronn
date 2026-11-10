@@ -2030,6 +2030,10 @@ async fn provision_task_execution_inner(
     // dispatch vs. CLI control offer), so a Cli worker provisions its sub-discussion
     // and worktree exactly like a native one and diverges only at the final step.
 
+    // KT-1646 — over the worktree cap, free the clean worktrees of finished
+    // executions first, with no connection held, so Phase A does not refuse.
+    reclaim_finished_worktrees_for_launch(db, &input.task_reference, &input.worker).await;
+
     // ── Phase A — validation + idempotent launch → Provisioning (one commit) ──
     let prepared = {
         let task_ref = input.task_reference.clone();
@@ -4474,19 +4478,9 @@ async fn cleanup_integrated_execution(
 /// gives; a refusal (a build still holding the lock, a symlink) is logged and
 /// audited, and the orphan sweep picks the directory up later.
 async fn reclaim_lane_target(db: &Database, repo_path: &std::path::Path, child_path: &str) {
-    let lane_target =
-        match worktree::lane_target_for_worktree(repo_path, std::path::Path::new(child_path)) {
-            Ok(path) => path,
-            Err(reason) => {
-                tracing::warn!(worktree = %child_path, "lane target reclaim skipped: {reason}");
-                return;
-            }
-        };
-    let outcome = worktree::remove_lane_target(repo_path, &lane_target)
-        .map(|report| (report.bytes_reclaimed, report.bytes_are_partial));
-    if let Err(reason) = &outcome {
-        tracing::warn!(lane_target = %lane_target.display(), "lane target kept: {reason}");
-    }
+    let Some((lane_target, outcome)) = remove_lane_target_outcome(repo_path, child_path) else {
+        return;
+    };
     let canonical = child_path.to_string();
     let target = lane_target.to_string_lossy().to_string();
     if let Err(error) = db
@@ -4497,6 +4491,400 @@ async fn reclaim_lane_target(db: &Database, repo_path: &std::path::Path, child_p
     {
         tracing::warn!(worktree = %child_path, "lane target reclaim audit failed: {error}");
     }
+}
+
+/// The removal half of [`reclaim_lane_target`]: `None` when the worktree names
+/// no lane, else the lane target and what removing it did.
+fn remove_lane_target_outcome(repo_path: &std::path::Path, child_path: &str) -> LaneRemoval {
+    let lane_target =
+        match worktree::lane_target_for_worktree(repo_path, std::path::Path::new(child_path)) {
+            Ok(path) => path,
+            Err(reason) => {
+                tracing::warn!(worktree = %child_path, "lane target reclaim skipped: {reason}");
+                return None;
+            }
+        };
+    let outcome = worktree::remove_lane_target(repo_path, &lane_target)
+        .map(|report| (report.bytes_reclaimed, report.bytes_are_partial));
+    if let Err(reason) = &outcome {
+        tracing::warn!(lane_target = %lane_target.display(), "lane target kept: {reason}");
+    }
+    Some((lane_target, outcome))
+}
+
+/// What [`reclaim_clean_finished_checkout`] did with one finished execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CleanCheckoutReclaim {
+    /// No managed checkout, the execution is not finished and unused, or another
+    /// release already holds it.
+    NotApplicable,
+    /// The clean checkout (or its leftover admin entry) is gone; the branch is kept.
+    Released,
+    /// A finished execution's checkout Kronn must not remove (dirty, on another
+    /// branch, unreadable). `name` is its directory name, never a path.
+    Kept { name: String, reason: String },
+}
+
+/// A finished execution's checkout a release has claimed (KT-1646): everything
+/// the removal and the recording need, read once under the connection so the
+/// removal itself holds none.
+struct ReleaseCandidate {
+    /// Held until the release has recorded its outcome.
+    _claim: crate::core::checkout_release::ReleaseClaim,
+    exec_id: String,
+    repo: std::path::PathBuf,
+    /// The checkout on this host.
+    checkout: String,
+    /// The path as the database stores it: the lane audit and the event key on it.
+    db_path: String,
+    branch: String,
+    head_sha: Option<String>,
+    /// The checkout's directory name, never a path.
+    name: String,
+}
+
+/// What removing a claimed checkout did to its lane build dir: `None` when the
+/// worktree names no lane.
+type LaneRemoval = Option<(std::path::PathBuf, Result<(u64, bool), String>)>;
+
+/// Step 1, under the connection: pick the execution if it is finished and
+/// unused, and claim its checkout so no other release (and no reassign, resume
+/// or review-round extension) takes it until the outcome is recorded.
+/// `Ok(None)` is an execution with nothing to release, or one already claimed.
+fn claim_finished_checkout(
+    conn: &rusqlite::Connection,
+    exec_id: &str,
+) -> Result<Option<ReleaseCandidate>> {
+    let Some(execution) = crate::db::orchestration::get_task_execution(conn, exec_id)? else {
+        return Ok(None);
+    };
+    if !execution.status.is_terminal() {
+        return Ok(None);
+    }
+    let Some(workspace) =
+        crate::db::discussion_workspaces::get_managed_for_execution(conn, exec_id)?
+    else {
+        return Ok(None);
+    };
+    let Some(path) = workspace.canonical_path.clone() else {
+        return Ok(None);
+    };
+    if !matches!(
+        crate::db::orchestration::worktree_cleanup_liveness(conn, &path)?,
+        worktree::ExecutionLiveness::Terminal
+    ) {
+        return Ok(None);
+    }
+    let Some(project) = crate::db::projects::get_project(conn, &workspace.project_id)? else {
+        return Ok(None);
+    };
+    let Some(claim) = crate::core::checkout_release::ReleaseClaim::take(exec_id) else {
+        return Ok(None);
+    };
+    let checkout = scanner::resolve_host_path(&path);
+    let name = checkout
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unnamed worktree".to_string());
+    Ok(Some(ReleaseCandidate {
+        _claim: claim,
+        exec_id: exec_id.to_string(),
+        repo: scanner::resolve_host_path(&project.path),
+        checkout: checkout.to_string_lossy().to_string(),
+        db_path: path,
+        branch: workspace.branch,
+        head_sha: workspace.head_sha,
+        name,
+    }))
+}
+
+/// Step 2, with no connection held: the Git checks (branch, `git status`) and
+/// the removal, then the lane build dir. `Err` is the reason the checkout was
+/// kept, with nothing removed.
+fn remove_finished_checkout(candidate: &ReleaseCandidate) -> Result<LaneRemoval, String> {
+    worktree::remove_cancelled_task_worktree(
+        &candidate.repo,
+        &candidate.checkout,
+        &candidate.branch,
+    )?;
+    Ok(remove_lane_target_outcome(
+        &candidate.repo,
+        &candidate.checkout,
+    ))
+}
+
+/// Step 3, under the connection again: record what step 2 did. A removed
+/// checkout retires its workspace row and journals the release; a kept one is
+/// reported back, its reason journaled by the caller.
+fn settle_finished_checkout(
+    conn: &rusqlite::Connection,
+    candidate: &ReleaseCandidate,
+    removal: Result<LaneRemoval, String>,
+) -> Result<CleanCheckoutReclaim> {
+    let exec_id = candidate.exec_id.as_str();
+    match removal {
+        Ok(lane) => {
+            if let Some((lane_target, outcome)) = lane {
+                let target = lane_target.to_string_lossy().to_string();
+                if let Err(error) = crate::db::orchestration::record_lane_target_reclaim(
+                    conn,
+                    &candidate.db_path,
+                    &target,
+                    outcome,
+                ) {
+                    tracing::warn!(
+                        worktree = %candidate.db_path,
+                        "lane target reclaim audit failed: {error}"
+                    );
+                }
+            }
+            let tx = conn.unchecked_transaction()?;
+            crate::db::discussion_workspaces::retire_managed_for_execution(
+                &tx,
+                exec_id,
+                candidate.head_sha.as_deref(),
+            )?;
+            crate::db::orchestration::record_execution_event(
+                &tx,
+                exec_id,
+                "worktree_released",
+                None,
+                None,
+                &backend_actor(),
+                serde_json::json!({
+                    "path": candidate.db_path,
+                    "branch": candidate.branch,
+                    "clean_only": true,
+                }),
+            )?;
+            tx.commit()?;
+            Ok(CleanCheckoutReclaim::Released)
+        }
+        // Recording the reason is the caller's: the sweep leaves a dirty checkout
+        // to its idle-aware pass, which journals its own reason, and the launch
+        // journals it through `record_release_kept`.
+        Err(reason) => Ok(CleanCheckoutReclaim::Kept {
+            name: candidate.name.clone(),
+            reason,
+        }),
+    }
+}
+
+/// Remove the managed checkout of one finished execution when its tree is clean
+/// (KT-1646). The branch is kept; a dirty tree, a foreign branch or any other
+/// refusal keeps the checkout, is reported as [`CleanCheckoutReclaim::Kept`] and
+/// is recorded once as a `worktree_release_kept` event. Unlike the idle-aware
+/// [`release_terminal_worktrees`] this needs no idle window: a clean tree holds
+/// nothing a removal can lose, and only a durably terminal execution with no
+/// live session or lease is touched. "Clean" is `git status` clean: ignored
+/// build output goes with the worktree.
+///
+/// The connection is held for the two short database steps only; the Git checks
+/// and the removal run on a blocking thread in between, so a slow disk never
+/// freezes the API (see [`claim_finished_checkout`]).
+async fn reclaim_clean_finished_checkout(
+    db: &Database,
+    exec_id: &str,
+) -> Result<CleanCheckoutReclaim> {
+    reclaim_clean_finished_checkout_with(db, exec_id, remove_finished_checkout).await
+}
+
+/// [`reclaim_clean_finished_checkout`] with the removal step injected: the
+/// tests observe the moment between the claim and the recording.
+async fn reclaim_clean_finished_checkout_with<R>(
+    db: &Database,
+    exec_id: &str,
+    remove: R,
+) -> Result<CleanCheckoutReclaim>
+where
+    R: FnOnce(&ReleaseCandidate) -> Result<LaneRemoval, String> + Send + 'static,
+{
+    let id = exec_id.to_string();
+    let Some(candidate) = db
+        .with_conn(move |conn| claim_finished_checkout(conn, &id))
+        .await?
+    else {
+        return Ok(CleanCheckoutReclaim::NotApplicable);
+    };
+    let (candidate, removal) = tokio::task::spawn_blocking(move || {
+        let removal = remove(&candidate);
+        (candidate, removal)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("worktree release failed: {error}"))?;
+    // The claim is released when `candidate` drops, after the outcome is recorded.
+    db.with_conn(move |conn| settle_finished_checkout(conn, &candidate, removal))
+        .await
+}
+
+/// What a reclaim over one project's finished executions did.
+#[derive(Debug, Default)]
+struct FinishedWorktreeReclaim {
+    released: usize,
+    /// Directory names of the finished executions' worktrees that were kept.
+    kept: Vec<String>,
+}
+
+/// The finished executions of `project_id` that still hold a managed checkout.
+fn finished_checkout_executions(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for (exec_id, _) in crate::db::orchestration::terminal_executions_with_checkout(conn)? {
+        let belongs = crate::db::discussion_workspaces::get_managed_for_execution(conn, &exec_id)?
+            .is_some_and(|workspace| workspace.project_id == project_id);
+        if belongs {
+            ids.push(exec_id);
+        }
+    }
+    Ok(ids)
+}
+
+/// The directory names of the finished executions' worktrees still on disk for
+/// `project_id`: what a human can review and remove (database only, no Git).
+fn finished_checkout_names(conn: &rusqlite::Connection, project_id: &str) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for exec_id in finished_checkout_executions(conn, project_id)? {
+        let path = crate::db::discussion_workspaces::get_managed_for_execution(conn, &exec_id)?
+            .and_then(|workspace| workspace.canonical_path);
+        if let Some(name) = path.as_deref().and_then(|path| {
+            scanner::resolve_host_path(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        }) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Reclaim the clean checkouts of every finished execution of `project_id`
+/// (KT-1646). One execution failing never stops the others.
+async fn reclaim_clean_finished_checkouts(
+    db: &Database,
+    project_id: &str,
+) -> Result<FinishedWorktreeReclaim> {
+    let pid = project_id.to_string();
+    let candidates = db
+        .with_conn(move |conn| finished_checkout_executions(conn, &pid))
+        .await?;
+    let mut report = FinishedWorktreeReclaim::default();
+    for exec_id in candidates {
+        match reclaim_clean_finished_checkout(db, &exec_id).await {
+            Ok(CleanCheckoutReclaim::Released) => report.released += 1,
+            Ok(CleanCheckoutReclaim::Kept { name, reason }) => {
+                tracing::info!(execution_id = %exec_id, "finished worktree kept: {reason}");
+                record_release_kept(db, &exec_id, &reason).await;
+                report.kept.push(name);
+            }
+            Ok(CleanCheckoutReclaim::NotApplicable) => {}
+            Err(error) => {
+                tracing::warn!(execution_id = %exec_id, "finished worktree reclaim failed: {error}");
+            }
+        }
+    }
+    report.kept.sort();
+    report.kept.dedup();
+    Ok(report)
+}
+
+/// How a launch measures the Claude sandbox catalogue of a project: injected so
+/// the reclaim is exercised on any host (the real measure only exists on macOS).
+type CatalogueMeasure =
+    fn(
+        &crate::models::Project,
+    ) -> Result<Option<crate::agents::runner::ClaudeSandboxCatalogueReceipt>, String>;
+
+/// Before a Claude launch is judged (KT-1646): when the project's worktree
+/// catalogue is over a cap, reclaim the clean worktrees of its finished
+/// executions. Runs with no connection held, before the synchronous verdict
+/// [`claude_catalogue_verdict`] re-measures. The cap itself protects the sandbox
+/// and is never raised.
+async fn reclaim_over_catalogue_cap(
+    db: &Database,
+    project: &crate::models::Project,
+    measure: CatalogueMeasure,
+) {
+    let measured = {
+        let project = project.clone();
+        tokio::task::spawn_blocking(move || measure(&project)).await
+    };
+    // A measure that fails or does not apply is the verdict's to report.
+    let Ok(Ok(Some(receipt))) = measured else {
+        return;
+    };
+    if receipt.within_caps() {
+        return;
+    }
+    let reclaim = match reclaim_clean_finished_checkouts(db, &project.id).await {
+        Ok(reclaim) => reclaim,
+        Err(error) => {
+            tracing::warn!(project = %project.id, "finished worktree reclaim failed: {error}");
+            return;
+        }
+    };
+    tracing::info!(
+        project = %project.id,
+        released = reclaim.released,
+        kept = reclaim.kept.len(),
+        "worktree catalogue over its cap: reclaimed finished worktrees before refusing"
+    );
+}
+
+/// [`reclaim_over_catalogue_cap`] for the launch and preparation boundaries
+/// (KT-1646), which only know the task and the worker: a no-op unless the worker
+/// is a Claude agent and the task has exactly one project.
+pub(crate) async fn reclaim_finished_worktrees_for_launch(
+    db: &Database,
+    task_reference: &str,
+    worker: &MessageTarget,
+) {
+    if worker.kind != MessageTargetKind::Agent || worker.agent_type != AgentType::ClaudeCode {
+        return;
+    }
+    let task_reference = task_reference.trim().to_string();
+    let project = db
+        .with_conn(move |conn| {
+            let Some(task) = crate::db::planning::get_task(conn, &task_reference)? else {
+                return Ok(None);
+            };
+            match task.summary.project_ids.as_slice() {
+                [project_id] => crate::db::projects::get_project(conn, project_id),
+                _ => Ok(None),
+            }
+        })
+        .await;
+    if let Ok(Some(project)) = project {
+        reclaim_over_catalogue_cap(
+            db,
+            &project,
+            crate::agents::runner::claude_task_worker_catalogue_measure,
+        )
+        .await;
+    }
+}
+
+/// The Claude sandbox catalogue verdict for a launch (KT-1646): measure, and when
+/// over a cap refuse, naming the finished worktrees still on disk so a human
+/// knows what to review and remove. Whatever could be reclaimed already was, by
+/// [`reclaim_over_catalogue_cap`], before the connection was taken. Database
+/// reads only: no Git runs here.
+fn claude_catalogue_verdict(
+    conn: &rusqlite::Connection,
+    project: &crate::models::Project,
+    measure: CatalogueMeasure,
+) -> Result<(), String> {
+    let Some(receipt) = measure(project)? else {
+        return Ok(());
+    };
+    if receipt.within_caps() {
+        return Ok(());
+    }
+    let kept = finished_checkout_names(conn, &project.id).unwrap_or_default();
+    receipt.validate_listing(&kept)
 }
 
 /// Where the evidence of one execution's released checkout is kept.
@@ -4762,6 +5150,24 @@ async fn release_terminal_worktrees(
     };
     let now = chrono::Utc::now();
     for (exec_id, finished_at) in candidates {
+        // KT-1646 — a clean checkout of a finished execution goes at once; the
+        // idle window below only guards the dirty ones, whose diff is saved first.
+        match reclaim_clean_finished_checkout(db, &exec_id).await {
+            Ok(CleanCheckoutReclaim::Released) => {
+                report.terminal_worktrees_released += 1;
+                report.lane_target_report.push(format!(
+                    "released finished execution {exec_id}: clean checkout removed, branch kept"
+                ));
+                continue;
+            }
+            Ok(CleanCheckoutReclaim::Kept { name, reason }) => {
+                tracing::info!(execution_id = %exec_id, worktree = %name, "finished worktree kept: {reason}");
+            }
+            Ok(CleanCheckoutReclaim::NotApplicable) => {}
+            Err(error) => report.errors.push(format!(
+                "execution {exec_id} clean checkout reclaim: {error}"
+            )),
+        }
         let recent = finished_at.is_some_and(|at| {
             now.signed_duration_since(at)
                 .to_std()
@@ -9062,7 +9468,7 @@ fn begin_provisioning(
         }
     };
     if !is_replay {
-        if let Some(reason) = worker_project_refusal(worker, &project) {
+        if let Some(reason) = worker_project_refusal_naming_finished(conn, worker, &project) {
             return Ok(Err(ProvisionError::NotLaunchable(format!(
                 "{}: {}",
                 reason.code, reason.detail
@@ -10945,6 +11351,27 @@ fn worker_project_refusal(
     None
 }
 
+/// [`worker_project_refusal`] for the launch and preparation boundaries, which
+/// hold a connection: a worktree catalogue over its cap refuses naming the
+/// finished worktrees a human can remove (KT-1646). Their async callers run
+/// [`reclaim_finished_worktrees_for_launch`] first, so no Git runs here.
+fn worker_project_refusal_naming_finished(
+    conn: &rusqlite::Connection,
+    worker: &MessageTarget,
+    project: &crate::models::Project,
+) -> Option<crate::models::CampaignTaskReason> {
+    if worker.kind == MessageTargetKind::Agent && worker.agent_type == AgentType::ClaudeCode {
+        return claude_catalogue_verdict(
+            conn,
+            project,
+            crate::agents::runner::claude_task_worker_catalogue_measure,
+        )
+        .err()
+        .map(|detail| preparation_reason("claude_sandbox_catalogue_unsafe", detail));
+    }
+    None
+}
+
 /// KT-515 — refuse a native/HTTP worker whose provider has an open quota
 /// escalation (see `provider_has_open_quota_exhaustion`). A `cli` worker is
 /// untouched: its own joined-session presence already carries that signal.
@@ -11241,7 +11668,9 @@ pub(crate) fn prepare_task_execution(
                     "task project no longer exists",
                 )),
                 Some(project) => {
-                    if let Some(reason) = worker_project_refusal(worker, &project) {
+                    if let Some(reason) =
+                        worker_project_refusal_naming_finished(conn, worker, &project)
+                    {
                         reasons.push(reason);
                     }
                 }
@@ -12555,6 +12984,13 @@ async fn resume_claimed_execution(
     state: AppState,
     exec_id: String,
 ) -> Json<ApiResponse<ExecutionRecoveryView>> {
+    // KT-1646 — a checkout a release is removing is not put back to use.
+    if let Err(error) = crate::core::checkout_release::ensure_not_being_released(&exec_id) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            error.to_string(),
+        ));
+    }
     let snapshot = {
         let id = exec_id.clone();
         state
@@ -15197,6 +15633,7 @@ pub async fn task_exec_prepare(
         .workers
         .effective_max_review_rounds();
     let (catalog_refusal, catalog_warning) = worker_catalog_verdict(&state, &worker).await;
+    reclaim_finished_worktrees_for_launch(&state.db, &task, &worker).await;
     let result = state
         .db
         .with_conn(move |conn| {
@@ -15285,6 +15722,7 @@ pub async fn task_exec_launch(
         let task = request.task_reference.trim().to_string();
         let principal = parent.clone();
         let worker = request.worker.clone();
+        reclaim_finished_worktrees_for_launch(&state.db, &task, &worker).await;
         state
             .db
             .with_conn(move |conn| {
@@ -40122,6 +40560,353 @@ pub(crate) mod tests {
         assert_eq!((released, kept), (1, 0));
         assert!(!std::path::Path::new(&path).exists());
         assert!(!lane_target.exists());
+    }
+
+    /// A finished execution's project, as the launch boundary reads it.
+    async fn project_of_execution(db: &Database, exec_id: &str) -> crate::models::Project {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            let workspace = crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)?
+                .expect("managed workspace");
+            Ok(crate::db::projects::get_project(conn, &workspace.project_id)?.expect("project"))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A catalogue measure that runs on any host (the real one is macOS-only,
+    /// see `claude_task_worker_catalogue_measure`): the repository's real
+    /// worktree count plus `EXCESS` worktrees standing for the unrelated ones
+    /// the ticket's repository carried. The cap is 64.
+    fn measure_with_excess<const EXCESS: usize>(
+        project: &crate::models::Project,
+    ) -> Result<Option<crate::agents::runner::ClaudeSandboxCatalogueReceipt>, String> {
+        let listed = git(
+            &scanner::resolve_host_path(&project.path),
+            &["worktree", "list", "--porcelain"],
+        );
+        let real = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count();
+        Ok(Some(crate::agents::runner::ClaudeSandboxCatalogueReceipt {
+            common_dir_count: 1,
+            worktree_count: real + EXCESS,
+            worktree_bytes: 0,
+        }))
+    }
+
+    /// The directory name of a checkout path.
+    fn dir_name(path: &str) -> String {
+        std::path::Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// KT-1646 — a finished execution releases its worktree when it is clean,
+    /// keeping the branch and dropping its lane; the workspace row is retired.
+    #[tokio::test]
+    async fn a_clean_finished_worktree_is_reclaimed_and_its_branch_kept() {
+        for status in ["Done", "Failed", "Cancelled"] {
+            let repo = init_repo();
+            let db = Database::open_in_memory().unwrap();
+            let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+            let path = managed_worktree_path(&db, &exec_id).await;
+            let branch = exec_of(&db, &exec_id).await.child_branch.expect("branch");
+            let lane_target = seed_lane_target_of(repo.path(), &path);
+            force_status(&db, &exec_id, status).await;
+            worker_session_left(&db).await;
+
+            let outcome = reclaim_clean_finished_checkout(&db, &exec_id)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome, CleanCheckoutReclaim::Released, "{status}");
+            assert!(!std::path::Path::new(&path).exists(), "{status}");
+            assert!(!lane_target.exists(), "{status}: lane purged");
+            assert_eq!(
+                git_rev(repo.path(), &format!("refs/heads/{branch}")).len(),
+                40,
+                "{status}: the branch is kept"
+            );
+            assert_eq!(lane_target_events(&db, "worktree_released").await, 1);
+            assert!(
+                !crate::core::checkout_release::is_claimed(&exec_id),
+                "{status}: the claim ends with the release"
+            );
+        }
+    }
+
+    /// KT-1646 — the sweep takes a clean finished checkout without waiting for
+    /// the idle window, which only guards the dirty ones.
+    #[tokio::test]
+    async fn the_sweep_releases_a_clean_finished_checkout_without_the_idle_window() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        let mut report = OrchestrationBootReport::default();
+        release_terminal_worktrees(
+            &db,
+            std::time::Duration::from_secs(100 * 365 * 24 * 3600),
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    /// KT-1646 — a dirty finished worktree is kept untouched and listed by name;
+    /// an execution still running is never a candidate.
+    #[tokio::test]
+    async fn a_dirty_finished_worktree_is_kept_and_listed() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, lane_target) = finished_dirty_execution(&db, repo.path()).await;
+        let project = project_of_execution(&db, &exec_id).await;
+
+        let report = reclaim_clean_finished_checkouts(&db, &project.id)
+            .await
+            .unwrap();
+
+        assert_eq!(report.released, 0);
+        assert_eq!(report.kept, vec![dir_name(&path)]);
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&path).join("README.md")).unwrap(),
+            "# edited"
+        );
+        assert!(lane_target.exists());
+        assert_eq!(kept_reasons(&db, &exec_id).await.len(), 1);
+
+        force_status(&db, &exec_id, "Working").await;
+        let outcome = reclaim_clean_finished_checkout(&db, &exec_id)
+            .await
+            .unwrap();
+        assert_eq!(outcome, CleanCheckoutReclaim::NotApplicable);
+    }
+
+    /// KT-1646 — the removal (the Git checks and `git worktree remove`) never
+    /// runs while the single database connection is held: a slow disk would
+    /// freeze every API request. The checkout is claimed for the whole span.
+    #[tokio::test]
+    async fn the_removal_holds_no_database_connection_and_keeps_the_claim() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (probe, seen) = (db.clone(), observed.clone());
+        let outcome = reclaim_clean_finished_checkout_with(&db, &exec_id, move |candidate| {
+            *seen.lock().unwrap() = Some((
+                probe.write_connection_is_free(),
+                crate::core::checkout_release::is_claimed(&candidate.exec_id),
+            ));
+            remove_finished_checkout(candidate)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, CleanCheckoutReclaim::Released);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((true, true)),
+            "(connection free, checkout claimed) while the removal runs"
+        );
+        assert!(!std::path::Path::new(&path).exists());
+        assert!(!crate::core::checkout_release::is_claimed(&exec_id));
+    }
+
+    /// KT-1646 — a reassign, a review-round extension or a resume racing a
+    /// release is refused while the checkout is claimed, a second release does
+    /// not take the same checkout, and once released nothing brings it back: a
+    /// finished execution stays finished and its retired workspace has no path.
+    #[tokio::test]
+    async fn a_reassign_racing_a_release_is_refused_and_nothing_is_revived() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        // Step 1 of a release: the checkout is claimed, its removal pending.
+        let id = exec_id.clone();
+        let candidate = db
+            .with_conn(move |conn| claim_finished_checkout(conn, &id))
+            .await
+            .unwrap()
+            .expect("a finished, clean, unused checkout is claimable");
+
+        let reassign = |db: std::sync::Arc<Database>, id: String| async move {
+            db.with_conn(move |conn| {
+                crate::db::orchestration::reassign_execution_worker(
+                    conn,
+                    &id,
+                    &claude_selection(),
+                    "retry",
+                    &backend_actor(),
+                )
+            })
+            .await
+            .map(|_| ())
+            .expect_err("refused")
+            .to_string()
+        };
+        assert!(reassign(db.clone(), exec_id.clone())
+            .await
+            .contains("being released"),);
+        let id = exec_id.clone();
+        let extension = db
+            .with_conn(move |conn| {
+                crate::db::orchestration::extend_review_rounds(
+                    conn,
+                    &id,
+                    crate::db::orchestration::ReviewRoundsExtension::By(1),
+                    &backend_actor(),
+                    "more rounds",
+                )
+            })
+            .await
+            .map(|_| ())
+            .expect_err("refused")
+            .to_string();
+        assert!(extension.contains("being released"), "{extension}");
+        let resumed = resume_claimed_execution(quota_test_state(&db), exec_id.clone())
+            .await
+            .0;
+        assert!(!resumed.success);
+        assert!(
+            resumed.error.unwrap_or_default().contains("being released"),
+            "resume refused while claimed"
+        );
+        assert_eq!(
+            reclaim_clean_finished_checkout(&db, &exec_id)
+                .await
+                .unwrap(),
+            CleanCheckoutReclaim::NotApplicable,
+            "a second release does not take a claimed checkout"
+        );
+        assert!(std::path::Path::new(&path).exists());
+
+        // Steps 2 and 3 of the release.
+        let removal = remove_finished_checkout(&candidate);
+        let outcome = db
+            .with_conn(move |conn| {
+                let outcome = settle_finished_checkout(conn, &candidate, removal)?;
+                Ok(outcome)
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, CleanCheckoutReclaim::Released);
+
+        // Settled: the claim is gone, the execution is still finished, and the
+        // retired workspace claims no path that could be handed out again.
+        assert!(!crate::core::checkout_release::is_claimed(&exec_id));
+        let after = reassign(db.clone(), exec_id.clone()).await;
+        assert!(after.contains("terminal execution"), "{after}");
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Failed
+        );
+        let id = exec_id.clone();
+        let workspace = db
+            .with_conn(move |conn| {
+                crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)
+            })
+            .await
+            .unwrap()
+            .expect("the lineage row survives");
+        assert_eq!(workspace.canonical_path, None);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    /// KT-1646 — over the worktree cap, the launch boundary reclaims the clean
+    /// worktree of a finished execution and no longer refuses. Platform-agnostic:
+    /// the catalogue measure is injected.
+    #[tokio::test]
+    async fn a_launch_over_the_worktree_cap_reclaims_a_clean_finished_worktree() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let project = project_of_execution(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        // main + the execution's worktree + 63 = 65, one over the cap of 64.
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<63>).await;
+        let verdict = db
+            .with_conn(move |conn| {
+                Ok(claude_catalogue_verdict(
+                    conn,
+                    &project,
+                    measure_with_excess::<63>,
+                ))
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(verdict, Ok(()));
+        assert!(!std::path::Path::new(&path).exists(), "reclaimed");
+    }
+
+    /// KT-1646 — a catalogue within its caps reclaims nothing: the cleanup is a
+    /// way out of the cap, not a standing sweep of the launch path.
+    #[tokio::test]
+    async fn a_launch_within_the_worktree_cap_reclaims_nothing() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let project = project_of_execution(&db, &exec_id).await;
+        force_status(&db, &exec_id, "Failed").await;
+        worker_session_left(&db).await;
+
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<0>).await;
+
+        assert!(std::path::Path::new(&path).exists());
+    }
+
+    /// KT-1646 — when nothing can be reclaimed the refusal stays, and names the
+    /// finished execution's worktree a human can review and remove (its
+    /// directory name, never a path).
+    #[tokio::test]
+    async fn a_refused_launch_names_the_finished_worktrees_a_human_can_remove() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, path, _lane) = finished_dirty_execution(&db, repo.path()).await;
+        let project = project_of_execution(&db, &exec_id).await;
+
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<64>).await;
+        let verdict = db
+            .with_conn(move |conn| {
+                Ok(claude_catalogue_verdict(
+                    conn,
+                    &project,
+                    measure_with_excess::<64>,
+                ))
+            })
+            .await
+            .unwrap();
+
+        let error = verdict.unwrap_err();
+        assert!(error.contains("reason_code=claude_sandbox_catalogue_unsafe"));
+        assert!(
+            error.contains("max_git_worktrees=64"),
+            "the cap is not raised: {error}"
+        );
+        assert!(error.contains(&dir_name(&path)), "{error}");
+        assert!(!error.contains(repo.path().to_str().unwrap()), "{error}");
+        assert!(std::path::Path::new(&path).exists(), "dirty checkout kept");
     }
 
     /// KT-1397 — `finished_at` does not prove the checkout idle: a file written
