@@ -15,7 +15,7 @@
 
 use super::diff_map::DiffMap;
 use super::{
-    file_citation_anchored, is_checked_doc, markers_at, reanchor_doc, suggested_span,
+    check_doc, file_citation_anchored, is_checked_doc, markers_at, reanchor_doc, suggested_span,
     DocCitationFailure, ReanchorOutcome,
 };
 use crate::core::anti_halluc::{anchor_miss, anchor_miss_in};
@@ -66,7 +66,60 @@ impl From<String> for SettleError {
     }
 }
 
+/// A citation-only conflict the merge settled itself (KT-1669): what the
+/// delivery card says so a reviewer knows the worker was not asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settlement {
+    /// The docs whose conflicts were only citation anchors.
+    pub docs: Vec<String>,
+    /// Citations the merge re-anchored onto the merged files.
+    pub moved: usize,
+}
+
 impl MergeDocs {
+    /// The settlement to report; `None` unless a conflict was settled. A clean
+    /// merge that merely re-anchored a citation settled no conflict.
+    pub fn settlement(&self) -> Option<Settlement> {
+        if self.resolved.is_empty() {
+            return None;
+        }
+        Some(Settlement {
+            docs: self
+                .resolved
+                .iter()
+                .map(|doc| doc.to_string_lossy().into_owned())
+                .collect(),
+            moved: self.outcome.rewritten.len(),
+        })
+    }
+
+    /// Every citation of the docs the settling touched that still does not
+    /// resolve in the merge in progress, as `(doc, "doc:line [src: …] reason")`:
+    /// what the docs gate would reject. The working tree is read, which for
+    /// these docs is the staged merge (settling refuses a doc with unstaged
+    /// changes).
+    pub fn unresolved(&self, root: &Path) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for doc in self.touched() {
+            let Ok(text) = std::fs::read_to_string(root.join(&doc)) else {
+                continue;
+            };
+            for failure in check_doc(&text, root) {
+                out.push((
+                    doc.to_string_lossy().into_owned(),
+                    format!(
+                        "{}:{} [src: {}] {}",
+                        doc.display(),
+                        failure.line,
+                        failure.citation,
+                        failure.reason
+                    ),
+                ));
+            }
+        }
+        out
+    }
+
     /// Every doc the settling changed or staged.
     pub fn touched(&self) -> BTreeSet<PathBuf> {
         self.resolved

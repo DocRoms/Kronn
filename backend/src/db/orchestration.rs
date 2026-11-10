@@ -3244,6 +3244,68 @@ pub fn provider_changes(conn: &Connection, exec_id: &str) -> Result<Vec<Provider
         .collect())
 }
 
+/// Journal action of an integration merge that settled a citation-only doc
+/// conflict without the worker (KT-1669).
+pub const CITATIONS_SETTLED_ACTION: &str = "integration_citations_settled";
+
+/// Record that the candidate merged at `merge_sha` settled a citation-only
+/// conflict, so the delivery card can say so.
+pub fn record_citations_settled(
+    conn: &Connection,
+    exec_id: &str,
+    merge_sha: &str,
+    settled: &crate::core::docs_citations::merge::Settlement,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        CITATIONS_SETTLED_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::json!({
+            "merge_sha": merge_sha,
+            "docs": settled.docs,
+            "moved": settled.moved,
+        }),
+    )
+}
+
+/// Every citation-only conflict the integration merges of an execution settled,
+/// oldest first. Each merge stays in the branch's history, so a candidate that
+/// was rebuilt after the target advanced adds to the earlier ones.
+pub fn citations_settled(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Vec<crate::core::docs_citations::merge::Settlement>> {
+    let mut stmt = conn.prepare(
+        "SELECT changes_json FROM task_execution_events \
+         WHERE task_execution_id = ?1 AND action = ?2 \
+         ORDER BY created_at ASC, rowid ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![exec_id, CITATIONS_SETTLED_ACTION], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|json| {
+            let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+            Some(crate::core::docs_citations::merge::Settlement {
+                docs: value
+                    .get("docs")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|doc| doc.as_str().map(str::to_owned))
+                    .collect(),
+                moved: usize::try_from(value.get("moved")?.as_u64()?).ok()?,
+            })
+        })
+        .collect())
+}
+
 /// The canonical stored form of a reset instant. One fixed-width UTC shape, so
 /// two stamps compare correctly as plain strings.
 pub(crate) fn quota_reset_stamp(at: DateTime<Utc>) -> String {

@@ -164,6 +164,13 @@ leaves the merge as it was) rather than sweep unnamed work in progress into the
 commit. A staged path that is neither the merge's nor named in `files` is
 refused before any doc is touched.
 
+When the integration settled a citation-only conflict (KT-1669), every citation
+of the settled docs must also resolve in the merged tree, the check the gate
+makes. One that does not (its symbol is gone, say) undoes the merge and sends the
+work back with the exact `doc:line [src: …] reason` list, and a settlement that
+holds is recorded on the delivery report. See
+[`task-orchestration.md`](guides/task-orchestration.md).
+
 Both land in the merge commit, which carries the sign-off of the configured git
 identity and a line counting what was settled. The same step runs inside the
 worker's `task_exec_commit` merge, so a worker needs no `make docs-reanchor` in

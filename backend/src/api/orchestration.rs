@@ -3498,23 +3498,31 @@ pub async fn run_integration(
     checkpoint(db, exec_id, CheckpointStep::Anchored(target_sha.clone())).await?;
 
     // ── Phase 1: build the candidate in the CHILD worktree ──
-    let merge_sha = match worktree::build_candidate(child, &target_sha) {
-        Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-        Ok(worktree::CandidateOutcome::Conflict { files }) => {
+    let build = match worktree::build_candidate_detailed(child, &target_sha) {
+        Ok(build) => build,
+        Err(error) => {
+            return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
+        }
+    };
+    let merge_sha = match build.outcome {
+        worktree::CandidateOutcome::Built { sha } => sha,
+        worktree::CandidateOutcome::Conflict { files } => {
             send_back(
                 db,
                 exec_id,
-                &ReworkReport::conflict(format!("merge conflict in {}", files.join(", "))),
+                &ReworkReport::conflict(conflict_reason(
+                    "merge conflict",
+                    &files,
+                    build.detail.as_deref(),
+                )),
             )
             .await?;
             return Ok(IntegrationOutcome::SentBack {
                 reason: format!("conflict in {}", files.join(", ")),
             });
         }
-        Err(error) => {
-            return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
-        }
     };
+    note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
     checkpoint(db, exec_id, CheckpointStep::Built(merge_sha.clone())).await?;
 
     // ── Validations: a failure sends the work back, it never blocks the parent ──
@@ -3532,6 +3540,45 @@ pub async fn run_integration(
         },
     )
     .await
+}
+
+/// What the worker reads as the cause of a merge conflict: the files, and for a
+/// bounce on doc citations the exact citations behind it (KT-1669).
+fn conflict_reason(prefix: &str, files: &[String], detail: Option<&str>) -> String {
+    let base = format!("{prefix} in {}", files.join(", "));
+    match detail {
+        Some(detail) => format!("{base}: {detail}"),
+        None => base,
+    }
+}
+
+/// Journal that the candidate merge settled a citation-only doc conflict
+/// itself, for the delivery card. Best effort: the merge exists either way and
+/// a lost note only leaves the card less informative.
+async fn note_citations_settled(
+    db: &Database,
+    exec_id: &str,
+    merge_sha: &str,
+    settled: Option<&crate::core::docs_citations::merge::Settlement>,
+) {
+    let Some(settled) = settled.cloned() else {
+        return;
+    };
+    let (id, sha) = (exec_id.to_string(), merge_sha.to_string());
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_citations_settled(
+                conn,
+                &id,
+                &sha,
+                &settled,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!(execution = %exec_id, %error, "citation settlement not journaled");
+    }
 }
 
 /// Validate, arm and fast-forward a built candidate; the row is `Validating` on
@@ -3665,20 +3712,25 @@ async fn validate_and_apply(
             }
         };
         reanchor_candidate(db, exec_id, &tip, "target_advanced").await?;
-        let merge_sha = match worktree::build_candidate(child, &tip) {
-            Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-            Ok(worktree::CandidateOutcome::Conflict { files }) => {
-                let reason = format!(
-                    "merge conflict after the target advanced in {}",
-                    files.join(", ")
-                );
-                send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
-                return Ok(IntegrationOutcome::SentBack { reason });
-            }
+        let build = match worktree::build_candidate_detailed(child, &tip) {
+            Ok(build) => build,
             Err(error) => {
                 return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
             }
         };
+        let merge_sha = match build.outcome {
+            worktree::CandidateOutcome::Built { sha } => sha,
+            worktree::CandidateOutcome::Conflict { files } => {
+                let reason = conflict_reason(
+                    "merge conflict after the target advanced",
+                    &files,
+                    build.detail.as_deref(),
+                );
+                send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
+                return Ok(IntegrationOutcome::SentBack { reason });
+            }
+        };
+        note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
         checkpoint(db, exec_id, CheckpointStep::Built(merge_sha.clone())).await?;
         checkpoint(db, exec_id, CheckpointStep::Validating).await?;
         candidate = AnchoredCandidate {
@@ -4074,17 +4126,25 @@ async fn resume_recovered_integration(
                     }
                 };
             reanchor_candidate(db, exec_id, &target_sha, "rebuild_candidate").await?;
-            let merge_sha = match worktree::build_candidate(child, &target_sha) {
-                Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-                Ok(worktree::CandidateOutcome::Conflict { files }) => {
-                    let reason = format!("merge conflict after recovery in {}", files.join(", "));
-                    send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
-                    return Ok(IntegrationOutcome::SentBack { reason });
-                }
+            let build = match worktree::build_candidate_detailed(child, &target_sha) {
+                Ok(build) => build,
                 Err(error) => {
                     return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
                 }
             };
+            let merge_sha = match build.outcome {
+                worktree::CandidateOutcome::Built { sha } => sha,
+                worktree::CandidateOutcome::Conflict { files } => {
+                    let reason = conflict_reason(
+                        "merge conflict after recovery",
+                        &files,
+                        build.detail.as_deref(),
+                    );
+                    send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
+                    return Ok(IntegrationOutcome::SentBack { reason });
+                }
+            };
+            note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
             checkpoint(db, exec_id, CheckpointStep::Built(merge_sha)).await?;
             checkpoint(db, exec_id, CheckpointStep::Validating).await?;
             backup_ref
@@ -11254,6 +11314,24 @@ fn worker_brief_markdown_in(
          l'intégration.\n\n"
             .to_string()
     };
+    // KT-1669 — a lane re-anchors only the citations its own gate reads. The
+    // integration settles a conflict that is only citation line numbers, so a
+    // lane never rewrites the target's anchors to avoid one.
+    let citations = if !fr {
+        "## Doc citations\n\
+         Keep the `[src:]` citations of the docs you edit resolving: that is your own \
+         gate. Do not re-anchor the citations of docs you did not edit, nor the anchors a merge \
+         of the target moved. When the only conflict between your branch and the target is \
+         citation line numbers, the integration takes the target's side and re-anchors them \
+         itself, without sending your work back.\n\n"
+    } else {
+        "## Citations de documentation\n\
+         Garde résolubles les citations `[src:]` des docs que tu modifies : c'est ta \
+         propre porte. Ne ré-ancre pas les citations des docs que tu n'as pas modifiés, ni les \
+         ancres qu'une fusion de la cible a déplacées. Quand le seul conflit entre ta branche et \
+         la cible porte sur des numéros de ligne de citations, l'intégration prend le côté de la \
+         cible et les ré-ancre elle-même, sans te renvoyer ton travail.\n\n"
+    };
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -11275,6 +11353,7 @@ fn worker_brief_markdown_in(
              is done by Kronn AFTER review.\n\
              - Stay within the DoD's scope.\n\n\
              {target_integration}\
+             {citations}\
              ## Tests\n\
              {tests}\n\n\
              ## Workspace\n\
@@ -11315,6 +11394,7 @@ fn worker_brief_markdown_in(
          protégée est faite par Kronn APRÈS revue.\n\
          - Reste dans le périmètre de la DoD.\n\n\
          {target_integration}\
+         {citations}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -11342,6 +11422,7 @@ fn worker_brief_markdown_in(
         human_arbitration = human_arbitration,
         parent_milestones = parent_milestones,
         target_integration = target_integration,
+        citations = citations,
         delivery_format = delivery_format,
         commit_boundary = commit_boundary,
         first_action = first_action,
@@ -20381,6 +20462,49 @@ pub(crate) mod tests {
         );
     }
 
+    /// KT-1669 — the brief asks a lane to keep only its own citations green and
+    /// says the integration settles a citation-only conflict, whatever the
+    /// transport and language.
+    #[test]
+    fn worker_brief_leaves_citation_only_conflicts_to_the_integration() {
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            for (can_run_shell, projection) in [(true, true), (true, false), (false, true)] {
+                let brief = worker_brief_markdown_in(
+                    lang,
+                    "KT-1669",
+                    "Citations",
+                    "Objective",
+                    &[],
+                    "/wt/kt1669",
+                    "kronn/task/KT-1669",
+                    "abc1234",
+                    can_run_shell,
+                    projection,
+                    None,
+                );
+                let (heading, own_gate, not_target) = match lang {
+                    RoomLang::Fr => (
+                        "## Citations de documentation",
+                        "c'est ta propre porte",
+                        "Ne ré-ancre pas les citations des docs que tu n'as pas modifiés",
+                    ),
+                    RoomLang::En => (
+                        "## Doc citations",
+                        "that is your own gate",
+                        "Do not re-anchor the citations of docs you did not edit",
+                    ),
+                };
+                for needle in [heading, own_gate, not_target] {
+                    assert!(brief.contains(needle), "missing `{needle}`: {brief}");
+                }
+                assert!(
+                    !brief.contains("make docs-reanchor"),
+                    "a lane is never asked to run the repository-wide re-anchor: {brief}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware() {
         let joined_cli = worker_brief_markdown(
@@ -27803,6 +27927,162 @@ pub(crate) mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(task.summary.status, PlanningTaskStatus::InProgress);
+    }
+
+    const OVERVIEW: &str = "docs/architecture/overview.md";
+
+    fn lib_lines(shift_after: usize, shift: usize) -> String {
+        let mut lines: Vec<String> = (1..=60)
+            .map(|n| match n {
+                10 => "pub fn alpha() {}".to_string(),
+                30 => "pub fn beta() {}".to_string(),
+                n => format!("let v{n} = {n};"),
+            })
+            .collect();
+        for k in 0..shift {
+            lines.insert(shift_after + k, format!("let shifted{k} = 0;"));
+        }
+        lines.join("\n") + "\n"
+    }
+
+    /// Ten lines, `gamma` on the third unless `with_gamma` is false.
+    fn other_lines(with_gamma: bool) -> String {
+        (1..=10)
+            .map(|n| match n {
+                3 if with_gamma => "pub fn gamma() {}".to_string(),
+                n => format!("let o{n} = 0;"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    fn overview(alpha: usize, beta: usize) -> String {
+        format!(
+            "# Overview\n\nAlpha: [src: file: src/lib.rs:{alpha}-{}#alpha]\n\
+             Beta: [src: file: src/lib.rs:{beta}-{}#beta]\n",
+            alpha + 1,
+            beta + 1
+        )
+    }
+
+    fn commit_everything(dir: &Path, message: &str) {
+        for args in [vec!["add", "."], vec!["commit", "-m", message]] {
+            assert!(git(dir, &args).status.success(), "{args:?}");
+        }
+    }
+
+    /// KT-1669 — the worker and the target both shifted `src/lib.rs` and
+    /// re-anchored the same two lines of `overview.md`. With `gone`, the worker
+    /// also cites a function the target deleted, elsewhere in the doc.
+    async fn two_lanes_on_overview(
+        db: &Database,
+        repo: &Path,
+        key: &str,
+        gone: bool,
+    ) -> TaskExecution {
+        const TAIL: &str = "\nNotes.\nOne.\nTwo.\nThree.\nFour.\n";
+        std::fs::create_dir_all(repo.join("docs/architecture")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), lib_lines(0, 0)).unwrap();
+        std::fs::write(repo.join("src/other.rs"), other_lines(true)).unwrap();
+        std::fs::write(repo.join(OVERVIEW), overview(10, 30) + TAIL).unwrap();
+        commit_everything(repo, "base: lib and overview");
+
+        let (execution, _task_ref, child) =
+            approved_execution_with_commit(db, repo, key, "src/lib.rs", &lib_lines(5, 5), vec![])
+                .await;
+        let mut doc = overview(15, 35) + TAIL;
+        if gone {
+            doc.push_str("Gamma: [src: file: src/other.rs:3-4#gamma]\n");
+        }
+        std::fs::write(child.join(OVERVIEW), doc).unwrap();
+        commit_everything(&child, "worker re-anchors overview");
+
+        std::fs::write(repo.join("src/lib.rs"), lib_lines(1, 3)).unwrap();
+        std::fs::write(repo.join(OVERVIEW), overview(13, 33) + TAIL).unwrap();
+        if gone {
+            std::fs::write(repo.join("src/other.rs"), other_lines(false)).unwrap();
+        }
+        commit_everything(repo, "target re-anchors overview");
+        assert!(
+            crate::core::docs_citations::check_corpus(repo).is_empty(),
+            "the target itself is green"
+        );
+        execution
+    }
+
+    #[tokio::test]
+    async fn a_citation_only_conflict_is_settled_by_the_integration_without_the_worker() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-settled", false).await;
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "no worker turn for an anchor-only conflict: {outcome:?}"
+        );
+        // The target side was taken, then re-anchored onto the merge: 3 + 5
+        // lines above both functions, and the docs gate is green on the result.
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(OVERVIEW)).unwrap(),
+            overview(18, 38) + "\nNotes.\nOne.\nTwo.\nThree.\nFour.\n"
+        );
+        assert!(crate::core::docs_citations::check_corpus(repo.path()).is_empty());
+        let id = execution.id.clone();
+        let settled = db
+            .with_conn(move |conn| crate::db::orchestration::citations_settled(conn, &id))
+            .await
+            .unwrap();
+        // The delivery card reads this journal: the doc and how many anchors moved.
+        assert_eq!(
+            settled,
+            vec![crate::core::docs_citations::merge::Settlement {
+                docs: vec![OVERVIEW.to_string()],
+                moved: 2,
+            }]
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_citation_left_unresolved_by_the_settlement_goes_back_with_the_exact_list() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-gone", true).await;
+        let target_before = git_rev(repo.path(), "HEAD");
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::SentBack { ref reason } if reason.contains(OVERVIEW)),
+            "{outcome:?}"
+        );
+        assert_eq!(git_rev(repo.path(), "HEAD"), target_before);
+        let after = exec_of(&db, &execution.id).await;
+        let (_, brief) = message_row(
+            &db,
+            &format!(
+                "orch-integration-rework:{}:{}",
+                execution.id, after.attempt_no
+            ),
+        )
+        .await
+        .expect("the worker is told what is unresolved");
+        assert!(
+            brief.contains("docs/architecture/overview.md:11 [src: file: src/other.rs:3-4#gamma]"),
+            "{brief}"
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            0,
+            "a bounced merge settled nothing"
+        );
     }
 
     #[tokio::test]

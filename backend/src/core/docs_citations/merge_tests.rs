@@ -812,3 +812,158 @@ fn a_citation_to_a_file_the_merge_did_not_change_is_left_alone() {
     let body = git(dir, &["log", "-1", "--format=%B"]);
     assert!(!body.contains("Doc citations"), "{body}");
 }
+
+// ── KT-1669: a citation-only conflict is settled by the integration ──
+
+use crate::core::worktree::build_candidate_detailed;
+
+/// Two lanes that each re-anchored the same `overview.md` lines: the integration
+/// takes the target side, re-anchors onto the merge and reports what it did.
+#[test]
+fn two_lanes_re_anchoring_the_same_overview_line_are_settled_and_reported() {
+    let (repo, target) = diverged_doc("docs/architecture/overview.md", 3, 5);
+    let dir = repo.path();
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    let CandidateOutcome::Built { .. } = build.outcome else {
+        panic!("anchor-only conflicts must not bounce: {:?}", build.outcome);
+    };
+    assert_eq!(build.detail, None);
+    // Alpha and beta both moved: the target's anchors are not the merged file's.
+    assert_eq!(
+        build.settled,
+        Some(merge::Settlement {
+            docs: vec!["docs/architecture/overview.md".to_string()],
+            moved: 2,
+        })
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/architecture/overview.md")).unwrap(),
+        api_doc(18, 38)
+    );
+    assert_eq!(broken(dir), Vec::<String>::new(), "the docs gate is green");
+    assert_eq!(parents(dir), 2);
+    assert_eq!(git(dir, &["status", "--porcelain"]), "");
+}
+
+/// A merge with no conflict settles nothing, so the card says nothing.
+#[test]
+fn a_clean_merge_reports_no_settlement() {
+    let (repo, target) = shifted_citation_repo();
+    let dir = repo.path();
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert!(matches!(build.outcome, CandidateOutcome::Built { .. }));
+    assert_eq!(build.settled, None);
+}
+
+const GAMMA: &str = "pub fn gamma() {}";
+
+/// Prose far enough below the anchors for git to keep the hunks apart.
+const TAIL: &str = "\nNotes.\nOne.\nTwo.\nThree.\nFour.\n";
+
+/// `docs/api.md` conflicts only on its anchors, while a citation the child added
+/// elsewhere in it points at a symbol the target deleted. Ends on `child`.
+fn gone_symbol_repo() -> (tempfile::TempDir, String) {
+    let repo = scratch_repo();
+    let dir = repo.path();
+    let base = source(&[(10, ALPHA), (30, BETA)]);
+    write_lines(dir, "src/lib.rs", &base);
+    write_lines(dir, "src/other.rs", &source_of(10, &[(3, GAMMA)]));
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(dir.join("docs/api.md"), api_doc(10, 30) + TAIL).unwrap();
+    commit_all(dir, "base");
+
+    git(dir, &["checkout", "-q", "-b", "child"]);
+    let mut lines = base.clone();
+    insert_after(&mut lines, 5, 5, "child");
+    write_lines(dir, "src/lib.rs", &lines);
+    let doc = format!(
+        "{}{TAIL}Gamma: [src: file: src/other.rs:3-4#gamma]\n",
+        api_doc(15, 35)
+    );
+    fs::write(dir.join("docs/api.md"), doc).unwrap();
+    commit_all(dir, "child shifts the file and cites gamma");
+    assert_eq!(broken(dir), Vec::<String>::new());
+
+    git(dir, &["checkout", "-q", "main"]);
+    let mut lines = base;
+    insert_after(&mut lines, 1, 3, "target");
+    write_lines(dir, "src/lib.rs", &lines);
+    write_lines(dir, "src/other.rs", &source_of(10, &[]));
+    fs::write(dir.join("docs/api.md"), api_doc(13, 33) + TAIL).unwrap();
+    let target = commit_all(dir, "target shifts the file and deletes gamma");
+    assert_eq!(broken(dir), Vec::<String>::new());
+
+    git(dir, &["checkout", "-q", "child"]);
+    (repo, target)
+}
+
+#[test]
+fn a_settled_conflict_that_leaves_a_citation_unresolved_bounces_with_the_list() {
+    let (repo, target) = gone_symbol_repo();
+    let dir = repo.path();
+    let head = git(dir, &["rev-parse", "HEAD"]);
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    let CandidateOutcome::Conflict { files } = build.outcome else {
+        panic!(
+            "a citation whose symbol is gone must bounce: {:?}",
+            build.outcome
+        );
+    };
+    assert_eq!(files, vec!["docs/api.md".to_string()]);
+    assert_eq!(build.settled, None, "nothing landed, nothing to report");
+    let detail = build.detail.expect("the worker is told which citations");
+    assert!(
+        detail.contains("docs/api.md:11 [src: file: src/other.rs:3-4#gamma]"),
+        "{detail}"
+    );
+    assert_eq!(
+        git(dir, &["rev-parse", "HEAD"]),
+        head,
+        "the merge is undone"
+    );
+    assert!(!merge::merge_in_progress(dir));
+    assert_eq!(git(dir, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_bounce_on_unplaceable_citations_carries_the_exact_list() {
+    let (repo, target) = far_occurrences_repo(&[10, 150, 200]);
+    let dir = repo.path();
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert!(matches!(build.outcome, CandidateOutcome::Conflict { .. }));
+    let detail = build.detail.expect("the worker is told which citations");
+    assert!(
+        detail.contains("docs/budget.md:1 [src: file: src/lib.rs:13-14#retry_budget]"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn a_prose_conflict_next_to_anchors_carries_no_citation_detail() {
+    let (repo, _) = diverged(3, 5);
+    let dir = repo.path();
+    fs::write(dir.join("src/notes.rs"), "child\n").unwrap();
+    commit_all(dir, "child notes");
+    git(dir, &["checkout", "-q", "main"]);
+    fs::write(dir.join("src/notes.rs"), "target\n").unwrap();
+    let target = commit_all(dir, "target notes");
+    git(dir, &["checkout", "-q", "child"]);
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert_eq!(
+        build.outcome,
+        CandidateOutcome::Conflict {
+            files: vec!["src/notes.rs".to_string()]
+        }
+    );
+    assert_eq!((build.settled, build.detail), (None, None));
+}

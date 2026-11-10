@@ -2339,6 +2339,46 @@ pub fn write_backup_ref(repo_path: &Path, slug: &str, sha: &str) -> Result<Strin
 /// succeeds the child descends from the parent tip, which is what lets phase 2 be
 /// a fast-forward and never a merge.
 pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<CandidateOutcome, String> {
+    build_candidate_detailed(worktree_path, base_sha).map(|build| build.outcome)
+}
+
+/// A built candidate with what the merge settled or why it bounced (KT-1669).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateBuild {
+    pub outcome: CandidateOutcome,
+    /// Set when the merge settled a citation-only doc conflict itself.
+    pub settled: Option<crate::core::docs_citations::merge::Settlement>,
+    /// Set when the bounce is about doc citations: the sentence the worker
+    /// reads, with the exact citations in it.
+    pub detail: Option<String>,
+}
+
+impl CandidateBuild {
+    fn of(outcome: CandidateOutcome) -> Self {
+        Self {
+            outcome,
+            settled: None,
+            detail: None,
+        }
+    }
+
+    fn bounced_on_docs(files: Vec<String>, detail: String) -> Self {
+        Self {
+            outcome: CandidateOutcome::Conflict { files },
+            settled: None,
+            detail: Some(detail),
+        }
+    }
+}
+
+/// [`build_candidate`], with what the doc settling did. A conflict that is only
+/// citation line anchors never reaches the worker: the target's side is taken,
+/// the citations are re-anchored onto the merge, and every citation of those
+/// docs must resolve, else the merge is undone and the bounce lists them.
+pub fn build_candidate_detailed(
+    worktree_path: &Path,
+    base_sha: &str,
+) -> Result<CandidateBuild, String> {
     reject_option_like_rev(base_sha)?;
     // The merge stops before its commit so the doc citations the two sides
     // shifted are settled into it (KT-1321) and the commit is made once.
@@ -2350,11 +2390,13 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
     if !crate::core::docs_citations::merge::merge_in_progress(worktree_path) {
         // Fast-forwarded, already up to date, or refused before any merge state.
         if out.status.success() {
-            return Ok(CandidateOutcome::Built {
+            return Ok(CandidateBuild::of(CandidateOutcome::Built {
                 sha: git_head(worktree_path)?,
-            });
+            }));
         }
-        return Ok(CandidateOutcome::Conflict { files: Vec::new() });
+        return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
+            files: Vec::new(),
+        }));
     }
     let conflicted_files = |path: &Path| {
         crate::core::cmd::git_cmd()
@@ -2381,7 +2423,7 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
         // Leave no half-merged tree behind: the worker must find its worktree as
         // it left it, not mid-conflict from a merge it never asked for.
         abort_merge(worktree_path);
-        return Ok(CandidateOutcome::Conflict { files });
+        return Ok(CandidateBuild::of(CandidateOutcome::Conflict { files }));
     }
     use crate::core::docs_citations::merge::SettleError;
     let docs = match crate::core::docs_citations::merge::reanchor_and_stage(worktree_path, resolved)
@@ -2394,13 +2436,41 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
         // Unstaged work in a doc to rewrite, or a citation nobody can place
         // safely: a human decides, as for any other conflict.
         Err(
-            SettleError::Refused { paths: files, .. } | SettleError::Unplaced { docs: files, .. },
+            SettleError::Refused {
+                paths: files,
+                message,
+            }
+            | SettleError::Unplaced {
+                docs: files,
+                message,
+            },
         ) => {
             tracing::warn!("doc citations left to the worker: {files:?}");
             abort_merge(worktree_path);
-            return Ok(CandidateOutcome::Conflict { files });
+            return Ok(CandidateBuild::bounced_on_docs(files, message));
         }
     };
+    let settled = docs.as_ref().and_then(|docs| docs.settlement());
+    if let Some(docs) = docs.as_ref().filter(|_| settled.is_some()) {
+        // The conflict was settled without the worker: the result must be what
+        // the docs gate accepts, or the worker gets the exact list.
+        let unresolved = docs.unresolved(worktree_path);
+        if !unresolved.is_empty() {
+            let mut files: Vec<String> = unresolved.iter().map(|(doc, _)| doc.clone()).collect();
+            files.dedup();
+            let listed: Vec<&str> = unresolved.iter().map(|(_, line)| line.as_str()).collect();
+            tracing::warn!("citation-only conflict left unresolved citations: {files:?}");
+            abort_merge(worktree_path);
+            return Ok(CandidateBuild::bounced_on_docs(
+                files,
+                format!(
+                    "the merge settled a citation-only conflict but these citations do not \
+                     resolve in the merged tree: {}. Point each at its new place by hand.",
+                    listed.join("; ")
+                ),
+            ));
+        }
+    }
     // Repositories that enforce DCO reject an unsigned merge commit.
     let mut commit = crate::core::cmd::git_cmd();
     commit.args(["commit", "--signoff", "--cleanup=strip"]);
@@ -2414,10 +2484,16 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
         .map_err(|e| format!("git commit failed: {e}"))?;
     if !committed.status.success() {
         abort_merge(worktree_path);
-        return Ok(CandidateOutcome::Conflict { files: Vec::new() });
+        return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
+            files: Vec::new(),
+        }));
     }
-    Ok(CandidateOutcome::Built {
-        sha: git_head(worktree_path)?,
+    Ok(CandidateBuild {
+        outcome: CandidateOutcome::Built {
+            sha: git_head(worktree_path)?,
+        },
+        settled,
+        detail: None,
     })
 }
 

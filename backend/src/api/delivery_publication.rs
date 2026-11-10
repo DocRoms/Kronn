@@ -42,6 +42,9 @@ pub struct ExecutionFacts {
     /// delivery that ran on another provider than the one first assigned says
     /// so in its attention points instead of passing as if it never moved.
     pub provider_changes: Vec<crate::db::orchestration::ProviderChange>,
+    /// KT-1669 — the citation-only doc conflicts the integration merges settled
+    /// without the worker, so a reviewer knows the worker was not asked.
+    pub citations_settled: Vec<crate::core::docs_citations::merge::Settlement>,
 }
 
 impl ExecutionFacts {
@@ -77,8 +80,31 @@ impl ExecutionFacts {
             cost_usd_micros: None,
             refused_tool_calls: Vec::new(),
             provider_changes: Vec::new(),
+            citations_settled: Vec::new(),
         }
     }
+}
+
+/// The attention point of a delivery whose integration settled citation-only
+/// conflicts itself; `None` when none was.
+fn citations_settled_point(
+    settled: &[crate::core::docs_citations::merge::Settlement],
+) -> Option<String> {
+    if settled.is_empty() {
+        return None;
+    }
+    let mut docs: Vec<&str> = settled
+        .iter()
+        .flat_map(|one| one.docs.iter().map(String::as_str))
+        .collect();
+    docs.sort_unstable();
+    docs.dedup();
+    let moved: usize = settled.iter().map(|one| one.moved).sum();
+    Some(format!(
+        "integration: a citation-only conflict in {} was settled by the integration (target side \
+         taken, citations re-anchored, docs gate green); {moved} anchor(s) moved",
+        docs.join(", ")
+    ))
 }
 
 /// How the worker was actually reached. Named for a human reading a report,
@@ -209,6 +235,7 @@ pub fn summary_from_manifest(
                     non_empty(Some(change.reason.trim()), "no reason recorded"),
                 )
             })
+            .chain(citations_settled_point(&facts.citations_settled))
             .chain(manifest.risks.iter().map(|risk| format!("risk: {risk}")))
             .chain(
                 manifest
@@ -512,6 +539,7 @@ pub async fn publish_accepted_delivery(
         spend,
         refused_tool_calls,
         provider_changes,
+        citations_settled,
     ) = db
         .with_conn(move |conn| {
             let delivery =
@@ -540,6 +568,8 @@ pub async fn publish_accepted_delivery(
                 None => Vec::new(),
             };
             let provider_changes = crate::db::orchestration::provider_changes(conn, &execution_id)?;
+            let citations_settled =
+                crate::db::orchestration::citations_settled(conn, &execution_id)?;
             Ok((
                 delivery,
                 task,
@@ -549,6 +579,7 @@ pub async fn publish_accepted_delivery(
                 spend,
                 refused_tool_calls,
                 provider_changes,
+                citations_settled,
             ))
         })
         .await?;
@@ -574,6 +605,7 @@ pub async fn publish_accepted_delivery(
     facts.cost_usd_micros = spend.cost_usd_micros;
     facts.refused_tool_calls = refused_tool_calls;
     facts.provider_changes = provider_changes;
+    facts.citations_settled = citations_settled;
     // KT-613 — the review that accepted THIS attempt, and only it. A decision
     // that failed to parse leaves the report without principal evidence rather
     // than without a report: publication is total once a delivery is accepted.
@@ -663,6 +695,7 @@ mod tests {
             cost_usd_micros: None,
             refused_tool_calls: Vec::new(),
             provider_changes: Vec::new(),
+            citations_settled: Vec::new(),
         }
     }
 
@@ -1133,6 +1166,55 @@ mod tests {
         assert_eq!(summary.timestamp, "2026-09-01T10:00:00+00:00");
         assert_eq!(summary.metrics.duration_ms, 91_000);
         assert_eq!(summary.metrics.tokens, Some(42_000));
+    }
+
+    #[test]
+    fn a_citation_only_conflict_settled_by_the_integration_is_on_the_card() {
+        use crate::core::docs_citations::merge::Settlement;
+        let report = |facts: &ExecutionFacts| {
+            summary_from_manifest(
+                "KT-1669",
+                "exec-1",
+                &manifest(),
+                facts,
+                &[],
+                at("2026-09-01T10:00:00Z"),
+            )
+            .unwrap()
+        };
+        let mut settled = facts();
+        settled.citations_settled = vec![
+            Settlement {
+                docs: vec!["docs/architecture/overview.md".into()],
+                moved: 2,
+            },
+            Settlement {
+                docs: vec![
+                    "docs/architecture/overview.md".into(),
+                    "docs/testing-quality.md".into(),
+                ],
+                moved: 3,
+            },
+        ];
+
+        let point = report(&settled)
+            .attention_points
+            .into_iter()
+            .find(|point| point.starts_with("integration:"))
+            .expect("the settled conflict is an attention point");
+        assert!(point.contains("citation-only conflict"), "{point}");
+        assert!(
+            point.contains("docs/architecture/overview.md, docs/testing-quality.md"),
+            "{point}"
+        );
+        assert!(point.contains("5 anchor(s) moved"), "{point}");
+        assert!(report(&settled)
+            .render_markdown()
+            .contains("a citation-only conflict in"));
+        assert!(!report(&facts())
+            .attention_points
+            .iter()
+            .any(|point| point.starts_with("integration:")));
     }
 
     #[test]
