@@ -198,7 +198,7 @@ jobs:
           fi
           changed=$(git diff --name-only "$BASE" "$HEAD")
           echo "$changed"
-          suites='^backend/src/(core/worktree|api/maintenance|db/orchestration|agents/wsl|acp/secret_files)'
+          suites='^backend/src/(core/worktree|core/fs_guard|core/rooted_fd|api/maintenance|db/orchestration|agents/wsl|acp/secret_files|core/config_copies)'
           if echo "$changed" | grep -Eq "$suites|^backend/Cargo\.(toml|lock)\$|^rust-toolchain"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
@@ -285,9 +285,21 @@ jobs:
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
         run: cargo test --lib --no-default-features agents::wsl
 
+      # KT-1595 — the write guards: rooted (directory-fd) writes on macOS, the
+      # lstat walk + write by path kept on Windows (residual risk documented in
+      # docs/operations/fs-guard-rooted-writes.md). The Windows leg runs the
+      # tests of that behaviour; the swap tests are unix-only.
+      - name: File write guards (rooted on unix, lstat walk on Windows)
+        if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
+        run: cargo test --lib --no-default-features core::fs_guard
+
       - name: Secret file paths (drives, UNC shares, links)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
         run: cargo test --lib --no-default-features acp::secret_files
+
+      - name: Sealed config copies (set-aside moves, never replacing)
+        if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
+        run: cargo test --lib --no-default-features core::config_copies
 
       - name: Save cargo registry and build (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-portability.outputs.cache-hit != 'true'

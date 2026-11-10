@@ -232,7 +232,7 @@ project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
 is pulled. [src: file: backend/src/api/agent_tools.rs:205-226#workflow_arc]
-[src: file: backend/src/workflows/runner.rs:2638-2643#workflow_arc]
+[src: file: backend/src/workflows/runner.rs:2653-2659#workflow_room_arc]
 [src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
 No-capability declaration should mean “unknown/ineligible”, not “probably

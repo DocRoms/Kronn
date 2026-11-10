@@ -192,7 +192,7 @@ member of the room itself when it activates it. The membership is the KT-793
 one: the same `workflow_step_room_sessions` row, ended with the step and
 revoked at backend boot, and the room shows the step working (KT-883).
 `[src: file: backend/src/workflows/step_room.rs:574-607#join_http_step]`
-`[src: file: backend/src/api/workflows.rs:773-780#validate_step_required_fields]`
+`[src: file: backend/src/api/workflows.rs:773-780]`
 
 Only then does the step's native catalogue carry three room tools, bound to that
 room: `disc_read`, `disc_append` (main channel; this is also how a
@@ -238,12 +238,12 @@ behaviour is the same as for a joined CLI; see
   (KT-1007). What stays open: on a host with no keychain and no verified
   recovery passphrase, the key sits in `config.toml` next to the data it
   decrypts; a locked or missing key at boot leaves pre-migration plaintext in
-  `config.toml` until restored; a set-aside `config.toml.corrupt.<timestamp>`
-  may hold credentials in clear. See
+  `config.toml` until restored; a set-aside `config.toml.corrupt.<timestamp>` is
+  encrypted whole (or reduced to its key line when no key store holds a key). See
   [key-management.md](key-management.md) and
   `docs/inconsistencies-tech-debt.md` (TD-20260901).
-  [src: file: backend/src/core/credential_store.rs:137-154#encrypt_rows]
-  [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
+  [src: file: backend/src/core/credential_store.rs:136-153#encrypt_rows]
+  [src: file: backend/src/core/credential_store.rs:345-348#sync_for_save]
 
 ## Troubleshooting
 

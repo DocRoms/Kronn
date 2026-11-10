@@ -1000,3 +1000,28 @@ mod tests {
         crate::core::child_env::remove_var("KRONN_REPOS_DIR");
     }
 }
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use crate::core::fs_guard::swap_probe;
+    use crate::core::scanner::*;
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_rewrites_an_outside_entry_file() {
+        let block = "<!-- KRONN:BOOTSTRAP:START -->\nfill\n<!-- KRONN:BOOTSTRAP:END -->\n\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/AGENTS.md"), format!("{block}# Entry\n")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("AGENTS.md"), format!("{block}# Outside\n")).unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = retire_legacy_bootstrap_block(&root);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("AGENTS.md")).unwrap(),
+            format!("{block}# Outside\n")
+        );
+    }
+}

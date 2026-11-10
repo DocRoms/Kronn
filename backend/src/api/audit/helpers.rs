@@ -1149,13 +1149,10 @@ pub(crate) fn restore_step_briefing(
     }
     match before {
         Some(bytes) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(path, bytes)
+            crate::core::fs_guard::guarded_replace(project_path, path, bytes)
                 .map_err(|e| format!("Cannot restore protected briefing: {e}"))?;
         }
-        None => std::fs::remove_file(path)
+        None => crate::core::fs_guard::guarded_remove_file(project_path, path)
             .map_err(|e| format!("Cannot remove unauthorized briefing: {e}"))?,
     }
     Err(
@@ -1166,7 +1163,7 @@ pub(crate) fn restore_step_briefing(
 
 /// Remove the legacy KRONN:BOOTSTRAP block from the docs entry file (the run
 /// start; `core::scanner::retire_legacy_bootstrap_block` does the same at boot).
-pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
+pub(super) fn remove_bootstrap_block(project_path: &std::path::Path, index_file: &std::path::Path) {
     let Ok(observed) = std::fs::read(index_file) else {
         return;
     };
@@ -1176,8 +1173,11 @@ pub(super) fn remove_bootstrap_block(index_file: &std::path::Path) {
     let Some(cleaned) = crate::core::scanner::without_legacy_bootstrap_block(content) else {
         return;
     };
-    if let Err(e) = crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
-        index_file, &cleaned, &observed,
+    if let Err(e) = crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+        project_path,
+        index_file,
+        &cleaned,
+        &observed,
     ) {
         tracing::warn!("Failed to remove bootstrap block: {}", e);
     }
@@ -1788,5 +1788,70 @@ mod compute_audit_info_tests {
             assert!(prompt.contains("docs/briefing.md"), "{language}: {prompt}");
             assert!(!prompt.contains("ai/"), "{language}: {prompt}");
         }
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    fn project() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        (tmp, root, external)
+    }
+
+    #[test]
+    fn restoring_the_briefing_never_writes_through_a_swapped_folder() {
+        let (_tmp, root, external) = project();
+        let briefing = root.join("docs/briefing.md");
+        std::fs::write(&briefing, "human").unwrap();
+        let snapshot = capture_validated_docs(&root).unwrap();
+        std::fs::write(&briefing, "agent edit").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = restore_step_briefing(&root, &snapshot);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs.moved/briefing.md")).unwrap(),
+            "human"
+        );
+    }
+
+    #[test]
+    fn removing_an_unauthorized_briefing_never_removes_an_outside_file() {
+        let (_tmp, root, external) = project();
+        let snapshot = capture_validated_docs(&root).unwrap();
+        std::fs::write(root.join("docs/briefing.md"), "agent made").unwrap();
+        std::fs::write(external.join("briefing.md"), "KEEP").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = restore_step_briefing(&root, &snapshot);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("briefing.md")).unwrap(),
+            "KEEP"
+        );
+        assert!(!root.join("docs.moved/briefing.md").exists());
+    }
+
+    #[test]
+    fn retiring_the_bootstrap_block_never_rewrites_through_a_swapped_folder() {
+        let (_tmp, root, external) = project();
+        let block = "<!-- KRONN:BOOTSTRAP:START -->\nfill\n<!-- KRONN:BOOTSTRAP:END -->\n\n";
+        let entry = root.join("docs/AGENTS.md");
+        std::fs::write(&entry, format!("{block}# Entry\n")).unwrap();
+        std::fs::write(external.join("AGENTS.md"), format!("{block}# Outside\n")).unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        remove_bootstrap_block(&root, &entry);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("AGENTS.md")).unwrap(),
+            format!("{block}# Outside\n"),
+            "the outside file is untouched"
+        );
     }
 }

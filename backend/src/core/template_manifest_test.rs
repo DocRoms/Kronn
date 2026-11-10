@@ -261,3 +261,38 @@ fn a_rename_outside_the_selected_additions_stays_put() {
     );
     assert!(!project.join("docs/new.md").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_folder_swapped_after_the_walk_never_loses_an_outside_file_to_a_rename() {
+    use crate::core::fs_guard::swap_probe;
+    let (tmp, project, template) = fixture();
+    write(&template, "old.md", "# Upstream content");
+    write(&project, "docs/old.md", "# Upstream content");
+    record_install(&project, &template).unwrap();
+    std::fs::rename(template.join("old.md"), template.join("new.md")).unwrap();
+    let external = tmp.path().join("external");
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("old.md"), "KEEP").unwrap();
+    swap_probe::arm(&project.join("docs"), &external);
+    let _ = apply_renames(&project, &template);
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert_eq!(
+        std::fs::read_to_string(external.join("old.md")).unwrap(),
+        "KEEP"
+    );
+    assert!(!external.join("new.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_swapped_after_the_walk_never_receives_the_spec_update() {
+    use crate::core::fs_guard::swap_probe;
+    let (tmp, project, template) = fixture();
+    let external = tmp.path().join("external");
+    std::fs::create_dir_all(&external).unwrap();
+    swap_probe::arm(&project.join("docs"), &external);
+    let _ = record_install(&project, &template);
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+}

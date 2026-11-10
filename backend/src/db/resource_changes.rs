@@ -64,7 +64,7 @@ impl ResourceChanges {
 /// Has `changes` hear every write `conn` makes. Set on the write connection
 /// only: the read connection cannot change anything. A hook that cannot be set
 /// costs the warm-up its re-runs, never a write.
-pub(super) fn watch(conn: &Connection, changes: &Arc<ResourceChanges>) {
+pub(super) fn watch(conn: &mut Connection, changes: &Arc<ResourceChanges>) {
     let changes = Arc::clone(changes);
     let hooked = conn.update_hook(Some(
         move |_action: rusqlite::hooks::Action, _database: &str, table: &str, _row: i64| {

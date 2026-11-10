@@ -310,16 +310,16 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 
 [src: file: backend/src/core/background_priority.rs:104-133#background_priority]
 [src: file: backend/src/core/background_priority.rs:168-182#plan_here]
-[src: file: backend/src/core/background_priority.rs:283-286#check_launcher_at_boot]
+[src: file: backend/src/core/background_priority.rs:293-295#check_launcher_at_boot]
 [src: file: backend/src/core/cmd.rs:359-370#async_cmd_with]
 [src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
-[src: file: backend/src/core/task_worker_env.rs:719-719#ProbeCommand.priority]
-[src: file: backend/src/core/task_worker_lane_warm.rs:782-782#first-build-priority]
+[src: file: backend/src/core/task_worker_env.rs:839]
+[src: file: backend/src/core/task_worker_lane_warm.rs:843]
 [src: file: backend/src/agents/runner.rs:14471-14480#agent_launch_priority]
 [src: file: backend/src/core/quick_exec.rs:516-540#build_command]
-[src: file: backend/src/workflows/steps.rs:1393-1393#agent-step-priority]
+[src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
-[src: file: backend/src/core/config.rs:604-604#publish-setting]
+[src: file: backend/src/core/config.rs:610-611]
 
 ## Maintenance command
 

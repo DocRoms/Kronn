@@ -11,7 +11,7 @@ agent files. [src: commit: 1b67e8d3]
   language. It now refers to `docs/AGENTS.md` for project parameters and rules.
   The existing replacement regression covers an old English-only block above
   French user instructions, preserving those user bytes.
-  [src: file: backend/src/core/root_agent_files.rs:299-305#KRONN_BLOCK_BODY]
+  [src: file: backend/src/core/root_agent_files.rs:303-309#KRONN_BLOCK_BODY]
   [src: file: backend/src/core/root_agent_files.rs:571-596#rerenders_block_in_place_when_markers_already_present]
 - **A second working-language value in adapter files.** New adapters copied
   `PROJECT_LANGUAGE`, whose bootstrap replacement is English. A later audit

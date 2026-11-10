@@ -278,7 +278,7 @@ pub fn move_to_legacy(
         )),
         DocsFolderState::HumanDocs { files, .. } => {
             crate::core::fs_guard::assert_contained_no_symlink(root, &dir.join("legacy"))?;
-            crate::core::legacy_docs::move_user_docs_to_legacy_in(&dir, docs_root)
+            crate::core::legacy_docs::move_user_docs_to_legacy_in(root, &dir, docs_root)
                 .map_err(|e| format!("moving the docs to legacy/ failed: {e}"))?;
             Ok(files)
         }
@@ -645,7 +645,8 @@ mod tests {
         assert_eq!(human_count(&folder_state(t.path(), "docs")), Some(3));
 
         crate::core::kronn_state::record_template_merge(
-            &t.path().join("docs"),
+            t.path(),
+            "docs",
             &["AGENTS.md".to_string(), "glossary.md".to_string()],
         )
         .unwrap();

@@ -334,34 +334,82 @@ pub fn plan_reinstall(
     })
 }
 
-fn publish(dst: &Path, bytes: &[u8], like: Option<&Path>) -> Result<(), String> {
-    use std::io::Write;
-    let parent = dst.parent().ok_or("no parent directory")?;
-    std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    let name = dst.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = parent.join(format!(".{name}.kronn-reinstall"));
-    let _ = std::fs::remove_file(&tmp);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    let written = file.write_all(bytes).and_then(|()| file.sync_all());
-    drop(file);
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("write {}: {e}", dst.display()));
+/// Puts `bytes` at `dst`, replacing the file there (its mode is kept).
+fn publish(project: &Path, dst: &Path, bytes: &[u8]) -> Result<(), String> {
+    fs_guard::guarded_replace_like(project, dst, bytes)
+}
+
+/// Writes one planned file: a `Create` is create-only (a file that appeared
+/// since the plan is never overwritten, nor deleted by a rollback) and says who
+/// the created file is, so a rollback removes only that file; a `Replace`
+/// swaps the file in place.
+fn write_planned(project: &Path, file: &Prepared) -> Result<Option<fs_guard::FileId>, String> {
+    if file.action != ReinstallAction::Create {
+        publish(project, &file.dst, &file.new)?;
+        return Ok(None);
     }
-    if let Some(perms) = like
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.permissions())
+    match fs_guard::guarded_write_new_identified(project, &file.dst, &file.new)? {
+        Some(id) => Ok(Some(id)),
+        None => Err(format!(
+            "{} appeared since the plan: nothing was overwritten",
+            file.rel
+        )),
+    }
+}
+
+/// Puts back what a failed reinstall already wrote, newest first, and says
+/// what happened. A created file is removed only while its name still is the
+/// file we created; a replaced one gets its original back, the failing file
+/// too when it was a replacement (a failure can come after the swap) unless it
+/// still holds its original bytes. A failing create is never touched: what sits
+/// at the name is not proven to be ours.
+fn roll_back(
+    project: &Path,
+    failing: &Prepared,
+    written: &[(&Prepared, Option<fs_guard::FileId>)],
+    backup_dir: Option<&str>,
+    error: String,
+) -> String {
+    let mut undone = Vec::new();
+    let mut restored_any = false;
+    // Read through the rooted primitive: a link planted at the name is not
+    // the original, whatever it points at.
+    let failing_replace = (failing.action == ReinstallAction::Replace)
+        .then_some((failing, None))
+        .filter(|(f, _)| {
+            fs_guard::guarded_read(project, &f.dst)
+                .ok()
+                .flatten()
+                .as_deref()
+                != f.old.as_deref()
+        });
+    for (done, created) in failing_replace
+        .into_iter()
+        .chain(written.iter().rev().cloned())
     {
-        let _ = std::fs::set_permissions(&tmp, perms);
+        let restored = match (&done.old, created) {
+            (Some(old), _) => publish(project, &done.dst, old),
+            (None, Some(id)) => fs_guard::guarded_remove_file_if_ours(project, &done.dst, &id)
+                .map_err(|e| e.to_string()),
+            // A create with no identity cannot be proven ours: left alone.
+            (None, None) => Err("not proven to be the file we created".to_string()),
+        };
+        match restored {
+            Ok(()) => restored_any = true,
+            Err(_) => undone.push(done.rel.clone()),
+        }
     }
-    std::fs::rename(&tmp, dst).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("replace {}: {e}", dst.display())
-    })
+    if !undone.is_empty() {
+        format!(
+            "{error}. These files could not be put back, restore them from {}: {}",
+            backup_dir.unwrap_or("the backups"),
+            undone.join(", ")
+        )
+    } else if restored_any {
+        format!("{error}. Files already written were put back.")
+    } else {
+        error
+    }
 }
 
 /// Every original is copied (and read back) before the first file is replaced;
@@ -410,12 +458,10 @@ pub fn reinstall(
         for file in &changing {
             let old = file.old.as_deref().unwrap_or_default();
             let backup = dir.join(&file.rel);
-            if let Some(parent) = backup.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("backup of {}: {e}", file.rel))?;
-            }
-            std::fs::write(&backup, old).map_err(|e| format!("backup of {}: {e}", file.rel))?;
-            if std::fs::read(&backup).map_err(|e| e.to_string())? != old {
+            fs_guard::guarded_replace(&root, &backup, old)
+                .map_err(|e| format!("backup of {}: {e}", file.rel))?;
+            let read_back = fs_guard::guarded_read(&root, &backup).map_err(|e| e.to_string())?;
+            if read_back.as_deref() != Some(old) {
                 return Err(format!(
                     "backup of {} does not match the original: nothing was replaced",
                     file.rel
@@ -438,45 +484,22 @@ pub fn reinstall(
         );
     }
 
-    let mut written: Vec<&Prepared> = Vec::new();
+    let mut written: Vec<(&Prepared, Option<fs_guard::FileId>)> = Vec::new();
     for file in prepared
         .iter()
         .filter(|p| p.action == ReinstallAction::Create || chosen(p))
     {
-        fs_guard::assert_contained_no_symlink(project, &file.dst)?;
-        if let Err(e) = publish(
-            &file.dst,
-            &file.new,
-            file.old.is_some().then_some(file.dst.as_path()),
-        ) {
-            let mut undone = Vec::new();
-            for done in written.iter().rev() {
-                let restored = match &done.old {
-                    Some(old) => publish(&done.dst, old, Some(&done.dst)),
-                    None => std::fs::remove_file(&done.dst).map_err(|e| e.to_string()),
-                };
-                if restored.is_err() {
-                    undone.push(done.rel.clone());
-                }
-            }
-            return Err(if undone.is_empty() {
-                format!("{e}. Files already replaced were put back.")
-            } else {
-                format!(
-                    "{e}. These files could not be put back, restore them from {}: {}",
-                    backup_dir.as_deref().unwrap_or("the backups"),
-                    undone.join(", ")
-                )
-            });
+        match write_planned(project, file) {
+            Ok(created) => written.push((file, created)),
+            Err(e) => return Err(roll_back(project, file, &written, backup_dir.as_deref(), e)),
         }
-        written.push(file);
     }
 
     // Placeholders of the files this call wrote, scoped to those files only.
-    let touched: Vec<PathBuf> = written.iter().map(|p| p.dst.clone()).collect();
+    let touched: Vec<PathBuf> = written.iter().map(|(p, _)| p.dst.clone()).collect();
     let _ = crate::core::docs_migration::prefill_files(project, &touched);
     let mut to_reconfirm = Vec::new();
-    for file in &written {
+    for (file, _) in &written {
         let (Some(old), Ok(after)) = (
             file.old
                 .as_deref()
@@ -656,3 +679,191 @@ pub async fn template_reinstall(
 #[cfg(test)]
 #[path = "template_reinstall_test.rs"]
 mod tests;
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A two-file template (`AGENTS.md`, then `architecture/overview.md`: the
+    /// reinstall writes them in that order) over a project whose two files
+    /// are damaged, so both are replaced by default.
+    fn damaged_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let template = tmp.path().join("templates/docs");
+        std::fs::create_dir_all(template.join("architecture")).unwrap();
+        std::fs::write(template.join("AGENTS.md"), "# Template entry\n").unwrap();
+        std::fs::write(
+            template.join("architecture/overview.md"),
+            "# Template overview\n",
+        )
+        .unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("docs/architecture")).unwrap();
+        std::fs::write(project.join("docs/AGENTS.md"), "damaged {{ENTRY}}").unwrap();
+        std::fs::write(
+            project.join("docs/architecture/overview.md"),
+            "damaged {{OVERVIEW}}",
+        )
+        .unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        (tmp, project, template, external)
+    }
+
+    #[test]
+    fn a_failure_on_the_second_file_puts_the_first_back_exactly() {
+        let (_tmp, project, template, external) = damaged_project();
+        let folder = project.join("docs/architecture");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // As root a read-only folder still takes writes: nothing to prove here.
+        let writable = std::fs::write(folder.join("probe"), "").is_ok();
+        if writable {
+            std::fs::remove_file(folder.join("probe")).unwrap();
+        }
+        let result = reinstall(&project, &template, "rollback", None);
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if writable {
+            return;
+        }
+        let error = result.unwrap_err();
+        assert!(error.contains("were put back"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(project.join("docs/AGENTS.md")).unwrap(),
+            "damaged {{ENTRY}}",
+            "the first file is back to its original bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("overview.md")).unwrap(),
+            "damaged {{OVERVIEW}}"
+        );
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_first_write_never_receives_the_rest_nor_the_rollback() {
+        let (_tmp, project, template, external) = damaged_project();
+        std::fs::write(external.join("AGENTS.md"), "KEEP").unwrap();
+        // The folder is swapped for a link the moment the first file is
+        // written through it (held as an fd): that write stays inside the
+        // root, the second file and the rollback are refused.
+        swap_probe::arm(&project.join("docs"), &external);
+        let error = reinstall(&project, &template, "swap", None).unwrap_err();
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(
+            error.contains("could not be put back"),
+            "the message must not claim a rollback that did not happen: {error}"
+        );
+        assert!(!error.contains("were put back"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(external.join("AGENTS.md")).unwrap(),
+            "KEEP",
+            "an outside file of the same name is never touched"
+        );
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_create_never_overwrites_a_file_that_appeared_since_the_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        let file = Prepared {
+            rel: "docs/new.md".into(),
+            dst: project.join("docs/new.md"),
+            action: ReinstallAction::Create,
+            kind: None,
+            old: None,
+            new: b"template".to_vec(),
+            human: Vec::new(),
+            validated: false,
+        };
+        std::fs::write(&file.dst, "someone else").unwrap();
+        let error = write_planned(&project, &file).unwrap_err();
+        assert!(error.contains("appeared since the plan"), "{error}");
+        assert_eq!(std::fs::read_to_string(&file.dst).unwrap(), "someone else");
+        // Free name: created.
+        std::fs::remove_file(&file.dst).unwrap();
+        write_planned(&project, &file).unwrap();
+        assert_eq!(std::fs::read_to_string(&file.dst).unwrap(), "template");
+    }
+
+    fn prepared(
+        project: &Path,
+        rel: &str,
+        action: ReinstallAction,
+        old: Option<&[u8]>,
+    ) -> Prepared {
+        Prepared {
+            rel: rel.into(),
+            dst: project.join(rel),
+            action,
+            kind: None,
+            old: old.map(<[u8]>::to_vec),
+            new: b"template".to_vec(),
+            human: Vec::new(),
+            validated: false,
+        }
+    }
+
+    #[test]
+    fn a_rollback_removes_a_created_file_only_while_it_is_the_one_we_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        let mine = prepared(&project, "docs/mine.md", ReinstallAction::Create, None);
+        let theirs = prepared(&project, "docs/theirs.md", ReinstallAction::Create, None);
+        let failing = prepared(&project, "docs/failing.md", ReinstallAction::Create, None);
+        let written = vec![
+            (&mine, write_planned(&project, &mine).unwrap()),
+            (&theirs, write_planned(&project, &theirs).unwrap()),
+        ];
+        assert!(written.iter().all(|(_, id)| id.is_some()));
+        // A concurrent writer replaces one of the two before the rollback.
+        std::fs::remove_file(&theirs.dst).unwrap();
+        // Same size as ours: only the identity can tell them apart.
+        std::fs::write(&theirs.dst, "THEIRS!!").unwrap();
+        let message = roll_back(&project, &failing, &written, Some("backups"), "boom".into());
+        assert!(!mine.dst.exists(), "our own file is removed");
+        assert_eq!(
+            std::fs::read_to_string(&theirs.dst).unwrap(),
+            "THEIRS!!",
+            "a file that is no longer ours is never deleted"
+        );
+        assert!(
+            message.contains("could not be put back") && message.contains("docs/theirs.md"),
+            "{message}"
+        );
+        assert!(!message.contains("docs/mine.md"), "{message}");
+    }
+
+    #[test]
+    fn a_rollback_decision_never_reads_through_a_link_planted_at_the_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        // The outside file holds exactly the original bytes: a path read would
+        // call the name "unchanged" and skip the restore.
+        std::fs::write(external.join("copy.md"), "ORIGINAL").unwrap();
+        let failing = prepared(
+            &project,
+            "docs/a.md",
+            ReinstallAction::Replace,
+            Some(b"ORIGINAL"),
+        );
+        std::os::unix::fs::symlink(external.join("copy.md"), &failing.dst).unwrap();
+        let message = roll_back(&project, &failing, &[], None, "boom".into());
+        assert!(message.contains("could not be put back"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(external.join("copy.md")).unwrap(),
+            "ORIGINAL",
+            "the outside file is untouched"
+        );
+        assert!(std::fs::symlink_metadata(&failing.dst)
+            .unwrap()
+            .is_symlink());
+    }
+}

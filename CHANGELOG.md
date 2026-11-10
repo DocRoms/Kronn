@@ -114,6 +114,8 @@ Release notes for 0.9.3 and earlier are available in the
   `X-Kronn-Local-Proof` header read from the data directory's `local-proof` file.
   `KRONN_ALLOW_INSECURE_LAN` does not waive any of it. In-process TLS is not
   shipped (`TD-20260314-no-tls`, reduced) (KT-1596).
+- rusqlite 0.41 bundles libsqlite3-sys 0.39, past the vulnerable SQLite of
+  RUSTSEC-2026-0459 (KT-1620).
 - The copy of a generated asset into a run's artifacts directory is written
   through the directory's file descriptor, so a link an Exec step planted at
   the asset's name is replaced, never written through. A press of a step's
@@ -122,6 +124,14 @@ Release notes for 0.9.3 and earlier are available in the
 - A project file used as a reference is read through directory fds: a link on its
   path is refused, a FIFO cannot block the open, and it must be a picture by its
   first bytes, not by its extension (KT-1605, #502).
+- Every copy of `config.toml` (migration backup, snapshots, the set-aside of an
+  unreadable config, a retired key) is encrypted with the instance key, clear
+  copies left by earlier versions are encrypted at the next start, and the
+  set-aside never follows a link or replaces an existing file (KT-1528).
+- Writes guarded by `fs_guard` (docs migration, templates, audits, skills,
+  worktrees) resolve through directory file descriptors with `O_NOFOLLOW`, so a
+  parent folder swapped for a link after the check never lets a write leave
+  the project; Windows keeps the check-then-write by path (KT-1595).
 
 ### Fixed
 

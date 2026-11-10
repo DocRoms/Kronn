@@ -1065,67 +1065,59 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
-/// token and provider keys (KT-1007): the copy never holds credentials, even if
-/// the credential store boot that follows fails.
-pub(crate) fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
+/// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
+/// with the instance key (KT-1528): whatever the file holds, a credential this
+/// build does not know included, is never on disk in clear in the copy. With no
+/// key to encrypt under, no copy is written. An older snapshot with other
+/// content is kept under a timestamped name; the clear copies 0.15.x left are
+/// converted first.
+pub(crate) fn backup_config_sealed(dir: &Path) -> std::io::Result<()> {
+    use crate::core::config_copies as copies;
     let cfg = dir.join("config.toml");
-    let text = match std::fs::read_to_string(&cfg) {
-        Ok(text) => text,
+    // The raw bytes: sealed as they are, not as a lossy string.
+    let content = match std::fs::read(&cfg) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    let Some(scrubbed) = crate::core::credential_store::without_credentials(&text) else {
-        // Unparseable: no copy at all rather than a plaintext one.
+    let Some(key) = copies::sealing_key(dir, true) else {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "config.toml is not valid TOML; no backup written",
+            std::io::ErrorKind::NotFound,
+            "no encryption key to seal the config.toml copy with; no backup written",
         ));
     };
-    let backup = dir.join("config.toml.backup");
+    let swept = copies::protect_clear_copies(dir, Some(&key));
+    for failure in &swept.failures {
+        tracing::warn!("config copy still in clear: {failure}");
+    }
+    let backup = dir.join(format!("{}{}", copies::BACKUP_NAME, copies::SEALED_SUFFIX));
+    // A link where the snapshot belongs is neither read through nor replaced.
+    copies::refuse_symlink(&backup)?;
     match std::fs::read_to_string(&backup) {
-        Ok(existing) if existing == scrubbed => return Ok(()),
-        // An older backup may hold a key the current file no longer has: keep
-        // it under a timestamped name instead of overwriting it.
-        Ok(_) => rotate_config_backup(dir, &backup)?,
+        Ok(existing) => {
+            let same =
+                copies::open_bytes(&existing, std::slice::from_ref(&key), copies::Kind::Backup)
+                    .is_some_and(|old| old == content);
+            if same {
+                return Ok(());
+            }
+            // An older backup may hold a key the current file no longer has:
+            // kept under a timestamped name, never overwritten.
+            copies::rotate_sealed_backup(dir)?;
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let tmp = dir.join(".config.toml.backup.tmp");
-    crate::core::keyvault::write_private_atomic(&tmp, &backup, scrubbed.as_bytes())
+    copies::write_sealed(dir, &backup, &content, &key).map_err(std::io::Error::other)
 }
 
-/// Move `backup` to `config.toml.backup.<UTC timestamp>` (owner-only).
-pub(crate) fn rotate_config_backup(dir: &Path, backup: &Path) -> std::io::Result<()> {
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
-    let mut target = dir.join(format!("config.toml.backup.{stamp}"));
-    let mut n = 1;
-    while target.exists() {
-        target = dir.join(format!("config.toml.backup.{stamp}-{n}"));
-        n += 1;
-    }
-    // The older copy may come from 0.14.2, which kept credentials in clear:
-    // the rotated file keeps its settings and key, never the credentials.
-    let existing = std::fs::read_to_string(backup)?;
-    match crate::core::credential_store::without_credentials(&existing) {
-        Some(scrubbed) => {
-            let tmp = dir.join(".config.toml.backup.rotate.tmp");
-            crate::core::keyvault::write_private_atomic(&tmp, &target, scrubbed.as_bytes())?;
-            std::fs::remove_file(backup)?;
-            crate::core::keyvault::sync_dir(dir);
-        }
-        // Unparseable: kept as it is (it may be the only copy of a key).
-        None => {
-            std::fs::rename(backup, &target)?;
-            crate::core::keyvault::sync_dir(dir);
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+/// Keep the current snapshot under a timestamped name (a reset sets it aside,
+/// since it may hold another key): a clear one is encrypted first.
+pub(crate) fn rotate_config_backup(dir: &Path) -> std::io::Result<()> {
+    use crate::core::config_copies as copies;
+    let sealing = copies::sealing(dir, true);
+    copies::protect_copies(dir, &sealing);
+    copies::rotate_sealed_backup(dir)
 }
 
 /// Apply one migration inside the caller-owned transaction.
@@ -1526,7 +1518,7 @@ fn run_with_backup_checked(
                 // holds auth_token + other config a bad migration/crash could
                 // strand. Best-effort; absence is fine (Docker/env configs).
                 if let Some(dir) = path.parent() {
-                    if let Err(e) = backup_config_without_credentials(dir) {
+                    if let Err(e) = backup_config_sealed(dir) {
                         tracing::warn!("Failed to backup config.toml before migration: {}", e);
                     }
                 }
@@ -3690,29 +3682,36 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch("CREATE TABLE t(id INTEGER);").unwrap();
         }
-        // A 0.14.2 config.toml holding credentials next to ordinary settings.
+        // A 0.14.2 config.toml holding its key and credentials next to ordinary
+        // settings.
+        let key = crate::core::crypto::generate_secret();
         let cfg = dir.path().join("config.toml");
-        std::fs::write(
-            &cfg,
-            "language = \"fr\"\n\n[server]\nport = 3140\nauth_token = \"tok-123\"\n\n\
-             [tokens]\nanthropic = \"sk-legacy\"\n\n[[tokens.keys]]\nid = \"k\"\nname = \"n\"\n\
-             provider = \"anthropic\"\nvalue = \"sk-ant-456\"\nactive = true\n",
-        )
-        .unwrap();
+        let original = format!(
+            "encryption_secret = \"{key}\"\nlanguage = \"fr\"\n\n[server]\nport = 3140\n\
+             auth_token = \"tok-123\"\n\n[tokens]\nanthropic = \"sk-legacy\"\n\n\
+             [[tokens.keys]]\nid = \"k\"\nname = \"n\"\nprovider = \"anthropic\"\n\
+             value = \"sk-ant-456\"\nactive = true\n"
+        );
+        std::fs::write(&cfg, &original).unwrap();
 
         let conn = Connection::open(&db_path).unwrap();
         run_with_backup(&conn, Some(&db_path)).expect("migrations should succeed");
 
-        let cfg_backup = dir.path().join("config.toml.backup");
+        let cfg_backup = dir.path().join("config.toml.backup.enc");
         assert!(
             cfg_backup.exists(),
             "config.toml must be snapshotted before migrations"
         );
-        let copy = std::fs::read_to_string(&cfg_backup).unwrap();
-        for secret in ["tok-123", "sk-legacy", "sk-ant-456"] {
-            assert!(!copy.contains(secret), "credential in the backup: {copy}");
+        // Encrypted whole: no clear value anywhere, and the copy restores the file.
+        let raw = std::fs::read_to_string(&cfg_backup).unwrap();
+        for secret in ["tok-123", "sk-legacy", "sk-ant-456", "language"] {
+            assert!(!raw.contains(secret), "clear value in the backup: {raw}");
         }
-        assert!(copy.contains("language = \"fr\"") && copy.contains("port = 3140"));
+        assert_eq!(
+            crate::core::config_copies::open_sealed(&cfg_backup, &[key]).unwrap(),
+            original
+        );
+        assert!(!dir.path().join("config.toml.backup").exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -3721,117 +3720,72 @@ mod tests {
         }
     }
 
-    /// An existing backup with other content (an older key) is kept under a
-    /// timestamped owner-only name, never overwritten; identical content is
-    /// not rotated again.
+    /// A clear snapshot from 0.15.x is converted by the next snapshot, and its
+    /// content is kept under an encrypted name, never overwritten.
     #[test]
-    fn a_different_existing_backup_is_rotated_not_overwritten() {
+    fn an_older_clear_backup_is_sealed_and_kept_when_a_new_snapshot_is_taken() {
         let dir = tempfile::tempdir().unwrap();
-        let old = "encryption_secret = \"K_OLD\"\n\n[server]\nport = 1\n";
+        let key = crate::core::crypto::generate_secret();
+        let old =
+            "encryption_secret = \"K_OLD\"\n\n[server]\nport = 1\nauth_token = \"tok-0142\"\n";
         std::fs::write(dir.path().join("config.toml.backup"), old).unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[server]\nport = 2\n").unwrap();
-
-        backup_config_without_credentials(dir.path()).unwrap();
-        backup_config_without_credentials(dir.path()).unwrap();
-
-        let rotated: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("config.toml.backup.")
-            })
-            .collect();
-        assert_eq!(rotated.len(), 1, "one rotation, not one per call");
-        let kept: toml::Table = std::fs::read_to_string(rotated[0].path())
-            .unwrap()
-            .parse()
-            .unwrap();
-        assert_eq!(kept, old.parse::<toml::Table>().unwrap());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = rotated[0].metadata().unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
-        }
-        let current = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
-        assert!(current.contains("port = 2"));
-    }
-
-    /// C3-06 — a 0.14.2 backup (credentials in clear) is rotated without its
-    /// credentials, keeping its key.
-    #[test]
-    fn a_rotated_0142_backup_keeps_its_key_but_never_its_credentials() {
-        let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("config.toml.backup"),
-            "encryption_secret = \"K_OLD\"\n\n[server]\nport = 1\nauth_token = \"tok-0142\"\n\n\
-             [tokens]\n[[tokens.keys]]\nid = \"k\"\nname = \"n\"\nprovider = \"anthropic\"\n\
-             value = \"sk-ant-0142\"\nactive = true\n",
+            dir.path().join("config.toml"),
+            format!("encryption_secret = \"{key}\"\n[server]\nport = 2\n"),
         )
         .unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[server]\nport = 2\n").unwrap();
-        backup_config_without_credentials(dir.path()).unwrap();
-        let mut found_key = false;
+        backup_config_sealed(dir.path()).unwrap();
+
+        assert!(!dir.path().join("config.toml.backup").exists());
+        let mut texts = Vec::new();
         for entry in std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
         {
-            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
-            assert!(
-                !text.contains("tok-0142") && !text.contains("sk-ant-0142"),
-                "{:?}",
-                entry.path()
-            );
-            found_key |= entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("config.toml.backup.")
-                && text.contains("K_OLD");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let raw = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            if name != "config.toml" {
+                assert!(
+                    !raw.contains("tok-0142") && !raw.contains("K_OLD"),
+                    "{name}"
+                );
+            }
+            if name.starts_with("config.toml.backup") {
+                texts.push(
+                    crate::core::config_copies::open_sealed(
+                        &entry.path(),
+                        std::slice::from_ref(&key),
+                    )
+                    .unwrap(),
+                );
+            }
         }
-        assert!(found_key, "the rotated copy keeps its encryption_secret");
+        // The old content and the new snapshot, both readable with the key.
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(texts.iter().any(|t| t == old));
+        assert!(texts.iter().any(|t| t.contains("port = 2")));
     }
 
+    /// An unparseable config.toml is still copied, encrypted whole: a damaged
+    /// file is the one most worth a copy, and the copy holds no clear text.
     #[test]
-    fn an_unparseable_config_toml_gets_no_backup_rather_than_a_plaintext_one() {
+    fn an_unparseable_config_toml_gets_an_encrypted_backup() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.toml"), "auth_token = [broken").unwrap();
-        assert!(backup_config_without_credentials(dir.path()).is_err());
-        assert!(!dir.path().join("config.toml.backup").exists());
+        let key = crate::core::crypto::generate_secret();
+        let text =
+            format!("encryption_secret = \"{key}\"\nauth_token = [broken\napi_key = \"sk-x\"\n");
+        std::fs::write(dir.path().join("config.toml"), &text).unwrap();
+        backup_config_sealed(dir.path()).unwrap();
+        let backup = dir.path().join("config.toml.backup.enc");
+        assert!(!std::fs::read_to_string(&backup).unwrap().contains("sk-x"));
+        assert_eq!(
+            crate::core::config_copies::open_sealed(&backup, &[key]).unwrap(),
+            text
+        );
+        // No config.toml: nothing to copy, not an error.
         let empty = tempfile::tempdir().unwrap();
-        backup_config_without_credentials(empty.path()).unwrap();
-        assert!(!empty.path().join("config.toml.backup").exists());
-    }
-
-    /// An unparseable older backup may hold the only copy of a key: it is
-    /// rotated verbatim, never scrubbed into nothing nor overwritten.
-    #[test]
-    fn an_unparseable_older_backup_is_rotated_verbatim() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = "encryption_secret = \"K_ONLY\"\nbroken = [\n";
-        std::fs::write(dir.path().join("config.toml.backup"), old).unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[server]\nport = 2\n").unwrap();
-        backup_config_without_credentials(dir.path()).unwrap();
-        let rotated: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("config.toml.backup.")
-            })
-            .collect();
-        assert_eq!(rotated.len(), 1);
-        assert_eq!(std::fs::read_to_string(rotated[0].path()).unwrap(), old);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = rotated[0].metadata().unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
-        }
-        let current = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
-        assert!(current.contains("port = 2"));
+        backup_config_sealed(empty.path()).unwrap();
+        assert!(!empty.path().join("config.toml.backup.enc").exists());
     }
 
     /// A config.toml or backup that cannot be read is an error, not a silent
@@ -3840,15 +3794,20 @@ mod tests {
     fn an_unreadable_config_or_backup_fails_the_config_backup() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("config.toml")).unwrap();
-        assert!(backup_config_without_credentials(dir.path()).is_err());
-        assert!(!dir.path().join("config.toml.backup").exists());
+        assert!(backup_config_sealed(dir.path()).is_err());
+        assert!(!dir.path().join("config.toml.backup.enc").exists());
 
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[server]\nport = 2\n").unwrap();
-        let backup = dir.path().join("config.toml.backup");
+        let key = crate::core::crypto::generate_secret();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!("encryption_secret = \"{key}\"\n[server]\nport = 2\n"),
+        )
+        .unwrap();
+        let backup = dir.path().join("config.toml.backup.enc");
         std::fs::create_dir(&backup).unwrap();
         std::fs::write(backup.join("marker"), "keep").unwrap();
-        assert!(backup_config_without_credentials(dir.path()).is_err());
+        assert!(backup_config_sealed(dir.path()).is_err());
         assert_eq!(
             std::fs::read_to_string(backup.join("marker")).unwrap(),
             "keep"

@@ -237,3 +237,18 @@ fn a_target_reached_through_a_symlinked_directory_outside_the_project_has_no_dig
     // The last component is a regular file, a parent is a link out.
     assert_eq!(file_digest(project.path(), "docs/linked/secret.md"), None);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_docs_folder_swapped_after_the_walk_never_receives_the_run_state() {
+    use crate::core::fs_guard::swap_probe;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    let external = tmp.path().join("external");
+    std::fs::create_dir_all(&external).unwrap();
+    swap_probe::arm(&root.join("docs"), &external);
+    let _ = write(&root, &state());
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+}
