@@ -312,7 +312,7 @@ with an instruction to clear the setting or choose an HTTP provider. An explicit
 effort on an unsupported transport is also refused. The runner applies the same
 validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:571-624#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:591-644#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
 [src: file: backend/src/workflows/steps.rs:1377-1381#reasoning_effort_override]
 [src: file: backend/src/agents/runner.rs:3971-3975#validate]
@@ -322,7 +322,7 @@ stream, edits the template while the job is queued, then inspects both requests
 received by a loopback provider. A separate Ollama fixture checks the actual
 request after context fitting. These fixtures prove transport and persistence,
 not live hosted-provider availability or model quality.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:491-569#quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:506-584#quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit]
 [src: file: backend/src/agents/generation_settings.rs:119-188#ollama_generation_controls_reach_the_actual_http_request_after_context_fitting]
 
 ## Full catalogue by default; progressive loading is experimental (KT-685)
