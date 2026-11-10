@@ -43,7 +43,7 @@ The discussion SSE path resolves this scope from the durable
 executor. If that lookup fails, the run is refused before provider inference;
 Kronn must never silently broaden a worker to the principal catalogue.
 `[src: file: backend/src/api/discussions/streaming.rs:92-146#native_http_tools_for_discussion]`
-`[src: file: backend/src/db/orchestration.rs:937-954#get_execution_for_sub_discussion]`
+`[src: file: backend/src/db/orchestration.rs:1092-1109#get_execution_for_sub_discussion]`
 
 ## Recommended subtask loop
 
@@ -169,7 +169,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_tools.rs:1693-1710#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1401-1415#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1417-1434#worker_repair_iteration_limit]`
-`[src: file: backend/src/api/orchestration.rs:9420-9574#worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:9666-9820#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
@@ -305,7 +305,7 @@ This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3574-3579#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4489-4510#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:4714-4727#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:14154-14163#Ollama]
+[src: file: backend/src/agents/runner.rs:14199-14208#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's

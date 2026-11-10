@@ -13239,25 +13239,27 @@ impl ClaudeSandboxCatalogueReceipt {
             && self.worktree_bytes <= MAX_CLAUDE_SANDBOX_WORKTREE_BYTES
     }
 
-    /// [`Self::validate`], naming the worktrees (directory names only, never a
-    /// path) of finished executions that Kronn could not reclaim and a human
-    /// can review and remove (KT-1646).
-    pub(crate) fn validate_listing(self, removable: &[String]) -> Result<(), String> {
+    /// [`Self::validate`], naming the worktrees that keep the catalogue over
+    /// its cap (directory names only, never a path), each with why Kronn did
+    /// not reclaim it, and the action that frees them (KT-1646, KT-1676).
+    /// `blockers` holds one `name (reason)` entry per worktree.
+    pub(crate) fn validate_listing(self, blockers: &[String]) -> Result<(), String> {
         if self.within_caps() {
             return Ok(());
         }
-        let removable = if removable.is_empty() {
+        let removable = if blockers.is_empty() {
             String::new()
         } else {
             const LISTED: usize = 20;
-            let mut names: Vec<&str> = removable.iter().map(String::as_str).take(LISTED).collect();
-            if removable.len() > LISTED {
+            let mut names: Vec<&str> = blockers.iter().map(String::as_str).take(LISTED).collect();
+            if blockers.len() > LISTED {
                 names.push("...");
             }
             format!(
-                " Worktrees of finished executions Kronn could not reclaim because they have \
-                 uncommitted changes, sit on another branch or are still in use (review, then \
-                 `git worktree remove`): {}.",
+                " Worktrees Kronn could not reclaim: {}. Kronn only removes the clean worktrees \
+                 of finished tasks it manages. To free the others, close their task or review \
+                 them and run `git worktree remove <name>` (commit or discard uncommitted \
+                 changes first).",
                 names.join(", ")
             )
         };
@@ -13384,6 +13386,49 @@ pub(crate) fn claude_task_worker_catalogue_measure(
         return Ok(None);
     }
     claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project)).map(Some)
+}
+
+/// The registered worktrees of every Git root of `project`, the main checkout of
+/// each repository left out: what a refusal names so a human knows which ones
+/// keep the catalogue over its cap (KT-1676). Best effort, read-only: a root
+/// Git cannot list contributes nothing, the refusal itself is the measure's.
+pub(crate) fn claude_task_worker_catalogue_worktrees(
+    project: &crate::models::Project,
+) -> Vec<PathBuf> {
+    let mut common_dirs = std::collections::BTreeSet::new();
+    let mut worktrees = Vec::new();
+    for root in claude_sandbox_catalogue_roots(project) {
+        let Ok(common) = crate::core::cmd::git_cmd()
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(&root.path)
+            .output()
+        else {
+            continue;
+        };
+        let Ok(common_dir) =
+            PathBuf::from(String::from_utf8_lossy(&common.stdout).trim()).canonicalize()
+        else {
+            continue;
+        };
+        if !common_dirs.insert(common_dir) {
+            continue;
+        }
+        let Ok(listed) = crate::core::cmd::git_cmd()
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&root.path)
+            .output()
+        else {
+            continue;
+        };
+        worktrees.extend(
+            String::from_utf8_lossy(&listed.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .skip(1)
+                .map(PathBuf::from),
+        );
+    }
+    worktrees
 }
 
 async fn run_claude_task_worker_auth_probe(

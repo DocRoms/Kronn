@@ -413,14 +413,14 @@ attempt either finds the parent already at `candidate_merge_sha` (idempotent no-
 because the parent moved (→ rebuild) or is dirty (→ `Blocked`). No step ever stashes, force-moves a
 checked-out branch, or closes a task before `integrated_sha` is durably recorded. The only place an
 agent's history lease meets this lifecycle is reclamation: an unreleased lease on a finished execution's
-worktree keeps it from being reclaimed `[src: file: backend/src/db/orchestration.rs:516-529#held_lease]`.
+worktree keeps it from being reclaimed `[src: file: backend/src/db/orchestration.rs:634-647#held_lease]`.
 
 The implemented recovery layer makes that decision durable rather than recomputing it after every
 restart. Boot first quiesces due dispatches and moves non-terminal executions to `Interrupted` in the
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:296-396#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:7987-8058#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:8142-8213#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:866-1037#start_resilience_watchdog]`.
 
@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:13837-13990#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9119-9165#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14366-14555#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8777-9084#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:14083-14236#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9274-9320#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14612-14801#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8932-9239#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -504,13 +504,13 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   reusing `SharedBudget`, the workflow engine's tree-wide LLM-call quota
   `[src: file: backend/src/workflows/runner.rs:389-407#SharedBudget]`. Once the tokens used by the run's
   sub-discussions reach it, the campaign stops offering new tasks (`token_budget` candidate reason)
-  `[src: file: backend/src/db/orchestration.rs:1497-1502#token_exhausted]`; it does not escalate an
+  `[src: file: backend/src/db/orchestration.rs:1652-1657#token_exhausted]`; it does not escalate an
   execution already running.
 - **Concurrency** — one active TaskExecution per task (a partial-unique index, like the one-primary and
   one-live-session invariants) `[src: file: backend/src/db/sql/127_task_orchestration.sql:207-212#idx_task_executions_one_active_per_task]`.
   Across a parent discussion / OrchestrationRun, a configurable `max_concurrent_executions`, enforced
   when the campaign selects launchable tasks (`remaining_slots`, from the count of non-terminal
-  executions) `[src: file: backend/src/db/orchestration.rs:1391-1408#active_execution_counts]`. The
+  executions) `[src: file: backend/src/db/orchestration.rs:1546-1563#active_execution_counts]`. The
   `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:728-735#group_concurrency_limit]`
   exists for batch fan-out; orchestration dispatches enqueue with `group_id: None`.
 - **Human escalation** — `Escalated` surfaces in the parent discussion, as the workflow Human Gate does
@@ -561,8 +561,8 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:293-393#reconcile_at_boot]`
   `[src: file: backend/src/api/orchestration.rs:866-1037#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:13837-13990#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:14366-14555#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:14083-14236#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:14612-14801#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.
