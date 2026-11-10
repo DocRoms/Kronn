@@ -639,7 +639,7 @@ of schema compliance. Repeated launches, including a repair launch, negotiate
 the capability independently; no persistent capability cache is written.
 `[src: file: backend/src/agents/runner.rs:9164-9198#rejects_structured_output]`
 `[src: file: backend/src/agents/runner.rs:9915-9979#format_fallback_notice]`
-`[src: file: backend/src/workflows/steps.rs:1091-1114#ollama_envelope_format]`
+`[src: file: backend/src/workflows/steps.rs:1101-1124#ollama_envelope_format]`
 
 **Quality escalation** (`steps.rs::escalation_step`): if a LOCAL (Ollama)
 TypedSchema step still fails validation after the repair attempt, it retries

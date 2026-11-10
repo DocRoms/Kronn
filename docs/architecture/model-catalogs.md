@@ -150,7 +150,7 @@ that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4225-4271#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
-[src: file: backend/src/workflows/steps.rs:1195-1248#preflight_workflow_launch]
+[src: file: backend/src/workflows/steps.rs:1205-1258#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
 that names a connection uses it; a row on another agent uses none, even when

@@ -53,9 +53,9 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
-  `[src: file: backend/src/workflows/steps.rs:2062-2096#evaluate_conditions]`
+  `[src: file: backend/src/workflows/steps.rs:2075-2109#evaluate_conditions]`
   `[src: file: backend/src/models/workflows.rs:1045-1049#room_id]`
-  `[src: file: backend/src/workflows/sub_workflow_step.rs:812-829#record_foreach_done]`
+  `[src: file: backend/src/workflows/sub_workflow_step.rs:982-999#record_foreach_done]`
 
 So the step does not need a new orchestration engine: it needs a **mechanical
 principal** for a campaign, plus a **reviewer** that is not a long-lived room
