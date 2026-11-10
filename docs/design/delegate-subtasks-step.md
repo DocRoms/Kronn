@@ -27,23 +27,23 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   within the concurrency, budget and escalation limits, and, with
   `auto_continue`, launches the next launchable task after each integration
   under the idempotency key `campaign-auto:<run>:<task>`.
-  `[src: file: backend/src/db/orchestration.rs:1393-1533#campaign_task_candidates]`
+  `[src: file: backend/src/db/orchestration.rs:1482-1622#campaign_task_candidates]`
   `[src: file: backend/src/api/orchestration.rs:4300-4400#advance_campaign_after_integration]`
 - **Worker resolution.** Explicit override, then the campaign default worker,
   then the principal discussion's identity.
-  `[src: file: backend/src/db/orchestration.rs:1203-1231#resolve_campaign_worker]`
+  `[src: file: backend/src/db/orchestration.rs:1292-1320#resolve_campaign_worker]`
 - **Review contract.** `ReviewDecisionV1` with a verdict `approve |
   request_changes`, the reviewed HEAD, findings and DoD verifications.
   `decide_review` bumps the round on `request_changes`, sends the findings to
   the worker, and escalates (`Escalated`, principal solicited) when the budget
-  is spent. `[src: file: backend/src/models/orchestration.rs:1963-1969#ReviewVerdict]`
-  `[src: file: backend/src/models/orchestration.rs:2006-2029#ReviewDecisionV1]`
+  is spent. `[src: file: backend/src/models/orchestration.rs:2004-2010#ReviewVerdict]`
+  `[src: file: backend/src/models/orchestration.rs:2047-2070#ReviewDecisionV1]`
   `[src: file: backend/src/api/orchestration.rs:8300-8307#decide_review]`
-  `[src: file: backend/src/db/orchestration.rs:4291-4300#ReviewCheckpoint]`
-  `[src: file: backend/src/db/orchestration.rs:4322-4334#ReviewCheckpointOutcome]`
+  `[src: file: backend/src/db/orchestration.rs:4380-4389#ReviewCheckpoint]`
+  `[src: file: backend/src/db/orchestration.rs:4411-4423#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:14145-14157#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:17803-17812#human_review]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:14192-14204#reassign_execution]`
+  `[src: file: backend/src/api/orchestration.rs:17850-17859#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
@@ -78,10 +78,10 @@ branch. Checked against the code:
   the discussion, or the room's native agent during its own running turn. The
   review obligation and the escalation are messages posted to the principal of
   that discussion.
-  `[src: file: backend/src/api/orchestration.rs:14630-14643#principal_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:14605-14647#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:14677-14690#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:14652-14694#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:7237-7244#deliver_worker_manifest]`
-  `[src: file: backend/src/db/orchestration.rs:4238-4245#EscalationDelivery]`
+  `[src: file: backend/src/db/orchestration.rs:4327-4334#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
   `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
 
@@ -142,7 +142,7 @@ Behaviour:
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
-   `[src: file: backend/src/api/orchestration.rs:15932-15970#wait_for_execution_status]`
+   `[src: file: backend/src/api/orchestration.rs:15979-16017#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP

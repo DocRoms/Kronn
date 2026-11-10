@@ -27,9 +27,9 @@ through their actually available output and to explicitly ask the principal to
 relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
 [src: file: backend/src/api/orchestration.rs:10596-10649#parent_milestones]
-[src: file: backend/src/db/orchestration.rs:7491-7535#get_execution_lineage]
-[src: file: backend/src/api/orchestration.rs:20248-20401#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
-[src: file: backend/src/models/orchestration.rs:1343-1356#TaskExecutionLineage]
+[src: file: backend/src/db/orchestration.rs:7580-7624#get_execution_lineage]
+[src: file: backend/src/api/orchestration.rs:20295-20448#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
+[src: file: backend/src/models/orchestration.rs:1384-1397#TaskExecutionLineage]
 
 The bridge documents that `disc_question_list` reads durable question state and
 that `disc_append` is the live discussion publication tool; its implementation

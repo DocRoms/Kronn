@@ -2522,6 +2522,21 @@ pub fn list_quota_waiting_runs(conn: &Connection) -> Result<Vec<WorkflowRun>> {
     Ok(runs)
 }
 
+/// Replaces the launch context of a run still parked on a provider quota
+/// (KT-1657: the agent choice of its refused step). `false` when the run
+/// resumed, finished or went away since it was read.
+pub fn set_quota_waiting_trigger_context(
+    conn: &Connection,
+    run_id: &str,
+    trigger_context: &serde_json::Value,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE workflow_runs SET trigger_context = ?1 WHERE id = ?2 AND status = 'WaitingQuota'",
+        params![trigger_context.to_string(), run_id],
+    )?;
+    Ok(changed > 0)
+}
+
 pub fn claim_waiting_run(conn: &Connection, run_id: &str, new_status: &RunStatus) -> Result<bool> {
     claim_run_status(conn, run_id, &RunStatus::WaitingApproval, new_status)
 }
@@ -2778,14 +2793,7 @@ pub fn count_admitted_runs(
     project: Option<Option<&str>>,
 ) -> Result<u32> {
     let count: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM workflow_runs
-          WHERE workflow_id = ?1
-            AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
-            AND (?2 = 0 OR concurrency_key IS ?3)
-            AND id IS NOT ?4
-            AND (?5 = 0 OR project_id IS ?6)
-            AND COALESCE(CASE WHEN json_valid(trigger_context)
-                THEN json_extract(trigger_context, '$.__variant__') END, '') <> 'shadow'",
+        &format!("SELECT COUNT(*) FROM workflow_runs WHERE {ADMITTED_RUNS_WHERE}"),
         params![
             workflow_id,
             key.is_some() as i64,
@@ -2797,6 +2805,126 @@ pub fn count_admitted_runs(
         |row| row.get(0),
     )?;
     Ok(count)
+}
+
+/// The runs [`count_admitted_runs`] counts, oldest first: what a refused
+/// launch is blocked by (KT-1657).
+pub fn list_admitted_runs(
+    conn: &Connection,
+    workflow_id: &str,
+    key: Option<Option<&str>>,
+    exclude_run_id: Option<&str>,
+    project: Option<Option<&str>>,
+) -> Result<Vec<WorkflowRun>> {
+    let sql = format!(
+        "SELECT {WORKFLOW_RUN_COLS} FROM workflow_runs WHERE {ADMITTED_RUNS_WHERE} ORDER BY started_at ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let runs = stmt
+        .query_map(
+            params![
+                workflow_id,
+                key.is_some() as i64,
+                key.flatten(),
+                exclude_run_id,
+                project.is_some() as i64,
+                project.flatten(),
+            ],
+            |row| Ok(row_to_run(row)),
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(runs)
+}
+
+/// Runs holding a concurrency slot. Parameters: workflow, key filter on/off,
+/// key, excluded run, project filter on/off, project.
+const ADMITTED_RUNS_WHERE: &str = "workflow_id = ?1
+            AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
+            AND (?2 = 0 OR concurrency_key IS ?3)
+            AND id IS NOT ?4
+            AND (?5 = 0 OR project_id IS ?6)
+            AND COALESCE(CASE WHEN json_valid(trigger_context)
+                THEN json_extract(trigger_context, '$.__variant__') END, '') <> 'shadow'";
+
+/// Every run that is not finished (KT-1657), oldest first, a run parked on a
+/// provider quota included with the wake time of its wait. Shadow variants
+/// hold no slot and are left to their own card.
+pub fn list_active_runs(
+    conn: &Connection,
+    visibility: Option<&RunVisibility>,
+) -> Result<Vec<crate::models::ActiveRunSummary>> {
+    let sql = format!(
+        "SELECT {WORKFLOW_RUN_COLS} FROM workflow_runs
+          WHERE status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
+            AND COALESCE(CASE WHEN json_valid(trigger_context)
+                THEN json_extract(trigger_context, '$.__variant__') END, '') <> 'shadow'{}
+          ORDER BY started_at ASC",
+        visible_clause(visibility, 1)
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = match visibility {
+        Some(v) => stmt
+            .query_map(params![v.project, v.own_run], |row| Ok(row_to_run(row)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        None => stmt
+            .query_map([], |row| Ok(row_to_run(row)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    };
+    let mut names = std::collections::HashMap::new();
+    let mut stmt = conn.prepare("SELECT id, name FROM workflows")?;
+    for row in stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (id, name) = row?;
+        names.insert(id, name);
+    }
+    Ok(rows
+        .into_iter()
+        .map(|run| active_run_summary(&run, names.get(&run.workflow_id).cloned()))
+        .collect())
+}
+
+/// A run's row on the active board; `workflow_name` falls back to the id.
+pub fn active_run_summary(
+    run: &WorkflowRun,
+    workflow_name: Option<String>,
+) -> crate::models::ActiveRunSummary {
+    let quota = crate::workflows::quota_wait::pending_wait(run).map(|wait| {
+        let step = run.step_results.last();
+        crate::models::ActiveRunQuota {
+            step_name: step.map(|s| s.step_name.clone()).unwrap_or_default(),
+            agent: step.and_then(|s| s.step_agent.clone()),
+            wake_at: wait.wake_at,
+            reset_at: wait.reset_at,
+            parked: wait.parked,
+        }
+    });
+    crate::models::ActiveRunSummary {
+        run_id: run.id.clone(),
+        workflow_name: workflow_name.unwrap_or_else(|| run.workflow_id.clone()),
+        workflow_id: run.workflow_id.clone(),
+        project_id: run.project_id.clone(),
+        status: run.status.clone(),
+        started_at: run.started_at,
+        parent_run_id: run.parent_run_id.clone(),
+        quota,
+        last_activity_at: Some(last_run_activity(run)),
+    }
+}
+
+/// When the run last showed life: the end of its latest finished step (a step
+/// without a recorded start does not date anything), else the run's start.
+fn last_run_activity(run: &WorkflowRun) -> chrono::DateTime<Utc> {
+    run.step_results
+        .iter()
+        .filter_map(|step| {
+            let started = step.started_at?;
+            let ended = started
+                + chrono::Duration::milliseconds(step.duration_ms.min(i64::MAX as u64) as i64);
+            Some(ended)
+        })
+        .max()
+        .map_or(run.started_at, |ended| ended.max(run.started_at))
 }
 
 // ─── Tracker reconciliation ─────────────────────────────────────────────────

@@ -79,7 +79,7 @@ composition and one genuinely new capability (protected merge), not reinvention.
    discussion row: `Discussion` carries only the batch `workflow_run_id`
    `[src: file: backend/src/models/discussions.rs:270-274#workflow_run_id]` and its task links sit in
    `planning_task_discussions` (§2). The edge is carried by the execution row
-   (`parent_discussion_id`, `sub_discussion_id`) `[src: file: backend/src/models/orchestration.rs:772-781#TaskExecution]`.
+   (`parent_discussion_id`, `sub_discussion_id`) `[src: file: backend/src/models/orchestration.rs:811-820#TaskExecution]`.
 3. **Cross-discussion wake** — deliver a child worker's result into the parent discussion and wake
    the parent agent. `notify_one` is process-global, not parent-scoped
    `[src: file: backend/src/api/discussions/runtime.rs:358]`; the only cross-object completion path today
@@ -420,7 +420,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:296-396#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:7737-7808#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:7826-7897#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:795-966#start_resilience_watchdog]`.
 
@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:13634-13787#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:8869-8915#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14145-14334#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8527-8834#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:13681-13834#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:8958-9004#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14192-14381#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8616-8923#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -463,7 +463,7 @@ and/or a `kronn-delivery` fence):
 ```
 
 **ReviewDecision v1** (principal → backend, via a new `task_exec_review` MCP tool; reuses the
-`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4201-4224#GateDecision]`):
+`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4213-4236#GateDecision]`):
 ```json
 { "version":"1", "task_ref":"KT-142", "decision":"approve|request_changes",
   "comment":"<required when request_changes>",
@@ -504,17 +504,17 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   reusing `SharedBudget`, the workflow engine's tree-wide LLM-call quota
   `[src: file: backend/src/workflows/runner.rs:389-407#SharedBudget]`. Once the tokens used by the run's
   sub-discussions reach it, the campaign stops offering new tasks (`token_budget` candidate reason)
-  `[src: file: backend/src/db/orchestration.rs:1408-1413#token_exhausted]`; it does not escalate an
+  `[src: file: backend/src/db/orchestration.rs:1497-1502#token_exhausted]`; it does not escalate an
   execution already running.
 - **Concurrency** — one active TaskExecution per task (a partial-unique index, like the one-primary and
   one-live-session invariants) `[src: file: backend/src/db/sql/127_task_orchestration.sql:207-212#idx_task_executions_one_active_per_task]`.
   Across a parent discussion / OrchestrationRun, a configurable `max_concurrent_executions`, enforced
   when the campaign selects launchable tasks (`remaining_slots`, from the count of non-terminal
-  executions) `[src: file: backend/src/db/orchestration.rs:1302-1319#active_execution_counts]`. The
+  executions) `[src: file: backend/src/db/orchestration.rs:1391-1408#active_execution_counts]`. The
   `agent_dispatch_jobs` `group_id` concurrency limit `[src: file: backend/src/db/agent_dispatch.rs:728-735#group_concurrency_limit]`
   exists for batch fan-out; orchestration dispatches enqueue with `group_id: None`.
 - **Human escalation** — `Escalated` surfaces in the parent discussion, as the workflow Human Gate does
-  with its decide endpoint `[src: file: backend/src/api/workflows.rs:5986-6173#decide_run]`, but the
+  with its decide endpoint `[src: file: backend/src/api/workflows.rs:6074-6261#decide_run]`, but the
   execution's own state machine carries the decision: the user force-approves (→ `Approved`), hands back
   with guidance (→ `Working`) `[src: file: backend/src/models/orchestration.rs:309-309#Escalated]`, or abandons
   (→ `Cancelled`, reachable from any non-terminal state) `[src: file: backend/src/models/orchestration.rs:274-283#can_transition_to]`.
@@ -561,8 +561,8 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:293-393#reconcile_at_boot]`
   `[src: file: backend/src/api/orchestration.rs:795-966#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:13634-13787#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:14145-14334#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:13681-13834#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:14192-14381#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.

@@ -665,6 +665,44 @@ fi
         assert!(prompt.ends_with("migrate"));
     }
 
+    /// KT-1599 — a CLI agent is told once, in a single line, that no permission
+    /// popup exists, so it reports a refused tool instead of inventing one.
+    #[tokio::test]
+    async fn a_cli_agents_prompt_carries_the_headless_no_popup_note() {
+        let fixture = Arc::new(NativeRouteFixture {
+            created: std::sync::atomic::AtomicUsize::new(0),
+            resumed: std::sync::atomic::AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let agent = AgentType::OpenCode;
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
+        let mut process = start_agent_with_config(AgentStartConfig {
+            test_acp_transport: Some(fixture.clone()),
+            full_access: true,
+            ..AgentStartConfig::new(&agent, project.path().to_str().unwrap(), "go", &tokens)
+        })
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+
+        let prompts = fixture.prompts.lock().unwrap();
+        assert!(prompts[0].contains(super::super::HEADLESS_NO_POPUP_NOTE));
+        let body = super::super::HEADLESS_NO_POPUP_NOTE
+            .split_once("\n\n")
+            .expect("a header then the note")
+            .1;
+        assert!(!body.contains('\n'), "the note is one line: {body}");
+        assert!(body.contains("no permission popup"));
+    }
+
     /// A server command that exists on this host: the registry leaves out
     /// one it cannot find.
     fn installed(project: &tempfile::TempDir, name: &str) -> String {
@@ -14348,6 +14386,135 @@ Suite de la réponse.";
             parse_claude_stream_line(line),
             StreamJsonEvent::ToolEnd
         ));
+    }
+
+    // ─── KT-1599 permission_denials ───────────────────────────────────────────
+
+    #[test]
+    fn permission_denials_are_read_off_the_result_line() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"permission_denials":[{"tool_name":"mcp__atlassian__jira_create_issue","tool_use_id":"toolu_1","tool_input":{"summary":"secret-ish"}},{"tool_name":"Bash","tool_use_id":"toolu_2","tool_input":{"command":"rm -rf /tmp/x"}},{"tool_name":"Bash","tool_use_id":"toolu_3","tool_input":{}}]}"#;
+        let tools = super::super::claude_permission_denials(line);
+        assert_eq!(tools, vec!["mcp__atlassian__jira_create_issue", "Bash"]);
+        let message = super::super::permission_denials_message(&tools);
+        assert!(message.contains("`mcp__atlassian__jira_create_issue`"));
+        assert!(message.contains("`Bash`"));
+        assert!(message.contains("--allowedTools"));
+        assert!(message.contains("full access"));
+        assert!(
+            !message.contains("secret-ish") && !message.contains("rm -rf"),
+            "tool input must never reach the message: {message}"
+        );
+    }
+
+    #[test]
+    fn permission_denials_ignore_clean_and_foreign_lines() {
+        for line in [
+            r#"{"type":"result","subtype":"success","permission_denials":[]}"#,
+            r#"{"type":"result","subtype":"success"}"#,
+            r#"{"type":"assistant","permission_denials":[{"tool_name":"Bash"}]}"#,
+            "not json",
+            "",
+        ] {
+            assert!(
+                super::super::claude_permission_denials(line).is_empty(),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_denial_without_a_name_is_still_reported() {
+        let tools = super::super::claude_permission_denials(
+            r#"{"type":"result","permission_denials":[{"tool_use_id":"x"}]}"#,
+        );
+        assert_eq!(tools, vec!["unknown tool"]);
+    }
+
+    #[test]
+    fn gemini_allows_kronn_internal_by_policy_not_yolo() {
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::GeminiCli, "hello", false, "", None);
+        assert!(!args.iter().any(|a| a == "--yolo"));
+        let at = args
+            .iter()
+            .position(|a| a == "--policy")
+            .expect("--policy must be passed");
+        let policy = std::fs::read_to_string(&args[at + 1]).expect("the policy file exists");
+        assert!(policy.contains("mcpName = \"kronn-internal\""));
+        assert!(policy.contains("toolName = \"*\""));
+        assert!(policy.contains("decision = \"allow\""));
+        // `-p <prompt>` stays last.
+        assert_eq!(&args[args.len() - 2..], ["-p", "hello"]);
+    }
+
+    #[test]
+    fn gemini_full_access_keeps_yolo_without_a_policy() {
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::GeminiCli, "hello", true, "", None);
+        assert!(args.iter().any(|a| a == "--yolo"));
+        assert!(!args.iter().any(|a| a == "--policy"));
+    }
+
+    /// KT-1599 live proof — needs a real `gemini` and `GEMINI_API_KEY`:
+    /// `cargo nextest run --run-ignored only -E 'test(gemini_live_)'`.
+    /// A stub MCP server named `kronn-internal` answers `ping_kronn`; the run uses
+    /// the argv Kronn builds (no `--yolo`) and must reach the tool.
+    #[test]
+    #[ignore = "live: needs the gemini CLI and GEMINI_API_KEY"]
+    fn gemini_live_calls_kronn_internal_without_yolo() {
+        if std::env::var("GEMINI_API_KEY").is_err() {
+            eprintln!("GEMINI_API_KEY unset — live proof not run");
+            return;
+        }
+        let project = tempfile::tempdir().unwrap();
+        let server = project.path().join("server.py");
+        std::fs::write(
+            &server,
+            "import sys, json\n\
+             for line in sys.stdin:\n\
+             \x20   m = json.loads(line)\n\
+             \x20   i, meth = m.get('id'), m.get('method')\n\
+             \x20   if meth == 'initialize':\n\
+             \x20       r = {'protocolVersion': m['params'].get('protocolVersion', '2024-11-05'), 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'kronn-internal', 'version': '1'}}\n\
+             \x20   elif meth == 'tools/list':\n\
+             \x20       r = {'tools': [{'name': 'ping_kronn', 'description': 'Returns the magic word.', 'inputSchema': {'type': 'object', 'properties': {}}}]}\n\
+             \x20   elif meth == 'tools/call':\n\
+             \x20       r = {'content': [{'type': 'text', 'text': 'MAGIC-WORD-ZEBRA-4417'}]}\n\
+             \x20   else:\n\
+             \x20       r = {}\n\
+             \x20   if i is not None:\n\
+             \x20       print(json.dumps({'jsonrpc': '2.0', 'id': i, 'result': r}), flush=True)\n",
+        )
+        .unwrap();
+        std::fs::create_dir(project.path().join(".gemini")).unwrap();
+        std::fs::write(
+            project.path().join(".gemini/settings.json"),
+            serde_json::json!({"mcpServers": {"kronn-internal": {
+                "command": "python3", "args": [server.to_string_lossy()]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let (_, _, mut args, _, _, _) = super::super::agent_command(
+            &AgentType::GeminiCli,
+            "Call the ping_kronn tool of the kronn-internal MCP server and reply with exactly what it returned.",
+            false,
+            "",
+            None,
+        );
+        assert!(!args.iter().any(|a| a == "--yolo"));
+        args.insert(0, "--skip-trust".into());
+        let output = std::process::Command::new("gemini")
+            .args(&args)
+            .current_dir(project.path())
+            .output()
+            .expect("gemini is installed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("MAGIC-WORD-ZEBRA-4417"),
+            "gemini did not reach the tool:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // ─── CopilotCli agent_command ─────────────────────────────────────────────

@@ -422,6 +422,22 @@ pub fn static_refusals(step: &WorkflowStep, allowlist: &[String]) -> Vec<(String
     found
 }
 
+/// What a step that could not start says. A missing `python3` (the shipped
+/// autoCode Issue steps are `python3` scripts, KT-1643) gets the prerequisite
+/// message that names what to install, not a raw OS error; any other failure
+/// keeps the raw spawn error.
+pub(crate) fn spawn_failure(step_name: &str, command: &str, error: &std::io::Error) -> String {
+    if command == crate::core::contribution::PYTHON_PROGRAM
+        && error.kind() == std::io::ErrorKind::NotFound
+    {
+        return format!(
+            "Exec step `{step_name}`: {}",
+            crate::core::contribution::python_missing_message()
+        );
+    }
+    format!("Exec step `{step_name}`: failed to spawn `{command}`: {error}")
+}
+
 fn needs_gh_hint(raw_command: &str, success: bool, github_env: &[(String, String)]) -> bool {
     !success && raw_command == "gh" && github_env.is_empty()
 }
@@ -797,14 +813,7 @@ async fn execute_exec_step_inner(
         match tokio::time::timeout(Duration::from_secs(main_timeout_secs), output_future).await {
             Ok(Ok(out)) => Ok(out),
             Ok(Err(e)) => {
-                return fail(
-                    step,
-                    start,
-                    format!(
-                        "Exec step `{}`: failed to spawn `{}`: {}",
-                        step.name, raw_command, e
-                    ),
-                );
+                return fail(step, start, spawn_failure(&step.name, raw_command, &e));
             }
             Err(_) => Err(()), // timeout
         };

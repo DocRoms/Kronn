@@ -159,7 +159,7 @@ isolates the run in that project's worktree (KT-851):
   [src: file: backend/src/workflows/project_scope.rs:15-60#resolve_run_project]
   [src: file: backend/src/workflows/project_scope.rs:62-81#scheduled_projects]
   [src: file: backend/src/workflows/project_scope.rs:83-128#tracker_project]
-  [src: file: backend/src/workflows/mod.rs:314-324#tracker_project].
+  [src: file: backend/src/workflows/mod.rs:320-330#tracker_project].
 - The run records its project (`workflow_runs.project_id`, KT-1015) and runs
   in that project's checkout or worktree, with its environment. A
   multi-project sub-workflow follows its parent run's project when it serves
@@ -331,7 +331,7 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:4271-4304#rebind_api_configs].
+  already does for API configs [src: file: backend/src/api/workflows.rs:4359-4392#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
   already does [src: file: backend/src/api/artifact_portability/import.rs:338-377#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,

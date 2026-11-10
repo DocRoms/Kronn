@@ -516,6 +516,309 @@ async fn wake_one(state: &AppState, workflow: Workflow, mut run: WorkflowRun) ->
     Some(id)
 }
 
+/// The Agent step a `WaitingQuota` run is really parked on (KT-1657). A
+/// sub-workflow step mirrors its child's wait, so the step that holds the
+/// provider refusal sits in a run further down.
+pub(crate) struct WaitingLeaf {
+    /// The run owning the Agent step.
+    pub run: WorkflowRun,
+    /// Its workflow as saved, without the run's own agent choices.
+    pub workflow: Workflow,
+    /// The refused step, with the run's agent choices applied.
+    pub step: crate::models::WorkflowStep,
+}
+
+/// Deepest chain of mirrored waits followed; the engine nests no deeper.
+const MAX_LEAF_DEPTH: usize = 8;
+
+pub(crate) fn waiting_leaf(
+    conn: &rusqlite::Connection,
+    mut run: WorkflowRun,
+) -> anyhow::Result<WaitingLeaf> {
+    for _ in 0..MAX_LEAF_DEPTH {
+        if pending_wait(&run).is_none() {
+            anyhow::bail!("run {} is not waiting on a provider quota", run.id);
+        }
+        let Some(workflow) = crate::db::workflows::get_workflow(conn, &run.workflow_id)? else {
+            anyhow::bail!("workflow {} no longer exists", run.workflow_id);
+        };
+        let waiting = run
+            .step_results
+            .last()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("run {} has no waiting step", run.id))?;
+        let Some(step) = workflow
+            .steps
+            .iter()
+            .find(|step| step.name == waiting.step_name)
+            .cloned()
+        else {
+            anyhow::bail!("step `{}` is no longer in the workflow", waiting.step_name);
+        };
+        if matches!(step.step_type, crate::models::StepType::Agent) {
+            let mut applied = workflow.clone();
+            super::step_agents::apply_from_run(&mut applied, &run);
+            let step = applied
+                .steps
+                .into_iter()
+                .find(|candidate| candidate.name == step.name)
+                .unwrap_or(step);
+            return Ok(WaitingLeaf {
+                run,
+                workflow,
+                step,
+            });
+        }
+        let child_id = waiting
+            .child_run_id
+            .clone()
+            .or_else(|| mirrored_child(&run.state, &waiting.step_name).map(|(id, _)| id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "step `{}` waits on a provider quota but is not an Agent step and has no waiting sub-workflow run",
+                    waiting.step_name
+                )
+            })?;
+        run = crate::db::workflows::get_run(conn, &child_id)?
+            .ok_or_else(|| anyhow::anyhow!("sub-workflow run {child_id} no longer exists"))?;
+    }
+    anyhow::bail!("the quota wait is nested deeper than {MAX_LEAF_DEPTH} sub-workflows")
+}
+
+/// How often a quota-paused run asks its provider whether the quota is back,
+/// instead of waiting blindly for the announced reset (KT-1657).
+pub const RECHECK_INTERVAL: Duration = Duration::minutes(20);
+/// Bound of one provider re-check.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// The whole request of a re-check: as small as an agent call gets.
+const PROBE_PROMPT: &str = "Reply with the single word: ok";
+
+/// A cheap, bounded question to a provider: can this agent answer again?
+#[async_trait::async_trait]
+pub trait QuotaProbe: Send + Sync {
+    /// `Some(true)`: the provider answered a minimal request. `Some(false)`:
+    /// it still refuses for a quota. `None`: inconclusive (the agent could not
+    /// start, timed out…), so the announced reset stays the only trigger.
+    async fn quota_is_back(
+        &self,
+        agent: &crate::models::AgentType,
+        project_path: &str,
+        tokens: &crate::models::TokensConfig,
+        full_access: bool,
+    ) -> Option<bool>;
+}
+
+/// The real probe: one minimal prompt through the agent's own launch path.
+pub struct AgentQuotaProbe;
+
+#[async_trait::async_trait]
+impl QuotaProbe for AgentQuotaProbe {
+    async fn quota_is_back(
+        &self,
+        agent: &crate::models::AgentType,
+        project_path: &str,
+        tokens: &crate::models::TokensConfig,
+        full_access: bool,
+    ) -> Option<bool> {
+        let attempt = async {
+            let process = crate::agents::runner::start_agent(
+                agent,
+                project_path,
+                PROBE_PROMPT,
+                tokens,
+                full_access,
+            )
+            .await?;
+            super::steps::drive_agent_to_output(
+                process,
+                None,
+                None,
+                PROBE_TIMEOUT,
+                agent,
+                "quota-recheck",
+            )
+            .await
+            .map_err(|error| error.to_string())
+        };
+        match tokio::time::timeout(PROBE_TIMEOUT, attempt).await {
+            Ok(Ok(_)) => Some(true),
+            Ok(Err(error)) => is_quota_refusal(&error).then_some(false),
+            Err(_) => None,
+        }
+    }
+}
+
+/// Bumped when an agent's account may have changed (login, key, toggle): the
+/// next engine pass re-checks every quota-paused run at once.
+static RECHECK_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Asks the engine to re-check quota-paused runs on its next pass.
+pub fn request_recheck() {
+    RECHECK_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[derive(Default)]
+struct RecheckBook {
+    /// When each wait was last asked about, by `run:wait`.
+    last: std::collections::HashMap<String, DateTime<Utc>>,
+    seen_requests: u64,
+}
+
+/// Re-asks the provider of every quota-paused run, bounded by an interval.
+pub struct QuotaRechecker {
+    probe: std::sync::Arc<dyn QuotaProbe>,
+    interval: Duration,
+    book: std::sync::Mutex<RecheckBook>,
+}
+
+impl QuotaRechecker {
+    pub fn new(probe: std::sync::Arc<dyn QuotaProbe>, interval: Duration) -> Self {
+        let seen_requests = RECHECK_REQUESTS.load(std::sync::atomic::Ordering::Relaxed);
+        Self {
+            probe,
+            interval,
+            book: std::sync::Mutex::new(RecheckBook {
+                seen_requests,
+                ..Default::default()
+            }),
+        }
+    }
+
+    pub fn production() -> Self {
+        Self::new(std::sync::Arc::new(AgentQuotaProbe), RECHECK_INTERVAL)
+    }
+
+    /// One engine pass: resume every waiting run whose provider answers again
+    /// before the announced reset. Returns the ids it resumed.
+    pub async fn recheck_due(&self, state: &AppState, now: DateTime<Utc>) -> Vec<String> {
+        let runs = match state
+            .db
+            .with_conn(crate::db::workflows::list_quota_waiting_runs)
+            .await
+        {
+            Ok(runs) => runs,
+            Err(error) => {
+                tracing::warn!("quota re-check scan failed: {error}");
+                return Vec::new();
+            }
+        };
+        let requested = RECHECK_REQUESTS.load(std::sync::atomic::Ordering::Relaxed);
+        let forced = {
+            let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+            let live: std::collections::HashSet<String> = runs.iter().map(recheck_key).collect();
+            book.last.retain(|key, _| live.contains(key));
+            let forced = book.seen_requests != requested;
+            book.seen_requests = requested;
+            forced
+        };
+        let mut verdicts: std::collections::HashMap<String, Option<bool>> = Default::default();
+        let mut resumed = Vec::new();
+        for run in runs {
+            // A child is resumed through its parent, which holds the same wait.
+            if run.parent_run_id.is_some() {
+                continue;
+            }
+            let Some(wait) = pending_wait(&run) else {
+                continue;
+            };
+            // Scheduled waits and waits with no trustworthy reset only: the
+            // other parks wait for a human on purpose.
+            if !matches!(wait.parked, None | Some(QuotaParkReason::NoResetTime)) {
+                continue;
+            }
+            // Due by the engine's own clock: the wake sweep resumes it.
+            if wait.wake_at.is_some_and(|wake_at| wake_at <= now) {
+                continue;
+            }
+            if !self.due(&recheck_key(&run), now, forced) {
+                continue;
+            }
+            let probe_run = run.clone();
+            let leaf = match state
+                .db
+                .with_conn(move |conn| waiting_leaf(conn, probe_run))
+                .await
+            {
+                Ok(leaf) => leaf,
+                Err(error) => {
+                    tracing::info!(run_id = %run.id, "quota re-check skipped: {error}");
+                    continue;
+                }
+            };
+            let agent = leaf.step.agent.clone();
+            let verdict = match verdicts.get(&format!("{agent:?}")) {
+                Some(known) => *known,
+                None => {
+                    let (tokens, full_access) = {
+                        let config = state.config.read().await;
+                        (config.tokens.clone(), config.agents.full_access_for(&agent))
+                    };
+                    let project_path = project_path_of(state, &run).await;
+                    let verdict = self
+                        .probe
+                        .quota_is_back(&agent, &project_path, &tokens, full_access)
+                        .await;
+                    verdicts.insert(format!("{agent:?}"), verdict);
+                    verdict
+                }
+            };
+            if verdict != Some(true) {
+                continue;
+            }
+            let workflow_id = run.workflow_id.clone();
+            let workflow = match state
+                .db
+                .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &workflow_id))
+                .await
+            {
+                Ok(Some(workflow)) => workflow,
+                _ => continue,
+            };
+            tracing::info!(run_id = %run.id, ?agent, "provider quota is back before its announced reset");
+            if let Some(id) = wake_one(state, workflow, run).await {
+                resumed.push(id);
+            }
+        }
+        resumed
+    }
+
+    /// Whether `key` is asked now. A wait seen for the first time starts its
+    /// interval: the provider has just refused it.
+    fn due(&self, key: &str, now: DateTime<Utc>, forced: bool) -> bool {
+        let mut book = self.book.lock().unwrap_or_else(|e| e.into_inner());
+        match book.last.get(key) {
+            Some(at) if !forced && now - *at < self.interval => false,
+            Some(_) => {
+                book.last.insert(key.to_string(), now);
+                true
+            }
+            None => {
+                book.last.insert(key.to_string(), now);
+                forced
+            }
+        }
+    }
+}
+
+fn recheck_key(run: &WorkflowRun) -> String {
+    let wait = pending_wait(run).and_then(|wait| wait.id.clone());
+    format!("{}:{}", run.id, wait.unwrap_or_default())
+}
+
+async fn project_path_of(state: &AppState, run: &WorkflowRun) -> String {
+    let Some(project_id) = run.project_id.clone() else {
+        return String::new();
+    };
+    state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|project| project.path)
+        .unwrap_or_default()
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "quota_wait_tests.rs"]
 mod tests;

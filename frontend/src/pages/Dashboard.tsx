@@ -1,5 +1,5 @@
 import './Dashboard.css';
-import { isPlainLeftClick, newTabClickProps } from '../lib/newTabNavigation';
+import { isPlainLeftClick } from '../lib/newTabNavigation';
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { Outlet, useLocation } from 'react-router';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
@@ -30,8 +30,8 @@ import { DEFAULT_PAGE, PAGE_PATHS, pathToPage, type DashboardPage } from '../lib
 import type { DashboardOutletContext, DiscussionPrefill } from '../lib/dashboardContext';
 import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { PRELOADED_ROUTES } from '../routes/lazyRoutes';
-import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
-import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
+import { ActivityBell } from '../components/activity/ActivityBell';
+import { openActivityLink } from '../lib/activity';
 import {
   Folder, FolderOpen, Puzzle,
   Search, Zap, Settings,
@@ -67,11 +67,6 @@ export function Dashboard({ onReset }: DashboardProps) {
     try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
   });
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(readActiveDiscussionId);
-  const [activeRunsPopoverOpen, setActiveRunsPopoverOpen] = useState(false);
-  const projectsTabRef = useRef<HTMLAnchorElement>(null);
-  const workflowsTabRef = useRef<HTMLAnchorElement>(null);
-  const auditsTriggerRef = useRef<HTMLButtonElement>(null);
-  const runsTriggerRef = useRef<HTMLButtonElement>(null);
   // 0.8.2 — Deep-link from the validation-discussion CTA: opens the
   // workflow wizard pre-loaded with a preset (e.g. `ticket-to-pr` for
 
@@ -87,13 +82,11 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
   // 2026-06-24 — server-side truth of which discs have an in-flight agent run
   // RIGHT NOW (incl. background/batch children). Polled, so it stays correct
-  // after you navigate away — fixes "looks like nothing's running, so I
-  // re-launch" while a workflow was in fact still going. Kept here in the
-  // persistent Dashboard shell so the nav badge survives page changes.
-  const [runningDiscIds, setRunningDiscIds] = useState<string[]>([]);
-  // Mirrored into a ref so the stale-stream watchdog can read it without
-  // listing it as a dependency: doing so would rebuild its 30 s interval on
-  // every 5 s poll, and the countdown would never complete.
+  // after you navigate away. Only the stale-stream watchdog reads it now: the
+  // header's view of what runs is the activity bell (KT-1658). A ref, so the
+  // watchdog can read it without listing it as a dependency: doing so would
+  // rebuild its 30 s interval on every 5 s poll, and the countdown would never
+  // complete.
   const runningDiscIdsRef = useRef<string[]>([]);
   const abortControllers = useRef<Record<string, AbortController>>({});
   // ─── Stale-stream watchdog (TD-20260504) ──────────────────────────────────
@@ -205,23 +198,16 @@ export function Dashboard({ onReset }: DashboardProps) {
   }, [cleanupStream, refetchDiscussions, toast, t, sendingMap, sendingStartMap]);
 
   // ─── Running-agents poll (2026-06-24) ─────────────────────────────────
-  // Server-side truth of in-flight runs, every 5 s. Page-independent (lives
-  // in the persistent Dashboard shell), so the nav badge keeps showing
-  // "N running" even after you leave the discussion — no more re-launching a
-  // workflow that's actually still going. Deliberately a SEPARATE state from
-  // `sendingMap`: feeding the poll into sendingMap would trip the stale-stream
-  // watchdog above (background children have no local chunks → falsely "stale").
+  // Server-side truth of in-flight runs, every 5 s, for the stale-stream
+  // watchdog above. Deliberately kept out of `sendingMap`: feeding the poll
+  // into it would trip the watchdog (background children have no local chunks
+  // → falsely "stale"). It holds no state, so a poll re-renders nothing.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       try {
         const ids = await discussionsApi.getRunning();
         if (!cancelled) runningDiscIdsRef.current = ids;
-        if (!cancelled) setRunningDiscIds(prev => {
-          // Avoid a re-render when nothing changed.
-          if (prev.length === ids.length && prev.every((x, i) => x === ids[i])) return prev;
-          return ids;
-        });
       } catch { /* transient (backend blip) — keep last known */ }
     };
     void tick();
@@ -248,7 +234,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   // 0.8.3 (#288) — fleet-wide active-audits state. Mirror of
   // `runningWorkflows` above: fast poll (3 s) when at least one
   // audit is live, slow poll (10 s on projets page, 60 s elsewhere)
-  // when idle. Drives the Projets nav badge + ActiveAuditsPopover.
+  // when idle. Drives the Projets nav badge + the activity bell audits.
   const [activeAudits, setActiveAudits] = useState<AuditProgress[]>([]);
   const projects = useMemo(() => projectList ?? [], [projectList]);
 
@@ -289,8 +275,6 @@ export function Dashboard({ onReset }: DashboardProps) {
     // page would keep rendering its stale "not installed" snapshot.
     refetchAgents();
   });
-  const [activeAuditsPopoverOpen, setActiveAuditsPopoverOpen] = useState(false);
-
   useEffect(() => {
     let cancelled = false;
     const fetchAudits = async () => {
@@ -752,7 +736,6 @@ export function Dashboard({ onReset }: DashboardProps) {
               // hook for sighted users.
               aria-current={page === id ? 'page' : undefined}
               aria-label={isMobile ? label : undefined}
-              ref={id === 'projects' ? projectsTabRef : id === 'workflows' ? workflowsTabRef : undefined}
               onClick={event => {
                 if (!isPlainLeftClick(event)) return;
                 event.preventDefault();
@@ -802,103 +785,20 @@ export function Dashboard({ onReset }: DashboardProps) {
         })}
         </div>
         <div className="dash-nav-activity-group" data-mobile={isMobile}>
-          {(activeAudits.length > 0 || activeAuditsPopoverOpen) && (
-            <div className="dash-nav-activity-wrap">
-              <button
-                ref={auditsTriggerRef}
-                type="button"
-                className="dash-nav-activity-btn"
-                data-testid="active-audits-trigger"
-                aria-label={t('audit.activeAuditsDisclosure', activeAudits.length, activeAudits.length === 1 ? '' : 's')}
-                aria-haspopup="dialog"
-                aria-expanded={activeAuditsPopoverOpen}
-                aria-controls={activeAuditsPopoverOpen ? 'active-audits-popover' : undefined}
-                onClick={() => {
-                  setActiveRunsPopoverOpen(false);
-                  setActiveAuditsPopoverOpen(open => !open);
-                }}
-              >
-                <Loader2 size={14} className="spin" aria-hidden="true" />
-              </button>
-              {activeAuditsPopoverOpen && (
-                <ActiveAuditsPopover
-                  audits={activeAudits}
-                  projects={projects}
-                  triggerRef={auditsTriggerRef}
-                  focusFallbackRef={projectsTabRef}
-                  onClose={() => setActiveAuditsPopoverOpen(false)}
-                  onNavigateToProject={(projectId) => {
-                    nav.toProject(projectId);
-                    setActiveAuditsPopoverOpen(false);
-                    requestAnimationFrame(() => projectsTabRef.current?.focus());
-                  }}
-                  onViewAllProjects={() => {
-                    nav.toPage('projects');
-                    setActiveAuditsPopoverOpen(false);
-                    requestAnimationFrame(() => projectsTabRef.current?.focus());
-                  }}
-                  onAfterCancel={async () => {
-                    try { setActiveAudits(await projectsApi.auditStatusAll()); } catch { /* ignore */ }
-                    refetch();
-                  }}
-                />
-              )}
-            </div>
-          )}
-          {(runningWorkflows > 0 || activeRunsPopoverOpen) && (
-            <div className="dash-nav-activity-wrap">
-              <button
-                ref={runsTriggerRef}
-                type="button"
-                className="dash-nav-activity-btn"
-                data-testid="active-runs-trigger"
-                aria-label={t('wf.activeRunsDisclosure', runningWorkflows, runningWorkflows === 1 ? '' : 's')}
-                aria-haspopup="dialog"
-                aria-expanded={activeRunsPopoverOpen}
-                aria-controls={activeRunsPopoverOpen ? 'active-runs-popover' : undefined}
-                onClick={() => {
-                  setActiveAuditsPopoverOpen(false);
-                  setActiveRunsPopoverOpen(open => !open);
-                }}
-              >
-                <Loader2 size={14} className="spin" aria-hidden="true" />
-              </button>
-              {activeRunsPopoverOpen && (
-                <ActiveRunsPopover
-                  workflows={workflowList ?? []}
-                  triggerRef={runsTriggerRef}
-                  focusFallbackRef={workflowsTabRef}
-                  onClose={() => setActiveRunsPopoverOpen(false)}
-                  onNavigateToWorkflow={(wfId) => {
-                    nav.toWorkflow(wfId);
-                    setActiveRunsPopoverOpen(false);
-                    requestAnimationFrame(() => workflowsTabRef.current?.focus());
-                  }}
-                  onViewAllWorkflows={() => {
-                    nav.toPage('workflows');
-                    setActiveRunsPopoverOpen(false);
-                    requestAnimationFrame(() => workflowsTabRef.current?.focus());
-                  }}
-                  onAfterCancel={() => { refetchWorkflows(); }}
-                />
-              )}
-            </div>
-          )}
+          {/* KT-1658 — the one permanent entry to everything running in Kronn:
+              it replaces the per-kind spinners, their popovers and the
+              "N en cours" text. */}
+          <ActivityBell
+            onOpenLink={link => openActivityLink(nav, link)}
+            onActionSettled={() => {
+              // The nav badges read the workflow list and the audit tracker.
+              refetchWorkflows();
+              projectsApi.auditStatusAll().then(setActiveAudits, () => { /* next poll */ });
+              refetch();
+            }}
+          />
         </div>
         <div className="dash-nav-spacer" data-mobile={isMobile} />
-        {runningDiscIds.length > 0 && (
-          <button
-            type="button"
-            className="dash-running-badge"
-            title={t('nav.agentsRunningHint')}
-            {...newTabClickProps(PAGE_PATHS.discussions)}
-            onClick={() => nav.toPage('discussions')}
-          >
-            <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
-            {!isMobile && <span>{t('nav.agentsRunning', String(runningDiscIds.length))}</span>}
-            {isMobile && <span>{runningDiscIds.length}</span>}
-          </button>
-        )}
         <button className="dash-scan-btn" data-tour-id="scan-btn" onClick={handleScan} disabled={scanning} title={t('nav.scan')}>
           {scanning ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
           {!isMobile && (scanning ? t('projects.scanning') : t('nav.scan'))}

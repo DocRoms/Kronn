@@ -43,7 +43,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/core/model_catalog/mod.rs:140-260#migrate_hardcoded_catalog_once]
 [src: file: backend/src/api/model_catalog.rs:242-273#update_manual]
 [src: file: backend/src/api/model_catalog.rs:275-301#delete_manual]
-[src: file: backend/src/agents/runner.rs:3608-3627#resolve_model_flag]
+[src: file: backend/src/agents/runner.rs:3667-3686#resolve_model_flag]
 
 ## Discovery boundaries
 
@@ -128,9 +128,9 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5682-5736#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1911-1920#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1886-1917#select_model]
+[src: file: backend/src/agents/runner.rs:5773-5827#offers_model_catalogue]
+[src: file: backend/src/acp.rs:1923-1932#offers_model_catalogue]
+[src: file: backend/src/acp.rs:1909-1940#select_model]
 
 ## Launch safety and UI
 
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3646-3824#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3705-3883#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13688-13705#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13827-13858#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13773-13790#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13908-13939#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5036-5064#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5098-5126#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -287,7 +287,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:2042-2076#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:2046-2080#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
 [src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
 [src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]

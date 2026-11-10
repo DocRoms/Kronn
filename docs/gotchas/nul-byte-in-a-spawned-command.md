@@ -4,7 +4,7 @@
 data` and names nothing. Four carriers produce that identical error — the
 program name, any argument, any environment entry, and the working directory —
 and Kronn's pre-spawn check examines all four.
-[src: file: backend/src/agents/runner.rs:14280-14328#nul_byte_offender]
+[src: file: backend/src/agents/runner.rs:14369-14417#nul_byte_offender]
 
 A `\0` is valid UTF-8, so `read_to_string` carries one out of a file without a
 word. Any value Kronn reads from disk or decrypts can therefore reach a command
@@ -19,11 +19,11 @@ into a C string, it substitutes the literal `<string-with-nul>`. Only
 
 A byte scan alone — the obvious implementation — therefore detects the
 environment case and stays blind to the other three, with nothing to signal it.
-Both checks are needed. [src: file: backend/src/agents/runner.rs:14257-14266#NUL_BEARING_PLACEHOLDER]
+Both checks are needed. [src: file: backend/src/agents/runner.rs:14346-14355#NUL_BEARING_PLACEHOLDER]
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
-detection. [src: file: backend/src/agents/runner_test.rs:11433-11467#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
+detection. [src: file: backend/src/agents/runner_test.rs:11471-11505#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
 
 ## Report the carrier, never the value
 
@@ -31,7 +31,7 @@ These fields hold API keys and tokens. The refusal names the environment
 variable by key, or the argument by the flag it follows — positions shift
 between agents — and never the content, matching the invocation receipt's own
 rule that no argument content is logged.
-[src: file: backend/src/agents/runner_test.rs:11365-11431#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
+[src: file: backend/src/agents/runner_test.rs:11403-11469#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
 
 ## It is settled before anything runs
 
@@ -87,8 +87,8 @@ provider or claim a browser/full-runtime end-to-end demonstration. Truly absent
 runtimes still use the existing deferral policy; this patch does not cap it.
 [src: file: backend/tests/context_file_safety.rs:82-137#upload_utf16_and_binary_keeps_original_bytes_and_safe_durable_previews]
 [src: file: backend/tests/context_file_safety.rs:139-247#imported_legacy_preview_and_history_are_safe_without_rewriting_the_archive]
-[src: file: backend/src/api/discussions/streaming.rs:7480-7510#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
-[src: file: backend/src/api/discussions/streaming.rs:7512-7604#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
+[src: file: backend/src/api/discussions/streaming.rs:7531-7561#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
+[src: file: backend/src/api/discussions/streaming.rs:7563-7655#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
 
 Initial production-path regression replay: **9 failed / 0 passed** before the
 preview/prompt corrections. Expanded focused replay: **12 passed**; two HTTP

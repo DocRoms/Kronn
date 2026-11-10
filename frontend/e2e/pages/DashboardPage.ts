@@ -20,8 +20,9 @@ export class DashboardPage {
   get navMcps(): Locator { return this.page.locator('[data-tour-id="nav-mcps"]'); }
   get navWorkflows(): Locator { return this.page.locator('[data-tour-id="nav-workflows"]'); }
   get navSettings(): Locator { return this.page.locator('[data-tour-id="nav-settings"]'); }
-  get activeAuditsTrigger(): Locator { return this.page.getByTestId('active-audits-trigger'); }
-  get activeRunsTrigger(): Locator { return this.page.getByTestId('active-runs-trigger'); }
+  /** The one permanent activity bell (KT-1658); it replaced the audits and runs triggers. */
+  get activityBell(): Locator { return this.page.getByTestId('activity-bell'); }
+  get activityPanel(): Locator { return this.page.getByTestId('activity-panel'); }
 
   async clickWorkflows() { await this.openWorkflows(); }
   async clickSettings() { await this.navSettings.click(); }

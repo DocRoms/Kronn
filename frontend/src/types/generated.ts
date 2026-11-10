@@ -74,6 +74,48 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
+/**
+ * What a `WaitingQuota` run is parked on.
+ */
+export type ActiveRunQuota = {
+/**
+ * The step that was refused.
+ */
+step_name: string,
+/**
+ * The agent the refused step runs on, when it is an Agent step.
+ */
+agent?: AgentType,
+/**
+ * When the engine resumes the run on its own; `None` while parked.
+ */
+wake_at?: string,
+/**
+ * The reset the provider announced.
+ */
+reset_at?: string, parked?: QuotaParkReason, };
+
+/**
+ * One run that is not finished (KT-1657): the board `workflow_active_runs`
+ * and the UI's active-run indicators read. A run paused on a provider quota
+ * is listed with its wake time, so it is never mistaken for a run that is
+ * working, nor invisible while it still holds a concurrency slot.
+ */
+export type ActiveRunSummary = { run_id: string, workflow_id: string, workflow_name: string, project_id: string | null, status: RunStatus, started_at: string,
+/**
+ * The sub-workflow's parent run; a child's wait is resumed through it.
+ */
+parent_run_id?: string,
+/**
+ * The quota wait, for a `WaitingQuota` run.
+ */
+quota?: ActiveRunQuota,
+/**
+ * The last sign of life the run records: the end of its latest finished
+ * step, else its start. A step in progress records nothing until it ends.
+ */
+last_activity_at?: string, };
+
 export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string,
 /**
  * KT-1252 — the `run_id` of the room's live `AgentRunProgress` frames for
@@ -89,11 +131,100 @@ progress_run_id?: string,
 preparing?: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
+ * An existing action a row offers. `id` names the UI handler that performs it
+ * with `args` (the same call the page's own button makes).
+ */
+export type ActivityAction = { id: string, kind: ActivityActionKind, args: { [key in string]: string }, };
+
+/**
+ * How an action reads on its button. The label follows this, never the row's type.
+ */
+export type ActivityActionKind = "stop" | "cancel" | "resume_now";
+
+/**
  * What kind of action an agent's tool call is, from a fixed table
  * (`agents::activity::category_of`). The only description of a call that
  * leaves the agent's run: its name, arguments and targets never do.
  */
 export type ActivityCategory = "Read" | "Search" | "Edit" | "Execute" | "Web" | "Mcp" | "Kronn" | "Think" | "Other";
+
+/**
+ * Where a row sits in the panel. Phase 1 fills `Running` only; the other two
+ * are the KT-334 compartments the next phase fills, reserved so adding them
+ * reworks neither the endpoint nor the panel.
+ */
+export type ActivityCompartment = "running" | "needs_decision" | "unseen_done";
+
+export type ActivityLink = { target: ActivityLinkTarget, id: string, run_id?: string, };
+
+/**
+ * The kinds of place a row's deep link can open. Resolved to an address by the
+ * UI's route table, so a path is never spelled in the backend.
+ */
+export type ActivityLinkTarget = "discussion" | "workflow" | "project" | "planning_task";
+
+/**
+ * `GET /api/activity`.
+ */
+export type ActivityOverview = { rows: Array<ActivityRow>,
+/**
+ * Inactivity after which a running row is flagged `stalled`.
+ */
+stall_after_secs: number, generated_at: string,
+/**
+ * Sources that could not be read this time: the list is partial, and says so.
+ */
+unavailable_sources: Array<string>, };
+
+/**
+ * One thing in the attention center.
+ */
+export type ActivityRow = {
+/**
+ * `<source>:<native id>`: stable across polls, unique across sources.
+ */
+id: string,
+/**
+ * What the row is (`agent_turn`, `workflow_run`, `audit`, `task_worker`, …).
+ * An open set: the panel shows a type it does not know without special-casing.
+ */
+type: string, compartment: ActivityCompartment, state: ActivityState,
+/**
+ * The state the row is derived from (`workflow_runs`, `agent_dispatch_jobs`,
+ * `task_executions`, `audit_tracker`).
+ */
+source: string, title: string,
+/**
+ * A second line of context that is data, not prose (project, step, progress).
+ */
+detail?: string,
+/**
+ * The project it belongs to, when it has one.
+ */
+project_name?: string,
+/**
+ * Elapsed time is `now - started_at`, counted by the UI.
+ */
+started_at: string,
+/**
+ * The last sign of life Kronn has for the row. `None` is "no continuous
+ * signal" and is never read as a stall.
+ */
+last_activity_at?: string,
+/**
+ * A running row whose last sign of life is older than the overview's
+ * `stall_after_secs`. A hint to look, not a verdict: the row may be thinking.
+ */
+stalled: boolean,
+/**
+ * When a `Paused` row resumes on its own; `None` while it waits for a person.
+ */
+wake_at?: string, link?: ActivityLink, actions: Array<ActivityAction>, };
+
+/**
+ * What a `Running`-compartment row is doing right now.
+ */
+export type ActivityState = "running" | "queued" | "paused";
 
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
@@ -1911,6 +2042,26 @@ export type BundleTask = { reference: string, title: string, status: string,
 dod_progress: string | null, };
 
 export type BundleWorkflowCreated = { id: string, name: string, };
+
+/**
+ * The reviewer a campaign names at creation. A delivery is never addressed to
+ * an agent no session serves: `agent` and `model` are what the campaign room
+ * is configured with, `Human` leaves the room to the person.
+ */
+export type CampaignReviewer = { kind: CampaignReviewerKind, agent?: AgentType, model?: string,
+/**
+ * The named connection of a `Custom` remote model.
+ */
+connection_id?: string,
+/**
+ * The campaign did not ask for this reviewer: Kronn chose it.
+ */
+defaulted: boolean, };
+
+/**
+ * Who reviews the deliveries of a campaign (KT-1643).
+ */
+export type CampaignReviewerKind = "agent" | "remote_model" | "human";
 
 export type CampaignTaskCandidate = { task: PlanningTaskSummary, plan_position: number, launchable: boolean, reasons: Array<CampaignTaskReason>, };
 
@@ -6746,7 +6897,12 @@ quota_fallback: boolean,
  * The alternatives a single-task launch named for its own fallback. Empty
  * for a campaign, which falls back among `allowed_agents`.
  */
-quota_fallback_agents: Array<AgentType>, created_at: string, updated_at: string, };
+quota_fallback_agents: Array<AgentType>,
+/**
+ * KT-1643 — who reviews each delivery of this campaign, named when it was
+ * created. `None` only for a campaign that predates the field.
+ */
+reviewer?: CampaignReviewer | null, created_at: string, updated_at: string, };
 
 /**
  * The V1 shape is one implicit run per launch (`single_task`); `campaign` is
@@ -7316,6 +7472,29 @@ export type PortablePluginConfig = { source_config_id: string, server: McpServer
  * What a configuration-only export withheld from `server` (KT-1040).
  */
 placeholders?: Array<ExportPlaceholder>, };
+
+export type PreflightCheck = {
+/**
+ * `gh_installed`, `gh_auth`, `gh_scopes`, `repo_access`, `project`, `worker`.
+ */
+id: string, ok: boolean,
+/**
+ * What was found, or what to do about it.
+ */
+message: string, };
+
+export type PreflightReport = { ok: boolean, repo: string, target_branch: string, max_review_rounds: number, checks: Array<PreflightCheck>, project_id?: string, publication?: PublicationPlan,
+/**
+ * The remote model this instance proposes as the campaign's reviewer, when
+ * one is configured; the workflow passes it explicitly. Absent: the
+ * campaign room keeps its own setup.
+ */
+suggested_reviewer?: CampaignReviewer,
+/**
+ * The local agents a task can be launched on, for the workflow to pick
+ * its default worker from instead of assuming one is installed.
+ */
+workers: Array<AgentType>, };
 
 /**
  * 0.9.2-G — honest presence state, server-derived (never a bare "connected"
@@ -7927,6 +8106,39 @@ export type ProviderQuotaState = { provider: AgentType, blocked: boolean,
 reset_at: string | null, };
 
 export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost: CostAggregate, };
+
+export type PublicationMode = "maintainer" | "fork";
+
+/**
+ * Where the branch is pushed and what the pull request is opened with.
+ */
+export type PublicationPlan = { mode: PublicationMode,
+/**
+ * `owner/name` the pull request is opened against.
+ */
+base_repo: string, base_branch: string,
+/**
+ * `owner/name` the branch is pushed to.
+ */
+push_repo: string,
+/**
+ * `gh pr create --head`: `branch`, or `login:branch` from a fork.
+ */
+pr_head: string,
+/**
+ * The fork has to be created (`gh repo fork`) before the push.
+ */
+needs_fork: boolean,
+/**
+ * What publishing does, in order: the workflow's publish step runs
+ * exactly these, so the plan read here is the plan carried out.
+ */
+steps: Array<PublicationStep>, };
+
+/**
+ * One action of a publication.
+ */
+export type PublicationStep = { "action": "fork_repo", repo: string, } | { "action": "push", repo: string, branch: string, } | { "action": "open_pull_request", repo: string, base: string, head: string, };
 
 export type PublishLivePageRequest = { workflow_id?: string | null, workflow_run_id?: string | null, writes: Array<LivePageWrite>, };
 
@@ -10365,7 +10577,7 @@ terminal_stop?: string | null,
  * the run view grades it against the configured threshold. `None` on a
  * run recorded before this field existed.
  */
-output_bytes?: number | null, };
+output_bytes?: number, };
 
 /**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
@@ -10457,6 +10669,16 @@ tokens_used: number, };
  * from the agent or from a human reopening a long room — writes into it.
  */
 export type SummaryStrategy = "OnDemand" | "Off";
+
+/**
+ * Response for [`switch_quota_agent`].
+ */
+export type SwitchQuotaAgentResponse = {
+/**
+ * The run that owns the refused step (a sub-workflow child, when the
+ * wait is mirrored from one).
+ */
+run_id: string, step_name: string, agent: AgentType, };
 
 export type TaskBoardConfig = {
 /**
@@ -12573,7 +12795,7 @@ export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: st
  * that step's name, so the workflow card can warn without reading the
  * run's payload. The UI grades it against the configured threshold.
  */
-heaviest_output_bytes?: number | null, heaviest_output_step?: string | null, };
+heaviest_output_bytes?: number, heaviest_output_step?: string, };
 
 export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_lines?: number | null, require_approval: boolean, };
 

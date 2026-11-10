@@ -3150,6 +3150,94 @@ pub async fn create_feasibility_autopilot(
     create_as(state, parent_req, WorkflowWriter::Human).await
 }
 
+/// The two workflows `POST /api/workflows/templates/autocode-issue` installs.
+#[derive(Debug, serde::Serialize)]
+pub struct AutocodeIssueInstall {
+    pub contribute: Workflow,
+    pub publish: Workflow,
+}
+
+/// POST /api/workflows/templates/autocode-issue (KT-1643): installs the
+/// contribution workflows Kronn ships (start the campaign of an issue, publish
+/// its pull request), the same on every instance: they carry no project id, no
+/// URL, no instance value. Body `{ project_id? }`. Refused when they are
+/// already installed, so a second click never duplicates them, and refused
+/// (nothing created) while `python3`, which every step runs, does not resolve
+/// on this machine's PATH: the message names what to install.
+pub async fn create_autocode_issue(
+    State(state): State<AppState>,
+    Json(params): Json<crate::workflows::autocode_issue_template::AutocodeIssueParams>,
+) -> Json<ApiResponse<AutocodeIssueInstall>> {
+    // The PATH a step's child inherits (`child_env` keeps it), read the way
+    // Kronn reads every variable.
+    let path = crate::core::child_env::var_os("PATH");
+    install_autocode_issue(state, params, path.as_deref()).await
+}
+
+/// [`create_autocode_issue`] against a given `PATH`, so the refusal is testable
+/// without touching the process environment.
+pub(crate) async fn install_autocode_issue(
+    state: AppState,
+    params: crate::workflows::autocode_issue_template::AutocodeIssueParams,
+    path: Option<&std::ffi::OsStr>,
+) -> Json<ApiResponse<AutocodeIssueInstall>> {
+    use crate::workflows::autocode_issue_template as tpl;
+    if let Some(message) = crate::core::contribution::python_refusal(path) {
+        return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
+    }
+    let installed = state
+        .db
+        .with_conn(crate::db::workflows::list_workflows)
+        .await
+        .unwrap_or_default();
+    if let Some(existing) = installed
+        .iter()
+        .find(|wf| wf.name == tpl::CONTRIBUTE_NAME || wf.name == tpl::PUBLISH_NAME)
+    {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            format!(
+                "« {} » is already installed (workflow {}): open it from the Workflows page.",
+                existing.name, existing.id
+            ),
+        ));
+    }
+    let template = tpl::build_autocode_issue(&params);
+    let Json(contribute) =
+        create_as(state.clone(), template.contribute, WorkflowWriter::Human).await;
+    // A refusal of either creation is relayed as it came.
+    fn relayed(refusal: ApiResponse<Workflow>) -> Json<ApiResponse<AutocodeIssueInstall>> {
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            error: refusal.error,
+            error_code: refusal.error_code,
+            notice: refusal.notice,
+            readiness: None,
+        })
+    }
+    let Some(created) = contribute.data.clone() else {
+        return relayed(contribute);
+    };
+    let contribute = created;
+    let Json(publish) = create_as(state.clone(), template.publish, WorkflowWriter::Human).await;
+    match publish.data.clone() {
+        Some(publish) => Json(ApiResponse::ok(AutocodeIssueInstall {
+            contribute,
+            publish,
+        })),
+        None => {
+            // No half-installed pair: the first one goes, the error stays.
+            let id = contribute.id.clone();
+            let _ = state
+                .db
+                .with_conn(move |conn| crate::db::workflows::delete_workflow(conn, &id))
+                .await;
+            relayed(publish)
+        }
+    }
+}
+
 /// PUT /api/workflows/:id
 pub async fn update(
     State(state): State<AppState>,
@@ -6563,6 +6651,106 @@ pub(crate) async fn resume_interrupted_as(
         run_id: response_run_id,
         new_status: RunStatus::Running,
     }))
+}
+
+/// GET /api/workflows/active-runs
+///
+/// Every run that is not finished (KT-1657), a run parked on a provider quota
+/// included with the wake time of its wait. A bridge token sees the runs its
+/// own project owns, like the workflow list.
+pub async fn active_runs(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Json<ApiResponse<Vec<ActiveRunSummary>>> {
+    let visibility = run_visibility(&bridge);
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::workflows::list_active_runs(conn, visibility.as_ref())
+        })
+        .await
+    {
+        Ok(runs) => Json(ApiResponse::ok(runs)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// Response for [`switch_quota_agent`].
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct SwitchQuotaAgentResponse {
+    /// The run that owns the refused step (a sub-workflow child, when the
+    /// wait is mirrored from one).
+    pub run_id: String,
+    pub step_name: String,
+    pub agent: AgentType,
+}
+
+/// POST /api/workflow-runs/:run_id/quota-agent
+///
+/// Switches the agent of the Agent step a `WaitingQuota` run is parked on to
+/// another installed agent (KT-1657). The choice is stored on the run like a
+/// launch-time one, so the next resume (the operator's, or the engine's as
+/// soon as the new provider answers) runs the step on it. Operator-only: not
+/// on the bridge-token list.
+pub async fn switch_quota_agent(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    Json(choice): Json<StepAgentOverride>,
+) -> Json<ApiResponse<SwitchQuotaAgentResponse>> {
+    match switch_quota_agent_inner(&state, run_id, choice).await {
+        Ok(switched) => Json(ApiResponse::ok(switched)),
+        Err(message) => Json(ApiResponse::err(message)),
+    }
+}
+
+pub(crate) async fn switch_quota_agent_inner(
+    state: &AppState,
+    run_id: String,
+    choice: StepAgentOverride,
+) -> Result<SwitchQuotaAgentResponse, String> {
+    use crate::workflows::step_agents;
+    let run = state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
+        .await
+        .map_err(|error| format!("DB error: {error}"))?
+        .ok_or_else(|| "Run not found".to_string())?;
+    if run.status != RunStatus::WaitingQuota {
+        return Err(format!(
+            "Run {} is {:?}: only a run paused on a provider quota can switch the agent of its waiting step.",
+            run.id, run.status
+        ));
+    }
+    let leaf = state
+        .db
+        .with_conn(move |conn| crate::workflows::quota_wait::waiting_leaf(conn, run))
+        .await
+        .map_err(|error| error.to_string())?;
+    let key = step_agents::step_key(&leaf.step);
+    let requested: StepAgents = std::iter::once((key.clone(), choice.clone())).collect();
+    let resolved = admit_step_agents(state, &leaf.workflow, &requested).await?;
+    // Back on the step's own agent (nothing resolved): the stored choice goes away.
+    let context = step_agents::context_with_choice(&leaf.run, &key, resolved.get(&key))
+        .map_err(|error| error.to_string())?;
+    let leaf_id = leaf.run.id.clone();
+    let changed = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::set_quota_waiting_trigger_context(conn, &leaf_id, &context)
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))?;
+    if !changed {
+        return Err("The run resumed or ended while its agent was being switched.".into());
+    }
+    // The new provider may answer right away: ask it on the next engine pass.
+    crate::workflows::quota_wait::request_recheck();
+    Ok(SwitchQuotaAgentResponse {
+        run_id: leaf.run.id,
+        step_name: leaf.step.name,
+        agent: choice.agent,
+    })
 }
 
 /// Response for [`delete_batch_run`].

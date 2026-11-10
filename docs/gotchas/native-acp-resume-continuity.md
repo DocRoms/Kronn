@@ -7,7 +7,7 @@ directory. The discussion layer selects the resume identity and delta together;
 A first turn, incomplete checkpoint, missing marker or delta without a size
 saving uses the ordinary bounded full prompt and no resume identity.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
-[src: file: backend/src/agents/runner.rs:4502-4506#acp_resume_id]
+[src: file: backend/src/agents/runner.rs:4564-4568#acp_resume_id]
 
 ## Two boundaries, one completed turn
 
@@ -38,18 +38,18 @@ response and completed checkpoint are written in the same database transaction;
 an interrupted/failed turn or rolled-back write leaves no completed proof.
 [src: file: backend/src/db/sql/173_acp_completed_turn_checkpoint.sql:1-9]
 [src: file: backend/src/db/acp_runtime_sessions.rs:110-195#begin_turn]
-[src: file: backend/src/db/discussions.rs:1855-1879#insert_native_agent_message_with_checkpoint]
+[src: file: backend/src/db/discussions.rs:1865-1889#insert_native_agent_message_with_checkpoint]
 [src: file: backend/src/db/discussions.rs:1905-1913#checkpoint]
-[src: file: backend/src/db/discussions.rs:2157-2160#complete_turn]
+[src: file: backend/src/db/discussions.rs:2165-2168#complete_turn]
 
 Claude CLI-print retains its separate `claude_cli_print_v1` identity. Its init
 event and final response share the same per-turn store; ACP adapter identities
 are never tested against a CLI-print conversation file. The direct CLI retires
 old progress before spawning, even if the next init event never arrives; a
 database failure there prevents the spawn rather than leaving a stale frontier.
-[src: file: backend/src/agents/runner.rs:2880-2885#CLI_PRINT_RUNTIME]
-[src: file: backend/src/agents/runner.rs:3012-3067#prepare_cli_print_turn]
-[src: file: backend/src/agents/runner.rs:4740-4749#prepare_cli_print_turn]
+[src: file: backend/src/agents/runner.rs:2939-2944#CLI_PRINT_RUNTIME]
+[src: file: backend/src/agents/runner.rs:3071-3126#prepare_cli_print_turn]
+[src: file: backend/src/agents/runner.rs:4802-4811#prepare_cli_print_turn]
 [src: file: backend/src/api/discussions/streaming.rs:2657-2669#acp_delta]
 
 ## Negotiated resumption
@@ -69,8 +69,8 @@ The safe fresh-session fallback is restricted to absent resume capability or a
 positively identified missing session before a prompt is sent. Authentication,
 timeouts and ambiguous transport errors fail visibly. Prompt, cancellation and
 persistence failures are not followed by an automatic fresh-session replay.
-[src: file: backend/src/agents/runner.rs:5545-5601#resume_refused]
-[src: file: backend/src/agents/runner.rs:5933-5998#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:5611-5667#resume_refused]
+[src: file: backend/src/agents/runner.rs:5999-6064#acp_failure_diagnostic]
 
 OpenCode v1.18.27 defines a structured missing-session error using code -32602,
 the exact message `session not found: <id>` and `data.sessionId`. The transport
@@ -80,9 +80,9 @@ fallback. Unstructured upstream failures remain ambiguous rather than being
 guessed from a 404 or free text.
 [Pinned OpenCode error contract](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/acp/error.ts)
 [src: file: backend/src/acp.rs:156-161#PendingRequest]
-[src: file: backend/src/acp.rs:1142-1150#missing_session_id]
-[src: file: backend/src/acp.rs:1227-1231#JSON_RPC_INVALID_PARAMS]
-[src: file: backend/src/acp.rs:1233-1269#classify_response_error]
+[src: file: backend/src/acp.rs:1158-1166#missing_session_id]
+[src: file: backend/src/acp.rs:1241-1245#JSON_RPC_INVALID_PARAMS]
+[src: file: backend/src/acp.rs:1245-1281#classify_response_error]
 
 Each agent reply records which path its turn took in
 `messages.session_continuity`: `resumed`, `new` or `fallback_full_history`
@@ -91,7 +91,7 @@ discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
 [src: file: backend/src/api/discussions/streaming.rs:2759-2769#settle_turn_continuity]
-[src: file: backend/src/agents/runner.rs:6027-6042#resume_refused]
+[src: file: backend/src/agents/runner.rs:6093-6108#resume_refused]
 
 ## Deterministic qualification boundaries
 
@@ -109,10 +109,10 @@ Additional tests cover scope isolation, stale turn/session events, incomplete
 legacy progress and atomic response/checkpoint rollback. Existing ACP fixtures
 cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
-[src: file: backend/src/api/discussions/streaming.rs:8861-9180#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+[src: file: backend/src/api/discussions/streaming.rs:8912-9231#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
-[src: file: backend/src/agents/runner.rs:15763-15864#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
-[src: file: backend/src/agents/runner.rs:15921-16125#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
+[src: file: backend/src/agents/runner.rs:15870-15971#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
+[src: file: backend/src/agents/runner.rs:16028-16232#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
 
 These tests do not launch a live provider or qualify real model behavior.
 Kronn normalizes ACP token counts but does not yet normalize optional cumulative

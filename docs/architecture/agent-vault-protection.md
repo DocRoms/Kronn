@@ -130,23 +130,37 @@ exist on the host, as given and with their links resolved, in two tiers:
 
 | Tier | Stores | Hidden from |
 |---|---|---|
-| Other agents' | `~/.gemini`, `~/.codex`, `~/.claude.json`, `~/.claude/.credentials.json`, `~/.copilot`, `~/.config/github-copilot`, `~/.kiro`, `~/.local/share/kiro-cli`, `~/.vibe`, `~/.local/share/opencode`, `~/.config/opencode` | every confined launch, except the store of the agent that is running |
+| Other agents' | `~/.gemini`, `~/.codex`, `~/.claude.json`, `~/.claude/.credentials.json`, `~/.claude/settings.json`, `~/.claude/settings.local.json` (their `env` block, `apiKeyHelper` and `mcpServers.*.env` have the shape that leaked from `~/.gemini/settings.json`), `~/.copilot`, `~/.config/github-copilot`, `~/.kiro`, `~/.local/share/kiro-cli`, `~/.vibe`, `~/.local/share/opencode`, `~/.config/opencode` | every confined launch, except the store of the agent that is running |
 | Shared | `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.config/glab-cli`, `~/.config/hub`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`, `~/.yarnrc.yml`, `~/.pypirc`, `~/.cargo/credentials*`, `~/.docker/config.json`, `~/.kube/config`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.vault-token`, … | a **sandboxed** launch only |
 
-[src: file: backend/src/core/home_credentials.rs:164-180#hidden_in]
+[src: file: backend/src/core/home_credentials.rs:178-194#hidden_in]
 
 | Launch | Tiers hidden | Mechanism |
 |---|---|---|
 | Claude task worker, read-only review (its own sandbox) | both, **including Claude's own** (the CLI reads its login from outside the sandbox it gives its shell) | `sandbox.filesystem.denyRead` and a `Read(…)` rule per store; independent of the vault setting |
-| Codex `read-only` / `workspace-write` (replaced sandbox) | both, but Codex's own `~/.codex` | the Kronn profile / `bwrap` mounts |
-| Any agent in full access (CLI, ACP runtime) | other agents' | the Kronn profile / `bwrap` mounts |
+| **Any restricted launch**, whatever the agent (Claude, Codex, Gemini, Kiro, Copilot, Vibe, OpenCode, an ACP adapter), and a Codex `read-only` / `workspace-write` one | both, but the running agent's own store | the Kronn profile / `bwrap` mounts |
+| A launch the owner opened in **full access** (CLI, ACP runtime) | other agents' only | the Kronn profile / `bwrap` mounts |
 | The validations Kronn runs in a worker's tree | other agents' | the lane's sandbox |
 
-- The owner's rule above holds for an agent in full access: `~/.ssh`, `~/.aws`,
-  `gh` stay reachable, as in the owner's terminal. Only the sandboxed launches,
-  which never had them by design, lose them. The validations keep the shared
-  files readable: a package manager or the Docker CLI fails on a file it is
-  refused.
+- **The tier follows the launch's real trust level, not the kind of its
+  sandbox.** `vault_guard::launch_reach` gives `Reach::FullAccess` only to a
+  launch with no sandbox of its own that the owner opened in full access
+  (`try_spawn`'s `full_access`, which is `false` for a task worker and for a
+  launch under a read-only repository policy; the `full_access` of the ACP
+  adapter's broker; the one `spawn_native` verified). Every other launch,
+  including a restricted Gemini, Kiro, Copilot or Vibe CLI launch and a
+  restricted ACP adapter, is `Reach::Sandboxed`. A native ACP runtime starts only
+  with its full-access setting on, so it is always a full-access launch.
+  [src: file: backend/src/core/vault_guard.rs:548-554#launch_reach]
+- Owner decision (2026-11-10): the owner's rule above holds for an agent in full
+  access: `~/.ssh`, `~/.aws`, `gh` stay reachable, as in the owner's terminal.
+  Only the restricted launches lose them. The validations keep the shared files
+  readable: a package manager or the Docker CLI fails on a file it is refused.
+- **Independent of "Protect the Kronn vault from agents".** With the setting off,
+  `trust_sandbox::credential_confinement` still builds a confinement, which hides
+  the stores and no Kronn data; it is `None` only when the host has no sandbox, or
+  when the setting is off and there is no store to hide.
+  [src: file: backend/src/core/vault_guard.rs:566-581#launch_confinement_for]
 - A path that does not exist is not listed (bubblewrap cannot mount over it);
   a store created after the launch is not covered until the next one. A `HOME`
   other than the user's is not followed.
@@ -163,15 +177,20 @@ exist on the host, as given and with their links resolved, in two tiers:
   run without the variable still finds its store there. A relative value is
   ignored (it is relative to the working directory of the tool, which Kronn does
   not know), and so is one that names the home or a parent of it
-  (`GNUPGHOME=$HOME`), which would hide everything. The Gemini home override name
-  is the one the CLI documents as of this writing; check it against the CLI's
-  release notes when it changes.
-  [src: file: backend/src/core/home_credentials.rs:202-240#locations]
+  (`GNUPGHOME=$HOME`), which would hide everything. `GEMINI_CLI_HOME` was
+  verified against the installed Gemini CLI 0.66.0 (its bundled `homedir()` returns
+  `process.env["GEMINI_CLI_HOME"]` when set, else the OS home, and the global
+  directory is `<that home>/.gemini`, `oauth_creds.json` in it); it is not a
+  documented contract, so re-check it when the CLI is upgraded.
+  `CLAUDE_CONFIG_DIR` moves Claude's `.credentials.json`, `.claude.json`,
+  `settings.json` and `settings.local.json` alike.
+  [src: file: backend/src/core/home_credentials.rs:214-252#locations]
 - Linux masks a directory with an empty tmpfs and a file with `/dev/null`
   bound over it.
-- On a host with no sandbox, or with "Protect the Kronn vault from agents" off,
-  the wrapped launches (full access, Codex) are not confined, so these stores are
-  open to them; a Claude worker's settings carry the denial either way.
+- On a host with no sandbox the wrapped launches (full access, Codex, the other
+  CLIs, ACP) are not confined, so these stores are open to them; a Claude worker's
+  settings carry the denial either way. With "Protect the Kronn vault from
+  agents" off they are hidden all the same (see above).
 - **Stored output is masked, with a measured false-positive rate.** An Agent
   message is redacted when it is inserted (`db::discussions::mask_agent_output`
   → `core::redact::redact_agent_output`), irreversibly, and what a human typed is
@@ -189,13 +208,33 @@ exist on the host, as given and with their links resolved, in two tiers:
   call, a path, a URL). A quoted value counts from 8 characters, 6 under a
   `password`-like name; a `pin` name needs 4 to 12 digits. The price is the
   inverse risk: a short bare secret under a harmless name is stored as written.
+  A secret word followed by a qualifier (`key`, `value`, `string`, `str`) still
+  names a secret (`SECRET_KEY`, `TOKEN_VALUE`, `passwordString`): the value is then
+  judged by the same rules as under the bare word. The login files of the other
+  agents are masked by shape too: Google OAuth access (`ya29.…`) and refresh
+  (`1//0…`) tokens (`~/.gemini/oauth_creds.json`), GitHub fine-grained
+  `github_pat_…` and AWS STS `ASIA…` keys.
+- **Masked once, then fed everywhere.** `insert_message_inner` masks the content
+  one time and hands that text to the row, `ingest_message_proposals`,
+  `ingest_message_actions`, `ingest_message_questions` and
+  `audit_validation::on_agent_message`: a `kronn-*` fence that carries a token is
+  still ingested as a card, with the token masked in the card's own tables. The
+  streaming checkpoints (`set_partial_response`,
+  `set_partial_response_for_dispatch`) mask their text the same way, so
+  `discussions.partial_response` and the message a boot recovery makes of it hold
+  no clear secret.
   The regression samples are `AS_WRITTEN` in `db::insert_redaction_measure`.
-  [src: file: backend/src/core/redact.rs:644-651#redact_agent_output]
+  [src: file: backend/src/core/redact.rs:702-707#redact_agent_output]
 - **Measured on a corpus, not yet on a database.** `db::insert_redaction_measure`
   (ignored) runs the insert path over every Agent message of a copy of a database
   and/or over text files cut into message-sized chunks. On this repository (prose,
   code, hashes, git history: 21,926 chunks) the audit redaction changed 1,508 and
-  the insert path 227, each one reviewed: all are credential-shaped literals in
+  the insert path 227, each one reviewed. After the widening of round 3
+  (`ya29.` / `1//0` / `github_pat_` / `ASIA` shapes, secret-word names with a
+  qualifier), the same run over the merged tree (20,412 chunks, a corpus rebuilt
+  from the repository, so not the same chunks) changes 206 (1.0%; the audit
+  redaction 1,430); the changes the widening adds are all the fixtures of its own
+  tests. Each change is: all are credential-shaped literals in
   test fixtures and demo scripts (fake `sk-…` / `ghp_…` keys, `password=hunter2`,
   `postgres://user:secret@…`), none is prose, code that only names a token, a
   commit SHA, a UUID or a digest. The false positives the review found
@@ -226,7 +265,7 @@ transcript or tool output, and two passes read it:
 | `messages.content` | the transcript | 293 (Agent), audit |
 | `message_tombstones.content`, `message_revision_events.content` | the copy a deletion or an edit keeps | 293, audit |
 | `discussions.partial_response`, `discussions.summary_cache`, `disc_summary_ranges.summary` | a turn in flight, text written from the transcript | 293, audit |
-| `discussion_important_messages.payload_json`, `discussion_questions.{payload_json,answer_json,resume_error}` | excerpts and answers | 293, audit |
+| `discussion_important_messages.payload_json`, `discussion_questions.{payload_json,answer_json,resume_error}`, `discussion_actions.{values_json,diagnostic}`, `planning_proposal_items.{payload_json,rejected_reason}` | excerpts, answers, and the cards ingested from the `kronn-*` fences of a message | 293, audit |
 | `agent_dispatch_jobs.{last_error,progress_detail}`, `agent_resume_jobs.{result_json,last_error,reason}`, `shared_runs.{result_json,exec_details_json,diagnostic}` | job results and errors | 293, audit |
 | `task_execution_deliveries.manifest_json`, `task_execution_reviews.decision_json`, `task_execution_validation_runs.output`, `task_executions.{blocked_reason,outcome_reason}`, `task_execution_events.changes_json`, `delivery_summaries.canonical_json` | what a worker delivered, a principal decided, a command printed | 293, audit (by the execution's `sub_discussion_id`) |
 | `planning_task_dod_items.evidence`, `planning_task_events.changes_json`, `planning_tasks.{description,blocked_reason}`, `review_findings.evidence`, `learnings.evidence_json` | evidence and notes agents attach to tasks | 293 (audit for `learnings` by discussion) |

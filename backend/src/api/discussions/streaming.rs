@@ -4639,6 +4639,8 @@ pub(super) async fn make_agent_stream_inner(
                 let mut stream_json_usage: Option<runner::ReportedUsage> = None;
                 let mut stream_json_cost: Option<f64> = None;
                 let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
+                // KT-1599 — tools Claude refused, read off the final `result` line.
+                let mut refused_tools: Vec<String> = Vec::new();
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
                 // Scope a resumable conversation to the directory it ran in: a
                 // moved or regenerated worktree must not resume a thread that
@@ -4860,6 +4862,11 @@ pub(super) async fn make_agent_stream_inner(
                         );
                         // KT-1541 — a task worker's refused tool call is written
                         // into its transcript; no other run's stream is.
+                        for tool in runner::claude_permission_denials(&line) {
+                            if !refused_tools.contains(&tool) {
+                                refused_tools.push(tool);
+                            }
+                        }
                         let parsed = if cli_task_worker_context.is_some() {
                             runner::parse_claude_worker_stream_line(&line)
                         } else {
@@ -5940,6 +5947,50 @@ pub(super) async fn make_agent_stream_inner(
                         markers.len(),
                         disc_id
                     );
+                }
+
+                // ── KT-1599 — headless permission denials ──────────────
+                // `--print` has no permission channel: a refused tool only shows
+                // up in the final `result` line. Say so as a System message.
+                if !refused_tools.is_empty() {
+                    let sys_msg = DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
+                        session_continuity: None,
+                        kind: Default::default(),
+                        model: None,
+                        lint_report: None,
+                        id: Uuid::new_v4().to_string(),
+                        role: MessageRole::System,
+                        channel: MessageChannel::Main,
+                        content: runner::permission_denials_message(&refused_tools),
+                        agent_type: None,
+                        timestamp: Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: dispatch_trigger_message_id.clone(),
+                    };
+                    let did_sys = disc_id.clone();
+                    let m = sys_msg.clone();
+                    if let Err(e) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussions::insert_message(conn, &did_sys, &m)
+                        })
+                        .await
+                    {
+                        tracing::warn!("Failed to persist permission denial notice: {e}");
+                    } else {
+                        crate::api::federation::federate_message(&state, &disc_id, &sys_msg).await;
+                    }
                 }
 
                 // ── HTTP provider retry trace ──────────────────────────

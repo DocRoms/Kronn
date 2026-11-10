@@ -91,12 +91,12 @@ first turn; history-tool discovery remains deferred until the third user
 message. This instruction contract does not imply a live provider validation
 or change session-resume and pricing limitations.
 [src: file: backend/src/api/disc_prompts.rs:1123-1153#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
-[src: file: backend/src/acp.rs:1570-1609#native_session_mcp_servers]
+[src: file: backend/src/acp.rs:1582-1621#native_session_mcp_servers]
 
 The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
-[src: file: backend/src/db/orchestration.rs:244-258#agent_type_from_db]
+[src: file: backend/src/db/orchestration.rs:250-264#agent_type_from_db]
 [src: file: backend/src/db/orchestration_tests.rs:4340-4373#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
@@ -116,9 +116,9 @@ the same job.
   not qualify live model behavior or KT-577's long-lived Claude process.
   See [native ACP continuity](../gotchas/native-acp-resume-continuity.md) for the
   negotiated `session/resume` contract and exact proof boundaries.
-  [src: file: backend/src/agents/runner.rs:2892-2952#load_completed_checkpoint]
+  [src: file: backend/src/agents/runner.rs:2951-3011#load_completed_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2626-2757#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8861-9182#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8912-9233#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -127,7 +127,7 @@ the same job.
   reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
-  [src: file: backend/src/acp.rs:1433-1455#usage_from_prompt_result]
+  [src: file: backend/src/acp.rs:1445-1467#usage_from_prompt_result]
   [src: file: backend/src/acp/claude_adapter.rs:450-467#Cost]
 - **Statistics distinguish missing cost from a recorded zero.** Token-usage
   aggregates retain recorded amounts, fresh pricing estimates and unpriced
@@ -151,7 +151,7 @@ the same job.
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3907-3925#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:3966-3984#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -171,9 +171,9 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:5986-5996#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:15866-16147#run_acp_session_streams_usage_through_agent_process]
-[src: file: backend/src/core/redact.rs:568-596#redact_for_audit_artifact]
+[src: file: backend/src/agents/runner.rs:6052-6062#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:15973-16254#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/core/redact.rs:626-654#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
 
@@ -228,5 +228,5 @@ explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1372-1380#currentConnectionId]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1190-1207#agentSettingsForSelection]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1202-1219#agentSettingsForSelection]
 [src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]

@@ -73,6 +73,83 @@ mod tests {
             .is_some_and(|doctrine| doctrine.starts_with("## Authoring doctrine")));
     }
 
+    /// KT-1657 — the route lists a run paused on a provider quota with its
+    /// wake time (it holds a concurrency slot), and routes `workflows/active-runs`
+    /// before `workflows/{id}`.
+    #[tokio::test]
+    async fn active_runs_route_lists_a_quota_paused_run_with_its_wake_time() {
+        let state = test_state();
+        let run: crate::models::WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-paused", "workflow_id": "wf-paused", "status": "WaitingQuota",
+            "trigger_context": null, "tokens_used": 0, "workspace_path": null,
+            "started_at": "2026-11-09T16:19:00Z", "finished_at": null, "run_type": "linear",
+            "batch_total": 0, "batch_completed": 0, "batch_failed": 0, "batch_no_response": 0,
+            "batch_name": null, "parent_run_id": null, "state": {}, "produced_branches": [],
+            "concurrency_key": null, "project_id": null,
+            "step_results": [{
+                "step_name": "Agent", "status": "WaitingQuota", "output": "", "duration_ms": 0,
+                "step_agent": "ClaudeCode",
+                "quota_wait": {
+                    "id": "w1", "reset_at": "2026-11-11T02:00:00Z",
+                    "wake_at": "2026-11-11T02:02:00Z", "attempt": 1
+                }
+            }]
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::resource_identities::tests::seed_workflow(
+                    conn,
+                    "wf-paused",
+                    "PR Review v3.4",
+                    None,
+                );
+                crate::db::workflows::insert_run(conn, &run)
+            })
+            .await
+            .unwrap();
+
+        let (status, body) = send(
+            state,
+            false,
+            Request::builder()
+                .uri("/api/workflows/active-runs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "{body}");
+        let runs = body["data"].as_array().expect("a list");
+        assert_eq!(runs.len(), 1, "{body}");
+        assert_eq!(runs[0]["run_id"], "run-paused");
+        assert_eq!(runs[0]["workflow_name"], "PR Review v3.4");
+        assert_eq!(runs[0]["status"], "WaitingQuota");
+        assert_eq!(runs[0]["quota"]["step_name"], "Agent");
+        assert_eq!(runs[0]["quota"]["agent"], "ClaudeCode");
+        assert_eq!(runs[0]["quota"]["wake_at"], "2026-11-11T02:02:00Z");
+        assert_eq!(runs[0]["quota"]["reset_at"], "2026-11-11T02:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn quota_agent_route_refuses_an_unknown_run() {
+        let (status, body) = send(
+            test_state(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflow-runs/nope/quota-agent")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"agent":"Codex"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], false);
+        assert_eq!(body["error"], "Run not found");
+    }
+
     /// Build a test AppState with a specific auth token configured.
     fn test_state_with_token(token: &str) -> AppState {
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));

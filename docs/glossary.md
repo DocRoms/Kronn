@@ -88,7 +88,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **customized_contexts** — `Vec<String>` of `"slug:projectId"` pairs in `McpOverview` where the context file has been customized (not default template). Used by frontend to color FileText icons.
 
-**AgentType** — Enum: `ClaudeCode`, `Codex`, `OpenCode`, `Vibe`, `GeminiCli`, `Kiro`, `CopilotCli`, `Ollama`, `LiteLlm`, `Nvidia`, `Custom`. Determines which CLI/HTTP runtime to spawn. `DeepSeek` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode, but not passed to a task worker) and `--wrap never` for clean output. `[src: file: backend/src/models/setup.rs:1049-1089#AgentType]` `[src: file: backend/src/agents/runner.rs:13974-13983#Kiro]`
+**AgentType** — Enum: `ClaudeCode`, `Codex`, `OpenCode`, `Vibe`, `GeminiCli`, `Kiro`, `CopilotCli`, `Ollama`, `LiteLlm`, `Nvidia`, `Custom`. Determines which CLI/HTTP runtime to spawn. `DeepSeek` planned. Kiro uses `--trust-all-tools` (mandatory in `--no-interactive` mode, but not passed to a task worker) and `--wrap never` for clean output. `[src: file: backend/src/models/setup.rs:1049-1089#AgentType]` `[src: file: backend/src/agents/runner.rs:14063-14072#Kiro]`
 
 **scan_depth** — Configurable depth for git repository scanning (2–10, default 4). Stored in `ScanConfig.scan_depth` in config.toml. Adjustable via UI slider in Config page. API: `GET/POST /api/config/scan-depth`.
 
@@ -256,7 +256,7 @@ Cron and Watch take an optional IANA `timezone`; without one they follow Kronn's
 
 **CompressionSection** — React component (`frontend/src/components/settings/CompressionSection.tsx`) rendering the "Mode économique" card at the top of the Agents list. Three activation states (none/partial/all), one-click CTA, install modal when RTK binary is absent, live savings counter from `GET /api/rtk/savings`, 3-card details expand, sobriety (?) tooltip. Attribution always visible: "Propulsé par RTK (open source)".
 
-**ActiveRunsPopover** — React component (`frontend/src/components/workflows/ActiveRunsPopover.tsx`) rendered from the Dashboard nav when `runningWorkflows > 0`. Clicking the Automatisation nav button opens it instead of navigating; lists every running/pending workflow run with a live elapsed timer and a one-click `⏹ Arrêter`. Closed by Esc, outside-click, or re-click (the nav button swallows `mousedown` to avoid the outside-close + onClick-toggle race).
+**ActivityBell / ActivityPanel** — React components (`frontend/src/components/activity/ActivityBell.tsx`, `ActivityPanel.tsx`) of the permanent header bell (KT-1658) that replaced `ActiveRunsPopover`, `ActiveAuditsPopover` and the « N en cours » text. The bell rings while something runs, carries a counter for what waits for the owner, and opens a panel of compartments (`En cours` now; `Attend une décision` and `Terminé non-vu` reserved for KT-334). Backed by `GET /api/activity`, which derives generic `ActivityRow`s (type / state / source) from `agent_dispatch_jobs`, `workflow_runs`, `task_executions` and the audit tracker, with no notification store. See `docs/architecture/ui-structure.md` § Attention center.
 
 **ActiveRunsPopover savings parser** — Defensive JSON navigator in `backend/src/api/rtk.rs::savings` that handles RTK 0.37 shape (`summary.total_saved` / `summary.avg_savings_pct` / `summary.total_commands`) with fallbacks on legacy top-level keys. Returns `available: false` when parsing fails so the UI cleanly hides the counter. A regression test embeds a real user-provided payload.
 

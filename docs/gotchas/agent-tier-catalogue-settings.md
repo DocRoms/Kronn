@@ -92,7 +92,7 @@ that distinction, including an existing historical identity assigned to another
 tier and a refusal for the explicitly configured unavailable model.
 [src: file: backend/tests/model_catalog_migration.rs:220-271#an_existing_historical_identity_keeps_its_other_tier_and_explicit_configuration]
 [src: file: backend/tests/model_catalog_migration.rs:273-332#one_configured_identity_can_still_resolve_multiple_explicit_tiers]
-[src: file: backend/src/agents/runner.rs:3555-3627#configured_model_flag]
+[src: file: backend/src/agents/runner.rs:3614-3686#configured_model_flag]
 
 Qualification on backend tree `189eb0f577ac44372ea5e85540ff5052321729e7`:
 the first five migration controls produced four failures on unchanged code;
@@ -127,8 +127,8 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
 [src: file: frontend/src/components/ChatHeader.tsx:315#currentModel]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1645-1676#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3281-3282#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1657-1688#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3301-3302#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -284,8 +284,8 @@ same agent family and tier is still a real target change, not a no-op. Merely
 opening, editing or rereading the catalogue preserves the saved overrides.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:307-336#renderAgentTierPicker]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1190-1222#changeStepAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1645-1676#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1202-1234#changeStepAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1657-1688#changeQuickPromptAgent]
 
 The creation wizard, full editor, inline inspector, pipeline and QP card receive
 the configured named targets. Their selectors display the saved explicit model
@@ -321,9 +321,9 @@ clear the old override only when the persisted agent, tier or connection
 actually changes. Each setter updates its field and clears the model in the
 same SQL statement. Resending an unchanged selection preserves its override;
 ordinary title edits and historical message models remain untouched.
-[src: file: backend/src/db/discussions.rs:1113-1121#update_discussion_tier]
-[src: file: backend/src/db/discussions.rs:1161-1192#update_discussion_agent]
-[src: file: backend/src/db/discussions.rs:1207-1222#update_discussion_connection]
+[src: file: backend/src/db/discussions.rs:1121-1129#update_discussion_tier]
+[src: file: backend/src/db/discussions.rs:1169-1200#update_discussion_agent]
+[src: file: backend/src/db/discussions.rs:1215-1230#update_discussion_connection]
 
 An explicit JSON `connection_id: null` is distinct from an absent field.
 Clearing a connection is validated against the effective agent before any
@@ -334,7 +334,7 @@ merely to compare targets.
 [src: file: backend/src/models/discussions.rs:609-618#connection_id]
 [src: file: backend/src/api/discussions/crud.rs:1013-1043#validate_connection_target]
 [src: file: backend/src/api/discussions/crud.rs:1086-1110#invalidate_summary_cache]
-[src: file: backend/src/db/discussions.rs:1102-1111#get_discussion_agent]
+[src: file: backend/src/db/discussions.rs:1110-1119#get_discussion_agent]
 
 Seven isolated Router/SQLite regressions cover changed and unchanged targets,
 null versus absent, invalid-target refusal and historical answer preservation.

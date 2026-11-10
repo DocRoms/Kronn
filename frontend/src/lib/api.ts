@@ -1,6 +1,6 @@
 import type { AcceptAuditStepResponse, ActivateQuickExecRequest, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange, QuickExecPendingApproval } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
-import type { WorkerConnectivity, WorkersConfig } from '../types/generated';
+import type { ActivityOverview, WorkerConnectivity, WorkersConfig } from '../types/generated';
 import type { ComfyUiConfig, ComfyUiStatus, ExternalApiConnection, SetComfyUiSlotsRequest, SetComfyUiSettingsRequest, SetComfyUiModelFamilyRequest } from '../types/generated';
 import type {
   DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
@@ -229,6 +229,9 @@ import type {
   DecideRunRequest,
   DecideRunResponse,
   ResumeInterruptedRequest,
+  ActiveRunSummary,
+  StepAgentOverride,
+  SwitchQuotaAgentResponse,
   ImportWorkflowRequest,
   WorkflowImportPreview,
   ImportQuickPromptRequest,
@@ -278,6 +281,7 @@ import type {
   UpdateLivePageRequest,
   LinkLivePageDiscussionRequest,
   CampaignTaskCandidate as GeneratedCampaignTaskCandidate,
+  CampaignReviewer,
   CampaignWorkerSelection,
   ExecutionDiscussionLink,
   IntegrationStrategy,
@@ -872,6 +876,11 @@ export interface HealthInfo {
   in_docker: boolean;
 }
 
+/** KT-1658 — the attention center: everything running in Kronn, derived on read. */
+export const activity = {
+  overview: () => api<ActivityOverview>('GET', '/activity'),
+};
+
 export const health = {
   /** `GET /api/health` — unauthed and NOT enveloped (raw JSON), so it bypasses
    *  the `api<T>()` `{success,data}` unwrap. */
@@ -1239,8 +1248,8 @@ export const projects = {
   auditStatus: (id: string) => api<AuditProgress | null>('GET', `/projects/${id}/audit-status`),
   /**
    * 0.8.3 (#288) — fleet-wide list of audits currently in progress
-   * across every project. Powers the ActiveAuditsPopover on the
-   * Projets nav button. Returns `[]` when nothing is running.
+   * across every project. Powers the Projets nav badge and the
+   * activity bell (KT-1658). Returns `[]` when nothing is running.
    */
   auditStatusAll: () => api<AuditProgress[]>('GET', '/audit-status'),
   /**
@@ -2983,6 +2992,14 @@ export const workflows = {
     api<{ run_id: string; new_status: string }>(
       'POST', `/workflow-runs/${runId}/resume`, request
     ),
+  /** KT-1657 — every unfinished run; a run paused on a provider quota
+   *  carries `quota.wake_at`. */
+  activeRuns: () => api<ActiveRunSummary[]>('GET', '/workflows/active-runs'),
+  /** KT-1657 — move the refused step of a quota-paused run to another
+   *  installed agent (the run keeps waiting; resume it or let the provider
+   *  re-check wake it). */
+  switchQuotaAgent: (runId: string, choice: StepAgentOverride) =>
+    api<SwitchQuotaAgentResponse>('POST', `/workflow-runs/${runId}/quota-agent`, choice),
   /** 0.7.0 Phase 4 — submit operator's decision on a paused (Gate) run.
    *  `decision` ∈ "approve" | "request_changes" | "reject".
    *  `comment` is required for request_changes (the agent needs feedback).
@@ -3926,6 +3943,8 @@ export interface CreateCampaignRequest {
   auto_continue?: boolean;
   /** Explicit opt-in: move to another allowed provider on quota exhaustion, and back after the reset. */
   quota_fallback?: boolean;
+  /** Who reviews each delivery. Omitted: a configured remote model, else you. */
+  reviewer?: CampaignReviewer | null;
 }
 
 export const orchestration = {

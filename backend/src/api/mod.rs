@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod agent_api;
 pub mod agent_jobs;
 pub mod agent_tools;
@@ -15,6 +16,7 @@ pub mod comfyui;
 pub mod compare;
 pub mod contacts;
 pub mod context_audit;
+pub mod contribution;
 pub mod debug;
 pub mod default_contents;
 pub mod delivery_publication;
