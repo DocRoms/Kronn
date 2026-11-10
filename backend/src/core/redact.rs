@@ -236,6 +236,25 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
         "gh*_***REDACTED***",
         Gate::Contains(&["ghp_", "gho_", "ghs_", "ghu_", "ghr_"]),
     ),
+    // GitHub fine-grained personal access tokens (`github_pat_<22>_<59>`): the
+    // `gh*_` shape above does not read them (KT-1656).
+    (
+        r"\bgithub_pat_[A-Za-z0-9_]{30,}\b",
+        "github_pat_***REDACTED***",
+        Gate::Contains(&["github_pat_"]),
+    ),
+    // Google OAuth access (`ya29.…`) and refresh (`1//0…`) tokens, the ones of
+    // `~/.gemini/oauth_creds.json` and of `gcloud` (KT-1656).
+    (
+        r"\bya29\.[A-Za-z0-9_-]{20,}",
+        "ya29.***REDACTED***",
+        Gate::Contains(&["ya29."]),
+    ),
+    (
+        r"\b1//0[A-Za-z0-9_-]{40,}",
+        "1//0***REDACTED***",
+        Gate::Contains(&["1//0"]),
+    ),
     // Slack tokens (bot, user, app, app-level, webhook).
     (
         r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b",
@@ -254,6 +273,12 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
         r"\bAKIA[0-9A-Z]{16}\b",
         "AKIA***REDACTED***",
         Gate::Contains(&["AKIA"]),
+    ),
+    // AWS temporary (STS) access keys: the `ASIA` twin of `AKIA` (KT-1656).
+    (
+        r"\bASIA[0-9A-Z]{16}\b",
+        "ASIA***REDACTED***",
+        Gate::Contains(&["ASIA"]),
     ),
     // Stripe live + restricted keys (rk_live_*, rk_test_*, pk_live_*, etc.).
     // Note `${1}_${2}_` (not `$1_$2_`): regex_lite parses `$1_` as a
@@ -456,8 +481,44 @@ pub fn looks_like_secret(input: &str) -> bool {
 // excludes quotes, so it can't consume a quoted value itself).
 const ASSIGNMENT_NAMES: &str = r"secret|apikey|api[_-]?key|passwd|password|pwd|pin|passcode|passphrase|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|hmac[_-]?key|client[_-]?secret|token";
 
+/// What can follow a secret word in a name that still holds the secret
+/// (`SECRET_KEY`, `TOKEN_VALUE`, `passwordString`): KT-1656. A name is otherwise
+/// read by its *last* word (`APP_SECRET`, `iris_token`).
+const NAME_QUALIFIERS: &[&str] = &["key", "value", "string", "str"];
+
+/// `name` (lowercase bytes) without a trailing qualifier of [`NAME_QUALIFIERS`]
+/// and the `_` / `-` before it; `None` when it has none, or nothing else.
+fn without_qualifier(name: &[u8]) -> Option<&[u8]> {
+    NAME_QUALIFIERS.iter().find_map(|qualifier| {
+        let qualifier = qualifier.as_bytes();
+        let split = name.len().checked_sub(qualifier.len())?;
+        if !name[split..].eq_ignore_ascii_case(qualifier) {
+            return None;
+        }
+        let stem = name[..split]
+            .strip_suffix(b"_")
+            .or_else(|| name[..split].strip_suffix(b"-"));
+        let stem = stem.unwrap_or(&name[..split]);
+        (!stem.is_empty()).then_some(stem)
+    })
+}
+
+/// Whether `name` ends with a secret word of [`ASSIGNMENT_NAMES`], with or
+/// without a [`NAME_QUALIFIERS`] word after it.
+fn ends_with_secret_word(name: &[u8], tails: &[Vec<u8>]) -> bool {
+    let ends = |name: &[u8]| {
+        tails.iter().any(|tail| {
+            name.len() >= tail.len() && name[name.len() - tail.len()..].eq_ignore_ascii_case(tail)
+        })
+    };
+    ends(name) || without_qualifier(name).is_some_and(ends)
+}
+
 static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
-    let name = format!("[a-z0-9_.-]*(?:{ASSIGNMENT_NAMES})");
+    let name = format!(
+        "[a-z0-9_.-]*(?:{ASSIGNMENT_NAMES})(?:[_-]?(?:{NAME_QUALIFIERS}))?",
+        NAME_QUALIFIERS = NAME_QUALIFIERS.join("|"),
+    );
     let quoted_dq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)\"((?:\\\\.|[^\"\\\\])+)\"");
     let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\.|[^'\\\\])+)'");
     let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\.|[^`\\\\])+)`");
@@ -558,10 +619,7 @@ fn assignment_gate(text: &str, quote: Option<u8>, quoted_key: bool) -> bool {
             };
             before = unquoted.strip_suffix(b"\\").unwrap_or(unquoted);
         }
-        tails.iter().any(|tail| {
-            before.len() >= tail.len()
-                && before[before.len() - tail.len()..].eq_ignore_ascii_case(tail)
-        })
+        ends_with_secret_word(before, tails)
     })
 }
 
@@ -776,6 +834,10 @@ fn is_placeholder(value: &str) -> bool {
 fn value_is_credential(name: &str, value: &str, quoted: bool) -> bool {
     let value = value.trim();
     let name = name.to_ascii_lowercase();
+    // `SECRET_KEY` is a secret, `PIN_VALUE` a pin: the qualifier is not the word.
+    let name = without_qualifier(name.as_bytes())
+        .and_then(|stem| std::str::from_utf8(stem).ok())
+        .map_or(name.clone(), str::to_owned);
     if is_placeholder(value) || value.chars().any(char::is_whitespace) {
         return false;
     }
@@ -900,12 +962,9 @@ fn is_credential_key(key: &str) -> bool {
     if JSON_CREDENTIAL_KEYS.contains(&key) {
         return true;
     }
-    let key = key.as_bytes();
-    ASSIGNMENT_TAILS.as_ref().is_some_and(|tails| {
-        tails.iter().any(|tail| {
-            key.len() >= tail.len() && key[key.len() - tail.len()..].eq_ignore_ascii_case(tail)
-        })
-    })
+    ASSIGNMENT_TAILS
+        .as_ref()
+        .is_some_and(|tails| ends_with_secret_word(key.as_bytes(), tails))
 }
 
 /// Runs `redact` on `input`, one JSON string at a time when `input` is a JSON
@@ -1880,6 +1939,121 @@ mod tests {
         }
     }
 
+    // ── KT-1656: the shapes of the other agents' login files ───────────
+
+    const GOOGLE_ACCESS: &str = "ya29.a0AfH6SMBx3Zk9QwErTyUiOpAsDfGhJkLzXcVbNm12345";
+    const GOOGLE_REFRESH: &str =
+        "1//0gAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEfGhIjKlMnOpQrStUv";
+    const GITHUB_FINE_GRAINED: &str =
+        "github_pat_11ABCDEFG0abcdefghijkl_0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijk";
+    const AWS_STS: &str = "ASIAY34FZKBOKMUTVV7A";
+
+    fn login_shapes() -> [&'static str; 4] {
+        [GOOGLE_ACCESS, GOOGLE_REFRESH, GITHUB_FINE_GRAINED, AWS_STS]
+    }
+
+    #[test]
+    fn google_oauth_fine_grained_github_and_sts_tokens_are_masked_bare() {
+        for secret in login_shapes() {
+            let text = format!("the token is {secret} and that is all");
+            for out in [
+                redact_secrets(&text),
+                redact_agent_output(&text),
+                redact_known_shapes(&text),
+            ] {
+                assert!(!out.contains(secret), "{secret} survived: {out}");
+                assert!(out.contains("***REDACTED***"), "{out}");
+                assert!(out.starts_with("the token is "), "{out}");
+                assert!(out.ends_with(" and that is all"), "{out}");
+            }
+            assert!(looks_like_secret(&text), "{secret}");
+        }
+    }
+
+    #[test]
+    fn an_oauth_creds_file_is_masked_with_and_without_its_keys() {
+        // `~/.gemini/oauth_creds.json` as printed, and the same values under
+        // names no key pattern reads.
+        let creds = format!(
+            r#"{{"access_token": "{GOOGLE_ACCESS}", "refresh_token": "{GOOGLE_REFRESH}", "scope": "openid", "token_type": "Bearer", "expiry_date": 1760000000000}}"#
+        );
+        let renamed = format!(
+            r#"{{"a": "{GOOGLE_ACCESS}", "b": "{GOOGLE_REFRESH}", "c": "{GITHUB_FINE_GRAINED}", "d": "{AWS_STS}"}}"#
+        );
+        for text in [creds, renamed] {
+            for out in [
+                redact_agent_output(&text),
+                redact_known_shapes(&text),
+                redact_secrets(&text),
+            ] {
+                for secret in login_shapes() {
+                    assert!(!out.contains(secret), "{secret} survived: {out}");
+                }
+                serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_shapes_leave_ordinary_text_alone() {
+        for text in [
+            "see ya29 and ya29.x",
+            "the 1//0 route and 1//a/b/c",
+            "github_pat_ is the prefix, github_pat_short too",
+            "ASIA, ASIAN and ASIAPACIFICREGION are words",
+            "ASIA0123456789ABCDEFG is one char too long to be a key",
+            "https://example.com/1//0/short",
+        ] {
+            assert_eq!(redact_agent_output(text), text, "{text}");
+            assert_eq!(redact_known_shapes(text), text, "{text}");
+        }
+        // A placeholder with a vendor shape stays as written in agent output.
+        let placeholder = "ya29.xxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        assert_eq!(redact_agent_output(placeholder), placeholder);
+    }
+
+    #[test]
+    fn a_secret_word_followed_by_a_qualifier_still_names_a_secret() {
+        for text in [
+            "SECRET_KEY=django-insecure-8f3a9c2e7d41b6",
+            "export TOKEN_VALUE=8f3a9c2e7d41b6a0",
+            "secret-key: 'plainSecretValue1'",
+            "TOKEN_VALUE = \"plainTokenValue1\"",
+            "passwordString=\"hunter22\"",
+            "SECRET_VALUE: s3cr3tValue-0042",
+        ] {
+            let out = redact_agent_output(text);
+            assert!(out.contains("***REDACTED***"), "{text} -> {out}");
+            assert_eq!(redact_agent_output(&out), out, "idempotent: {out}");
+            let audit = redact_for_audit_artifact(text).0;
+            assert!(audit.contains("***REDACTED***"), "{text} -> {audit}");
+        }
+        let env_block = r#"{"env": {"TOKEN_VALUE": "plainTokenValue1", "SECRET_KEY": "plainSecretKey-42", "LOG_LEVEL": "debug"}}"#;
+        let out = redact_agent_output(env_block);
+        assert!(!out.contains("plainTokenValue1"), "{out}");
+        assert!(!out.contains("plainSecretKey-42"), "{out}");
+        assert!(out.contains("\"LOG_LEVEL\": \"debug\""), "{out}");
+        serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+        assert!(!redact_known_shapes(env_block).contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn a_qualifier_does_not_turn_code_or_prose_into_a_secret() {
+        for text in [
+            "SECRET_KEY: String,",
+            "let token_value: u64 = 0;",
+            "token_value = compute(input)",
+            "secret_key = os.environ[\"SECRET_KEY\"]",
+            "\"secret_key\": \"<your key>\"",
+            "TOKEN_VALUE=$TOKEN_VALUE",
+            "tokenizer_key=abcdefghijkl1234",
+            "monkey_value=abcdefghijkl1234",
+            "the secret key is rotated yearly",
+        ] {
+            assert_eq!(redact_agent_output(text), text, "{text}");
+        }
+    }
+
     #[test]
     fn redact_is_idempotent() {
         let s = "Authorization: Bearer abc123def456ghi789jklmn AIzaSy0123456789012345678901234567";
@@ -2265,6 +2439,12 @@ mod tests {
             "xoxb-",
             "eyJ",
             "AKIA",
+            "ASIA",
+            "github_pat_",
+            "ya29.",
+            "1//0",
+            "SECRET_KEY",
+            "TOKEN_VALUE",
             "rk_live_",
             "pk_test_",
             "abcdefghijklmnopqrstuvwxyz",

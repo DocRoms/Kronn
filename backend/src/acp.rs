@@ -821,6 +821,12 @@ pub struct NativeLaunchEnv {
     pub bridge_token: Option<String>,
     /// `core::github_connection::env_for_launch` for the agent's project (D2).
     pub github_env: Vec<(String, String)>,
+    /// Whether the owner opened this launch in full access (KT-1656): the
+    /// launch then keeps the shared credential stores of the home readable
+    /// (`~/.ssh`, `~/.aws`, …). `false` by default, so a launch that does not
+    /// say loses them. [`AcpJsonRpcTransport::spawn_native`] sets it from the
+    /// `full_access` it verified.
+    pub full_access: bool,
 }
 
 fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
@@ -844,6 +850,7 @@ fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
 /// not own (a Gemini runtime cannot read `~/.codex`).
 fn vault_confined(
     family: crate::core::child_env::AgentFamily,
+    full_access: bool,
     program: &str,
     args: &[&str],
 ) -> (String, Vec<String>) {
@@ -852,6 +859,7 @@ fn vault_confined(
         crate::core::vault_guard::launch_confinement_for(
             family,
             crate::core::vault_guard::LaunchSandbox::None,
+            full_access,
         )
         .as_ref(),
         crate::core::vault_guard::LaunchSandbox::None,
@@ -878,7 +886,7 @@ fn native_command(
     // to the OS sandbox, like every other agent launch (`runner::try_spawn`).
     // The arguments appended later (the bridge declaration) land after the
     // program's own, behind the launcher.
-    let (program, args) = vault_confined(family, program, args);
+    let (program, args) = vault_confined(family, launch.full_access, program, args);
     let mut command = crate::core::cmd::async_cmd(&program, route);
     command.args(&args).current_dir(cwd);
     child_env::reset(command.as_std_mut(), route);
@@ -968,6 +976,10 @@ impl AcpJsonRpcTransport {
         if let Some(refusal) = native_acp_wsl_only_refusal(program) {
             return Err(AcpError::Transport(refusal));
         }
+        let launch = NativeLaunchEnv {
+            full_access,
+            ..launch
+        };
         let mut command =
             native_command(agent, program, &args, cwd, &launch).map_err(AcpError::Transport)?;
         let bridge_env =
@@ -2196,6 +2208,7 @@ mod tests {
             api_key: Some("kronn-stored-gemini-key".into()),
             bridge_token: Some("kbt_native".into()),
             github_env: Vec::new(),
+            full_access: true,
         };
         let command = crate::core::child_env::with_parent_env(
             &[
@@ -2351,6 +2364,7 @@ mod tests {
         assert_eq!(
             vault_confined(
                 crate::core::child_env::AgentFamily::Other,
+                true,
                 &stub,
                 &["--acp"]
             ),
@@ -2359,6 +2373,7 @@ mod tests {
         crate::core::vault_guard::set_test_wrap(true);
         let wrapped = vault_confined(
             crate::core::child_env::AgentFamily::Other,
+            true,
             &stub,
             &["--acp"],
         );

@@ -332,7 +332,7 @@ pub fn wrap_launch(
         return (
             program,
             args,
-            Confined::Unchanged("vault protection is off"),
+            Confined::Unchanged("vault protection is off or the host has no sandbox"),
         );
     };
     match sandbox {
@@ -538,22 +538,55 @@ pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
     }
 }
 
+/// The tier of home credential stores a launch loses (KT-1656), from its real
+/// trust level and not from the kind of its sandbox. Only a launch the owner
+/// opened in full access, with no sandbox of its own, keeps the shared stores
+/// (`~/.ssh`, `~/.aws`, `~/.config/gh`, …), as the tools of the owner's
+/// terminal; every other launch (a worker, a read-only review, a restricted
+/// Gemini, Kiro, Copilot, Vibe, Claude or ACP launch, a Codex `read-only` /
+/// `workspace-write` one) loses them too.
+pub fn launch_reach(sandbox: LaunchSandbox, full_access: bool) -> home_credentials::Reach {
+    match sandbox {
+        LaunchSandbox::None if full_access => home_credentials::Reach::FullAccess,
+        LaunchSandbox::None | LaunchSandbox::Own | LaunchSandbox::Codex(_) => {
+            home_credentials::Reach::Sandboxed
+        }
+    }
+}
+
 /// [`launch_confinement`] for the agent a launch starts (KT-1656): the same
 /// confinement, with the credential stores of the home that agent does not own
-/// hidden as well. A launch in `sandbox` (Codex's `read-only` /
-/// `workspace-write`) also loses the shared ones (`~/.ssh`, `~/.aws`,
-/// `~/.config/gh`, …); a full-access launch keeps the tools of the owner's
-/// terminal. The agent's own store stays open: its process needs it.
+/// hidden as well, and the shared ones according to [`launch_reach`]. The
+/// agent's own store stays open: its process needs it.
+///
+/// The stores are hidden **whatever the "protect the vault" setting says**:
+/// with it off the launch is confined to hide them only, no Kronn data. The
+/// result is `None` only when the host has no sandbox, or when the setting is
+/// off and there is no store to hide.
 pub fn launch_confinement_for(
     family: AgentFamily,
     sandbox: LaunchSandbox,
+    full_access: bool,
 ) -> Option<LevelConfinement> {
-    let reach = match sandbox {
-        LaunchSandbox::None => home_credentials::Reach::FullAccess,
-        LaunchSandbox::Own | LaunchSandbox::Codex(_) => home_credentials::Reach::Sandboxed,
-    };
-    launch_confinement()
-        .map(|confinement| confinement.hiding_also(home_credentials::hidden(Some(family), reach)))
+    #[cfg(test)]
+    {
+        if !test_wrap() {
+            return None;
+        }
+    }
+    confinement_hiding(home_credentials::hidden(
+        Some(family),
+        launch_reach(sandbox, full_access),
+    ))
+}
+
+/// The vault confinement with `stores` hidden as well; with no vault
+/// confinement (the setting is off), a confinement of the stores alone.
+fn confinement_hiding(stores: Vec<PathBuf>) -> Option<LevelConfinement> {
+    if stores.is_empty() {
+        return trust_sandbox::confinement();
+    }
+    trust_sandbox::credential_confinement().map(|confinement| confinement.hiding_also(stores))
 }
 
 #[cfg(test)]
@@ -573,3 +606,7 @@ fn test_wrap() -> bool {
 #[cfg(test)]
 #[path = "vault_guard_tests.rs"]
 mod vault_guard_tests;
+
+#[cfg(test)]
+#[path = "vault_guard_reach_tests.rs"]
+mod vault_guard_reach_tests;

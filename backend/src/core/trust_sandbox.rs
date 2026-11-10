@@ -422,6 +422,20 @@ pub fn confinement() -> Option<LevelConfinement> {
     Some(LevelConfinement::with(mechanism, protected_dirs()))
 }
 
+/// [`confinement`] whatever the "protect the vault" setting says (KT-1656): with
+/// the setting off it hides no Kronn data, but still exists, so that the
+/// credential stores of the home (`~/.gemini`, `~/.ssh`, …) can be hidden from
+/// an agent that is not their owner. `None` only when the host has no sandbox.
+pub fn credential_confinement() -> Option<LevelConfinement> {
+    let mechanism = host_mechanism().ok()?;
+    let protected = if protect_vault_setting() {
+        protected_dirs()
+    } else {
+        Vec::new()
+    };
+    Some(LevelConfinement::with(mechanism, protected))
+}
+
 /// `Ok` when this host can apply a sandbox, whatever the setting; otherwise why not.
 pub fn host_sandbox() -> Result<(), String> {
     host_mechanism().map(|_| ())

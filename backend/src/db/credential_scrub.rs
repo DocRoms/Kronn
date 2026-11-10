@@ -54,6 +54,8 @@ const fn target(
 }
 
 const BY_DISCUSSION: Option<&str> = Some("discussion_id = ?1");
+const BY_PROPOSAL: Option<&str> =
+    Some("proposal_id IN (SELECT id FROM planning_proposals WHERE discussion_id = ?1)");
 const BY_EXECUTION: Option<&str> =
     Some("task_execution_id IN (SELECT id FROM task_executions WHERE sub_discussion_id = ?1)");
 
@@ -80,6 +82,11 @@ pub(crate) const TARGETS: &[Target] = &[
     target("discussion_questions", "payload_json", BY_DISCUSSION),
     target("discussion_questions", "answer_json", BY_DISCUSSION),
     target("discussion_questions", "resume_error", BY_DISCUSSION),
+    // The cards ingested from the `kronn-*` fences of an agent message.
+    target("discussion_actions", "values_json", BY_DISCUSSION),
+    target("discussion_actions", "diagnostic", BY_DISCUSSION),
+    target("planning_proposal_items", "payload_json", BY_PROPOSAL),
+    target("planning_proposal_items", "rejected_reason", BY_PROPOSAL),
     // Dispatch and resume of the agent turns.
     target("agent_dispatch_jobs", "last_error", BY_DISCUSSION),
     target("agent_dispatch_jobs", "progress_detail", BY_DISCUSSION),
@@ -402,6 +409,49 @@ mod tests {
 
         // One-shot and idempotent.
         assert_eq!(redact_discussion(&conn, &id).unwrap().1.total, 0);
+    }
+
+    /// The shapes of the other agents' login files are masked by the upgrade
+    /// pass (`~/.gemini/oauth_creds.json`, fine-grained GitHub, STS keys).
+    #[test]
+    fn the_upgrade_pass_masks_the_oauth_fine_grained_and_sts_shapes() {
+        const SHAPES: [&str; 4] = [
+            "ya29.a0AfH6SMBx3Zk9QwErTyUiOpAsDfGhJkLzXcVbNm12345",
+            "1//0gAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEfGhIjKlMnOpQrStUv",
+            "github_pat_11ABCDEFG0abcdefghijkl_0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijk",
+            "ASIAY34FZKBOKMUTVV7A",
+        ];
+        let conn = database();
+        insert_discussion(&conn, ROOM_A);
+        for (order, shape) in SHAPES.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
+                 VALUES (?1, ?2, 'Agent', ?3, '2026-11-10T00:00:00Z', ?4)",
+                rusqlite::params![
+                    format!("shape-{order}"),
+                    ROOM_A,
+                    format!("{{\"a\": \"{shape}\"}} and prose"),
+                    100 + order as i64
+                ],
+            )
+            .unwrap();
+        }
+        let report = scrub_known_shapes(&conn).unwrap();
+        assert_eq!(report.total, 4, "{report:?}");
+        for (order, shape) in SHAPES.iter().enumerate() {
+            let content: String = conn
+                .query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    [format!("shape-{order}")],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!content.contains(shape), "{content}");
+            assert!(content.ends_with(" and prose"), "{content}");
+            serde_json::from_str::<serde_json::Value>(content.trim_end_matches(" and prose"))
+                .unwrap();
+        }
+        assert_eq!(scrub_known_shapes(&conn).unwrap().total, 0, "idempotent");
     }
 
     #[test]

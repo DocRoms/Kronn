@@ -4545,6 +4545,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     .and_then(|env_key| get_api_key(env_key, config.tokens)),
                 bridge_token: bridge_value.clone(),
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
+                // The runtime starts only with full access, verified above.
+                full_access: launch_full_access,
             };
             return start_native_acp(request, launch_full_access, native_env)
                 .await
@@ -4766,6 +4768,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         &github_env,
         bridge_value.as_deref(),
         config.priority,
+        launch_full_access && read_only_repos.is_none(),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4800,6 +4803,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     &github_env,
                     bridge_value.as_deref(),
                     config.priority,
+                    launch_full_access && read_only_repos.is_none(),
                 )
                 .map_err(|error| {
                     format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
@@ -14538,6 +14542,11 @@ fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> Str
 /// args, env, cwd, stdin) plus four Kronn-specific feed-throughs
 /// (npx_package, api_key, discussion_id, task-worker capability). Allow-listed rather than
 /// refactored.
+///
+/// `full_access` is the launch's real trust level (KT-1656): `true` only for
+/// a launch the owner opened in full access. Any other launch, a task worker
+/// included whatever it passes, also loses the shared credential stores of
+/// the home (`~/.ssh`, `~/.aws`, `gh`, …), whichever agent it runs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_spawn(
     binary: &str,
@@ -14555,6 +14564,7 @@ pub(crate) fn try_spawn(
     github_env: &[(String, String)],
     bridge_token: Option<&str>,
     priority: Priority,
+    full_access: bool,
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -14630,8 +14640,12 @@ pub(crate) fn try_spawn(
         // not own (`~/.gemini` for a Claude, `~/.codex` for a Gemini, …).
         let sandbox = crate::core::vault_guard::launch_sandbox(binary, npx_package, args);
         let family = crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key);
+        // The launch's trust level, not the kind of its sandbox: a task worker
+        // never has the owner's full access, whatever agent it runs.
+        let owner_full_access = full_access && task_worker_context.is_none();
         let (program, wrapped_args, outcome) = crate::core::vault_guard::wrap_launch(
-            crate::core::vault_guard::launch_confinement_for(family, sandbox).as_ref(),
+            crate::core::vault_guard::launch_confinement_for(family, sandbox, owner_full_access)
+                .as_ref(),
             sandbox,
             &roots,
             final_cmd,

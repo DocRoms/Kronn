@@ -91,6 +91,22 @@ const AGENT_STORES: &[(AgentFamily, Store)] = &[
             &[Override::Under("CLAUDE_CONFIG_DIR", ".claude.json")],
         ),
     ),
+    // The `env` block, `apiKeyHelper` and `mcpServers.*.env` of Claude's
+    // settings: the same shape that leaked from `~/.gemini/settings.json`.
+    (
+        AgentFamily::Claude,
+        moved(
+            ".claude/settings.json",
+            &[Override::Under("CLAUDE_CONFIG_DIR", "settings.json")],
+        ),
+    ),
+    (
+        AgentFamily::Claude,
+        moved(
+            ".claude/settings.local.json",
+            &[Override::Under("CLAUDE_CONFIG_DIR", "settings.local.json")],
+        ),
+    ),
     (
         AgentFamily::Codex,
         moved(".codex", &[Override::Path("CODEX_HOME")]),

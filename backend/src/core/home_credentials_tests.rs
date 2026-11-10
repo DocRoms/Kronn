@@ -38,6 +38,8 @@ fn looks_like_file(rel: &str) -> bool {
     [
         ".claude.json",
         ".credentials.json",
+        "settings.json",
+        "settings.local.json",
         "credentials",
         "credentials.toml",
         "config.json",
@@ -90,6 +92,41 @@ fn every_store_of_another_agent_is_hidden_and_the_running_ones_stays_open() {
     }
     assert!(!hidden.iter().any(|path| path == ".gemini"));
     assert!(hidden.iter().any(|path| path == ".codex"));
+}
+
+/// KT-1656 — the `env` block, `apiKeyHelper` and `mcpServers.*.env` of Claude's
+/// settings are what leaked from `~/.gemini/settings.json`, in another shape.
+#[test]
+fn claude_settings_files_are_hidden_from_every_other_agent_and_from_a_workers_shell() {
+    let home = full_home();
+    let settings = [".claude/settings.json", ".claude/settings.local.json"];
+    for other in [
+        AgentFamily::Gemini,
+        AgentFamily::Codex,
+        AgentFamily::Copilot,
+        AgentFamily::Kiro,
+        AgentFamily::Vibe,
+        AgentFamily::OpenCode,
+        AgentFamily::Other,
+    ] {
+        for reach in [Reach::Sandboxed, Reach::FullAccess] {
+            let hidden = names(&hidden_in(home.path(), Some(other), reach), home.path());
+            for rel in settings {
+                assert!(hidden.iter().any(|path| path == rel), "{rel} for {other:?}");
+            }
+        }
+    }
+    // A Claude worker's shell: nothing of Claude's is for it.
+    let worker = names(&hidden_in(home.path(), None, Reach::Sandboxed), home.path());
+    // The running Claude reads its own settings.
+    let claude = names(
+        &hidden_in(home.path(), Some(AgentFamily::Claude), Reach::FullAccess),
+        home.path(),
+    );
+    for rel in settings {
+        assert!(worker.iter().any(|path| path == rel), "{rel} for a worker");
+        assert!(!claude.iter().any(|path| path == rel), "{rel} for Claude");
+    }
 }
 
 #[test]
@@ -315,7 +352,12 @@ const MOVES: &[Moved] = &[
     Moved {
         variable: "CLAUDE_CONFIG_DIR",
         value: &["claude"],
-        stores: &["claude/.credentials.json", "claude/.claude.json"],
+        stores: &[
+            "claude/.credentials.json",
+            "claude/.claude.json",
+            "claude/settings.json",
+            "claude/settings.local.json",
+        ],
     },
     Moved {
         variable: "CODEX_HOME",

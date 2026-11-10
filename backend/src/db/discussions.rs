@@ -19,6 +19,15 @@ pub fn count_discussions(conn: &Connection) -> Result<u32> {
     Ok(count)
 }
 
+/// KT-1656 — the text of a turn still streaming is agent output too: it is kept in
+/// `discussions.partial_response` until the turn completes or boot recovery turns
+/// it into a message, so it is masked like a stored message
+/// ([`mask_agent_output`]), not only when it becomes one.
+fn mask_partial_response(conn: &Connection, disc_id: &str, text: &str) -> Result<String> {
+    let masked = crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, text)?;
+    Ok(crate::core::redact::redact_agent_output(&masked))
+}
+
 /// Checkpoint the in-flight agent response. Called periodically from
 /// `make_agent_stream` (every ~30s or ~100 chunks) so a backend restart
 /// preserves what the agent has produced so far.
@@ -42,8 +51,7 @@ pub fn set_partial_response(
 ) -> Result<()> {
     match partial {
         Some(text) => {
-            let masked =
-                crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, text)?;
+            let masked = mask_partial_response(conn, disc_id, text)?;
             let text = masked.as_str();
             let agent_type = provenance.map(|(agent, _)| format_agent_type(agent));
             let model = provenance.and_then(|(_, model)| model);
@@ -104,7 +112,7 @@ pub fn set_partial_response_for_dispatch(
     trigger_message_id: &str,
     connection_id: Option<&str>,
 ) -> Result<bool> {
-    let masked = crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, partial)?;
+    let masked = mask_partial_response(conn, disc_id, partial)?;
     let partial = masked.as_str();
     let agent_type = format_agent_type(provenance.0);
     let changed = conn.execute(
@@ -2919,6 +2927,8 @@ fn insert_message_inner(
         .as_ref()
         .and_then(|r| serde_json::to_string(r).ok());
     // KT-1111 — every message of an assistant conversation, any author.
+    // KT-1656 — masked once, here: the row, the proposals, the actions, the
+    // questions and the audit hook below read this text, never `msg.content`.
     let content =
         crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, &msg.content)?;
     let content = mask_agent_output(&msg.role, content);
@@ -2976,19 +2986,14 @@ fn insert_message_inner(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
         )?;
-        super::discussion_actions::ingest_message_actions(
-            conn,
-            discussion_id,
-            &msg.id,
-            &msg.content,
-        )?;
+        super::discussion_actions::ingest_message_actions(conn, discussion_id, &msg.id, &content)?;
         let invalid_cards = super::discussion_questions::ingest_message_questions(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
         )?;
         super::discussion_questions::report_invalid_cards(
             conn,
@@ -3000,7 +3005,7 @@ fn insert_message_inner(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
             &msg.timestamp.to_rfc3339(),
         )?;
     }

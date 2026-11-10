@@ -55,6 +55,85 @@ fn insert(conn: &Connection, id: &str, value: serde_json::Value) {
     .unwrap();
 }
 
+/// Every text of every row of `table`, joined.
+fn whole_table(conn: &Connection, table: &str) -> String {
+    let mut statement = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+    let columns = statement.column_count();
+    statement
+        .query_map([], |row| {
+            (0..columns)
+                .map(|at| {
+                    Ok(match row.get_ref(at)? {
+                        rusqlite::types::ValueRef::Text(text) => {
+                            String::from_utf8_lossy(text).into_owned()
+                        }
+                        other => format!("{other:?}"),
+                    })
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map(|cells| cells.join("|"))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// KT-1656 — the message row is masked once and every consumer of the content
+/// reads the masked text: a `kronn-*` fence that carries a credential is still
+/// ingested as a card, with the credential masked in the card's own tables.
+#[test]
+fn a_fence_carrying_a_token_is_still_ingested_with_the_token_masked() {
+    const TOKEN: &str = "ghp_R7kQ2mZx9LpV4nB8cT1yW6dH3sF5jG0aNeUo";
+    let conn = database();
+    let question = serde_json::json!({"version":1,"key":"rotate","question":format!("Rotate {TOKEN} now?"),
+        "options":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]});
+    let action = serde_json::json!({"kind":"quick_prompt","target_id":"missing-target",
+        "values":[{"name":"token","value":TOKEN,"provenance":"agent_suggestion","suggested_by":"codex"}]});
+    crate::db::discussions::insert_message(
+        &conn,
+        "d",
+        &message(
+            "m-token",
+            format!(
+                "I found {TOKEN} in the file.\n```kronn-question\n{question}\n```\n```kronn-action\n{action}\n```"
+            ),
+        ),
+    )
+    .unwrap();
+
+    let stored: String = conn
+        .query_row(
+            "SELECT content FROM messages WHERE id = 'm-token'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored.contains(TOKEN), "{stored}");
+    assert!(stored.contains("kronn-question") && stored.contains("kronn-action"));
+
+    let questions = whole_table(&conn, "discussion_questions");
+    assert!(
+        questions.contains("rotate"),
+        "the question card is still ingested: {questions}"
+    );
+    assert!(questions.contains("REDACTED"), "{questions}");
+    let actions = whole_table(&conn, "discussion_actions");
+    assert!(
+        actions.contains("action:m-token:0"),
+        "the action card is still ingested: {actions}"
+    );
+    for table in [
+        "discussion_questions",
+        "discussion_actions",
+        "planning_proposal_items",
+        "messages",
+    ] {
+        let text = whole_table(&conn, table);
+        assert!(!text.contains(TOKEN), "{table} holds the token: {text}");
+    }
+}
+
 fn finished_step_question(value: serde_json::Value) -> Connection {
     finished_step_cards(&[value])
 }

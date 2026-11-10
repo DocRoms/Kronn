@@ -11533,6 +11533,7 @@ Suite de la réponse.";
             &[],
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11576,6 +11577,7 @@ Suite de la réponse.";
             github_env,
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11641,6 +11643,7 @@ Suite de la réponse.";
             &[],
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11739,6 +11742,7 @@ Suite de la réponse.";
                 &[],
                 None,
                 crate::core::background_priority::Priority::Normal,
+                false,
             )
         })
         .expect("the stand-in binary starts");
