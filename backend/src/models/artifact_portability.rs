@@ -1,5 +1,5 @@
-//! Versioned Artifact bundles. Runtime histories and credentials are not part
-//! of the portable definition; retained dataset observations are explicitly included.
+//! Versioned Artifact bundles, without credentials or runtime histories. An Artifact
+//! file carries dataset definitions only; project resources and pre-#273 files carry values.
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;

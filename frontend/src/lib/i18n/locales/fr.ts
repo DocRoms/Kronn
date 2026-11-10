@@ -95,7 +95,7 @@ const fr: TranslationDict = {
   "pages.import.methodUnspecified": "Méthode non précisée",
   "pages.exportArtifact": "JSON Artifact",
   "pages.import.title": "Importer un Artifact",
-  "pages.import.hint": "Conserve le HTML, les données retenues et les définitions des automatisations liées. Vérifie les dépendances avant de créer un nouvel Artifact.",
+  "pages.import.hint": "Conserve le HTML, les définitions des datasets et celles des automatisations liées. Les datasets arrivent vides, sauf si le fichier date d'avant les exports sans données. Vérifie les dépendances avant de créer un nouvel Artifact.",
   "pages.import.file": "Fichier JSON Artifact Kronn",
   "pages.import.tooLarge": "Le fichier dépasse la limite de 64 Mio.",
   "pages.import.invalidFile": "Choisis un bundle Artifact Kronn (version 1).",

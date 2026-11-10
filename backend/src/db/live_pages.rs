@@ -604,6 +604,32 @@ pub fn get_live_page_summary(conn: &Connection, page_id: &str) -> Result<Option<
         .optional()?)
 }
 
+/// The page, its current revision and its dataset definitions, without any
+/// published value: `current` is always `None` and no point is read.
+pub fn get_live_page_definition(
+    conn: &Connection,
+    page_id: &str,
+) -> Result<Option<(LivePage, LivePageRevision, Vec<LivePageDataset>)>> {
+    let Some(page) = get_live_page_summary(conn, page_id)? else {
+        return Ok(None);
+    };
+    let revision = conn.query_row(
+        "SELECT id, page_id, revision, html, created_by_agent, created_at
+           FROM live_page_revisions WHERE id = ?1",
+        [&page.current_revision_id],
+        map_revision,
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, page_id, name, kind, NULL, schema_json,
+                max_points, max_age_days, updated_at
+           FROM live_page_datasets WHERE page_id = ?1 ORDER BY name COLLATE NOCASE",
+    )?;
+    let datasets = stmt
+        .query_map([&page.id], map_dataset)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some((page, revision, datasets)))
+}
+
 pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePageDetail>> {
     let page = get_live_page_summary(conn, page_id)?;
     let Some(page) = page else {
