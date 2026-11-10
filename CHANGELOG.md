@@ -110,6 +110,13 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A task worker that bumps a dependency is no longer delivered uncompiled: before
+  the lane's first build, Kronn fetches the crates (and npm packages) its lock
+  files reference and the host cache lacks, outside the worker's sandbox, from
+  crates.io / the npm registry only. A lock naming a git dependency, another
+  registry or a tarball URL is refused whole and fetches nothing; the worker
+  gets no network of its own. Each fetch is journalled on the execution
+  (`dependency_fetch`) (KT-1649).
 - An interrupted task execution no longer stays stuck on "recovery decision
   already consumed": it can always resume or deliver, and a resume never
   consumes the decision of a newer interruption (KT-1537, #492).

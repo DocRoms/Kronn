@@ -6606,6 +6606,48 @@ pub fn record_lane_warm_start(
     )
 }
 
+/// Journal what the launch fetched into the host's dependency caches for the
+/// worker's lock files (KT-1649): per lock file, the registries the fetch was
+/// bounded to and how it ended. Append-only; readers take the latest.
+pub fn record_dependency_fetch(
+    conn: &Connection,
+    exec_id: &str,
+    record: &crate::core::task_worker_dep_fetch::DepFetchRecord,
+    actor: &OrchestrationActor,
+) -> Result<()> {
+    record_execution_event(
+        conn,
+        exec_id,
+        crate::core::task_worker_dep_fetch::DEP_FETCH_EVENT_ACTION,
+        None,
+        None,
+        actor,
+        serde_json::to_value(record)?,
+    )
+}
+
+/// The most recent dependency-fetch record of an execution, if any.
+pub fn latest_dependency_fetch(
+    conn: &Connection,
+    exec_id: &str,
+) -> Result<Option<crate::core::task_worker_dep_fetch::DepFetchRecord>> {
+    let latest: Option<String> = conn
+        .query_row(
+            "SELECT changes_json FROM task_execution_events \
+             WHERE task_execution_id = ?1 AND action = ?2 \
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            params![
+                exec_id,
+                crate::core::task_worker_dep_fetch::DEP_FETCH_EVENT_ACTION
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    latest
+        .map(|changes| serde_json::from_str(&changes).map_err(anyhow::Error::from))
+        .transpose()
+}
+
 /// Journal what seeding a task worktree with the project's gitignored assets
 /// did (KT-1438): which paths were cloned, refreshed, left alone or refused,
 /// and why.

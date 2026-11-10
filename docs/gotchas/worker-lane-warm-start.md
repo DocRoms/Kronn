@@ -62,6 +62,50 @@ whole process group (so `rustc` children do not keep compiling), the gate slot
 is freed, `lane_warm_start` records `first_build: cancelled`, and neither the
 smoke check nor the dispatch happens.
 
+## Dependency fetch before the first build (KT-1649)
+
+A worker is offline and reads the host's caches read-only, so a dependency it
+bumped (KT-1647: `utoipa-swagger-ui` 10.0.2 while the cache held 10.0.1) could
+not be compiled or tested, and was delivered blind. Before the first build,
+`record_dependency_fetch` (`api/orchestration.rs`) runs
+`core::task_worker_dep_fetch::fetch_missing_dependencies` as **Kronn's own
+process, outside the worker's sandbox**, and journals a `dependency_fetch`
+event (`db::orchestration::latest_dependency_fetch`): per lock file, the
+registries the step was bounded to, its outcome (`cached`, `fetched`,
+`refused`, `failed`, `cancelled`) and its duration.
+
+What bounds the network:
+
+- **The lock file is the whole input.** `Cargo.lock` is parsed as TOML; every
+  package `source` must be crates.io (git index or sparse). `pnpm-lock.yaml` must
+  carry no `tarball:`, git (`repo:`, `commit:`, `type: git`) or `directory:`
+  resolution. One out-of-bounds entry **refuses the whole lock** (`refused`):
+  `cargo fetch` fetches all of a lock, so a partial fetch is not possible.
+  Git dependencies and alternate registries are therefore never fetched; the
+  worker stays offline for them, as before.
+- **Probe first.** `cargo fetch --offline --locked` (and `pnpm fetch --offline`);
+  a complete cache never touches the network (`cached`).
+- **Nothing the worker writes configures the command.** Cargo reads
+  `.cargo/config.toml` from the working directory upwards, so it runs with the
+  host's `CARGO_HOME` as its cwd and `--manifest-path` at the worktree. pnpm reads
+  `.npmrc` and `pnpm-workspace.yaml` from the project, so it runs in a scratch
+  directory (`<tmp>/kronn-dep-fetch-<uuid>`, removed afterwards) with a copy of the
+  lock, an empty manifest and the workspace file — refused when it sets a
+  registry, proxy, store, cache, hook (`pnpmfile`), certificate or TLS switch —
+  and gets `--registry https://registry.npmjs.org/ --store-dir <host store>
+  --ignore-scripts` on the command line. `cargo fetch` builds nothing, so no
+  `build.rs` or proc-macro runs.
+- It fills the host's `~/.cargo/registry` and pnpm store, the caches the lane
+  already reads, so the first build and the worker's own `cargo` see the crate.
+
+Limits: best effort (a failed or refused fetch is journalled and the worker
+still starts); cancellable with the warm-up; the pnpm step only fills the
+**store** — a package the main checkout's `node_modules` lacks still needs an
+offline `pnpm install` by whoever uses it, since the lane's `node_modules` links
+the main checkout's. The pnpm commands were not run against the live registry
+when this was written (the sandbox of the author is offline): the lock/workspace
+guards and the command shape are unit-tested with a fake runner only.
+
 ## Known limits
 
 - The gate governs Kronn's first build only. Builds and tests a worker later

@@ -2672,6 +2672,17 @@ async fn finish_native_provisioning(
             &prepared.execution.id,
         )
         .await;
+        // KT-1649 — what the worker's lock files reference and the host caches
+        // lack is fetched here, outside its sandbox and from the registries of
+        // the lock files only, so the first build and the worker can compile it.
+        record_dependency_fetch(
+            db,
+            &prepared.execution.id,
+            &worktree_path,
+            std::sync::Arc::new(crate::core::task_worker_env::ProcessProbeRunner),
+            warm_cancel.clone(),
+        )
+        .await;
         // KT-1250 — the lane target is seeded from a warm one and its first build
         // runs here, under the host's cap, so the worker starts warm.
         let warm = record_lane_warm_start(
@@ -10069,6 +10080,57 @@ async fn record_warming_step(
         .await
     {
         tracing::warn!(execution_id = %exec_id, "warming step {step:?} not recorded: {error}");
+    }
+}
+
+/// Fill the host's dependency caches with what the worker's lock files
+/// reference and they lack (KT-1649), and journal it on the execution. Runs as
+/// Kronn's own process, not under the worker's sandbox (it needs the network),
+/// which is why `core::task_worker_dep_fetch` bounds it to the lock files'
+/// public registries. Never raised: a fetch that fails only leaves the worker
+/// with the cache it had.
+async fn record_dependency_fetch(
+    db: &Database,
+    exec_id: &str,
+    worktree: &std::path::Path,
+    runner: std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let path = worktree.to_path_buf();
+    let record = tokio::task::spawn_blocking(move || {
+        crate::core::task_worker_dep_fetch::fetch_missing_dependencies(
+            &path,
+            runner.as_ref(),
+            &cancel,
+        )
+    })
+    .await;
+    let record = match record {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::warn!(execution_id = %exec_id, "dependency fetch did not complete: {error}");
+            return;
+        }
+    };
+    if record.steps.is_empty() {
+        return;
+    }
+    for step in &record.steps {
+        tracing::info!(
+            execution_id = %exec_id,
+            lockfile = %step.lockfile,
+            outcome = ?step.outcome,
+            "task worker dependency fetch"
+        );
+    }
+    let id = exec_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_dependency_fetch(conn, &id, &record, &backend_actor())
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "dependency fetch record not persisted: {error}");
     }
 }
 
@@ -30663,6 +30725,79 @@ pub(crate) mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// KT-1649 — a launch fetches what the worker's lock file references before
+    /// anything builds, and the step is on the execution's journal with the
+    /// registries it was bounded to.
+    #[tokio::test]
+    async fn the_dependency_fetch_of_a_lock_file_is_journalled_with_its_registries() {
+        use crate::core::task_worker_dep_fetch::{Ecosystem, FetchOutcome};
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+        std::fs::write(
+            worktree.join("backend").join("Cargo.lock"),
+            "version = 4\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n\
+             source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .unwrap();
+
+        record_dependency_fetch(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let id = exec_id.clone();
+        let record = db
+            .with_conn(move |conn| crate::db::orchestration::latest_dependency_fetch(conn, &id))
+            .await
+            .unwrap()
+            .expect("the fetch is journalled");
+        assert_eq!(record.steps.len(), 1, "{record:?}");
+        let step = &record.steps[0];
+        assert_eq!(step.ecosystem, Ecosystem::Cargo);
+        assert_eq!(step.lockfile, "backend/Cargo.lock");
+        // The probe answers "cached" when the host has a CARGO_HOME to read.
+        let host_has_cargo_home = crate::core::task_worker_env::SharedCaches::discover(None)
+            .cargo_home
+            .is_some();
+        if host_has_cargo_home {
+            assert_eq!(step.outcome, FetchOutcome::Cached);
+            assert_eq!(
+                step.registries,
+                vec!["registry+https://github.com/rust-lang/crates.io-index".to_string()]
+            );
+        } else {
+            assert!(matches!(step.outcome, FetchOutcome::Refused { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_launch_with_no_lock_file_to_fetch_journals_no_dependency_fetch() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (exec_id, worktree) = provisioned_lane_for_smoke_check(repo.path(), &db).await;
+
+        record_dependency_fetch(
+            &db,
+            &exec_id,
+            &worktree,
+            std::sync::Arc::new(FixedRunner(true)),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let id = exec_id.clone();
+        let record = db
+            .with_conn(move |conn| crate::db::orchestration::latest_dependency_fetch(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(record, None);
     }
 
     #[tokio::test]
