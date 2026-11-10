@@ -1248,6 +1248,17 @@ mod tests {
     }
 
     #[test]
+    fn excerpt_of_a_json_output_loses_the_url_secrets_of_its_strings() {
+        let out = excerpt(
+            r#"{"next":"https://api.example.com/v1/items?api_key=Qk7SecretValue9","webhook":"https://user:s3cr3t@hooks.example.com/cb"}"#,
+        );
+        assert_eq!(
+            out,
+            r#"{"next":"https://api.example.com/v1/items","webhook":"https://hooks.example.com/cb"}"#
+        );
+    }
+
+    #[test]
     fn excerpt_long_string_truncated_with_ellipsis() {
         let s = "a".repeat(250);
         let out = excerpt(&s);

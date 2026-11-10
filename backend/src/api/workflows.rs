@@ -10293,6 +10293,56 @@ mod tests {
         assert!(output.contains("REDACTED"), "{output}");
     }
 
+    /// KT-1673: the URL secrets inside the strings of a JSON step output are
+    /// dropped by the run detail, and the document stays valid.
+    #[tokio::test]
+    async fn run_detail_drops_the_url_secrets_of_a_json_step_output() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("json-url-history");
+        wf.project_id = None;
+        let insert = wf.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &insert))
+            .await
+            .unwrap();
+        let (_, mut run) = create_manual_run(
+            &state,
+            &wf.id,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let document = serde_json::json!({
+            "next": "https://api.example.com/v1/items?api_key=Qk7SecretValue9",
+            "webhook": "https://user:s3cr3t@hooks.example.com/cb"
+        })
+        .to_string();
+        run.step_results = vec![serde_json::from_value(serde_json::json!({
+            "step_name": "collect",
+            "status": "Success",
+            "output": document,
+            "duration_ms": 1
+        }))
+        .unwrap()];
+        let stored = run.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::update_run(conn, &stored))
+            .await
+            .unwrap();
+        let Json(served) =
+            get_run(State(state.clone()), Path((wf.id.clone(), run.id.clone()))).await;
+        let output = served.data.unwrap().step_results[0].output.clone();
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect(&output);
+        assert_eq!(parsed["next"], "https://api.example.com/v1/items");
+        assert_eq!(parsed["webhook"], "https://hooks.example.com/cb");
+        assert!(!output.contains("Qk7SecretValue9"), "{output}");
+        assert!(!output.contains("s3cr3t"), "{output}");
+    }
+
     async fn auto_disabled(state: &AppState) -> Vec<AutoDisabledWorkflow> {
         state
             .db

@@ -153,9 +153,11 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
     // value that swallowed that backslash or quote would leave the document
     // unparseable (KT-1526). A backslash is part of the value only with the
     // character it escapes (`\\`, `\n`), so an escape is taken whole or not at
-    // all. A value that opens with an escaped quote keeps it (group 3).
+    // all. A value that opens with an escaped quote keeps it (group 3). An
+    // escaped quote with a value character right behind it (`head\"tail`) is
+    // inside the value, not its closing quote: JSON text never writes one.
     (
-        r#"(?i)(authorization\s*:\s*)(bearer|basic|token|digest)\s+(\\")?(?:[^\s\\"]|\\[^\s"])+"#,
+        r#"(?i)(authorization\s*:\s*)(bearer|basic|token|digest)\s+(\\")?(?:[^\s\\"]|\\[^\s"]|\\"[^\s\\"'`,;}\])])+"#,
         "$1$2 $3***REDACTED***",
         Gate::ContainsAsciiCi(&["authorization"]),
     ),
@@ -163,10 +165,11 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
     // `"api_key"`, `"apiKey"`, `"secret"`, `"access_token"`, `"refresh_token"`,
     // `"client_secret"`, `"private_key"`. Ported from FE bug-report.ts
     // (one entry there) + expanded. The value reads an escaped quote (`\"`)
-    // as part of it, and a lone backslash as a last resort so a value cut
-    // right after one still ends on the closing quote.
+    // as part of it, up to the first bare quote. An excerpt cut inside the
+    // value (maybe right after a backslash) has no closing quote: the value
+    // then runs to the end of the text.
     (
-        r#"("(?:password|token|api_key|apiKey|secret|access_token|refresh_token|client_secret|private_key)"\s*:\s*")(?:\\.|[^"\\]|\\)+(")"#,
+        r#"("(?:password|token|api_key|apiKey|secret|access_token|refresh_token|client_secret|private_key)"\s*:\s*")(?:\\[\s\S]|[^"\\])+\\?("|$)"#,
         "$1***REDACTED***$2",
         Gate::Contains(&[
             "\"password\"",
@@ -427,8 +430,10 @@ pub fn looks_like_secret(input: &str) -> bool {
 //      quote: in JSON text it would take the escape of the closing quote and
 //      the document would no longer parse (KT-1526). A backslash belongs to the
 //      token only with the character it escapes, so an escape is taken whole or
-//      not at all. A token may open with an escaped quote (a value cut before
-//      its closing one), which is kept.
+//      not at all (`\'` and `` \` `` are no JSON escapes and never end a token).
+//      An escaped quote with a value character right behind it (`head\"tail`)
+//      is inside the token too. A token may open with an escaped quote (a value
+//      cut before its closing one), which is kept.
 // Anchored on the secret NAME, so ordinary path-keyed hex checksums (no NAME)
 // are never touched. Quoted MUST run before unquoted (the unquoted value class
 // excludes quotes, so it can't consume a quoted value itself).
@@ -440,7 +445,9 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\.|[^'\\\\])+)'");
     let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\.|[^`\\\\])+)`");
     let quoted_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
-    let unquoted = format!(r#"(?i)(\b{name}\b\s*[:=]\s*(?:\\")?)((?:[^\s\\"'`,;]|\\[^\s"'`])+)"#);
+    let unquoted = format!(
+        r#"(?i)(\b{name}\b\s*[:=]\s*(?:\\")?)((?:[^\s\\"'`,;]|\\[^\s"]|\\"[^\s\\"'`,;}}\])])+)"#
+    );
     [
         (quoted_dq, "$1\"***REDACTED***\"", Some(b'"')),
         (quoted_sq, "$1'***REDACTED***'", Some(b'\'')),
@@ -571,6 +578,15 @@ pub fn strip_url_secrets(text: &str) -> String {
         .replace_all(text, |caps: &regex_lite::Captures<'_>| {
             let raw = &caps[0];
             match reqwest::Url::parse(raw) {
+                // Nothing to drop: keep the bytes (`Url` would add a `/`), so
+                // that a changed text means a secret was removed.
+                Ok(url)
+                    if url.query().is_none()
+                        && url.username().is_empty()
+                        && url.password().is_none() =>
+                {
+                    raw.to_string()
+                }
                 Ok(mut url) => {
                     url.set_query(None);
                     let _ = url.set_username("");
@@ -588,10 +604,19 @@ pub fn strip_url_secrets(text: &str) -> String {
 /// excerpts): URL queries and userinfo dropped, then the vendor and
 /// secret-assignment heuristics. It cannot catch a bare secret by value.
 pub fn redact_stored_text(text: &str) -> String {
-    redact_json_aware(text, |text| {
-        redact_for_audit_artifact_text(&strip_url_secrets(text))
-    })
-    .0
+    redact_json_aware(text, redact_stored_part).0
+}
+
+/// [`redact_stored_text`] on one text: the URL strip counts as a change, since
+/// [`redact_json_aware`] keeps a string's rewrite only when it is reported.
+fn redact_stored_part(text: &str) -> (String, usize) {
+    let stripped = strip_url_secrets(text);
+    let (out, count) = redact_for_audit_artifact_text(&stripped);
+    if out == text {
+        (out, 0)
+    } else {
+        (out, count.max(1))
+    }
 }
 
 /// Object keys whose string value is a credential, whatever it holds. Same
@@ -1052,9 +1077,9 @@ mod tests {
             assert_eq!(parsed["password"], "***REDACTED***", "{name}");
             assert_eq!(parsed["user"], "alice", "{name}");
         }
-        // Cut right after an escaped quote: the value still ends on a quote.
+        // Cut right after an escaped quote: the value runs to the end.
         let cut = "{\"password\":\"abc\\\"";
-        assert_eq!(redact_secrets(cut), "{\"password\":\"***REDACTED***\"");
+        assert_eq!(redact_secrets(cut), "{\"password\":\"***REDACTED***");
     }
 
     #[test]
@@ -1098,6 +1123,119 @@ mod tests {
                 "{name}: {out}"
             );
         }
+    }
+
+    // ── KT-1673: second pass on KT-1526 ───────────────────────────────
+
+    const URL_SECRETS: [&str; 3] = ["Qk7SecretValue9", "s3cr3t@", "user:s3cr3t"];
+
+    #[test]
+    fn a_json_document_loses_the_url_secrets_of_its_strings() {
+        let doc = r#"{"next":"https://api.example.com/v1/items?api_key=Qk7SecretValue9","webhook":"https://user:s3cr3t@hooks.example.com/cb","n":2}"#;
+        let out = redact_stored_text(doc);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect(&out);
+        assert_eq!(parsed["next"], "https://api.example.com/v1/items");
+        assert_eq!(parsed["webhook"], "https://hooks.example.com/cb");
+        assert_eq!(parsed["n"], 2);
+        for secret in URL_SECRETS {
+            assert!(!out.contains(secret), "{secret}: {out}");
+        }
+        assert_eq!(redact_stored_text(&out), out, "not idempotent");
+    }
+
+    #[test]
+    fn a_json_document_loses_the_url_secrets_of_its_keys() {
+        let doc = r#"{"https://u:s3cr3t@x.example/p?secret=Qk7SecretValue9":1,"b":["https://x.example/a?token=Qk7SecretValue9"]}"#;
+        let out = redact_stored_text(doc);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect(&out);
+        assert_eq!(parsed["https://x.example/p"], 1);
+        assert_eq!(parsed["b"][0], "https://x.example/a");
+        for secret in URL_SECRETS {
+            assert!(!out.contains(secret), "{secret}: {out}");
+        }
+    }
+
+    #[test]
+    fn a_json_url_with_nothing_to_drop_keeps_its_bytes() {
+        let doc = r#"{"a":"https://x.example","b":"see https://x.example/p#frag now"}"#;
+        assert_eq!(redact_stored_text(doc), doc);
+    }
+
+    #[test]
+    fn a_truncated_json_credential_is_masked_to_the_end_of_the_excerpt() {
+        for (input, expected) in [
+            // Interior escaped quote, no closing quote.
+            (
+                r#"{"password":"prefix\"s3cr3t_tail"#,
+                r#"{"password":"***REDACTED***"#,
+            ),
+            // No escape, no closing quote.
+            (
+                r#"{"password":"s3cr3t_tail"#,
+                r#"{"password":"***REDACTED***"#,
+            ),
+            // Cut right after a lone backslash.
+            (r#"{"token":"s3cr3t_tail\"#, r#"{"token":"***REDACTED***"#),
+            // Cut right after an escaped quote.
+            (r#"{"api_key":"s3cr3t\""#, r#"{"api_key":"***REDACTED***"#),
+            // Interior escaped quote, closing quote present.
+            (
+                r#"{"password":"prefix\"s3cr3t_tail","user":"alice"#,
+                r#"{"password":"***REDACTED***","user":"alice"#,
+            ),
+            // Several escapes, then the closing quote.
+            (
+                r#"{"secret":"a\\\"b\\s3cr3t_tail","user":"alice"#,
+                r#"{"secret":"***REDACTED***","user":"alice"#,
+            ),
+        ] {
+            assert!(serde_json::from_str::<serde_json::Value>(input).is_err());
+            for (name, redact) in text_redactors() {
+                let out = redact(input);
+                assert_eq!(out, expected, "{name}: from {input}");
+                assert!(!out.contains("s3cr3t"), "{name}: {out}");
+                assert_eq!(redact(&out), out, "{name}: not idempotent");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unquoted_value_with_an_escaped_quote_or_backtick_is_masked_whole() {
+        for input in [
+            r"password=head\'s3cr3tTail",
+            r"password=head\`s3cr3tTail",
+            r#"password=head\"s3cr3tTail"#,
+            r"x-api-token: head\'s3cr3tTail",
+            r"secret=\'s3cr3tTail",
+            r"password=s3cr3tTail\'",
+        ] {
+            for (name, redact) in text_redactors() {
+                if name == "redact_secrets" {
+                    continue;
+                }
+                let out = redact(input);
+                assert!(!out.contains("s3cr3t"), "{name}: {out}");
+                assert!(out.contains("***REDACTED***"), "{name}: {out}");
+                assert_eq!(redact(&out), out, "{name}: not idempotent");
+            }
+        }
+        for input in [
+            r#"Authorization: Bearer head\"s3cr3tTail"#,
+            r"Authorization: Bearer head\'s3cr3tTail",
+            r"Authorization: Bearer head\`s3cr3tTail",
+        ] {
+            for (name, redact) in text_redactors() {
+                let out = redact(input);
+                assert!(!out.contains("s3cr3t"), "{name}: {out}");
+                assert_eq!(redact(&out), out, "{name}: not idempotent");
+            }
+        }
+        // The closing escaped quote of a JSON string still ends the value.
+        let closed = r#"x-api-token: head\'s3cr3tTail\" tail"#;
+        assert_eq!(
+            redact_for_audit_artifact(closed).0,
+            r#"x-api-token: ***REDACTED***\" tail"#
+        );
     }
 
     // ── Per-pattern positive tests (each MUST match + redact) ─────────
