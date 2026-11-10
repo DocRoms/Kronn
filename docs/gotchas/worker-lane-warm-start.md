@@ -105,9 +105,11 @@ What bounds the network:
   lock, which `--locked` would refuse; the locked versions are kept by the lock
   copy — the `#[ignore]`d `the_staged_cargo_project_is_accepted_by_the_real_cargo`
   checks this repository's own lock against the real `cargo`.) pnpm gets the same
-  treatment: a scratch project with the lock **re-serialised from the validated
-  document** (what pnpm parses is what Kronn validated, not the worker's text, so
-  a YAML parser differential cannot hide anything), an empty manifest, no
+  treatment: a scratch project with the lock **rebuilt from an allow-list**
+  (`lockfileVersion` plus the validated `packages` and `snapshots` fields only —
+  `settings`, `overrides`, `patchedDependencies`, `importers` and any other field
+  are dropped, so what pnpm parses is what Kronn validated, not the worker's text,
+  and a YAML parser differential cannot hide anything), an empty manifest, no
   `.npmrc`, and a workspace file **rebuilt from an allow-list** (`WORKSPACE_KEYS`:
   `allowBuilds`, `onlyBuiltDependencies`, `neverBuiltDependencies`, `overrides`,
   `packageExtensions`, `catalog(s)`, `ignoredOptionalDependencies`,
@@ -119,8 +121,16 @@ What bounds the network:
   `cargo fetch` builds nothing, so no `build.rs` or proc-macro runs.
 - **The environment is cleared.** Both commands run with `ProbeCommand::clean_env`
   (the process runner calls `env_clear`) and get only `FETCH_ENV_NAMES` (`PATH`,
-  `HOME`, locale, `TMPDIR`, the toolchain homes, the operator's proxy and CA
-  variables) plus `CARGO_HOME`/`CARGO_NET_OFFLINE` for Cargo. The sealed Kronn
+  locale, `TMPDIR`, the toolchain homes, the operator's proxy and CA variables)
+  plus `CARGO_HOME`/`CARGO_NET_OFFLINE` for Cargo. **No home directory is
+  inherited** (KT-1674): `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` and
+  `XDG_CONFIG_HOME` point into the scratch project, so `~/.npmrc`,
+  `~/.config/pnpm/rc` and `~/.cargo` are unreachable; Cargo's `CARGO_HOME` is a
+  staged directory linking only the host's `registry` (and `git`), never
+  `credentials.toml` or `config.toml`. Since a rustup/Volta/corepack shim finds its
+  toolchain under `HOME`, `RUSTUP_HOME`/`VOLTA_HOME`/`COREPACK_HOME` are pinned to
+  their default location under the operator's real home when unset
+  (`toolchain_homes`). The sealed Kronn
   environment is not enough on its own: it inherits `NPM_CONFIG_*`
   (`child_env::is_base`). A host `NPM_CONFIG_REGISTRY`, `CARGO_REGISTRIES_*`,
   `CARGO_HTTP_*` or any token never reaches the child.
@@ -135,7 +145,10 @@ still starts); cancellable with the warm-up; the pnpm step only fills the
 **store** — a package the main checkout's `node_modules` lacks still needs an
 offline `pnpm install` by whoever uses it, since the lane's `node_modules` links
 the main checkout's. A pnpm workspace whose lock needs a key outside the
-allow-list (`patchedDependencies`, say) is fetched without it. Cargo's staged
+allow-list (`patchedDependencies`, say) is fetched without it. Cargo still walks
+the scratch project's ancestor directories for `.cargo/config.toml`; a data dir
+under the operator's home therefore still exposes `~/.cargo/config.toml` (not
+`credentials.toml`, which is read from `CARGO_HOME` only). Cargo's staged
 project was run against the real `cargo`; the pnpm commands (and the
 `npm_config_userconfig` redirection) were **not** run against pnpm or the live
 registry when this was written (the author's sandbox is offline): the lock and
