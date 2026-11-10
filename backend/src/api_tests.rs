@@ -61,9 +61,16 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["success"], true);
-        let expected: Value =
-            serde_json::from_str(include_str!("api/workflow_step_schema.json")).unwrap();
+        // The file plus what the code owns: the step types and the doctrine.
+        let expected = crate::api::workflows::canonical_step_schema();
         assert_eq!(body["data"], expected);
+        assert_eq!(
+            body["data"]["step_types_closed_set"],
+            serde_json::json!(crate::models::StepType::names())
+        );
+        assert!(body["data"]["authoring_doctrine"]
+            .as_str()
+            .is_some_and(|doctrine| doctrine.starts_with("## Authoring doctrine")));
     }
 
     /// Build a test AppState with a specific auth token configured.

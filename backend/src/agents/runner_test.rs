@@ -2375,8 +2375,8 @@ fi
 
     #[test]
     fn authoring_schemas_survive_clamping_when_tool_history_fills_the_window() {
-        let workflow_schema: serde_json::Value =
-            serde_json::from_str(include_str!("../api/workflow_step_schema.json")).unwrap();
+        // What the tool serves, doctrine included (KT-1216).
+        let workflow_schema = crate::api::workflows::canonical_step_schema();
         for (name, schema) in [
             ("workflow_step_schema", workflow_schema),
             (

@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 
+use super::doctrine_warnings::{self, ConfiguredApi};
 use crate::models::{
     AgentType, BlockedQuickExec, QuickExec, StepType, Workflow, WorkflowBlocker,
-    WorkflowBlockerKind, WorkflowReadiness, WorkflowStep,
+    WorkflowBlockerKind, WorkflowReadiness, WorkflowStep, WorkflowWarning,
 };
 
 const HUMAN_APPROVAL_ACTION: &str = "Ask a human to review and approve this line in the \
@@ -69,9 +70,29 @@ pub fn assess_in_db(
             .collect(),
         Err(error) => return collection_failure(root, &format!("Quick Execs: {error}")),
     };
-    assess_full(root, workflows, &quick_execs, &mut |wf| {
+    // KT-1216: the plugins an Exec could bypass. A failed read only drops that
+    // one advisory check: it is never a blocker.
+    let apis = configured_apis(conn).unwrap_or_default();
+    assess_walk(root, workflows, &quick_execs, &apis, &mut |wf| {
         repository_approval_refusal(conn, wf)
     })
+}
+
+/// The API plugins with at least one saved configuration, by the host their
+/// base URL serves (KT-1216).
+pub fn configured_apis(conn: &rusqlite::Connection) -> anyhow::Result<Vec<ConfiguredApi>> {
+    let configured: std::collections::HashSet<String> = crate::db::mcps::list_configs(conn)?
+        .into_iter()
+        .map(|config| config.server_id)
+        .collect();
+    Ok(crate::db::mcps::list_servers(conn)?
+        .into_iter()
+        .filter(|server| configured.contains(&server.id))
+        .filter_map(|server| {
+            let spec = server.api_spec.as_ref()?;
+            ConfiguredApi::from_base_url(&server.name, &spec.base_url)
+        })
+        .collect())
 }
 
 /// The run's own gate (`workflow_execution_refusal`, which the runner's
@@ -99,18 +120,32 @@ pub fn assess_full(
     quick_execs: &HashMap<String, QuickExec>,
     approval: &mut ApprovalCheck<'_>,
 ) -> WorkflowReadiness {
+    assess_walk(root, workflows, quick_execs, &[], approval)
+}
+
+/// [`assess_full`] that also knows the configured API plugins, which the
+/// `ExecBypassesPlugin` warning needs.
+pub fn assess_walk(
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+    quick_execs: &HashMap<String, QuickExec>,
+    apis: &[ConfiguredApi],
+    approval: &mut ApprovalCheck<'_>,
+) -> WorkflowReadiness {
     let mut walk = Walk {
         workflows,
         quick_execs,
+        apis,
         root,
         path: Vec::new(),
         checked: Vec::new(),
         blockers: Vec::new(),
+        warnings: Vec::new(),
         full_access_refusals: HashMap::new(),
         approval,
     };
     walk.visit(root);
-    finish(root, walk.checked, walk.blockers)
+    finish(root, walk.checked, walk.blockers, walk.warnings)
 }
 
 /// A readiness that says the diagnostic itself failed: never `ready`.
@@ -128,7 +163,7 @@ pub fn collection_failure(root: &Workflow, error: &str) -> WorkflowReadiness {
         human_only: false,
         quick_exec: None,
     };
-    finish(root, vec![root.id.clone()], vec![blocker])
+    finish(root, vec![root.id.clone()], vec![blocker], Vec::new())
 }
 
 /// The blocker counts a workflow card shows: (all, human-only).
@@ -142,10 +177,12 @@ pub fn counts(readiness: &WorkflowReadiness) -> (u32, u32) {
 struct Walk<'a, 'b> {
     workflows: &'a HashMap<String, Workflow>,
     quick_execs: &'a HashMap<String, QuickExec>,
+    apis: &'a [ConfiguredApi],
     root: &'a Workflow,
     path: Vec<String>,
     checked: Vec<String>,
     blockers: Vec<WorkflowBlocker>,
+    warnings: Vec<WorkflowWarning>,
     /// Each agent's setting is read once per check, as the runner reads it.
     full_access_refusals: HashMap<String, bool>,
     /// The repository-import gate every run of a checked workflow passes.
@@ -293,6 +330,8 @@ impl Walk<'_, '_> {
         }
         self.checked.push(wf.id.clone());
         self.approval_blocker(wf);
+        self.warnings
+            .extend(doctrine_warnings::warnings(wf, self.apis));
         for (chain, on_failure) in [(&wf.steps, false), (&wf.on_failure, true)] {
             for step in chain {
                 self.blockers.extend(step_blockers(wf, step, on_failure));
@@ -479,6 +518,7 @@ fn finish(
     root: &Workflow,
     checked: Vec<String>,
     blockers: Vec<WorkflowBlocker>,
+    warnings: Vec<WorkflowWarning>,
 ) -> WorkflowReadiness {
     let human = blockers.iter().filter(|b| b.human_only).count() as u32;
     let state = if root.enabled {
@@ -486,7 +526,7 @@ fn finish(
     } else {
         "Saved and disabled"
     };
-    let summary = if blockers.is_empty() {
+    let mut summary = if blockers.is_empty() {
         format!(
             "READY: no known blocker in {} workflow(s) checked. {state}. This is a pre-run \
              check, not a guarantee: a run can still fail on credentials, changed scripts, \
@@ -503,12 +543,20 @@ fn finish(
             checked.len()
         )
     };
+    if !warnings.is_empty() {
+        summary.push_str(&format!(
+            " {} design warning(s), not blockers: see `warnings` and read `authoring_doctrine` \
+             (workflow_step_schema).",
+            warnings.len()
+        ));
+    }
     WorkflowReadiness {
         workflow_id: root.id.clone(),
         workflow_name: root.name.clone(),
         enabled: root.enabled,
         ready: blockers.is_empty(),
         human_approval_count: human,
+        warnings,
         blockers,
         checked_workflow_ids: checked,
         summary,

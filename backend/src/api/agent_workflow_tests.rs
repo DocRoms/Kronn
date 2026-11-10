@@ -161,7 +161,11 @@ fn workflow_schema_sections_preserve_the_canonical_contract() {
         let _: crate::models::WorkflowStep =
             serde_json::from_value(selected["contract"]["example"].clone()).unwrap();
     }
-    for section in ["template_vars", "data_pipeline_contract"] {
+    for section in [
+        "template_vars",
+        "data_pipeline_contract",
+        "authoring_doctrine",
+    ] {
         assert_eq!(
             schema_section(&json!({"section":section})).unwrap()["contract"],
             schema[section]
@@ -247,4 +251,33 @@ async fn a_native_draft_with_an_agent_line_is_not_ready_and_stays_unapproved() {
     );
     let got = call(&executor, "workflow_get", json!({"workflow_id":id})).await;
     assert_eq!(got.content["kronn_readiness"]["human_approval_count"], 1);
+}
+
+/// KT-1216 — the authoring tools send the agent to the doctrine, and the
+/// manuals do too.
+#[test]
+fn the_authoring_tools_point_at_the_doctrine() {
+    let described: std::collections::HashMap<String, String> = declarations()
+        .iter()
+        .map(|d| {
+            (
+                d["function"]["name"].as_str().unwrap().to_string(),
+                d["function"]["description"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    for tool in [
+        "workflow_step_schema",
+        "workflow_create_draft",
+        "workflow_update",
+    ] {
+        assert!(described[tool].contains("authoring_doctrine"), "{tool}");
+    }
+    for tool in ["workflow_create_draft", "workflow_update"] {
+        let manual = super::super::tool_manual(Some(tool), None)["manual"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(manual.contains("authoring_doctrine"), "{tool}: {manual}");
+    }
 }

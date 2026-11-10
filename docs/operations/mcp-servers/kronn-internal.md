@@ -1014,7 +1014,26 @@ its datasets: the built-in `workflow-architect` skill. CLI agents (MCP) and HTTP
 agents load it through the same tool, `tool_manual({tool: "workflow-architect"})`,
 which returns its role and table of contents; `section` returns one section
 (`backend/src/core/skill_guide.rs`, route `GET /api/skills/{id}/guide`). Tool
-descriptions stay short and point at it: the doctrine lives in the guide only.
+descriptions stay short and point at it.
+
+The short design doctrine (decision tree, equal-cost rules, ApiCall limits;
+KT-1216) is one file, `backend/src/workflows/authoring_doctrine.md`, with two
+doors that cannot drift because both read it: the `authoring_doctrine` field of
+`workflow_step_schema` (also `section: "authoring_doctrine"` on the native
+tool), and the guide's « Authoring doctrine » section, where the guide source
+carries only the `<!-- kronn:authoring-doctrine -->` marker that
+`workflows/authoring_doctrine.rs` renders. The same marker mechanism writes the
+step-type list and count (`<!-- kronn:step-types -->`) from `StepType::ALL`,
+which also feeds the schema's `step_types_closed_set`; the bridge's
+`STEP_TYPES` tuple (greeting, `workflow_create_draft` description) is checked
+against it by `authoring_doctrine_test.rs` and `test_disc_introspection_mcp.py`.
+`workflow_create_draft` and `workflow_update` (tool descriptions and manuals)
+tell the agent to read the doctrine before composing.
+
+`kronn_readiness` carries a non-blocking `warnings` list for drift from it
+(`workflows/doctrine_warnings.rs`): the same long script or inline code in
+several Exec steps, and an Exec running `gh`/`curl` against a service that has a
+configured API plugin. A warning never changes `ready`.
 
 The two catalogues stay aligned by a test: a tool declared for one audience only
 fails `backend/src/api/agent_tool_parity_tests.rs` until it is listed there with

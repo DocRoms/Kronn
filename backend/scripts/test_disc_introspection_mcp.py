@@ -7363,6 +7363,14 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
             )
 
 
+def _backend_step_types():
+    """`StepType::ALL` read from the backend source: the one list in the code."""
+    models = (_SCRIPT.parent.parent / "src" / "models" / "workflows.rs").read_text()
+    block = re.search(r"pub const ALL: \[StepType; \d+\] = \[(.*?)\];", models, re.S)
+    assert block, "StepType::ALL not found"
+    return re.findall(r"StepType::(\w+)", block.group(1))
+
+
 class StepSchemaAndBindingListTests(unittest.TestCase):
     """0.8.8 (2026-06-24) — `workflow_step_schema` (canonical schema as an
     untruncatable tool RESULT) + the Agent-step binding catalogs
@@ -7374,6 +7382,11 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         self.mod = _load_module()
         schema_path = _SCRIPT.parent.parent / "src" / "api" / "workflow_step_schema.json"
         self.schema = json.loads(schema_path.read_text())
+        # The backend injects both from the code before serving the schema.
+        self.schema["step_types_closed_set"] = _backend_step_types()
+        self.schema["authoring_doctrine"] = (
+            _SCRIPT.parent.parent / "src" / "workflows" / "authoring_doctrine.md"
+        ).read_text()
         def read_schema(method, path, *args, **kwargs):
             self.assertEqual((method, path), ("GET", "/api/workflows/step-schema"))
             return self._env(self.schema)
@@ -7402,6 +7415,34 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         # every type has a field spec
         for st in out["step_types_closed_set"]:
             self.assertIn(st, out["fields_by_type"])
+
+    def test_step_types_are_named_the_same_everywhere(self):
+        """KT-1216 — the greeting, the `workflow_create_draft` description and
+        the schema all name the backend enum's step types, no more, no less."""
+        backend = _backend_step_types()
+        self.assertEqual(list(self.mod.STEP_TYPES), backend)
+        tools = {t["name"]: t for t in self.mod.TOOLS}
+        draft = tools["workflow_create_draft"]["description"]
+        listed = re.search(r"closed set \*\*(.*?)\*\*", draft)
+        self.assertIsNotNone(listed, draft)
+        self.assertEqual(listed.group(1).split(", "), backend)
+        response = self.mod._handle({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
+        })
+        instructions = response["result"]["instructions"]
+        self.assertIn(f"the closed {len(backend)} `step_type`s", instructions)
+        self.assertEqual(
+            self.mod.call_workflow_step_schema({})["step_types_closed_set"], backend
+        )
+
+    def test_authoring_doctrine_reaches_the_schema_and_the_authoring_tools(self):
+        out = self.mod.call_workflow_step_schema({})
+        doctrine = out["authoring_doctrine"]
+        self.assertIn("ApiCall", doctrine)
+        self.assertIn("PAGINATION_TRUNCATED", doctrine)
+        tools = {t["name"]: t["description"] for t in self.mod.TOOLS}
+        for name in ("workflow_create_draft", "workflow_update", "workflow_step_schema"):
+            self.assertIn("authoring_doctrine", tools[name], name)
 
     def test_step_schema_documents_foreach_runtime_contract(self):
         out = self.mod.call_workflow_step_schema({})
@@ -7581,7 +7622,8 @@ class LivePageToolTests(unittest.TestCase):
         self.assertIn("page_list", instructions)
         self.assertIn("page_add_dataset", instructions)
         self.assertIn("page_delete_dataset", instructions)
-        self.assertIn("closed 12", instructions)
+        self.assertIn(f"closed {len(self.mod.STEP_TYPES)} ", instructions)
+        self.assertNotIn("closed 12 ", instructions)
         self.assertNotIn("closed 9", instructions)
 
     def test_page_list_returns_compact_discovery_shape(self):

@@ -12396,6 +12396,10 @@ export type WorkflowReadiness = { workflow_id: string, workflow_name: string, en
  */
 ready: boolean, blockers: Array<WorkflowBlocker>, human_approval_count: number,
 /**
+ * Design drift (KT-1216): advisory, never a blocker, never part of `ready`.
+ */
+warnings?: Array<WorkflowWarning>,
+/**
  * The workflows checked: this one, then its sub-workflows.
  */
 checked_workflow_ids: Array<string>,
@@ -13018,6 +13022,21 @@ export type WorkflowTrigger = { "type": "Cron", schedule: string,
  * global timezone. Triggers saved before it were pinned to UTC.
  */
 timezone?: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" } | { "type": "Watch" } & WatchTrigger;
+
+/**
+ * An advisory finding: the workflow can still start, but it was built against
+ * the doctrine served by `workflow_step_schema` (`authoring_doctrine`).
+ */
+export type WorkflowWarning = { workflow_id: string, workflow_name: string,
+/**
+ * The steps that show it, in workflow order.
+ */
+steps: Array<string>, kind: WorkflowWarningKind, message: string, action: string, };
+
+/**
+ * A sign that a workflow drifts from the authoring doctrine (KT-1216).
+ */
+export type WorkflowWarningKind = "duplicated_exec_script" | "exec_bypasses_plugin";
 
 export type WorkspaceConfig = { hooks: WorkspaceHooks,
 /**

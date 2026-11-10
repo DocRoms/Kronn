@@ -1836,9 +1836,18 @@ async fn validate_saved_quick_exec_refs(
 
 /// Shared by the MCP bridge and native HTTP agents; kept out of every-turn
 /// declarations so the canonical authoring contract is paid only on demand.
-pub(super) fn canonical_step_schema() -> serde_json::Value {
-    serde_json::from_str(include_str!("workflow_step_schema.json"))
-        .expect("versioned workflow step schema is valid JSON")
+///
+/// The closed set of step types and the authoring doctrine come from the code,
+/// not from the JSON file: the list cannot lag the enum, and the doctrine is
+/// the very text the `workflow-architect` guide carries (KT-1216).
+pub(crate) fn canonical_step_schema() -> serde_json::Value {
+    let mut schema: serde_json::Value =
+        serde_json::from_str(include_str!("workflow_step_schema.json"))
+            .expect("versioned workflow step schema is valid JSON");
+    schema["step_types_closed_set"] = serde_json::json!(StepType::names());
+    schema["authoring_doctrine"] =
+        serde_json::json!(crate::workflows::authoring_doctrine::AUTHORING_DOCTRINE);
+    schema
 }
 
 /// GET /api/workflows/step-schema
