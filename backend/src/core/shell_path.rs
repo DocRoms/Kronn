@@ -192,6 +192,29 @@ pub fn enrich_path_for_service() -> StartupLog {
     #[cfg(not(unix))]
     let shell_path = shell_path_from_user_shell(&mut log);
     let current = crate::core::child_env::var("PATH").unwrap_or_default();
+    let home = crate::core::child_env::var("HOME").unwrap_or_default();
+    let path = service_path(
+        &current,
+        shell_path,
+        std::path::Path::new(&home),
+        separator,
+        &mut log,
+    );
+    crate::core::child_env::set_var("PATH", path);
+    log
+}
+
+/// The PATH of a service process: `current`, then the entries of the login
+/// shell's PATH it lacks, else the existing per-user bin dirs of `home`
+/// (launchd and systemd start units with a minimal PATH, and agent CLIs live in
+/// those dirs). Pure, so the choice is tested without touching the process PATH.
+fn service_path(
+    current: &str,
+    shell_path: Option<String>,
+    home: &std::path::Path,
+    separator: char,
+    log: &mut StartupLog,
+) -> String {
     let extra = match shell_path {
         Some(path) => {
             log.push((
@@ -201,9 +224,7 @@ pub fn enrich_path_for_service() -> StartupLog {
             path
         }
         None => {
-            let home = crate::core::child_env::var("HOME").unwrap_or_default();
-            let dirs = fallback_bin_dirs(std::path::Path::new(&home));
-            let joined = dirs
+            let joined = fallback_bin_dirs(home)
                 .iter()
                 .map(|d| d.display().to_string())
                 .collect::<Vec<_>>()
@@ -217,8 +238,7 @@ pub fn enrich_path_for_service() -> StartupLog {
             joined
         }
     };
-    crate::core::child_env::set_var("PATH", merge_path(&current, &extra, separator));
-    log
+    merge_path(current, &extra, separator)
 }
 
 #[cfg(test)]
@@ -242,6 +262,42 @@ mod tests {
         assert_eq!(merge_path("/a", "", ':'), "/a");
         assert_eq!(merge_path("/a", "/b::/c", ':'), "/a:/b:/c");
         assert_eq!(merge_path("/a", "/a", ';'), "/a");
+    }
+
+    #[test]
+    fn service_path_appends_the_shell_path_after_the_current_one() {
+        let mut log = StartupLog::new();
+        let home = std::path::Path::new("/nonexistent-kronn-home");
+        let path = service_path(
+            "/usr/bin:/bin",
+            Some("/opt/homebrew/bin:/usr/bin".into()),
+            home,
+            ':',
+            &mut log,
+        );
+        assert_eq!(path, "/usr/bin:/bin:/opt/homebrew/bin");
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert_eq!(log[0].0, tracing::Level::INFO);
+        assert!(log[0].1.contains("loaded PATH from user shell"), "{log:?}");
+    }
+
+    #[test]
+    fn service_path_without_a_shell_path_appends_the_fallback_dirs() {
+        let home = std::env::temp_dir().join(format!("kronn-service-path-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        let mut log = StartupLog::new();
+        let path = service_path("/usr/bin:/bin", None, &home, ':', &mut log);
+        let _ = std::fs::remove_dir_all(&home);
+        let local = home.join(".local/bin").display().to_string();
+        let cargo = home.join(".cargo/bin").display().to_string();
+        let entries: Vec<&str> = path.split(':').collect();
+        assert_eq!(&entries[..2], ["/usr/bin", "/bin"], "{path}");
+        assert!(entries.contains(&local.as_str()), "{path}");
+        assert!(entries.contains(&cargo.as_str()), "{path}");
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert_eq!(log[0].0, tracing::Level::WARN);
+        assert!(log[0].1.contains(&local), "{log:?}");
     }
 
     #[test]
@@ -303,6 +359,7 @@ mod tests {
         for signature in [
             "fn shell_path_within(timeout_secs: u64, log: &mut StartupLog) -> Option<String> {",
             "pub fn enrich_path_for_service() -> StartupLog {",
+            "fn service_path(",
         ] {
             let start = source.find(signature).unwrap();
             let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
