@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod agent_api;
 pub mod agent_jobs;
 pub mod agent_tools;

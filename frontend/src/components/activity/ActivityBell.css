@@ -1,0 +1,71 @@
+/* The permanent bell (KT-1658). The button reuses `.dash-nav-activity-btn`
+ * (its size, border, hover and Euronews recolouring live in Dashboard.css);
+ * this file adds what is the bell's own: it moves while something runs and
+ * carries a counter when something waits for the owner. Tokens only. */
+
+.activity-bell {
+  position: relative;
+}
+
+.activity-bell-icon {
+  transform-origin: 50% 0;
+}
+
+/* Something is running: the bell rings, softly, and keeps ringing. */
+.activity-bell[data-running="true"] .activity-bell-icon {
+  animation: activity-bell-ring 2.4s ease-in-out infinite;
+}
+
+@keyframes activity-bell-ring {
+  0%, 62%, 100% { transform: rotate(0); }
+  66% { transform: rotate(14deg); }
+  72% { transform: rotate(-12deg); }
+  78% { transform: rotate(8deg); }
+  84% { transform: rotate(-5deg); }
+  90% { transform: rotate(2deg); }
+}
+
+/* Motion is a nicety, never the only signal: the accessible name carries the
+ * count, and a reduced-motion reader gets a steady dot instead. */
+@media (prefers-reduced-motion: reduce) {
+  .activity-bell[data-running="true"] .activity-bell-icon {
+    animation: none;
+  }
+  .activity-bell[data-running="true"]::after {
+    content: "";
+    position: absolute;
+    top: var(--kr-sp-2);
+    right: var(--kr-sp-2);
+    width: 6px;
+    height: 6px;
+    border-radius: var(--kr-r-full);
+    background: var(--kr-accent);
+  }
+}
+
+.activity-bell-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 14px;
+  padding: 1px var(--kr-sp-3);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-error);
+  color: var(--kr-on-error);
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 12px;
+  text-align: center;
+}
+
+.activity-bell-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

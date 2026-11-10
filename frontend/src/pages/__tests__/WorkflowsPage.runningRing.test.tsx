@@ -1,6 +1,6 @@
 // Which automation is running, told on the card.
 //
-// Kronn already knew: `ActiveRunsPopover` lists the active runs. But it is a
+// Kronn already knew: the activity bell panel lists the active runs. But it is a
 // popover you have to open, so the sidebar answered "something is running" and
 // never "which one" — which is the question actually being asked.
 

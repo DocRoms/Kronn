@@ -567,11 +567,12 @@ pass (a frequent schedule adds no fire during the repeated hour).
   next resume and the re-check use it. The UI reads one label for the state,
   « Paused — provider quota, resumes automatically at <time> », on the
   workflow list, the card and the run page, each with « Resume now »; the
-  existing active-runs popover lists paused runs apart from running ones. The
-  paused state has no header indicator of its own: the shape the notification
-  bell (KT-1658) aggregates is the `ActiveRunSummary` of the active-runs board
-  (`status: WaitingQuota`, `quota.wake_at`), read in the UI through
-  `useQuotaPausedRuns` and `lib/quotaPause.ts`.
+  header's activity bell (KT-1658) lists paused runs apart from running ones
+  (« En pause », the wake time, « Resume now »). The paused state has no header
+  indicator of its own and does not make the bell ring: the bell's `GET
+  /api/activity` reads the `ActiveRunSummary` of the active-runs board
+  (`status: WaitingQuota`, `quota.wake_at`) as a `paused` row. The workflow
+  pages still read it through `useQuotaPausedRuns` and `lib/quotaPause.ts`.
 - **Worktrees nested in a run worktree (KT-985).** A step may add its own
   worktree inside the run's (`<run worktree>/.kronn/pr-N`). Deleting the run's
   directory alone leaves that entry `prunable` in `git worktree list`, so

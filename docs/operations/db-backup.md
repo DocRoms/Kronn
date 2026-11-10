@@ -92,7 +92,7 @@ was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
   nothing until a human enables it.
   `[src: file: backend/src/core/run_retention.rs:50-68#window_hours]`
   `[src: file: backend/src/core/run_retention.rs:91-131#run_pass]`
-  `[src: file: backend/src/db/workflows.rs:2955-2966#retention_from_column]`
+  `[src: file: backend/src/db/workflows.rs:2971-2982#retention_from_column]`
 
 Never touched, whatever their age: runs that are not `Success`, `Partial`,
 `Failed`, `Cancelled` or `StoppedByGuard` (so not `Running`, `Pending`,

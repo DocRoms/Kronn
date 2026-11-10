@@ -43,8 +43,8 @@ pub async fn audit_status(
 }
 
 /// 0.8.3 (#288) — list ALL audits currently in progress across every
-/// project. Powers the `ActiveAuditsPopover` on the Projets nav button,
-/// same UX as `ActiveRunsPopover` for workflows: one badge with the
+/// project. Powers the Projets nav badge and the activity bell panel,
+/// like the active-runs board for workflows: one badge with the
 /// running count, click intercepts navigation to surface the list +
 /// per-audit Stop button. Returns an empty Vec when no audit is
 /// running (the popover then hides itself; the nav button keeps the

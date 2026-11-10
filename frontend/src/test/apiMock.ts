@@ -33,6 +33,7 @@ const resolve = <T>(value: T) => vi.fn().mockResolvedValue(value);
 /** All top-level namespaces exposed by `lib/api.ts`. Kept in sync by the
  *  completeness test. */
 export const API_NAMESPACES = [
+  'activity',
   'setup',
   'media',
   'config',
@@ -99,6 +100,7 @@ interface DefaultMock {
   getApiBase: AnyFn;
   fetchHealth: AnyFn;
   health: Record<string, AnyFn>;
+  activity: Record<string, AnyFn>;
   setup: Record<string, AnyFn>;
   config: Record<string, AnyFn>;
   contacts: Record<string, AnyFn>;
@@ -161,6 +163,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
 
     health: {
       get: resolve({ ok: true, version: '0.0.0', host_os: 'linux', in_docker: false }),
+    },
+
+    activity: {
+      overview: resolve({ rows: [], stall_after_secs: 900, generated_at: '2026-01-01T00:00:00Z', unavailable_sources: [] }),
     },
 
     setup: {

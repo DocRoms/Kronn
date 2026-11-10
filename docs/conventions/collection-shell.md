@@ -162,9 +162,9 @@ every partial task response.
 [src: file: frontend/src/hooks/usePersistentIdSet.ts:13-40#usePersistentIdSet]
 [src: file: frontend/src/hooks/useApi.ts:9-10#hasLoaded]
 [src: file: frontend/src/hooks/useApi.ts:38-44#setHasLoaded]
-[src: file: frontend/src/pages/Dashboard.tsx:119#projectsLoaded]
+[src: file: frontend/src/pages/Dashboard.tsx:111#projectsLoaded]
 [src: file: frontend/src/routes/ProjectsRoute.tsx:38#favoritesReady]
-[src: file: frontend/src/pages/Dashboard.tsx:670#mcpOverviewLoaded]
+[src: file: frontend/src/pages/Dashboard.tsx:648#mcpOverviewLoaded]
 [src: file: frontend/src/routes/PluginsRoute.tsx:28#overviewLoaded]
 [src: file: frontend/src/pages/PlanningPage.tsx:155-162#usePersistentIdSet]
 
