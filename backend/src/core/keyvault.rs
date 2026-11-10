@@ -898,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     fn sidecar_writes_0600_roundtrips_and_leaves_no_temp() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -982,7 +982,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[test]
     fn sidecar_permission_denied_is_reported_as_denied() {
         use std::os::unix::fs::PermissionsExt;
@@ -1026,7 +1026,7 @@ mod tests {
             .contains("create data dir for sidecar"));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn sidecar_store_never_follows_a_symlink_planted_at_the_temp_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -1047,7 +1047,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn private_temp_is_owner_only_at_creation_even_over_a_stale_0644_file() {
         use std::os::unix::fs::PermissionsExt;

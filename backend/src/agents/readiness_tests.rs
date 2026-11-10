@@ -506,7 +506,7 @@ async fn a_result_is_cached_until_the_agent_or_project_mcp_configuration_changes
 
 /// Through Kronn's real spawn of `opencode acp`: the runtime receives
 /// `initialize` and `session/new`, never `session/prompt`.
-#[cfg(unix)]
+#[cfg(unix)] // spawns a /usr/bin/python3 fake agent made executable with chmod mode bits
 mod real_spawn {
     use super::*;
 

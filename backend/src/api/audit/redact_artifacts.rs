@@ -298,7 +298,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn refuses_symlinked_artifact_fail_closed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -333,7 +333,7 @@ mod tests {
         assert!(report.is_empty());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn refuses_symlinked_tech_debt_directory_fail_closed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -345,7 +345,7 @@ mod tests {
         assert!(err.contains("symlink"), "{err}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn refuses_symlinked_tech_debt_parent_before_enumeration() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -401,7 +401,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn atomic_permission_helper_refuses_symlink_without_caller_precheck() {
         let tmp = tempfile::TempDir::new().unwrap();

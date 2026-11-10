@@ -234,8 +234,13 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
             self.assertGreaterEqual(len(gated), minimum, name)
             route_job = workflow[workflow.index(f"\n  {route}:\n"):]
             route_job = route_job[: route_job.index("\n\n  ", 1)]
-            self.assertIn('if [ "$EVENT_NAME" = "pull_request" ]', route_job, name)
-            self.assertIn(f"grep -qx '{label}'", route_job, name)
+            # The live label read and the pull-request-only rule live in
+            # require_label.sh (KT-1523); the route job passes the event.
+            self.assertIn(f"scripts/ci/require_label.sh {label} ", route_job, name)
+            self.assertIn("EVENT_NAME: ${{ github.event_name }}", route_job, name)
+            script = (workflows.parent.parent / "scripts/ci/require_label.sh").read_text(encoding="utf-8")
+            self.assertIn('if [ "${EVENT_NAME:-pull_request}" != "pull_request" ]', script)
+            self.assertIn('grep -qxF "$label"', script)
             self.assertIn('echo "run=true" >> "$GITHUB_OUTPUT"', route_job, name)
 
     def test_checkout_network_retry_is_bounded(self) -> None:

@@ -414,7 +414,7 @@ fn a_lost_end_marker_with_human_text_inside_keeps_it() {
     assert!(fixed.contains("## Global"), "{fixed}");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
 #[test]
 fn a_docs_folder_swapped_after_the_walk_never_receives_the_coding_rules() {
     use crate::core::fs_guard::swap_probe;

@@ -1233,7 +1233,7 @@ mod tests {
         assert!(resolve_contained_read(&root, Path::new("src/é漢.md")).is_ok());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_leaving_the_project_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1259,7 +1259,7 @@ mod tests {
             .all(|e| !e.file_name().to_string_lossy().starts_with(".kronn-tmp-"))
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // hooks the POSIX linkat publish of the rooted write
     #[test]
     fn concurrent_regular_file_at_publish_is_never_clobbered() {
         // The Copilot round-3 finding, made deterministic: a rival file
@@ -1282,7 +1282,7 @@ mod tests {
         assert!(no_temp_left(&proj.join("docs")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn dangling_symlink_appearing_at_publish_is_never_followed() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1310,7 +1310,7 @@ mod tests {
         assert!(no_temp_left(&proj.join("docs")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // the POSIX openat/linkat temp naming; Windows writes by path
     #[test]
     fn name_max_basename_still_publishes() {
         // The temp name is basename-independent — a destination close to
@@ -1324,7 +1324,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "content");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // drives rooted_fd::Dir, POSIX openat directory fds
     #[test]
     fn injected_write_failure_leaves_no_destination_and_no_temp() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1353,7 +1353,7 @@ mod tests {
         assert!(no_temp_left(&proj.join("docs")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn write_new_mode_matches_fs_write_parity() {
         use std::os::unix::fs::PermissionsExt;
@@ -1371,7 +1371,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn parent_swapped_to_symlink_after_walk_is_refused() {
         // Real regression harness (KT-1595): every path-based check and the
@@ -1408,7 +1408,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn parent_moved_and_replaced_by_symlink_never_writes_outside() {
         // The non-trivial swap: the directory still holds data, so it is
@@ -1445,7 +1445,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn parent_swapped_between_temp_and_publish_never_writes_outside() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1471,7 +1471,7 @@ mod tests {
         assert!(proj.join("docs-moved/late.md").exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn create_dir_all_refuses_a_link_in_the_middle() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1515,7 +1515,7 @@ mod tests {
         assert!(guarded_write_new(&tmp.path().join("other"), &proj.join("z.md"), b"x").is_err());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn refuses_symlinked_component_and_dangling_target() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1540,7 +1540,7 @@ mod tests {
             .is_symlink());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; makes hard links and reads unix inode metadata
     #[test]
     fn copy_preserves_src_mode_and_stays_create_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -1564,7 +1564,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dst).unwrap(), "user edit");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // the POSIX openat/linkat path; Windows has its own by-path test
     #[test]
     fn refuses_escape_and_creates_cleanly_inside() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1599,7 +1599,7 @@ mod tests {
         std::fs::read_dir(dir).unwrap().next().is_none()
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_temp_swapped_for_a_link_before_publish_is_refused() {
         // The temp is replaced by a link to an outside file right before the
@@ -1636,7 +1636,7 @@ mod tests {
         assert!(no_temp_left(&docs), "the swapped-in link is cleaned up too");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn replace_swaps_atomically_and_creates_the_folders() {
         let (_tmp, proj, _external) = project_and_external();
@@ -1657,7 +1657,7 @@ mod tests {
         drop(tmp2);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn replace_over_a_link_planted_at_the_last_moment_replaces_the_link() {
         let (_tmp, proj, external) = project_and_external();
@@ -1682,7 +1682,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&link).unwrap(), "mine");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn replace_with_a_parent_swapped_after_the_walk_never_writes_outside() {
         for at_rename in [false, true] {
@@ -1709,7 +1709,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks and asserts POSIX mode bits
     #[test]
     fn replace_if_unchanged_keeps_the_mode_and_refuses_a_concurrent_edit() {
         use std::os::unix::fs::PermissionsExt;
@@ -1748,7 +1748,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(external.join("t")).unwrap(), "KEEP");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks and asserts POSIX mode bits
     #[test]
     fn set_mode_remove_rename_and_move_stay_under_the_root() {
         use std::os::unix::fs::PermissionsExt;
@@ -1812,7 +1812,7 @@ mod tests {
         assert!(guarded_remove_file(&proj, &proj.join("gone.md")).is_err());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn replace_if_unchanged_with_a_parent_swapped_after_the_walk_never_writes_outside() {
         let (_tmp, proj, external) = project_and_external();
@@ -1833,7 +1833,7 @@ mod tests {
         assert!(no_temp_left(&proj.join("docs.moved")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink; asserts POSIX mode bits
     #[test]
     fn remove_and_set_mode_with_a_parent_swapped_after_the_walk_spare_the_outside() {
         use std::os::unix::fs::PermissionsExt;
@@ -1879,7 +1879,7 @@ mod tests {
         assert!(!proj2.join("docs.moved/v.md").exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn move_new_with_a_parent_swapped_after_the_walk_never_writes_outside() {
         let (_tmp, proj, external) = project_and_external();
@@ -1895,7 +1895,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks; drives rooted_fd::Dir, POSIX openat fds
     #[test]
     fn a_published_entry_that_is_not_the_temp_is_reported_never_deleted() {
         // The window between the check of the temp and its publication: the
@@ -1943,7 +1943,7 @@ mod tests {
         assert!(proj.join("docs/real.md").is_file());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // hooks the POSIX renameat of the rooted replace
     #[test]
     fn replace_if_unchanged_refuses_a_file_replaced_or_edited_under_it() {
         use super::imp::guarded_replace_if_unchanged_hooked;
@@ -1981,7 +1981,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks and asserts POSIX mode bits
     #[test]
     fn replace_keeps_the_mode_and_creates_new_files_like_a_plain_write() {
         use std::os::unix::fs::PermissionsExt;
@@ -2014,7 +2014,7 @@ mod tests {
         assert!(no_temp_left(&proj.join("docs")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks and asserts POSIX mode bits
     #[test]
     fn replace_like_keeps_the_mode_and_refuses_a_link() {
         use std::os::unix::fs::PermissionsExt;
@@ -2045,7 +2045,7 @@ mod tests {
         assert!(no_temp_left(&proj.join("docs")));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn replace_like_with_a_parent_swapped_after_the_walk_never_writes_outside() {
         let (_tmp, proj, external) = project_and_external();
@@ -2060,7 +2060,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn create_dir_all_with_a_parent_swapped_after_the_walk_never_creates_outside() {
         let (_tmp, proj, external) = project_and_external();
@@ -2072,7 +2072,7 @@ mod tests {
         assert!(!proj.join("docs.moved/sub").exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
     #[test]
     fn remove_tree_with_a_parent_swapped_after_the_walk_spares_the_outside() {
         let (_tmp, proj, external) = project_and_external();
@@ -2089,7 +2089,7 @@ mod tests {
         );
         assert!(!proj.join("docs.moved/tree").exists());
     }
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts setuid/setgid/sticky POSIX mode bits
     #[test]
     fn written_content_never_carries_setuid_setgid_or_sticky_bits() {
         use std::os::unix::fs::PermissionsExt;
@@ -2117,7 +2117,7 @@ mod tests {
         assert_eq!(mode(&proj.join("docs/copy.sh")), 0o755);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn remove_if_ours_spares_a_file_that_is_no_longer_the_one_we_created() {
         let (_tmp, proj, external) = project_and_external();
@@ -2160,7 +2160,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn guarded_read_refuses_a_link_and_never_reads_through_a_swapped_parent() {
         let (_tmp, proj, external) = project_and_external();
@@ -2186,7 +2186,7 @@ mod tests {
         assert_eq!(read.as_deref(), Some(b"inside".as_slice()));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn move_new_removes_the_source_only_while_it_is_still_the_file_we_opened() {
         use super::imp::guarded_move_new_hooked;

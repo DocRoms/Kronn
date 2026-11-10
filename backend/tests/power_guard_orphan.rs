@@ -5,6 +5,7 @@
 //! takes the lease; its `caffeinate` must exit with it.
 
 #![cfg(target_os = "macos")]
+// asserts caffeinate orphan reaping with libc kill and POSIX signals
 // The helper protocol and the ps/pgrep/lsof probes start processes directly.
 #![allow(clippy::disallowed_methods)]
 

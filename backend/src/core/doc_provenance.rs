@@ -889,7 +889,7 @@ pub(crate) fn source_provenance_with_citations(
 #[path = "doc_provenance_test.rs"]
 mod tests;
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, unix, feature = "full-tests"))] // swaps a folder for a symlink (std::os::unix)
 mod swap_tests {
     use super::*;
     use crate::core::fs_guard::swap_probe;

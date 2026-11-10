@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(caffeinate_args(4242), ["-i", "-w", "4242"]);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "macos")] // asserts the caffeinate command line; caffeinate exists only on macOS
     #[test]
     fn caffeinate_command_targets_this_process() {
         let cmd = caffeinate_command();

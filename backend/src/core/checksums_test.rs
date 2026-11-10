@@ -563,7 +563,7 @@ fn only_a_section_built_from_the_unchanged_source_tree_is_unchanged() {
     let _ = fs::remove_dir_all(&bare);
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
 #[test]
 fn source_tree_fingerprint_survives_hostile_paths_and_tracks_mode() {
     // Codex round 3 — byte-safety: a path containing a newline must neither
@@ -604,7 +604,7 @@ fn source_tree_fingerprint_survives_hostile_paths_and_tracks_mode() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")] // builds non-UTF-8 names from raw bytes with std::os::unix::ffi::OsStrExt
 #[test]
 fn source_tree_fingerprint_keeps_non_utf8_paths() {
     // Non-UTF-8 file names exist on Linux filesystems (APFS rejects them, so
@@ -859,7 +859,7 @@ fn glob_multiple_stars_falls_back_to_exact_match() {
     assert!(!matches_simple_glob("a*b*c", "aXbYc"));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
 #[test]
 fn failed_checksums_write_preserves_the_previous_manifest() {
     // Codex lot-2 #4 — a truncating fs::write could corrupt the manifest:

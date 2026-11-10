@@ -36,6 +36,7 @@ fn resolve_windows_program(program: &OsStr) -> Option<PathBuf> {
     which::which(s).ok()
 }
 
+pub use crate::core::background_priority::{self, Priority};
 pub use crate::core::child_env::ChildRoute;
 
 /// The only place a process is constructed (clippy's `disallowed_methods`
@@ -99,6 +100,31 @@ pub fn real_agents_forbidden() -> bool {
             cfg!(feature = "test-support"),
         );
     armed && !real_agent_guard::live_probe_open()
+}
+
+/// Opt-in that lets an integration test start the machine's own OS sandbox
+/// launcher (`sandbox-exec`, `bwrap`): `1`, set by the one who runs those tests
+/// on purpose (CI does). Read only where [`real_sandbox_refusal`] applies.
+pub const REAL_SANDBOX_ENV: &str = "KRONN_TEST_REAL_SANDBOX";
+
+/// Why the OS sandbox launcher of the machine must not be started, when this is
+/// an integration test binary that armed [`NO_REAL_AGENTS_ENV`] and was not
+/// opted in with [`REAL_SANDBOX_ENV`]; `None` everywhere else (production, the
+/// library's own unit tests, an opted-in run).
+///
+/// Without it, every agent launch a test makes is wrapped in the real
+/// `sandbox-exec` on an agent route: the KT-1189 guard refuses that and aborts
+/// the binary (KT-1608). A host that cannot be confined is a case Kronn
+/// already handles (the launch runs unwrapped), so refusing here is what the
+/// test sees on a machine with no sandbox.
+pub fn real_sandbox_refusal() -> Option<String> {
+    if cfg!(test) || !real_agents_forbidden() {
+        return None;
+    }
+    let opted_in = crate::core::child_env::var(REAL_SANDBOX_ENV).is_ok_and(|value| value == "1");
+    (!opted_in).then(|| {
+        format!("an integration test does not start the OS sandbox of the machine ({REAL_SANDBOX_ENV}=1 opts in)")
+    })
 }
 
 /// `true` when [`NO_REAL_AGENTS_ENV`] is set in a build that ignores it: the
@@ -322,16 +348,77 @@ pub(crate) mod real_agent_guard {
 ///
 /// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, …).
 pub fn async_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> tokio::process::Command {
-    real_agent_guard::refuse_real_agent(program.as_ref(), route);
-    let mut cmd = raw_async(program.as_ref());
+    async_cmd_with(program, route, Priority::Normal)
+}
+
+/// [`async_cmd`] at `priority` (KT-1633). A background spawn runs behind the
+/// host's priority launcher (`taskpolicy -b`, `nice -n 10`) or, on Windows,
+/// with the below-normal priority class, unless the owner switched that off
+/// (Settings > Workers, or [`background_priority::BACKGROUND_PRIORITY_ENV`]). Arguments the caller
+/// adds afterwards follow `program`, behind the launcher.
+pub fn async_cmd_with<S: AsRef<OsStr>>(
+    program: S,
+    route: ChildRoute,
+    priority: Priority,
+) -> tokio::process::Command {
+    async_cmd_planned(
+        program.as_ref(),
+        route,
+        background_priority::plan_here(priority),
+    )
+}
+
+/// [`async_cmd_with`] for an already decided [`background_priority::Plan`].
+pub(crate) fn async_cmd_planned(
+    program: &OsStr,
+    route: ChildRoute,
+    plan: background_priority::Plan,
+) -> tokio::process::Command {
+    real_agent_guard::refuse_real_agent(program, route);
+    let (launched, prefix_args) = plan.argv(program);
+    let mut cmd = raw_async(&launched);
+    cmd.args(&prefix_args);
+    #[cfg(target_os = "windows")]
+    if plan.below_normal_class {
+        cmd.creation_flags(CREATE_NO_WINDOW | background_priority::BELOW_NORMAL_PRIORITY_CLASS);
+    }
     crate::core::child_env::isolate(cmd.as_std_mut(), route);
     cmd
 }
 
 /// [`async_cmd`] for a `std::process::Command`.
 pub fn sync_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> std::process::Command {
-    real_agent_guard::refuse_real_agent(program.as_ref(), route);
-    let mut cmd = raw_sync(program.as_ref());
+    sync_cmd_with(program, route, Priority::Normal)
+}
+
+/// [`sync_cmd`] at `priority` (KT-1633), as [`async_cmd_with`] does for tokio.
+pub fn sync_cmd_with<S: AsRef<OsStr>>(
+    program: S,
+    route: ChildRoute,
+    priority: Priority,
+) -> std::process::Command {
+    sync_cmd_planned(
+        program.as_ref(),
+        route,
+        background_priority::plan_here(priority),
+    )
+}
+
+/// [`sync_cmd_with`] for an already decided [`background_priority::Plan`].
+pub(crate) fn sync_cmd_planned(
+    program: &OsStr,
+    route: ChildRoute,
+    plan: background_priority::Plan,
+) -> std::process::Command {
+    real_agent_guard::refuse_real_agent(program, route);
+    let (launched, prefix_args) = plan.argv(program);
+    let mut cmd = raw_sync(&launched);
+    cmd.args(&prefix_args);
+    #[cfg(target_os = "windows")]
+    if plan.below_normal_class {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW | background_priority::BELOW_NORMAL_PRIORITY_CLASS);
+    }
     crate::core::child_env::isolate(&mut cmd, route);
     cmd
 }
@@ -452,6 +539,48 @@ fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command
 mod tests {
     use super::*;
 
+    /// A program present on every host and under no directory a test controls:
+    /// what stands for "a CLI the developer installed" (KT-1189).
+    fn machine_program() -> &'static str {
+        if cfg!(windows) {
+            r"C:\Windows\System32\cmd.exe"
+        } else {
+            "/bin/ls"
+        }
+    }
+
+    /// KT-1633: the priority launcher execs the program, so the child Kronn
+    /// holds (the one it kills, with its process group) IS the program.
+    #[cfg(unix)] // spawns `sh -c 'echo $$'` under the POSIX priority launcher
+    #[tokio::test]
+    #[serial_test::serial(background_launcher)]
+    async fn a_background_spawn_runs_the_program_in_the_launchers_own_process() {
+        // Ask the host first, as boot does: a sandbox that refuses the launcher
+        // leaves the program unwrapped, and there is nothing to exec.
+        background_priority::check_launcher_blocking();
+        let plan = background_priority::plan_here(Priority::Background);
+        if plan.launcher.is_none() {
+            eprintln!("skipped: this host does not let a process lower its own priority");
+            return;
+        }
+        let shell = which::which("sh").expect("a POSIX shell on PATH");
+        let mut cmd = async_cmd_planned(shell.as_os_str(), ChildRoute::Tool, plan);
+        cmd.args(["-c", "echo $$"]);
+        cmd.stdout(std::process::Stdio::piped());
+        let child = cmd.spawn().expect("spawn");
+        let spawned = child.id().expect("a running child has an id");
+        let output = child.wait_with_output().await.expect("wait");
+        assert!(output.status.success(), "{output:?}");
+        let reported: u32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("the shell prints its pid");
+        assert_eq!(
+            reported, spawned,
+            "the launcher must exec the program, not fork it: a kill of the child's group would miss it"
+        );
+    }
+
     #[test]
     fn async_cmd_creates_command() {
         let cmd = tool_cmd("echo");
@@ -478,14 +607,13 @@ mod tests {
     }
 
     /// KT-1189: a program resolved outside the directories a test controls is
-    /// the machine's. `/bin/ls` stands for "a CLI the developer installed":
-    /// present on every Unix host, never under the temporary directory.
-    #[cfg(unix)]
+    /// the machine's. `machine_program()` stands for "a CLI the developer installed":
+    /// present on every host, never under the temporary directory.
     #[test]
     fn a_machine_program_on_an_agent_route_is_a_real_agent() {
         use crate::core::child_env::AgentFamily;
         use real_agent_guard::{is_machine_agent, real_agent_binary};
-        let sh = std::ffi::OsStr::new("/bin/ls");
+        let sh = std::ffi::OsStr::new(machine_program());
         // A route that belongs to an agent makes any program an agent launch…
         assert!(real_agent_binary(sh, ChildRoute::Agent(AgentFamily::Claude), None).is_some());
         // …except a plain shell, the stand-in tests give an agent route…
@@ -497,9 +625,9 @@ mod tests {
         // …and neither does an agent route nothing is known about.
         assert!(real_agent_binary(sh, ChildRoute::Agent(AgentFamily::Other), None).is_none());
         // By name: a CLI of the machine is hidden from detection, a stub is not.
-        assert!(is_machine_agent("claude", "/bin/ls"));
-        assert!(is_machine_agent("vibe", "/bin/ls"));
-        assert!(!is_machine_agent("git", "/bin/ls"));
+        assert!(is_machine_agent("claude", machine_program()));
+        assert!(is_machine_agent("vibe", machine_program()));
+        assert!(!is_machine_agent("git", machine_program()));
         let dir = tempfile::tempdir().unwrap();
         let stub = dir.path().join("claude");
         std::fs::write(&stub, "#!/bin/sh\n").unwrap();
@@ -508,27 +636,26 @@ mod tests {
 
     /// KT-1189: the guard itself. Launching a real agent binary from a test
     /// panics with the offending path, whichever builder is used.
-    #[cfg(unix)]
     #[test]
     fn a_test_cannot_start_a_real_agent_binary() {
         use crate::core::child_env::AgentFamily;
         let before = real_agent_guard::refused().len();
         let route = ChildRoute::Agent(AgentFamily::Copilot);
         let refused_async = std::panic::catch_unwind(|| {
-            let _ = async_cmd("/bin/ls", route);
+            let _ = async_cmd(machine_program(), route);
         });
         let refused_sync = std::panic::catch_unwind(|| {
-            let _ = sync_cmd("/bin/ls", route);
+            let _ = sync_cmd(machine_program(), route);
         });
         let refused_discovery = std::panic::catch_unwind(|| {
-            let _ = discovery_cmd("/bin/ls", AgentFamily::Vibe);
+            let _ = discovery_cmd(machine_program(), AgentFamily::Vibe);
         });
         assert!(refused_async.is_err() && refused_sync.is_err() && refused_discovery.is_err());
         let refused = real_agent_guard::refused();
         assert!(refused.len() >= before + 3, "each refusal is recorded");
         assert!(refused
             .iter()
-            .any(|m| m.contains("/bin/ls") && m.contains("KT-1189")));
+            .any(|m| m.contains(machine_program()) && m.contains("KT-1189")));
     }
 
     /// KT-1495: the live vault probe opens the guard only with the gate at `1`
@@ -552,7 +679,6 @@ mod tests {
     /// KT-1495: without the gate, a thread named like a probe holds no
     /// allowance and the guard still refuses a real agent binary. Reverting the
     /// gate check in `live_probe_may_open` fails it.
-    #[cfg(unix)]
     #[test]
     fn a_probe_named_test_without_the_gate_still_cannot_start_a_real_agent() {
         use crate::core::child_env::AgentFamily;
@@ -563,7 +689,7 @@ mod tests {
             .spawn(move || {
                 let allowance = allow_live_probe_for(std::thread::current().name(), None);
                 let refused = std::panic::catch_unwind(|| {
-                    let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+                    let _ = sync_cmd(machine_program(), ChildRoute::Agent(AgentFamily::Codex));
                 });
                 (allowance.is_none(), refused.is_err())
             })
@@ -578,7 +704,6 @@ mod tests {
     /// KT-1495: the allowance is held by a gated probe only, opens the guard
     /// for the real binary while held, and the guard is armed again once it
     /// drops. Runs on a thread of its own: the allowance is process-wide.
-    #[cfg(unix)]
     #[test]
     fn the_live_probe_allowance_is_scoped_to_its_holder() {
         use crate::core::child_env::AgentFamily;
@@ -590,18 +715,18 @@ mod tests {
         let held = allow_live_probe_for(Some("live_vault_probe_scoped"), Some("1"));
         assert!(held.is_some() && live_probe_open() && !real_agents_forbidden());
         // While held, the real binary starts on an agent route.
-        let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+        let _ = sync_cmd(machine_program(), ChildRoute::Agent(AgentFamily::Codex));
         drop(held);
         assert!(!live_probe_open() && real_agents_forbidden());
         let refused = std::panic::catch_unwind(|| {
-            let _ = sync_cmd("/bin/ls", ChildRoute::Agent(AgentFamily::Codex));
+            let _ = sync_cmd(machine_program(), ChildRoute::Agent(AgentFamily::Codex));
         });
         assert!(refused.is_err(), "refused again after the allowance drops");
     }
 
     /// KT-1189: a stub the test wrote under the temporary directory is a
     /// program the test controls: it starts, on an agent route too.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn a_stub_agent_in_the_temporary_directory_starts() {
         use crate::core::child_env::AgentFamily;
@@ -620,7 +745,7 @@ mod tests {
 
     /// A repository hook runs inside git's process: it never sees a variable
     /// outside the git allow-list (synthetic sentinels, no real secret).
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn a_git_hook_runs_without_the_backend_environment() {
         use std::os::unix::fs::PermissionsExt;
@@ -668,6 +793,7 @@ mod tests {
 
     /// A program Kronn runs for itself gets the base allow-list only.
     #[cfg(unix)]
+    // dumps the child environment with probe::env_dumping_program, a #!/bin/sh script made executable through unix mode bits
     #[tokio::test]
     async fn a_tool_command_runs_without_the_backend_environment() {
         use crate::core::child_env::probe;
@@ -1317,5 +1443,45 @@ mod tests {
             resolve_windows_program(&with_ext).is_none(),
             "name with extension must skip resolution"
         );
+    }
+}
+
+/// KT-1633. Not behind `full-tests`: the macOS portability leg builds without
+/// it and must still prove the argv of a background spawn.
+#[cfg(all(test, unix))] // asserts the taskpolicy/nice launchers, POSIX only
+mod background_argv_tests {
+    use super::*;
+    use background_priority::{plan, HostOs};
+
+    /// A background spawn starts the host's priority launcher with the program
+    /// as its argument; a normal one, or one the owner switched off, starts the
+    /// program itself. Async and sync spawns agree.
+    #[test]
+    fn a_background_spawn_runs_the_program_behind_the_priority_launcher() {
+        for (os, launcher, flags) in [
+            (HostOs::MacOs, "/usr/sbin/taskpolicy", vec!["-b"]),
+            (HostOs::Linux, "/usr/bin/nice", vec!["-n", "10"]),
+        ] {
+            let background = plan(Priority::Background, true, os, |_| true);
+            let asynchronous = async_cmd_planned(OsStr::new("cargo"), ChildRoute::Tool, background);
+            let synchronous = sync_cmd_planned(OsStr::new("cargo"), ChildRoute::Tool, background);
+            let mut expected: Vec<&str> = flags;
+            expected.push("cargo");
+            for std_cmd in [asynchronous.as_std(), &synchronous] {
+                assert_eq!(std_cmd.get_program(), launcher, "{os:?}");
+                let args: Vec<_> = std_cmd.get_args().collect();
+                assert_eq!(args, expected, "{os:?}");
+            }
+
+            let normal = plan(Priority::Normal, true, os, |_| true);
+            let cmd = sync_cmd_planned(OsStr::new("cargo"), ChildRoute::Tool, normal);
+            assert_eq!(cmd.get_program(), "cargo");
+            assert_eq!(cmd.get_args().count(), 0);
+
+            let switched_off = plan(Priority::Background, false, os, |_| true);
+            let cmd = async_cmd_planned(OsStr::new("cargo"), ChildRoute::Tool, switched_off);
+            assert_eq!(cmd.as_std().get_program(), "cargo");
+            assert_eq!(cmd.as_std().get_args().count(), 0);
+        }
     }
 }

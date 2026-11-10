@@ -159,7 +159,7 @@ pub fn reap_recorded_agents(conn: &rusqlite::Connection) -> anyhow::Result<usize
     Ok(killed)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix))] // exercises the unix half of agent_orphans (libc kill, /proc start times) on `sleep` processes
 mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;

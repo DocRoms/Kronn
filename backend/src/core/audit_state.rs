@@ -277,7 +277,7 @@ mod tests {
         assert!(!root.join(CITATION_ORIGINALS_DIR).join(&name).exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_state_dir_is_refused() {
         let tmp = tempfile::tempdir().unwrap();

@@ -598,7 +598,7 @@ fn generated_docs_only_need_reconfirmation_after_a_human_changes_them() {
         .contains("Human decision."));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn snapshot_refuses_symlinks_instead_of_following_unmanaged_documents() {
     let dir = project();

@@ -51,9 +51,20 @@ red, and is healed automatically:
   takes the newest CI Verdict run of that head, waits for it to complete (up to
   `REARM_WAIT_SECONDS`, 900), and re-runs the one gate job that was cut short
   (`POST /actions/jobs/<id>/rerun`). The re-run reads the real upstream result
-  itself; the re-arm never decides a verdict. A gate that passed or really
-  failed is left alone. Every outcome exits 0: a red check of this workflow
-  would land on the default branch.
+  itself; the re-arm never decides a verdict. A gate that passed is left alone.
+  Every outcome exits 0: a red check of this workflow would land on the default
+  branch.
+- A gate that **failed** is re-run too (KT-1523): the verdict may have run on
+  the label event before CI Tests / CI Build existed for the head ("No ci-*.yml
+  run tested pull request #N…"), or repeated an earlier attempt that a re-run
+  has since fixed. The re-run reads the real result, so it turns green once the
+  upstream run succeeded, with no close/reopen and no empty commit. Two limits
+  keep this from looping or hiding a real problem: a failed gate is re-armed
+  only while its `run_attempt` is below `REARM_MAX_ATTEMPTS` (default 3), and
+  the label guard reads the labels live (next section), so a gate that failed on
+  "Require the `<label>` label" is re-run too and judges the pull request as it
+  is now. A verdict that repeats a genuine failure just repeats it, and a label
+  that really is absent is re-run at most that many times.
 - The re-arm only takes effect once the workflow is on the default branch.
 - If the job's cut-off is reported as `failure` with a cancelled step, it is
   re-run too. A cancel made by hand is re-run the same way when the upstream run
@@ -66,6 +77,34 @@ one touching PR code. Permissions are `actions: write` (re-run) and
 `contents: read` (that checkout). The upstream name and head SHA enter through
 `env` only, never inline in a `run:`, and the script validates the SHA as 40 hex
 characters. `tests/bats/rearm_verdict.bats` pins this shape.
+
+## Labels are read live, never from the event payload
+
+A re-run of a job replays the payload of the **original** event, so the
+`labels` list in `github.event.pull_request` can be stale, and a guard that
+read it would turn a labelled pull request red. The #507 case of 2026-11-09
+(`ci-test` and `ci-build` present, a re-run, then a close/reopen, and
+`ci-quality-gates` / `ci-build-gates` failing with "missing label") is the
+reported symptom; the two causes below fit it, but its runs were not inspected.
+Every label guard now calls
+`scripts/ci/require_label.sh <label> <message>`, which reads `GET /pulls/<n>`:
+
+- the guard of both CI Verdict jobs (it no longer carries an `if`, and the jobs
+  have `pull-requests: read`), and the `require-ci-label` /
+  `require-ci-build-label` jobs of CI Tests and CI Build (sparse checkout of
+  `scripts/ci`);
+- an unreadable list is retried (`REQUIRE_LABEL_ATTEMPTS`, default 3) and then
+  fails with exit 2 and "not a missing label": a GitHub API error never tells
+  anyone to add a label that is there. Exit 1 is a label really absent;
+- a push or a dispatch has no label to require.
+
+In the two gates (`ci-quality-gates`, `ci-build-gates`) only a label check that
+**ran and failed** (`needs.<job>.result == 'failure'`) is "label missing". A
+check that was skipped or cancelled (a reopened pull request replacing the run)
+used to read as an empty `outputs.run`, so as a missing label; it now fails the
+gate with its own step, "Fail when the label check did not run", and a message
+that does not blame the label. It still fails: a gate must never pass because
+nothing ran. `tests/bats/require_label.bats` pins the script and this wiring.
 
 ## A newer head supersedes an older verdict
 

@@ -137,11 +137,29 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     //      which otherwise binds 127.0.0.1 and is unreachable cross-machine).
     //   2. A real container → 0.0.0.0 so nginx can reach us.
     //   3. `config.server.host` (default 127.0.0.1 — localhost only).
-    let host = kronn::core::net_expose::resolve_bind_host(
+    let requested_host = kronn::core::net_expose::resolve_bind_host(
         kronn::core::child_env::var("KRONN_HOST").ok().as_deref(),
         kronn::core::env::is_docker(),
         &app_config.server.host,
     );
+    // KT-1596 — real container detection (KRONN_IN_DOCKER / /.dockerenv), NOT the
+    // old KRONN_DATA_DIR proxy: a native install relocating its data dir must not
+    // silently switch the guards to docker mode (where an unset KRONN_BIND reads
+    // as "not exposed" even when the actual bind host is 0.0.0.0).
+    let is_docker = kronn::core::env::is_docker();
+    let kronn_bind = kronn::core::child_env::var("KRONN_BIND").ok();
+    // KT-1596 — a requested exposure that nothing encrypts never serves the token
+    // in clear: a native instance falls back to loopback and says so (Settings
+    // shows why), Docker — whose publish is outside this process — refuses below.
+    // There is no in-process TLS yet, hence `tls_enabled = false`.
+    let boot_bind = kronn::core::net_expose::boot_bind(
+        &requested_host,
+        is_docker,
+        kronn_bind.as_deref(),
+        false,
+        kronn::core::net_expose::proxy_declared_for(&app_config.server),
+    );
+    let host = boot_bind.bind_host.clone();
     // Record what we actually bound so the "Allow connections from other
     // devices" toggle can tell the UI whether a restart is still pending.
     kronn::core::net_expose::record_bound_host(&host);
@@ -202,24 +220,26 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // a fresh `docker compose up` publishes on 127.0.0.1 (see docker-compose.yml
     // `KRONN_BIND`), so this never fires for the standard install. Exposing to
     // the LAN then requires a token, auth, or an explicit risk acknowledgment.
-    // Real container detection (KRONN_IN_DOCKER / /.dockerenv) — NOT the old
-    // KRONN_DATA_DIR proxy: a native install relocating its data dir must not
-    // silently switch the guard to docker mode (where an unset KRONN_BIND
-    // reads as "not exposed" even when the actual bind host is 0.0.0.0).
-    let is_docker = kronn::core::env::is_docker();
-    let kronn_bind = kronn::core::child_env::var("KRONN_BIND").ok();
     let ack_insecure = kronn::core::child_env::var("KRONN_ALLOW_INSECURE_LAN")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false);
-    let exposed = kronn::core::net_expose::lan_exposed(is_docker, kronn_bind.as_deref(), &host);
     if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
-        exposed,
+        boot_bind.reachable_from_network,
         app_config.server.auth_enabled,
         app_config.server.auth_token_or_lock(),
         ack_insecure,
     ) {
         tracing::error!("{msg}");
         return Err(anyhow::anyhow!(msg));
+    }
+    // KT-1596 — Docker cannot fall back to loopback (the publish is outside this
+    // process), so a plain-HTTP publish with no declared proxy ends startup there.
+    if let Some(msg) = boot_bind.fatal.as_deref() {
+        tracing::error!("{msg}");
+        return Err(anyhow::anyhow!(msg.to_string()));
+    }
+    if let Some(notice) = boot_bind.notice() {
+        tracing::warn!("{notice}");
     }
 
     // KT-619 — an operator who lost the admin secret asks for a new one by
@@ -388,7 +408,17 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             config.server.disk_launch_min_free_gib,
             config.server.disk_sweep_idle_hours,
         );
+        // KT-1438 — the lane-seed switches, before the first worktree of this boot.
+        kronn::core::task_worker_lane_seeds::set_seed_policy(
+            config.server.lane_seeds_copy_enabled,
+            config.server.lane_seeds_adopt_suggested,
+        );
+        // KT-1633 — the background-priority switch, before the first worker of this boot.
+        kronn::core::background_priority::set_enabled(config.workers.background_priority);
     }
+    // KT-1633 — ask the host once whether its priority launcher runs, off the
+    // async path, before recovery can dispatch a worker. A spawn only reads the answer.
+    kronn::core::background_priority::check_launcher_at_boot().await;
     // reply without spending tokens twice.
     match state
         .db
@@ -450,6 +480,17 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             errors = ?orchestration_recovery.errors,
             "Task orchestration boot reconciliation completed"
         );
+    }
+    // KT-1649 — a dependency fetch's scratch project is removed when its step
+    // ends, but a killed backend never ran that: sweep what it left.
+    if let Ok(root) = kronn::core::task_worker_dep_fetch::scratch_root() {
+        let swept = kronn::core::task_worker_dep_fetch::sweep_stale_scratch(&root);
+        if swept > 0 {
+            tracing::info!(
+                swept,
+                "dependency fetch scratch projects of an earlier run removed"
+            );
+        }
     }
     // KT-1318 — the boot pass above is not enough on a host that stays up for
     // weeks: orphaned lane build dirs are swept periodically as well.
@@ -901,7 +942,23 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
 
     // Build router
     let deferred_resume_state = state.clone();
-    let app = build_router(state);
+    let frontend_dist = frontend_dist_dir(
+        kronn::core::child_env::var("KRONN_FRONTEND_DIST")
+            .ok()
+            .as_deref(),
+    );
+    let frontend_service = frontend_dist
+        .as_deref()
+        .map(|dist| kronn::api::live_pages::serve_app_documents(dist, state.clone()));
+    let mut app = build_router(state);
+    if let (Some(dist), Some(service)) = (frontend_dist.as_deref(), frontend_service) {
+        // Same mount as the desktop's embedded server: /api/* → API, the rest → the UI.
+        tracing::info!("Serving the built UI from {}", dist.display());
+        if let Some(problem) = frontend_dist_problem(dist) {
+            tracing::warn!("{problem}");
+        }
+        app = axum::Router::new().merge(app).fallback_service(service);
+    }
 
     // Start server
     let addr = format!("{}:{}", host, port);
@@ -964,6 +1021,28 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The built frontend a headless `kronn` serves next to its API, when
+/// `KRONN_FRONTEND_DIST` names one. Unset or empty: API only, as before. The
+/// Windows end-to-end job opens the UI through this, the way the desktop does.
+fn frontend_dist_dir(value: Option<&str>) -> Option<std::path::PathBuf> {
+    value
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Why a named `KRONN_FRONTEND_DIST` would serve nothing: a typo, or a frontend
+/// that was never built, would otherwise only show as a blank page and 404s.
+fn frontend_dist_problem(dist: &std::path::Path) -> Option<String> {
+    if dist.join("index.html").is_file() {
+        return None;
+    }
+    Some(format!(
+        "KRONN_FRONTEND_DIST={} has no index.html: the UI will not load (is it the built `frontend/dist`?)",
+        dist.display()
+    ))
+}
+
 /// URL shown in the startup banner's "→" line. Returns the dev-UI override when
 /// it is set and non-empty (`kronn start-dev` exports KRONN_DEV_UI_URL — in
 /// native dev the listen port serves the API only), otherwise the backend
@@ -1024,6 +1103,30 @@ async fn shutdown_signal() {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frontend_dist_is_served_only_when_named() {
+        assert_eq!(frontend_dist_dir(None), None);
+        assert_eq!(frontend_dist_dir(Some("  ")), None);
+        assert_eq!(
+            frontend_dist_dir(Some(" ../frontend/dist ")),
+            Some(std::path::PathBuf::from("../frontend/dist"))
+        );
+    }
+
+    #[test]
+    fn a_frontend_dist_without_an_index_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let problem = frontend_dist_problem(dir.path()).expect("an empty directory serves nothing");
+        assert!(problem.contains("no index.html"), "{problem}");
+        assert!(
+            problem.contains(&dir.path().display().to_string()),
+            "{problem}"
+        );
+        assert!(frontend_dist_problem(&dir.path().join("typo")).is_some());
+        std::fs::write(dir.path().join("index.html"), "<html></html>").unwrap();
+        assert_eq!(frontend_dist_problem(dir.path()), None);
+    }
 
     #[test]
     fn banner_uses_backend_url_without_override() {

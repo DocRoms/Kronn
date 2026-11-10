@@ -1370,7 +1370,7 @@ pub(crate) mod operating_seed;
 #[path = "project_doc_tests.rs"]
 mod tests;
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, unix, feature = "full-tests"))] // swaps a folder for a symlink (std::os::unix)
 mod swap_tests {
     use super::*;
     use crate::core::fs_guard::swap_probe;

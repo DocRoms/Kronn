@@ -27,6 +27,11 @@
 # red; ci-verdict-rearm.yml then re-runs this job once the upstream run
 # completes (scripts/ci/rearm_verdict.sh).
 #
+# A verdict that did decide red before the upstream run existed (no run found
+# within the discovery wait) or against an earlier attempt of it is healed the
+# same way: the re-arm re-runs a failed gate when CI Tests / CI Build completes
+# for the head, and the re-run reads the real result (KT-1523).
+#
 # A verdict for a head the pull request has moved past is obsolete: it stops
 # holding a runner (cancelling the run, whose two jobs are then both obsolete).
 # It is never reported green. Without a write token it exits 1: red, on a
@@ -169,5 +174,5 @@ if [ -n "${cancelled_run:-}" ]; then
   echo "::error::Run $cancelled_run was cancelled before $job decided, and no earlier run tested this state. Re-run it: https://github.com/$GITHUB_REPOSITORY/actions/runs/$cancelled_run"
   exit 1
 fi
-echo "::error::No $workflow run tested pull request #$PR_NUMBER at head $HEAD_SHA, base $BASE_SHA. Push a commit, or close and reopen the pull request, to run it."
+echo "::error::No $workflow run tested pull request #$PR_NUMBER at head $HEAD_SHA, base $BASE_SHA. If one is still starting, CI Verdict Re-arm re-runs this check when it completes; otherwise push a commit, or close and reopen the pull request, to run it."
 exit 1

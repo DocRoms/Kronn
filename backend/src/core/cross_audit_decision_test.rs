@@ -51,7 +51,7 @@ fn a_refusal_only_refreshes_the_verdict() {
     assert!(out.contains("- **Verdict**: disputed — left undecided by a human"));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
 #[test]
 fn a_tech_debt_folder_swapped_after_the_walk_never_receives_the_decided_sheet() {
     use crate::core::fs_guard::swap_probe;

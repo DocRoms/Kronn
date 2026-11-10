@@ -15,6 +15,7 @@ pub(crate) mod cli_worker_bindings;
 pub mod compare;
 pub mod contacts;
 pub mod context_audits;
+pub mod credential_scrub;
 pub mod default_contents;
 pub mod delivery_summaries;
 pub mod disc_source;
@@ -86,6 +87,12 @@ mod release_gate_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
 mod large_db_measure;
+
+#[cfg(test)]
+mod insert_redaction_measure;
+
+#[cfg(all(test, feature = "full-tests"))]
+mod upgrade_fixture_tests;
 
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
 #[cfg(test)]
@@ -506,6 +513,16 @@ impl Database {
         Self::run_on(self.conn.clone(), self.assistant_guard.clone(), f).await
     }
 
+    /// Whether no closure currently holds the write connection: lets a test
+    /// assert that slow work runs outside `with_conn` (KT-1646).
+    #[cfg(test)]
+    pub(crate) fn write_connection_is_free(&self) -> bool {
+        !matches!(
+            self.conn.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+
     /// Shared executor for both connections: spawn_blocking + poison
     /// recovery + panic containment (0.8.11 hardening semantics).
     async fn run_on<F, T>(
@@ -590,7 +607,7 @@ pub(crate) fn restrict_data_dir_to_owner(dir: &std::path::Path) {
     let _ = dir;
 }
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, unix, feature = "full-tests"))] // asserts the data directory's chmod mode bits through std::os::unix
 mod data_dir_permission_tests {
     use std::os::unix::fs::PermissionsExt;
 
