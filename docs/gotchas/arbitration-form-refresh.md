@@ -20,7 +20,7 @@ The form's draft, selection and in-flight guard are local state/refs.
 [src: commit: 6503ecd14af145a5f668e1afd845b6f839abc7ef]
 `[src: file: frontend/src/pages/DiscussionsPage.tsx:1200-1215#reloadDiscussion]`
 `[src: file: frontend/src/pages/DiscussionsPage.tsx:997-998#reconcileLoadedDiscussion]`
-`[src: file: frontend/src/components/MessageBubble.tsx:1188-1198#sources]`
+`[src: file: frontend/src/components/MessageBubble.tsx:1194-1204#sources]`
 `[src: file: frontend/src/components/DiscussionQuestionCard.tsx:100-114]`
 
 ## Deterministic local evidence
@@ -51,10 +51,10 @@ stable, and supplies fresh values through a per-message React context. Polling
 is unchanged and citation verdicts still update. Question/planning-card keys
 include the discussion, message and fence identity, so changing the question
 does not transfer the previous draft.
-`[src: file: frontend/src/components/MessageBubble.tsx:2048-2064#MarkdownRenderContext]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2074-2146#MarkdownPre]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2147-2152#discussionMdComponents]`
-`[src: file: frontend/src/components/MessageBubble.tsx:2187-2189#renderContext]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2054-2070#MarkdownRenderContext]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2080-2152#MarkdownPre]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2153-2158#discussionMdComponents]`
+`[src: file: frontend/src/components/MessageBubble.tsx:2193-2195#renderContext]`
 
 Seven product regressions cover question-store refresh, same-reference and
 repeated equivalent sources, changing citation verdicts in paragraphs/lists,

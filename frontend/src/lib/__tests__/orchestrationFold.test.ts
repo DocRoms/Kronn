@@ -6,7 +6,7 @@ import { groupMessagesWithToolFold } from '../discussionMessageGrouping';
 import {
   foldOrchestrationRuns,
   isOrchestrationMessage,
-  requiresUserAction,
+  requiresUserAction, resolvedQuotaEscalations,
   type FoldedRenderItem,
 } from '../orchestrationFold';
 import type { DiscussionMessage } from '../../types/generated';
@@ -165,5 +165,40 @@ describe('requiresUserAction', () => {
     ]);
     const folded = foldOrchestrationRuns(items, { hide: true, expandedRunIds: new Set() });
     expect(folded.some(item => 'msg' in item && item.msg.id === 'orch-escalation:exec-1:7')).toBe(true);
+  });
+});
+
+// KT-1664 — a quota escalation closes itself when the worker resumes: the
+// orchestrator's `provider-quota-resumed:<job>` line settles the notice.
+describe('a resumed quota escalation', () => {
+  it('is settled by the resumed line of the same refused dispatch only', () => {
+    const msgs = [
+      orch('provider-quota-escalation:job-1'),
+      orch('provider-quota-escalation:job-2'),
+      orch('provider-quota-resumed:job-1'),
+      orch('provider-quota-resumed:job-3'),
+    ];
+    expect([...resolvedQuotaEscalations(msgs)]).toEqual(['provider-quota-escalation:job-1']);
+  });
+
+  it('no longer requires a human, and folds again like any orchestrator post', () => {
+    const open = orch('provider-quota-escalation:job-1');
+    const msgs = [orch('orch-dispatch:a'), open, orch('provider-quota-resumed:job-1')];
+    const resolved = resolvedQuotaEscalations(msgs);
+    expect(requiresUserAction(open)).toBe(true);
+    expect(requiresUserAction(open, () => false, resolved)).toBe(false);
+
+    const items = groupMessagesWithToolFold(msgs);
+    const stillOpen = foldOrchestrationRuns(items, { hide: true, expandedRunIds: new Set() });
+    expect(stillOpen.some(item => 'msg' in item && item.msg.id === open.id)).toBe(true);
+    const settled = foldOrchestrationRuns(items, { hide: true, expandedRunIds: new Set(), resolvedIds: resolved });
+    expect(settled.some(item => 'msg' in item)).toBe(false);
+    expect(settled).toHaveLength(1);
+  });
+
+  it('keeps a notice open that carries an action the user can still take', () => {
+    const open = orch('provider-quota-escalation:job-1');
+    const resolved = resolvedQuotaEscalations([open, orch('provider-quota-resumed:job-1')]);
+    expect(requiresUserAction(open, id => id === open.id, resolved)).toBe(true);
   });
 });

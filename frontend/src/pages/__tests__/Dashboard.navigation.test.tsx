@@ -37,7 +37,7 @@ vi.mock('../../lib/api', async () => {
   return buildApiMock();
 });
 
-import { discussions as discussionsApi, pages as pagesApi, workflows as workflowsApi, projects as projectsApi } from '../../lib/api';
+import { activity as activityApi, discussions as discussionsApi, pages as pagesApi, workflows as workflowsApi, projects as projectsApi } from '../../lib/api';
 import { Dashboard } from '../Dashboard';
 import { navigateAppTab } from '../../lib/live-page-navigation';
 
@@ -87,6 +87,7 @@ beforeEach(() => {
   vi.mocked(discussionsApi.list).mockResolvedValue([]);
   vi.mocked(workflowsApi.list).mockResolvedValue([]);
   vi.mocked(projectsApi.auditStatusAll).mockResolvedValue([]);
+  vi.mocked(activityApi.overview).mockResolvedValue({ rows: [], stall_after_secs: 900, generated_at: '2026-11-10T12:00:00Z', unavailable_sources: [] });
   vi.mocked(pagesApi.capability).mockResolvedValue({ activated: false, activated_at: null });
 });
 
@@ -96,8 +97,123 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe('Dashboard — the permanent activity bell (KT-1658)', () => {
+  const pausedRun = {
+    id: 'workflow_runs:run-paused', type: 'workflow_run', compartment: 'running' as const, state: 'paused' as const,
+    source: 'workflow_runs', title: 'PR Review v3.4', detail: 'Agent', started_at: '2026-11-09T16:19:00Z',
+    stalled: false, wake_at: '2026-11-11T02:02:00Z',
+    link: { target: 'workflow' as const, id: 'wf-review', run_id: 'run-paused' },
+    actions: [{ id: 'resume_workflow_run', kind: 'resume_now' as const, args: { run_id: 'run-paused' } }],
+  };
+  const turn = {
+    id: 'agent_dispatch_jobs:j1', type: 'agent_turn', compartment: 'running' as const, state: 'running' as const,
+    source: 'agent_dispatch_jobs', title: 'Fix the login', started_at: '2026-11-10T11:56:00Z', stalled: false,
+    link: { target: 'discussion' as const, id: 'disc-running' },
+    actions: [{ id: 'stop_dispatch', kind: 'stop' as const, args: { discussion_id: 'disc-running', dispatch_id: 'j1' } }],
+  };
+  const serve = (rows: unknown[]) => vi.mocked(activityApi.overview).mockResolvedValue({
+    rows, stall_after_secs: 900, generated_at: '2026-11-10T12:00:00Z', unavailable_sources: [],
+  } as never);
+
+  it('is the one activity entry in the header: no spinner next to Config, no "N en cours" text, no popover triggers', async () => {
+    vi.mocked(workflowsApi.list).mockResolvedValue([{
+      id: 'wf-live', name: 'Live workflow', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0, enabled: true, pinned: false,
+      last_run: { id: 'run-live', status: 'Running', started_at: '2026-01-01T00:00:00Z', finished_at: null, tokens_used: 0 },
+      created_at: '2026-01-01T00:00:00Z',
+    }]);
+    vi.mocked(projectsApi.auditStatusAll).mockResolvedValue([{
+      project_id: 'project-live', phase: 'auditing', step_index: 1, total_steps: 2,
+      current_file: null, started_at: '2026-01-01T00:00:00Z', kind: 'full_audit',
+    }]);
+    const api = discussionsApi as unknown as { getRunning?: () => Promise<string[]> };
+    api.getRunning = vi.fn().mockResolvedValue(['disc-running']);
+    try {
+      serve([turn]);
+      await renderDashboard('/discussions');
+      await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+      expect(screen.getAllByTestId('activity-bell')).toHaveLength(1);
+      expect(screen.queryByTestId('active-runs-trigger')).toBeNull();
+      expect(screen.queryByTestId('active-audits-trigger')).toBeNull();
+      expect(document.querySelector('.dash-running-badge')).toBeNull();
+      expect(screen.queryByText(/en cours$/)).toBeNull();
+      // The bell sits in the header's activity group, after the page tabs.
+      const group = document.querySelector('.dash-nav-activity-group');
+      expect(group?.contains(screen.getByTestId('activity-bell'))).toBe(true);
+      // The tabs themselves still navigate and keep their passive counts.
+      expect(document.querySelector('[data-tour-id="nav-projects"]')?.querySelector('button')).toBeNull();
+      expect(document.querySelector('[data-tour-id="nav-workflows"]')?.querySelector('button')).toBeNull();
+    } finally {
+      delete api.getRunning;
+    }
+  });
+
+  it('is there with nothing running, and moves once something does', async () => {
+    serve([]);
+    await renderDashboard('/discussions');
+    expect(screen.getByTestId('activity-bell')).toHaveAttribute('data-running', 'false');
+    cleanup();
+
+    serve([turn]);
+    await renderDashboard('/discussions');
+    expect(await screen.findByTestId('activity-bell')).toHaveAttribute('data-running', 'true');
+  });
+
+  it('lists a quota-paused run in the panel with its wake time and a Resume now, and does not count it as running', async () => {
+    serve([pausedRun]);
+    vi.mocked(workflowsApi.resumeRun).mockResolvedValue({ run_id: 'run-paused', new_status: 'Running' });
+    await renderDashboard('/discussions');
+
+    const bell = screen.getByTestId('activity-bell');
+    expect(bell).toHaveAttribute('data-running', 'false');
+    await act(async () => { fireEvent.click(bell); });
+
+    const item = await screen.findByTestId('activity-row');
+    expect(item).toHaveTextContent('PR Review v3.4');
+    expect(item).toHaveTextContent('En pause');
+    expect(item).toHaveTextContent('Reprise automatique à');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Reprendre maintenant/ })); });
+    expect(workflowsApi.resumeRun).toHaveBeenCalledWith('run-paused');
+  });
+
+  it('stops a discussion agent from the panel with the existing call, then refreshes the workflow list', async () => {
+    serve([turn]);
+    vi.mocked(discussionsApi.stopDispatch).mockResolvedValue({ cancelled: true, dispatch_id: 'j1', still_awaiting: false });
+    await renderDashboard('/discussions');
+    await act(async () => { fireEvent.click(screen.getByTestId('activity-bell')); });
+    const before = vi.mocked(workflowsApi.list).mock.calls.length;
+
+    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /Arrêter : Fix the login/ })); });
+    expect(discussionsApi.stopDispatch).toHaveBeenCalledWith('disc-running', 'j1');
+    expect(vi.mocked(workflowsApi.list).mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it('opens Discussions on the row\'s discussion in place on a plain click, and in a new tab on a Ctrl-click', async () => {
+    serve([turn]);
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    try {
+      await renderDashboard('/projects');
+      await act(async () => { fireEvent.click(screen.getByTestId('activity-bell')); });
+      const link = await screen.findByRole('button', { name: 'Ouvrir Fix the login' });
+
+      fireEvent.click(link, { ctrlKey: true });
+      expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions/disc-running`, '_blank', 'noopener,noreferrer');
+      expect(screen.queryByTestId('discussion-page')).toBeNull();
+
+      await act(async () => { fireEvent.click(link); });
+      expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-running');
+      expect(window.location.pathname).toBe('/discussions/disc-running');
+      expect(screen.queryByRole('dialog', { name: 'Activité' })).toBeNull();
+      expect(open).toHaveBeenCalledTimes(1);
+    } finally {
+      open.mockRestore();
+    }
+  });
+});
+
 describe('Dashboard navigation', () => {
-  it('always navigates Projects and Automation while activity disclosures remain separate buttons', async () => {
+  it('always navigates Projects and Automation: their counts stay passive badges', async () => {
     vi.mocked(workflowsApi.list).mockResolvedValue([{
       id: 'wf-live', name: 'Live workflow', project_id: null, project_name: null,
       trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0, enabled: true, pinned: false,
@@ -113,27 +229,10 @@ describe('Dashboard navigation', () => {
     const workflowsTab = document.querySelector<HTMLAnchorElement>('[data-tour-id="nav-workflows"]');
     expect(projectsTab).not.toBeNull();
     expect(workflowsTab).not.toBeNull();
-    expect(screen.getByTestId('active-audits-trigger')).toBeInTheDocument();
-    expect(screen.getByTestId('active-runs-trigger')).toBeInTheDocument();
-    expect(screen.getByTestId('active-audits-trigger')).toHaveAccessibleName('Voir et arrêter 1 audit en cours');
-    expect(screen.getByTestId('active-runs-trigger')).toHaveAccessibleName('Voir et arrêter 1 exécution en cours');
-    expect(screen.getByTestId('active-audits-trigger')).toHaveAttribute('aria-haspopup', 'dialog');
-    expect(screen.getByTestId('active-runs-trigger')).not.toHaveAttribute('aria-controls');
+    expect(projectsTab?.querySelector('.dash-nav-badge')).toHaveTextContent('1');
+    expect(workflowsTab?.querySelector('.dash-nav-badge')).toHaveTextContent('1');
     expect(projectsTab?.querySelector('button')).toBeNull();
     expect(workflowsTab?.querySelector('button')).toBeNull();
-    await act(async () => { fireEvent.click(screen.getByTestId('active-audits-trigger')); });
-    expect(screen.getByRole('dialog', { name: 'Audits en cours' })).toBeInTheDocument();
-    expect(screen.getByTestId('active-audits-trigger')).toHaveAttribute('aria-controls', 'active-audits-popover');
-    await act(async () => { fireEvent.click(screen.getByTestId('active-runs-trigger')); });
-    expect(screen.queryByRole('dialog', { name: 'Audits en cours' })).not.toBeInTheDocument();
-    expect(screen.getByRole('dialog', { name: 'Runs en cours' })).toBeInTheDocument();
-    // A trigger pointerdown is not an outside click: its following click closes
-    // this disclosure rather than reopening it from a stale outside handler.
-    await act(async () => {
-      fireEvent.pointerDown(screen.getByTestId('active-runs-trigger'));
-      fireEvent.click(screen.getByTestId('active-runs-trigger'));
-    });
-    expect(screen.queryByRole('dialog', { name: 'Runs en cours' })).not.toBeInTheDocument();
     await act(async () => { workflowsTab?.click(); });
     expect(await screen.findByTestId('workflow-page')).toBeInTheDocument();
     await act(async () => { projectsTab?.click(); });
@@ -300,33 +399,6 @@ describe('Dashboard page addresses', () => {
     expect(plain.defaultPrevented).toBe(true);
     expect(await screen.findByTestId('discussion-page')).toBeInTheDocument();
     expect(window.location.pathname).toBe('/discussions');
-  });
-
-  it('opens Discussions in a new tab from the running-agents badge on a Ctrl-click, and in place on a plain click', async () => {
-    // The shared API mock has no `getRunning`: give this test one, and take it back.
-    const api = discussionsApi as unknown as { getRunning?: () => Promise<string[]> };
-    api.getRunning = vi.fn().mockResolvedValue(['disc-running']);
-    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
-    try {
-      await renderDashboard('/projects');
-      const badge = await waitFor(() => {
-        const found = document.querySelector<HTMLElement>('.dash-running-badge');
-        if (!found) throw new Error('No running-agents badge yet');
-        return found;
-      });
-
-      fireEvent.click(badge, { ctrlKey: true });
-      expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions`, '_blank', 'noopener,noreferrer');
-      expect(screen.queryByTestId('discussion-page')).toBeNull();
-
-      await act(async () => { fireEvent.click(badge); });
-      expect(await screen.findByTestId('discussion-page')).toBeInTheDocument();
-      expect(window.location.pathname).toBe('/discussions');
-      expect(open).toHaveBeenCalledTimes(1);
-    } finally {
-      open.mockRestore();
-      delete api.getRunning;
-    }
   });
 
   it('lands on Projects from the bare address', async () => {

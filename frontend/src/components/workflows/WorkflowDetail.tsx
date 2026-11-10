@@ -1301,7 +1301,7 @@ export function LiveFinishedBanner({
   const label = isWaiting
     ? t('wf.runWaiting')
     : isQuota
-      ? t('run.status.quota')
+      ? t('wf.quota.paused')
       : t('wf.runDone', status ?? '');
   return (
     <div className="wf-live-finished" data-status={dataStatus}>

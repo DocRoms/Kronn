@@ -22,7 +22,7 @@ const MAX_TEXT_CHARS: usize = 200;
 /// none), holding only steps whose agent, model or effort actually change.
 pub type ResolvedStepAgents = BTreeMap<String, StepAgentOverride>;
 
-fn step_key(step: &WorkflowStep) -> String {
+pub(crate) fn step_key(step: &WorkflowStep) -> String {
     step.id.clone().unwrap_or_else(|| step.name.clone())
 }
 
@@ -224,6 +224,35 @@ pub fn from_run(run: &WorkflowRun) -> Option<ResolvedStepAgents> {
             None
         }
     }
+}
+
+/// The run's launch context with the agent choice of step `key` set, or
+/// removed when `choice` is `None` (the step is back on its own agent). The
+/// run's other choices and launch values are kept.
+pub fn context_with_choice(
+    run: &WorkflowRun,
+    key: &str,
+    choice: Option<&StepAgentOverride>,
+) -> serde_json::Result<serde_json::Value> {
+    let mut stored = from_run(run).unwrap_or_default();
+    match choice {
+        Some(choice) => {
+            stored.insert(key.to_string(), choice.clone());
+        }
+        None => {
+            stored.remove(key);
+        }
+    }
+    let mut context = match &run.trigger_context {
+        Some(serde_json::Value::Object(map)) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if stored.is_empty() {
+        context.remove(TRIGGER_CONTEXT_KEY);
+    } else {
+        context.insert(TRIGGER_CONTEXT_KEY.into(), serde_json::to_value(&stored)?);
+    }
+    Ok(serde_json::Value::Object(context))
 }
 
 /// Applies the run's stored choice to its copy of the workflow. Idempotent.

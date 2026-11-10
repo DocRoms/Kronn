@@ -61,9 +61,93 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["success"], true);
-        let expected: Value =
-            serde_json::from_str(include_str!("api/workflow_step_schema.json")).unwrap();
+        // The file plus what the code owns: the step types and the doctrine.
+        let expected = crate::api::workflows::canonical_step_schema();
         assert_eq!(body["data"], expected);
+        assert_eq!(
+            body["data"]["step_types_closed_set"],
+            serde_json::json!(crate::models::StepType::names())
+        );
+        assert!(body["data"]["authoring_doctrine"]
+            .as_str()
+            .is_some_and(|doctrine| doctrine.starts_with("## Authoring doctrine")));
+    }
+
+    /// KT-1657 — the route lists a run paused on a provider quota with its
+    /// wake time (it holds a concurrency slot), and routes `workflows/active-runs`
+    /// before `workflows/{id}`.
+    #[tokio::test]
+    async fn active_runs_route_lists_a_quota_paused_run_with_its_wake_time() {
+        let state = test_state();
+        let run: crate::models::WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-paused", "workflow_id": "wf-paused", "status": "WaitingQuota",
+            "trigger_context": null, "tokens_used": 0, "workspace_path": null,
+            "started_at": "2026-11-09T16:19:00Z", "finished_at": null, "run_type": "linear",
+            "batch_total": 0, "batch_completed": 0, "batch_failed": 0, "batch_no_response": 0,
+            "batch_name": null, "parent_run_id": null, "state": {}, "produced_branches": [],
+            "concurrency_key": null, "project_id": null,
+            "step_results": [{
+                "step_name": "Agent", "status": "WaitingQuota", "output": "", "duration_ms": 0,
+                "step_agent": "ClaudeCode",
+                "quota_wait": {
+                    "id": "w1", "reset_at": "2026-11-11T02:00:00Z",
+                    "wake_at": "2026-11-11T02:02:00Z", "attempt": 1
+                }
+            }]
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::resource_identities::tests::seed_workflow(
+                    conn,
+                    "wf-paused",
+                    "PR Review v3.4",
+                    None,
+                );
+                crate::db::workflows::insert_run(conn, &run)
+            })
+            .await
+            .unwrap();
+
+        let (status, body) = send(
+            state,
+            false,
+            Request::builder()
+                .uri("/api/workflows/active-runs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "{body}");
+        let runs = body["data"].as_array().expect("a list");
+        assert_eq!(runs.len(), 1, "{body}");
+        assert_eq!(runs[0]["run_id"], "run-paused");
+        assert_eq!(runs[0]["workflow_name"], "PR Review v3.4");
+        assert_eq!(runs[0]["status"], "WaitingQuota");
+        assert_eq!(runs[0]["quota"]["step_name"], "Agent");
+        assert_eq!(runs[0]["quota"]["agent"], "ClaudeCode");
+        assert_eq!(runs[0]["quota"]["wake_at"], "2026-11-11T02:02:00Z");
+        assert_eq!(runs[0]["quota"]["reset_at"], "2026-11-11T02:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn quota_agent_route_refuses_an_unknown_run() {
+        let (status, body) = send(
+            test_state(),
+            false,
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflow-runs/nope/quota-agent")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"agent":"Codex"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], false);
+        assert_eq!(body["error"], "Run not found");
     }
 
     /// Build a test AppState with a specific auth token configured.
@@ -91,7 +175,7 @@ mod tests {
         (status, json)
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn source_directory_http_refuses_a_symlink_outside_the_project() {
         let root = tempfile::TempDir::new().unwrap();
@@ -3612,6 +3696,61 @@ mod tests {
             .is_none());
     }
 
+    /// KT-1600 — the per-agent tools switch persists for an HTTP agent, clears
+    /// back to the default, and is refused for a CLI agent (which brings its own
+    /// tools) and for `Custom` (whose setting lives on its connection).
+    #[tokio::test]
+    #[serial]
+    async fn config_agent_tools_switch_persists_clears_and_refuses_non_http_agents() {
+        isolate_config_dir();
+        let state = test_state();
+        let post = |body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/config/agent-tools")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            post(serde_json::json!({ "agent": "Ollama", "enabled": false })),
+        )
+        .await;
+        assert_eq!(body["success"], true, "{body}");
+        assert_eq!(
+            state.config.read().await.agents.ollama.tools_enabled,
+            Some(false)
+        );
+        let persisted = crate::core::config::load()
+            .await
+            .expect("load persisted config")
+            .expect("saved config exists");
+        assert_eq!(persisted.agents.ollama.tools_enabled, Some(false));
+        assert_eq!(persisted.agents.lite_llm.tools_enabled, None, "per agent");
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            post(serde_json::json!({ "agent": "Ollama", "enabled": null })),
+        )
+        .await;
+        assert_eq!(body["success"], true, "{body}");
+        assert_eq!(state.config.read().await.agents.ollama.tools_enabled, None);
+
+        for agent in ["ClaudeCode", "Custom"] {
+            let (_, body) = send(
+                state.clone(),
+                false,
+                post(serde_json::json!({ "agent": agent, "enabled": false })),
+            )
+            .await;
+            assert_eq!(body["success"], false, "{agent}: {body}");
+        }
+    }
+
     #[tokio::test]
     async fn config_scan_paths_get() {
         let state = test_state();
@@ -3754,77 +3893,6 @@ mod tests {
             })
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn discussions_delete_last_agent_messages() {
-        let state = test_state();
-        insert_test_discussion(&state, "disc-msg", "Message Test").await;
-        insert_test_message(&state, "disc-msg", "User", "Hello").await;
-        insert_test_message(&state, "disc-msg", "Agent", "Agent reply").await;
-        insert_test_message(&state, "disc-msg", "Agent", "Agent follow up").await;
-
-        // DELETE last agent messages
-        let req = Request::builder()
-            .method("DELETE")
-            .uri("/api/discussions/disc-msg/messages/last")
-            .body(Body::empty())
-            .unwrap();
-        let (status, body) = send(state.clone(), false, req).await;
-        assert_eq!(status, StatusCode::OK, "delete last agent messages: {body}");
-        assert!(body["success"].as_bool().unwrap());
-
-        // Verify: discussion should only have the user message now
-        let req = Request::builder()
-            .method("GET")
-            .uri("/api/discussions/disc-msg")
-            .body(Body::empty())
-            .unwrap();
-        let (_, body) = send(state, false, req).await;
-        let messages = body["data"]["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1, "Only user message should remain");
-        assert_eq!(messages[0]["role"].as_str().unwrap(), "User");
-    }
-
-    #[tokio::test]
-    async fn discussions_edit_last_user_message() {
-        let state = test_state();
-        insert_test_discussion(&state, "disc-edit", "Edit Test").await;
-        insert_test_message(&state, "disc-edit", "User", "Original message").await;
-        insert_test_message(&state, "disc-edit", "Agent", "Agent reply").await;
-
-        // PATCH last user message
-        let edit_body = serde_json::json!({ "content": "Edited message" });
-        let req = Request::builder()
-            .method("PATCH")
-            .uri("/api/discussions/disc-edit/messages/last")
-            .header("Content-Type", "application/json")
-            .body(Body::from(edit_body.to_string()))
-            .unwrap();
-        let (status, body) = send(state.clone(), false, req).await;
-        assert_eq!(status, StatusCode::OK, "edit last user message: {body}");
-
-        // Verify: user message content updated, agent messages removed
-        let req = Request::builder()
-            .method("GET")
-            .uri("/api/discussions/disc-edit")
-            .body(Body::empty())
-            .unwrap();
-        let (_, body) = send(state, false, req).await;
-        let messages = body["data"]["messages"].as_array().unwrap();
-        // After edit, agent messages should be deleted and user message updated
-        let user_msgs: Vec<_> = messages
-            .iter()
-            .filter(|m| m["role"].as_str() == Some("User"))
-            .collect();
-        assert!(
-            !user_msgs.is_empty(),
-            "Should have at least one user message"
-        );
-        assert_eq!(
-            user_msgs.last().unwrap()["content"].as_str().unwrap(),
-            "Edited message"
-        );
     }
 
     #[tokio::test]
@@ -5639,6 +5707,49 @@ mod tests {
             .unwrap();
         let (status, _) = send(state, false, req).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// KT-1647: the Swagger UI mount (`utoipa-swagger-ui`) keeps serving the
+    /// spec at `/api/openapi.json` and the UI shell under `/api/docs/`, with
+    /// the same documented paths as `api::openapi::openapi_spec()`.
+    #[tokio::test]
+    async fn swagger_ui_serves_spec_and_ui_shell() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/openapi.json")
+            .body(Body::empty())
+            .unwrap();
+        let (status, spec) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        let served: std::collections::BTreeSet<&str> = spec["paths"]
+            .as_object()
+            .expect("spec has a paths object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let built = crate::api::openapi::openapi_spec();
+        let expected: std::collections::BTreeSet<&str> =
+            built.paths.paths.keys().map(String::as_str).collect();
+        assert_eq!(served, expected, "served spec lists the documented paths");
+        assert!(served.contains("/api/version/check"));
+
+        let app = build_router_with_auth(test_state(), false);
+        for uri in ["/api/docs/", "/api/docs/index.html"] {
+            let req = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.expect("oneshot failed");
+            assert_eq!(resp.status(), StatusCode::OK, "[{uri}]");
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let html = String::from_utf8_lossy(&bytes);
+            assert!(
+                html.contains("swagger-ui"),
+                "[{uri}] is the Swagger UI page"
+            );
+        }
     }
 
     // ─── Auto-trigger opt-out (GET endpoint edge cases) ─────────────

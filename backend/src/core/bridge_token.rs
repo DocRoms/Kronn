@@ -611,6 +611,7 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("POST", "/api/workflows", Write, &[]),
     r("POST", "/api/workflows/import", Write, &[]),
     r("GET", "/api/workflows/step-schema", Read, &[]),
+    r("GET", "/api/workflows/active-runs", Read, &[]),
     r("GET", "/api/workflows/{id}", Read, &[("id", W)]),
     r("PUT", "/api/workflows/{id}", Write, &[("id", W)]),
     r("PATCH", "/api/workflows/{id}/step", Write, &[("id", W)]),

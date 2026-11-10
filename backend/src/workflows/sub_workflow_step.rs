@@ -378,33 +378,119 @@ pub async fn execute_sub_workflow_step(
         Err(error) => return fail(step, start, error),
     };
 
+    // The child this step left waiting for its provider quota, if the parent
+    // is resuming it (KT-1119): reclaimed at its step instead of rerun whole.
+    let parent_run = {
+        let pid = parent_run_id.to_string();
+        state
+            .db
+            .with_conn(move |c| crate::db::workflows::get_run(c, &pid))
+            .await
+            .ok()
+            .flatten()
+    };
+    let parent_resumes_quota = parent_run.as_ref().is_some_and(super::quota_wait::can_wait);
+    let recorded_child = match parent_run
+        .as_ref()
+        .and_then(|run| super::quota_wait::mirrored_child(&run.state, &step.name))
+    {
+        Some((mirrored_id, mirrored_wait)) => {
+            let found = state
+                .db
+                .with_conn(move |c| crate::db::workflows::get_run(c, &mirrored_id))
+                .await
+                .ok()
+                .flatten();
+            // The child this parent mirrored, whichever wait it is parked on
+            // now: a child woken and refused again waits under a new identity,
+            // and the claim below compares-and-sets on that current one.
+            found
+                .filter(|child| {
+                    child.parent_run_id.as_deref() == Some(parent_run_id)
+                        && child.workflow_id == child_wf.id
+                })
+                .inspect(|child| {
+                    let current = super::quota_wait::pending_wait(child).map(|wait| &wait.id);
+                    if current.is_some_and(|id| *id != mirrored_wait) {
+                        tracing::info!(
+                            target: "kronn::sub_workflow",
+                            parent_run = %parent_run_id, child_run = %child.id,
+                            "sub-workflow child re-parked under a newer wait — following it"
+                        );
+                    }
+                })
+        }
+        None => None,
+    };
+    // A child that is no longer waiting is not replaced by a fresh one: that
+    // would redo its steps, or run what a human cancelled.
+    if let Some(child) = recorded_child.as_ref().filter(|child| {
+        !matches!(
+            child.status,
+            RunStatus::WaitingQuota | RunStatus::Interrupted
+        )
+    }) {
+        return fail(
+            step,
+            start,
+            ended_while_waiting(&child_wf.name, &child.status),
+        );
+    }
+    let waiting_child = recorded_child;
+
     // Build + persist the child run. The depth marker rides in
     // `trigger_context` so the child's OWN SubWorkflow steps read the right
     // depth (the dispatch reads `__subwf_depth__`).
     let now = Utc::now();
-    let child_run_id = Uuid::new_v4().to_string();
-    let mut trigger = serde_json::Map::new();
+    let child_run_id = waiting_child
+        .as_ref()
+        .map_or_else(|| Uuid::new_v4().to_string(), |child| child.id.clone());
+    // A child resumed after its wait keeps the context it was created with
+    // (pinned variables, markers it accumulated); only what this pass owns is
+    // set again.
+    let mut trigger = waiting_child
+        .as_ref()
+        .and_then(|child| child.trigger_context.as_ref())
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     trigger.insert("__subwf_depth__".into(), json!(child_depth));
+    if parent_resumes_quota {
+        trigger.insert(super::quota_wait::PARENT_RESUMES_KEY.into(), json!(true));
+    }
     if super::shadow::parent_is_shadow(state, parent_run_id).await {
         trigger.insert(
             super::shadow::VARIANT_KEY.into(),
             json!(super::shadow::SHADOW),
         );
     }
-    let prepared = match prepare_child_snapshot(
-        state,
-        &child_wf,
-        &child_run_id,
-        supplied,
-        launch.parent_project_id,
-    )
-    .await
-    {
-        Ok(prepared) => prepared,
-        Err(error) => return fail(step, start, error),
+    // Its variables were resolved when it started: a resume neither resolves
+    // them again nor moves the child to another concurrency bucket.
+    let pinned_concurrency_key = waiting_child.as_ref().and_then(|child| {
+        let pinned = trigger.contains_key("execution_snapshot_id")
+            && (child.concurrency_key.is_some() || child_wf.concurrency_key.is_none());
+        pinned.then(|| child.concurrency_key.clone())
+    });
+    let concurrency_key = match pinned_concurrency_key {
+        Some(key) => key,
+        None => {
+            let prepared = match prepare_child_snapshot(
+                state,
+                &child_wf,
+                &child_run_id,
+                supplied,
+                launch.parent_project_id,
+            )
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => return fail(step, start, error),
+            };
+            insert_snapshot_marker(&mut trigger, prepared.snapshot);
+            prepared.concurrency_key
+        }
     };
-    insert_snapshot_marker(&mut trigger, prepared.snapshot);
-    let mut child_run = WorkflowRun {
+    let fresh = WorkflowRun {
         outcome: None,
         id: child_run_id.clone(),
         workflow_id: child_wf.id.clone(),
@@ -426,7 +512,7 @@ pub async fn execute_sub_workflow_step(
         parent_run_id: Some(parent_run_id.to_string()),
         state: Default::default(),
         produced_branches: vec![],
-        concurrency_key: prepared.concurrency_key,
+        concurrency_key: concurrency_key.clone(),
         triggered_by_run_id: None,
         project_id: child_project_id(&child_wf, launch.parent_project_id),
         parent_workflow_id: None,
@@ -438,39 +524,90 @@ pub async fn execute_sub_workflow_step(
     } else {
         parent_workspace
     };
-    // Same admission as a manual launch or TriggerWorkflow: a child over its
-    // workflow's concurrency_limit fails the step instead of running twice.
-    let to_insert = child_run.clone();
-    let admission = child_wf.clone();
     let enforced_deadline = budget.deadline().map(|(deadline, _)| deadline);
-    match state
-        .db
-        .with_conn(move |c| {
-            crate::workflows::concurrency::insert_child_within_limit(
-                c,
-                &admission,
-                &to_insert,
-                enforced_deadline,
-            )
+    let mut child_run = if let Some(mut child) = waiting_child {
+        // The child keeps its steps and its active-time clock; only its
+        // trigger context and concurrency key are rendered again, like a
+        // foreach item's resume.
+        child.trigger_context = fresh.trigger_context;
+        child.concurrency_key = concurrency_key;
+        let claim = std::sync::Arc::new(tokio::sync::Mutex::new(child));
+        let claimed = wait_for_capacity(launch.cancel, capacity_deadline(&budget), || {
+            let claim = claim.clone();
+            async move {
+                let mut child = claim.lock().await;
+                super::runner::try_claim_interrupted_run_row(state, &mut child, enforced_deadline)
+                    .await
+            }
         })
-        .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(reason)) => {
-            return fail(
-                step,
-                start,
-                format!("Sub-workflow « {} » not started: {reason}", child_wf.name),
-            )
+        .await;
+        let child = claim.lock().await.clone();
+        match claimed {
+            Ok(Ok(())) => child,
+            Ok(Err(reason)) => {
+                return fail(
+                    step,
+                    start,
+                    format!(
+                        "Sub-workflow « {} » could not resume after its quota wait: {reason}",
+                        child_wf.name
+                    ),
+                )
+            }
+            Err(e) => {
+                // Cancelled between the read and the claim: say so, rather
+                // than report a lost claim.
+                let id = child.id.clone();
+                let current = state
+                    .db
+                    .with_conn(move |c| crate::db::workflows::get_run(c, &id))
+                    .await
+                    .ok()
+                    .flatten();
+                let message = match current.filter(|run| run.status == RunStatus::Cancelled) {
+                    Some(run) => ended_while_waiting(&child_wf.name, &run.status),
+                    None => format!(
+                        "Sub-workflow « {} » could not be claimed after its quota wait: {e}",
+                        child_wf.name
+                    ),
+                };
+                return fail(step, start, message);
+            }
         }
-        Err(e) => {
-            return fail(
-                step,
-                start,
-                format!("Failed to create sub-workflow run row: {e}"),
-            )
+    } else {
+        // Same admission as a manual launch or TriggerWorkflow: a child over its
+        // workflow's concurrency_limit fails the step instead of running twice.
+        let to_insert = fresh.clone();
+        let admission = child_wf.clone();
+        match state
+            .db
+            .with_conn(move |c| {
+                crate::workflows::concurrency::insert_child_within_limit(
+                    c,
+                    &admission,
+                    &to_insert,
+                    enforced_deadline,
+                )
+            })
+            .await
+        {
+            Ok(Ok(())) => fresh,
+            Ok(Err(reason)) => {
+                return fail(
+                    step,
+                    start,
+                    format!("Sub-workflow « {} » not started: {reason}", child_wf.name),
+                )
+            }
+            Err(e) => {
+                return fail(
+                    step,
+                    start,
+                    format!("Failed to create sub-workflow run row: {e}"),
+                )
+            }
         }
-    }
+    };
 
     tracing::info!(
         target: "kronn::sub_workflow",
@@ -504,15 +641,28 @@ pub async fn execute_sub_workflow_step(
     // Map the child's terminal status onto this step.
     let child_status = child_run.status.clone();
     let success = matches!(child_status, RunStatus::Success);
-    let status_str = if success { "OK" } else { "SUBWF_FAILED" };
+    // Neither a success nor a failure yet: the parent waits with it (KT-1119).
+    let quota_wait = super::quota_wait::pending_wait(&child_run).cloned();
+    let status_str = if success {
+        "OK"
+    } else if quota_wait.is_some() {
+        "SUBWF_WAITING_QUOTA"
+    } else {
+        "SUBWF_FAILED"
+    };
     let signal = status_str;
     let child_tokens = measured_run_tokens(&child_run);
     let summary = format!(
-        "Sous-workflow « {} » → {:?} ({} étapes, {})",
+        "Sous-workflow « {} » → {:?} ({} étapes, {}){}",
         child_wf.name,
         child_status,
         child_run.step_results.len(),
         tokens_label(child_tokens),
+        if quota_wait.is_some() {
+            ", en attente de quota fournisseur"
+        } else {
+            ""
+        },
     );
     // 2026-06-11 Phase 2 (§5 envelope enrichment) — expose the child's LAST
     // step output + name so a parent step (`create_pr`, `ready_gate`) can read
@@ -526,12 +676,18 @@ pub async fn execute_sub_workflow_step(
         "child_workflow_id": child_wf.id,
         "child_status": format!("{child_status:?}"),
         "child_steps": child_run.step_results.len(),
+        "waiting_quota": quota_wait.is_some(),
         "last_step": last.map(|s| s.step_name.clone()),
         "last_output": last.map(|s| s.output.clone()),
     });
     let output =
         super::step_output_format::format_step_output(data, status_str, &summary, None, &[signal]);
-    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    // A waiting step has no verdict for `on_result` to branch on yet.
+    let condition_action = if quota_wait.is_some() {
+        None
+    } else {
+        super::steps::evaluate_conditions(&step.on_result, &output)
+    };
     let condition_result = condition_action.as_ref().map(|a| match a {
         crate::models::ConditionAction::Stop => "Stop".to_string(),
         crate::models::ConditionAction::Skip => "Skip".to_string(),
@@ -542,7 +698,9 @@ pub async fn execute_sub_workflow_step(
         result: StepResult {
             step_name: step.name.clone(),
             // child Failed/StoppedByGuard/Cancelled → step Failed (parent's
-            // on_result can branch on SUBWF_FAILED to retry/escalate).
+            // on_result can branch on SUBWF_FAILED to retry/escalate). A waiting
+            // child reads as Failed here; the runner turns it into the
+            // parent's own wait.
             status: if success {
                 RunStatus::Success
             } else {
@@ -566,10 +724,23 @@ pub async fn execute_sub_workflow_step(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
-            quota_wait: None,
+            quota_wait,
             terminal_stop: crate::workflows::safety::run_terminal_stop(&child_run),
+            output_bytes: None,
         },
         condition_action,
+    }
+}
+
+/// Why a step does not resume the child it left waiting for its quota (KT-1119).
+fn ended_while_waiting(child_name: &str, status: &RunStatus) -> String {
+    match status {
+        RunStatus::Cancelled => format!(
+            "Sub-workflow « {child_name} » was cancelled while its parent waited for the provider quota — it is not restarted."
+        ),
+        other => format!(
+            "Sub-workflow « {child_name} » is {other:?}, no longer waiting for the provider quota — it is not restarted."
+        ),
     }
 }
 
@@ -1584,6 +1755,7 @@ async fn execute_foreach(
             last_activity: None,
             quota_wait: child_quota_wait,
             terminal_stop: foreach_terminal_stop,
+            output_bytes: None,
         },
         condition_action,
     }
@@ -1641,6 +1813,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }
@@ -2417,7 +2590,7 @@ mod tests {
         assert_eq!(data["items"].as_array().map(Vec::len), Some(2), "{data}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn foreach_never_writes_through_a_planted_symlink() {
         let (state, tokens, agents, ws, step) = foreach_fixture().await;

@@ -22,10 +22,10 @@ alone does not establish a user-visible duration.
    [src: file: backend/src/api/discussions/crud.rs:92-131#load_detail]
 2. `get_discussion` loads every message for the selected discussion and derives
    both message counters by iterating that returned array.
-   [src: file: backend/src/db/discussions.rs:791-801#list_messages]
+   [src: file: backend/src/db/discussions.rs:799-809#list_messages]
 3. `list_messages` selects the message content and other message fields for one
    discussion, ordered by `sort_order, timestamp`; it has no `LIMIT` or
-   pagination clause. [src: file: backend/src/db/discussions.rs:2598-2665#list_messages]
+   pagination clause. [src: file: backend/src/db/discussions.rs:2623-2690#list_messages]
    The `(discussion_id, sort_order)` unique index supports the first ordering
    key. [src: file: backend/src/db/sql/082_message_sequence.sql:14-15#idx_messages_discussion_sort_order_unique]
 4. The frontend polls `GET /api/discussions/{id}/poll` on active-discussion
@@ -39,7 +39,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:997-998#reconcileLoadedDiscussion]
 5. The detail response also queries all message targets belonging to the
    discussion and groups them in a map.
-   [src: file: backend/src/db/discussions.rs:3066-3110#list_discussion_message_targets]
+   [src: file: backend/src/db/discussions.rs:3105-3149#list_discussion_message_targets]
    This means the refresh payload and
    server-side deserialization can grow with both messages and addressed
    targets, independently of visible transcript rows.
@@ -49,16 +49,16 @@ alone does not establish a user-visible duration.
 1. The active transcript is rendered as the complete `activeDiscussion.messages`
    collection inside one scrolling container; this code does not window or
    paginate visible message rows.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:4606-4626#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:4651-4671#transcriptElements]
    Each normal item creates a
    `MessageBubble`; tool groups create `ToolCallsGroup`.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:4043-4101#MessageBubble]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:4045-4104#MessageBubble]
 2. Before mapping rows, the page filters notes, projects messages into
    conversation order and builds lookup maps, memoized per transcript change;
    the memoized element list then makes several more passes to calculate
    metadata and reply/turn anchors.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:3260-3277#transcriptIndex]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3816-3897#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3858-3941#transcriptElements]
 3. The conversation-order projection maps every message and sorts the resulting
    array; resolving a reply chain can walk up to 16 links for an eligible row.
    [src: file: frontend/src/lib/messageTargets.ts:319-367#messagesInConversationOrder]
@@ -68,15 +68,15 @@ alone does not establish a user-visible duration.
 4. A `MessageBubble` passes normal text through `MessageBody`, which splits
    injected context and sends the content to `ReactMarkdown` with
    `remark-gfm` and `remark-emoji`.
-   [src: file: frontend/src/components/MessageBubble.tsx:2295-2343#MessageBody]
-   [src: file: frontend/src/components/MessageBubble.tsx:2246-2259#ReactMarkdown]
+   [src: file: frontend/src/components/MessageBubble.tsx:2301-2349#MessageBody]
+   [src: file: frontend/src/components/MessageBubble.tsx:2252-2265#ReactMarkdown]
    Each message first renders as plain text and upgrades to Markdown once it is
    near the viewport or the browser is idle, so every message is still parsed.
-   [src: file: frontend/src/components/MessageBubble.tsx:2196-2228#canDefer]
+   [src: file: frontend/src/components/MessageBubble.tsx:2202-2234#canDefer]
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
-   [src: file: frontend/src/components/MessageBubble.tsx:1996-2003#MAX_MARKDOWN_CHARS]
+   [src: file: frontend/src/components/MessageBubble.tsx:2002-2009#MAX_MARKDOWN_CHARS]
 5. The active-detail change also triggers an effect that filters the complete
    array to mark the discussion seen.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:1959-1973#markDiscussionSeen]
@@ -100,7 +100,7 @@ alone does not establish a user-visible duration.
    The active streaming text is
    deferred before being passed to the streaming reply renderer.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:1558#deferredStreamingText]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3916-3924#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3960-3968#deferredStreamingText]
 
 ## Findings and priorities
 

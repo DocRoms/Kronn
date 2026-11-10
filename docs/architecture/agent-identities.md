@@ -24,7 +24,7 @@ room: `@claude` is the discussion agent in a ClaudeCode-configured room
 and a punctual spawn everywhere else. This is intentional and the
 autocomplete must always show which one is being picked (KT-211).
 [src: file: frontend/src/lib/messageTargets.ts:54-68#isPrincipal]
-[src: file: backend/scripts/disc-introspection-mcp.py:5250-5258#principal]
+[src: file: backend/scripts/disc-introspection-mcp.py:5261-5269#principal]
 
 ## 2. Alias resolution, exactly
 
@@ -41,7 +41,7 @@ autocomplete must always show which one is being picked (KT-211).
   identify a joined CLI — an agent cannot invent a session. A short
   alias resolves to `discussion_agent` when principal, else `agent`.
   Multiple mentions fan out once per identity, in textual order.
-  [src: file: backend/scripts/disc-introspection-mcp.py:5177-5263#_structured_message_targets]
+  [src: file: backend/scripts/disc-introspection-mcp.py:5188-5274#_structured_message_targets]
 - **No presence-based substitution.** A short alias never silently
   reroutes to a joined CLI (and never refuses to spawn) just because a
   same-provider CLI is present: the punctual agent and the CLI are
@@ -54,7 +54,7 @@ autocomplete must always show which one is being picked (KT-211).
   Claude CLI unless Claude is the room's own agent. That CLI gets the
   wake and no punctual agent is spawned; with two candidate CLIs and no
   reply context nothing is guessed.
-  [src: file: backend/src/db/discussions.rs:4090-4116#agent_alias_cli_target]
+  [src: file: backend/src/db/discussions.rs:4083-4109#agent_alias_cli_target]
   [src: file: backend/src/db/discussions.rs:1967-2010#providers_resolved_to_cli]
   [src: file: backend/src/api/disc_source.rs:678-730#agent_alias_cli_target]
 
@@ -74,7 +74,7 @@ Awareness batches are bounded (20/wake), explicitly flagged
 never end a quiet wait. The bridge itself does not return merely because one
 server poll was quiet.
 [src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES] [src: file: backend/src/api/disc_invite.rs:1135-1142#awareness]
-[src: file: backend/src/api/disc_invite.rs:1716-1735#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7325-7336#_WAIT_MIN_QUIET_POLL_SECS]
+[src: file: backend/src/api/disc_invite.rs:1716-1735#load_awareness_batch] [src: file: backend/scripts/disc-introspection-mcp.py:7336-7347#_WAIT_MIN_QUIET_POLL_SECS]
 [src: file: docs/architecture/discussion-agent-routing.md:87-99#awareness_offered_upto]
 
 ## 3 bis — Bridge guarantee vs host capability
@@ -109,11 +109,11 @@ rows too: an untargeted agent turn replying to this session's message is
 do not poll. A punctual agent is also told it is a one-off, not the
 joined CLI of its provider, whose turns its transcript labels with
 the CLI alias.
-[src: file: backend/src/db/discussions.rs:2093-2096#reply_author]
+[src: file: backend/src/db/discussions.rs:2101-2104#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
 [src: file: backend/src/api/disc_invite.rs:1708-1718#addressed_to_caller]
-[src: file: backend/scripts/disc-introspection-mcp.py:11354-11364#attention_required]
-[src: file: backend/src/api/discussions/streaming.rs:2382-2430#punctual_identity_notice]
+[src: file: backend/scripts/disc-introspection-mcp.py:11363-11373#attention_required]
+[src: file: backend/src/api/discussions/streaming.rs:2416-2464#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1622-1630#reply_target]
 
@@ -132,7 +132,7 @@ the author or alias cannot be verified, with a refusal that never
 fabricates an ordinal. A deliberate fan-out that lists the exact replied
 CLI alongside its native identity passes untouched, and outside a reply
 context the short alias stays free (both identities may be wanted).
-[src: file: backend/scripts/disc-introspection-mcp.py:5353-5436#_reject_short_alias_reply_to_cli_author]
+[src: file: backend/scripts/disc-introspection-mcp.py:5364-5447#_reject_short_alias_reply_to_cli_author]
 
 ## 6. Presence, fallback, reload
 
@@ -146,7 +146,7 @@ context the short alias stays free (both identities may be wanted).
   belongs to the configured discussion agent, whatever the CLI presence
   (target identity, not presence, decides ownership); the turn reaches the
   joined CLIs as awareness and is marked for their one-shot catch-up.
-  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2221-2232#native_fallback_candidate]
+  [src: file: backend/src/api/discussions/routing.rs:20-40#route_human_turn] [src: file: backend/src/db/discussions.rs:2229-2240#native_fallback_candidate]
 - **Reload**: a bridge reload re-attaches the durable session through
   the 0600 resume credential (`/peer-resume`, no token). A CLI whose
   native identity rotated (fresh session id) needs one `disc_join` with

@@ -3,11 +3,14 @@
 //! Ticks every 30s, checks triggers, enforces concurrency limits,
 //! and spawns runs.
 
+pub mod api_auth_failure;
 pub mod api_call_binary;
 pub mod api_call_executor;
 pub mod api_call_ratelimit;
 pub mod api_call_security;
 pub mod api_call_step;
+pub mod authoring_doctrine;
+pub mod autocode_issue_template;
 pub mod batch_apicall_step;
 pub mod batch_step;
 pub mod big_ticket_template;
@@ -15,6 +18,7 @@ pub mod cancellation;
 pub mod collect_api_data_step;
 pub mod concurrency;
 pub mod delegate_subtasks_step;
+pub mod doctrine_warnings;
 pub mod exec_step;
 pub mod gate_checkpoint;
 pub mod gate_step;
@@ -78,6 +82,8 @@ pub struct WorkflowEngine {
     last_trigger_check: tokio::sync::Mutex<chrono::DateTime<Utc>>,
     /// Outbound policy of Watch polls; tests point it at a local server.
     api_policy: api_call_executor::SecurityPolicy,
+    /// Asks the providers of quota-paused runs whether they answer again.
+    quota_rechecker: quota_wait::QuotaRechecker,
 }
 
 impl WorkflowEngine {
@@ -86,6 +92,7 @@ impl WorkflowEngine {
             state,
             last_trigger_check: tokio::sync::Mutex::new(Utc::now()),
             api_policy: api_call_executor::SecurityPolicy::production(),
+            quota_rechecker: quota_wait::QuotaRechecker::production(),
         }
     }
 
@@ -116,6 +123,9 @@ impl WorkflowEngine {
                 tracing::error!("Workflow engine tick error: {}", e);
             }
             quota_wait::wake_due_runs(&self.state, Utc::now()).await;
+            self.quota_rechecker
+                .recheck_pass(&self.state, Utc::now())
+                .await;
             crate::core::citation_drift::scheduled_tick(&self.state).await;
         }
     }
@@ -627,9 +637,15 @@ mod tests {
         .iter()
         .map(variant_name)
         .collect();
+        // KT-1216: `StepType::ALL` is the list every authoring surface renders;
+        // a variant missing from it fails here.
+        assert_eq!(
+            rust,
+            StepType::ALL.iter().map(StepType::name).collect(),
+            "StepType::ALL lags the enum"
+        );
 
-        let schema: serde_json::Value =
-            serde_json::from_str(include_str!("../api/workflow_step_schema.json")).unwrap();
+        let schema = crate::api::workflows::canonical_step_schema();
         let schema_types: std::collections::BTreeSet<&str> = schema["step_types_closed_set"]
             .as_array()
             .expect("canonical closed set")
@@ -640,7 +656,7 @@ mod tests {
         assert_eq!(
             rust, schema_types,
             "StepType enum and the shared authoring schema's step_types_closed_set have drifted — \
-             update api/workflow_step_schema.json to match the Rust enum."
+             the schema renders `StepType::ALL`, so list the new variant there."
         );
     }
 
