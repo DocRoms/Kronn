@@ -129,8 +129,8 @@ session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
 [src: file: backend/src/agents/runner.rs:5773-5827#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1900-1909#offers_model_catalogue]
-[src: file: backend/src/acp.rs:1886-1917#select_model]
+[src: file: backend/src/acp.rs:1948-1957#offers_model_catalogue]
+[src: file: backend/src/acp.rs:1963-1994#select_model]
 
 ## Launch safety and UI
 
@@ -217,11 +217,11 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13785-13802#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:13924-13955#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13804-13821#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13936-13967#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5114-5142#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5133-5161#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -287,7 +287,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:2034-2068#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:2046-2080#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
 [src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
 [src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]

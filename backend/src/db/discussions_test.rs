@@ -192,6 +192,35 @@ mod tests {
     /// left to tell a queued agent from a working one. The flag is read by
     /// column position and a miss is swallowed as `false` — the very state that
     /// used to show an hourglass over a running job — so pin both ends.
+    /// KT-1656 — what an agent prints of a credential file is stored masked;
+    /// what a human wrote is kept as written.
+    #[test]
+    fn an_agent_message_quoting_a_credential_file_is_stored_masked() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-secret")).unwrap();
+        let file = r#"{"mcpServers": {"github": {"env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "t0kenNotShapedLikeAVendor01", "LOG_LEVEL": "debug"}}}}"#;
+        let quoted = format!("`cat ~/.gemini/settings.json` shows:\n```json\n{file}\n```");
+
+        let mut agent = make_message("m-agent", MessageRole::Agent, Some(AgentType::ClaudeCode));
+        agent.content = quoted.clone();
+        insert_message(&conn, "d-secret", &agent).unwrap();
+        let mut human = make_message("m-human", MessageRole::User, None);
+        human.content = quoted.clone();
+        insert_message(&conn, "d-secret", &human).unwrap();
+
+        let stored = |id: &str| -> String {
+            conn.query_row("SELECT content FROM messages WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        let agent = stored("m-agent");
+        assert!(!agent.contains("t0kenNotShapedLikeAVendor01"), "{agent}");
+        assert!(agent.contains("\"LOG_LEVEL\": \"debug\""), "{agent}");
+        assert!(agent.contains("`cat ~/.gemini/settings.json` shows:"));
+        assert_eq!(stored("m-human"), quoted);
+    }
+
     #[test]
     fn list_tells_a_running_agent_from_a_queued_one() {
         use crate::db::agent_dispatch::{self, NewAgentDispatchJob};

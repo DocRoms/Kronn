@@ -873,7 +873,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:13690-13740#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2827-2855#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:13709-13759#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2827-2855#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5917-5949#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5942-5955#_spawned_task_worker_mode]`
 
@@ -1193,7 +1193,7 @@ pre-receipt failure. Calls that use only `idx` remain backward compatible.
 [src: file: backend/src/api/disc_introspection.rs:470-586#disc_get_message]
 [src: file: backend/src/api/disc_prompts.rs:357-385#reply_context]
 [src: file: backend/src/api/disc_portability.rs:618-627#reply_to_message_id]
-[src: file: backend/src/api/federation.rs:51-68#reply_to_message_id]
+[src: file: backend/src/api/federation.rs:67-84#reply_to_message_id]
 [src: file: frontend/src/lib/chat-reply-drafts.ts:14-79#saveReplyDraft]
 [src: file: backend/scripts/disc-introspection-mcp.py:4769-4786#call_disc_get_message]
 
@@ -1226,7 +1226,7 @@ other visible timeline message.
 [src: file: backend/src/api/disc_invite.rs:121-123#note_count] [src: file: backend/src/api/disc_invite.rs:394-399#note_count]
 [src: file: backend/src/api/disc_source.rs:1793-1880#disc_load_other]
 [src: file: backend/src/api/discussions/messaging.rs:441-518#MessageChannel]
-[src: file: backend/src/db/discussions.rs:1433-1473#insert_note_message]
+[src: file: backend/src/db/discussions.rs:1441-1481#insert_note_message]
 
 A workflow Agent step receives its rendered `prompt_template` separately from
 the room transcript. A workflow may therefore inject a launch variable into

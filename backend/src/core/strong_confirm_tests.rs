@@ -270,6 +270,8 @@ const OPEN_ON_PURPOSE: &[(&str, &str)] = &[
         "/api/orchestration/provider-quotas/{provider}/rearm",
     ),
     ("POST", "/api/audit-runs/cleanup"),
+    // KT-1656: masks credentials in the stored text of one discussion; returns none.
+    ("POST", "/api/maintenance/redact-discussion"),
     ("POST", "/api/rtk/deactivate"),
     ("POST", "/api/config/embed-origins"),
     ("POST", "/api/projects/{id}/context-audit/baseline"),

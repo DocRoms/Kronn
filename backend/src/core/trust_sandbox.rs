@@ -15,7 +15,9 @@
 //! the owner's Quick Exec scripts go through it; the human-only routes are
 //! protected by the TOTP proof, not by the network), Docker, other
 //! repositories and the credentials of third-party CLIs (`~/.aws`, `gh`). The
-//! risk panel says so.
+//! risk panel says so. (KT-1656: an *agent* launch also loses the login files
+//! of the other agents, and a sandboxed one the shared credential stores of the
+//! home: [`crate::core::home_credentials`].)
 //!
 //! macOS uses a Seatbelt profile (`sandbox-exec`, allow by default, one deny).
 //! Linux uses bubblewrap: the data directory is replaced by an empty tmpfs and
@@ -111,9 +113,7 @@ pub fn bubblewrap_args(protected: &[PathBuf]) -> Vec<String> {
     .into_iter()
     .map(String::from)
     .collect();
-    for dir in bubblewrap_mount_points(protected) {
-        args.extend(["--tmpfs".to_string(), dir]);
-    }
+    args.extend(bubblewrap_hide_args(protected));
     args.extend(
         ["--share-net", "--die-with-parent", "--new-session", "--"]
             .into_iter()
@@ -137,6 +137,35 @@ pub fn bubblewrap_mount_points(protected: &[PathBuf]) -> Vec<String> {
     points.sort();
     points.dedup();
     points
+}
+
+/// Where bubblewrap masks a protected **file** (KT-1656: `~/.npmrc`,
+/// `~/.claude.json`): each existing one resolved, once. A tmpfs only covers a
+/// directory; a file is bound over with `/dev/null`.
+pub fn bubblewrap_file_mask_points(protected: &[PathBuf]) -> Vec<String> {
+    let mut points: Vec<String> = protected
+        .iter()
+        .map(|path| real_path(path))
+        .filter(|path| path.exists() && !path.is_dir())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    points.sort();
+    points.dedup();
+    points
+}
+
+/// The `bwrap` mounts that hide `protected`: an empty tmpfs over each
+/// directory, `/dev/null` over each file. Emitted after every bind so the mask
+/// stays on top, and where `/dev` is already mounted.
+pub fn bubblewrap_hide_args(protected: &[PathBuf]) -> Vec<String> {
+    let mut args = Vec::new();
+    for dir in bubblewrap_mount_points(protected) {
+        args.extend(["--tmpfs".to_string(), dir]);
+    }
+    for file in bubblewrap_file_mask_points(protected) {
+        args.extend(["--ro-bind".to_string(), "/dev/null".to_string(), file]);
+    }
+    args
 }
 
 /// The Seatbelt deny rules of the protected directories alone, appended to a
@@ -227,7 +256,7 @@ fn unglue_short_flag(part: &str) -> Vec<&str> {
         .collect()
 }
 
-fn host_home() -> Option<PathBuf> {
+pub(crate) fn host_home() -> Option<PathBuf> {
     directories::BaseDirs::new()
         .map(|dirs| dirs.home_dir().to_path_buf())
         .or_else(|| crate::core::child_env::var("HOME").ok().map(PathBuf::from))
@@ -393,6 +422,20 @@ pub fn confinement() -> Option<LevelConfinement> {
     Some(LevelConfinement::with(mechanism, protected_dirs()))
 }
 
+/// [`confinement`] whatever the "protect the vault" setting says (KT-1656): with
+/// the setting off it hides no Kronn data, but still exists, so that the
+/// credential stores of the home (`~/.gemini`, `~/.ssh`, …) can be hidden from
+/// an agent that is not their owner. `None` only when the host has no sandbox.
+pub fn credential_confinement() -> Option<LevelConfinement> {
+    let mechanism = host_mechanism().ok()?;
+    let protected = if protect_vault_setting() {
+        protected_dirs()
+    } else {
+        Vec::new()
+    };
+    Some(LevelConfinement::with(mechanism, protected))
+}
+
 /// `Ok` when this host can apply a sandbox, whatever the setting; otherwise why not.
 pub fn host_sandbox() -> Result<(), String> {
     host_mechanism().map(|_| ())
@@ -435,6 +478,19 @@ impl LevelConfinement {
 
     pub fn protected(&self) -> &[PathBuf] {
         &self.protected
+    }
+
+    /// This confinement with `more` hidden as well (KT-1656: the credential
+    /// stores of the home that the agent being launched does not own).
+    pub fn hiding_also(&self, more: Vec<PathBuf>) -> Self {
+        let mut protected = self.protected.clone();
+        protected.extend(more);
+        protected.sort();
+        protected.dedup();
+        Self {
+            mechanism: self.mechanism,
+            protected,
+        }
     }
 
     /// `program args` behind the sandbox launcher. Pure: nothing is started.

@@ -530,6 +530,7 @@ impl AcpTransport for CodexAcpAdapter {
             &self.launch.github_env,
             self.launch.bridge_token.as_deref(),
             self.launch.priority,
+            self.broker.full_access(),
             &self.launch.run_artifacts,
         )
         .map_err(AcpError::Transport)?;

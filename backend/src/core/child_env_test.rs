@@ -519,6 +519,7 @@ async fn a_direct_launch_spawns_with_the_built_environment_only() {
                 &[],
                 Some("kbt_direct"),
                 crate::core::background_priority::Priority::Normal,
+                false,
             )
             .unwrap()
         });
@@ -602,6 +603,7 @@ async fn an_adapter_launch_env_cannot_reinject_forbidden_names() {
             &[],
             Some("kbt_adapter"),
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .unwrap()
     });

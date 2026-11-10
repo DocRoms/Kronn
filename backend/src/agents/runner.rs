@@ -3909,6 +3909,14 @@ pub const NATIVE_ACP_TASK_WORKER_REFUSAL: &str =
 /// Prefix of the refusal of a native ACP launch without full access.
 pub const NATIVE_FULL_ACCESS_REQUIRED: &str = "native_full_access_required";
 
+/// Whether a launch keeps the shared credential stores of the home readable
+/// (`~/.ssh`, `~/.aws`, …, KT-1656): only the owner's full access does, and not
+/// one that carries read-only grants (a read policy is a restricted launch,
+/// whatever the agent's saved setting says). Every route asks this one place.
+pub(crate) fn reach_is_full_access(launch_full_access: bool, has_read_only_grants: bool) -> bool {
+    launch_full_access && !has_read_only_grants
+}
+
 /// Whether `agent` runs only with its full-access setting on: a native ACP
 /// runtime (OpenCode, Vibe, GitHub Copilot, Gemini CLI, Kiro) loads repository
 /// plugins, tools, hooks and MCP servers before any permission check, so no
@@ -4607,6 +4615,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     .and_then(|env_key| get_api_key(env_key, config.tokens)),
                 bridge_token: bridge_value.clone(),
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
+                // The runtime starts only with full access, verified above; the
+                // read grants of the launch (none can reach it today: only
+                // Claude Code and Codex hold them) still take it off the shared
+                // credential stores of the home, as on the other routes.
+                full_access: launch_full_access,
+                read_only_grants: read_only_repos.is_some(),
             };
             return start_native_acp(request, launch_full_access, native_env)
                 .await
@@ -4692,7 +4706,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
                 request,
-                launch_full_access && read_only_repos.is_none(),
+                reach_is_full_access(launch_full_access, read_only_repos.is_some()),
                 launch,
             )
             .await
@@ -4712,7 +4726,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_command_with_task_worker_policy(
             config.agent_type,
             config.prompt,
-            launch_full_access,
+            // The shared rule: with read-only grants the launch is restricted, so
+            // the command must not carry the global bypass `policy.apply` strips
+            // (it would leave the launch without its `--allowedTools`).
+            reach_is_full_access(launch_full_access, read_only_repos.is_some()),
             &extra_context,
             model_flag.as_deref(),
             reasoning_effort.as_deref(),
@@ -4838,6 +4855,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         &github_env,
         bridge_value.as_deref(),
         config.priority,
+        reach_is_full_access(launch_full_access, read_only_repos.is_some()),
         &run_artifacts,
     ) {
         Ok(c) => c,
@@ -4873,6 +4891,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     &github_env,
                     bridge_value.as_deref(),
                     config.priority,
+                    reach_is_full_access(launch_full_access, read_only_repos.is_some()),
                     &run_artifacts,
                 )
                 .map_err(|error| {
@@ -14644,6 +14663,11 @@ fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> Str
 /// (npx_package, api_key, discussion_id, task-worker capability). Allow-listed rather than
 /// refactored.
 ///
+/// `full_access` is the launch's real trust level (KT-1656): `true` only for
+/// a launch the owner opened in full access. Any other launch, a task worker
+/// included whatever it passes, also loses the shared credential stores of
+/// the home (`~/.ssh`, `~/.aws`, `gh`, …), whichever agent it runs.
+///
 /// Tests only (KT-1587): a production launch always goes through
 /// [`try_spawn_granted`], so none can drop the run artifacts grant by calling
 /// this no-grant form.
@@ -14665,6 +14689,7 @@ pub(crate) fn try_spawn(
     github_env: &[(String, String)],
     bridge_token: Option<&str>,
     priority: Priority,
+    full_access: bool,
 ) -> Result<tokio::process::Child, String> {
     // KT-1587 — a launch that is not handed a run artifacts grant reads none.
     try_spawn_granted(
@@ -14683,6 +14708,7 @@ pub(crate) fn try_spawn(
         github_env,
         bridge_token,
         priority,
+        full_access,
         &[],
     )
 }
@@ -14730,6 +14756,7 @@ pub(crate) fn try_spawn_granted(
     github_env: &[(String, String)],
     bridge_token: Option<&str>,
     priority: Priority,
+    full_access: bool,
     run_artifacts: &[PathBuf],
 ) -> Result<tokio::process::Child, String> {
     #[cfg(test)]
@@ -14806,9 +14833,17 @@ pub(crate) fn try_spawn_granted(
         )
         // KT-1587 — the run artifacts root, but for the run directory granted.
         .with_run_artifacts(run_artifacts);
+        // KT-1656 — and the credential files of the home that this agent does
+        // not own (`~/.gemini` for a Claude, `~/.codex` for a Gemini, …).
+        let sandbox = crate::core::vault_guard::launch_sandbox(binary, npx_package, args);
+        let family = crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key);
+        // The launch's trust level, not the kind of its sandbox: a task worker
+        // never has the owner's full access, whatever agent it runs.
+        let owner_full_access = full_access && task_worker_context.is_none();
         let (program, wrapped_args, outcome) = crate::core::vault_guard::wrap_launch(
-            crate::core::vault_guard::launch_confinement().as_ref(),
-            crate::core::vault_guard::launch_sandbox(binary, npx_package, args),
+            crate::core::vault_guard::launch_confinement_for(family, sandbox, owner_full_access)
+                .as_ref(),
+            sandbox,
             &roots,
             final_cmd,
             final_args,
