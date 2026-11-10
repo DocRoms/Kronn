@@ -12,6 +12,9 @@ setup() {
     export HOME="$TEST_TMPDIR/home"
     export KRONN_SERVICE_HOME="$TEST_TMPDIR/svc"
     export KRONN_DATA_DIR="$TEST_TMPDIR/data"
+    # GitHub runners export XDG_CONFIG_HOME: install would write it into the
+    # unit, and the tests that read the unit back would see the runner's value.
+    unset XDG_CONFIG_HOME
     export KRONN_SOURCE_ONLY=1
     export KRONN_PORT=1
     export KRONN_SERVICE_RETRY_DELAY=0
