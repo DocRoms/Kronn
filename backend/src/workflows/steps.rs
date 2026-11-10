@@ -100,6 +100,7 @@ fn refusal_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     }
@@ -268,6 +269,16 @@ pub async fn execute_step(
     if let Some(refusal) = native_full_access_refusal_for(&step.agent) {
         return refusal_outcome(step, refusal);
     }
+    // A debate reviewer runs on its own agent, with that agent's saved access:
+    // refuse before the author spends a turn rather than letting the debate
+    // swallow the reviewer's error and keep the author's output as a success.
+    if let Some(refusal) = step
+        .multi_agent_review
+        .as_ref()
+        .and_then(|cfg| native_full_access_refusal_for(&cfg.reviewer_agent))
+    {
+        return refusal_outcome(step, refusal);
+    }
 
     // Build prompt (template render + output-format addendum + triage
     // addendum). Errors map to a Failed StepOutcome.
@@ -298,6 +309,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -397,6 +409,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -444,6 +457,7 @@ pub async fn execute_step(
                     last_activity: None,
                     quota_wait: None,
                     terminal_stop: None,
+                    output_bytes: None,
                 },
                 condition_action: None,
             };
@@ -822,6 +836,7 @@ pub async fn execute_step(
                                         last_activity: None,
                                         quota_wait: None,
                                         terminal_stop: None,
+                                        output_bytes: None,
                                     },
                                     condition_action: None,
                                 };
@@ -966,6 +981,7 @@ pub async fn execute_step(
                         last_activity: None,
                         quota_wait: None,
                         terminal_stop: None,
+                        output_bytes: None,
                     },
                     condition_action,
                 };
@@ -1006,6 +1022,7 @@ pub async fn execute_step(
                             last_activity: None,
                             quota_wait: Some(quota),
                             terminal_stop: None,
+                            output_bytes: None,
                         },
                         condition_action: None,
                     };
@@ -1048,6 +1065,7 @@ pub async fn execute_step(
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action,
     }
@@ -1388,6 +1406,9 @@ async fn run_agent_with_timeout(
             // The bridge's discussion is the room the capability names.
             discussion_id: room.map(|room| room.discussion_id.as_str()),
             workflow_step_context: room,
+            // KT-1633 — an Agent step (autoCode implement, review, fix) can build
+            // for minutes: it yields to the owner's interactive applications.
+            priority: crate::core::background_priority::Priority::Background,
             project_id,
             ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
         })
@@ -1759,7 +1780,7 @@ pub(crate) async fn drive_agent_to_output(
         // "[MCP error]…" lines) — gating on count>0 silently re-injected that
         // noise into the recorded step output and every {{steps.X.output}}.
         output = cleaned;
-        (count > 0).then_some(count)
+        count.filter(|count| *count > 0)
     };
 
     match tokens_used {
@@ -2144,6 +2165,7 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             last_activity: None,
             quota_wait: None,
             terminal_stop: None,
+            output_bytes: None,
         },
         condition_action: None,
     })
@@ -2482,6 +2504,7 @@ mod tests {
                 image_model: None,
                 video_model: None,
                 decision_model: None,
+                tools_enabled: None,
                 media_endpoint: None,
             }
         }
@@ -2531,6 +2554,7 @@ mod tests {
             image_model: None,
             video_model: None,
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }
@@ -3417,6 +3441,7 @@ mod http_native_tool_step_tests {
             image_model: None,
             video_model: None,
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }
@@ -3665,7 +3690,7 @@ mod http_native_tool_step_tests {
         assert!(String::from_utf8_lossy(&requests[0].body).contains("\"model\":\"model-b\""));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn disappeared_model_dispatches_same_target_replacement_and_records_both_models() {
         let dir = tempfile::tempdir().unwrap();
@@ -3790,6 +3815,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().to_string_lossy();
         let endpoints = crate::models::setup::HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some(fallback.uri()),
             nvidia: None,
         };
@@ -3841,6 +3867,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().to_string_lossy();
         let endpoints = crate::models::setup::HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some(fallback.uri()),
             nvidia: None,
         };
@@ -3939,6 +3966,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             None,
             None,
             Some(&crate::models::setup::HttpEndpoints {
+                tools: Default::default(),
                 lite_llm: Some(server.uri()),
                 nvidia: None,
             }),

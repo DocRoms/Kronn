@@ -24,6 +24,7 @@ fn connection(
         image_model: None,
         video_model: video_model.map(str::to_string),
         decision_model: None,
+        tools_enabled: None,
         media_endpoint: None,
     }
 }
@@ -608,7 +609,7 @@ fn in_step(state: &AppState, name: &str) -> std::sync::Arc<dyn ToolExecutor> {
     )
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_link_planted_at_the_asset_name_leaves_its_target_untouched() {
     let run = "media-run-planted-link";
@@ -923,7 +924,7 @@ async fn a_brand_image_named_by_context_file_id_is_usable_and_a_foreign_one_is_n
     assert_eq!(queued(&state).await, 2);
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[tokio::test]
 async fn a_project_file_is_a_reference_and_cannot_leave_the_project() {
     let state = state_with_run(one_connection()).await;
@@ -1022,7 +1023,7 @@ async fn project_at(state: &AppState) -> tempfile::TempDir {
     project
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; uses a POSIX FIFO
 #[tokio::test]
 async fn a_fifo_named_like_a_picture_is_refused_without_blocking() {
     let state = state_with_run(one_connection()).await;
@@ -1051,7 +1052,7 @@ async fn a_fifo_named_like_a_picture_is_refused_without_blocking() {
     assert_eq!(media_rooms(&state).await, 0, "a refusal left a room behind");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[tokio::test]
 async fn a_directory_swapped_for_a_link_is_refused_not_followed() {
     let state = state_with_run(one_connection()).await;

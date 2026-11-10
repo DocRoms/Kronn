@@ -1,6 +1,6 @@
 import type { AcceptAuditStepResponse, ActivateQuickExecRequest, ArtifactBundle, AuditLatest, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditRunCost, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange, QuickExecPendingApproval } from '../types/generated';
 import type { BriefingDetectedDoc, BriefingDocsAnswers, BriefingProjectAnswers, BriefingProjectRules, CrossAuditEstimate, LinkedRepoDocStatus, SavedBriefing } from '../types/generated';
-import type { WorkerConnectivity, WorkersConfig } from '../types/generated';
+import type { ActivityOverview, WorkerConnectivity, WorkersConfig } from '../types/generated';
 import type { ComfyUiConfig, ComfyUiStatus, ExternalApiConnection, SetComfyUiSlotsRequest, SetComfyUiSettingsRequest, SetComfyUiModelFamilyRequest } from '../types/generated';
 import type {
   DecideScopeRequest, DiscussionProjectGrant, DiscussionScope, GrantDiscussionProjectRequest,
@@ -229,6 +229,9 @@ import type {
   DecideRunRequest,
   DecideRunResponse,
   ResumeInterruptedRequest,
+  ActiveRunSummary,
+  StepAgentOverride,
+  SwitchQuotaAgentResponse,
   ImportWorkflowRequest,
   WorkflowImportPreview,
   ImportQuickPromptRequest,
@@ -278,6 +281,7 @@ import type {
   UpdateLivePageRequest,
   LinkLivePageDiscussionRequest,
   CampaignTaskCandidate as GeneratedCampaignTaskCandidate,
+  CampaignReviewer,
   CampaignWorkerSelection,
   ExecutionDiscussionLink,
   IntegrationStrategy,
@@ -310,7 +314,7 @@ import { registerGrantMinter, strongFetch, withStrongConfirm } from './strongCon
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
-import type { AgentFilesPolicy, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, LaneSeedCandidate, ProjectLaneSeeds, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -433,6 +437,21 @@ export function getApiBase(): string {
  * Extracts the duplicated ReadableStream SSE parsing loop used by
  * auditStream, partialAuditStream, fullAuditStream, _streamSSE, etc.
  */
+/** `HTTP <status>`, plus the backend's own plain-text reason when the refusal
+ *  carried one (an `ApiResponse` body). A JSON-encoded reason (e.g. a revision
+ *  conflict payload) is not a sentence for a human, so it is left out. */
+async function sseHttpError(res: Response): Promise<string> {
+  const base = `HTTP ${res.status}`;
+  if (res.ok) return base;
+  try {
+    const body = await res.clone().json() as { error?: unknown };
+    const reason = typeof body?.error === 'string' ? body.error.trim() : '';
+    return reason && !reason.startsWith('{') ? `${base}: ${reason}` : base;
+  } catch {
+    return base;
+  }
+}
+
 async function parseSSEStream(
   res: Response,
   handlers: {
@@ -442,7 +461,7 @@ async function parseSSEStream(
   },
 ) {
   if (!res.ok || !res.body) {
-    handlers.onError(`HTTP ${res.status}`);
+    handlers.onError(await sseHttpError(res));
     return;
   }
 
@@ -857,6 +876,11 @@ export interface HealthInfo {
   in_docker: boolean;
 }
 
+/** KT-1658 — the attention center: everything running in Kronn, derived on read. */
+export const activity = {
+  overview: () => api<ActivityOverview>('GET', '/activity'),
+};
+
 export const health = {
   /** `GET /api/health` — unauthed and NOT enveloped (raw JSON), so it bypasses
    *  the `api<T>()` `{success,data}` unwrap. */
@@ -893,6 +917,16 @@ export interface NetworkExposure {
   reachable_ips: DetectedIp[];
   /** A network access token is in force (auth on and a token stored). */
   auth_token_set: boolean;
+  /** A TLS-terminating proxy on this machine is declared (Settings or env). */
+  tls_terminated_by_proxy: boolean;
+  /** The declaration comes from the environment: Settings cannot withdraw it. */
+  tls_declared_by_env: boolean;
+  /** The proxy's public `https://` origin, the address invites advertise. */
+  public_origin: string | null;
+  /** The config asks for exposure nothing encrypts: Kronn started on loopback instead. */
+  plain_http_blocked: boolean;
+  /** Only in the reply to a declaration: the token the local UI must keep. */
+  issued_auth_token?: string | null;
 }
 
 export const config = {
@@ -951,6 +985,8 @@ export const config = {
   getAgentAccessEffective: () => api<AgentEffectiveAccess[]>('GET', '/config/agent-access/effective'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
   setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
+  /** Kronn tool executor switch of an HTTP agent (KT-1600): `false` = off, `null` = the default (on). */
+  setAgentTools: (req: { agent: AgentType; enabled: boolean | null }) => api<void>('POST', '/config/agent-tools', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>
     api<void>('POST', '/config/agent-mention-color', req),
   getModelTiers: () => api<ModelTiersConfig>('GET', '/config/model-tiers'),
@@ -994,10 +1030,19 @@ export const config = {
   getNetworkExposure: () => api<NetworkExposure>('GET', '/config/network-exposure'),
   getDesktopPort: () => api<DesktopPortInfo>('GET', '/config/desktop-port'),
   setDesktopPort: (port: number) => api<DesktopPortInfo>('POST', '/config/desktop-port', { port }),
-  setNetworkExposure: (exposed: boolean) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed }),
+  /** Exposing over plain HTTP is refused by the backend (409) unless a TLS proxy is declared:
+   *  declare it in the same call or before. Absent declaration fields are left as they are. */
+  setNetworkExposure: (
+    exposed: boolean,
+    proxy?: { tls_terminated_by_proxy?: boolean; public_origin?: string },
+  ) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed, ...proxy }),
   /** P2 recovery passphrase — the encryption key wrapped under an Argon2id
    *  passphrase, so MCP secrets survive total machine/keychain loss. */
   getRecoveryStatus: () => api<RecoveryStatus>('GET', '/config/recovery/status'),
+  /** Deletes a kept `config.toml.corrupt.<ts>`; the backend checks again that
+   *  every credential in it is verified, and the strong confirmation applies (KT-1594). */
+  deleteSetAsideFile: (name: string) =>
+    api<void>('DELETE', `/config/recovery/set-aside-files/${encodeURIComponent(name)}`),
   /** Returns the recovery code the user MUST save off-machine. */
   // Replacing an existing passphrase requires the current one (KT-1007).
   setRecovery: (passphrase: string, currentPassphrase?: string, replaceUnverified?: boolean) => api<{ recovery_code: string }>('POST', '/config/recovery/set', {
@@ -1025,7 +1070,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; lane_seeds_copy_enabled?: boolean; lane_seeds_adopt_suggested?: boolean; lane_seeds_strong_confirm?: boolean; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1056,6 +1101,15 @@ export const projects = {
     api<ProjectValidationsAccess>('GET', `/projects/${encodeURIComponent(id)}/validations-access`),
   setValidationsAccess: (id: string, access: ValidationsAccess) =>
     api<ProjectValidationsAccess>('PUT', `/projects/${encodeURIComponent(id)}/validations-access`, { access }),
+  /** Gitignored paths copied into each task worktree, with the last seeding (KT-1438). */
+  laneSeeds: (id: string) =>
+    api<ProjectLaneSeeds>('GET', `/projects/${encodeURIComponent(id)}/lane-seeds`),
+  /** Replaces the list; a secret-looking path comes back in `needs_confirmation` until confirmed. */
+  setLaneSeeds: (id: string, seeds: string[], confirmSecretPaths: string[] = []) =>
+    api<ProjectLaneSeeds>('PUT', `/projects/${encodeURIComponent(id)}/lane-seeds`, { seeds, confirm_secret_paths: confirmSecretPaths }),
+  /** Gitignored directories the project's tracked code references. */
+  laneSeedCandidates: (id: string) =>
+    api<LaneSeedCandidate[]>('GET', `/projects/${encodeURIComponent(id)}/lane-seeds/candidates`),
   setAgentFiles: (id: string, policy: AgentFilesPolicy) =>
     api<ProjectAgentFiles>('PUT', `/projects/${encodeURIComponent(id)}/agent-files`, { policy }),
   /** Where the project keeps its AI doc, and its own override (KT-263). */
@@ -1196,8 +1250,8 @@ export const projects = {
   auditStatus: (id: string) => api<AuditProgress | null>('GET', `/projects/${id}/audit-status`),
   /**
    * 0.8.3 (#288) — fleet-wide list of audits currently in progress
-   * across every project. Powers the ActiveAuditsPopover on the
-   * Projets nav button. Returns `[]` when nothing is running.
+   * across every project. Powers the Projets nav badge and the
+   * activity bell (KT-1658). Returns `[]` when nothing is running.
    */
   auditStatusAll: () => api<AuditProgress[]>('GET', '/audit-status'),
   /**
@@ -1259,8 +1313,9 @@ export const projects = {
    * cumulative_tokens, cli_success + the optional step_warning. Empty
    * Vec for legacy runs (pre-0.8.4) or runs with no recorded steps.
    */
-  /** KT-977 — the Full audit's steps in run order, known before any run. */
-  auditSteps: () => api<AuditStepInfo[]>('GET', '/audit/steps'),
+  /** KT-977 — the Full audit's steps in run order, known before any run. KT-1603: targets sit under the project's docs root. */
+  auditSteps: (projectId: string) =>
+    api<AuditStepInfo[]>('GET', `/audit/steps?project_id=${encodeURIComponent(projectId)}`),
   /** KT-1084 — an audit run's tokens and cost per phase (briefing, audit, validation) and in total. */
   auditRunCost: (runId: string) => api<AuditRunCost>('GET', `/audit-runs/${runId}/cost`),
   auditRunSteps: (runId: string) =>
@@ -2222,6 +2277,7 @@ export const discussions = {
             event_id?: string;
             revision?: string;
             dispatch_job_id?: string | null;
+            dropped_targets?: number;
           };
           if (type === 'chunk' && parsed.text !== undefined) {
             onChunk(parsed.text);
@@ -2251,6 +2307,7 @@ export const discussions = {
               sort_order: parsed.sort_order,
               duplicate: parsed.duplicate ?? false,
               dispatch_job_id: parsed.dispatch_job_id ?? null,
+              dropped_targets: parsed.dropped_targets ?? 0,
             });
           } else if (type === 'done') {
             done();
@@ -2369,9 +2426,6 @@ export const discussions = {
     if (!json.success) throw new Error(json.error ?? 'Upload failed');
     return json.data;
   },
-
-  /** Delete trailing agent/system messages (for retry/edit). */
-  deleteLastAgentMessages: (id: string) => api<void>('DELETE', `/discussions/${id}/messages/last`),
 
   /** KT-580 — the notes of a discussion, for a human. The route existed to
    *  serve `disc_note_list` to agents; nothing on this side ever called it,
@@ -2499,9 +2553,6 @@ export const discussions = {
     'DELETE',
     `/discussions/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`,
   ),
-
-  /** Edit the last user message content. */
-  editLastUserMessage: (id: string, content: string) => api<void>('PATCH', `/discussions/${id}/messages/last`, { content } as SendMessageRequest),
 
   /** Atomically edit a User turn, archive its trailing replies and resend. */
   reviseMessageStream: (
@@ -2944,6 +2995,14 @@ export const workflows = {
     api<{ run_id: string; new_status: string }>(
       'POST', `/workflow-runs/${runId}/resume`, request
     ),
+  /** KT-1657 — every unfinished run; a run paused on a provider quota
+   *  carries `quota.wake_at`. */
+  activeRuns: () => api<ActiveRunSummary[]>('GET', '/workflows/active-runs'),
+  /** KT-1657 — move the refused step of a quota-paused run to another
+   *  installed agent (the run keeps waiting; resume it or let the provider
+   *  re-check wake it). */
+  switchQuotaAgent: (runId: string, choice: StepAgentOverride) =>
+    api<SwitchQuotaAgentResponse>('POST', `/workflow-runs/${runId}/quota-agent`, choice),
   /** 0.7.0 Phase 4 — submit operator's decision on a paused (Gate) run.
    *  `decision` ∈ "approve" | "request_changes" | "reject".
    *  `comment` is required for request_changes (the agent needs feedback).
@@ -3627,6 +3686,8 @@ export interface ExternalApiConnectionView {
   media_endpoint?: string | null;
   /** The model Decision steps call (KT-1366); a capability, not a tier. */
   decision_model?: string | null;
+  /** Kronn tools: on unless `false` (KT-1600). */
+  tools_enabled?: boolean | null;
   created_at: string;
   updated_at: string;
   /** Whether a credential is currently stored; the value never crosses the wire. */
@@ -3646,6 +3707,8 @@ export interface UpsertExternalApiConnection {
   video_model?: string | null;
   media_endpoint?: string | null;
   decision_model?: string | null;
+  /** Kronn tools: `false` turns them off, anything else leaves them on (KT-1600). */
+  tools_enabled?: boolean | null;
   /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
   api_key?: string | null;
   /** Keep a tier model the proxy just refused; otherwise the save fails with `unreachable_model`. */
@@ -3887,6 +3950,8 @@ export interface CreateCampaignRequest {
   auto_continue?: boolean;
   /** Explicit opt-in: move to another allowed provider on quota exhaustion, and back after the reset. */
   quota_fallback?: boolean;
+  /** Who reviews each delivery. Omitted: a configured remote model, else you. */
+  reviewer?: CampaignReviewer | null;
 }
 
 export const orchestration = {

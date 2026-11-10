@@ -773,7 +773,7 @@ pub(super) fn is_acp_tool_marker(line: &str) -> bool {
 /// The streaming task and its test call this, so the panel's contract is
 /// pinned by the same code the task runs.
 pub(super) fn forwards_to_log_panel(trimmed: &str) -> bool {
-    !trimmed.is_empty() && !is_acp_tool_marker(trimmed)
+    !trimmed.is_empty() && !is_acp_tool_marker(trimmed) && !trimmed.starts_with("vibe_tokens:")
 }
 
 /// The fixed line announcing that the agent wrote a diagnostic.
@@ -1349,6 +1349,38 @@ fn agent_http_status(error: &str) -> Option<u16> {
         .split_once(" error ")
         .and_then(|(_, suffix)| suffix.split_whitespace().next())
         .and_then(|status| status.trim_end_matches(':').parse::<u16>().ok())
+}
+
+/// KT-1607 — whether an HTTP agent failure is the model refusing the prompt as
+/// too large, as opposed to refusing the model or being unreachable. A 413 always
+/// is; a 400/422 is when the provider's own words name the context window or the
+/// size, which is how OpenAI-wire proxies phrase it. Ollama has no status: Kronn's
+/// own pre-send refusal (`prompt is about N tokens but the context window is M`)
+/// is matched on its fixed wording only, so a timeout that says "too long" is not.
+fn is_prompt_size_refusal(status: Option<u16>, error: &str) -> bool {
+    const PROVIDER_MARKERS: [&str; 10] = [
+        "context length",
+        "context_length",
+        "context window",
+        "maximum context",
+        "too long",
+        "too large",
+        "token limit",
+        "maximum number of tokens",
+        "input token count",
+        "reduce the length",
+    ];
+    match status {
+        Some(413) => true,
+        Some(400 | 422) => {
+            let lowered = error.to_ascii_lowercase();
+            PROVIDER_MARKERS
+                .iter()
+                .any(|marker| lowered.contains(marker))
+        }
+        Some(_) => false,
+        None => error.contains("Sending it would make Ollama silently drop"),
+    }
 }
 
 /// The sentence a LiteLLM user reads when the proxy lists a model it cannot
@@ -3246,8 +3278,22 @@ pub(super) async fn make_agent_stream_inner(
 
     // Without a project the agent used to run in the shared system temp dir,
     // where its files could not be told apart from anything else on the machine.
-    if !tool_free_judge && workspace_path.is_none() && project_path.is_empty() {
-        match runner::discussion_scratch_dir(&discussion_id) {
+    // KT-1645 — a review whose worktree pointer is gone is refused here, by the
+    // same preflight, rather than started in the project's main checkout.
+    let review_worktree_lost = !tool_free_judge
+        && workspace_path.is_none()
+        && disc.workspace_mode == crate::core::worktree::REVIEW_WORKSPACE_MODE;
+    if !tool_free_judge
+        && workspace_path.is_none()
+        && (project_path.is_empty() || review_worktree_lost)
+    {
+        let prepared = if review_worktree_lost {
+            Err("this review's worktree is gone; Kronn will not run it in the project's main checkout"
+                .to_string())
+        } else {
+            runner::discussion_scratch_dir(&discussion_id)
+        };
+        match prepared {
             Ok(dir) => workspace_path = Some(dir.to_string_lossy().into_owned()),
             Err(error) => {
                 let content = if disc.language == "fr" {
@@ -3717,6 +3763,7 @@ pub(super) async fn make_agent_stream_inner(
                 display_name: connection.display_name.clone(),
                 mention_alias: connection.mention_alias.clone(),
                 endpoint: endpoint.clone(),
+                tools_enabled: connection.tools_enabled,
                 api_key: tokens
                     .active_key_for(&connection.credential_slug)
                     .filter(|key| !key.trim().is_empty())
@@ -4593,6 +4640,8 @@ pub(super) async fn make_agent_stream_inner(
                 let mut stream_json_usage: Option<runner::ReportedUsage> = None;
                 let mut stream_json_cost: Option<f64> = None;
                 let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
+                // KT-1599 — tools Claude refused, read off the final `result` line.
+                let mut refused_tools: Vec<String> = Vec::new();
                 let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
                 // Scope a resumable conversation to the directory it ran in: a
                 // moved or regenerated worktree must not resume a thread that
@@ -4814,6 +4863,11 @@ pub(super) async fn make_agent_stream_inner(
                         );
                         // KT-1541 — a task worker's refused tool call is written
                         // into its transcript; no other run's stream is.
+                        for tool in runner::claude_permission_denials(&line) {
+                            if !refused_tools.contains(&tool) {
+                                refused_tools.push(tool);
+                            }
+                        }
                         let parsed = if cli_task_worker_context.is_some() {
                             runner::parse_claude_worker_stream_line(&line)
                         } else {
@@ -5196,6 +5250,7 @@ pub(super) async fn make_agent_stream_inner(
                     .filter(|line| {
                         let line = line.trim_start();
                         !line.starts_with("ollama_tokens:")
+                            && !line.starts_with("vibe_tokens:")
                             && !line.starts_with("kronn_http_turn:")
                             && !line.starts_with("kronn_http_tool_exec:")
                             && !line.starts_with(runner::CEILING_TRACE_PREFIX)
@@ -5401,10 +5456,11 @@ pub(super) async fn make_agent_stream_inner(
                 } else {
                     let (cleaned, count) =
                         runner::parse_token_usage(&agent_type, &full_response, &stderr_lines);
-                    if count > 0 {
+                    if count.is_some_and(|count| count > 0) {
                         full_response = cleaned;
                     }
-                    count
+                    // `messages.tokens_used` is NOT NULL: unmeasured is stored as 0.
+                    count.unwrap_or(0)
                 };
 
                 // Hard cap before persistence — covers EVERY path (incl. the
@@ -5896,6 +5952,50 @@ pub(super) async fn make_agent_stream_inner(
                     );
                 }
 
+                // ── KT-1599 — headless permission denials ──────────────
+                // `--print` has no permission channel: a refused tool only shows
+                // up in the final `result` line. Say so as a System message.
+                if !refused_tools.is_empty() {
+                    let sys_msg = DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
+                        session_continuity: None,
+                        kind: Default::default(),
+                        model: None,
+                        lint_report: None,
+                        id: Uuid::new_v4().to_string(),
+                        role: MessageRole::System,
+                        channel: MessageChannel::Main,
+                        content: runner::permission_denials_message(&refused_tools),
+                        agent_type: None,
+                        timestamp: Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: dispatch_trigger_message_id.clone(),
+                    };
+                    let did_sys = disc_id.clone();
+                    let m = sys_msg.clone();
+                    if let Err(e) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussions::insert_message(conn, &did_sys, &m)
+                        })
+                        .await
+                    {
+                        tracing::warn!("Failed to persist permission denial notice: {e}");
+                    } else {
+                        crate::api::federation::federate_message(&state, &disc_id, &sys_msg).await;
+                    }
+                }
+
                 // ── HTTP provider retry trace ──────────────────────────
                 if !provider_retry_trace.is_empty() {
                     let sys_msg = DiscussionMessage {
@@ -6223,7 +6323,13 @@ pub(super) async fn make_agent_stream_inner(
                     crate::models::ModelTier::Default => "default",
                     crate::models::ModelTier::Reasoning => "reasoning",
                 };
-                if agent_type == AgentType::LiteLlm {
+                // KT-1607 — a provider that refuses the prompt as too large says
+                // nothing against the model: no catalogue flag, no "model not
+                // found" card, but the size and the limit it was held against.
+                let size_refusal = runner::is_http_chat_agent(&agent_type)
+                    && start_timeout.is_none()
+                    && is_prompt_size_refusal(agent_http_status(&e), &e);
+                if agent_type == AgentType::LiteLlm && !size_refusal {
                     if let (Some(status), Some(model)) =
                         (agent_http_status(&e), attempted_model.as_deref())
                     {
@@ -6266,6 +6372,23 @@ pub(super) async fn make_agent_stream_inner(
                 }
                 let content = match start_timeout {
                     Some(_) => e.clone(),
+                    None if size_refusal => {
+                        let limit = super::prompt_limit::limit_for(
+                            &agent_type,
+                            attempted_model.as_deref(),
+                            &ollama_context_overrides,
+                            super::prompt_limit::hard_ceiling(&state).await,
+                        );
+                        super::start_refusal::prompt_too_large_card(
+                            &disc.language,
+                            agent_http_status(&e),
+                            prompt.len() + extra_context_len,
+                            &limit,
+                            &e,
+                            disc_tier,
+                            dispatch_job_id.as_deref(),
+                        )
+                    }
                     None => agent_start_error_content(
                         &agent_type,
                         attempted_model.as_deref(),
@@ -6677,10 +6800,11 @@ pub(super) async fn run_agent_streaming(
         reported
     } else {
         let (cleaned, count) = runner::parse_token_usage(agent_type, &full_response, &stderr);
-        if count > 0 {
+        if count.is_some_and(|count| count > 0) {
             full_response = cleaned;
         }
-        count
+        // `messages.tokens_used` is NOT NULL: unmeasured is stored as 0.
+        count.unwrap_or(0)
     };
 
     AgentRunResult {
@@ -6884,7 +7008,7 @@ mod agent_lifecycle_tests {
         auth_required_system_message, cap_agent_response, child_run_counts_as_success,
         configured_agent_global_timeout, connection_mismatch, effective_global_timeout,
         effective_stall_timeout, finish_tracked_preflight, forwards_to_log_panel,
-        lift_acp_tool_calls, AgentExecutionOutcome, ConnectionMismatch,
+        is_prompt_size_refusal, lift_acp_tool_calls, AgentExecutionOutcome, ConnectionMismatch,
         NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
@@ -7604,6 +7728,34 @@ mod agent_lifecycle_tests {
             agent_http_status("LiteLLM unreachable at http://proxy: connection refused"),
             None
         );
+    }
+
+    /// KT-1607 — which provider answers are the prompt being too large, and
+    /// which are not: a 413 always, a 400/422 only when it names the window or
+    /// the size, never a model refusal, a rate limit or a plain outage.
+    #[test]
+    fn a_provider_refusing_the_prompt_as_too_large_is_told_apart_from_a_model_refusal() {
+        let big = "LiteLlm error 400: Provider response: {\"error\":{\"message\":\"This model's maximum context length is 131072 tokens. However, your messages resulted in 150000 tokens.\"}}";
+        assert!(is_prompt_size_refusal(agent_http_status(big), big));
+        let vertex = "LiteLlm error 400: Provider response: input token count exceeds the maximum number of tokens allowed";
+        assert!(is_prompt_size_refusal(agent_http_status(vertex), vertex));
+        let body_limit = "LiteLlm error 413: Provider response: Request Entity Too Large";
+        assert!(is_prompt_size_refusal(
+            agent_http_status(body_limit),
+            body_limit
+        ));
+        let ollama = "prompt is about 90000 tokens but the context window is 32768 (this model's own trained context window). Sending it would make Ollama silently drop part of the conversation and answer from the remainder, so Kronn refuses instead: shorten the step's input.";
+        assert!(is_prompt_size_refusal(agent_http_status(ollama), ollama));
+
+        let model_gone = "LiteLlm error 400: Provider response: model not found";
+        assert!(!is_prompt_size_refusal(
+            agent_http_status(model_gone),
+            model_gone
+        ));
+        let rate = "LiteLlm error 429: Provider response: token limit reached for this minute";
+        assert!(!is_prompt_size_refusal(agent_http_status(rate), rate));
+        let timeout = "error sending request: operation took too long";
+        assert!(!is_prompt_size_refusal(agent_http_status(timeout), timeout));
     }
 
     #[test]
@@ -9346,7 +9498,7 @@ for line in sys.stdin:
 
     /// A discussion whose native ACP agent never opens its session ends with a
     /// message in the user's language, settled as failed, the agent killed.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     async fn a_session_that_never_opens_is_settled_with_a_message_and_killed() {
@@ -9701,8 +9853,10 @@ mod http_run_progress_tests {
     /// bubble waits for the model with its deadline before any header, shows
     /// a reasoning-only chunk as thinking, and ends on the run's own stop.
     #[tokio::test]
+    #[serial_test::serial] // HOME is process-wide: the discussion folder must land in a scratch home
     async fn an_http_discussion_turn_reports_its_wait_its_reasoning_and_its_end() {
         use axum::response::IntoResponse;
+        let _home = crate::agents::runner::ScratchHome::enter();
         let gate = Arc::new(Notify::new());
         let base = gated_proxy(gate.clone()).await;
         let mut config = crate::core::config::default_config();
