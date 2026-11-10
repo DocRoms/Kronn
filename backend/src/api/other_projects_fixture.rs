@@ -84,6 +84,7 @@ pub(crate) async fn project_among_others(state: &AppState, dir: &Path, linked: b
 
 /// A scripted `claude` that records its stdin and its arguments, then ends a turn
 /// with a one-word answer. Returns the fixture program and the log it appends to.
+#[cfg(unix)] // the scripted claude is a POSIX sh script (cat, printf), which Windows cannot run
 pub(crate) fn recording_claude(tools: &Path) -> (PathBuf, PathBuf) {
     let log = tools.join("turns.log");
     let script = format!(

@@ -1071,7 +1071,7 @@ fn assert_chain_presence_only(dir: &Path) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn chain_directory_component_keeps_secret_names_and_never_hashes() {
     type Record = fn(&Path);
@@ -1101,7 +1101,7 @@ fn chain_directory_component_keeps_secret_names_and_never_hashes() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_fingerprint_stored_under_a_directory_chain_alias_is_dropped() {
     let tmp = chain_fixture();

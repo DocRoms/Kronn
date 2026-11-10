@@ -821,7 +821,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_secret_written_name_remains_secret_after_resolving_to_an_ordinary_name() {
         let tmp = repo();
@@ -845,7 +845,7 @@ mod tests {
         assert!(reasons("[src: file: settings-data:2]", root).is_empty());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn chain_directory_component_keeps_secret_names() {
         let tmp = repo();

@@ -1449,7 +1449,7 @@ mod tests {
         assert!(root.join("doc/index.md").is_file());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn backfill_refuses_a_symlinked_docs_dir_even_when_probes_follow() {
         // Copilot r4 family — `is_dir()`/`is_file()` FOLLOW links, so the
@@ -1487,7 +1487,7 @@ mod tests {
 
     // ─── ensure_docs_index ────────────────────────────────────────────
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn ensure_docs_index_refuses_a_symlinked_docs_dir() {
         // Copilot r4 — the trust root is the EXPLICIT project root: a
@@ -1612,7 +1612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     async fn create_symlink_flag_creates_ai_link() {
         let (_tmp, root) = make_legacy_project().await;
         let outcome = migrate_project(&root, true).await;
@@ -2002,7 +2002,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, unix, feature = "full-tests"))] // swaps a folder for a symlink (std::os::unix)
 mod swap_tests {
     use super::*;
     use crate::core::fs_guard::swap_probe;

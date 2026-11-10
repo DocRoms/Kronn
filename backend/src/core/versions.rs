@@ -529,7 +529,7 @@ mod tests {
         assert!(parse_installed_version(&[0xff, 0xfe]).is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn installed_probe_only_requests_version_and_bounds_process_and_output() {
         use std::os::unix::fs::PermissionsExt;

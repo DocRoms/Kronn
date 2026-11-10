@@ -215,7 +215,9 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("--fail-under-lines 83", backend)
         self.assertIn("check-keymgmt-coverage.sh", backend)
         self.assertIn("cargo fmt --all -- --check", backend)
-        self.assertNotIn("cargo test", backend)
+        # Only doctests may run outside nextest; the suite itself runs once.
+        code = "\n".join(l for l in backend.splitlines() if not l.lstrip().startswith("#"))
+        self.assertNotRegex(code, r"cargo test(?! --doc)")
         self.assertNotIn("test-backend-coverage", workflow)
         self.assertTrue((ROOT / "backend/.config/nextest.toml").is_file())
         self.assertNotIn("cargo check — desktop crate", backend)
@@ -343,16 +345,13 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             self.assertNotRegex(section, r"(?m)^    (if|needs|uses|strategy):", gate)
             self.assertIn("actions: write", section)
             self.assertIn("checks: write", section)
-            self.assertIn(
-                f"        if: \"!contains(github.event.pull_request.labels.*.name, '{label}')\"\n"
-                f"        run: |\n", section,
-            )
+            self.assertIn(f"scripts/ci/require_label.sh {label} ", section)
             self.assertIn(f"run: scripts/ci/previous_gate_verdict.sh {path.name} {gate} {label}\n", section)
             for name in ("PR_NUMBER", "HEAD_SHA", "BASE_SHA"):
                 self.assertIn(f"          {name}: ${{{{ github.event.pull_request.", section)
-            # Only the label guard and the superseding step are conditional;
-            # the verdict always runs. Superseding must not run on a cancel.
-            self.assertEqual(section.count("        if: "), 2, gate)
+            # The label guard (require_label.sh) and the verdict always run;
+            # only superseding is conditional, and never on a cancel.
+            self.assertEqual(section.count("        if: "), 1, gate)
             self.assertIn(
                 "        if: success() || failure()\n"
                 "        env:\n"
@@ -449,7 +448,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             self.assertNotRegex(route_job, r"(?m)^    (if|needs):")
             self.assertIn("pull-requests: read", route_job)
             self.assertIn("run: ${{ steps.label.outputs.run }}", route_job)
-            self.assertIn(f"--jq '.labels[].name' | grep -qx '{label}'", route_job)
+            # The live label read lives in require_label.sh (KT-1523).
+            self.assertIn(f"scripts/ci/require_label.sh {label} ", route_job)
             self.assertIn('echo "run=true" >> "$GITHUB_OUTPUT"', route_job)
             live = f"needs.{route}.outputs.run == 'true'"
             aggregate = jobs[gate]
@@ -459,7 +459,10 @@ class E2eContainerWorkflowTests(unittest.TestCase):
                 path.name,
             )
             self.assertIn("    if: always()\n", aggregate)
-            self.assertIn(f"        if: needs.{route}.outputs.run != 'true'\n", aggregate)
+            # A label check that failed means a missing label; one that did not
+            # run fails the gate without blaming the label (KT-1523).
+            self.assertIn(f"        if: needs.{route}.result == 'failure'\n", aggregate)
+            self.assertIn(f"        if: needs.{route}.result != 'success' && needs.{route}.result != 'failure'\n", aggregate)
             self.assertIn(f"        if: {live}\n", aggregate)
             self.assertIn(IDENTITY_STEP, aggregate)
             # Only a push to main may count a skipped job: it refreshes caches.

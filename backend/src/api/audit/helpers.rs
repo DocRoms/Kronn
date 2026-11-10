@@ -1791,7 +1791,7 @@ mod compute_audit_info_tests {
     }
 }
 
-#[cfg(all(test, unix, feature = "full-tests"))]
+#[cfg(all(test, unix, feature = "full-tests"))] // swaps a folder for a symlink (std::os::unix)
 mod swap_tests {
     use super::*;
     use crate::core::fs_guard::swap_probe;

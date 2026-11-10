@@ -231,6 +231,21 @@ pub async fn undecryptable_rows(db: &Database, key: &str) -> Result<usize> {
         .sum())
 }
 
+/// Encrypted rows `other` decrypts and `key` does not: what is lost if `other`
+/// is the only copy of its key and that copy goes (KT-1594).
+pub async fn rows_only_this_key_opens(db: &Database, key: &str, other: &str) -> Result<usize> {
+    Ok(collect_encrypted_rows(db)
+        .await?
+        .iter()
+        .map(|col| {
+            col.sample
+                .iter()
+                .filter(|enc| decrypts(enc, other) && !decrypts(enc, key))
+                .count()
+        })
+        .sum())
+}
+
 /// True when `key` decrypts at least one sampled row of every non-empty column.
 fn decrypts_every_column(key: &str, columns: &[ColumnRows]) -> bool {
     columns
@@ -3415,7 +3430,7 @@ mod tests {
 
     /// C3-07 — no durable copy of a new key can be written: the boot stops
     /// before anything is encrypted under it.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     async fn a_new_key_without_any_durable_copy_stops_the_boot() {
         use std::os::unix::fs::PermissionsExt;
@@ -3846,7 +3861,7 @@ mod tests {
 
     /// C4-05 — config.toml already holding the key is the durable copy: no
     /// rewrite, so a read-only data directory does not stop the boot.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     async fn an_existing_config_copy_is_accepted_without_rewriting() {
         use std::os::unix::fs::PermissionsExt;
@@ -4064,7 +4079,7 @@ mod tests {
 
     /// C6-03 (a) — the move waits for a durable copy of the target key: with
     /// none possible, the boot stops and the file-key rows are untouched.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     async fn no_move_before_the_target_key_has_a_durable_copy() {
         use std::os::unix::fs::PermissionsExt;

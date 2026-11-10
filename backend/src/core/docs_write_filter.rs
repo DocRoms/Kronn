@@ -666,7 +666,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // builds paths from raw bytes with std::os::unix::ffi::OsStrExt
     #[test]
     fn native_document_paths_preserve_bytes_and_diagnostics_distinguish_names() {
         use std::os::unix::ffi::OsStrExt;
@@ -702,7 +702,7 @@ mod tests {
     // The filesystem must accept arbitrary filename bytes. The local macOS
     // test volume rejects their creation with EILSEQ; pure conversions above
     // still run there. This fixture is qualified on Linux, not silently skipped.
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")] // builds non-UTF-8 names from raw bytes with std::os::unix::ffi::OsStrExt
     #[tokio::test]
     async fn audit_handles_non_utf8_names_without_lossy_access_or_index_changes() {
         use std::os::unix::ffi::OsStrExt;
@@ -984,7 +984,7 @@ mod tests {
         assert!(!path.exists(), "audit never restores deleted files");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn audit_does_not_follow_document_symlinks() {
         let dir = tempfile::tempdir().unwrap();

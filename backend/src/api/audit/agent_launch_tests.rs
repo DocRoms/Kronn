@@ -10,19 +10,19 @@ use std::sync::{Arc, Mutex};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-#[cfg(unix)]
 #[path = "coverage_repair_tests.rs"]
 mod coverage_repair_tests;
 
-#[cfg(unix)]
 #[path = "detector_retry_tests.rs"]
 mod detector_retry_tests;
 
 #[cfg(unix)]
+// scripts a POSIX sh `case` stand-in for the claude CLI (write_fixture_script), which Windows cannot exec
 #[path = "reaudit_unchanged_tests.rs"]
 mod reaudit_unchanged_tests;
 
 #[cfg(unix)]
+// scripts a POSIX sh `case` stand-in for the claude CLI (write_fixture_script), which Windows cannot exec
 #[path = "cross_audit_e2e_tests.rs"]
 mod cross_audit_e2e_tests;
 
@@ -318,7 +318,6 @@ fn assert_git_shows_only_docs(root: &Path) {
     assert!(!root.join(".gitignore").exists(), "{status}");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
     use axum::response::IntoResponse;
@@ -547,19 +546,16 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
     }
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn http_start_failure_during_documentary_retry_persists_error_and_prior_usage() {
     assert_http_failure_is_persisted(false).await;
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn http_failure_after_write_persists_status_and_preserves_partial_files_without_replay() {
     assert_http_failure_is_persisted(true).await;
 }
 
-#[cfg(unix)]
 async fn assert_http_failure_is_persisted(after_write: bool) {
     use axum::response::IntoResponse;
     let server = MockServer::builder().start().await;
@@ -1157,6 +1153,7 @@ async fn a_named_connection_audit_calls_that_connection_with_its_tier_model() {
         image_model: None,
         video_model: None,
         decision_model: None,
+        tools_enabled: None,
         media_endpoint: None,
     };
     state
@@ -1187,14 +1184,13 @@ async fn a_named_connection_audit_calls_that_connection_with_its_tier_model() {
 // routed to the audited project, and read what that agent was handed on stdin —
 // the prompt as the model receives it, not a string the test assembled. No socket.
 
-#[cfg(unix)]
+#[cfg(unix)] // the scripted claude (recording_claude) is a POSIX sh script
 use crate::api::other_projects_fixture::{
-    assert_no_candidate_pool, assert_no_unlinked_project, fresh_state, project_among_others,
-    recorded_turns, recording_claude, route_claude, BRIEFING_MARKER, LINKED_LOCATION, LINKED_NAME,
-    PROJECT_ID,
+    assert_no_candidate_pool, assert_no_unlinked_project, recorded_turns, recording_claude,
+    route_claude, BRIEFING_MARKER, LINKED_LOCATION, LINKED_NAME,
 };
+use crate::api::other_projects_fixture::{fresh_state, project_among_others, PROJECT_ID};
 
-#[cfg(unix)]
 async fn sse_body(response: axum::response::Response) -> String {
     let body = tokio::time::timeout(
         std::time::Duration::from_secs(120),
@@ -1299,6 +1295,7 @@ async fn step_prompts_of(pipeline: &str, linked: bool) -> Vec<String> {
 }
 
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn no_step_of_the_full_or_partial_audit_names_an_unlinked_kronn_project() {
     for pipeline in ["full", "partial"] {
@@ -1316,6 +1313,7 @@ async fn no_step_of_the_full_or_partial_audit_names_an_unlinked_kronn_project() 
 }
 
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn an_explicitly_linked_repo_stays_in_every_step_prompt_and_the_others_stay_out() {
     for pipeline in ["full", "partial"] {
@@ -1337,6 +1335,7 @@ async fn an_explicitly_linked_repo_stays_in_every_step_prompt_and_the_others_sta
 }
 
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machines_projects() {
     for pipeline in ["full", "partial"] {
@@ -1359,6 +1358,7 @@ async fn an_audit_prompt_no_longer_reads_another_repos_docs_or_lists_the_machine
 /// step runs its gates' attempts): each turn ends on one step's own directive,
 /// and the step numbers it names are those of the chain.
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn every_step_prompt_the_full_and_partial_pipelines_hand_the_agent_ends_on_its_directive() {
     let docs_root = crate::core::docs_location::DocsRoot::default_root();
@@ -1452,7 +1452,6 @@ fn no_static_audit_prompt_carries_the_retired_companion_pool() {
 // at all while the 15 documents of the other steps existed.
 
 /// The `data:` payloads of every `event: <name>` frame in an SSE body.
-#[cfg(unix)]
 fn sse_events(body: &str, name: &str) -> Vec<Value> {
     let header = format!("event: {name}\n");
     body.split("\n\n")
@@ -1463,6 +1462,7 @@ fn sse_events(body: &str, name: &str) -> Vec<Value> {
 }
 
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_validated() {
     use axum::response::IntoResponse;
@@ -1624,6 +1624,7 @@ async fn a_resume_reruns_only_the_failed_step_and_the_partial_run_is_still_valid
 // failed, the other 15 successes get no validation discussion, only a
 // resumable run naming step 1 to redo.
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn a_resume_that_loses_only_the_founding_step_gets_no_validation() {
     use axum::response::IntoResponse;
@@ -2127,6 +2128,7 @@ async fn version_source_inputs_read_the_mcp_config_the_agent_is_handed() {
 /// KT-1320 — the connection a resumed run had may have been deleted since: the
 /// resume runs on the agent's default connection and says so, it is not refused.
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() {
     resume_after_the_run_connection_was_deleted(None).await;
@@ -2135,6 +2137,7 @@ async fn a_resume_whose_connection_was_deleted_falls_back_with_a_visible_note() 
 /// KT-1320 — the UI echoes the run's connection id back on a resume with an
 /// untouched picker: the server still recognises it as the run's own choice.
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn a_resume_echoing_the_deleted_connection_of_its_run_falls_back_too() {
     resume_after_the_run_connection_was_deleted(Some("deleted-conn")).await;
@@ -2143,6 +2146,7 @@ async fn a_resume_echoing_the_deleted_connection_of_its_run_falls_back_too() {
 /// KT-1320 — the same fallback on an HTTP provider: the retried step reaches the
 /// agent's default endpoint on the run's economy model, not the reasoning one.
 #[cfg(unix)]
+// scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec
 #[tokio::test]
 async fn a_resume_whose_connection_was_deleted_reaches_the_default_provider_on_the_run_tier() {
     let prose = text("The documentation is unchanged.");
@@ -2296,7 +2300,6 @@ async fn latest_run(state: &AppState) -> crate::models::AuditRun {
 /// KT-1318 — a full audit writes a lot of files and builds: below the
 /// configured free space it is refused before anything is recorded or written,
 /// with the number and the setting named.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_full_audit_under_disk_pressure_is_refused_before_it_creates_anything() {
     use axum::response::IntoResponse;

@@ -41,6 +41,11 @@ jobs:
     outputs:
       run: ${{ steps.label.outputs.run }}
     steps:
+      # Sparse: the script is all this job needs.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          sparse-checkout: scripts/ci
       - name: Require ci-build label for pull requests
         id: label
         env:
@@ -48,11 +53,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ] \
-            && ! gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.labels[].name' | grep -qx 'ci-build'; then
-            echo "::error::Add the ci-build label before merging: it runs the app builds ci-build-gates requires."
-            exit 1
-          fi
+          scripts/ci/require_label.sh ci-build "Add the ci-build label before merging: it runs the app builds ci-build-gates requires."
           echo "run=true" >> "$GITHUB_OUTPUT"
 
   test-desktop-compile:
@@ -372,13 +373,26 @@ jobs:
       - test-docs-sidecar-windows
       - portability-scope
       - test-backend-portability
+      - lint-windows-skips
+      - boot-scope
+      - test-boot-windows
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Only a label check that ran and failed means "label missing". One that
+      # was skipped or cancelled (a reopened pull request replacing the run) says
+      # nothing about the label: the next step fails on it without blaming it.
       - name: Require the ci-build label
-        if: needs.require-ci-build-label.outputs.run != 'true'
+        if: needs.require-ci-build-label.result == 'failure'
         run: |
           echo "::error::Add the ci-build label before merging: it runs the app builds this check requires."
+          exit 1
+      - name: Fail when the label check did not run
+        if: needs.require-ci-build-label.result != 'success' && needs.require-ci-build-label.result != 'failure'
+        env:
+          LABEL_CHECK: ${{ needs.require-ci-build-label.result }}
+        run: |
+          echo "::error::The ci-build label check did not run (result: $LABEL_CHECK), so nothing was built. This is not a missing label: re-run this workflow."
           exit 1
       # The name records what this run tested; CI Verdict reads it back.
       - name: "Gate verdict for ${{ github.event_name }} #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }}"
@@ -388,13 +402,177 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         # A push to main only refreshes caches: its skipped checks are by design.
         # The portability job is skipped by design when the change does not
-        # touch what it tests (`portability-scope`).
+        # touch what it tests (`portability-scope`), and so is the Windows boot
+        # job when the change touches nothing Kronn is built or started from (`boot-scope`).
         run: |
           echo "Gate results: $RESULTS"
           echo "$RESULTS" | jq -e --arg event "$EVENT_NAME" '
             (.["portability-scope"].outputs.run // "true") as $portability
+            | (.["boot-scope"].outputs.run // "true") as $boot
             | to_entries
             | all(.[];
                 .value.result == "success"
                 or ($event == "push" and .value.result == "skipped")
-                or (.key == "test-backend-portability" and .value.result == "skipped" and $portability == "false"))'
+                or (.key == "test-backend-portability" and .value.result == "skipped" and $portability == "false")
+                or (.key == "test-boot-windows" and .value.result == "skipped" and $boot == "false"))'
+
+  # ── KT-1629 — a test skipped on Windows is cfg(unix) with a reason ──────────
+  #
+  # The nightly Windows lib run (ci-nightly-windows.yml) is only worth reading
+  # if what it skips is visible and justified. Cheap and Linux-only, so it runs
+  # with every build.
+  lint-windows-skips:
+    needs: require-ci-build-label
+    if: needs.require-ci-build-label.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Lint — a test skipped on Windows is cfg(unix) with a reason
+        run: |
+          python3 scripts/ci/test_lint_windows_skips.py
+          python3 scripts/ci/lint_windows_skips.py
+
+  # ── KT-1629 — Kronn starts on Windows, on every change to the app ───────────
+  #
+  # #509 / KT-1625 shipped because nothing in CI ever ran Kronn on Windows: the
+  # portability job runs a handful of lib modules, and the pre-migration backup
+  # (a read-only handle flushed on Windows, os error 5) stopped the boot of an
+  # upgraded database, so the desktop showed its startup-error screen.
+  #
+  # `test-boot-windows` builds the real `kronn.exe` and drives it, with no agent
+  # configured (a fresh install, and CI):
+  #   1. a fresh data directory: boots, /api/health 200;
+  #   2. the previous release's database (backend/tests/fixtures/
+  #      db-previous-release.sqlite, migrations pending): backed up, upgraded,
+  #      boots, /api/health 200;
+  #   3. Playwright opens the UI that binary serves (KRONN_FRONTEND_DIST):
+  #      onboarding, then Settings, Projects and Discussions, no 5xx, no error
+  #      screen;
+  #   4. a project, a sealed secret and a manual backup, read back after a
+  #      restart.
+  # The specs are frontend/e2e-boot; `pnpm test:boot` runs them locally.
+  #
+  # Proving the gate: dispatch this workflow with `ref` on this branch's head: it
+  # has this job and predates the KT-1625 fix (PR #510, not merged when this was
+  # written), so the upgrade case goes red. Green: the same ref once #510 is in.
+  boot-scope:
+    needs: require-ci-build-label
+    if: needs.require-ci-build-label.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: Does this change touch the app Kronn boots?
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE" "$HEAD")
+          echo "$changed"
+          # What Kronn is built or started from: the backend and its templates, the
+          # frontend, the desktop crate that embeds both, the cargo config, the CI
+          # scripts this job runs, and this workflow.
+          if echo "$changed" | grep -Eq '^(backend|frontend|templates|desktop|scripts/ci)/|^\.cargo/|^\.github/workflows/ci-build\.yml$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test-boot-windows:
+    needs: [require-ci-build-label, boot-scope]
+    if: needs.require-ci-build-label.outputs.run == 'true' && needs.boot-scope.outputs.run == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the frontend Kronn serves
+        working-directory: frontend
+        run: pnpm build
+
+      # Same shape as the portability job: pull requests restore, main saves.
+      - name: Restore cargo registry and build
+        id: cache-boot
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: boot-windows-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: boot-windows-
+
+      - name: Build kronn.exe
+        working-directory: backend
+        run: cargo build --locked --bin kronn
+
+      - name: Install the Playwright browser
+        working-directory: frontend
+        shell: bash
+        # The CDN is flaky from runners (frontend/e2e/README.md): retry the download.
+        run: |
+          for attempt in 1 2 3; do
+            pnpm exec playwright install chromium --only-shell && exit 0
+            echo "playwright install failed (attempt $attempt)"; sleep 10
+          done
+          exit 1
+
+      - name: Boot Kronn on a fresh and an upgraded database, and use its UI
+        working-directory: frontend
+        env:
+          KRONN_BIN: ${{ github.workspace }}\target\debug\kronn.exe
+          KRONN_FRONTEND_DIST: ${{ github.workspace }}\frontend\dist
+          # The state of a fresh install and of CI: fail if the runner has an agent CLI.
+          KRONN_E2E_EXPECT_NO_AGENT: "1"
+        run: pnpm test:boot
+
+      - name: Upload boot diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-windows-diagnostics
+          path: frontend/test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Save cargo registry and build (main)
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-boot.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache-boot.outputs.cache-primary-key }}

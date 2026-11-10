@@ -79,7 +79,7 @@ export default defineConfig({
     css: false,
     testTimeout: 30000,
     hookTimeout: 30000,
-    // E2E specs live under e2e/ and use Playwright's runner; vitest must
+    // E2E specs live under e2e/ and e2e-boot/ and use Playwright's runner; vitest must
     // skip them or `import { test } from '@playwright/test'` blows up
     // with "test.describe() called outside Playwright".
     //
@@ -89,7 +89,7 @@ export default defineConfig({
     // even when that 100+ MB sibling directory is present — without
     // this, vitest picks up the embedded test files in third-party
     // packages and fails on imports that aren't part of our project.
-    exclude: ['node_modules/**', 'node_modules_old/**', 'dist/**', 'e2e/**'],
+    exclude: ['node_modules/**', 'node_modules_old/**', 'dist/**', 'e2e/**', 'e2e-boot/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

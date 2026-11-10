@@ -496,7 +496,7 @@ fn an_include_by_absolute_path_outside_the_project_is_refused() {
     assert_nothing_leaks(&asked_for(&proj));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn an_include_through_a_symlink_out_of_the_project_is_refused() {
     use std::os::unix::fs::symlink;
@@ -523,7 +523,7 @@ fn an_include_through_a_symlink_out_of_the_project_is_refused() {
     assert_nothing_leaks(&asked_for(&proj));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_symlink_inside_the_project_is_not_followed_either() {
     use std::os::unix::fs::symlink;
@@ -609,7 +609,7 @@ fn what_includes_make_us_read_is_bounded() {
     assert!(!found.make_targets.contains("huge"));
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // makes hard links and reads unix inode metadata
 #[test]
 fn a_hard_link_is_read_by_no_path_at_all() {
     let outside = outside_rules();

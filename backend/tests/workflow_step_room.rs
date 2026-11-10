@@ -2,7 +2,7 @@
 //! room without an invite token, at launch and again after `/resume`. Real
 //! runner, real process boundary (a fake CLI that records its environment),
 //! real HTTP handlers, a real database reopened as a restarted backend would.
-#![cfg(unix)]
+#![cfg(unix)] // writes #!/bin/sh stand-in agents made executable with chmod mode bits through std::os::unix
 
 use std::{ffi::OsString, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
 
