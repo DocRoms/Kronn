@@ -18,6 +18,7 @@ pub mod backup;
 pub mod bridge_admit;
 pub mod bridge_token;
 pub mod briefing_docs;
+pub mod checkout_release;
 pub mod checksums;
 pub mod child_env;
 pub mod ci_facts;

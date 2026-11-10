@@ -13018,8 +13018,9 @@ impl ClaudeSandboxCatalogueReceipt {
                 names.push("...");
             }
             format!(
-                " Worktrees of finished executions kept because they are dirty, were written \
-                 to recently or sit on another branch (review, then `git worktree remove`): {}.",
+                " Worktrees of finished executions Kronn could not reclaim because they have \
+                 uncommitted changes, sit on another branch or are still in use (review, then \
+                 `git worktree remove`): {}.",
                 names.join(", ")
             )
         };

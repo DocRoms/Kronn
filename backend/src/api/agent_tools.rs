@@ -2759,6 +2759,12 @@ impl KronnToolExecutor {
                     Err(error) => return fail(call, error),
                 };
                 let parent = discussion_id;
+                crate::api::orchestration::reclaim_finished_worktrees_for_launch(
+                    &self.state.db,
+                    &task_reference,
+                    &worker,
+                )
+                .await;
                 match self
                     .state
                     .db
@@ -2825,6 +2831,12 @@ impl KronnToolExecutor {
                     let task = task_reference.clone();
                     let parent = discussion_id.clone();
                     let selected = worker.clone();
+                    crate::api::orchestration::reclaim_finished_worktrees_for_launch(
+                        &self.state.db,
+                        &task,
+                        &selected,
+                    )
+                    .await;
                     self.state
                         .db
                         .with_conn(move |conn| {

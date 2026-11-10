@@ -82,13 +82,27 @@ A Claude task worker is refused (`claude_sandbox_catalogue_unsafe`) once the rep
 worktrees: the sandbox policy enumerates them. The cap is not raised. When a launch (or `task_exec_prepare`) is
 over it, Kronn first removes the **clean** checkouts of finished (Done, Failed, Cancelled) executions of that
 project, branch kept, measures again, and refuses only if it is still over. The refusal then names, by directory
-name only, the finished executions' worktrees it had to keep (dirty, written to, or on another branch) so a human
-can review them and run `git worktree remove`. Worktrees that belong to no finished execution (older lanes,
-discussion worktrees) are never touched. The catalogue listing (`task_worker_catalogue`) is advisory and does not
-reclaim.
+name only, the finished executions' worktrees it had to keep (uncommitted changes, another branch, or still in
+use) so a human can review them and run `git worktree remove`. Worktrees that belong to no finished execution
+(older lanes, discussion worktrees) are never touched. The catalogue listing (`task_worker_catalogue`) is
+advisory and does not reclaim.
+
+**"Clean" means `git status` clean.** Ignored files do not count: a Rust `target/` or `node_modules/` inside a
+checkout that `.gitignore` covers goes with the worktree, and the lane build dir (`target/wt-<lane>`) is purged
+with it. A checkout with any modified or untracked (non-ignored) file is kept.
+
+The release runs in three steps so that a slow removal never freezes the API: under the database connection the
+execution is picked (finished, no live session, no worker lease) and its checkout **claimed**; with no connection
+held, Git checks the branch and `git status` and removes the worktree; under the connection again the outcome is
+recorded (`worktree_released`, workspace row retired). While the claim is held no second release takes the
+checkout, and a reassign, a resume or an extension of the review rounds of that execution is refused ("its
+checkout is being released") until the release has settled. The claim is in memory, not durable: a crash drops it
+and the next sweep judges the checkout again. A finished execution cannot be reassigned or resumed at all
+(`reassign_execution_worker_keeping_origin` and `extend_review_rounds` refuse a terminal one), so there is no
+released checkout to provision again; the claim guards the gap between the check and the removal.
 
 [src: file: backend/src/api/orchestration.rs:4409-4421#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:12829-12840#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:13270-13281#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -130,7 +144,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:791-857#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:9481-9504#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:9887-9910#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.
