@@ -357,9 +357,12 @@ Release notes for 0.9.3 and earlier are available in the
   runs). The grant is the typed `read_only_dirs` Kronn built for the step, never
   parsed back out of the launch arguments (a prompt or an issue body that spells
   `--add-dir <other run>` grants nothing), and a granted directory must be a
-  direct, non-link, lowercase-UUID child of the root. A launch with no grant
-  reads no run's artifacts, and a Claude launch with more run directories than
-  its rules can name gets none either. Follows the vault protection setting:
+  direct, non-link, lowercase-UUID child of the root, vetted as given (before
+  any `canonicalize`): one that fails reaches no `--add-dir` or read entry. The
+  default adapted ACP route (Claude and Codex) carries the grant to its spawn.
+  A launch with no grant reads no run's artifacts, and a Claude launch with more
+  run directories than its rules can name gets none either, `--add-dir`
+  included. Follows the vault protection setting:
   off, or no sandbox on the host, leaves the root open.
 - A task worker can edit its project's own `.cargo/audit.toml` and
   `.cargo/config.toml`, and a refused tool call is no longer silent (KT-1541).

@@ -695,7 +695,26 @@ impl ReadOnlyRepos {
                     "read-only directory must be absolute: {location:?}"
                 ));
             }
-            let root = canonical_directory(path)?;
+            // KT-1587 — a path under the run artifacts root is vetted as given,
+            // before `canonicalize` could turn a `..` or a leaf link into a
+            // plain run directory. One that fails is no grant at all: it is in
+            // neither the roots (so no `--add-dir`, no read entry) nor the
+            // typed grant, and the launch runs without it.
+            let (root, own_run) = match crate::core::artifacts_reach::vet_run_dir(path) {
+                crate::core::artifacts_reach::RunDir::Refused => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "run artifacts directory refused: not granted to this launch"
+                    );
+                    continue;
+                }
+                crate::core::artifacts_reach::RunDir::Own(own) => {
+                    (canonical_directory(&own)?, true)
+                }
+                crate::core::artifacts_reach::RunDir::Elsewhere => {
+                    (canonical_directory(path)?, false)
+                }
+            };
             if work_dir.starts_with(&root) || root.starts_with(&work_dir) {
                 return Err(format!(
                     "read-only directory {} overlaps the writable working directory {}",
@@ -703,7 +722,9 @@ impl ReadOnlyRepos {
                     work_dir.display()
                 ));
             }
-            push_unique(&mut granted_dirs, root.clone());
+            if own_run {
+                push_unique(&mut granted_dirs, root.clone());
+            }
             push_unique(&mut roots, root);
         }
         for location in declared {
@@ -1437,5 +1458,125 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    const OWN_RUN: &str = "3e7f4d85-af84-4c3b-8a0d-4a5b6c7d8e9f";
+    const OTHER_RUN: &str = "4f805e96-b095-4d4c-9b1e-5b6c7d8e9fa0";
+    const LINKED_RUN: &str = "5a916fa7-c1a6-4e5d-8c2f-6c7d8e9fa0b1";
+
+    fn run_dir(run: &str) -> PathBuf {
+        crate::workflows::run_artifacts::ensure(run)
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// The arguments the launch of `agent` gets, the way the adapters build them.
+    fn launch_args(agent: &AgentType, work: &Path, policy: &ReadOnlyRepos) -> Vec<String> {
+        crate::agents::runner::adapter_policy_args(agent, work, policy)
+    }
+
+    /// KT-1587 — a directory under the run artifacts root is vetted as it was
+    /// given. One that fails is no grant: not in the typed grant, no
+    /// `--add-dir` (Claude), no read entry (Codex).
+    #[cfg(unix)] // creates symlinks through std::os::unix
+    #[test]
+    #[serial_test::serial]
+    fn a_run_artifacts_path_that_fails_vetting_reaches_no_argument() {
+        let (temp, work, _repo) = fixture();
+        let own = run_dir(OWN_RUN);
+        let other = run_dir(OTHER_RUN);
+        let root = own.parent().unwrap().to_path_buf();
+        let inside = root.join(LINKED_RUN);
+        std::os::unix::fs::symlink(&other, &inside).unwrap();
+        let outside = temp.path().join("link-to-own");
+        std::os::unix::fs::symlink(&own, &outside).unwrap();
+        let refused = [
+            root.join(OTHER_RUN).join("..").join(OWN_RUN),
+            root.join("a").join("..").join(OWN_RUN),
+            inside.clone(),
+            outside,
+            root.clone(),
+        ];
+        for bad in refused {
+            let dirs = [bad.display().to_string()];
+            let policy =
+                ReadOnlyRepos::resolve_with_dirs(&AgentType::ClaudeCode, &work, &[], &dirs)
+                    .unwrap()
+                    .expect("a refused directory still leaves the policy in force");
+            assert!(policy.granted_dirs().is_empty(), "{bad:?}");
+            assert!(policy.roots.is_empty(), "{bad:?}");
+            for agent in [AgentType::ClaudeCode, AgentType::Codex] {
+                let args = launch_args(&agent, &work, &policy);
+                let text = args.join("\n");
+                assert!(
+                    !args.iter().any(|arg| arg == "--add-dir"),
+                    "{bad:?}: {text}"
+                );
+                for run in [&own, &other] {
+                    assert!(!text.contains(run.to_str().unwrap()), "{bad:?}: {text}");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&inside);
+
+        // The vetted own run is granted, in both agents' arguments.
+        let dirs = [own.display().to_string()];
+        let policy = ReadOnlyRepos::resolve_with_dirs(&AgentType::ClaudeCode, &work, &[], &dirs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.granted_dirs(), std::slice::from_ref(&own));
+        let claude = launch_args(&AgentType::ClaudeCode, &work, &policy);
+        assert!(claude
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == own.to_str().unwrap()));
+        let codex = launch_args(&AgentType::Codex, &work, &policy).join(" ");
+        assert!(codex.contains(&format!(
+            "{}=\"read\"",
+            serde_json::to_string(&own).unwrap()
+        )));
+        assert!(!codex.contains(other.to_str().unwrap()), "{codex}");
+        crate::workflows::run_artifacts::remove(OWN_RUN);
+        crate::workflows::run_artifacts::remove(OTHER_RUN);
+    }
+
+    /// KT-1587 — a root with more run directories than the Read rules can name
+    /// leaves a Claude launch without its grant: the rules deny the root whole,
+    /// and the arguments agree (no `--add-dir <own>` to re-open it).
+    #[test]
+    #[serial_test::serial]
+    fn a_claude_launch_past_the_rule_cap_has_no_add_dir_for_its_run() {
+        let (_temp, work, _repo) = fixture();
+        let own = run_dir(OWN_RUN);
+        let crowd: Vec<String> = (0..300)
+            .map(|_| uuid::Uuid::new_v4().hyphenated().to_string())
+            .collect();
+        for id in &crowd {
+            run_dir(id);
+        }
+        let dirs = [own.display().to_string()];
+        let policy = ReadOnlyRepos::resolve_with_dirs(&AgentType::ClaudeCode, &work, &[], &dirs)
+            .unwrap()
+            .unwrap();
+        let args = launch_args(&AgentType::ClaudeCode, &work, &policy);
+        for id in &crowd {
+            crate::workflows::run_artifacts::remove(id);
+        }
+        crate::workflows::run_artifacts::remove(OWN_RUN);
+
+        assert!(
+            !args.iter().any(|arg| arg == "--add-dir"),
+            "the withheld grant is not opened by the arguments: {args:?}"
+        );
+        let settings: serde_json::Value =
+            serde_json::from_str(&args[args.iter().position(|a| a == "--settings").unwrap() + 1])
+                .unwrap();
+        let root_rule = format!("Read(/{}/**)", own.parent().unwrap().display());
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(
+            deny.iter().any(|rule| rule.as_str() == Some(&root_rule)),
+            "{root_rule} not in {deny:?}"
+        );
+        assert!(settings["sandbox"]["filesystem"]["allowRead"].is_null());
     }
 }

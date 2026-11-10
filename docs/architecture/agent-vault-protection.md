@@ -129,14 +129,18 @@ that contains it, is refused and the default is used. Details:
 
 Exec outputs kept there are scrubbed of known secrets; reports and screenshots a
 step writes are not, which is why a launch reaches **its own run's directory
-only** (KT-1587). Every native agent launch (`try_spawn`, the ACP runtimes) has
+only** (KT-1587). Every native agent launch (`try_spawn_granted`, the ACP runtimes) has
 the whole root closed; the run directory a step was *granted* (its prompt names
 `{{run.artifacts_dir}}`, so `read_only_repos` passes it as `--add-dir` for Claude
 and a `"<dir>"="read"` entry for Codex) is opened again, **read-only**. A launch
 with no grant (a discussion, a task worker, an ACP runtime, a step that does not
 name the path) reads no run at all. The grant is **typed, never parsed**: it is
 the `read_only_dirs` Kronn built for the step, kept by `ReadOnlyRepos`
-(`granted_dirs`) and handed to `try_spawn_granted`; no layer reads it back out of
+(`granted_dirs`) and handed to `try_spawn_granted`: on the direct route by
+`start_agent_with_config`, and on the **default adapted ACP route** (Claude and
+Codex) through `AdapterLaunchOptions::run_artifacts`, which both adapters pass
+to `try_spawn_granted` on every turn (the no-grant `try_spawn` is test-only, so
+no production spawn can drop it). No layer reads it back out of
 an argument vector, which also carries the prompt, the system prompt (the
 repository's instructions, skills, MCP context) and the ticket text, any of which
 can spell `--add-dir <victim run>` or `"<victim run>"="read"`. Every typed grant
@@ -144,15 +148,20 @@ is still vetted (`vetted_grant`): absolute, no `..` component, the directory
 itself not a link (`symlink_metadata`), canonicalised, its canonical parent the
 canonical root, and its name a lowercase hyphenated UUID (the name Kronn gives a
 run), so an uppercase spelling on a case-insensitive volume is never a grant. Only
-the canonical own directory reaches a rule. `core/artifacts_reach.rs` builds each
-runtime's rules:
+the canonical own directory reaches a rule. The same vetting runs **first, on the
+path as given**, when `ReadOnlyRepos::resolve_with_dirs` receives it
+(`artifacts_reach::vet_run_dir`, before `canonicalize` could turn a `..` or a leaf
+link into a plain run directory): a path under the root that fails is no grant at
+all, so it is in neither the typed grant nor the roots and reaches no `--add-dir`
+(Claude) and no read entry (Codex). Read-only directories outside the root keep
+their behaviour. `core/artifacts_reach.rs` builds each runtime's rules:
 
 | Runtime | Root closed | Own run opened |
 |---|---|---|
 | Seatbelt (Codex, every wrapped launch) | `(deny file-read* file-write*)` on the root and its real path, after every other rule | `(allow file-read*)` on the own dir (a later rule wins), plus `file-read-metadata` on the root itself; writes stay denied |
 | bubblewrap | empty tmpfs over the resolved root (the root is created before the launch so the mount has a target) | `--ro-bind` of the own dir on top, after the tmpfs |
 | Claude's own sandbox (policy launches, task workers) | `sandbox.filesystem.denyRead` and `denyWrite` on the root | `sandbox.filesystem.allowRead` on the own dir (an allow inside a denied read path re-opens it) |
-| Claude's Read, Edit and Write tools | `Edit` and `Write` denied on the root; `Read` denied on the whole root with no grant | with a grant, a deny cannot be carved out by an allow, so each *other* entry of the root present at the launch is denied by its literal path. A root with more than 200 other entries (or one that cannot be listed) fails closed: no grant, the whole root denied and no `allowRead` |
+| Claude's Read, Edit and Write tools | `Edit` and `Write` denied on the root; `Read` denied on the whole root with no grant | with a grant, a deny cannot be carved out by an allow, so each *other* entry of the root present at the launch is denied by its literal path. A root with more than 200 other entries (or one that cannot be listed) fails closed: no grant, the whole root denied, no `allowRead`, and no `--add-dir <own>` in the arguments either (`ClaudeReach::withheld`, removed by `fold_vault_into_claude_settings`), so the arguments and the rules agree |
 
 A Claude launch with a grant is **not** wrapped in Kronn's OS sandbox: an OS
 sandbox does not nest (`sandbox_apply` fails inside one) and Claude's own, set

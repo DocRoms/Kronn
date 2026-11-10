@@ -14,7 +14,9 @@
 //! argument vector: those hold the prompt, the system prompt (the repository's
 //! instructions, skills, MCP context) and the ticket text, any of which can
 //! spell `--add-dir <victim run>` or `"<victim run>"="read"`.
-//! [`ArtifactsReach::new`] still vets every typed grant ([`vetted_grant`]).
+//! [`vet_run_dir`] vets it first, as given, when the policy receives it (a path
+//! that fails reaches neither argv nor a rule), and [`ArtifactsReach::new`] vets
+//! every typed grant again ([`vetted_grant`]).
 //!
 //! - **Seatbelt** (Codex, and every launch Kronn wraps): the root is denied,
 //!   then the own directory allowed for reads; a later rule wins.
@@ -70,6 +72,10 @@ pub struct ClaudeReach {
     pub permission_deny: Vec<String>,
     /// `sandbox.filesystem.allowRead`.
     pub sandbox_allow_read: Vec<String>,
+    /// Granted run directories this launch does not get after all (the root
+    /// holds more entries than the rules can name). Its argv must not open them
+    /// either: no `--add-dir` for these.
+    pub withheld: Vec<PathBuf>,
 }
 
 fn both(path: &Path) -> Vec<PathBuf> {
@@ -113,6 +119,42 @@ fn vetted_grant(real_root: &Path, granted: &Path) -> Option<PathBuf> {
         .and_then(|name| name.to_str())
         .is_some_and(crate::workflows::run_artifacts::is_run_dir_name);
     (named_like_a_run && real.parent() == Some(real_root)).then_some(real)
+}
+
+/// What a directory handed to a launch as read-only is, as to the run artifacts
+/// root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunDir {
+    /// Not under the run artifacts root: an ordinary read-only directory.
+    Elsewhere,
+    /// A run directory of the root, vetted: this is its canonical path.
+    Own(PathBuf),
+    /// Under the root (or the root itself, or a link into it) but not a run
+    /// directory it may open: no grant, in argv or in rules.
+    Refused,
+}
+
+/// Classifies `given` **as given**, before anything resolves it: `..`, a link
+/// at the leaf or an odd spelling must not be normalised into a grant. A path
+/// counts as under the root when it names it lexically (as given or resolved)
+/// or when it resolves into it.
+pub fn vet_run_dir(given: &Path) -> RunDir {
+    let Some(root) = crate::workflows::run_artifacts::root() else {
+        return RunDir::Elsewhere;
+    };
+    let real_root = std::fs::canonicalize(&root).ok();
+    let under = given.starts_with(&root)
+        || real_root.as_deref().is_some_and(|real| {
+            given.starts_with(real)
+                || std::fs::canonicalize(given).is_ok_and(|real_given| real_given.starts_with(real))
+        });
+    if !under {
+        return RunDir::Elsewhere;
+    }
+    match real_root.and_then(|real| vetted_grant(&real, given)) {
+        Some(own) => RunDir::Own(own),
+        None => RunDir::Refused,
+    }
 }
 
 impl ArtifactsReach {
@@ -227,6 +269,8 @@ impl ArtifactsReach {
             return ClaudeReach {
                 permission_deny,
                 sandbox_allow_read: Vec::new(),
+                // Rules deny the root whole: argv must not re-open the grant.
+                withheld: self.own.clone(),
             };
         };
         for dir in others {
@@ -244,6 +288,7 @@ impl ArtifactsReach {
                 .iter()
                 .map(|own| own.to_string_lossy().into_owned())
                 .collect(),
+            withheld: Vec::new(),
         }
     }
 

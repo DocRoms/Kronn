@@ -270,3 +270,72 @@ fn at_the_cap_every_other_run_is_still_named() {
     }
     assert!(read_rule_covers(&claude.permission_deny, &root.join(OTHER)));
 }
+
+/// Past the cap the grant is withheld from the arguments too: the rules deny
+/// the root whole, so `--add-dir <own>` must not re-open it for the file tools.
+#[test]
+fn a_launch_past_the_cap_withholds_its_grant_from_the_arguments_too() {
+    let (_temp, root) = root_with_two_runs();
+    let own = root.join(OWN);
+    let claude = ArtifactsReach::new(root.clone(), &grant(&own)).claude_reach();
+    assert!(claude.withheld.is_empty(), "granted: {claude:?}");
+
+    for at in 0..MAX_SIBLING_RULES + 20 {
+        std::fs::create_dir_all(root.join(format!("run-{at:04}"))).unwrap();
+    }
+    let claude = ArtifactsReach::new(root.clone(), &grant(&own)).claude_reach();
+    assert_eq!(claude.withheld, std::slice::from_ref(&own));
+    assert!(claude.sandbox_allow_read.is_empty());
+}
+
+/// `vet_run_dir` looks at the path as given, under the root the production
+/// resolution gives (a temp cache in tests).
+#[serial_test::serial]
+#[test]
+fn a_directory_is_classified_as_given_before_anything_resolves_it() {
+    let own = crate::workflows::run_artifacts::ensure(OWN)
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let other = crate::workflows::run_artifacts::ensure(OTHER)
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let root = own.parent().unwrap().to_path_buf();
+    assert_eq!(vet_run_dir(&own), RunDir::Own(own.clone()));
+
+    // Under the root, but not a run directory it may open.
+    assert_eq!(vet_run_dir(&root), RunDir::Refused);
+    assert_eq!(vet_run_dir(&root.join("a/../b")), RunDir::Refused);
+    assert_eq!(
+        vet_run_dir(&root.join(OTHER).join("..").join(OWN)),
+        RunDir::Refused,
+        "a `..` is never normalised into a grant"
+    );
+    assert_eq!(vet_run_dir(&own.join("sub")), RunDir::Refused);
+
+    // Anywhere else is an ordinary read-only directory.
+    let temp = tempfile::tempdir().unwrap();
+    assert_eq!(vet_run_dir(temp.path()), RunDir::Elsewhere);
+
+    #[cfg(unix)]
+    {
+        // A link inside the root, and a link from outside into it.
+        let inside = root.join(LINKED);
+        std::os::unix::fs::symlink(&other, &inside).unwrap();
+        let outside = temp.path().join("link");
+        std::os::unix::fs::symlink(&own, &outside).unwrap();
+        assert_eq!(vet_run_dir(&inside), RunDir::Refused);
+        assert_eq!(vet_run_dir(&outside), RunDir::Refused);
+        let _ = std::fs::remove_file(&inside);
+    }
+
+    // On a case-insensitive volume the uppercase spelling is the same
+    // directory: only its canonical, lowercase path can come out.
+    match vet_run_dir(&root.join(OWN.to_uppercase())) {
+        RunDir::Own(dir) => assert_eq!(dir, own),
+        RunDir::Refused | RunDir::Elsewhere => {}
+    }
+    crate::workflows::run_artifacts::remove(OWN);
+    crate::workflows::run_artifacts::remove(OTHER);
+}

@@ -479,11 +479,13 @@ fn claude_reach(granted: &[PathBuf]) -> ClaudeReach {
             })
             .collect(),
         sandbox_allow_read: Vec::new(),
+        withheld: Vec::new(),
     };
     if let Some(artifacts) = ArtifactsReach::for_launch(granted) {
         let artifacts = artifacts.claude_reach();
         reach.permission_deny.extend(artifacts.permission_deny);
         reach.sandbox_allow_read = artifacts.sandbox_allow_read;
+        reach.withheld = artifacts.withheld;
     }
     reach
 }
@@ -571,6 +573,21 @@ pub fn fold_vault_into_claude_settings(args: &mut Vec<String>, granted: &[PathBu
     args[own + 1] = settings.to_string();
     if let Some(at) = standalone {
         args.drain(at..at + 2);
+    }
+    // KT-1587 — a grant the rules withheld is not opened by the arguments
+    // either: `--add-dir` would let the file tools read it past the denies.
+    let mut at = 0;
+    while at + 1 < args.len() {
+        if args[at] == "--add-dir"
+            && reach
+                .withheld
+                .iter()
+                .any(|dir| args[at + 1] == dir.to_string_lossy())
+        {
+            args.drain(at..at + 2);
+        } else {
+            at += 1;
+        }
     }
 }
 

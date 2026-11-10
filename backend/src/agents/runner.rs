@@ -4684,6 +4684,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
                 bridge_token: bridge_value.clone(),
                 priority: config.priority,
+                run_artifacts: read_only_repos
+                    .as_ref()
+                    .map(|policy| policy.granted_dirs().to_vec())
+                    .unwrap_or_default(),
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
@@ -5101,6 +5105,10 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) bridge_token: Option<String>,
     /// KT-1633 — see [`AgentStartConfig::priority`].
     pub(crate) priority: Priority,
+    /// KT-1587 — the run directories the step was granted: the typed
+    /// `ReadOnlyRepos::granted_dirs`, handed to the spawn of every turn (the
+    /// adapters spawn the CLI themselves, so the grant cannot be lost here).
+    pub(crate) run_artifacts: Vec<PathBuf>,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -14635,6 +14643,11 @@ fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> Str
 /// args, env, cwd, stdin) plus four Kronn-specific feed-throughs
 /// (npx_package, api_key, discussion_id, task-worker capability). Allow-listed rather than
 /// refactored.
+///
+/// Tests only (KT-1587): a production launch always goes through
+/// [`try_spawn_granted`], so none can drop the run artifacts grant by calling
+/// this no-grant form.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_spawn(
     binary: &str,
@@ -14674,6 +14687,28 @@ pub(crate) fn try_spawn(
     )
 }
 
+/// Tests: the run artifacts grant each spawn was handed, by program.
+#[cfg(test)]
+pub(crate) mod spawn_grants {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<(String, Vec<PathBuf>)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn record(binary: &str, granted: &[PathBuf]) {
+        SEEN.lock()
+            .unwrap()
+            .push((binary.to_owned(), granted.to_vec()));
+    }
+
+    /// The grant of the last spawn of `binary`; `None` when it never spawned.
+    pub(crate) fn last_for(binary: &str) -> Option<Vec<PathBuf>> {
+        let seen = SEEN.lock().unwrap();
+        let (_, granted) = seen.iter().rev().find(|(name, _)| name == binary)?;
+        Some(granted.clone())
+    }
+}
+
 /// [`try_spawn`] for a launch granted the run directories `run_artifacts`
 /// (KT-1587): the typed grant Kronn built for the step
 /// (`ReadOnlyRepos::granted_dirs`), never read back out of `args`, whose prompt
@@ -14697,6 +14732,8 @@ pub(crate) fn try_spawn_granted(
     priority: Priority,
     run_artifacts: &[PathBuf],
 ) -> Result<tokio::process::Child, String> {
+    #[cfg(test)]
+    spawn_grants::record(binary, run_artifacts);
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
         SpawnIo::Adapter(_) => None,
