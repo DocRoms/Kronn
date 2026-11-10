@@ -14,7 +14,7 @@
     the `result` usage on the process. The single-envelope `--output-format
     json` was tried first and rejected: the whole reply arrived at the end.
     A run with no `result` event, or with zero tokens, stays unmeasured.
-    `[src: file: backend/src/agents/runner.rs#GeminiStreamAdapter]`
+    `[src: file: backend/src/agents/runner.rs:15724#GeminiStreamAdapter]`
   - Gemini stays unpriced: `TokenCounters::from_agent_report` has no
     `GeminiCli` arm on purpose. The reported usage is summed over every model
     the run used (the CLI routes between a pro and a flash model), while a cost
@@ -24,7 +24,7 @@
     from the Mistral stream's `usage` chunk. The Vibe SDK path
     (`run_programmatic`) exposes no usage the script can read, so that path
     stays unmeasured.
-    `[src: file: backend/scripts/vibe-runner.py#report_usage]`
+    `[src: file: backend/scripts/vibe-runner.py:108#report_usage]`
 - **Remaining (constraint)**: `messages.tokens_used` (and the summary-range
   cache) is `INTEGER NOT NULL DEFAULT 0` and `DiscussionMessage.tokens_used` is
   a `u64`, so a discussion reply with no count still stores 0. Workflow steps

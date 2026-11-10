@@ -12,9 +12,9 @@
   for its blobs; a file left out keeps its row, and the import reports rows
   that come back without bytes. The source machine's `disk_path` is never
   exported; the import writes the bytes under its own context-file store.
-  `[src: file: backend/src/models/db.rs#ContextFileRecord]`
-  `[src: file: backend/src/api/setup.rs#read_context_blobs]`
-  `[src: file: backend/src/api/setup_context_files_tests.rs]`
+  `[src: file: backend/src/models/db.rs:150#ContextFileRecord]`
+  `[src: file: backend/src/api/setup.rs:3104#read_context_blobs]`
+  `[src: file: backend/src/api/setup_context_files_tests.rs:1]`
 - **Problem (fact, still open)**: three table families are still missing from
   `DbExport`, so a restore does not bring them back:
   - Planning: `planning_tasks` and its satellites (`planning_task_projects`,
@@ -32,9 +32,9 @@
     policy tables.
   Also not exported: the AI-generation provenance of a context file (it lives
   in `media_jobs`).
-  `[src: file: backend/src/db/sql/081_planning_tasks.sql]`
-  `[src: file: backend/src/db/sql/123_live_pages.sql]`
-  `[src: file: backend/src/db/sql/127_task_orchestration.sql]`
+  `[src: file: backend/src/db/sql/081_planning_tasks.sql:1]`
+  `[src: file: backend/src/db/sql/123_live_pages.sql:1]`
+  `[src: file: backend/src/db/sql/127_task_orchestration.sql:1]`
 - **Why we can't fix now (constraint)**: these are about forty tables with
   cross-references to each other and to projects, discussions, worktrees and
   CLI sessions. A task execution points at a worktree and a session of the
