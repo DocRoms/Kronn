@@ -4969,6 +4969,61 @@ fn partial_response_recovery_idempotent_when_nothing_to_recover() {
     assert!(n2.is_empty());
 }
 
+/// KT-1656 — the text of a turn still streaming is agent output too: a printed
+/// credential file is masked in `discussions.partial_response`, through both
+/// checkpoint writers, and so in the message a boot recovery makes of it.
+#[test]
+fn a_streaming_checkpoint_masks_a_printed_credential_file() {
+    const SECRET: &str = "t0kenNotShapedLikeAVendor01";
+    let printed = format!(
+        "```json\n{{\"mcpServers\": {{\"github\": {{\"env\": {{\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"{SECRET}\", \"LOG_LEVEL\": \"debug\"}}}}}}}}\n```"
+    );
+    let partial_of = |conn: &Connection, id: &str| -> String {
+        conn.query_row(
+            "SELECT partial_response FROM discussions WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("disc-stream", None))
+        .unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-stream", Some(&printed), None)
+        .unwrap();
+    let stored = partial_of(&conn, "disc-stream");
+    assert!(!stored.contains(SECRET), "{stored}");
+    assert!(stored.contains("\"LOG_LEVEL\": \"debug\""), "{stored}");
+
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("disc-owned-stream", None))
+        .unwrap();
+    assert!(crate::db::discussions::set_partial_response_for_dispatch(
+        &conn,
+        "disc-owned-stream",
+        &printed,
+        (&AgentType::Custom, Some("openrouter/model-a")),
+        "job-a",
+        "user-a",
+        None,
+    )
+    .unwrap());
+    let stored = partial_of(&conn, "disc-owned-stream");
+    assert!(!stored.contains(SECRET), "{stored}");
+
+    // Boot recovery makes a message of what was kept: it holds no secret either.
+    crate::db::discussions::recover_partial_responses(&conn).unwrap();
+    let contents: Vec<String> = conn
+        .prepare("SELECT content FROM messages")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!contents.is_empty());
+    assert!(contents.iter().all(|content| !content.contains(SECRET)));
+}
+
 #[test]
 fn partial_response_dispatch_owner_blocks_stale_writes_and_clears() {
     let conn = test_db();

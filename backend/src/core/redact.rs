@@ -47,6 +47,10 @@ enum Gate {
     /// quoted-value pattern also needs its quote right after the `:`/`=`, past
     /// optional whitespace; `None` for the one that takes a bare value.
     Assignment(Option<u8>),
+    /// As [`Gate::Assignment`], for a quoted object key (`"NAME": "value"`): the
+    /// name is followed by its closing quote (escaped or not) before the `:`.
+    /// Carries the quote the value opens with (`"` or the `\` of `\"`).
+    JsonKey(u8),
 }
 
 impl Gate {
@@ -57,7 +61,8 @@ impl Gate {
                 let lowered = text.to_ascii_lowercase();
                 needles.iter().any(|needle| lowered.contains(needle))
             }
-            Gate::Assignment(quote) => assignment_gate(text, quote),
+            Gate::Assignment(quote) => assignment_gate(text, quote, false),
+            Gate::JsonKey(quote) => assignment_gate(text, Some(quote), true),
         }
     }
 }
@@ -234,6 +239,25 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
         "gh*_***REDACTED***",
         Gate::Contains(&["ghp_", "gho_", "ghs_", "ghu_", "ghr_"]),
     ),
+    // GitHub fine-grained personal access tokens (`github_pat_<22>_<59>`): the
+    // `gh*_` shape above does not read them (KT-1656).
+    (
+        r"\bgithub_pat_[A-Za-z0-9_]{30,}\b",
+        "github_pat_***REDACTED***",
+        Gate::Contains(&["github_pat_"]),
+    ),
+    // Google OAuth access (`ya29.…`) and refresh (`1//0…`) tokens, the ones of
+    // `~/.gemini/oauth_creds.json` and of `gcloud` (KT-1656).
+    (
+        r"\bya29\.[A-Za-z0-9_-]{20,}",
+        "ya29.***REDACTED***",
+        Gate::Contains(&["ya29."]),
+    ),
+    (
+        r"\b1//0[A-Za-z0-9_-]{40,}",
+        "1//0***REDACTED***",
+        Gate::Contains(&["1//0"]),
+    ),
     // Slack tokens (bot, user, app, app-level, webhook).
     (
         r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b",
@@ -252,6 +276,12 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
         r"\bAKIA[0-9A-Z]{16}\b",
         "AKIA***REDACTED***",
         Gate::Contains(&["AKIA"]),
+    ),
+    // AWS temporary (STS) access keys: the `ASIA` twin of `AKIA` (KT-1656).
+    (
+        r"\bASIA[0-9A-Z]{16}\b",
+        "ASIA***REDACTED***",
+        Gate::Contains(&["ASIA"]),
     ),
     // Stripe live + restricted keys (rk_live_*, rk_test_*, pk_live_*, etc.).
     // Note `${1}_${2}_` (not `$1_$2_`): regex_lite parses `$1_` as a
@@ -325,6 +355,20 @@ static ASSIGNMENT_PREFILTER: Prefilter = Prefilter::Separator;
 /// exact back-reference semantics used by `replace_all` while preserving the
 /// important invariant `count > 0` iff the returned text changed.
 fn apply_patterns(input: &str, patterns: &[Pattern], prefilter: &Prefilter) -> (String, usize) {
+    apply_patterns_guarded(input, patterns, prefilter, None)
+}
+
+/// Decides whether a match is a credential worth masking, from its captures and
+/// the text it was found in; a match it refuses is left as written.
+type MatchGuard<'a> = &'a dyn Fn(&regex_lite::Captures<'_>, &str) -> bool;
+
+/// [`apply_patterns`], with a `guard` that can leave a match as it is.
+fn apply_patterns_guarded(
+    input: &str,
+    patterns: &[Pattern],
+    prefilter: &Prefilter,
+    guard: Option<MatchGuard<'_>>,
+) -> (String, usize) {
     let mut out = input.to_string();
     let mut count = 0usize;
     // The prefilter's verdict on `out` as it stands: asked again each time a
@@ -352,6 +396,9 @@ fn apply_patterns(input: &str, patterns: &[Pattern], prefilter: &Prefilter) -> (
             let Some(matched) = captures.get(0) else {
                 continue;
             };
+            if guard.is_some_and(|guard| !guard(&captures, &out)) {
+                continue;
+            }
             next.push_str(&out[copied..matched.start()]);
             let written = next.len();
             captures.expand(pat.replacement, &mut next);
@@ -439,8 +486,45 @@ pub fn looks_like_secret(input: &str) -> bool {
 // excludes quotes, so it can't consume a quoted value itself).
 const ASSIGNMENT_NAMES: &str = r"secret|apikey|api[_-]?key|passwd|password|pwd|pin|passcode|passphrase|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|hmac[_-]?key|client[_-]?secret|token";
 
+/// What can follow a secret word in a name that still holds the secret
+/// (`SECRET_KEY`, `TOKEN_VALUE`, `passwordString`): KT-1656. A name is otherwise
+/// read by its *last* word (`APP_SECRET`, `iris_token`).
+const NAME_QUALIFIERS: &[&str] = &["key", "value", "string", "str"];
+
+/// `name` (lowercase bytes) without a trailing qualifier of [`NAME_QUALIFIERS`]
+/// and the whole run of `_` / `-` before it (`SECRET__KEY`, `secret--value`);
+/// `None` when it has none, or nothing else.
+fn without_qualifier(name: &[u8]) -> Option<&[u8]> {
+    NAME_QUALIFIERS.iter().find_map(|qualifier| {
+        let qualifier = qualifier.as_bytes();
+        let split = name.len().checked_sub(qualifier.len())?;
+        if !name[split..].eq_ignore_ascii_case(qualifier) {
+            return None;
+        }
+        let stem = name[..split]
+            .iter()
+            .rposition(|byte| *byte != b'_' && *byte != b'-')
+            .map_or(&name[..0], |last| &name[..=last]);
+        (!stem.is_empty()).then_some(stem)
+    })
+}
+
+/// Whether `name` ends with a secret word of [`ASSIGNMENT_NAMES`], with or
+/// without a [`NAME_QUALIFIERS`] word after it.
+fn ends_with_secret_word(name: &[u8], tails: &[Vec<u8>]) -> bool {
+    let ends = |name: &[u8]| {
+        tails.iter().any(|tail| {
+            name.len() >= tail.len() && name[name.len() - tail.len()..].eq_ignore_ascii_case(tail)
+        })
+    };
+    ends(name) || without_qualifier(name).is_some_and(ends)
+}
+
 static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
-    let name = format!("[a-z0-9_.-]*(?:{ASSIGNMENT_NAMES})");
+    let name = format!(
+        "[a-z0-9_.-]*(?:{ASSIGNMENT_NAMES})(?:[_-]*(?:{NAME_QUALIFIERS}))?",
+        NAME_QUALIFIERS = NAME_QUALIFIERS.join("|"),
+    );
     let quoted_dq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)\"((?:\\\\.|[^\"\\\\])+)\"");
     let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\.|[^'\\\\])+)'");
     let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\.|[^`\\\\])+)`");
@@ -448,20 +532,27 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let unquoted = format!(
         r#"(?i)(\b{name}\b\s*[:=]\s*(?:\\")?)((?:[^\s\\"'`,;]|\\[^\s"]|\\"[^\s\\"'`,;}}\])])+)"#
     );
+    // KT-1656 — a credential file printed whole (`~/.gemini/settings.json`,
+    // `.npmrc`-like JSON): the secret-ish name is a quoted object key, closed
+    // by its quote before the `:`, which the shapes above never read.
+    let json_key_dq = format!(r#"(?i)("{name}"\s*:\s*)"((?:\\.|[^"\\])+)""#);
+    let json_key_escaped = format!(r#"(?i)(\\"{name}\\"\s*:\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
     [
-        (quoted_dq, "$1\"***REDACTED***\"", Some(b'"')),
-        (quoted_sq, "$1'***REDACTED***'", Some(b'\'')),
-        (quoted_bt, "$1`***REDACTED***`", Some(b'`')),
-        (quoted_escaped, "$1***REDACTED***$3", Some(b'\\')),
-        (unquoted, "$1***REDACTED***", None),
+        (quoted_dq, "$1\"***REDACTED***\"", Gate::Assignment(Some(b'"'))),
+        (quoted_sq, "$1'***REDACTED***'", Gate::Assignment(Some(b'\''))),
+        (quoted_bt, "$1`***REDACTED***`", Gate::Assignment(Some(b'`'))),
+        (quoted_escaped, "$1***REDACTED***$3", Gate::Assignment(Some(b'\\'))),
+        (unquoted, "$1***REDACTED***", Gate::Assignment(None)),
+        (json_key_dq, "$1\"***REDACTED***\"", Gate::JsonKey(b'"')),
+        (json_key_escaped, "$1***REDACTED***$3", Gate::JsonKey(b'\\')),
     ]
     .into_iter()
-    .filter_map(|(src, repl, quote)| {
+    .filter_map(|(src, repl, gate)| {
         Regex::new(&src)
             .map(|re| Pattern {
                 re,
                 replacement: repl,
-                gate: Gate::Assignment(quote),
+                gate,
             })
             .map_err(|e| {
                 tracing::warn!(pattern = %src, error = %e, "core::redact: invalid assignment pattern skipped");
@@ -508,7 +599,7 @@ static ASSIGNMENT_TAILS: LazyLock<Option<Vec<Vec<u8>>>> = LazyLock::new(|| {
 ///
 /// A quoted-value pattern reads its opening `quote` right after `[:=]\s*`, so
 /// the first byte past the `:`/`=` that is not up to a space must be that quote.
-fn assignment_gate(text: &str, quote: Option<u8>) -> bool {
+fn assignment_gate(text: &str, quote: Option<u8>, quoted_key: bool) -> bool {
     let Some(tails) = ASSIGNMENT_TAILS.as_ref() else {
         return true;
     };
@@ -528,11 +619,15 @@ fn assignment_gate(text: &str, quote: Option<u8>) -> bool {
             .iter()
             .rposition(|byte| *byte > b' ')
             .map_or(0, |last| last + 1);
-        let before = &before[..end];
-        tails.iter().any(|tail| {
-            before.len() >= tail.len()
-                && before[before.len() - tail.len()..].eq_ignore_ascii_case(tail)
-        })
+        let mut before = &before[..end];
+        if quoted_key {
+            // `NAME"` or `NAME\"`: the key's closing quote, escaped or not.
+            let Some(unquoted) = before.strip_suffix(b"\"") else {
+                return false;
+            };
+            before = unquoted.strip_suffix(b"\\").unwrap_or(unquoted);
+        }
+        ends_with_secret_word(before, tails)
     })
 }
 
@@ -619,6 +714,291 @@ fn redact_stored_part(text: &str) -> (String, usize) {
     }
 }
 
+/// KT-1656 — redaction of what an **agent wrote**, which is stored, kept in the
+/// transcript and sent back to the model on every later turn.
+///
+/// The vendor shapes ([`redact_secrets`]) and the secret-named assignments and
+/// JSON keys of [`redact_for_audit_artifact`], but a secret-named assignment is
+/// only masked when its value is a credential ([`value_is_credential`]): an
+/// agent's reply is full of code and prose that names a token without holding
+/// one (`let token = lexer.next_token();`, `password: required`,
+/// `"token": "<your-token>"`, `Authorization: Bearer $TOKEN`), which the audit
+/// pass would rewrite irreversibly. A printed credential file keeps being
+/// masked (`"GITHUB_PERSONAL_ACCESS_TOKEN": "t0ken…"`, `GEMINI_API_KEY=…`).
+pub fn redact_agent_output(input: &str) -> String {
+    redact_json_aware_with(input, redact_agent_output_text, &|key, value| {
+        value_is_credential(key, value, true)
+    })
+    .0
+}
+
+/// KT-1656 — the credentials of a **known shape** only, for rewriting history
+/// that was stored unmasked: a vendor-prefixed token, a JWT, an `Authorization`
+/// or `Bearer` value, a connection-string password, a `"password": "…"` field,
+/// each left as written when it is a placeholder. No secret-named assignment or
+/// JSON key is read, and no JSON key masks its value, so a message that only
+/// names a token is never touched.
+pub fn redact_known_shapes(input: &str) -> String {
+    redact_json_aware_with(
+        input,
+        |text| {
+            apply_patterns_guarded(
+                text,
+                PATTERNS.as_slice(),
+                &VENDOR_PREFILTER,
+                Some(&vendor_match_is_credential),
+            )
+        },
+        &|_, _| false,
+    )
+    .0
+}
+
+fn redact_agent_output_text(input: &str) -> (String, usize) {
+    let (out, vendor_count) = apply_patterns_guarded(
+        input,
+        PATTERNS.as_slice(),
+        &VENDOR_PREFILTER,
+        Some(&vendor_match_is_credential),
+    );
+    let (out, assignment_count) = apply_patterns_guarded(
+        &out,
+        ASSIGNMENT.as_slice(),
+        &ASSIGNMENT_PREFILTER,
+        Some(&assignment_is_credential),
+    );
+    let count = vendor_count.saturating_add(assignment_count);
+    if out == input {
+        (out, 0)
+    } else {
+        (out, count.max(1))
+    }
+}
+
+/// A value that stands for a secret without being one: nothing, a value already
+/// masked, a template or an environment reference (`$TOKEN`, `${{ secrets.X }}`,
+/// `<your-token>`, `secret://NAME`), the name of an environment variable
+/// (`VOTRE_API_KEY`), an ellipsis (`kr-join-...`, `…`), a filler (`xxxxxxxx`,
+/// `0000000000`), a placeholder word (`your-api-key`, `changeme`, `string`), a
+/// text with no letter or digit in it (the `//!` that opens the next comment
+/// line), or prose in a script that has no spaces (Chinese, Japanese).
+fn is_placeholder(value: &str) -> bool {
+    const PLACEHOLDERS: &[&str] = &[
+        "your-",
+        "your_",
+        "xxx",
+        "0000000000",
+        "placeholder",
+        "changeme",
+        "change-me",
+        "example",
+        "redacted",
+        "dummy",
+        "<",
+        "todo",
+        "...",
+        "secret://",
+    ];
+    const WORDS: &[&str] = &[
+        "string",
+        "null",
+        "none",
+        "nil",
+        "true",
+        "false",
+        "undefined",
+        "secret",
+        "token",
+        "password",
+        "apikey",
+        "api_key",
+        "api-key",
+        "required",
+        "optional",
+        "pass",
+        "passwd",
+        "pwd",
+        "pw",
+    ];
+    // The quote or escape a match opens with (`\"{TOKEN}`) is not the value.
+    let value = value.trim().trim_start_matches(['\\', '"', '\'', '`']);
+    let first = value.chars().next();
+    let lowered = value.to_ascii_lowercase();
+    let env_name = value.contains('_')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && first.is_some_and(|c| c.is_ascii_uppercase());
+    value.is_empty()
+        || value.starts_with(['$', '<', '{', '%', '@'])
+        || value.starts_with("--")
+        || value.contains("${")
+        || value.contains("{{")
+        || value.contains('…')
+        || !value.chars().any(|c| c.is_ascii_alphanumeric())
+        || value.chars().any(|c| !c.is_ascii() && c.is_alphabetic())
+        || env_name
+        || value.chars().all(|c| Some(c) == first)
+        || PLACEHOLDERS.iter().any(|needle| lowered.contains(needle))
+        || WORDS.contains(&lowered.as_str())
+        || is_invite_token(value)
+}
+
+/// A room invitation (`kr-join-<32 hex>`, `db::discussion_sessions::create_invite_token`):
+/// an agent posts it on purpose so that a peer can `disc_join` with it, and it
+/// lives `INVITE_TTL_SECS` (10 minutes) and is stored only as a hash. Masking it
+/// at insert would break the invitation it carries, so the stored-agent-output
+/// guards leave it as written. The audit pass ([`redact_for_audit_artifact`],
+/// [`redact_stored_text`]) is not guarded and still masks it: it runs on history
+/// long after the expiry, where a leaked `kr-join-` token is better gone.
+///
+/// The exemption is the WHOLE value, exactly as `create_invite_token` writes it
+/// (`kr-join-` and 32 lowercase hex characters), optionally inside one quote or
+/// backtick on each side. A prefix put in front of a real secret, an invitation
+/// embedded in a longer value, an uppercase or non-hex suffix are not one.
+fn is_invite_token(value: &str) -> bool {
+    const PREFIX: &str = "kr-join-";
+    let value = value.trim();
+    let value = value
+        .strip_prefix(['"', '\'', '`'])
+        .unwrap_or(value)
+        .trim_end_matches(['"', '\'', '`']);
+    value.strip_prefix(PREFIX).is_some_and(|hex| {
+        hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Whether the value of a secret-named assignment (`password: …`,
+/// `API_KEY=…`, `"token": "…"`; `name` is the secret-ish name) is a credential
+/// rather than prose, code or a placeholder. Heuristic, and tuned to miss a
+/// short bare value rather than to rewrite a sentence of code.
+///
+/// Never a credential: a placeholder ([`is_placeholder`]), a value with
+/// Never a credential: a placeholder ([`is_placeholder`]), a value with
+/// whitespace (prose), a dotted identifier (`disc.inviteTabToken`, an i18n key)
+/// or a snake_case one (`test_does_not_fill_source_id`), a value under a `pin`
+/// name that is not a number of 4 to 12 digits. A **quoted** value is
+/// a credential from 8 characters, from 6 under a `password`-like name. A
+/// **bare** one must look like a token (12 characters or more, letters and
+/// digits, no trailing `-` / `_`) and not like code (a call, an access path, a
+/// URL, a file path, an operator).
+fn value_is_credential(name: &str, value: &str, quoted: bool) -> bool {
+    let value = value.trim();
+    let full_name = name.to_ascii_lowercase();
+    // `SECRET_KEY` is a secret, `PIN_VALUE` a pin: the qualifier is not the word.
+    let name = without_qualifier(full_name.as_bytes())
+        .and_then(|stem| std::str::from_utf8(stem).ok())
+        .map_or(full_name.clone(), str::to_owned);
+    if is_placeholder(value) || value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    // No carve-out for a camelCase word, a path, the name repeated or a short
+    // number: each is also what a real password, token or PIN can look like
+    // (`"password": "CorrectHorseBatteryStaple"`, `admin_password =
+    // "adminpassword"`, `PIN=4821`). Zero defect on secrets: an identifier masked
+    // in a transcript is the accepted cost (KT-1656, round 5).
+    let dotted_identifier = value.contains('.')
+        && value.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+        });
+    let snake_identifier = value.contains('_')
+        && value
+            .split('_')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase()));
+    if dotted_identifier || snake_identifier {
+        return false;
+    }
+    // A PIN is a number; the word "pin" before anything else is prose or code.
+    if name.ends_with("pin") {
+        return (4..=12).contains(&value.len()) && value.chars().all(|c| c.is_ascii_digit());
+    }
+    if quoted {
+        const PASSWORDS: &[&str] = &[
+            "password",
+            "passwd",
+            "pwd",
+            "passphrase",
+            "passcode",
+            "secret",
+        ];
+        let floor = if PASSWORDS.iter().any(|word| name.ends_with(word)) {
+            6
+        } else {
+            8
+        };
+        return value.chars().count() >= floor;
+    }
+    value.chars().count() >= 12
+        && value.chars().any(|c| c.is_ascii_digit())
+        && value.chars().any(|c| c.is_ascii_alphabetic())
+        && !value.ends_with(['-', '_'])
+        && !value.contains([
+            '(', ')', '[', ']', '{', '}', '<', '>', ';', ',', '|', '&', '*',
+        ])
+        && !value.contains("://")
+        && !value.contains("::")
+        && !value.contains("->")
+        && !value.contains("=>")
+        && !value.starts_with(['/', '~', '.'])
+}
+
+/// The name in the text that opens a match (`  "GEMINI_API_KEY": "`,
+/// `export GITHUB_TOKEN=`, `password: `): the word before the separator.
+fn name_before_value(prefix: &str) -> &str {
+    let prefix = prefix.trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, ':' | '=' | '"' | '\'' | '`' | '\\')
+    });
+    let start = prefix
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .map_or(0, |at| at + 1);
+    &prefix[start..]
+}
+
+/// Guard of the secret-assignment patterns: group 1 holds the name, group 2 is
+/// the value, quoted when the character before it is a quote.
+fn assignment_is_credential(captures: &regex_lite::Captures<'_>, text: &str) -> bool {
+    let Some(value) = captures.get(2) else {
+        return true;
+    };
+    let quoted = text[..value.start()]
+        .chars()
+        .next_back()
+        .is_some_and(|before| matches!(before, '"' | '\'' | '`'));
+    let name = captures
+        .get(1)
+        .map_or("", |prefix| name_before_value(prefix.as_str()));
+    value_is_credential(name, value.as_str(), quoted)
+}
+
+/// Guard of [`PATTERNS`] for stored agent output. A vendor-prefixed token is
+/// masked unless it is a placeholder (`xoxb-xxxxxxxxxxxx`); the shapes that read
+/// a value next to a name (an `Authorization` header, a `"password": "…"` field,
+/// the password of a connection string) leave a placeholder as written.
+fn vendor_match_is_credential(captures: &regex_lite::Captures<'_>, _text: &str) -> bool {
+    let matched = captures.get(0).map_or("", |m| m.as_str());
+    let lowered = matched.to_ascii_lowercase();
+    if lowered.starts_with("authorization") {
+        let value = matched.rsplit(char::is_whitespace).next().unwrap_or("");
+        !is_placeholder(value)
+    } else if lowered.starts_with('"') {
+        let prefix = captures.get(1).map_or("", |prefix| prefix.as_str());
+        let value = matched
+            .get(prefix.len()..matched.len().saturating_sub(1))
+            .unwrap_or("");
+        value_is_credential(name_before_value(prefix), value, true)
+    } else if lowered.contains("://") {
+        captures
+            .get(3)
+            .is_none_or(|password| !is_placeholder(password.as_str()))
+    } else {
+        // `Token <value>` / `Bearer <value>` in a log line: the exemption of an
+        // invitation is the value word on its own, never a match that merely
+        // contains one.
+        let value = matched.rsplit(char::is_whitespace).next().unwrap_or("");
+        !is_invite_token(value) && !is_placeholder(matched)
+    }
+}
+
 /// Object keys whose string value is a credential, whatever it holds. Same
 /// names as the `"password": "…"` pattern of [`RAW_PATTERNS`], which stops at
 /// the first `"` and so cannot read a value that carries an escaped one.
@@ -633,6 +1013,19 @@ const JSON_CREDENTIAL_KEYS: &[&str] = &[
     "client_secret",
     "private_key",
 ];
+
+/// Whether the value of this object key is a credential: one of
+/// [`JSON_CREDENTIAL_KEYS`], or a name that ends in a secret-ish word of
+/// [`ASSIGNMENT_NAMES`] (`GEMINI_API_KEY`, `GITHUB_PERSONAL_ACCESS_TOKEN`: the
+/// env block of a CLI's `settings.json`, KT-1656), as the text patterns read it.
+fn is_credential_key(key: &str) -> bool {
+    if JSON_CREDENTIAL_KEYS.contains(&key) {
+        return true;
+    }
+    ASSIGNMENT_TAILS
+        .as_ref()
+        .is_some_and(|tails| ends_with_secret_word(key.as_bytes(), tails))
+}
 
 /// Runs `redact` on `input`, one JSON string at a time when `input` is a JSON
 /// document (an object or an array), on the whole text otherwise.
@@ -653,6 +1046,18 @@ const JSON_CREDENTIAL_KEYS: &[&str] = &[
 /// document as a whole (NDJSON, an excerpt cut mid-document) takes `redact`
 /// as it is: its patterns keep the escapes around a value themselves.
 fn redact_json_aware(input: &str, redact: impl Fn(&str) -> (String, usize)) -> (String, usize) {
+    redact_json_aware_with(input, redact, &|_, _| true)
+}
+
+/// [`redact_json_aware`], where `masks_value(key, value)` decides whether the
+/// string value of a credential-named key is masked whatever it holds (`true`
+/// for the callers that mask every such value; stored agent output keeps a
+/// placeholder, and the known-shape pass never masks by key).
+fn redact_json_aware_with(
+    input: &str,
+    redact: impl Fn(&str) -> (String, usize),
+    masks_value: &dyn Fn(&str, &str) -> bool,
+) -> (String, usize) {
     let trimmed = input.trim_start();
     let is_container = trimmed.starts_with('{') || trimmed.starts_with('[');
     if !is_container || serde_json::from_str::<serde::de::IgnoredAny>(input).is_err() {
@@ -687,8 +1092,8 @@ fn redact_json_aware(input: &str, redact: impl Fn(&str) -> (String, usize)) -> (
                     redacted
                 } else if key
                     .take()
-                    .is_some_and(|key| JSON_CREDENTIAL_KEYS.contains(&key.as_str()))
-                    && !decoded.is_empty()
+                    .filter(|key| is_credential_key(key))
+                    .is_some_and(|key| !decoded.is_empty() && masks_value(&key, &decoded))
                 {
                     let masked = "***REDACTED***";
                     (masked.to_string(), usize::from(decoded != masked))
@@ -1638,6 +2043,364 @@ mod tests {
         assert!(!out.contains("0123456789012345678901234567"));
     }
 
+    // ── KT-1656: a printed credential file is masked ───────────────────
+
+    /// What `cat ~/.gemini/settings.json` prints: an env block of MCP servers
+    /// keyed by the variable name, no vendor prefix on the values.
+    const GEMINI_SETTINGS: &str = r#"{
+  "security": { "auth": { "selectedType": "oauth-personal" } },
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "t0kenValueNotShapedLikeAVendor1",
+        "GEMINI_API_KEY": "plainKeyValue-8f3a9c2e7d41",
+        "LOG_LEVEL": "debug"
+      },
+      "headers": { "X-Api-Key": "headerKeyValue-77aa11bb22cc" }
+    }
+  }
+}"#;
+
+    const GEMINI_SECRETS: [&str; 3] = [
+        "t0kenValueNotShapedLikeAVendor1",
+        "plainKeyValue-8f3a9c2e7d41",
+        "headerKeyValue-77aa11bb22cc",
+    ];
+
+    fn assert_masked(out: &str) {
+        for secret in GEMINI_SECRETS {
+            assert!(!out.contains(secret), "{secret} survived: {out}");
+        }
+        assert!(out.contains("\"LOG_LEVEL\": \"debug\""), "{out}");
+    }
+
+    #[test]
+    fn a_settings_json_printed_as_a_document_is_masked() {
+        let (out, count) = redact_for_audit_artifact(GEMINI_SETTINGS);
+        assert_masked(&out);
+        assert!(count > 0);
+        serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+        assert_eq!(redact_for_audit_artifact(&out).1, 0, "idempotent");
+        assert_masked(&redact_stored_text(GEMINI_SETTINGS));
+    }
+
+    #[test]
+    fn a_settings_json_quoted_in_a_message_is_masked() {
+        let message = format!("Here is the file:\n```json\n{GEMINI_SETTINGS}\n```\nDone.");
+        assert_masked(&redact_for_audit_artifact(&message).0);
+        assert_masked(&redact_stored_text(&message));
+    }
+
+    #[test]
+    fn a_settings_json_nested_in_a_json_string_is_masked() {
+        // A tool result carried as an escaped string inside a JSON envelope.
+        let envelope =
+            serde_json::to_string(&serde_json::json!({ "output": GEMINI_SETTINGS })).unwrap();
+        let (out, _) = redact_for_audit_artifact(&envelope);
+        serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+        for secret in GEMINI_SECRETS {
+            assert!(!out.contains(secret), "{secret} survived: {out}");
+        }
+        // The same text cut mid-document, which the JSON parser rejects.
+        let cut = &envelope[..envelope.len() - 2];
+        for secret in GEMINI_SECRETS {
+            assert!(
+                !redact_for_audit_artifact(cut).0.contains(secret),
+                "{secret}"
+            );
+        }
+    }
+
+    // ── KT-1656: the shapes of the other agents' login files ───────────
+
+    const GOOGLE_ACCESS: &str = "ya29.a0AfH6SMBx3Zk9QwErTyUiOpAsDfGhJkLzXcVbNm12345";
+    const GOOGLE_REFRESH: &str =
+        "1//0gAbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEfGhIjKlMnOpQrStUv";
+    const GITHUB_FINE_GRAINED: &str =
+        "github_pat_11ABCDEFG0abcdefghijkl_0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijk";
+    const AWS_STS: &str = "ASIAY34FZKBOKMUTVV7A";
+
+    fn login_shapes() -> [&'static str; 4] {
+        [GOOGLE_ACCESS, GOOGLE_REFRESH, GITHUB_FINE_GRAINED, AWS_STS]
+    }
+
+    #[test]
+    fn google_oauth_fine_grained_github_and_sts_tokens_are_masked_bare() {
+        for secret in login_shapes() {
+            let text = format!("the token is {secret} and that is all");
+            for out in [
+                redact_secrets(&text),
+                redact_agent_output(&text),
+                redact_known_shapes(&text),
+            ] {
+                assert!(!out.contains(secret), "{secret} survived: {out}");
+                assert!(out.contains("***REDACTED***"), "{out}");
+                assert!(out.starts_with("the token is "), "{out}");
+                assert!(out.ends_with(" and that is all"), "{out}");
+            }
+            assert!(looks_like_secret(&text), "{secret}");
+        }
+    }
+
+    #[test]
+    fn an_oauth_creds_file_is_masked_with_and_without_its_keys() {
+        // `~/.gemini/oauth_creds.json` as printed, and the same values under
+        // names no key pattern reads.
+        let creds = format!(
+            r#"{{"access_token": "{GOOGLE_ACCESS}", "refresh_token": "{GOOGLE_REFRESH}", "scope": "openid", "token_type": "Bearer", "expiry_date": 1760000000000}}"#
+        );
+        let renamed = format!(
+            r#"{{"a": "{GOOGLE_ACCESS}", "b": "{GOOGLE_REFRESH}", "c": "{GITHUB_FINE_GRAINED}", "d": "{AWS_STS}"}}"#
+        );
+        for text in [creds, renamed] {
+            for out in [
+                redact_agent_output(&text),
+                redact_known_shapes(&text),
+                redact_secrets(&text),
+            ] {
+                for secret in login_shapes() {
+                    assert!(!out.contains(secret), "{secret} survived: {out}");
+                }
+                serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_shapes_leave_ordinary_text_alone() {
+        for text in [
+            "see ya29 and ya29.x",
+            "the 1//0 route and 1//a/b/c",
+            "github_pat_ is the prefix, github_pat_short too",
+            "ASIA, ASIAN and ASIAPACIFICREGION are words",
+            "ASIA0123456789ABCDEFG is one char too long to be a key",
+            "https://example.com/1//0/short",
+        ] {
+            assert_eq!(redact_agent_output(text), text, "{text}");
+            assert_eq!(redact_known_shapes(text), text, "{text}");
+        }
+        // A placeholder with a vendor shape stays as written in agent output.
+        let placeholder = "ya29.xxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        assert_eq!(redact_agent_output(placeholder), placeholder);
+    }
+
+    #[test]
+    fn a_secret_word_followed_by_a_qualifier_still_names_a_secret() {
+        for text in [
+            "SECRET_KEY=django-insecure-8f3a9c2e7d41b6",
+            "export TOKEN_VALUE=8f3a9c2e7d41b6a0",
+            "secret-key: 'plainSecretValue1'",
+            "TOKEN_VALUE = \"plainTokenValue1\"",
+            "passwordString=\"hunter22\"",
+            "SECRET_VALUE: s3cr3tValue-0042",
+        ] {
+            let out = redact_agent_output(text);
+            assert!(out.contains("***REDACTED***"), "{text} -> {out}");
+            assert_eq!(redact_agent_output(&out), out, "idempotent: {out}");
+            let audit = redact_for_audit_artifact(text).0;
+            assert!(audit.contains("***REDACTED***"), "{text} -> {audit}");
+        }
+        let env_block = r#"{"env": {"TOKEN_VALUE": "plainTokenValue1", "SECRET_KEY": "plainSecretKey-42", "LOG_LEVEL": "debug"}}"#;
+        let out = redact_agent_output(env_block);
+        assert!(!out.contains("plainTokenValue1"), "{out}");
+        assert!(!out.contains("plainSecretKey-42"), "{out}");
+        assert!(out.contains("\"LOG_LEVEL\": \"debug\""), "{out}");
+        serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+        assert!(!redact_known_shapes(env_block).contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn a_qualifier_does_not_turn_code_or_prose_into_a_secret() {
+        for text in [
+            "SECRET_KEY: String,",
+            "let token_value: u64 = 0;",
+            "token_value = compute(input)",
+            "secret_key = os.environ[\"SECRET_KEY\"]",
+            "\"secret_key\": \"<your key>\"",
+            "TOKEN_VALUE=$TOKEN_VALUE",
+            "tokenizer_key=abcdefghijkl1234",
+            "monkey_value=abcdefghijkl1234",
+            "the secret key is rotated yearly",
+        ] {
+            assert_eq!(redact_agent_output(text), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_run_of_separators_before_the_qualifier_still_names_a_secret() {
+        for text in [
+            "SECRET__KEY=django-insecure-8f3a9c2e7d41b6",
+            "secret--value: 's3cr3tValue-0042'",
+            "export TOKEN___VALUE=8f3a9c2e7d41b6a0",
+            "api_key__string = \"plainKeyString-7\"",
+        ] {
+            let out = redact_agent_output(text);
+            assert!(out.contains("***REDACTED***"), "{text} -> {out}");
+            assert!(
+                redact_for_audit_artifact(text).0.contains("***REDACTED***"),
+                "{text}"
+            );
+        }
+        let env_block = r#"{"env": {"SECRET__KEY": "plainSecretKey-42", "TOKEN--VALUE": "plainTokenValue1", "LOG_LEVEL": "debug"}}"#;
+        let out = redact_agent_output(env_block);
+        assert!(!out.contains("plainSecretKey-42"), "{out}");
+        assert!(!out.contains("plainTokenValue1"), "{out}");
+        assert!(out.contains("\"LOG_LEVEL\": \"debug\""), "{out}");
+        serde_json::from_str::<serde_json::Value>(&out).expect("still JSON");
+        // The gate of the patterns reads the same names.
+        assert!(is_credential_key("SECRET__KEY"));
+        assert!(is_credential_key("secret--value"));
+        assert!(!is_credential_key("__key"));
+        assert_eq!(without_qualifier(b"secret__key"), Some(&b"secret"[..]));
+        assert_eq!(without_qualifier(b"__value"), None);
+    }
+
+    /// KT-1656 — a room invitation is posted on purpose, so a peer can join: it is
+    /// stored as written. A credential next to it is still masked.
+    #[test]
+    fn a_room_invitation_is_stored_as_written_and_a_credential_beside_it_is_not() {
+        let invite = "kr-join-0123456789abcdef0123456789abcdef";
+        for text in [
+            format!("disc_join({{token: \"{invite}\"}})"),
+            format!("disc_join({{\"token\": \"{invite}\"}})"),
+            format!("{{\"token\":\"{invite}\"}}"),
+            format!("token={invite}"),
+            format!("Token {invite} is valid for ten minutes"),
+        ] {
+            assert_eq!(redact_agent_output(&text), text, "{text}");
+        }
+        let both = format!(
+            "disc_join({{token: \"{invite}\"}}) and GEMINI_API_KEY=t0kenNotShapedLikeAVendor01"
+        );
+        let out = redact_agent_output(&both);
+        assert!(out.contains(invite), "{out}");
+        assert!(!out.contains("t0kenNotShapedLikeAVendor01"), "{out}");
+        // A shorter `kr-join-` is not an invitation.
+        assert!(redact_agent_output("token: \"kr-join-9f8e7d6c5b4a\"").contains("REDACTED"));
+        // The exemption is the whole value, in the exact shape of
+        // `create_invite_token`: 32 lowercase hex characters, nothing around them.
+        let upper = "kr-join-0123456789ABCDEF0123456789ABCDEF";
+        let non_hex = "kr-join-0123456789abcdefghijklmnopqrstuv";
+        let longer = format!("{invite}0123456789abcdef");
+        let one_short = "kr-join-0123456789abcdef0123456789abcde";
+        for (text, secret) in [
+            // A prefix attached to a real secret.
+            (
+                "API_KEY=\"kr-join-MyRealSecretValue0123456789abcdef\"".to_owned(),
+                "MyRealSecretValue0123456789abcdef",
+            ),
+            (
+                format!("API_KEY=\"{invite}MyRealSecret0123456789\""),
+                "MyRealSecret0123456789",
+            ),
+            // An invitation embedded in a longer value.
+            (format!("password: \"hunter2-{invite}-tail\""), "hunter2-"),
+            (format!("token: \"prefix{invite}\""), "prefix"),
+            (format!("token: \"{longer}\""), "0123456789abcdef\""),
+            // Uppercase, non-hex and wrong-length suffixes.
+            (format!("token: \"{upper}\""), upper),
+            (format!("token: \"{non_hex}\""), non_hex),
+            (format!("token: \"{one_short}\""), one_short),
+            // The bare `Token <value>` of a log line follows the same rule.
+            (format!("Token {longer} is valid"), longer.as_str()),
+            (format!("Bearer {upper}"), upper),
+        ] {
+            let out = redact_agent_output(&text);
+            assert!(out.contains("REDACTED"), "{text} -> {out}");
+            assert!(!out.contains(secret), "{text} -> {out}");
+        }
+        assert!(is_invite_token(invite));
+        assert!(is_invite_token(&format!("`{invite}`")));
+        assert!(is_invite_token(&format!("\"{invite}\"")));
+        assert!(!is_invite_token(&format!("x{invite}")));
+        assert!(!is_invite_token(&format!("{invite}x")));
+        assert!(!is_invite_token(upper));
+        assert!(!is_invite_token(&longer));
+        assert!(!is_invite_token(one_short));
+        // The audit pass is not guarded: history is scrubbed of it.
+        assert!(redact_for_audit_artifact(&format!("token: \"{invite}\""))
+            .0
+            .contains("REDACTED"));
+    }
+
+    /// KT-1656 round 5 — EXPECTED-MASKED. These are the "false positives" of the
+    /// real-message measurement (`"token":"initGeneration"`, ``cancel token:
+    /// `session/cancel` ``, `TooLarge`, `CHANNEL_TOKEN = 'channeltoken'`,
+    /// `PIN=1234`). Round 4 stored them as written; a camelCase word, a path, the
+    /// name repeated and a short number are also what a real password, token or
+    /// PIN looks like, so the carve-outs leaked credentials. Zero defect on
+    /// secrets: the identifier is masked, which is the accepted cost.
+    #[test]
+    fn an_identifier_looking_value_under_a_secret_name_is_masked() {
+        for (text, value) in [
+            (r#"{"token":"initGeneration"}"#, "initGeneration"),
+            (r#""token": "TooLarge""#, "TooLarge"),
+            ("cancel token: `session/cancel`", "session/cancel"),
+            ("token: 'session/cancel'", "session/cancel"),
+            ("CHANNEL_TOKEN = 'channeltoken'", "channeltoken"),
+            ("const CHANNEL_TOKEN = \"channel-token\";", "channel-token"),
+            ("PIN=1234", "1234"),
+            ("pin: 123456", "123456"),
+            ("\"pin\": \"0042\"", "0042"),
+            ("password: \"1234567\"", "1234567"),
+        ] {
+            let out = redact_agent_output(text);
+            assert!(out.contains("REDACTED"), "{text} -> {out}");
+            assert!(!out.contains(value), "{text} -> {out}");
+        }
+    }
+
+    /// KT-1656 round 5 — every leak the two security passes of round 4 listed.
+    #[test]
+    fn a_pin_password_or_token_that_looks_like_an_identifier_is_masked() {
+        for (text, secret) in [
+            // Short PINs, passcodes and numeric passwords: the 4..=7 range is live.
+            ("PIN=4821", "4821"),
+            ("pin = 0042", "0042"),
+            ("PASSCODE: \"123456\"", "123456"),
+            ("\"password\": \"1234567\"", "1234567"),
+            ("pin: '9876543'", "9876543"),
+            // A random-letter token in backticks after `token:` / `secret:`.
+            ("CLIENT_SECRET=`kqzwxvtrplmnbcdf`", "kqzwxvtrplmnbcdf"),
+            ("client secret: `kqzwxvtrplmnbcdf`", "kqzwxvtrplmnbcdf"),
+            ("token: `qwertyuiopasdfgh`", "qwertyuiopasdfgh"),
+            // A camelCase / PascalCase password.
+            (
+                "\"password\": \"CorrectHorseBatteryStaple\"",
+                "CorrectHorseBatteryStaple",
+            ),
+            ("secret = 'SummerWinterSpring'", "SummerWinterSpring"),
+            // A path-like password or token.
+            (
+                "token: \"live/0123456789abcdef0123456789abcdef\"",
+                "live/0123456789abcdef0123456789abcdef",
+            ),
+            (
+                "password = \"summer2026/winter2026\"",
+                "summer2026/winter2026",
+            ),
+            // The name repeated is a real weak credential.
+            ("admin_password = \"adminpassword\"", "adminpassword"),
+            ("db_password: 'dbpassword'", "dbpassword"),
+            ("API_TOKEN=\"api-token\"", "api-token"),
+            // Still masked: mixed-case random, base64 with a `/`, an 8-digit PIN.
+            ("token: \"aB3dE5fG7hJ9kL1m\"", "aB3dE5fG7hJ9kL1m"),
+            ("token: \"xKjQpLmZrTbVnWcY\"", "xKjQpLmZrTbVnWcY"),
+            (
+                "secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYsD9fT3kQ'",
+                "wJalrXUtnFEMI",
+            ),
+            ("PIN=12345678", "12345678"),
+            ("password: \"correcthorsebattery\"", "correcthorsebattery"),
+            ("api_key = 'channeltoken-7f3a'", "channeltoken-7f3a"),
+        ] {
+            let out = redact_agent_output(text);
+            assert!(out.contains("REDACTED"), "{text} -> {out}");
+            assert!(!out.contains(secret), "{text} -> {out}");
+        }
+    }
+
     #[test]
     fn redact_is_idempotent() {
         let s = "Authorization: Bearer abc123def456ghi789jklmn AIzaSy0123456789012345678901234567";
@@ -1727,7 +2490,7 @@ mod tests {
             RAW_PATTERNS.len(),
             "a pattern failed to compile"
         );
-        assert_eq!(ASSIGNMENT.len(), 5);
+        assert_eq!(ASSIGNMENT.len(), 7);
         assert!(
             matches!(&*VENDOR_PREFILTER, Prefilter::Triples(_)),
             "a gate literal shorter than three bytes turns the vendor prefilter off"
@@ -1947,7 +2710,8 @@ mod tests {
 
     #[test]
     fn quoted_assignment_patterns_wait_for_their_own_quote() {
-        // ASSIGNMENT is ordered: double quote, single quote, backtick, bare.
+        // ASSIGNMENT is ordered: double quote, single quote, backtick, escaped, bare, then the two
+        // quoted-key shapes (KT-1656).
         let admitted = |text: &str| -> Vec<bool> {
             ASSIGNMENT.iter().map(|pat| pat.gate.admits(text)).collect()
         };
@@ -1955,26 +2719,26 @@ mod tests {
         // value pattern has anything to do.
         assert_eq!(
             admitted("curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com"),
-            [false, false, false, false, true]
+            [false, false, false, false, true, false, false]
         );
         assert_eq!(
             admitted("password: \"hunter2\""),
-            [true, false, false, false, true]
+            [true, false, false, false, true, false, false]
         );
         assert_eq!(
             admitted("token =\n  'hunter2'"),
-            [false, true, false, false, true]
+            [false, true, false, false, true, false, false]
         );
         assert_eq!(
             admitted("secret=`hunter2`"),
-            [false, false, true, false, true]
+            [false, false, true, false, true, false, false]
         );
         assert_eq!(
             admitted(r#"token: \"hunter2\""#),
-            [false, false, false, true, true]
+            [false, false, false, true, true, false, false]
         );
         // No assignment at all: nothing runs, whatever quotes the text holds.
-        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 5]);
+        assert_eq!(admitted("say \"hello\" to `them`, it's fine"), [false; 7]);
         // Each pattern that is turned away really has no match to make.
         for text in [
             "curl -H 'x-api-key: ${SERVICE_KEY}' https://example.com",
@@ -2022,6 +2786,12 @@ mod tests {
             "xoxb-",
             "eyJ",
             "AKIA",
+            "ASIA",
+            "github_pat_",
+            "ya29.",
+            "1//0",
+            "SECRET_KEY",
+            "TOKEN_VALUE",
             "rk_live_",
             "pk_test_",
             "abcdefghijklmnopqrstuvwxyz",

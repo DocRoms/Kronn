@@ -324,6 +324,7 @@ mod tests {
             &[],
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .unwrap()
     }
@@ -366,6 +367,7 @@ mod tests {
             &[],
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .unwrap();
         let pgid = child.id().unwrap() as i32;
