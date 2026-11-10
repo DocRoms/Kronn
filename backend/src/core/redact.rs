@@ -525,9 +525,9 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         "[a-z0-9_.-]*(?:{ASSIGNMENT_NAMES})(?:[_-]*(?:{NAME_QUALIFIERS}))?",
         NAME_QUALIFIERS = NAME_QUALIFIERS.join("|"),
     );
-    let quoted_dq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)\"((?:\\\\.|[^\"\\\\])+)\"");
-    let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\.|[^'\\\\])+)'");
-    let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\.|[^`\\\\])+)`");
+    let quoted_dq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)\"((?:\\\\[\\s\\S]|[^\"\\\\])+)\"");
+    let quoted_sq = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)'((?:\\\\[\\s\\S]|[^'\\\\])+)'");
+    let quoted_bt = format!("(?i)(\\b{name}\\b\\s*[:=]\\s*)`((?:\\\\[\\s\\S]|[^`\\\\])+)`");
     let quoted_escaped = format!(r#"(?i)(\b{name}\b\s*[:=]\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
     // A quoted value cut before its closing quote: the closed shapes above ran
     // first, so no closing quote is left to find — mask to the end of the text.
@@ -548,7 +548,7 @@ static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     // KT-1656 — a credential file printed whole (`~/.gemini/settings.json`,
     // `.npmrc`-like JSON): the secret-ish name is a quoted object key, closed
     // by its quote before the `:`, which the shapes above never read.
-    let json_key_dq = format!(r#"(?i)("{name}"\s*:\s*)"((?:\\.|[^"\\])+)""#);
+    let json_key_dq = format!(r#"(?i)("{name}"\s*:\s*)"((?:\\[\s\S]|[^"\\])+)""#);
     let json_key_escaped = format!(r#"(?i)(\\"{name}\\"\s*:\s*\\")((?:[^\\"]|\\[^"])+)(\\")"#);
     [
         (quoted_dq, "$1\"***REDACTED***\"", Gate::Assignment(Some(b'"'))),
@@ -1757,6 +1757,44 @@ mod tests {
         ] {
             for (name, redact) in text_redactors() {
                 assert_eq!(redact(input), expected, "{name}: {input}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_closed_quoted_value_holding_an_escaped_newline_is_masked_whole() {
+        // `\` + newline is an escape pair: `.` does not match the newline, so the
+        // closed shapes must read the escaped character as `[\s\S]`.
+        for (input, expected) in [
+            (
+                "secret: \"part1\\\npart2 s3cr3t\" ok",
+                "secret: \"***REDACTED***\" ok",
+            ),
+            (
+                "secret: 'part1\\\npart2 s3cr3t' ok",
+                "secret: '***REDACTED***' ok",
+            ),
+            (
+                "secret: `part1\\\npart2 s3cr3t` ok",
+                "secret: `***REDACTED***` ok",
+            ),
+            (
+                "{\"secret\": \"part1\\\npart2 s3cr3t\", \"user\": \"alice\"}",
+                "{\"secret\": \"***REDACTED***\", \"user\": \"alice\"}",
+            ),
+            (
+                "{\"client_secret\": \"part1\\\r\npart2 s3cr3t\"} tail",
+                "{\"client_secret\": \"***REDACTED***\"} tail",
+            ),
+        ] {
+            for (name, redact) in text_redactors() {
+                if name == "redact_secrets" {
+                    continue;
+                }
+                let out = redact(input);
+                assert_eq!(out, expected, "{name}: {input:?}");
+                assert!(!out.contains("s3cr3t") && !out.contains("part1"), "{name}");
+                assert_eq!(redact(&out), out, "{name}: not idempotent");
             }
         }
     }
