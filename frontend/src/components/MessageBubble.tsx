@@ -302,6 +302,9 @@ export interface MessageBubbleProps {
    * jumps the user to the project card with the docs/tech-debt
    * section pre-expanded. Saves N clicks at end-of-validation. */
   projectId?: string | null;
+  /** KT-1664 — this orchestrator notice (an exhausted-quota escalation) was
+   * settled: the worker resumed, so it no longer asks a human to act. */
+  quotaResumed?: boolean;
   /** Variable-free QPs a `KRONN:CHAIN_QP:<id>` agent signal can reference.
    * When an Agent message carries that signal AND the id matches one of
    * these, a "launch this QP" CTA renders under the bubble — the agent
@@ -342,7 +345,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const { msg, workflowStep, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, defaultAgentAlias, targetConnectionAliases = {}, summaryCache, language, sending, editingText, hasFullAccess,
     defaultTargets = [],
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], inertMentions = [], t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, quotaResumed = false, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], inertMentions = [], t } = props;
   const [fileOpenRequest, setFileOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
   const fileLinkContext = useMemo<MessageFileLinkContextValue>(() => ({
     attachments: discussionMedia ?? attachments,
@@ -475,11 +478,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const [orchestratorDetailsOpen, setOrchestratorDetailsOpen] = useState(false);
   // A notice that asks the human to decide (a card Kronn posted) is never
   // folded behind "details": the decision would stay out of sight.
-  const orchestratorAsks = isOrchestrator && requiresUserAction(msg);
+  const orchestratorAsks = isOrchestrator
+    && requiresUserAction(msg, undefined, quotaResumed ? new Set([msg.id]) : undefined);
   const orchestratorOpen = orchestratorDetailsOpen || orchestratorAsks;
 
   const orchestratorPreview = useMemo(() => {
     if (!isOrchestrator) return '';
+    // A settled escalation says so, not "human intervention required".
+    if (quotaResumed) return t('disc.orchestratorQuotaResumed');
     const firstLine = visibleContent
       .split('\n')
       .map(line => line.trim())
@@ -490,7 +496,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
       .trim() ?? '';
     const compact = firstLine || t('disc.orchestratorUpdate');
     return compact.length > 140 ? `${compact.slice(0, 137).trimEnd()}…` : compact;
-  }, [isOrchestrator, t, visibleContent]);
+  }, [isOrchestrator, quotaResumed, t, visibleContent]);
 
   useEffect(() => () => {
     if (messageIdResetTimer.current) clearTimeout(messageIdResetTimer.current);

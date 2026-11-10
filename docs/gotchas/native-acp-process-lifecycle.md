@@ -26,7 +26,7 @@ not every `JoinError`. The claim stops at the drain: on Unix `shutdown` first
 kills the process group the child leads, so only a descendant outside that group
 can still hold the inherited pipe, and that one is not Kronn's to terminate.
 [src: file: backend/src/acp.rs:707-749#finish]
-[src: file: backend/src/acp.rs:1818-1852#shutdown]
+[src: file: backend/src/acp.rs:1824-1858#shutdown]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-120#discover_with_transport]
 
 The Unix-only regression fixtures observe a real subprocess over a socket the
@@ -45,7 +45,7 @@ that remain are anti-hang bounds, never waits — every one of them resolves on 
 socket event.
 [src: file: backend/src/acp.rs:4314-4331#FixtureLink]
 [src: file: backend/src/acp.rs:4351-4386#command]
-[src: file: backend/src/acp.rs:4333-4336#FIXTURE_GUARD]
+[src: file: backend/src/acp.rs:4334-4337#FIXTURE_GUARD]
 
 The in-process tests pin the ownership rules without a subprocess and without
 timing, including that a PANICKING drain is reported as an error rather than
@@ -65,8 +65,8 @@ session-creation failures, and no longer discards its own cleanup error. A
 scripted transport counts its shutdowns, so "did this path clean up?" is
 asserted on all three outcomes rather than read off the source — and a failing
 cleanup never replaces the failure that caused it.
-[src: file: backend/src/agents/runner.rs:6132-6141#acp_start_failure]
-[src: file: backend/src/agents/runner.rs:5628-5639#acp_start_failure]
+[src: file: backend/src/agents/runner.rs:6148-6157#acp_start_failure]
+[src: file: backend/src/agents/runner.rs:5644-5655#acp_start_failure]
 [src: file: backend/src/agents/runner.rs:5650-5658#acp_start_failure]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-120#discover_with_transport]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:287-298#ScriptedTransport]

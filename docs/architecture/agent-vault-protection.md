@@ -51,8 +51,8 @@ How the choice is made, in one place: every native agent process goes through
 own OS sandbox. A Claude launch whose `--settings` enable it keeps it (and tells
 it the data directory); a Codex launch that did not turn its sandbox off has it
 replaced; everything else is wrapped as it is.
-[src: file: backend/src/core/vault_guard.rs:132-142#launch_sandbox]
-[src: file: backend/src/core/vault_guard.rs:319-338#wrap_launch]
+[src: file: backend/src/core/vault_guard.rs:150-160#launch_sandbox]
+[src: file: backend/src/core/vault_guard.rs:343-362#wrap_launch]
 
 - macOS wraps with `sandbox-exec` (allow by default, one deny on the data
   directory). Linux wraps with `bwrap`: the data directory is replaced by an empty
@@ -65,7 +65,7 @@ replaced; everything else is wrapped as it is.
 - Claude's rules name the directory as `Read(//abs/path/**)` (two slashes: a path
   from the filesystem root), for `Read`, `Edit` and `Write`. A deny rule is checked
   before the permission mode, so the bypass flag does not lift it.
-  [src: file: backend/src/core/vault_guard.rs:416-426#claude_permission_deny]
+  [src: file: backend/src/core/vault_guard.rs:463-492#claude_permission_deny]
   `sandbox.filesystem.denyRead` is a documented field of Claude Code's sandbox
   settings ("paths to deny reading within the sandbox, merged with paths from
   `Read(...)` deny permission rules", read from the installed 2.1.285 binary's
@@ -85,7 +85,7 @@ therefore starts Codex with `--sandbox=danger-full-access` (dropping any
 | `read-only` (Codex's default for `exec`) | the temp directories, `CODEX_HOME` (else `~/.codex`), `/dev`; `~/.npm` for an `npx` launch | everything | denied, read and write |
 | `workspace-write` (the task worker) | the same, plus the worktree; the worktree's `.git` stays read-only | everything | denied, read and write |
 
-[src: file: backend/src/core/vault_guard.rs:242-275#codex_seatbelt_profile]
+[src: file: backend/src/core/vault_guard.rs:260-293#codex_seatbelt_profile]
 
 macOS is allow-by-default with a broad `file-write*` deny, the allowed roots, the
 `.git` deny, and the data-directory deny last (the last matching rule wins). Linux

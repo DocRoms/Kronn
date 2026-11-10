@@ -91,7 +91,7 @@ first turn; history-tool discovery remains deferred until the third user
 message. This instruction contract does not imply a live provider validation
 or change session-resume and pricing limitations.
 [src: file: backend/src/api/disc_prompts.rs:1123-1153#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
-[src: file: backend/src/acp.rs:1554-1593#native_session_mcp_servers]
+[src: file: backend/src/acp.rs:1560-1599#native_session_mcp_servers]
 
 The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
@@ -171,8 +171,8 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:6048-6058#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:15955-16236#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:6064-6074#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:16046-16327#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:532-560#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)

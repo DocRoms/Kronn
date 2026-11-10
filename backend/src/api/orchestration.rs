@@ -792,6 +792,77 @@ pub(crate) async fn return_quota_escalations_past_reset(state: &AppState) -> Vec
     returned
 }
 
+/// KT-1664 — the room line that closes a quota escalation the provider
+/// re-check resolved. Its id carries the refused dispatch the escalation notice
+/// (`provider-quota-escalation:<dispatch>`) is keyed by, so the room shows that
+/// notice as settled and a replay cannot post it twice.
+pub(crate) fn quota_resumed_message_id(refused_dispatch_id: &str) -> String {
+    format!("provider-quota-resumed:{refused_dispatch_id}")
+}
+
+/// KT-1664 — a provider that answered the KT-1657 re-check closes the quota
+/// escalation of `execution_id` (one that announced no reset): the execution
+/// goes back to its own worker, in its kept child discussion and worktree, and
+/// its parent room gets one line saying so. Never another provider. The
+/// reassignment re-checks in its own transaction that the execution is still
+/// parked on that quota, so an owner who acted meanwhile is never overridden.
+pub(crate) async fn resume_quota_escalation_after_probe(
+    state: &AppState,
+    execution_id: &str,
+) -> Result<()> {
+    let id = execution_id.to_string();
+    let (execution, selection) = state
+        .db
+        .with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution vanished before its quota resume")?;
+            let selection = crate::models::CampaignWorkerSelection {
+                target: worker_target_from_execution(&execution)?,
+                model: execution.worker_model.clone(),
+                profile_id: execution.worker_profile_id.clone(),
+            };
+            Ok((execution, selection))
+        })
+        .await?;
+    let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
+    reassign_native_execution_as(
+        state,
+        execution_id,
+        selection,
+        "the provider answers again: the quota is back",
+        ReassignCause::QuotaProbed,
+    )
+    .await?;
+    let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
+    let refused = execution.dispatch_job_id.as_deref().unwrap_or(execution_id);
+    let message = orchestrator_message(
+        quota_resumed_message_id(refused),
+        match lang {
+            RoomLang::Fr => format!(
+                "**Quota rétabli — worker relancé**\n\nLe provider `{provider}` répond de nouveau : Kronn a relancé l'exécution `{execution_id}` sur le même worker, dans sa sous-discussion et son worktree existants. Plus aucune action humaine n'est requise pour cette escalade."
+            ),
+            RoomLang::En => format!(
+                "**Quota back — worker resumed**\n\nProvider `{provider}` answers again: Kronn resumed execution `{execution_id}` on the same worker, in its existing child discussion and worktree. No human action is required for that escalation any more."
+            ),
+        },
+    );
+    let room = execution.parent_discussion_id.clone();
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_message(conn, &room, &message)?;
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!(
+            execution_id,
+            "quota resumed notice could not be persisted: {error}"
+        );
+    }
+    Ok(())
+}
+
 /// Runtime counterpart of boot reconciliation. Four clocks remain distinct in
 /// the journal; review/human waiting can therefore be tuned without pretending
 /// that an agent was inactive, and a total campaign deadline cannot be reset by
@@ -3427,23 +3498,31 @@ pub async fn run_integration(
     checkpoint(db, exec_id, CheckpointStep::Anchored(target_sha.clone())).await?;
 
     // ── Phase 1: build the candidate in the CHILD worktree ──
-    let merge_sha = match worktree::build_candidate(child, &target_sha) {
-        Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-        Ok(worktree::CandidateOutcome::Conflict { files }) => {
+    let build = match worktree::build_candidate_detailed(child, &target_sha) {
+        Ok(build) => build,
+        Err(error) => {
+            return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
+        }
+    };
+    let merge_sha = match build.outcome {
+        worktree::CandidateOutcome::Built { sha } => sha,
+        worktree::CandidateOutcome::Conflict { files } => {
             send_back(
                 db,
                 exec_id,
-                &ReworkReport::conflict(format!("merge conflict in {}", files.join(", "))),
+                &ReworkReport::conflict(conflict_reason(
+                    "merge conflict",
+                    &files,
+                    build.detail.as_deref(),
+                )),
             )
             .await?;
             return Ok(IntegrationOutcome::SentBack {
                 reason: format!("conflict in {}", files.join(", ")),
             });
         }
-        Err(error) => {
-            return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
-        }
     };
+    note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
     checkpoint(db, exec_id, CheckpointStep::Built(merge_sha.clone())).await?;
 
     // ── Validations: a failure sends the work back, it never blocks the parent ──
@@ -3461,6 +3540,45 @@ pub async fn run_integration(
         },
     )
     .await
+}
+
+/// What the worker reads as the cause of a merge conflict: the files, and for a
+/// bounce on doc citations the exact citations behind it (KT-1669).
+fn conflict_reason(prefix: &str, files: &[String], detail: Option<&str>) -> String {
+    let base = format!("{prefix} in {}", files.join(", "));
+    match detail {
+        Some(detail) => format!("{base}: {detail}"),
+        None => base,
+    }
+}
+
+/// Journal that the candidate merge settled a citation-only doc conflict
+/// itself, for the delivery card. Best effort: the merge exists either way and
+/// a lost note only leaves the card less informative.
+async fn note_citations_settled(
+    db: &Database,
+    exec_id: &str,
+    merge_sha: &str,
+    settled: Option<&crate::core::docs_citations::merge::Settlement>,
+) {
+    let Some(settled) = settled.cloned() else {
+        return;
+    };
+    let (id, sha) = (exec_id.to_string(), merge_sha.to_string());
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::orchestration::record_citations_settled(
+                conn,
+                &id,
+                &sha,
+                &settled,
+                &backend_actor(),
+            )
+        })
+        .await
+    {
+        tracing::warn!(execution = %exec_id, %error, "citation settlement not journaled");
+    }
 }
 
 /// Validate, arm and fast-forward a built candidate; the row is `Validating` on
@@ -3594,20 +3712,25 @@ async fn validate_and_apply(
             }
         };
         reanchor_candidate(db, exec_id, &tip, "target_advanced").await?;
-        let merge_sha = match worktree::build_candidate(child, &tip) {
-            Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-            Ok(worktree::CandidateOutcome::Conflict { files }) => {
-                let reason = format!(
-                    "merge conflict after the target advanced in {}",
-                    files.join(", ")
-                );
-                send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
-                return Ok(IntegrationOutcome::SentBack { reason });
-            }
+        let build = match worktree::build_candidate_detailed(child, &tip) {
+            Ok(build) => build,
             Err(error) => {
                 return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
             }
         };
+        let merge_sha = match build.outcome {
+            worktree::CandidateOutcome::Built { sha } => sha,
+            worktree::CandidateOutcome::Conflict { files } => {
+                let reason = conflict_reason(
+                    "merge conflict after the target advanced",
+                    &files,
+                    build.detail.as_deref(),
+                );
+                send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
+                return Ok(IntegrationOutcome::SentBack { reason });
+            }
+        };
+        note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
         checkpoint(db, exec_id, CheckpointStep::Built(merge_sha.clone())).await?;
         checkpoint(db, exec_id, CheckpointStep::Validating).await?;
         candidate = AnchoredCandidate {
@@ -4003,17 +4126,25 @@ async fn resume_recovered_integration(
                     }
                 };
             reanchor_candidate(db, exec_id, &target_sha, "rebuild_candidate").await?;
-            let merge_sha = match worktree::build_candidate(child, &target_sha) {
-                Ok(worktree::CandidateOutcome::Built { sha }) => sha,
-                Ok(worktree::CandidateOutcome::Conflict { files }) => {
-                    let reason = format!("merge conflict after recovery in {}", files.join(", "));
-                    send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
-                    return Ok(IntegrationOutcome::SentBack { reason });
-                }
+            let build = match worktree::build_candidate_detailed(child, &target_sha) {
+                Ok(build) => build,
                 Err(error) => {
                     return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
                 }
             };
+            let merge_sha = match build.outcome {
+                worktree::CandidateOutcome::Built { sha } => sha,
+                worktree::CandidateOutcome::Conflict { files } => {
+                    let reason = conflict_reason(
+                        "merge conflict after recovery",
+                        &files,
+                        build.detail.as_deref(),
+                    );
+                    send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
+                    return Ok(IntegrationOutcome::SentBack { reason });
+                }
+            };
+            note_citations_settled(db, exec_id, &merge_sha, build.settled.as_ref()).await;
             checkpoint(db, exec_id, CheckpointStep::Built(merge_sha)).await?;
             checkpoint(db, exec_id, CheckpointStep::Validating).await?;
             backup_ref
@@ -11183,6 +11314,28 @@ fn worker_brief_markdown_in(
          l'intégration.\n\n"
             .to_string()
     };
+    // KT-1669 — a lane re-anchors only the citations its own gate reads. The
+    // integration settles a conflict that is only citation line numbers, so a
+    // lane never rewrites the target's anchors to avoid one.
+    let citations = if !fr {
+        "## Doc citations\n\
+         Keep the `[src:]` citations of the docs you edit resolving: that is your own \
+         gate. Do not re-anchor the citations of docs you did not edit, nor the anchors a merge \
+         of the target moved. The integration re-anchors every citation your code shift only \
+         moved, in any doc, and takes the target's side when the only conflict is citation line \
+         numbers, without sending your work back. A citation your change breaks for good (its \
+         symbol removed or renamed) is yours to fix: the integration sends it back with the \
+         exact list.\n\n"
+    } else {
+        "## Citations de documentation\n\
+         Garde résolubles les citations `[src:]` des docs que tu modifies : c'est ta \
+         propre porte. Ne ré-ancre pas les citations des docs que tu n'as pas modifiés, ni les \
+         ancres qu'une fusion de la cible a déplacées. L'intégration ré-ancre toute citation que \
+         ton décalage de code a seulement déplacée, dans n'importe quel doc, et prend le côté de \
+         la cible quand le seul conflit porte sur des numéros de ligne de citations, sans te \
+         renvoyer ton travail. Une citation que ton changement casse pour de bon (symbole \
+         supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
+    };
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -11204,6 +11357,7 @@ fn worker_brief_markdown_in(
              is done by Kronn AFTER review.\n\
              - Stay within the DoD's scope.\n\n\
              {target_integration}\
+             {citations}\
              ## Tests\n\
              {tests}\n\n\
              ## Workspace\n\
@@ -11244,6 +11398,7 @@ fn worker_brief_markdown_in(
          protégée est faite par Kronn APRÈS revue.\n\
          - Reste dans le périmètre de la DoD.\n\n\
          {target_integration}\
+         {citations}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -11271,6 +11426,7 @@ fn worker_brief_markdown_in(
         human_arbitration = human_arbitration,
         parent_milestones = parent_milestones,
         target_integration = target_integration,
+        citations = citations,
         delivery_format = delivery_format,
         commit_boundary = commit_boundary,
         first_action = first_action,
@@ -13902,6 +14058,10 @@ pub(crate) enum ReassignCause {
     /// The sweep handing an execution back after the reset. Re-validated
     /// inside the reassignment transaction.
     QuotaReturn,
+    /// The provider re-check (KT-1664) found the provider answering again for
+    /// an escalation that announced no reset. Same worker, same worktree;
+    /// re-validated inside the reassignment transaction.
+    QuotaProbed,
 }
 
 impl ReassignCause {
@@ -13911,7 +14071,33 @@ impl ReassignCause {
     fn rearm_actor(self) -> PlanningActorKind {
         match self {
             Self::Human => PlanningActorKind::Human,
-            Self::QuotaFallback { .. } | Self::QuotaReturn => PlanningActorKind::Backend,
+            Self::QuotaFallback { .. } | Self::QuotaReturn | Self::QuotaProbed => {
+                PlanningActorKind::Backend
+            }
+        }
+    }
+
+    /// Kronn handing an execution back to the worker it was parked on.
+    fn is_quota_return(self) -> bool {
+        matches!(self, Self::QuotaReturn | Self::QuotaProbed)
+    }
+
+    /// The still-valid check a quota return runs before and inside its
+    /// reassignment transaction.
+    fn ensure_return_still_due(
+        self,
+        conn: &rusqlite::Connection,
+        exec_id: &str,
+        provider: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        match self {
+            Self::QuotaProbed => crate::db::orchestration::ensure_probed_quota_return_still_parked(
+                conn, exec_id, provider, now,
+            ),
+            _ => crate::db::orchestration::ensure_quota_return_still_due(
+                conn, exec_id, provider, now,
+            ),
         }
     }
 }
@@ -13937,7 +14123,7 @@ pub(crate) async fn reassign_native_execution_as(
                 .context("execution vanished before worker reassignment")
         })
         .await?;
-    if matches!(cause, ReassignCause::QuotaReturn) {
+    if cause.is_quota_return() {
         // Same check as the one inside the reassignment transaction (which
         // stays authoritative), run first so a return that is already stale
         // does not persist a re-anchored scope for a worker round that will
@@ -13946,14 +14132,7 @@ pub(crate) async fn reassign_native_execution_as(
         let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
         state
             .db
-            .with_conn(move |conn| {
-                crate::db::orchestration::ensure_quota_return_still_due(
-                    conn,
-                    &id,
-                    &provider,
-                    chrono::Utc::now(),
-                )
-            })
+            .with_conn(move |conn| cause.ensure_return_still_due(conn, &id, &provider))
             .await?;
     }
     let lang = room_lang(&state.db, &execution.parent_discussion_id).await;
@@ -13983,16 +14162,11 @@ pub(crate) async fn reassign_native_execution_as(
                 }
             }
             let transaction = conn.unchecked_transaction()?;
-            if matches!(cause, ReassignCause::QuotaReturn) {
+            if cause.is_quota_return() {
                 // The sweep read this execution before the git re-anchoring
                 // above. A person may have moved, paused or finished it since:
                 // refuse here, before anything is written or cancelled.
-                crate::db::orchestration::ensure_quota_return_still_due(
-                    &transaction,
-                    &id,
-                    &provider,
-                    chrono::Utc::now(),
-                )?;
+                cause.ensure_return_still_due(&transaction, &id, &provider)?;
             }
             let before = crate::db::orchestration::get_task_execution(&transaction, &id)?
                 .context("execution vanished before worker reassignment")?;
@@ -14010,7 +14184,7 @@ pub(crate) async fn reassign_native_execution_as(
             let back_on_origin = earlier_origin
                 .as_ref()
                 .is_some_and(|origin| origin.is_worker(&provider, selection.target.tier));
-            let keep_quota_origin = matches!(cause, ReassignCause::QuotaReturn)
+            let keep_quota_origin = cause.is_quota_return()
                 && earlier_origin.is_some()
                 && !back_on_origin;
             let execution = crate::db::orchestration::reassign_execution_worker_keeping_origin(
@@ -20290,6 +20464,59 @@ pub(crate) mod tests {
             !no_shell.contains("## Intégrer la branche cible"),
             "{no_shell}"
         );
+    }
+
+    /// KT-1669 — the brief asks a lane to keep only its own citations green and
+    /// says the integration settles a citation-only conflict, whatever the
+    /// transport and language.
+    #[test]
+    fn worker_brief_leaves_citation_only_conflicts_to_the_integration() {
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            for (can_run_shell, projection) in [(true, true), (true, false), (false, true)] {
+                let brief = worker_brief_markdown_in(
+                    lang,
+                    "KT-1669",
+                    "Citations",
+                    "Objective",
+                    &[],
+                    "/wt/kt1669",
+                    "kronn/task/KT-1669",
+                    "abc1234",
+                    can_run_shell,
+                    projection,
+                    None,
+                );
+                let (heading, own_gate, not_target) = match lang {
+                    RoomLang::Fr => (
+                        "## Citations de documentation",
+                        "c'est ta propre porte",
+                        "Ne ré-ancre pas les citations des docs que tu n'as pas modifiés",
+                    ),
+                    RoomLang::En => (
+                        "## Doc citations",
+                        "that is your own gate",
+                        "Do not re-anchor the citations of docs you did not edit",
+                    ),
+                };
+                let (shift, broken_for_good) = match lang {
+                    RoomLang::Fr => (
+                        "ton décalage de code a seulement déplacée",
+                        "Une citation que ton changement casse pour de bon",
+                    ),
+                    RoomLang::En => (
+                        "your code shift only moved",
+                        "A citation your change breaks for good",
+                    ),
+                };
+                for needle in [heading, own_gate, not_target, shift, broken_for_good] {
+                    assert!(brief.contains(needle), "missing `{needle}`: {brief}");
+                }
+                assert!(
+                    !brief.contains("make docs-reanchor"),
+                    "a lane is never asked to run the repository-wide re-anchor: {brief}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -27716,6 +27943,267 @@ pub(crate) mod tests {
         assert_eq!(task.summary.status, PlanningTaskStatus::InProgress);
     }
 
+    const OVERVIEW: &str = "docs/architecture/overview.md";
+
+    fn lib_lines(shift_after: usize, shift: usize) -> String {
+        let mut lines: Vec<String> = (1..=60)
+            .map(|n| match n {
+                10 => "pub fn alpha() {}".to_string(),
+                30 => "pub fn beta() {}".to_string(),
+                n => format!("let v{n} = {n};"),
+            })
+            .collect();
+        for k in 0..shift {
+            lines.insert(shift_after + k, format!("let shifted{k} = 0;"));
+        }
+        lines.join("\n") + "\n"
+    }
+
+    /// Ten lines, `gamma` on the third unless `with_gamma` is false.
+    fn other_lines(with_gamma: bool) -> String {
+        (1..=10)
+            .map(|n| match n {
+                3 if with_gamma => "pub fn gamma() {}".to_string(),
+                n => format!("let o{n} = 0;"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    }
+
+    fn overview(alpha: usize, beta: usize) -> String {
+        format!(
+            "# Overview\n\nAlpha: [src: file: src/lib.rs:{alpha}-{}#alpha]\n\
+             Beta: [src: file: src/lib.rs:{beta}-{}#beta]\n",
+            alpha + 1,
+            beta + 1
+        )
+    }
+
+    fn commit_everything(dir: &Path, message: &str) {
+        for args in [vec!["add", "."], vec!["commit", "-m", message]] {
+            assert!(git(dir, &args).status.success(), "{args:?}");
+        }
+    }
+
+    /// KT-1669 — the worker and the target both shifted `src/lib.rs` and
+    /// re-anchored the same two lines of `overview.md`. With `gone`, the worker
+    /// also cites a function the target deleted, elsewhere in the doc.
+    async fn two_lanes_on_overview(
+        db: &Database,
+        repo: &Path,
+        key: &str,
+        gone: bool,
+    ) -> TaskExecution {
+        const TAIL: &str = "\nNotes.\nOne.\nTwo.\nThree.\nFour.\n";
+        std::fs::create_dir_all(repo.join("docs/architecture")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), lib_lines(0, 0)).unwrap();
+        std::fs::write(repo.join("src/other.rs"), other_lines(true)).unwrap();
+        std::fs::write(repo.join(OVERVIEW), overview(10, 30) + TAIL).unwrap();
+        commit_everything(repo, "base: lib and overview");
+
+        let (execution, _task_ref, child) =
+            approved_execution_with_commit(db, repo, key, "src/lib.rs", &lib_lines(5, 5), vec![])
+                .await;
+        let mut doc = overview(15, 35) + TAIL;
+        if gone {
+            doc.push_str("Gamma: [src: file: src/other.rs:3-4#gamma]\n");
+        }
+        std::fs::write(child.join(OVERVIEW), doc).unwrap();
+        commit_everything(&child, "worker re-anchors overview");
+
+        std::fs::write(repo.join("src/lib.rs"), lib_lines(1, 3)).unwrap();
+        std::fs::write(repo.join(OVERVIEW), overview(13, 33) + TAIL).unwrap();
+        if gone {
+            std::fs::write(repo.join("src/other.rs"), other_lines(false)).unwrap();
+        }
+        commit_everything(repo, "target re-anchors overview");
+        assert!(
+            crate::core::docs_citations::check_corpus(repo).is_empty(),
+            "the target itself is green"
+        );
+        execution
+    }
+
+    #[tokio::test]
+    async fn a_citation_only_conflict_is_settled_by_the_integration_without_the_worker() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-settled", false).await;
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "no worker turn for an anchor-only conflict: {outcome:?}"
+        );
+        // The target side was taken, then re-anchored onto the merge: 3 + 5
+        // lines above both functions, and the docs gate is green on the result.
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(OVERVIEW)).unwrap(),
+            overview(18, 38) + "\nNotes.\nOne.\nTwo.\nThree.\nFour.\n"
+        );
+        assert!(crate::core::docs_citations::check_corpus(repo.path()).is_empty());
+        let id = execution.id.clone();
+        let settled = db
+            .with_conn(move |conn| crate::db::orchestration::citations_settled(conn, &id))
+            .await
+            .unwrap();
+        // The delivery card reads this journal: the doc and how many anchors moved.
+        assert_eq!(
+            settled,
+            vec![crate::core::docs_citations::merge::Settlement {
+                docs: vec![OVERVIEW.to_string()],
+                moved: 2,
+                reanchored: vec![OVERVIEW.to_string()],
+            }]
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_citation_left_unresolved_by_the_settlement_goes_back_with_the_exact_list() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-gone", true).await;
+        let target_before = git_rev(repo.path(), "HEAD");
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::SentBack { ref reason } if reason.contains(OVERVIEW)),
+            "{outcome:?}"
+        );
+        assert_eq!(git_rev(repo.path(), "HEAD"), target_before);
+        let after = exec_of(&db, &execution.id).await;
+        let (_, brief) = message_row(
+            &db,
+            &format!(
+                "orch-integration-rework:{}:{}",
+                execution.id, after.attempt_no
+            ),
+        )
+        .await
+        .expect("the worker is told what is unresolved");
+        assert!(
+            brief.contains("docs/architecture/overview.md:11 [src: file: src/other.rs:3-4#gamma]"),
+            "{brief}"
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            0,
+            "a bounced merge settled nothing"
+        );
+    }
+
+    /// An interrupted execution whose boot recovery decided to rebuild the
+    /// candidate, then the recovery consumed.
+    async fn recover_by_rebuilding(
+        db: &Database,
+        execution: &TaskExecution,
+        repo: &Path,
+    ) -> IntegrationOutcome {
+        checkpoint(
+            db,
+            &execution.id,
+            CheckpointStep::Anchored(git_rev(repo, "main")),
+        )
+        .await
+        .unwrap();
+        let id = execution.id.clone();
+        db.with_conn(move |conn| {
+            crate::db::orchestration::transition_execution(
+                conn,
+                &id,
+                TaskExecutionStatus::Interrupted,
+                &backend_actor(),
+                serde_json::json!({ "reason": "backend restart" }),
+            )?;
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?
+                .context("execution exists")?;
+            let run = crate::db::orchestration::get_orchestration_run(
+                conn,
+                &execution.orchestration_run_id,
+            )?
+            .context("run exists")?;
+            crate::db::orchestration::set_execution_recovery(
+                conn,
+                &execution,
+                &run,
+                ExecutionRecoveryAction::RebuildCandidate,
+                "the target may have moved",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        resume_recovered_integration(db, &execution.id, ExecutionRecoveryAction::RebuildCandidate)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_recovered_rebuild_settles_and_journals_a_citation_only_conflict() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution = two_lanes_on_overview(&db, repo.path(), "citation-recovered", false).await;
+
+        let outcome = recover_by_rebuilding(&db, &execution, repo.path()).await;
+
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "no worker turn for an anchor-only conflict after recovery: {outcome:?}"
+        );
+        assert!(crate::core::docs_citations::check_corpus(repo.path()).is_empty());
+        let id = execution.id.clone();
+        let settled = db
+            .with_conn(move |conn| crate::db::orchestration::citations_settled(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(
+            settled,
+            vec![crate::core::docs_citations::merge::Settlement {
+                docs: vec![OVERVIEW.to_string()],
+                moved: 2,
+                reanchored: vec![OVERVIEW.to_string()],
+            }],
+            "the delivery card reads what the recovery settled"
+        );
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recovered_rebuild_that_leaves_a_citation_unresolved_goes_back_with_the_list() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let execution =
+            two_lanes_on_overview(&db, repo.path(), "citation-recovered-gone", true).await;
+        let target_before = git_rev(repo.path(), "HEAD");
+
+        let outcome = recover_by_rebuilding(&db, &execution, repo.path()).await;
+
+        let IntegrationOutcome::SentBack { reason } = outcome else {
+            panic!("a citation whose symbol is gone goes back: {outcome:?}");
+        };
+        assert!(reason.contains("merge conflict after recovery"), "{reason}");
+        assert!(
+            reason.contains("docs/architecture/overview.md:11 [src: file: src/other.rs:3-4#gamma]"),
+            "{reason}"
+        );
+        assert_eq!(git_rev(repo.path(), "HEAD"), target_before);
+        assert_eq!(
+            event_count(&db, &execution.id, "integration_citations_settled").await,
+            0
+        );
+    }
+
     #[tokio::test]
     async fn failed_validation_returns_to_worker_and_records_the_exact_candidate() {
         let repo = init_repo();
@@ -35069,6 +35557,502 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .unwrap()
+    }
+
+    /// KT-1664 — a provider that answers with a fixed verdict and remembers who
+    /// it was asked about, standing in for the KT-1657 agent probe.
+    struct StubQuotaProbe {
+        verdict: Option<bool>,
+        asked: std::sync::Mutex<Vec<AgentType>>,
+    }
+
+    impl StubQuotaProbe {
+        fn new(verdict: Option<bool>) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                verdict,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> Vec<AgentType> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::workflows::quota_wait::QuotaProbe for StubQuotaProbe {
+        async fn quota_is_back(
+            &self,
+            agent: &AgentType,
+            _project_path: &str,
+            _tokens: &crate::models::TokensConfig,
+            _full_access: bool,
+        ) -> Option<bool> {
+            self.asked.lock().unwrap().push(agent.clone());
+            self.verdict
+        }
+    }
+
+    fn rechecker_with(
+        probe: &std::sync::Arc<StubQuotaProbe>,
+    ) -> crate::workflows::quota_wait::QuotaRechecker {
+        crate::workflows::quota_wait::QuotaRechecker::new(
+            probe.clone(),
+            chrono::Duration::minutes(20),
+        )
+    }
+
+    /// The 10/11 incident: Claude Code refused a worker's dispatch with no
+    /// announced reset, so KT-1564's reset sweep never lists it. Every execution
+    /// escalated that way, with its own tier and model.
+    async fn escalate_claude_without_reset(
+        db: &std::sync::Arc<Database>,
+        repo: &Path,
+        count: usize,
+    ) -> Vec<TaskExecution> {
+        let executions = economy_claude_executions(db, repo, count).await;
+        for execution in &executions {
+            escalate_claude_with_reset(db, execution.dispatch_job_id.clone().unwrap(), None).await;
+        }
+        executions
+    }
+
+    async fn messages_of(
+        db: &Database,
+        discussion_id: &str,
+    ) -> Vec<crate::models::DiscussionMessage> {
+        let id = discussion_id.to_string();
+        db.with_conn(move |conn| crate::db::discussions::list_messages(conn, &id))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_quota_escalation_with_no_announced_reset_resumes_on_its_worker_when_the_provider_answers(
+    ) {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let refused = was.dispatch_job_id.clone().unwrap();
+        let parent = was.parent_discussion_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET language = 'en' WHERE id = ?1",
+                [&parent],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+        assert!(
+            return_quota_escalations_past_reset(&quota_test_state(&db))
+                .await
+                .is_empty(),
+            "the reset sweep has nothing to go by"
+        );
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+
+        // Just refused: the provider is not asked about it yet.
+        assert!(rechecker
+            .recheck_pass(&state, t0)
+            .await
+            .executions
+            .is_empty());
+        // Bounded: no new question inside the interval.
+        assert!(rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(10))
+            .await
+            .executions
+            .is_empty());
+        assert!(probe.asked().is_empty());
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Escalated
+        );
+
+        let resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+            .await;
+        assert_eq!(resumed.executions, vec![was.id.clone()]);
+        assert_eq!(probe.asked(), vec![AgentType::ClaudeCode]);
+
+        // Same worker, same room, same worktree; a fresh dispatch carries it.
+        let back = exec_of(&db, &was.id).await;
+        assert_eq!(back.status, TaskExecutionStatus::Working);
+        assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(back.worker_model_tier.as_deref(), Some("economy"));
+        assert_eq!(back.worker_model, was.worker_model);
+        assert_eq!(back.sub_discussion_id, was.sub_discussion_id);
+        assert_eq!(back.workspace_id, was.workspace_id);
+        assert_eq!(back.child_branch, was.child_branch);
+        let dispatch = back.dispatch_job_id.clone().unwrap();
+        assert_ne!(dispatch, refused);
+        assert_eq!(
+            dispatch_of(&db, dispatch).await.agent_override,
+            Some(AgentType::ClaudeCode)
+        );
+        let id = was.id.clone();
+        assert!(db
+            .with_conn(move |conn| crate::db::orchestration::provider_changes(conn, &id))
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            !claude_quota_blocked(&db).await,
+            "the provider stops being refused (KT-838)"
+        );
+
+        // The room gets one line, keyed by the refused dispatch the escalation
+        // notice is keyed by.
+        let notices = messages_of(&db, &was.parent_discussion_id)
+            .await
+            .into_iter()
+            .filter(|message| message.id == format!("provider-quota-resumed:{refused}"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].content.contains("Quota back"),
+            "{}",
+            notices[0].content
+        );
+        assert!(notices[0].content.contains("No human action"));
+
+        // Settled: the next passes find nothing left to ask about.
+        assert!(rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(60))
+            .await
+            .executions
+            .is_empty());
+        assert_eq!(probe.asked().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_room_line_of_a_resumed_quota_escalation_speaks_the_rooms_language() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let parent = was.parent_discussion_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET language = 'fr' WHERE id = ?1",
+                [&parent],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        resume_quota_escalation_after_probe(&quota_test_state(&db), &was.id)
+            .await
+            .unwrap();
+        let line = messages_of(&db, &was.parent_discussion_id)
+            .await
+            .into_iter()
+            .find(|message| message.id.starts_with("provider-quota-resumed:"))
+            .expect("one line in the room");
+        assert!(line.content.contains("Quota rétabli"), "{}", line.content);
+        assert!(line.content.contains("Plus aucune action humaine"));
+    }
+
+    #[tokio::test]
+    async fn a_login_or_key_change_asks_the_provider_about_quota_escalations_at_once() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+        assert!(rechecker
+            .recheck_pass(&state, t0)
+            .await
+            .executions
+            .is_empty());
+        assert!(probe.asked().is_empty());
+
+        crate::workflows::quota_wait::request_recheck();
+        let resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(1))
+            .await;
+        assert_eq!(resumed.executions, vec![was.id.clone()]);
+        assert_eq!(probe.asked().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn several_executions_escalated_by_one_outage_all_resume_after_one_successful_probe() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let before = escalate_claude_without_reset(&db, repo.path(), 3).await;
+        assert!(claude_quota_blocked(&db).await);
+        let state = quota_test_state(&db);
+        let probe = StubQuotaProbe::new(Some(true));
+        let rechecker = rechecker_with(&probe);
+        let t0 = chrono::Utc::now();
+        rechecker.recheck_pass(&state, t0).await;
+        let mut resumed = rechecker
+            .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+            .await
+            .executions;
+        resumed.sort();
+        let mut expected = before.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(resumed, expected);
+        assert_eq!(
+            probe.asked(),
+            vec![AgentType::ClaudeCode],
+            "one probe for all"
+        );
+        for was in &before {
+            let back = exec_of(&db, &was.id).await;
+            assert_eq!(back.status, TaskExecutionStatus::Working);
+            assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+            assert_eq!(
+                back.worker_model, was.worker_model,
+                "each keeps its own model, not its sibling's"
+            );
+            assert_ne!(back.dispatch_job_id, was.dispatch_job_id);
+        }
+        assert!(!claude_quota_blocked(&db).await);
+    }
+
+    #[tokio::test]
+    async fn a_provider_still_refusing_or_silent_keeps_every_escalation_without_a_dispatch() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let before = escalate_claude_without_reset(&db, repo.path(), 2).await;
+        let state = quota_test_state(&db);
+        let t0 = chrono::Utc::now();
+        for verdict in [Some(false), None] {
+            let probe = StubQuotaProbe::new(verdict);
+            let rechecker = rechecker_with(&probe);
+            rechecker.recheck_pass(&state, t0).await;
+            assert!(rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+                .await
+                .executions
+                .is_empty());
+            assert!(rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(30))
+                .await
+                .executions
+                .is_empty());
+            assert_eq!(probe.asked().len(), 1, "{verdict:?}: asked once in 30 min");
+            rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(42))
+                .await;
+            assert_eq!(
+                probe.asked().len(),
+                2,
+                "{verdict:?}: asked again after 20 min"
+            );
+        }
+        for was in &before {
+            let still = exec_of(&db, &was.id).await;
+            assert_eq!(still.status, TaskExecutionStatus::Escalated);
+            assert_eq!(
+                still.dispatch_job_id, was.dispatch_job_id,
+                "no new dispatch was enqueued"
+            );
+            let child = was.sub_discussion_id.clone().unwrap();
+            let jobs: i64 = db
+                .with_conn(move |conn| {
+                    Ok(conn.query_row(
+                        "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE discussion_id = ?1",
+                        [&child],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(jobs, 1, "only the refused dispatch exists");
+        }
+        assert!(claude_quota_blocked(&db).await);
+        assert!(messages_of(&db, &before[0].parent_discussion_id)
+            .await
+            .iter()
+            .all(|message| !message.id.starts_with("provider-quota-resumed:")));
+    }
+
+    /// How an escalation stops being one the provider re-check may resume.
+    #[derive(Debug, Clone, Copy)]
+    enum Spoiled {
+        AnotherReason,
+        OwnerChangedWorker,
+        RunAwaitsHuman,
+        RunPaused,
+        TaskDone,
+        ResetAnnounced,
+    }
+
+    async fn spoil_the_escalation(
+        db: &std::sync::Arc<Database>,
+        state: &AppState,
+        was: &TaskExecution,
+        how: Spoiled,
+    ) {
+        let id = was.id.clone();
+        match how {
+            Spoiled::AnotherReason => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE task_execution_recovery SET recovery_reason = 'review_wait_timeout' \
+                         WHERE task_execution_id = ?1",
+                        [&id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            Spoiled::OwnerChangedWorker => {
+                reassign_native_execution(
+                    state,
+                    &id,
+                    crate::models::CampaignWorkerSelection {
+                        target: MessageTarget::agent(AgentType::Codex),
+                        model: None,
+                        profile_id: None,
+                    },
+                    "the owner picked Codex",
+                )
+                .await
+                .unwrap();
+            }
+            Spoiled::RunAwaitsHuman => set_run_state(db, &id, "awaiting_human", "active").await,
+            Spoiled::RunPaused => set_run_state(db, &id, "paused", "active").await,
+            Spoiled::TaskDone => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE planning_tasks SET status = 'done' \
+                         WHERE id = (SELECT task_id FROM task_executions WHERE id = ?1)",
+                        [&id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+            // The provider announced a reset: the reset sweep owns it, not the probe.
+            Spoiled::ResetAnnounced => {
+                db.with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE provider_quota_generations SET reset_at = ?1 \
+                         WHERE provider = 'ClaudeCode'",
+                        [(chrono::Utc::now() + chrono::Duration::hours(2))
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escalation_that_is_not_a_quota_one_or_was_taken_over_is_never_probed_or_resumed() {
+        for how in [
+            Spoiled::AnotherReason,
+            Spoiled::OwnerChangedWorker,
+            Spoiled::RunAwaitsHuman,
+            Spoiled::RunPaused,
+            Spoiled::TaskDone,
+            Spoiled::ResetAnnounced,
+        ] {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let state = quota_test_state(&db);
+            let was = escalate_claude_without_reset(&db, repo.path(), 1)
+                .await
+                .remove(0);
+            assert_eq!(
+                db.with_read_conn(
+                    crate::db::orchestration::executions_escalated_on_unannounced_quota
+                )
+                .await
+                .unwrap()
+                .len(),
+                1,
+                "the control: it is listed before being spoiled"
+            );
+            spoil_the_escalation(&db, &state, &was, how).await;
+            let before = exec_of(&db, &was.id).await;
+
+            let probe = StubQuotaProbe::new(Some(true));
+            let rechecker = rechecker_with(&probe);
+            let t0 = chrono::Utc::now();
+            rechecker.recheck_pass(&state, t0).await;
+            let resumed = rechecker
+                .recheck_pass(&state, t0 + chrono::Duration::minutes(21))
+                .await;
+            assert!(resumed.executions.is_empty(), "{how:?}");
+            assert!(probe.asked().is_empty(), "{how:?}: no provider is asked");
+            let after = exec_of(&db, &was.id).await;
+            assert_eq!(after.status, before.status, "{how:?}");
+            assert_eq!(after.worker_agent_type, before.worker_agent_type, "{how:?}");
+            assert_eq!(after.dispatch_job_id, before.dispatch_job_id, "{how:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resume_never_overrides_an_owner_who_moved_the_worker_after_the_probe() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = escalate_claude_without_reset(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        // The re-check listed the execution; the owner then moves it to Codex.
+        reassign_native_execution(
+            &state,
+            &was.id,
+            crate::models::CampaignWorkerSelection {
+                target: MessageTarget::agent(AgentType::Codex),
+                model: None,
+                profile_id: None,
+            },
+            "the owner picked Codex",
+        )
+        .await
+        .unwrap();
+        let human = exec_of(&db, &was.id).await;
+        // The re-check's stale selection names Claude Code again.
+        let refused = reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "the provider answers again",
+            ReassignCause::QuotaProbed,
+        )
+        .await
+        .err()
+        .expect("a stale resume must not move an execution its owner moved");
+        assert!(
+            refused.to_string().contains("quota return skipped"),
+            "{refused}"
+        );
+        let still = exec_of(&db, &was.id).await;
+        assert_eq!(still.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(still.dispatch_job_id, human.dispatch_job_id);
+        assert!(resume_quota_escalation_after_probe(&state, &was.id)
+            .await
+            .is_err());
+        assert!(messages_of(&db, &was.parent_discussion_id)
+            .await
+            .iter()
+            .all(|message| !message.id.starts_with("provider-quota-resumed:")));
     }
 
     #[tokio::test]

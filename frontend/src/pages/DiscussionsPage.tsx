@@ -18,7 +18,7 @@ import { unseenBasis } from '../lib/discussionUiUtils';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { MessageDateSeparator } from '../components/MessageDateSeparator';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
-import { foldOrchestrationRuns, isOrchestrationMessage } from '../lib/orchestrationFold';
+import { foldOrchestrationRuns, isOrchestrationMessage, resolvedQuotaEscalations } from '../lib/orchestrationFold';
 import { OrchestrationFoldMarker } from '../components/OrchestrationFoldMarker';
 import { localCalendarDayKey } from '../lib/discussionDates';
 import { ChatInput } from '../components/ChatInput';
@@ -3904,11 +3904,13 @@ export function DiscussionsPage({
         // points at, is never folded away.
         const forceVisibleIds = new Set<string>();
         if (globalSearchTarget?.messageId) forceVisibleIds.add(globalSearchTarget.messageId);
+        const resolvedEscalations = resolvedQuotaEscalations(msgs);
         const items = foldOrchestrationRuns(
           groupMessagesWithToolFold(msgs, { isAutoPrompt }),
           {
             hide: !showOrchestrationMessages,
             expandedRunIds: expandedOrchestrationRuns,
+            resolvedIds: resolvedEscalations,
             hasActions: messageId => (discussionActionsByMessageId.get(messageId)?.length ?? 0) > 0,
             forceVisibleIds,
           },
@@ -4092,6 +4094,7 @@ export function DiscussionsPage({
                 attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
                 discussionMedia={activeContextFiles}
                 pendingAttachment={pendingFileMsgIds.has(msg.id)}
+                quotaResumed={resolvedEscalations.has(msg.id)}
                 isLastUser={msg.role === 'User' && idx === lastUserIdx}
                 isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
                 isEditing={editingMsgId === msg.id}

@@ -4,8 +4,8 @@
 - **Area**: Backend (agent output parsing)
 - **Problem (fact)**: on the CLI text path, `parse_token_usage` returns 0
   tokens for Gemini CLI and Vibe, pinned by tests.
-  `[src: file: backend/src/agents/runner.rs:15341-15375#GeminiCli]`
-  `[src: file: backend/src/agents/runner.rs:15409-15411#Vibe]`
+  `[src: file: backend/src/agents/runner.rs:15432-15466#GeminiCli]`
+  `[src: file: backend/src/agents/runner.rs:15500-15502#Vibe]`
   `[src: file: backend/src/agents/runner_test.rs:9990-10000#vibe_tokens_always_zero]`
 - **Why we can't fix now (constraint)**: neither CLI prints a token count on
   that path; the measurement has to come from upstream.

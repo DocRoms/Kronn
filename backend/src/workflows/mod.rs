@@ -124,7 +124,7 @@ impl WorkflowEngine {
             }
             quota_wait::wake_due_runs(&self.state, Utc::now()).await;
             self.quota_rechecker
-                .recheck_due(&self.state, Utc::now())
+                .recheck_pass(&self.state, Utc::now())
                 .await;
             crate::core::citation_drift::scheduled_tick(&self.state).await;
         }

@@ -187,7 +187,7 @@ name states the counts. It owns its polling (3 s while something moves, 15 s idl
 once more on open and when the tab returns), so a refresh re-renders the bell and
 its panel, not the dashboard.
 [src: file: frontend/src/pages/Dashboard.tsx:787-801#ActivityBell]
-[src: file: frontend/src/components/activity/ActivityBell.tsx:25-100#ActivityBell]
+[src: file: frontend/src/components/activity/ActivityBell.tsx:25-96#ActivityBell]
 [src: file: frontend/src/components/activity/ActivityBell.css:14-44#data-running]
 [src: file: frontend/src/hooks/useActivityOverview.ts:12-52#useActivityOverview]
 
@@ -238,7 +238,7 @@ nothing in the panel**: a backend test injects one, and a frontend test renders 
 type no locale file names.
 [src: file: backend/src/models/activity.rs:87-139#ActivityRow]
 [src: file: backend/src/api/activity.rs:61-90#collect_activity]
-[src: file: backend/src/api/activity_tests.rs:382-405#new_source]
+[src: file: backend/src/api/activity_tests.rs:382-405#a_new_row_type_is_one_new_source_and_nothing_else]
 [src: file: frontend/src/lib/activity.ts:116-135#ACTIVITY_ACTION_HANDLERS]
 
 What each source counts, and leaves out (so nothing is listed twice and nothing that

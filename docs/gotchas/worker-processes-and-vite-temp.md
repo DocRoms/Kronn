@@ -14,7 +14,7 @@ meanwhile. Only the ended dispatch's id is matched.
 [src: file: backend/src/core/dispatch_reaper.rs:29-30#DISPATCH_ENV]
 [src: file: backend/src/core/child_env.rs:941-953#DISPATCH_ENV]
 [src: file: backend/src/api/discussions/runtime.rs:626-628#reap_task_worker_processes]
-[src: file: backend/src/api/orchestration.rs:920-922#reap_task_worker_processes]
+[src: file: backend/src/api/orchestration.rs:991-993#reap_task_worker_processes]
 [src: file: backend/src/api/discussions/runtime.rs:626-642#reap_task_worker_processes]
 [src: file: backend/src/core/dispatch_reaper.rs:638-693#reap_dispatch]
 
@@ -83,4 +83,4 @@ lane's first build (KT-1255): the deny-default profile, never the backend's own
 rights. If vitest cannot load its config under that profile the frontend reads
 as unavailable, with the command's output as the reason.
 [src: file: backend/src/core/task_worker_env.rs:1124-1184#check_frontend]
-[src: file: backend/src/api/orchestration.rs:2491-2511#worker_probe_runner]
+[src: file: backend/src/api/orchestration.rs:2562-2582#worker_probe_runner]

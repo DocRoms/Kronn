@@ -10,7 +10,7 @@ locally recorded answer cannot overwrite it.
 
 [src: file: frontend/src/lib/discussionQuestions.ts:33-143]
 [src: file: frontend/src/components/DiscussionQuestionBanner.tsx:14-25]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4612-4616#DiscussionQuestionBanner]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4615-4619#DiscussionQuestionBanner]
 
 Nothing floats over the conversation any more (KT-1344): the panel rail lives
 in the side panel's own column and the in-conversation search was removed, so
