@@ -4469,7 +4469,7 @@ const zh: TranslationDict = {
   "orch.config.reviewRoundsUnavailable": "无法读取设置 > Workers：除非在此填写数值，否则由服务器应用其默认值。",
   "orch.config.validations": "验证命令（每行一条）",
   "orch.config.validationsHint": "例如 cargo fmt --check",
-  "orch.config.validationsDefault": "默认验证：fmt + clippy + 定向 lib 测试（例如 cargo test --lib <过滤器>）。完整测试套件由 PR 的 CI 负责。",
+  "orch.config.validationsDefault": "默认验证：cargo fmt --check + cargo clippy --all-targets -- -D warnings + 定向 lib 测试（例如 cargo test --lib <过滤器>）。请报告每项的退出码。完整测试套件由 PR 的 CI 负责。",
   "orch.config.validationsFullSuite": "完整测试套件验证（本地约 20 分钟，而 --lib 仅需 3.3 分钟）属于 PR 的 CI，而非本地集成验证。请优先使用 fmt、clippy 和定向 lib 测试。",
   "orch.config.fallbacks": "允许的备用智能体",
   "orch.config.autoContinue": "自动启动下一个就绪任务",

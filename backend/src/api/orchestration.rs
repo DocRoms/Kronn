@@ -7560,7 +7560,8 @@ async fn deliver_authorized_worker_manifest_inner(
                 Vec::new()
             })
     };
-    let review_request = build_review_request_message(
+    let lang = room_lang(db, &exec.parent_discussion_id).await;
+    let mut review_request = build_review_request_message(
         &exec.id,
         exec.attempt_no,
         &task.summary.reference,
@@ -7569,8 +7570,12 @@ async fn deliver_authorized_worker_manifest_inner(
         &manifest.head_sha,
         &manifest.summary,
         &provider_changes,
-        room_lang(db, &exec.parent_discussion_id).await,
+        lang,
     );
+    if let Some(warning) = delivery_lint_gate_warning(&manifest, lang) {
+        review_request.content.push_str("\n\n");
+        review_request.content.push_str(&warning);
+    }
     // The queryable obligation payload carries the exact TARGETED principal identity (DoD-3).
     let review_requested_changes = serde_json::json!({
         "principal_discussion_id": exec.parent_discussion_id,
@@ -10319,6 +10324,45 @@ fn build_review_request_message(
     )
 }
 
+/// KT-1654 — a Rust change is delivered without a passing `clippy --all-targets`
+/// entry: the CI gate is `cargo clippy --all-targets -- -D warnings`, and a
+/// `--lib` / `--lib --tests` run never lints `tests/` (KT-1608 broke clippy that
+/// way). Non-blocking: the delivery is accepted and the principal reads this on
+/// the review request.
+fn delivery_lint_gate_warning(
+    manifest: &crate::models::DeliveryManifestV1,
+    lang: RoomLang,
+) -> Option<String> {
+    let rust_change = manifest.files_touched.iter().any(|file| {
+        file.path.ends_with(".rs")
+            || file.path.ends_with("Cargo.toml")
+            || file.path.ends_with("Cargo.lock")
+    });
+    if !rust_change {
+        return None;
+    }
+    let linted = manifest.tests.iter().any(|test| {
+        let haystack = format!("{} {}", test.name, test.evidence.as_deref().unwrap_or(""));
+        test.status == crate::models::TestStatus::Pass
+            && haystack.contains("clippy")
+            && haystack.contains("--all-targets")
+    });
+    if linted {
+        return None;
+    }
+    Some(match lang {
+        RoomLang::Fr => "⚠️ Gate de lint : cette livraison touche du Rust mais aucune validation \
+             `clippy --all-targets` au statut `pass` n'y figure. Le gate de la CI est `cargo \
+             clippy --all-targets -- -D warnings` (`--lib` ou `--lib --tests` ne lintent pas \
+             `tests/`) : lance-le avant d'approuver."
+            .to_string(),
+        RoomLang::En => "⚠️ Lint gate: this delivery touches Rust but lists no passing \
+             `clippy --all-targets` validation. The CI gate is `cargo clippy --all-targets -- -D \
+             warnings` (`--lib` or `--lib --tests` do not lint `tests/`): run it before approving."
+            .to_string(),
+    })
+}
+
 /// The escalation solicitation posted to the PRINCIPAL in the parent room when the review budget
 /// is exhausted (KT-319 DoD-6). It tells the principal the run has paused in `Escalated` and names
 /// the human choices — it does NOT re-offer. Deterministic id per `(exec, attempt)` so a resume
@@ -10713,7 +10757,10 @@ fn worker_brief_markdown_in(
          (`pass`/`fail`/`skipped` + non-empty evidence) in `tests`. A `pass` without a \
          verifiable command or output is refused.\n\
          The default validations are fmt + clippy + targeted lib tests (`cargo test --lib \
-         <filter>`): the full suite is owned by the PR's CI, never by a local run. The long \
+         <filter>`): the full suite is owned by the PR's CI, never by a local run. For a Rust \
+         change the lint gate is EXACTLY `cargo fmt --check` and `cargo clippy --all-targets -- \
+         -D warnings` (the CI gate: `--lib`, `--lib --tests` or a filtered output do not lint \
+         `tests/`); report each exit code in the evidence of its `tests` entry. The long \
          validations persisted by the principal are run by Kronn at integration, after the \
          review: do not replay them in full. The shell tool \
          cuts a long command (Bash: 600 s): never start one in the background to wait for it, \
@@ -10734,7 +10781,10 @@ fn worker_brief_markdown_in(
          commande ou sortie vérifiable est refusé.\n\
          Les validations par défaut sont fmt + clippy + tests lib ciblés (`cargo test --lib \
          <filtre>`) : la suite complète appartient à la CI de la PR, jamais à un run local. \
-         Les validations longues persistées par le principal sont \
+         Pour un changement Rust, le gate de lint est EXACTEMENT `cargo fmt --check` et \
+         `cargo clippy --all-targets -- -D warnings` (le gate de la CI : `--lib`, `--lib \
+         --tests` ou une sortie filtrée ne lintent pas `tests/`) ; reporte le code de sortie \
+         de chacun dans la preuve de son entrée `tests`. Les validations longues persistées par le principal sont \
          jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
          L'outil shell coupe une commande longue (Bash : 600 s) : n'en lance jamais une en \
          arrière-plan pour l'attendre, car ton processus s'arrête dès que tu rends la main \
@@ -23644,6 +23694,124 @@ pub(crate) mod tests {
         );
         assert!(brief.contains("fmt + clippy + tests lib ciblés"), "{brief}");
         assert!(brief.contains("appartient à la CI de la PR"), "{brief}");
+    }
+
+    /// KT-1654 — both brief languages spell the
+    /// exact lint gate and ask for its exit code, so a worker never guesses.
+    #[test]
+    fn worker_brief_names_the_exact_lint_gate_and_the_exit_code() {
+        let en = worker_brief_markdown_in(
+            RoomLang::En,
+            "KT-1654",
+            "Lint gate",
+            "Objective",
+            &[],
+            "/wt/kt1654",
+            "kronn/task/KT-1654",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        let fr = worker_brief_markdown(
+            "KT-1654",
+            "Lint gate",
+            "Objective",
+            &[],
+            "/wt",
+            "b",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        for brief in [&en, &fr] {
+            assert!(brief.contains("`cargo fmt --check`"), "{brief}");
+            assert!(
+                brief.contains("`cargo clippy --all-targets -- -D warnings`"),
+                "{brief}"
+            );
+        }
+        assert!(en.contains("report each exit code"), "{en}");
+        assert!(fr.contains("reporte le code de sortie"), "{fr}");
+    }
+
+    /// KT-1654 — a Rust delivery with no passing `clippy --all-targets` entry
+    /// raises a non-blocking warning that rides on the review request.
+    #[test]
+    fn delivery_without_a_passing_clippy_all_targets_entry_warns_the_principal() {
+        let manifest = |files: &[&str], tests: &[(&str, crate::models::TestStatus, &str)]| {
+            crate::models::DeliveryManifestV1 {
+                version: "1".into(),
+                task_ref: "KT-1654".into(),
+                head_sha: "abc1234".into(),
+                files_touched: files
+                    .iter()
+                    .map(|path| crate::models::ManifestFile {
+                        path: (*path).into(),
+                        kind: crate::models::FileChangeKind::Modified,
+                    })
+                    .collect(),
+                tests: tests
+                    .iter()
+                    .map(|(name, status, evidence)| crate::models::ManifestTest {
+                        name: (*name).into(),
+                        status: *status,
+                        evidence: Some((*evidence).into()),
+                    })
+                    .collect(),
+                dod_status: vec![],
+                docs: vec![],
+                migrations: vec![],
+                risks: vec![],
+                limitations: vec![],
+                summary: "s".into(),
+                tests_executed: None,
+            }
+        };
+        let rust = ["backend/src/lib.rs"];
+        let lib_only = [(
+            "clippy --lib",
+            crate::models::TestStatus::Pass,
+            "cargo clippy --lib: exit 0",
+        )];
+        let warning = delivery_lint_gate_warning(&manifest(&rust, &lib_only), RoomLang::En)
+            .expect("--lib clippy does not satisfy the gate");
+        assert!(warning.contains("cargo clippy --all-targets -- -D warnings"));
+        assert!(
+            delivery_lint_gate_warning(&manifest(&rust, &lib_only), RoomLang::Fr)
+                .unwrap()
+                .contains("Gate de lint")
+        );
+        // No tests at all, and a failing/skipped entry, both warn.
+        assert!(delivery_lint_gate_warning(&manifest(&rust, &[]), RoomLang::En).is_some());
+        let failed = [(
+            "clippy",
+            crate::models::TestStatus::Fail,
+            "cargo clippy --all-targets -- -D warnings: exit 101",
+        )];
+        assert!(delivery_lint_gate_warning(&manifest(&rust, &failed), RoomLang::En).is_some());
+        // A passing entry, in the name or the evidence, clears it.
+        let ok = [(
+            "cargo clippy --all-targets -- -D warnings",
+            crate::models::TestStatus::Pass,
+            "exit 0",
+        )];
+        assert!(delivery_lint_gate_warning(&manifest(&rust, &ok), RoomLang::En).is_none());
+        let manifest_path = [(
+            "lint",
+            crate::models::TestStatus::Pass,
+            "cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings → 0",
+        )];
+        assert!(
+            delivery_lint_gate_warning(&manifest(&rust, &manifest_path), RoomLang::En).is_none()
+        );
+        // A change with no Rust is never warned.
+        assert!(delivery_lint_gate_warning(
+            &manifest(&["frontend/src/a.ts", "README.md"], &[]),
+            RoomLang::En
+        )
+        .is_none());
     }
 
     #[test]
