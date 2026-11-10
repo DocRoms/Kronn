@@ -14,8 +14,8 @@ advances the deadline without relying on child startup timing. The assertion
 requires the process to be absent immediately on return, with `ESRCH`, without
 the former 50 ms sleep. A separate regression exercises the full invocation
 path and pins its unchanged four-second production deadline.
-[src: file: backend/src/agents/runner_test.rs:11017-11052#copilot_task_worker_preflight_times_out_and_terminates_the_child]
-[src: file: backend/src/agents/runner_test.rs:11139-11162#copilot_preflight_full_spawn_path_preserves_its_four_second_deadline]
+[src: file: backend/src/agents/runner_test.rs:11169-11204#copilot_task_worker_preflight_times_out_and_terminates_the_child]
+[src: file: backend/src/agents/runner_test.rs:11291-11314#copilot_preflight_full_spawn_path_preserves_its_four_second_deadline]
 
 The preflight keeps ownership of `Child` outside the timed output collection.
 Timeout explicitly awaits `Child::kill`, which also waits/reaps in Tokio;
@@ -23,9 +23,9 @@ Timeout explicitly awaits `Child::kill`, which also waits/reaps in Tokio;
 and spawn errors are covered separately. The timer budget still includes
 spawning; this does not alter account classification, authentication or worker
 reassignment policy.
-[src: file: backend/src/agents/runner.rs:13417-13466#wait_copilot_preflight_child_with_timeout]
-[src: file: backend/src/agents/runner.rs:13346-13377#run_copilot_task_worker_preflight_with_timeout]
-[src: file: backend/src/agents/runner_test.rs:11102-11138#copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure]
+[src: file: backend/src/agents/runner.rs:13483-13532#wait_copilot_preflight_child_with_timeout]
+[src: file: backend/src/agents/runner.rs:13412-13443#run_copilot_task_worker_preflight_with_timeout]
+[src: file: backend/src/agents/runner_test.rs:11254-11290#copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure]
 [Tokio Child lifecycle](https://docs.rs/tokio/latest/tokio/process/struct.Child.html#method.kill)
 
 These are local shell fixtures, not a real agent or account check. The release

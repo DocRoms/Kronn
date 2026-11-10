@@ -1591,6 +1591,22 @@ pub(crate) fn is_hard_quota_exhausted(output: &str) -> bool {
         "monthly credit limit",
         "organization spend limit",
         "org spend limit",
+        // KT-1517 — the other wordings a native agent ends a turn on when the
+        // provider account is out of credits. Codex over an API key reports the
+        // OpenAI quota error verbatim; Claude Code reports Anthropic's prepaid
+        // balance and its extra-usage allowance; both CLIs name the rolling
+        // windows. None of them clears before a reset or a top-up.
+        "exceeded your current quota",
+        "credit balance is too low",
+        "credit balance too low",
+        "out of extra usage",
+        "billing_hard_limit_reached",
+        "insufficient credits",
+        "insufficient funds",
+        "no credits remaining",
+        "hour limit reached",
+        "weekly limit reached",
+        "monthly limit reached",
     ]
     .iter()
     .any(|pattern| lower.contains(pattern))
@@ -2675,6 +2691,34 @@ mod error_hint_tests {
         assert!(is_transient_provider_overload(
             "[Agent provider error]\n\nOverloaded\n\n(HTTP 529; terminal_reason=api_error)"
         ));
+    }
+
+    #[test]
+    fn every_native_agent_credit_wording_is_a_hard_quota() {
+        // KT-1517 — the shapes a Codex or Claude Code turn ends on when the
+        // account is out of credits: none may read as silence or as a transient
+        // failure worth retrying.
+        for out in [
+            "ERROR: You've hit your usage limit. Upgrade to Pro or try again in 2 hours 13 minutes.",
+            "You exceeded your current quota, please check your plan and billing details.",
+            "{\"error\":{\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}",
+            "Your credit balance is too low to access the Anthropic API.",
+            "You're out of extra usage · resets 4pm (Europe/Paris)",
+            "5-hour limit reached ∙ resets 3pm",
+            "Weekly limit reached ∙ resets Oct 3, 4pm",
+            "billing_hard_limit_reached",
+        ] {
+            assert!(is_hard_quota_exhausted(out), "{out}");
+            assert!(!is_transient_provider_overload(out), "{out}");
+            assert!(
+                detect_agent_error_hint(out, &AgentType::Codex)
+                    .is_some_and(|hint| hint.contains("Limite du plan atteinte")),
+                "{out}"
+            );
+        }
+        // Shared-capacity saturation and plain rate limits stay out.
+        assert!(!is_hard_quota_exhausted("request limit reached"));
+        assert!(!is_hard_quota_exhausted("Rate limit reached for requests"));
     }
 
     #[test]

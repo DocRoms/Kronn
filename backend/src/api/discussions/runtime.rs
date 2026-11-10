@@ -876,6 +876,35 @@ pub(crate) async fn try_quota_provider_fallback_among(
     Ok(Some((alternative, view.execution.parent_discussion_id)))
 }
 
+/// The provider's own words in a failed turn's reply (KT-1517).
+///
+/// The reply leads with Kronn's hint and folds the raw output into a
+/// `kronn:context` block, and a Codex failure can echo the whole prompt before the
+/// refusal. So the line that carries the quota signal is the message worth
+/// quoting; without one, the start of the raw output.
+pub(crate) fn provider_quota_message(response: &str) -> String {
+    const CONTEXT_CLOSE: &str = "<!-- /kronn:context -->";
+    let raw = response
+        .find("<!-- kronn:context")
+        .and_then(|open| {
+            let body = &response[open..];
+            let start = body.find("-->")? + "-->".len();
+            let end = body.find(CONTEXT_CLOSE).unwrap_or(body.len());
+            body.get(start..end.max(start))
+        })
+        .unwrap_or(response);
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && super::is_hard_quota_exhausted(line));
+    line.unwrap_or_else(|| raw.trim())
+        .trim_start_matches("[Agent provider error]")
+        .trim()
+        .chars()
+        .take(800)
+        .collect()
+}
+
 async fn finish_dispatch_turn(
     state: &AppState,
     job: crate::db::agent_dispatch::AgentDispatchJob,
@@ -883,7 +912,7 @@ async fn finish_dispatch_turn(
     execution_succeeded: bool,
 ) {
     if !execution_succeeded && super::is_hard_quota_exhausted(&response) {
-        let detail = response.trim().chars().take(800).collect::<String>();
+        let detail = provider_quota_message(&response);
         let durable_error = if detail.is_empty() {
             "quota_exhausted: provider plan or credit limit reached".to_string()
         } else {
@@ -1318,27 +1347,99 @@ async fn fail_dispatch_job_with_outcome_kind(
                         )
                     })
                     .unwrap_or_default();
-                let message = crate::api::orchestration::orchestrator_message(
-                    format!("provider-quota-escalation:{}", job.id),
-                    format!(
-                        "**Intervention humaine requise — quota épuisé**\n\nLe provider `{provider}` a refusé le dispatch `{}` pour limite de plan/crédits. Aucun provider alternatif explicitement autorisé n'est disponible ; Kronn ne relancera pas le même compte avant la réinitialisation.{return_note} Sans échéance annoncée : bascule de compte ou réaffectation explicite requise.",
-                        job.id
-                    ),
-                );
-                if let Err(db_error) = state
-                    .db
-                    .with_conn(move |conn| {
-                        crate::db::discussions::insert_message(conn, &target_discussion, &message)?;
-                        Ok(())
-                    })
-                    .await
-                {
-                    tracing::warn!(dispatch_job_id = %job.id, "quota notice could not be persisted: {db_error}");
+                // KT-1517 — the room that ran the turn gets the System card: the
+                // provider's message and what to do next. Without it the agent just
+                // stops publishing and the room looks idle.
+                record_quota_card(state, job, error, announced_reset).await;
+                // A task worker's parent room also gets the orchestrator's escalation.
+                if target_discussion != job.discussion_id {
+                    let message = crate::api::orchestration::orchestrator_message(
+                        format!("provider-quota-escalation:{}", job.id),
+                        format!(
+                            "**Intervention humaine requise — quota épuisé**\n\nLe provider `{provider}` a refusé le dispatch `{}` pour limite de plan/crédits. Aucun provider alternatif explicitement autorisé n'est disponible ; Kronn ne relancera pas le même compte avant la réinitialisation.{return_note} Sans échéance annoncée : bascule de compte ou réaffectation explicite requise.",
+                            job.id
+                        ),
+                    );
+                    if let Err(db_error) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussions::insert_message(
+                                conn,
+                                &target_discussion,
+                                &message,
+                            )?;
+                            Ok(())
+                        })
+                        .await
+                    {
+                        tracing::warn!(dispatch_job_id = %job.id, "quota notice could not be persisted: {db_error}");
+                    }
                 }
             }
         }
     }
     state.agent_dispatch_notify.notify_waiters();
+}
+
+/// KT-1517 — the System card a quota-refused turn leaves in its own room: the
+/// provider's message, when it resets if it said, and the way out. It is linked to
+/// the dispatch, so the room's Retry runs the same turn again.
+async fn record_quota_card(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    error: &str,
+    announced_reset: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let lookup = job.clone();
+    let loaded = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(
+                crate::db::discussions::get_discussion(conn, &lookup.discussion_id)?.map(
+                    |discussion| {
+                        (
+                            discussion.agent,
+                            discussion.tier,
+                            discussion.model,
+                            discussion.language,
+                        )
+                    },
+                ),
+            )
+        })
+        .await;
+    let (agent, tier, model, language) = match loaded {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => return,
+        Err(db_error) => {
+            tracing::warn!(dispatch_job_id = %job.id, "unable to read the room for the quota card: {db_error}");
+            return;
+        }
+    };
+    let agent = job.agent_override.clone().unwrap_or(agent);
+    let message = error.strip_prefix("quota_exhausted: ").unwrap_or(error);
+    let content = super::start_refusal::quota_exhausted_card(
+        &language,
+        &format!("{agent:?}"),
+        message,
+        announced_reset,
+        tier,
+        Some(&job.id),
+    );
+    super::start_refusal::record_refusal_card(
+        state,
+        super::start_refusal::RefusedStart {
+            discussion_id: &job.discussion_id,
+            agent_type: &agent,
+            model,
+            tier,
+            dispatch_id: Some(&job.id),
+            tracked_dispatch: true,
+            reply_to: Some(job.trigger_message_id.clone()),
+        },
+        content,
+    )
+    .await;
 }
 
 /// KT-1607 — a settled dispatch must leave something the room can read. A refusal
@@ -2815,3 +2916,7 @@ mod refused_tool_call_notice_tests {
         assert!(notice.contains(REFUSAL), "{notice}");
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_quota_tests.rs"]
+mod quota_turn_tests;
