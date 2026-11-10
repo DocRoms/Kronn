@@ -12,8 +12,10 @@ call. Nothing instance-specific is written in them.
 POST /api/workflows/templates/autocode-issue        body: {} or { "project_id": "<id>" }
 ```
 
-It creates two manual workflows (refused with the existing id when they are
-already installed, so a second click never duplicates them):
+It is refused, with nothing created, while `python3` does not resolve on the
+PATH of the Kronn process (see [Prerequisite: python3](#prerequisite-python3)).
+Otherwise it creates two manual workflows (refused with the existing id when
+they are already installed, so a second click never duplicates them):
 
 | Workflow | Steps |
 | --- | --- |
@@ -35,12 +37,43 @@ the workflows find their project by the repository at run time either way.
 | the PR base | the variable `targetBranch` | launch form; empty = **main** |
 | review rounds | the variable `maxReviewRounds` | launch form; empty = **10** |
 | the issue | the variable `issueNumber` | required |
+| who reviews | the variable `reviewer` | launch form; empty = the first configured remote model, else you (see [Who reviews a delivery](#who-reviews-a-delivery)) |
 
 The defaults are the placeholders of the launch form and are applied by the
 scripts when a variable is left empty. The project is found by remote: a
 project's `repo_url`, else a remote of its checkout, compared as a case-blind
 `owner/name`. Zero matches and several matches are both refusals with the fix
 named; Kronn never guesses.
+
+## Prerequisite: python3
+
+Every step of the shipped workflows, the preflight included, is a script run as
+`python3` (no token is spent, and the scripts are the same on every platform).
+`python3` is therefore a prerequisite like `gh`, and it is the only name Kronn
+runs: not `python`, not `py -3`. It is checked twice, since the preflight itself
+is a `python3` script and cannot report its own absence:
+
+- **At install.** `POST /api/workflows/templates/autocode-issue` looks for an
+  executable `python3` in the PATH of the Kronn process and **refuses** (a
+  `validation` error, nothing installed) when there is none. It does not install
+  with a warning: workflows whose first step cannot start would only fail later,
+  on the board. Install Python 3, check that `python3 --version` works in a
+  terminal, restart Kronn so it sees the new PATH, then install again.
+- **At run time.** If `python3` disappears afterwards (uninstalled, PATH
+  changed), the step that cannot start it fails with the same message instead of
+  the raw OS error (`failed to spawn …: No such file or directory`). Any other
+  program that fails to start keeps the raw error.
+
+| Platform | What to install |
+| --- | --- |
+| macOS | `brew install python3` |
+| Debian, Ubuntu | `apt install python3` |
+| Windows | Python from the Microsoft Store, whose build registers `python3`. The python.org installer provides `python` and the `py` launcher, **not** `python3`: with it, copy `python.exe` to `python3.exe` in the same folder (and keep that folder on the PATH). |
+| Anywhere else | https://www.python.org/downloads/ |
+
+Resolving `python` or `py -3` instead was considered and left out on purpose: the
+workflow is shared as it is (no per-machine command written into a step), and the
+guarantee « the name in the step is the name that is checked » stays simple.
 
 ## The first step: prerequisites
 
@@ -59,6 +92,7 @@ fix) and stops the run when one fails. `ok` is true only when all hold:
 | `repo_access` | `gh api repos/<repo>` fails | check the name and `gh repo view` |
 | `project` | no, several, or a moved clone | clone it and add the folder in Projects; or keep one |
 | `worker` | no installed, enabled CLI agent | install one in Settings > Agents |
+| `reviewer` | never (informational) | who reviews each delivery, which model was picked and how to change it |
 
 The report also carries `workers` (the agent the campaign launches the task
 on: Claude Code when available, else the first installed), `suggested_reviewer`
@@ -102,10 +136,33 @@ review (an agent without a model, a CLI agent declared as a remote model) is
 refused with nothing created.
 
 The shipped `orchestrate` step creates its room human-only and passes the
-report's `suggested_reviewer`: the first remote model this instance has
-configured (LiteLLM once its proxy and key are set, else NVIDIA once its key is
-set; its model is the reasoning-tier model, else the default-tier one). With no
-remote model configured it passes none, so the human reviews from the UI.
+report's `suggested_reviewer`, which is, in this order:
+
+1. what the `reviewer` workflow variable names, when it is set;
+2. else the first remote model this instance has configured: LiteLLM once its
+   proxy and key are set, else NVIDIA once its key is set, with the
+   reasoning-tier model, else the default-tier one. This is an arbitrary pick
+   (the first one that is configured), which is why it is shown;
+3. else none: the room keeps its setup and the human reviews from the UI.
+
+**The choice is visible before anything runs.** The preflight prints a
+`[ok] reviewer: …` line naming the model it picked (or that none is configured)
+and how to change it, and the campaign room opens with the same reviewer in its
+rules message.
+
+**Overriding it.** Set the `reviewer` variable on the launch form (empty keeps
+the pick above). The value is checked by the preflight, before `gh` is called:
+a value that cannot review is refused with the accepted forms.
+
+| `reviewer` | Reviews with |
+| --- | --- |
+| *(empty)* | the first configured remote model, else you |
+| `human` | you, from the review card (no agent answers in the room) |
+| `litellm:<model>`, `nvidia:<model>`, `ollama:<model>` | that remote model (the model is everything after the first colon, so `ollama:llama3:8b` works) |
+| `agent:<Agent>:<model>` | a local agent with the model it reviews with, `<Agent>` as Kronn names it (`ClaudeCode`, `Codex`, …) |
+
+A named connection (a `Custom` remote model) is not expressible in the variable:
+pass `reviewer` with its `connection_id` to `POST /api/orchestration/campaigns`.
 
 The choice is stored on the run (`reviewer`, migration 292), announced in the
 room and shown on the campaign panel. The human can always decide from the UI,
@@ -116,7 +173,16 @@ whoever the reviewer is.
 - The workflow stored on the maintainer's instance (`61f7a323`) is instance
   data and is not rewritten by Kronn: install the shipped workflows and retire
   that copy.
-- The board workflow's refresh after a launch is not part of the shipped
-  workflow (it would need that instance's board id); the board refreshes on its
-  own trigger.
+- **The board refresh is gone.** The stored workflow ended by triggering the
+  contribution board's own workflow (`POST /api/workflows/<id>/trigger`, best
+  effort) so that the board showed the new autoCode phase under the issue right
+  away. That call named the board workflow by its id, an instance value, so it
+  is not in the shipped workflow: the shipped steps never address another
+  workflow of the instance. A launch and a publication work without it; only the
+  board's display of the new phase waits for the board workflow to run. What the
+  owner does instead, on their own instance: run the board workflow from the
+  Workflows page after a launch, or keep the trigger in a private copy of the
+  « start the campaign » workflow by adding, as its last step, a sub-workflow
+  step on the board workflow (picked from the list, so no id is typed). Either
+  way the id stays out of what Kronn ships.
 - `gh` is the only forge tool read; a non-GitHub remote resolves to no project.

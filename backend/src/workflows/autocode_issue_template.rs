@@ -20,10 +20,14 @@
 //!   contributor's fork otherwise, the pull request always targeting the
 //!   repository.
 //!
-//! The steps are deterministic scripts (no token spent): `autocode_issue/*.py`.
+//! The steps are deterministic scripts (no token spent): `autocode_issue/*.py`,
+//! run by `python3`. That is a prerequisite like `gh`: the install call refuses
+//! while `python3` does not resolve on the PATH, and a run whose spawn fails
+//! says what to install (`exec_step::spawn_failure`).
 
 use crate::core::contribution::{
-    DEFAULT_MAX_REVIEW_ROUNDS, DEFAULT_REPOSITORY, DEFAULT_TARGET_BRANCH,
+    DEFAULT_MAX_REVIEW_ROUNDS, DEFAULT_REPOSITORY, DEFAULT_TARGET_BRANCH, PYTHON_PROGRAM,
+    REVIEWER_VARIABLE_FORMS,
 };
 use crate::models::{
     AgentType, CreateWorkflowRequest, PromptVariable, PromptVariableControl, StepType,
@@ -76,19 +80,22 @@ fn exec_step(
 ) -> WorkflowStep {
     let mut step = blank_step(name, StepType::Exec, AgentType::ClaudeCode);
     step.description = Some(description.into());
-    step.exec_command = Some("python3".into());
+    // Only `python3` is run, never `python` or `py -3`: it is the one name the
+    // install call checks and a failed spawn reports on (KT-1643).
+    step.exec_command = Some(PYTHON_PROGRAM.into());
     step.exec_args = vec!["-c".into(), script(source)];
     step.exec_stdin = Some(input);
     step.exec_timeout_secs = Some(secs);
     step
 }
 
-/// The five values every step reads, in the order the scripts split them.
+/// The values every step reads, in the order the scripts split them.
 const KRONN_URL: &str = "{{run.kronn_url}}";
 const REPO: &str = "{{repo}}";
 const TARGET: &str = "{{targetBranch}}";
 const ROUNDS: &str = "{{maxReviewRounds}}";
 const ISSUE: &str = "{{issueNumber}}";
+const REVIEWER: &str = "{{reviewer}}";
 
 fn preflight_step() -> WorkflowStep {
     exec_step(
@@ -97,7 +104,7 @@ fn preflight_step() -> WorkflowStep {
          access to the repository (direct or through a fork), the Kronn project that is a \
          clone of it, a local worker. Each failure says what to run to fix it.",
         include_str!("autocode_issue/preflight.py"),
-        stdin(&[KRONN_URL, REPO, TARGET, ROUNDS, ISSUE]),
+        stdin(&[KRONN_URL, REPO, TARGET, ROUNDS, ISSUE, REVIEWER]),
         120,
     )
 }
@@ -163,6 +170,18 @@ fn variables() -> Vec<PromptVariable> {
             false,
             None,
         ),
+        text_variable(
+            "reviewer",
+            "Reviewer",
+            "first configured remote model, else you",
+            &format!(
+                "Who reviews each delivery: {REVIEWER_VARIABLE_FORMS}. Empty = the first remote \
+                 model configured on this instance (LiteLLM, then NVIDIA), else you from the \
+                 review card. The preflight prints the reviewer it will use."
+            ),
+            false,
+            None,
+        ),
     ]
 }
 
@@ -189,7 +208,7 @@ fn request(
         guards: None,
         artifacts: HashMap::new(),
         on_failure: vec![],
-        exec_allowlist: vec!["gh".into(), "git".into(), "python3".into()],
+        exec_allowlist: vec!["gh".into(), "git".into(), PYTHON_PROGRAM.into()],
         variables: variables(),
         enabled: None,
     }

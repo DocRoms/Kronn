@@ -28,8 +28,11 @@ Release notes for 0.9.3 and earlier are available in the
   reviews each delivery and announces it in its room: the reviewer it was
   created with, else the agent the room already has, else the human. A room is
   reconfigured only for a reviewer passed explicitly, and the shipped workflow
-  passes the instance's configured remote model when it has one. See
-  [the guide](docs/guides/autocode-issue-workflow.md).
+  passes the instance's configured remote model when it has one, announced by
+  the preflight and replaceable with the workflow's `reviewer` variable. The
+  steps are `python3` scripts: the install call is refused with what to install
+  while `python3` is not on the PATH, and a run that cannot start it says the
+  same. See [the guide](docs/guides/autocode-issue-workflow.md).
 - API connections: a revoked or expired token is surfaced before the next run
   fails on it (KT-1524). A 401 (or a 403 that names the credential, or a failed
   OAuth refresh) flags the connection until its next successful call: the card

@@ -359,6 +359,150 @@ fn an_unreadable_repository_is_named() {
     assert!(report.publication.is_none());
 }
 
+// ─── python3, the interpreter of the shipped steps ──────────────────────────
+
+fn executable(dir: &std::path::Path, name: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let file = dir.join(name);
+    std::fs::write(&file, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn python3_resolves_only_as_an_executable_file_of_the_path() {
+    let with = tempfile::tempdir().unwrap();
+    let without = tempfile::tempdir().unwrap();
+    executable(with.path(), "python3", 0o755);
+    executable(without.path(), "python", 0o755); // `python` is not `python3`
+    executable(without.path(), "python3x", 0o755);
+    let joined = std::env::join_paths([without.path(), with.path()]).unwrap();
+
+    assert!(resolves_on_path("python3", Some(joined.as_os_str())));
+    assert!(!resolves_on_path(
+        "python3",
+        Some(without.path().as_os_str())
+    ));
+    assert!(!resolves_on_path("python3", None));
+    assert!(python_refusal(Some(joined.as_os_str())).is_none());
+
+    // A file that is not executable does not resolve.
+    let plain = tempfile::tempdir().unwrap();
+    executable(plain.path(), "python3", 0o644);
+    assert!(!resolves_on_path("python3", Some(plain.path().as_os_str())));
+}
+
+#[test]
+fn the_python3_message_names_what_to_install_for_each_platform() {
+    let message = python_refusal(None).expect("no PATH, no python3");
+    assert_eq!(message, python_missing_message());
+    for needle in [
+        "python3 --version",
+        "https://www.python.org/downloads/",
+        "brew install python3",
+        "apt install python3",
+        "Windows",
+        "`python` and `py`",
+        "Microsoft Store",
+        "restart Kronn",
+    ] {
+        assert!(message.contains(needle), "missing `{needle}`: {message}");
+    }
+}
+
+// ─── The reviewer the preflight announces, and how to override it ──────────
+
+#[test]
+fn the_preflight_says_which_remote_model_it_picked_and_how_to_change_it() {
+    let report = evaluate(REPO, "main", 10, "b", &all_good());
+    let reviewer = suggested_reviewer(&[remote(AgentType::LiteLlm, "gpt-x")]);
+    let report = report.with_suggested_reviewer(reviewer.clone());
+    assert!(report.ok, "an informational line never fails the preflight");
+    assert_eq!(report.suggested_reviewer, reviewer);
+    let line = report.checks.iter().find(|c| c.id == "reviewer").unwrap();
+    assert!(line.ok);
+    for needle in [
+        "LiteLlm",
+        "gpt-x",
+        "first remote model configured",
+        "`reviewer` variable",
+        "`human`",
+        "`agent:<Agent>:<model>`",
+    ] {
+        assert!(line.message.contains(needle), "{needle}: {}", line.message);
+    }
+}
+
+#[test]
+fn the_preflight_says_so_when_no_remote_model_is_configured() {
+    let report = evaluate(REPO, "main", 10, "b", &all_good()).with_suggested_reviewer(None);
+    assert!(report.ok && report.suggested_reviewer.is_none());
+    let line = report.checks.iter().find(|c| c.id == "reviewer").unwrap();
+    assert!(line.message.contains("No remote model is configured"));
+    assert!(line.message.contains("review card"));
+    assert!(line.message.contains("`reviewer` variable"));
+}
+
+#[test]
+fn a_reviewer_named_by_the_variable_is_announced_as_such() {
+    let named = parse_reviewer_variable("ollama:llama3:8b")
+        .unwrap()
+        .unwrap();
+    let report = evaluate(REPO, "main", 10, "b", &all_good()).with_suggested_reviewer(Some(named));
+    let line = report.checks.iter().find(|c| c.id == "reviewer").unwrap();
+    assert!(line.message.contains("`llama3:8b`"), "{}", line.message);
+    assert!(line.message.contains("as the `reviewer` variable"));
+    assert!(!line.message.contains("first remote model"));
+}
+
+#[test]
+fn the_reviewer_variable_accepts_the_documented_forms() {
+    assert_eq!(parse_reviewer_variable("").unwrap(), None);
+    assert_eq!(parse_reviewer_variable("   ").unwrap(), None);
+
+    let human = parse_reviewer_variable("human").unwrap().unwrap();
+    assert_eq!(human.kind, CampaignReviewerKind::Human);
+    assert!(!human.defaulted, "it was asked for, not defaulted");
+
+    for (text, agent, model) in [
+        ("litellm:gpt-x", AgentType::LiteLlm, "gpt-x"),
+        ("NVIDIA:meta/llama-3", AgentType::Nvidia, "meta/llama-3"),
+        (" ollama:llama3:8b ", AgentType::Ollama, "llama3:8b"),
+    ] {
+        let reviewer = parse_reviewer_variable(text).unwrap().unwrap();
+        assert_eq!(reviewer.kind, CampaignReviewerKind::RemoteModel, "{text}");
+        assert_eq!(reviewer.agent, Some(agent), "{text}");
+        assert_eq!(reviewer.model.as_deref(), Some(model), "{text}");
+        assert!(!reviewer.defaulted);
+    }
+
+    let agent = parse_reviewer_variable("agent:ClaudeCode:opus")
+        .unwrap()
+        .unwrap();
+    assert_eq!(agent.kind, CampaignReviewerKind::Agent);
+    assert_eq!(agent.agent, Some(AgentType::ClaudeCode));
+    assert_eq!(agent.model.as_deref(), Some("opus"));
+}
+
+#[test]
+fn a_reviewer_variable_that_cannot_review_is_refused_with_the_accepted_forms() {
+    for text in [
+        "somebody",
+        "human:x",
+        "litellm",
+        "nvidia:",
+        "agent:ClaudeCode",
+        "agent:ClaudeCode:",
+        "agent:Nobody:m",
+        "agent:Ollama:m",
+    ] {
+        let error = parse_reviewer_variable(text).expect_err(text);
+        assert!(error.contains("`reviewer`"), "{text}: {error}");
+    }
+    assert!(parse_reviewer_variable("somebody")
+        .unwrap_err()
+        .contains(REVIEWER_VARIABLE_FORMS));
+}
+
 // ─── DoD 5: the reviewer is named at creation ───────────────────────────────
 
 fn remote(agent: AgentType, model: &str) -> (AgentType, Option<String>) {

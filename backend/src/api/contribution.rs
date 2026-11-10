@@ -38,6 +38,10 @@ pub struct PreflightQuery {
     /// The branch about to be published, for the `--head` the plan names.
     #[serde(default)]
     pub branch: Option<String>,
+    /// The workflow's `reviewer` variable: who reviews each delivery. Empty
+    /// means the instance proposes its first configured remote model.
+    #[serde(default)]
+    pub reviewer: Option<String>,
 }
 
 /// A branch name safe to hand to `git` and `gh` as one argument.
@@ -117,6 +121,14 @@ pub async fn preflight(
         ));
     }
     let repo = query.repo.trim().trim_matches('/').to_string();
+    let named_reviewer = match contribution::parse_reviewer_variable(
+        query.reviewer.as_deref().unwrap_or_default(),
+    ) {
+        Ok(reviewer) => reviewer,
+        Err(message) => {
+            return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
+        }
+    };
     let target_branch = query
         .target_branch
         .as_deref()
@@ -190,11 +202,15 @@ pub async fn preflight(
         project: Some(project),
         local_workers,
     };
-    let mut report =
-        contribution::evaluate(&repo, &target_branch, max_review_rounds, &branch, &facts);
-    report.suggested_reviewer = contribution::suggested_reviewer(
-        &contribution::remote_reviewer_candidates(&*state.config.read().await),
-    );
+    // The variable wins; else the instance proposes its first remote model.
+    let reviewer = match named_reviewer {
+        Some(reviewer) => Some(reviewer),
+        None => contribution::suggested_reviewer(&contribution::remote_reviewer_candidates(
+            &*state.config.read().await,
+        )),
+    };
+    let report = contribution::evaluate(&repo, &target_branch, max_review_rounds, &branch, &facts)
+        .with_suggested_reviewer(reviewer);
     Json(ApiResponse::ok(report))
 }
 
@@ -225,6 +241,7 @@ mod tests {
                 target_branch: None,
                 max_review_rounds: None,
                 branch: None,
+                reviewer: None,
             })
             .await;
             assert!(error.unwrap().contains("owner/name"), "{repo:?}");
@@ -243,12 +260,34 @@ mod tests {
                 target_branch: target.map(String::from),
                 max_review_rounds: None,
                 branch: branch.map(String::from),
+                reviewer: None,
             })
             .await;
             assert!(
                 error.unwrap().contains("branch name"),
                 "{target:?} {branch:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_variable_that_cannot_review_is_refused_before_any_gh_call() {
+        for reviewer in [
+            "somebody",
+            "litellm",
+            "agent:ClaudeCode",
+            "agent:Nobody:m",
+            "nvidia:",
+        ] {
+            let error = refused(PreflightQuery {
+                repo: "acme/widgets".into(),
+                target_branch: None,
+                max_review_rounds: None,
+                branch: None,
+                reviewer: Some(reviewer.into()),
+            })
+            .await;
+            assert!(error.unwrap().contains("`reviewer`"), "{reviewer}");
         }
     }
 

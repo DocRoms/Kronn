@@ -119,6 +119,31 @@ fn the_repository_the_target_branch_and_the_review_rounds_are_workflow_variables
     assert!(code.contains("rounds or '10'"));
 }
 
+#[test]
+fn the_reviewer_is_an_optional_workflow_variable_the_preflight_receives() {
+    let template = template(None);
+    for workflow in [&template.contribute, &template.publish] {
+        let reviewer = workflow
+            .variables
+            .iter()
+            .find(|v| v.name == "reviewer")
+            .expect("the reviewer variable");
+        assert!(!reviewer.required);
+        let description = reviewer.description.clone().unwrap();
+        assert!(description.contains("litellm:<model>") && description.contains("`human`"));
+        let preflight = &workflow.steps[0];
+        assert!(preflight
+            .exec_stdin
+            .as_ref()
+            .unwrap()
+            .ends_with("{{reviewer}}"));
+        assert!(preflight.exec_args[1].contains("'reviewer': reviewer"));
+    }
+    // The campaign is created with the reviewer the preflight announced.
+    let orchestrate = &template.contribute.steps[2];
+    assert!(orchestrate.exec_args[1].contains("report['suggested_reviewer']"));
+}
+
 // ─── DoD 3: the first step is the preflight ─────────────────────────────────
 
 #[test]
@@ -143,6 +168,7 @@ fn the_steps_render_with_the_values_of_a_run() {
     ctx.set("repo", "acme/widgets");
     ctx.set("targetBranch", "develop");
     ctx.set("maxReviewRounds", "4");
+    ctx.set("reviewer", "nvidia:meta/llama-3");
     let preflight = ctx
         .render_strict(template.contribute.steps[0].exec_stdin.as_ref().unwrap())
         .unwrap();
@@ -153,13 +179,106 @@ fn the_steps_render_with_the_values_of_a_run() {
             "acme/widgets",
             "develop",
             "4",
-            "7"
+            "7",
+            "nvidia:meta/llama-3"
         ]
     );
     let take = ctx
         .render_strict(template.contribute.steps[1].exec_stdin.as_ref().unwrap())
         .unwrap();
     assert_eq!(take, format!("7{SEP}acme/widgets"));
+}
+
+// ─── python3 is a prerequisite ──────────────────────────────────────────────
+
+/// A directory holding an executable `python3` (and nothing else): the PATH of
+/// a machine that has Python 3, whatever the host running the test has.
+struct FakePython {
+    dir: tempfile::TempDir,
+}
+
+impl FakePython {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let python = dir.path().join("python3");
+        std::fs::write(&python, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self { dir }
+    }
+
+    fn path(&self) -> &std::ffi::OsStr {
+        self.dir.path().as_os_str()
+    }
+}
+
+#[test]
+fn every_step_runs_python3_and_the_allowlist_names_it() {
+    let template = template(None);
+    for step in all_steps(&template) {
+        assert_eq!(
+            step.exec_command.as_deref(),
+            Some("python3"),
+            "{}",
+            step.name
+        );
+    }
+    for workflow in [&template.contribute, &template.publish] {
+        assert!(workflow.exec_allowlist.iter().any(|p| p == "python3"));
+    }
+}
+
+#[tokio::test]
+async fn the_install_is_refused_with_the_fix_when_python3_is_not_on_the_path() {
+    let state = fresh_state();
+    // A machine whose PATH holds no python3 (a `python` alone is not enough).
+    let no_python = tempfile::tempdir().unwrap();
+    std::fs::write(no_python.path().join("python"), "#!/bin/sh\n").unwrap();
+    for path in [Some(no_python.path().as_os_str()), None] {
+        let Json(refused) = crate::api::workflows::install_autocode_issue(
+            state.clone(),
+            AutocodeIssueParams { project_id: None },
+            path,
+        )
+        .await;
+        assert!(!refused.success);
+        assert_eq!(refused.error_code.as_deref(), Some("validation"));
+        let message = refused.error.unwrap();
+        assert_eq!(message, crate::core::contribution::python_missing_message());
+        // It names what to install, and what Windows offers instead.
+        for needle in ["python3", "https://www.python.org", "Microsoft Store"] {
+            assert!(message.contains(needle), "{message}");
+        }
+    }
+    let stored = state
+        .db
+        .with_conn(crate::db::workflows::list_workflows)
+        .await
+        .unwrap();
+    assert!(stored.is_empty(), "nothing was installed");
+}
+
+#[test]
+fn a_run_whose_python3_disappeared_says_what_to_install() {
+    // A real spawn of `python3` with no python3 on the child's PATH.
+    let empty = tempfile::tempdir().unwrap();
+    let error = Command::new("python3")
+        .env("PATH", empty.path())
+        .spawn()
+        .expect_err("no python3 on that PATH");
+    let step = &template(None).contribute.steps[0];
+    let message = crate::workflows::exec_step::spawn_failure(&step.name, "python3", &error);
+    assert_eq!(
+        message,
+        format!(
+            "Exec step `preflight`: {}",
+            crate::core::contribution::python_missing_message()
+        )
+    );
+    assert!(message.contains("Microsoft Store") && !message.contains("failed to spawn"));
+    // Any other program keeps the raw error.
+    let other = crate::workflows::exec_step::spawn_failure("s", "make", &error);
+    assert!(other.contains("failed to spawn `make`"), "{other}");
 }
 
 // ─── Installing on another instance ─────────────────────────────────────────
@@ -212,11 +331,13 @@ async fn the_template_installs_on_a_fresh_data_dir_with_another_project_id() {
         .await
         .unwrap();
 
-    let Json(installed) = crate::api::workflows::create_autocode_issue(
-        axum::extract::State(state.clone()),
-        Json(AutocodeIssueParams {
+    let python = FakePython::new();
+    let Json(installed) = crate::api::workflows::install_autocode_issue(
+        state.clone(),
+        AutocodeIssueParams {
             project_id: Some(local_id.clone()),
-        }),
+        },
+        Some(python.path()),
     )
     .await;
     assert!(installed.success, "{:?}", installed.error);
@@ -251,18 +372,15 @@ async fn the_template_installs_on_a_fresh_data_dir_with_another_project_id() {
 #[tokio::test]
 async fn installing_twice_is_refused_instead_of_duplicating_the_workflows() {
     let state = fresh_state();
+    let python = FakePython::new();
     let params = || AutocodeIssueParams { project_id: None };
-    let Json(first) = crate::api::workflows::create_autocode_issue(
-        axum::extract::State(state.clone()),
-        Json(params()),
-    )
-    .await;
+    let Json(first) =
+        crate::api::workflows::install_autocode_issue(state.clone(), params(), Some(python.path()))
+            .await;
     assert!(first.success, "{:?}", first.error);
-    let Json(second) = crate::api::workflows::create_autocode_issue(
-        axum::extract::State(state.clone()),
-        Json(params()),
-    )
-    .await;
+    let Json(second) =
+        crate::api::workflows::install_autocode_issue(state.clone(), params(), Some(python.path()))
+            .await;
     assert!(!second.success);
     assert!(second.error.unwrap().contains("already installed"));
     let count = state

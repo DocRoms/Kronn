@@ -4,10 +4,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# stdin: Kronn URL, repo, target branch, review rounds, issue number, each on
-# its own part. An empty or unresolved (raw template) part takes its default.
+# stdin: Kronn URL, repo, target branch, review rounds, issue number, reviewer,
+# each on its own part. An empty or unresolved (raw template) part takes its default.
 parts = sys.stdin.read().split('\n===SEP===\n')
-parts += [''] * (5 - len(parts))
+parts += [''] * (6 - len(parts))
 
 
 def clean(value):
@@ -15,7 +15,7 @@ def clean(value):
     return '' if value.startswith(chr(123) * 2) else value
 
 
-kronn, repo, branch, rounds, num = [clean(part) for part in parts[:5]]
+kronn, repo, branch, rounds, num, reviewer = [clean(part) for part in parts[:6]]
 repo = repo or '__DEFAULT_REPO__'
 branch = branch or '__DEFAULT_BRANCH__'
 rounds = rounds or '__DEFAULT_ROUNDS__'
@@ -31,6 +31,7 @@ query = urllib.parse.urlencode({
     'target_branch': branch,
     'max_review_rounds': rounds,
     'branch': 'autocode/issue-' + num,
+    'reviewer': reviewer,
 })
 try:
     with urllib.request.urlopen(kronn + '/api/contribution/preflight?' + query, timeout=60) as response:

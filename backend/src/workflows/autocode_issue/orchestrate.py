@@ -172,8 +172,9 @@ if not exists:
     git('branch', branch, '%s/%s' % (remote, target))
 
 # 4) The campaign: the one active on this room, else a new one. The reviewer is
-#    the remote model this instance proposes, when it has one; otherwise the
-#    room as it is (nobody answers in it: the human decides from the UI).
+#    the one the preflight announced: the `reviewer` variable when set, else the
+#    first remote model this instance has configured; with neither, the room as
+#    it is (nobody answers in it: the human decides from the UI).
 def run_of(view):
     if not isinstance(view, dict):
         return None

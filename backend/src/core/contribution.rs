@@ -30,6 +30,59 @@ pub const DEFAULT_REPOSITORY: &str = "DocRoms/Kronn";
 pub const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 10;
 /// The branch a pull request targets when the workflow sets none.
 pub const DEFAULT_TARGET_BRANCH: &str = "main";
+/// The interpreter every step of the shipped workflows runs.
+pub const PYTHON_PROGRAM: &str = "python3";
+
+/// Whether `program` resolves in the directories of `path` (a `PATH` value),
+/// the way a spawn would find it: an executable file there, with the usual
+/// executable extensions on Windows.
+pub fn resolves_on_path(program: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else { return false };
+    let names: Vec<String> = if cfg!(windows) {
+        ["", ".exe", ".cmd", ".bat"]
+            .iter()
+            .map(|ext| format!("{program}{ext}"))
+            .collect()
+    } else {
+        vec![program.to_string()]
+    };
+    let executable = |file: &std::path::Path| {
+        let Ok(meta) = std::fs::metadata(file) else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            meta.is_file()
+        }
+    };
+    std::env::split_paths(path).any(|dir| names.iter().any(|name| executable(&dir.join(name))))
+}
+
+/// `Some(message)` when `python3` does not resolve in `path`: what the shipped
+/// workflows need and how to get it, for the install call and for a run.
+pub fn python_refusal(path: Option<&std::ffi::OsStr>) -> Option<String> {
+    (!resolves_on_path(PYTHON_PROGRAM, path)).then(python_missing_message)
+}
+
+/// The prerequisite the shipped autoCode Issue workflows have besides `gh`:
+/// their steps are `python3` scripts, and only `python3` is run (not `python`
+/// or `py -3`), so it is the name that has to resolve.
+pub fn python_missing_message() -> String {
+    format!(
+        "`{PYTHON_PROGRAM}` was not found on this machine's PATH, and every step of the autoCode \
+         Issue workflows is a `{PYTHON_PROGRAM}` script. Install Python 3 \
+         (https://www.python.org/downloads/, `brew install python3` or `apt install python3`), \
+         check that `{PYTHON_PROGRAM} --version` works in a terminal, then restart Kronn so it \
+         sees the new PATH. On Windows the python.org installer provides `python` and `py`, not \
+         `{PYTHON_PROGRAM}`: install Python from the Microsoft Store (its build registers \
+         `{PYTHON_PROGRAM}`) or copy `python.exe` to `{PYTHON_PROGRAM}.exe` in the same folder."
+    )
+}
 
 /// The Kronn instance's own address, as a process it spawns reaches it:
 /// `KRONN_BACKEND_URL` when the operator (or Docker) pinned it, else loopback
@@ -481,6 +534,52 @@ pub fn evaluate(
     }
 }
 
+impl PreflightReport {
+    /// Records the reviewer the instance proposes, and says so in the checks so
+    /// the contributor reads which model was picked and how to change it.
+    pub fn with_suggested_reviewer(mut self, reviewer: Option<CampaignReviewer>) -> Self {
+        self.checks.push(reviewer_check(reviewer.as_ref()));
+        self.suggested_reviewer = reviewer;
+        self
+    }
+}
+
+/// The reviewer line of the preflight. Informational: it never fails the
+/// preflight, since a campaign always has a reviewer (the human at worst).
+pub fn reviewer_check(reviewer: Option<&CampaignReviewer>) -> PreflightCheck {
+    let message = match reviewer {
+        Some(reviewer) if reviewer.defaulted => format!(
+            "Deliveries will be reviewed by {}: the first remote model configured on this \
+             instance, picked because the `reviewer` variable is empty. To choose another \
+             reviewer, set that variable to {REVIEWER_VARIABLE_FORMS}.",
+            reviewer_label(reviewer)
+        ),
+        Some(reviewer) => format!(
+            "Deliveries will be reviewed by {}, as the `reviewer` variable of the workflow says.",
+            reviewer_label(reviewer)
+        ),
+        None => format!(
+            "No remote model is configured on this instance and the `reviewer` variable is \
+             empty, so the campaign room keeps its own setup and you review each delivery from \
+             the review card. To have a model review instead, set that variable to \
+             {REVIEWER_VARIABLE_FORMS}."
+        ),
+    };
+    check("reviewer", true, message)
+}
+
+fn reviewer_label(reviewer: &CampaignReviewer) -> String {
+    let model = reviewer.model.as_deref().unwrap_or("default model");
+    match (reviewer.kind, reviewer.agent.as_ref()) {
+        (CampaignReviewerKind::Human, _) => "the human".to_string(),
+        (CampaignReviewerKind::Agent, Some(agent)) => format!("the agent {agent:?} `{model}`"),
+        (CampaignReviewerKind::RemoteModel, Some(agent)) => {
+            format!("the remote model {agent:?} `{model}`")
+        }
+        _ => "nobody named".to_string(),
+    }
+}
+
 // ─── Reviewer ───────────────────────────────────────────────────────────────
 
 /// A provider reached over HTTP: no session of it is ever "joined", so it is
@@ -527,6 +626,72 @@ pub fn suggested_reviewer(
         connection_id: None,
         defaulted: true,
     })
+}
+
+/// The forms the `reviewer` workflow variable accepts.
+pub const REVIEWER_VARIABLE_FORMS: &str =
+    "`human`, `litellm:<model>`, `nvidia:<model>`, `ollama:<model>` or `agent:<Agent>:<model>`";
+
+/// The reviewer the `reviewer` workflow variable names, checked like one a
+/// caller passes to a campaign. Empty means "not set" (`Ok(None)`: the instance
+/// proposes its own). `human`; `litellm:<model>`, `nvidia:<model>` or
+/// `ollama:<model>` for a remote model; `agent:<Agent>:<model>` for a local
+/// agent with the model it reviews with (`<Agent>` as Kronn names it:
+/// `ClaudeCode`, `Codex`, …). The model is everything after the first colon, so
+/// an Ollama tag such as `llama3:8b` is kept whole.
+pub fn parse_reviewer_variable(text: &str) -> Result<Option<CampaignReviewer>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let bad =
+        || format!("`reviewer` is `{text}`; it must be empty or one of {REVIEWER_VARIABLE_FORMS}.");
+    let reviewer = |kind, agent, model: &str| CampaignReviewer {
+        kind,
+        agent,
+        model: Some(model.trim().to_string()).filter(|model| !model.is_empty()),
+        connection_id: None,
+        defaulted: false,
+    };
+    let (head, rest) = match text.split_once(':') {
+        Some((head, rest)) => (head.trim(), Some(rest)),
+        None => (text, None),
+    };
+    let named = match (head.to_ascii_lowercase().as_str(), rest) {
+        ("human", None) => reviewer(CampaignReviewerKind::Human, None, ""),
+        ("litellm", Some(model)) if !model.trim().is_empty() => reviewer(
+            CampaignReviewerKind::RemoteModel,
+            Some(AgentType::LiteLlm),
+            model,
+        ),
+        ("nvidia", Some(model)) if !model.trim().is_empty() => reviewer(
+            CampaignReviewerKind::RemoteModel,
+            Some(AgentType::Nvidia),
+            model,
+        ),
+        ("ollama", Some(model)) if !model.trim().is_empty() => reviewer(
+            CampaignReviewerKind::RemoteModel,
+            Some(AgentType::Ollama),
+            model,
+        ),
+        ("agent", Some(rest)) => {
+            let (name, model) = rest.split_once(':').ok_or_else(bad)?;
+            let agent: AgentType =
+                serde_json::from_value(serde_json::Value::String(name.trim().to_string()))
+                    .map_err(|_| {
+                        format!(
+                            "`reviewer` names the agent `{}`, which Kronn does not know \
+                             (ClaudeCode, Codex, GeminiCli, …).",
+                            name.trim()
+                        )
+                    })?;
+            reviewer(CampaignReviewerKind::Agent, Some(agent), model)
+        }
+        _ => return Err(bad()),
+    };
+    resolve_reviewer(named)
+        .map(Some)
+        .map_err(|why| format!("`reviewer` is `{text}`: {why}."))
 }
 
 /// Who reviews a campaign created without a named reviewer: the room as it

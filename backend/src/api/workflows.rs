@@ -3161,12 +3161,30 @@ pub struct AutocodeIssueInstall {
 /// contribution workflows Kronn ships (start the campaign of an issue, publish
 /// its pull request), the same on every instance: they carry no project id, no
 /// URL, no instance value. Body `{ project_id? }`. Refused when they are
-/// already installed, so a second click never duplicates them.
+/// already installed, so a second click never duplicates them, and refused
+/// (nothing created) while `python3`, which every step runs, does not resolve
+/// on this machine's PATH: the message names what to install.
 pub async fn create_autocode_issue(
     State(state): State<AppState>,
     Json(params): Json<crate::workflows::autocode_issue_template::AutocodeIssueParams>,
 ) -> Json<ApiResponse<AutocodeIssueInstall>> {
+    // The PATH a step's child inherits (`child_env` keeps it), read the way
+    // Kronn reads every variable.
+    let path = crate::core::child_env::var_os("PATH");
+    install_autocode_issue(state, params, path.as_deref()).await
+}
+
+/// [`create_autocode_issue`] against a given `PATH`, so the refusal is testable
+/// without touching the process environment.
+pub(crate) async fn install_autocode_issue(
+    state: AppState,
+    params: crate::workflows::autocode_issue_template::AutocodeIssueParams,
+    path: Option<&std::ffi::OsStr>,
+) -> Json<ApiResponse<AutocodeIssueInstall>> {
     use crate::workflows::autocode_issue_template as tpl;
+    if let Some(message) = crate::core::contribution::python_refusal(path) {
+        return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
+    }
     let installed = state
         .db
         .with_conn(crate::db::workflows::list_workflows)
