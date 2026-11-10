@@ -417,6 +417,8 @@ describe('ExternalApiSection', () => {
       image_model: null,
       video_model: null,
       decision_model: null,
+      // Kronn tools are on unless the operator turns them off (KT-1600).
+      tools_enabled: true,
       api_key: 'sk-together',
     });
     // The list is reloaded after a successful create.

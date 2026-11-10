@@ -4,8 +4,8 @@
 the audit, the briefing editor and the project card. An empty or unreadable
 file does not revive older DB notes. DB notes remain the fallback before the
 file exists, so answers saved before template installation are usable.
-[src: file: backend/src/api/projects/mod.rs:188-201#resolve_briefing_notes]
-[src: file: backend/src/api/projects/mod.rs:231#resolve_briefing_notes]
+[src: file: backend/src/api/projects/mod.rs:194-207#resolve_briefing_notes]
+[src: file: backend/src/api/projects/mod.rs:232#resolve_briefing_notes]
 [src: file: backend/src/api/audit/briefing.rs:21-39#get_briefing]
 
 Removing a TD-to-tasks or cross-agent option from the file disables it even
@@ -57,7 +57,7 @@ The regression suite covers HTTP reads and cards, stale database options,
 empty/unreadable files, explicit workflow defaults, clone preservation and a
 scripted Full audit that reads the briefing before its first step in both
 `docs/` and `.ai/`.
-[src: file: backend/tests/api_tests.rs:8346-8384#briefing_file_drives_http_reads_and_audited_project_cards]
+[src: file: backend/tests/api_tests.rs:8357-8395#briefing_file_drives_http_reads_and_audited_project_cards]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:67-97#briefing_residuals_empty_or_unreadable_file_never_resurrects_db_options]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:99-118#briefing_residuals_removing_an_option_in_the_file_overrides_stale_db_notes]
 [src: file: backend/src/api/audit/briefing_residuals_tests.rs:120-169#briefing_residuals_fresh_clone_keeps_the_generated_project_doc_without_answers]

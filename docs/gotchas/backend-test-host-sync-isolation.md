@@ -17,8 +17,8 @@ roots. [src: file: backend/src/api/mcps.rs:945-953#sync_pids]
 (`backend/tests/it.rs`), and nextest runs each of its tests in its own process. Its ordinary
 `test_state` calls a single `OnceLock<TempDir>` initializer which creates and
 installs both `KRONN_DATA_DIR` and `KRONN_HOST_HOME`; subsequent state builders
-do not mutate either process-global variable. [src: file: backend/tests/api_tests.rs:5636-5661#isolate_config_dir]
-[src: file: backend/tests/api_tests.rs:6043-6050#test_state]
+do not mutate either process-global variable. [src: file: backend/tests/api_tests.rs:5649-5674#isolate_config_dir]
+[src: file: backend/tests/api_tests.rs:6051-6058#test_state]
 
 The library test module has a different constraint: its non-serial state
 constructors do not mutate the environment, while the pre-existing config-save
@@ -83,14 +83,14 @@ and sends two ordinary concurrent create requests after initialization. The
 blocked child places a file inside the owned Codex fixture and verifies that a
 write failure leaves the outside sentinels unchanged. The parent re-executes its
 own test binary with `--exact`, has a 15-second deadline/kill path, and asserts
-that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:18742-18972#MCP_HOST_ISOLATION_CHILD]
+that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:18783-19013#MCP_HOST_ISOLATION_CHILD]
 
 The parent initializes the ordinary `OnceLock` before taking those environment
 snapshots. Otherwise a parallel non-serial router test can perform the first
 initialization during a child run and make the parent falsely report an
 environment leak. Keep that initialization inside the parent branch: doing it
 in the child before its RED control would hide the confinement regression.
-[src: file: backend/tests/api_tests.rs:18791-18796#isolate_config_dir]
+[src: file: backend/tests/api_tests.rs:18835-18840#isolate_config_dir]
 
 The focused regression is not a replacement for the principal's combined-suite
 qualification; it is the source-level confinement audit and regression proof

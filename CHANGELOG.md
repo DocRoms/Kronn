@@ -13,6 +13,127 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- HTTP agents: an operator switch for Kronn's tools, and a gate on models that
+  cannot take them (KT-1600). Tools stay on by default for every HTTP agent. Turn
+  them off per agent (Settings > Agents: Ollama, LiteLLM, NVIDIA) or per external
+  API connection when a model does not support tool calls. Ollama also withholds
+  them from a model its catalogue lists as a chat model without `tools`; a model
+  not yet re-read since the upgrade keeps them. An `api_call` result is capped at
+  16 KiB with a `truncation_marker` telling the model to narrow its request.
+  Migration 294 adds the nullable `tools_enabled` column; nothing is backfilled.
+- Orchestration: an integration whose only conflicts are doc-citation line
+  numbers no longer goes back to the worker (KT-1669). The integration takes the
+  target's side. Every candidate, conflicted or not, is re-anchored across all
+  docs (a branch already on the target gets a commit of its own) and must leave
+  no citation unresolved that resolved on the target; a citation already broken
+  there never blocks. The accepted delivery report carries an `integration:`
+  attention point with the docs and how many anchors moved. Any other conflict,
+  or a citation the candidate newly leaves unresolved (its symbol is gone), still
+  goes back with the exact `doc:line [src: …]` list. The worker brief now asks a
+  lane to keep only its own docs' citations resolving.
+- UI: one permanent bell for everything running in Kronn (KT-1658, phase 1 of
+  the KT-334 attention center). It replaces the spinner next to Config, the
+  « N en cours » text that jumped to the discussions and the audits popover. The
+  bell rings while something runs (a run paused on a provider quota does not make
+  it ring) and carries a counter for what will wait for you. Its panel has an
+  « En cours » compartment listing agent turns, workflow runs (including
+  quota-paused ones, with « resumes at <time> » and « Resume now »), audits and
+  task workers, each with elapsed time, a « no activity for … » hint past 15
+  minutes, a link to open it and its existing stop / cancel / resume action. The
+  layout already reserves « Attend une décision » and « Terminé non-vu » for the
+  next phase. `GET /api/activity` derives these generic rows (type / state /
+  source) on read from `agent_dispatch_jobs`, `workflow_runs`, `task_executions`
+  and the audit tracker: there is no notification store, and a new kind of row
+  is one new source with no panel change.
+- Workflows: a run paused on a provider quota is shown as paused everywhere,
+  resumes as soon as the quota is back, and never blocks a launch silently
+  (KT-1657). A refused launch (`Concurrency limit reached`) now names the run
+  that holds the slot (workflow, state, and for a quota wait the wake time) and
+  the actions: resume it now, open it, cancel it, or switch the agent of its
+  waiting step. `workflow_active_runs` and `GET /api/workflows/active-runs`
+  list every unfinished run, a `WaitingQuota` one with its wake time; the
+  workflow list, card and run page read
+  « Paused — provider quota, resumes automatically at <time> » with a
+  « Resume now » reachable without opening the run, and the active-runs
+  popover lists paused runs apart from the running ones (no new header
+  indicator: the global view is the activity bell, KT-1658). A paused run no longer
+  waits blindly for the announced reset: about every 20 minutes, and at once
+  after a key, agent or login change, Kronn asks the provider with a minimal
+  request and resumes the run as soon as it answers; the refused step can be
+  moved to another installed agent from the paused run
+  (`POST /api/workflow-runs/{id}/quota-agent`).
+- Workflows: the autoCode Issue workflow can run on any Kronn (KT-1643). The
+  instance's address is a built-in, `{{run.kronn_url}}`; `GET
+  /api/contribution/preflight` finds the project by the repository's remote
+  (no fixed id), checks `gh` (installed, logged in, `repo` scope), the clone
+  and a local worker with the command that fixes each failure, and says whether
+  the branch goes straight to the repository or through the contributor's fork
+  (the pull request always targets the repository). The workflows ship with
+  Kronn: `POST /api/workflows/templates/autocode-issue` installs « start the
+  campaign » (preflight, take the issue, task, room, campaign, launch) and
+  « publish the pull request » (fork when needed, push, `gh pr create`) on any
+  instance, with the repository, the target branch (default `main`) and the
+  review rounds (default 10) as launch variables. A campaign records who
+  reviews each delivery and announces it in its room: the reviewer it was
+  created with, else the agent the room already has, else the human. A room is
+  reconfigured only for a reviewer passed explicitly, and the shipped workflow
+  passes the instance's configured remote model when it has one, announced by
+  the preflight and replaceable with the workflow's `reviewer` variable. The
+  steps are `python3` scripts: the install call is refused with what to install
+  while `python3` is not on the PATH, and a run that cannot start it says the
+  same. See [the guide](docs/guides/autocode-issue-workflow.md).
+- API connections: a revoked or expired token is surfaced before the next run
+  fails on it (KT-1524). A 401 (or a 403 that names the credential, or a failed
+  OAuth refresh) flags the connection until its next successful call: the card
+  shows « Token refused » with the provider's message and an update action, and
+  a dashboard banner lists every connection that needs a new token. A workflow
+  step, collector or Quick API that fails on it now opens with one plain
+  sentence naming the connection, and the run page says so at run level.
+- Workflows: a heavy step output no longer goes unnoticed (KT-1525). Each step
+  result records its output size, a Collect API data step records the payload of
+  each source, and the run view flags a step above the threshold (256 KB by
+  default, Settings > Workers) with its name and the fix (select fields, limit,
+  paginate); the workflow card names the heaviest step of its last run. The
+  Page header and sync panel grade the weight of the datasets a Page receives,
+  whoever publishes them, like its HTML weight.
+
+- Workflows: the design doctrine now reaches the agents that author them over
+  MCP. One short file (decision tree, "at equal cost, choose for
+  maintainability" rules, ApiCall limits) is served as `authoring_doctrine` by
+  `workflow_step_schema` and is the « Authoring doctrine » section of the
+  `workflow-architect` guide, so the two cannot diverge. The rules: any HTTP call
+  to a service that has a plugin goes through ApiCall / BatchApiCall /
+  CollectApiData, Exec is for logic only, a script is shared (Quick Exec or
+  `exec_script_files`) and never copied, state passes through step outputs. The
+  schema now says what an ApiCall does past its 50-page cap (the items so far,
+  a success, and the `PAGINATION_TRUNCATED` signal), that `Auto` pagination
+  does not walk, and how a GraphQL query is sent (and that it is not paginated).
+  `workflow_create_draft` and `workflow_update` tell the agent to read it, and
+  `kronn_readiness` gains non-blocking `warnings` for a script copied into
+  several Exec steps and for an Exec calling `gh`/`curl` toward a service with a
+  configured plugin. The step-type list is generated from the code everywhere
+  (schema, guide, MCP greeting, draft description: fifteen types, no longer 12
+  or 13); the guide no longer says "limit to 4-5 steps" (the cap is 20), "never
+  end on Structured", "fall back to Agent + bash for `bash -c`", or pins the
+  plugin list to 0.6.0. `backend/src/api/agent_workflow_bench.rs` scores the PR
+  review chain a model builds, with and without the doctrine (KT-1216).
+
+- CI: Kronn is started on Windows on every backend or frontend change. The
+  `test-boot-windows` job builds `kronn.exe` and boots it on a fresh data
+  directory and on the previous release's database (migrations pending, backup
+  taken first), then drives the UI it serves with no agent configured
+  (onboarding, Settings, Projects, Discussions, no 5xx), and reads a project, a
+  manual backup and a sealed secret back after a restart. A headless `kronn`
+  serves the built UI when `KRONN_FRONTEND_DIST` names it. A nightly workflow
+  runs the full backend lib suite on Windows; a test skipped there must be
+  `#[cfg(unix)]` with a concrete POSIX reason on the gate line, never
+  "unverified" (`scripts/ci/lint_windows_skips.py`, which also covers module and
+  whole-file gates and a `cfg!`/`consts::OS` check that returns inside a test;
+  366 gated tests carry a reason). Gates that only hid portable tests were
+  dropped, so the nightly decides; the room-reach and read-only-repo tests that
+  need `VerifiedCheckout::verify`, which refuses Windows, stay gated. See
+  `docs/operations/windows-boot-gate.md` (KT-1629).
+
 - Media: an image or a video can be generated from several source images of
   the discussion, ordered and removable in the Creator. Each saved image/video
   model (ComfyUI included) has a reference limit in Config: empty uses what
@@ -43,6 +164,58 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Security
 
+- An agent can no longer read another agent's login from the owner's home
+  (KT-1656). A task worker that probed Gemini CLI printed `~/.gemini/settings.json`
+  with its tokens into its transcript, which is stored and sent to the model
+  provider. Every confined launch now denies the credential stores of the other
+  agents (`~/.gemini`, `~/.codex`, `~/.claude.json`, `~/.claude/settings.json`,
+  `~/.copilot`, `~/.vibe`, …), whatever the « Protect the Kronn vault » setting
+  says, and any restricted launch, whichever agent it runs (Claude, Codex,
+  Gemini, Kiro, Copilot, Vibe, an ACP adapter), also `~/.ssh`, `~/.aws`,
+  `~/.config/gh`, `~/.npmrc`, `~/.cargo/credentials*` and the other tools' files;
+  the agent's own store stays open, and a launch you opened in full access keeps
+  the tools of your terminal (owner decision). A
+  store the environment moves (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `GNUPGHOME`, `AWS_*_FILE`, `KUBECONFIG`,
+  `DOCKER_CONFIG`, `CARGO_HOME`, `NPM_CONFIG_USERCONFIG`, `GH_CONFIG_DIR`,
+  `CLOUDSDK_CONFIG`, the Gemini CLI home) is denied where it really is.
+  What an agent writes is stored masked when it holds a credential (a settings
+  file printed whole, an `env` block keyed by `*_TOKEN` / `*_API_KEY` /
+  `SECRET_KEY`, Google OAuth `ya29.` / `1//0`, `github_pat_` and AWS `ASIA`
+  tokens), while code and prose that only name a token are left as written; the
+  cards ingested from a message, the streaming checkpoint and the peers of a
+  shared discussion see the masked text too; a room invitation an agent posts
+  (`kr-join-` and 32 lowercase hex characters, the whole value) is left as
+  written, or the invite would no longer work. A camelCase word, a path, a value
+  equal to its name or a short number under a secret name is masked all the same
+  (it can be a real password or PIN). The upgrade (migration 293)
+  masks the vendor-shaped tokens already held by agent messages and by the other
+  tables that carry agent output (deleted and edited copies, summaries, task
+  executions, workflow step results, run logs). **Rotate the Gemini tokens that
+  were in that file, and the credentials of any other file an agent printed: the
+  backups taken before the upgrade (`kronn.db.backup`, `kronn-auto-*.db`, manual
+  copies) keep the clear text.** For one discussion known to be exposed, the owner
+  runs the full audit redaction once, by id:
+  `POST /api/maintenance/redact-discussion` (`docs/operations/db-backup.md`).
+- Kronn is no longer exposed over plain HTTP. The Settings « Allow connections
+  from other devices » toggle now refuses (409, with what is needed) unless a
+  TLS-terminating proxy on the machine (nginx, Caddy, `tailscale serve`) is
+  declared there with its public `https://` address (`server.tls_terminated_by_proxy`
+  / `server.public_origin`, or `KRONN_TLS_TERMINATED_BY_PROXY=1` +
+  `KRONN_PUBLIC_ORIGIN`). A config that already asks for exposure with no
+  declaration starts on `127.0.0.1` with a banner instead of refusing to start;
+  Docker, whose publish is outside the process, refuses to start on a
+  non-loopback `KRONN_BIND`, with or without the declaration (a declared proxy
+  must reach Kronn through `KRONN_BIND=127.0.0.1`). Behind a declared proxy the
+  backend listens on loopback only, invites become `kronns:` (https/wss on the
+  proxy's origin; none are handed out while exposure is blocked), CORS and the
+  WebSocket origin check accept the declared public origin, and the loopback auth
+  bypass is withdrawn since every proxied request comes from `127.0.0.1`: the
+  declaration (`POST /api/config/network-exposure`) is owner-only even with auth
+  off, a reset refuses while it is set, and recovery of a locked token needs the
+  `X-Kronn-Local-Proof` header read from the data directory's `local-proof` file.
+  `KRONN_ALLOW_INSECURE_LAN` does not waive any of it. In-process TLS is not
+  shipped (`TD-20260314-no-tls`, reduced) (KT-1596).
 - rusqlite 0.41 bundles libsqlite3-sys 0.39, past the vulnerable SQLite of
   RUSTSEC-2026-0459 (KT-1620).
 - The copy of a generated asset into a run's artifacts directory is written
@@ -64,6 +237,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A task worker that bumps a dependency is no longer delivered uncompiled: before
+  the lane's first build, Kronn fetches the crates (and npm packages) its lock
+  files reference and the host cache lacks, outside the worker's sandbox, from
+  crates.io / the npm registry only. A lock naming a git dependency, another
+  registry or a tarball URL is refused whole and fetches nothing; the worker
+  gets no network of its own. Each fetch is journalled on the execution
+  (`dependency_fetch`). The lock files are parsed (TOML, YAML) rather than
+  scanned, and the fetch runs in a private scratch project under Kronn's data
+  directory with a cleared environment, so nothing the worker wrote (a
+  `.cargo/config.toml`, a `[patch]`, an `.npmrc`, a workspace registry) and no
+  host registry setting or token reaches it; leftovers are swept at startup
+  (KT-1649).
 - Windows: Kronn could not start after an upgrade with a pending migration ("Access denied (os error 5)"), and scheduled backups failed. The backup copy was flushed through a read-only handle, which Windows refuses; it is now opened for writing first, and the Windows CI job runs the test (KT-1625, #509).
 
 - An interrupted task execution no longer stays stuck on "recovery decision
@@ -214,8 +399,22 @@ Release notes for 0.9.3 and earlier are available in the
   a `kronn-run-artifacts/<key>` directory of Kronn's own; a base inside or
   containing the data directory is refused. Docker uses a new
   `kronn-run-artifacts` volume. Existing live run directories are moved at
-  startup, dead ones deleted. Any Agent step can still read any run's
-  artifacts; per-run confinement is KT-1587.
+  startup, dead ones deleted. Per-run confinement follows (KT-1587, below).
+- An agent step reads its own run's artifacts and no other run's (KT-1587). The
+  run artifacts root is closed to every native agent launch (Seatbelt deny, a
+  bubblewrap tmpfs, Claude `denyRead` and the Read/Edit/Write rules) and the run
+  directory the step was granted is opened again, read-only (a later Seatbelt
+  rule, a read-only bind, Claude `allowRead`, literal Read denies on the other
+  runs). The grant is the typed `read_only_dirs` Kronn built for the step, never
+  parsed back out of the launch arguments (a prompt or an issue body that spells
+  `--add-dir <other run>` grants nothing), and a granted directory must be a
+  direct, non-link, lowercase-UUID child of the root, vetted as given (before
+  any `canonicalize`): one that fails reaches no `--add-dir` or read entry. The
+  default adapted ACP route (Claude and Codex) carries the grant to its spawn.
+  A launch with no grant reads no run's artifacts, and a Claude launch with more
+  run directories than its rules can name gets none either, `--add-dir`
+  included. Follows the vault protection setting:
+  off, or no sandbox on the host, leaves the root open.
 - A task worker can edit its project's own `.cargo/audit.toml` and
   `.cargo/config.toml`, and a refused tool call is no longer silent (KT-1541).
   Claude Code's built-in sensitive-directory check asks on any path under
@@ -331,6 +530,16 @@ Release notes for 0.9.3 and earlier are available in the
   sweep (no duplicate PR comments). Claude's short "limit · resets …" wordings
   are classified as quota; "Context limit: reset the conversation" is not. The
   run page no longer offers Resume on a sub-workflow child.
+- A single sub-workflow child refused for quota, at any depth, waits through
+  its parent instead of failing it (KT-1119). The parent goes to
+  `WaitingQuota` with the wait it mirrored, and its resume reclaims the same
+  child at the refused step: neither the parent's nor the child's earlier steps
+  are replayed. A foreach under a single sub-workflow waits through the whole
+  chain. A batch step whose children were all refused for quota waits too and
+  re-runs at the reset; a batch with at least one success keeps its partial
+  verdict. Cancellation never wakes the chain, a child cancelled on its own ends
+  the parent's wait with a clear failure, and the parent follows its child
+  across repeated refusals instead of starting another.
 - A quota pause no longer spends a run's Timeout guard, which now measures
   active runner time (persisted, so a restart keeps it). A reset announced past
   the old deadline schedules a wake like any other instead of leaving the run

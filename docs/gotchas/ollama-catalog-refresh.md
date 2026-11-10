@@ -26,7 +26,7 @@ Successful empty discovery marks missing models unavailable without deleting
 their identity or operator settings. Reappearance restores the same identity.
 Manual display names become aliases on promotion; existing aliases, tier,
 cost and privacy overlays are preserved.
-[src: file: backend/src/core/model_catalog/mod.rs:604-655#refresh_ollama_catalog_at]
+[src: file: backend/src/core/model_catalog/mod.rs:664-715#refresh_ollama_catalog_at]
 [src: file: backend/src/db/model_catalog.rs:556-730#reconcile_live]
 [src: file: backend/src/db/model_catalog.rs:732-761#record_refresh_failure]
 
