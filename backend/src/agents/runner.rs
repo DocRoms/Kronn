@@ -4893,6 +4893,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     let (tx, rx) = mpsc::channel::<String>(256);
     let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+    let usage = Arc::new(Mutex::new(AgentUsage::default()));
     let mut stderr_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Always stream stdout
@@ -4900,6 +4901,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         let tx_out = tx.clone();
         let provenance = config.provenance.clone();
         let observe_claude = *config.agent_type == AgentType::ClaudeCode;
+        // Gemini answers with one JSON envelope (`--output-format json`): it is
+        // unwrapped here so consumers read the reply, and its usage is kept.
+        let mut gemini_json =
+            (*config.agent_type == AgentType::GeminiCli).then(GeminiJsonAssembler::default);
+        let reader_usage = usage.clone();
         tokio::spawn(async move {
             let mut lines = lossy_lines(stdout);
             // Don't conflate a read error with EOF: the stream is truncated
@@ -4907,6 +4913,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
+                        let line = match gemini_json.as_mut() {
+                            Some(assembler) => match assembler.push(line, &reader_usage) {
+                                Some(line) => line,
+                                None => continue,
+                            },
+                            None => line,
+                        };
                         if observe_claude {
                             if let Some(model) = provenance::claude_observed_model(&line) {
                                 provenance::observe_model(provenance.as_ref(), &model);
@@ -4919,7 +4932,12 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                             break;
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        if let Some(held) = gemini_json.as_mut().and_then(|a| a.flush()) {
+                            let _ = tx_out.send(held).await;
+                        }
+                        break;
+                    }
                     Err(e) => {
                         tracing::warn!("agent stdout read error (output truncated): {}", e);
                         break;
@@ -5000,7 +5018,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_type: config.agent_type.clone(),
         rx,
         stderr_capture,
-        usage: Arc::new(Mutex::new(AgentUsage::default())),
+        usage,
         stderr_task: stderr_handle,
         http_cancel: None,
         pgid,
@@ -14066,6 +14084,10 @@ fn agent_command_with_task_worker_policy(
                     args.push(policy);
                 }
             }
+            // The JSON envelope carries the run's token usage, which the text
+            // output does not (`GeminiJsonAssembler` unwraps it).
+            args.push("--output-format".into());
+            args.push("json".into());
             // Gemini CLI has no system prompt flag — prepend context to prompt
             let full_prompt = if mcp_context.is_empty() {
                 prompt.into()
@@ -15313,12 +15335,15 @@ pub fn clean_kiro_line(line: &str) -> Option<String> {
 /// Parse token usage from agent output.
 /// Codex outputs "tokens used\nN,NNN" on stderr (StdoutOnly mode captures it).
 /// Kiro outputs "Credits: 0.05 • Time: 3s" on stderr.
+/// Gemini CLI reports through its `--output-format json` envelope (`gemini_json_usage`),
+/// Vibe through the `vibe_tokens:<prompt>:<completion>` stderr marker `vibe-runner.py` prints.
 /// Returns (cleaned_response, tokens_used) — token lines are stripped if found in response.
+/// `None` means UNMEASURED: no count was reported, which is not the same as a free run.
 pub fn parse_token_usage(
     agent_type: &AgentType,
     response: &str,
     stderr_lines: &[String],
-) -> (String, u64) {
+) -> (String, Option<u64>) {
     match agent_type {
         AgentType::Kiro => {
             // Kiro outputs "Credits: X.XX" or "▸ Credits: X.XX" on stderr.
@@ -15335,7 +15360,7 @@ pub fn parse_token_usage(
                         .trim();
                     if let Ok(credits) = credits_str.parse::<f64>() {
                         let tokens = (credits * 10000.0) as u64;
-                        return (response.to_string(), tokens);
+                        return (response.to_string(), Some(tokens));
                     } else {
                         tracing::warn!("Kiro credits parse failed for: {:?}", credits_str);
                     }
@@ -15347,7 +15372,7 @@ pub fn parse_token_usage(
                     stderr_lines.len()
                 );
             }
-            (response.to_string(), 0)
+            (response.to_string(), None)
         }
         AgentType::Codex => {
             // Codex writes `tokens used` followed by the count. Newer releases
@@ -15355,7 +15380,7 @@ pub fn parse_token_usage(
             // the penultimate stderr line anymore. Scan every adjacent pair and
             // prefer the latest valid measurement.
             if let Some(count) = codex_token_usage(stderr_lines.iter().map(String::as_str)) {
-                return (response.to_string(), count);
+                return (response.to_string(), Some(count));
             }
             // Fallback: check stdout (some versions may put it there)
             let lines: Vec<&str> = response.lines().collect();
@@ -15369,10 +15394,10 @@ pub fn parse_token_usage(
                         .map(|(_, line)| *line)
                         .collect::<Vec<_>>()
                         .join("\n");
-                    return (clean, count);
+                    return (clean, Some(count));
                 }
             }
-            (response.to_string(), 0)
+            (response.to_string(), None)
         }
         AgentType::Ollama | AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
             // Both HTTP backends put "ollama_tokens:prompt:eval" in stderr_capture
@@ -15384,7 +15409,7 @@ pub fn parse_token_usage(
             // marker per turn. KT-408 — this used to `return` on the FIRST
             // match, silently reporting only turn one's cost for any run that
             // used tools; the real total is the SUM across every turn.
-            let mut total = 0u64;
+            let mut total: Option<u64> = None;
             for line in stderr_lines {
                 let Some(rest) = line.strip_prefix("ollama_tokens:") else {
                     continue;
@@ -15399,7 +15424,7 @@ pub fn parse_token_usage(
                 else {
                     continue;
                 };
-                total += prompt + eval;
+                total = Some(total.unwrap_or(0) + prompt + eval);
             }
             (response.to_string(), total)
         }
@@ -15414,9 +15439,15 @@ pub fn parse_token_usage(
             // lines that occasionally leak into stdout. The MCP failure itself
             // is still logged via stderr_capture for debugging.
             //
-            // Token usage isn't available on Gemini CLI 0.32 stdout (no
-            // `tokens used` marker) — return 0, the auth_mode field still
-            // disambiguates `override` vs `local auth` in the UI.
+            // Usage comes from the `--output-format json` envelope. The process
+            // unwraps it while streaming (`GeminiJsonAssembler`); this covers a
+            // response that still carries the raw envelope. A plain-text reply
+            // (an older CLI, a failed run) has no count: unmeasured, not zero.
+            let (response, usage) = match unwrap_gemini_json(response) {
+                Some((text, usage)) => (text, usage.map(|usage| usage.total)),
+                None => (response.to_string(), None),
+            };
+            let response = response.as_str();
             const MCP_ISSUES_MARKER: &str = "MCP issues detected. Run /mcp list for status.";
             // Step 1 — drop debug noise lines. We keep blank lines so paragraph
             // breaks in the agent's actual reply survive intact.
@@ -15436,11 +15467,133 @@ pub fn parse_token_usage(
             // to the next chunk (handled by the same `replacen` since the
             // marker is unique).
             let cleaned = cleaned.replacen(MCP_ISSUES_MARKER, "", 1);
-            (cleaned.trim_start().to_string(), 0)
+            (cleaned.trim_start().to_string(), usage)
         }
+        // `vibe-runner.py` prints `vibe_tokens:<prompt>:<completion>` on stderr
+        // when the Mistral API reports usage. No marker → unmeasured.
+        AgentType::Vibe => (response.to_string(), vibe_token_usage(stderr_lines)),
         // Claude Code: tokens parsed inline via parse_claude_stream_line() in discussions.rs
-        // TODO: Vibe — not yet supported
-        _ => (response.to_string(), 0),
+        _ => (response.to_string(), None),
+    }
+}
+
+/// Usage `vibe-runner.py` reported (`vibe_tokens:<prompt>:<completion>`), the
+/// latest valid marker winning. `None` when it printed none or only malformed
+/// ones: the Vibe SDK path and a Mistral stream without a usage chunk report
+/// nothing, and that is unmeasured, never 0.
+fn vibe_token_usage(stderr_lines: &[String]) -> Option<u64> {
+    stderr_lines.iter().rev().find_map(|line| {
+        let clean = strip_ansi(line);
+        let rest = clean.trim().strip_prefix("vibe_tokens:")?;
+        let (prompt, completion) = rest.split_once(':')?;
+        let prompt = prompt.trim().parse::<u64>().ok()?;
+        let completion = completion.trim().parse::<u64>().ok()?;
+        Some(prompt.saturating_add(completion))
+    })
+}
+
+/// What Gemini CLI's `--output-format json` envelope reports for one run,
+/// summed over the models it used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GeminiUsage {
+    /// Prompt tokens, cached share included.
+    prompt: u64,
+    /// The CLI's own total (prompt + candidates + thoughts + tool).
+    total: u64,
+    cached: Option<u64>,
+}
+
+/// Unwrap a Gemini CLI `--output-format json` envelope
+/// (`{"session_id", "response", "stats": {"models": {"<m>": {"tokens": {...}}}}}`).
+/// `None` when `text` is not that envelope; the usage is `None` when the
+/// envelope carries no token counts. Checked against Gemini CLI 0.66.0
+/// (`JsonFormatter` and `createInitialModelMetrics` in its bundle).
+fn unwrap_gemini_json(text: &str) -> Option<(String, Option<GeminiUsage>)> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let object = value.as_object()?;
+    let response = object.get("response")?.as_str()?.to_string();
+    let models = object
+        .get("stats")
+        .and_then(|stats| stats.get("models"))
+        .and_then(serde_json::Value::as_object);
+    let mut usage: Option<GeminiUsage> = None;
+    for tokens in models
+        .into_iter()
+        .flat_map(|models| models.values())
+        .filter_map(|model| model.get("tokens"))
+    {
+        let field = |name: &str| tokens.get(name).and_then(serde_json::Value::as_u64);
+        let prompt = field("prompt");
+        let total = field("total").or_else(|| Some(prompt? + field("candidates")?));
+        let (Some(prompt), Some(total)) = (prompt, total) else {
+            continue;
+        };
+        let sum = usage.get_or_insert(GeminiUsage {
+            prompt: 0,
+            total: 0,
+            cached: None,
+        });
+        sum.prompt = sum.prompt.saturating_add(prompt);
+        sum.total = sum.total.saturating_add(total);
+        if let Some(cached) = field("cached") {
+            sum.cached = Some(sum.cached.unwrap_or(0).saturating_add(cached));
+        }
+    }
+    // A run that made no request reports zeros: nothing was measured.
+    Some((response, usage.filter(|usage| usage.total > 0)))
+}
+
+/// Reassembles Gemini CLI's pretty-printed `--output-format json` object from
+/// the stdout lines and hands the consumers the reply text instead of the
+/// envelope, keeping the usage for `AgentProcess::reported_token_usage`.
+/// Anything that is not the envelope (warnings, an older CLI's plain text)
+/// passes through untouched.
+#[derive(Default)]
+struct GeminiJsonAssembler {
+    pending: Option<Vec<String>>,
+}
+
+impl GeminiJsonAssembler {
+    /// `Some(line)` is what to emit now; `None` means the line is held.
+    fn push(&mut self, line: String, usage: &Mutex<AgentUsage>) -> Option<String> {
+        match self.pending.as_mut() {
+            None if line == "{" => {
+                self.pending = Some(vec![line]);
+                None
+            }
+            None => Some(line),
+            Some(buffer) => {
+                let closes = line == "}";
+                buffer.push(line);
+                if !closes {
+                    return None;
+                }
+                let raw = self.pending.take()?.join("\n");
+                Some(match unwrap_gemini_json(&raw) {
+                    Some((text, reported)) => {
+                        record_gemini_usage(usage, reported);
+                        text
+                    }
+                    None => raw,
+                })
+            }
+        }
+    }
+
+    /// The stream ended inside an object: nothing is lost, it is emitted raw.
+    fn flush(&mut self) -> Option<String> {
+        self.pending.take().map(|buffer| buffer.join("\n"))
+    }
+}
+
+fn record_gemini_usage(usage: &Mutex<AgentUsage>, reported: Option<GeminiUsage>) {
+    let Some(reported) = reported else {
+        return;
+    };
+    if let Ok(mut usage) = usage.lock() {
+        usage.input_tokens = reported.prompt;
+        usage.output_tokens = reported.total.saturating_sub(reported.prompt);
+        usage.prompt_cache.cached_prompt_tokens = reported.cached;
     }
 }
 

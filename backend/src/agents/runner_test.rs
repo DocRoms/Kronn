@@ -7307,7 +7307,8 @@ fi
         );
         let (_, total_tokens) = parse_token_usage(&AgentType::Ollama, "unused", &captured_lines);
         assert_eq!(
-            total_tokens, 19,
+            total_tokens,
+            Some(19),
             "real total across both turns (5+2+9+3), not just one turn's: {captured_lines:?}"
         );
     }
@@ -9780,7 +9781,7 @@ fi
     fn codex_tokens_from_stderr() {
         let stderr = vec!["some info".into(), "tokens used".into(), "1,234".into()];
         let (response, tokens) = parse_token_usage(&AgentType::Codex, "response text", &stderr);
-        assert_eq!(tokens, 1234);
+        assert_eq!(tokens, Some(1234));
         assert_eq!(response, "response text"); // response not modified
     }
 
@@ -9793,7 +9794,7 @@ fi
             "warning: telemetry flush delayed".into(),
         ];
         let (response, tokens) = parse_token_usage(&AgentType::Codex, "response text", &stderr);
-        assert_eq!(tokens, 12_345);
+        assert_eq!(tokens, Some(12_345));
         assert_eq!(response, "response text");
     }
 
@@ -9801,7 +9802,7 @@ fi
     fn codex_tokens_from_stdout_fallback() {
         let response = "Hello world\ntokens used\n5,678";
         let (cleaned, tokens) = parse_token_usage(&AgentType::Codex, response, &[]);
-        assert_eq!(tokens, 5678);
+        assert_eq!(tokens, Some(5678));
         assert_eq!(cleaned, "Hello world"); // token lines stripped
     }
 
@@ -9809,7 +9810,7 @@ fi
     fn codex_stdout_fallback_preserves_lines_after_usage() {
         let response = "Hello world\ntokens used\n5,678\nlate diagnostic";
         let (cleaned, tokens) = parse_token_usage(&AgentType::Codex, response, &[]);
-        assert_eq!(tokens, 5678);
+        assert_eq!(tokens, Some(5678));
         assert_eq!(cleaned, "Hello world\nlate diagnostic");
     }
 
@@ -9827,17 +9828,17 @@ fi
             "ollama_tokens:9:3".to_string(),
         ];
         let (_, tokens) = parse_token_usage(&AgentType::Ollama, "response", &stderr);
-        assert_eq!(tokens, 19, "5+2+9+3, not just the first marker's 5+2");
+        assert_eq!(tokens, Some(19), "5+2+9+3, not just the first marker's 5+2");
 
         // Same wire format, same bug surface, for the other HTTP backends
         // that share this branch. Custom is the durable AgentType used by
         // OpenRouter and user-defined OpenAI-compatible connections.
         let (_, tokens) = parse_token_usage(&AgentType::LiteLlm, "response", &stderr);
-        assert_eq!(tokens, 19);
+        assert_eq!(tokens, Some(19));
         let (_, tokens) = parse_token_usage(&AgentType::Nvidia, "response", &stderr);
-        assert_eq!(tokens, 19);
+        assert_eq!(tokens, Some(19));
         let (_, tokens) = parse_token_usage(&AgentType::Custom, "response", &stderr);
-        assert_eq!(tokens, 19);
+        assert_eq!(tokens, Some(19));
     }
 
     /// A malformed marker (truncated by a stream cut, or simply not this
@@ -9854,7 +9855,8 @@ fi
         ];
         let (_, tokens) = parse_token_usage(&AgentType::Ollama, "response", &stderr);
         assert_eq!(
-            tokens, 19,
+            tokens,
+            Some(19),
             "only the two well-formed markers (5:2 and 9:3) contribute"
         );
     }
@@ -9863,13 +9865,13 @@ fi
     fn a_single_turn_run_still_sums_to_exactly_that_turns_cost() {
         let stderr = vec!["ollama_tokens:12:3".to_string()];
         let (_, tokens) = parse_token_usage(&AgentType::Ollama, "response", &stderr);
-        assert_eq!(tokens, 15, "the single-turn case must not regress");
+        assert_eq!(tokens, Some(15), "the single-turn case must not regress");
     }
 
     #[test]
-    fn no_marker_at_all_yields_zero_not_an_error() {
+    fn no_marker_at_all_is_unmeasured_not_zero() {
         let (_, tokens) = parse_token_usage(&AgentType::Ollama, "response", &[]);
-        assert_eq!(tokens, 0);
+        assert_eq!(tokens, None);
     }
 
     #[test]
@@ -9930,15 +9932,15 @@ fi
     #[test]
     fn codex_no_tokens() {
         let (response, tokens) = parse_token_usage(&AgentType::Codex, "just a response", &[]);
-        assert_eq!(tokens, 0);
+        assert_eq!(tokens, None);
         assert_eq!(response, "just a response");
     }
 
     #[test]
-    fn claude_tokens_always_zero_from_this_fn() {
+    fn claude_tokens_are_unmeasured_from_this_fn() {
         // Claude Code tokens are parsed inline via parse_claude_stream_line
         let (_, tokens) = parse_token_usage(&AgentType::ClaudeCode, "response", &[]);
-        assert_eq!(tokens, 0);
+        assert_eq!(tokens, None);
     }
 
     #[test]
@@ -9951,7 +9953,7 @@ fi
         let raw =
             "MCP issues detected. Run /mcp list for status.\nVoici la réponse réelle de Gemini.";
         let (cleaned, tokens) = parse_token_usage(&AgentType::GeminiCli, raw, &[]);
-        assert_eq!(tokens, 0);
+        assert_eq!(tokens, None);
         assert_eq!(cleaned, "Voici la réponse réelle de Gemini.");
     }
 
@@ -9988,15 +9990,115 @@ Suite de la réponse.";
     }
 
     #[test]
-    fn vibe_tokens_always_zero() {
+    fn vibe_without_a_usage_marker_is_unmeasured_not_zero() {
         let (_, tokens) = parse_token_usage(&AgentType::Vibe, "response", &[]);
-        assert_eq!(tokens, 0);
+        assert_eq!(tokens, None);
     }
 
     #[test]
-    fn gemini_tokens_always_zero() {
+    fn vibe_reads_the_runner_usage_marker() {
+        let stderr = vec![
+            "some SDK warning".to_string(),
+            "vibe_tokens:120:30".to_string(),
+        ];
+        let (response, tokens) = parse_token_usage(&AgentType::Vibe, "response", &stderr);
+        assert_eq!(tokens, Some(150));
+        assert_eq!(response, "response");
+    }
+
+    #[test]
+    fn vibe_ignores_malformed_markers_and_keeps_the_latest_valid_one() {
+        let stderr = vec![
+            "vibe_tokens:10:5".to_string(),
+            "vibe_tokens:not-a-number:3".to_string(),
+            "vibe_tokens:9".to_string(),
+        ];
+        let (_, tokens) = parse_token_usage(&AgentType::Vibe, "response", &stderr);
+        assert_eq!(tokens, Some(15));
+        let (_, tokens) = parse_token_usage(
+            &AgentType::Vibe,
+            "response",
+            &["vibe_tokens:x:y".to_string()],
+        );
+        assert_eq!(tokens, None);
+    }
+
+    #[test]
+    fn gemini_plain_text_is_unmeasured_not_zero() {
         let (_, tokens) = parse_token_usage(&AgentType::GeminiCli, "response", &[]);
-        assert_eq!(tokens, 0);
+        assert_eq!(tokens, None);
+    }
+
+    const GEMINI_ENVELOPE: &str = r#"{
+  "session_id": "s-1",
+  "response": "Bonjour\nle monde",
+  "stats": {
+    "models": {
+      "gemini-2.5-pro": {
+        "api": {"totalRequests": 2},
+        "tokens": {"input": 80, "prompt": 100, "candidates": 20, "total": 130, "cached": 20, "thoughts": 10, "tool": 0}
+      },
+      "gemini-2.5-flash": {
+        "tokens": {"input": 5, "prompt": 5, "candidates": 2, "total": 7, "cached": 0, "thoughts": 0, "tool": 0}
+      }
+    }
+  }
+}"#;
+
+    #[test]
+    fn gemini_json_envelope_yields_the_reply_and_the_summed_total() {
+        let (cleaned, tokens) = parse_token_usage(&AgentType::GeminiCli, GEMINI_ENVELOPE, &[]);
+        assert_eq!(cleaned, "Bonjour\nle monde");
+        assert_eq!(tokens, Some(137));
+    }
+
+    #[test]
+    fn gemini_json_envelope_without_usage_is_unmeasured() {
+        for raw in [
+            r#"{"response": "ok"}"#,
+            r#"{"response": "ok", "stats": {"models": {}}}"#,
+            r#"{"response": "ok", "stats": {"models": {"m": {"tokens": {"prompt": 0, "candidates": 0, "total": 0}}}}}"#,
+        ] {
+            let (cleaned, tokens) = parse_token_usage(&AgentType::GeminiCli, raw, &[]);
+            assert_eq!(cleaned, "ok");
+            assert_eq!(tokens, None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn gemini_assembler_unwraps_the_envelope_and_records_usage() {
+        let usage = Mutex::new(AgentUsage::default());
+        let mut assembler = GeminiJsonAssembler::default();
+        let mut emitted = Vec::new();
+        for line in GEMINI_ENVELOPE.lines() {
+            emitted.extend(assembler.push(line.to_string(), &usage));
+        }
+        assert_eq!(emitted, vec!["Bonjour\nle monde".to_string()]);
+        assert!(assembler.flush().is_none());
+        let usage = usage.lock().unwrap().clone();
+        assert_eq!(usage.input_tokens, 105);
+        assert_eq!(usage.output_tokens, 32, "total 137 - prompt 105");
+        assert_eq!(usage.prompt_cache.cached_prompt_tokens, Some(20));
+    }
+
+    #[test]
+    fn gemini_assembler_passes_plain_text_through_and_flushes_a_cut_envelope() {
+        let usage = Mutex::new(AgentUsage::default());
+        let mut assembler = GeminiJsonAssembler::default();
+        assert_eq!(
+            assembler.push("just text".to_string(), &usage),
+            Some("just text".to_string())
+        );
+        assert_eq!(assembler.push("{".to_string(), &usage), None);
+        assert_eq!(
+            assembler.push("  \"response\": \"cut".to_string(), &usage),
+            None
+        );
+        assert_eq!(
+            assembler.flush(),
+            Some("{\n  \"response\": \"cut".to_string())
+        );
+        assert_eq!(*usage.lock().unwrap(), AgentUsage::default());
     }
 
     // ─── fix_file_ownership ──────────────────────────────────────────────────
@@ -12550,14 +12652,14 @@ Suite de la réponse.";
     fn kiro_credits_parsing() {
         let stderr = vec!["▸ Credits: 0.05 • Time: 3s".into()];
         let (_, tokens) = parse_token_usage(&AgentType::Kiro, "response", &stderr);
-        assert_eq!(tokens, 500); // 0.05 × 10000
+        assert_eq!(tokens, Some(500)); // 0.05 × 10000
     }
 
     #[test]
     fn kiro_credits_parsing_no_bullet() {
         let stderr = vec!["Credits: 1.23 • Time: 10s".into()];
         let (_, tokens) = parse_token_usage(&AgentType::Kiro, "response", &stderr);
-        assert_eq!(tokens, 12300); // 1.23 × 10000
+        assert_eq!(tokens, Some(12300)); // 1.23 × 10000
     }
 
     // ─── clean_kiro_line: structural pattern filtering ───────────────────────

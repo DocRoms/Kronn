@@ -1780,7 +1780,7 @@ pub(crate) async fn drive_agent_to_output(
         // "[MCP error]…" lines) — gating on count>0 silently re-injected that
         // noise into the recorded step output and every {{steps.X.output}}.
         output = cleaned;
-        (count > 0).then_some(count)
+        count.filter(|count| *count > 0)
     };
 
     match tokens_used {
