@@ -826,68 +826,21 @@ fn is_placeholder(value: &str) -> bool {
 /// guards leave it as written. The audit pass ([`redact_for_audit_artifact`],
 /// [`redact_stored_text`]) is not guarded and still masks it: it runs on history
 /// long after the expiry, where a leaked `kr-join-` token is better gone.
+///
+/// The exemption is the WHOLE value, exactly as `create_invite_token` writes it
+/// (`kr-join-` and 32 lowercase hex characters), optionally inside one quote or
+/// backtick on each side. A prefix put in front of a real secret, an invitation
+/// embedded in a longer value, an uppercase or non-hex suffix are not one.
 fn is_invite_token(value: &str) -> bool {
     const PREFIX: &str = "kr-join-";
-    value.find(PREFIX).is_some_and(|at| {
-        value[at + PREFIX.len()..]
-            .chars()
-            .take_while(char::is_ascii_alphanumeric)
-            .count()
-            >= 16
+    let value = value.trim();
+    let value = value
+        .strip_prefix(['"', '\'', '`'])
+        .unwrap_or(value)
+        .trim_end_matches(['"', '\'', '`']);
+    value.strip_prefix(PREFIX).is_some_and(|hex| {
+        hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     })
-}
-
-/// A value that is a plain camelCase or PascalCase word (`initGeneration`,
-/// `TooLarge`): letters only, each word of two letters or more, cut at the
-/// capitals. Random mixed-case text never splits that cleanly.
-fn is_camel_identifier(value: &str) -> bool {
-    if !value.chars().all(|c| c.is_ascii_alphabetic())
-        || !value.chars().any(|c| c.is_ascii_lowercase())
-        || !value.chars().any(|c| c.is_ascii_uppercase())
-    {
-        return false;
-    }
-    let mut words = Vec::new();
-    let mut start = 0;
-    for (at, c) in value.char_indices() {
-        if c.is_ascii_uppercase() && at > start {
-            words.push(&value[start..at]);
-            start = at;
-        }
-    }
-    words.push(&value[start..]);
-    words.len() >= 2
-        && words
-            .iter()
-            .all(|word| word.len() >= 2 && word[1..].chars().all(|c| c.is_ascii_lowercase()))
-}
-
-/// A value that is a lowercase path or route (`session/cancel`, `docs/a-b.md`):
-/// segments of lowercase letters, digits, `_`, `.` and `-`. A base64 secret with
-/// a `/` in it carries capitals.
-fn is_path_like(value: &str) -> bool {
-    let segments: Vec<&str> = value.split('/').collect();
-    segments.len() >= 2
-        && value.starts_with(|c: char| c.is_ascii_lowercase())
-        && segments.iter().all(|segment| {
-            !segment.is_empty()
-                && segment.chars().all(|c| {
-                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-')
-                })
-        })
-}
-
-/// A value that only repeats the name it is given to (`CHANNEL_TOKEN =
-/// 'channeltoken'`), separators and case aside.
-fn repeats_its_name(name: &str, value: &str) -> bool {
-    let squash = |text: &str| {
-        text.chars()
-            .filter(|c| !matches!(c, '_' | '-' | '.'))
-            .map(|c| c.to_ascii_lowercase())
-            .collect::<String>()
-    };
-    let value = squash(value);
-    !value.is_empty() && value == squash(name)
 }
 
 /// Whether the value of a secret-named assignment (`password: …`,
@@ -914,16 +867,11 @@ fn value_is_credential(name: &str, value: &str, quoted: bool) -> bool {
     if is_placeholder(value) || value.chars().any(char::is_whitespace) {
         return false;
     }
-    // A code identifier, a route, the name repeated, a short number: what a
-    // reply says about a secret, not the secret (KT-1656, real-message review).
-    if is_camel_identifier(value)
-        || is_path_like(value)
-        || repeats_its_name(&full_name, value)
-        || repeats_its_name(&name, value)
-        || (value.len() < 8 && value.chars().all(|c| c.is_ascii_digit()))
-    {
-        return false;
-    }
+    // No carve-out for a camelCase word, a path, the name repeated or a short
+    // number: each is also what a real password, token or PIN can look like
+    // (`"password": "CorrectHorseBatteryStaple"`, `admin_password =
+    // "adminpassword"`, `PIN=4821`). Zero defect on secrets: an identifier masked
+    // in a transcript is the accepted cost (KT-1656, round 5).
     let dotted_identifier = value.contains('.')
         && value.split('.').all(|part| {
             !part.is_empty() && part.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
@@ -994,17 +942,6 @@ fn assignment_is_credential(captures: &regex_lite::Captures<'_>, text: &str) -> 
     let name = captures
         .get(1)
         .map_or("", |prefix| name_before_value(prefix.as_str()));
-    // A word in backticks right after `token:` / `secret:` is prose naming a
-    // thing (``cancel token: `session/cancel` ``, ``un secret : `TooLarge` ``).
-    let backticked = text[..value.start()].ends_with('`');
-    let lowered = name.to_ascii_lowercase();
-    let stem = without_qualifier(lowered.as_bytes()).unwrap_or(lowered.as_bytes());
-    if backticked
-        && (stem.ends_with(b"token") || stem.ends_with(b"secret"))
-        && value.as_str().chars().all(|c| c.is_alphabetic())
-    {
-        return false;
-    }
     value_is_credential(name, value.as_str(), quoted)
 }
 
@@ -1029,7 +966,11 @@ fn vendor_match_is_credential(captures: &regex_lite::Captures<'_>, _text: &str) 
             .get(3)
             .is_none_or(|password| !is_placeholder(password.as_str()))
     } else {
-        !is_placeholder(matched)
+        // `Token <value>` / `Bearer <value>` in a log line: the exemption of an
+        // invitation is the value word on its own, never a match that merely
+        // contains one.
+        let value = matched.rsplit(char::is_whitespace).next().unwrap_or("");
+        !is_invite_token(value) && !is_placeholder(matched)
     }
 }
 
@@ -2199,35 +2140,113 @@ mod tests {
         assert!(!out.contains("t0kenNotShapedLikeAVendor01"), "{out}");
         // A shorter `kr-join-` is not an invitation.
         assert!(redact_agent_output("token: \"kr-join-9f8e7d6c5b4a\"").contains("REDACTED"));
+        // The exemption is the whole value, in the exact shape of
+        // `create_invite_token`: 32 lowercase hex characters, nothing around them.
+        let upper = "kr-join-0123456789ABCDEF0123456789ABCDEF";
+        let non_hex = "kr-join-0123456789abcdefghijklmnopqrstuv";
+        let longer = format!("{invite}0123456789abcdef");
+        let one_short = "kr-join-0123456789abcdef0123456789abcde";
+        for (text, secret) in [
+            // A prefix attached to a real secret.
+            (
+                "API_KEY=\"kr-join-MyRealSecretValue0123456789abcdef\"".to_owned(),
+                "MyRealSecretValue0123456789abcdef",
+            ),
+            (
+                format!("API_KEY=\"{invite}MyRealSecret0123456789\""),
+                "MyRealSecret0123456789",
+            ),
+            // An invitation embedded in a longer value.
+            (format!("password: \"hunter2-{invite}-tail\""), "hunter2-"),
+            (format!("token: \"prefix{invite}\""), "prefix"),
+            (format!("token: \"{longer}\""), "0123456789abcdef\""),
+            // Uppercase, non-hex and wrong-length suffixes.
+            (format!("token: \"{upper}\""), upper),
+            (format!("token: \"{non_hex}\""), non_hex),
+            (format!("token: \"{one_short}\""), one_short),
+            // The bare `Token <value>` of a log line follows the same rule.
+            (format!("Token {longer} is valid"), longer.as_str()),
+            (format!("Bearer {upper}"), upper),
+        ] {
+            let out = redact_agent_output(&text);
+            assert!(out.contains("REDACTED"), "{text} -> {out}");
+            assert!(!out.contains(secret), "{text} -> {out}");
+        }
+        assert!(is_invite_token(invite));
+        assert!(is_invite_token(&format!("`{invite}`")));
+        assert!(is_invite_token(&format!("\"{invite}\"")));
+        assert!(!is_invite_token(&format!("x{invite}")));
+        assert!(!is_invite_token(&format!("{invite}x")));
+        assert!(!is_invite_token(upper));
+        assert!(!is_invite_token(&longer));
+        assert!(!is_invite_token(one_short));
         // The audit pass is not guarded: history is scrubbed of it.
         assert!(redact_for_audit_artifact(&format!("token: \"{invite}\""))
             .0
             .contains("REDACTED"));
     }
 
-    /// KT-1656 — the false positives of the real-message measurement: the value
-    /// is a name or a number, not a credential.
+    /// KT-1656 round 5 — EXPECTED-MASKED. These are the "false positives" of the
+    /// real-message measurement (`"token":"initGeneration"`, ``cancel token:
+    /// `session/cancel` ``, `TooLarge`, `CHANNEL_TOKEN = 'channeltoken'`,
+    /// `PIN=1234`). Round 4 stored them as written; a camelCase word, a path, the
+    /// name repeated and a short number are also what a real password, token or
+    /// PIN looks like, so the carve-outs leaked credentials. Zero defect on
+    /// secrets: the identifier is masked, which is the accepted cost.
     #[test]
-    fn an_identifier_a_route_the_name_repeated_or_a_short_number_is_not_a_secret() {
-        for text in [
-            r#"{"token":"initGeneration"}"#,
-            r#""token": "TooLarge""#,
-            "cancel token: `session/cancel`",
-            "token: 'session/cancel'",
-            "ce n'est **pas** un secret : `TooLarge`",
-            "le secret : `initGeneration`",
-            "CHANNEL_TOKEN = 'channeltoken'",
-            "const CHANNEL_TOKEN = \"channel-token\";",
-            "api_key = 'apikey'",
-            "PIN=1234",
-            "pin: 123456",
-            "\"pin\": \"0042\"",
-            "password: 1234567",
+    fn an_identifier_looking_value_under_a_secret_name_is_masked() {
+        for (text, value) in [
+            (r#"{"token":"initGeneration"}"#, "initGeneration"),
+            (r#""token": "TooLarge""#, "TooLarge"),
+            ("cancel token: `session/cancel`", "session/cancel"),
+            ("token: 'session/cancel'", "session/cancel"),
+            ("CHANNEL_TOKEN = 'channeltoken'", "channeltoken"),
+            ("const CHANNEL_TOKEN = \"channel-token\";", "channel-token"),
+            ("PIN=1234", "1234"),
+            ("pin: 123456", "123456"),
+            ("\"pin\": \"0042\"", "0042"),
+            ("password: \"1234567\"", "1234567"),
         ] {
-            assert_eq!(redact_agent_output(text), text, "{text}");
+            let out = redact_agent_output(text);
+            assert!(out.contains("REDACTED"), "{text} -> {out}");
+            assert!(!out.contains(value), "{text} -> {out}");
         }
-        // What is not a plain identifier is still a credential.
+    }
+
+    /// KT-1656 round 5 — every leak the two security passes of round 4 listed.
+    #[test]
+    fn a_pin_password_or_token_that_looks_like_an_identifier_is_masked() {
         for (text, secret) in [
+            // Short PINs, passcodes and numeric passwords: the 4..=7 range is live.
+            ("PIN=4821", "4821"),
+            ("pin = 0042", "0042"),
+            ("PASSCODE: \"123456\"", "123456"),
+            ("\"password\": \"1234567\"", "1234567"),
+            ("pin: '9876543'", "9876543"),
+            // A random-letter token in backticks after `token:` / `secret:`.
+            ("CLIENT_SECRET=`kqzwxvtrplmnbcdf`", "kqzwxvtrplmnbcdf"),
+            ("client secret: `kqzwxvtrplmnbcdf`", "kqzwxvtrplmnbcdf"),
+            ("token: `qwertyuiopasdfgh`", "qwertyuiopasdfgh"),
+            // A camelCase / PascalCase password.
+            (
+                "\"password\": \"CorrectHorseBatteryStaple\"",
+                "CorrectHorseBatteryStaple",
+            ),
+            ("secret = 'SummerWinterSpring'", "SummerWinterSpring"),
+            // A path-like password or token.
+            (
+                "token: \"live/0123456789abcdef0123456789abcdef\"",
+                "live/0123456789abcdef0123456789abcdef",
+            ),
+            (
+                "password = \"summer2026/winter2026\"",
+                "summer2026/winter2026",
+            ),
+            // The name repeated is a real weak credential.
+            ("admin_password = \"adminpassword\"", "adminpassword"),
+            ("db_password: 'dbpassword'", "dbpassword"),
+            ("API_TOKEN=\"api-token\"", "api-token"),
+            // Still masked: mixed-case random, base64 with a `/`, an 8-digit PIN.
             ("token: \"aB3dE5fG7hJ9kL1m\"", "aB3dE5fG7hJ9kL1m"),
             ("token: \"xKjQpLmZrTbVnWcY\"", "xKjQpLmZrTbVnWcY"),
             (
@@ -2236,23 +2255,12 @@ mod tests {
             ),
             ("PIN=12345678", "12345678"),
             ("password: \"correcthorsebattery\"", "correcthorsebattery"),
-            ("token: `correcthorse8battery`", "correcthorse8battery"),
             ("api_key = 'channeltoken-7f3a'", "channeltoken-7f3a"),
         ] {
             let out = redact_agent_output(text);
+            assert!(out.contains("REDACTED"), "{text} -> {out}");
             assert!(!out.contains(secret), "{text} -> {out}");
         }
-        assert!(is_camel_identifier("initGeneration"));
-        assert!(is_camel_identifier("TooLarge"));
-        assert!(!is_camel_identifier("xKjQpLmZrTbV"));
-        assert!(!is_camel_identifier("lowercase"));
-        assert!(!is_camel_identifier("ABCDEF"));
-        assert!(is_path_like("session/cancel"));
-        assert!(!is_path_like("Session/Cancel"));
-        assert!(!is_path_like("/etc/passwd"));
-        assert!(!is_path_like("wJalrXUtnFEMI/K7MDENG"));
-        assert!(repeats_its_name("CHANNEL_TOKEN", "channeltoken"));
-        assert!(!repeats_its_name("CHANNEL_TOKEN", "channeltoken1"));
     }
 
     #[test]

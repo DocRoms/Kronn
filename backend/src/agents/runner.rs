@@ -4722,7 +4722,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         agent_command_with_task_worker_policy(
             config.agent_type,
             config.prompt,
-            launch_full_access,
+            // The shared rule: with read-only grants the launch is restricted, so
+            // the command must not carry the global bypass `policy.apply` strips
+            // (it would leave the launch without its `--allowedTools`).
+            reach_is_full_access(launch_full_access, read_only_repos.is_some()),
             &extra_context,
             model_flag.as_deref(),
             reasoning_effort.as_deref(),

@@ -838,6 +838,23 @@ fn native_reach_is_full(full_access: bool, launch: &NativeLaunchEnv) -> bool {
     crate::agents::runner::reach_is_full_access(full_access, launch.read_only_grants)
 }
 
+/// The launch with its reach settled: what the command, the home masks and the
+/// session's broker are all built from, so none of them reads the raw flag.
+fn native_launch_with_reach(full_access: bool, launch: NativeLaunchEnv) -> NativeLaunchEnv {
+    NativeLaunchEnv {
+        full_access: native_reach_is_full(full_access, &launch),
+        ..launch
+    }
+}
+
+/// The broker of a native launch, from its settled reach.
+fn native_session_broker(
+    launch: &NativeLaunchEnv,
+    scope: Option<AcpSessionScope>,
+) -> AcpPermissionBroker {
+    session_broker(launch.full_access, scope)
+}
+
 fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
     use crate::core::child_env::AgentFamily;
     match agent {
@@ -985,17 +1002,16 @@ impl AcpJsonRpcTransport {
         if let Some(refusal) = native_acp_wsl_only_refusal(program) {
             return Err(AcpError::Transport(refusal));
         }
-        let launch = NativeLaunchEnv {
-            full_access: native_reach_is_full(full_access, &launch),
-            ..launch
-        };
+        let launch = native_launch_with_reach(full_access, launch);
         let mut command =
             native_command(agent, program, &args, cwd, &launch).map_err(AcpError::Transport)?;
         let bridge_env =
             bridge_env::for_launch(agent, command.as_std()).map_err(AcpError::Transport)?;
         // The servers are authorized once, by the session's own broker: the
         // launch arguments never name a server `session/new` does not declare.
-        let broker = session_broker(full_access, Some(scope));
+        // The broker follows the reach-adjusted flag, not the raw one: a launch
+        // with read-only grants is restricted for its permissions too.
+        let broker = native_session_broker(&launch, Some(scope));
         // Vibe's permission request carries only the call id; the tool it
         // resolved is in the update announcing that call.
         if agent == AcpAgent::Vibe {
@@ -2583,6 +2599,21 @@ mod tests {
         assert!(!native_reach_is_full(true, &granted));
         assert!(!native_reach_is_full(false, &plain));
         assert!(!native_reach_is_full(false, &granted));
+        // The broker of the session is built from the settled reach, not the raw
+        // flag: read-only grants make its permissions restricted too.
+        let broker_full = |full_access: bool, launch: NativeLaunchEnv| {
+            let settled = native_launch_with_reach(full_access, launch);
+            native_session_broker(&settled, None).full_access()
+        };
+        assert!(broker_full(true, NativeLaunchEnv::default()));
+        assert!(!broker_full(
+            true,
+            NativeLaunchEnv {
+                read_only_grants: true,
+                ..Default::default()
+            }
+        ));
+        assert!(!broker_full(false, NativeLaunchEnv::default()));
         // The runner's rule, shared by every route.
         assert!(crate::agents::runner::reach_is_full_access(true, false));
         assert!(!crate::agents::runner::reach_is_full_access(true, true));

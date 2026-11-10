@@ -260,11 +260,6 @@ const AS_WRITTEN: &[&str] = &[
     // (KT-1656): a room invitation posted on purpose, and the names of things.
     "disc_join({token: \"kr-join-0123456789abcdef0123456789abcdef\"}) to enter the room",
     "Run `disc_join({token: 'kr-join-fedcba9876543210fedcba9876543210'})` within 10 minutes",
-    "{\"token\":\"initGeneration\",\"sessionId\":\"s-1\"}",
-    "the cancel token: `session/cancel`",
-    "ce n'est **pas** un secret : `TooLarge`",
-    "const CHANNEL_TOKEN = 'channeltoken';",
-    "Example: PIN=1234",
     // Prose.
     "The token budget is 5000 and the password policy asks for 12 characters.",
     "password: required, 12 characters minimum",
@@ -278,6 +273,27 @@ const AS_WRITTEN: &[&str] = &[
     "\"integrity\": \"sha512-Xr3GkEXQYHF2qZ3Hq0O1m3m4eJmZrYw6qk7f0Zr5r0ZyQ3nJt2kTQ6o1Qj8m1gVPWk4N0a3t2w9c1r8h5y7z6A==\"",
     "checksum: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
 ];
+
+/// Round 4 stored these as written (they were the false positives of the real
+/// database measurement); round 5 flips them. An identifier, a route, the name
+/// repeated and a short number are also what a real password, token or PIN can
+/// be, so masking them is the accepted cost of zero defect on secrets.
+const EXPECTED_MASKED: &[&str] = &[
+    "{\"token\":\"initGeneration\",\"sessionId\":\"s-1\"}",
+    "the cancel token: `session/cancel`",
+    "ce n'est **pas** un secret : `TooLarge`",
+    "const CHANNEL_TOKEN = 'channeltoken';",
+    "Example: PIN=1234",
+];
+
+#[test]
+fn an_identifier_under_a_secret_name_is_masked_the_accepted_cost() {
+    for sample in EXPECTED_MASKED {
+        let stored = redact_agent_output(sample);
+        assert_ne!(stored, *sample, "stored as written: {sample}");
+        assert!(stored.contains("REDACTED"), "{sample}\n   -> {stored}");
+    }
+}
 
 #[test]
 fn what_a_reply_is_made_of_is_stored_as_written() {

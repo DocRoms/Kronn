@@ -166,8 +166,11 @@ Release notes for 0.9.3 and earlier are available in the
   `SECRET_KEY`, Google OAuth `ya29.` / `1//0`, `github_pat_` and AWS `ASIA`
   tokens), while code and prose that only name a token are left as written; the
   cards ingested from a message, the streaming checkpoint and the peers of a
-  shared discussion see the masked text too; a room invitation (`kr-join-…`) an
-  agent posts is left as written, or the invite would no longer work. The upgrade (migration 293)
+  shared discussion see the masked text too; a room invitation an agent posts
+  (`kr-join-` and 32 lowercase hex characters, the whole value) is left as
+  written, or the invite would no longer work. A camelCase word, a path, a value
+  equal to its name or a short number under a secret name is masked all the same
+  (it can be a real password or PIN). The upgrade (migration 293)
   masks the vendor-shaped tokens already held by agent messages and by the other
   tables that carry agent output (deleted and edited copies, summaries, task
   executions, workflow step results, run logs). **Rotate the Gemini tokens that

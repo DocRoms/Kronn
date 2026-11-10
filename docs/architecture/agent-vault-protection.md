@@ -207,15 +207,19 @@ exist on the host, as given and with their links resolved, in two tiers:
   placeholder (`$TOKEN`, `<your-token>`, `your-api-key`, `changeme`, `xxxx`,
   `kr-join-...`, `…`), the name of an environment variable (`VOTRE_API_KEY`),
   prose (whitespace, or a script with no spaces), a dotted or snake_case
-  identifier, a camelCase / PascalCase word (`initGeneration`, `TooLarge`), a
-  lowercase route or path (`session/cancel`), the name it is given to repeated
-  (`CHANNEL_TOKEN = 'channeltoken'`), a number of fewer than 8 digits (`PIN=1234`),
-  a word in backticks right after `token:` / `secret:` in prose, a CSS variable, a
-  reference (`secret://NAME`), or, for a bare value,
+  identifier, a CSS variable, a reference (`secret://NAME`), or, for a bare value,
   shorter than 12 characters or without letters and digits or shaped like code (a
   call, a path, a URL). A quoted value counts from 8 characters, 6 under a
-  `password`-like name; a `pin` name needs 8 to 12 digits. The price is the
+  `password`-like name; a `pin` name needs 4 to 12 digits. The price is the
   inverse risk: a short bare secret under a harmless name is stored as written.
+  **No identifier carve-out (round 5).** A camelCase word (`initGeneration`,
+  `CorrectHorseBatteryStaple`), a lowercase or mixed path (`session/cancel`,
+  `summer2026/winter2026`), a value that repeats its name (`CHANNEL_TOKEN =
+  'channeltoken'`, `admin_password = "adminpassword"`), a short number
+  (`PIN=1234`) and a word in backticks after `token:` / `secret:` are masked: each
+  is also what a real password, token or PIN looks like. Zero defect on secrets, so
+  an identifier masked in a transcript is the accepted cost. The measurement's five
+  former false positives are `EXPECTED_MASKED` in `db::insert_redaction_measure`.
   A secret word followed by a qualifier (`key`, `value`, `string`, `str`), after
   any run of `_` / `-` (`SECRET__KEY`, `secret--value`), still
   names a secret (`SECRET_KEY`, `TOKEN_VALUE`, `passwordString`): the value is then
@@ -224,7 +228,11 @@ exist on the host, as given and with their links resolved, in two tiers:
   `disc_join({token: "kr-join-<32 hex>"})` on purpose, so that a peer can join
   within the invitation's ten minutes (`INVITE_TTL_SECS`; the database keeps only
   its hash). Masking it at insert would break the invite, so the insert path
-  (`is_invite_token`: `kr-join-` and 16 characters or more) leaves it. The audit
+  leaves it, but only the WHOLE value, exactly as `create_invite_token` writes it
+  (`is_invite_token`: `kr-join-` and 32 lowercase hex characters, inside at most
+  one quote or backtick on each side). A prefix put in front of a real secret, an
+  invitation embedded in a longer value, an uppercase or non-hex suffix are masked
+  like any value. The audit
   passes (`redact_for_audit_artifact`, `redact_stored_text`, so the owner-run
   `redact-discussion`) still mask it: they run on history, long after the expiry,
   and a `kr-join-` token found in a public place means a compromised room.
@@ -268,11 +276,13 @@ exist on the host, as given and with their links resolved, in two tiers:
   The principal ran it on the 16,004 Agent messages of the owner's database
   (read-only extract): 42 would be masked (0.26%), each reviewed. True positives:
   a real `KRONN_AUTH_TOKEN` and credential-shaped URL examples. False positives,
-  fixed and now samples: 12 room invitations (`kr-join-`) and 5 identifiers or
-  prose (`"token":"initGeneration"`, `` cancel token: `session/cancel` ``,
-  `` un secret : `TooLarge` ``, `CHANNEL_TOKEN = 'channeltoken'`, `PIN=1234`). After
-  those fixes the repository corpus run (20,421 chunks) changes 209, the three
-  more than before being fake credentials in the new tests.
+  fixed and now samples: 12 room invitations (`kr-join-`), kept as written, and 5
+  identifiers or prose (`"token":"initGeneration"`, `` cancel token:
+  `session/cancel` ``, `` un secret : `TooLarge` ``, `CHANNEL_TOKEN =
+  'channeltoken'`, `PIN=1234`). Round 4 stored those five as written; the security
+  passes showed each carve-out lets a real credential through, so round 5 masks
+  them again (accepted cost) and keeps them as expected-masked samples. The
+  repository corpus count after round 5 is in the delivery.
 
 #### What is scrubbed after the fact, and where
 
