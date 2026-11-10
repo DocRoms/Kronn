@@ -74,6 +74,54 @@ async fn project_repo_path(
     Ok(scanner::resolve_host_path(&project.path))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RedactDiscussionRequest {
+    /// The discussion to audit: its id, or the first 8 characters or more of it.
+    pub discussion_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RedactDiscussionResult {
+    /// The id the reference resolved to.
+    pub discussion_id: String,
+    pub rewritten: crate::db::credential_scrub::Rewritten,
+}
+
+/// `POST /api/maintenance/redact-discussion` — KT-1656's one-shot audit.
+///
+/// A discussion the owner knows has printed a credential (a worker that
+/// `cat`-ed a CLI's settings file) is masked with the full audit redaction:
+/// every message of any role, the copies a deletion or an edit kept, its summary
+/// and partial response, and what its task executions delivered, reviewed and
+/// validated. The upgrade only masks vendor-shaped tokens, everywhere; this masks
+/// whatever the redaction heuristics can read in **one** discussion, and names no
+/// discussion in the code. Irreversible, so it is gated like the other
+/// destructive POSTs, and an agent's bridge token cannot reach it. The
+/// credentials themselves still have to be rotated: an older backup keeps the
+/// clear text (`docs/operations/db-backup.md`).
+pub async fn redact_discussion(
+    State(state): State<AppState>,
+    Json(request): Json<RedactDiscussionRequest>,
+) -> Json<ApiResponse<RedactDiscussionResult>> {
+    let reference = request.discussion_id;
+    let outcome = state
+        .db
+        .with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let outcome = crate::db::credential_scrub::redact_discussion(&tx, &reference)?;
+            tx.commit()?;
+            Ok(outcome)
+        })
+        .await;
+    match outcome {
+        Ok((discussion_id, rewritten)) => Json(ApiResponse::ok(RedactDiscussionResult {
+            discussion_id,
+            rewritten,
+        })),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
 /// `GET /api/maintenance/build-artifacts` — the dry run.
 ///
 /// Read-only, and it lists refused targets too. A maintenance view that hides

@@ -103,11 +103,22 @@ Release notes for 0.9.3 and earlier are available in the
   and a sandboxed one (task worker, read-only review, Codex `read-only` /
   `workspace-write`) also `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.npmrc`,
   `~/.cargo/credentials*` and the other tools' files; the agent's own store stays
-  open, and an agent in full access keeps the tools of the owner's terminal.
-  What an agent writes is stored masked (a settings file printed whole, an `env`
-  block keyed by `*_TOKEN` / `*_API_KEY`), and the upgrade masks what the exposed
-  transcript and any agent message with a vendor-shaped token already hold.
-  **Rotate the Gemini tokens that were in that file.**
+  open, and an agent in full access keeps the tools of the owner's terminal. A
+  store the environment moves (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+  `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `GNUPGHOME`, `AWS_*_FILE`, `KUBECONFIG`,
+  `DOCKER_CONFIG`, `CARGO_HOME`, `NPM_CONFIG_USERCONFIG`, `GH_CONFIG_DIR`,
+  `CLOUDSDK_CONFIG`, the Gemini CLI home) is denied where it really is.
+  What an agent writes is stored masked when it holds a credential (a settings
+  file printed whole, an `env` block keyed by `*_TOKEN` / `*_API_KEY`), while code
+  and prose that only name a token are left as written. The upgrade (migration 293)
+  masks the vendor-shaped tokens already held by agent messages and by the other
+  tables that carry agent output (deleted and edited copies, summaries, task
+  executions, workflow step results, run logs). **Rotate the Gemini tokens that
+  were in that file, and the credentials of any other file an agent printed: the
+  backups taken before the upgrade (`kronn.db.backup`, `kronn-auto-*.db`, manual
+  copies) keep the clear text.** For one discussion known to be exposed, the owner
+  runs the full audit redaction once, by id:
+  `POST /api/maintenance/redact-discussion` (`docs/operations/db-backup.md`).
 - Kronn is no longer exposed over plain HTTP. The Settings « Allow connections
   from other devices » toggle now refuses (409, with what is needed) unless a
   TLS-terminating proxy on the machine (nginx, Caddy, `tailscale serve`) is

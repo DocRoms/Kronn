@@ -15,6 +15,7 @@ pub(crate) mod cli_worker_bindings;
 pub mod compare;
 pub mod contacts;
 pub mod context_audits;
+pub mod credential_scrub;
 pub mod default_contents;
 pub mod delivery_summaries;
 pub mod disc_source;
@@ -86,6 +87,9 @@ mod release_gate_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
 mod large_db_measure;
+
+#[cfg(test)]
+mod insert_redaction_measure;
 
 #[cfg(all(test, feature = "full-tests"))]
 mod upgrade_fixture_tests;

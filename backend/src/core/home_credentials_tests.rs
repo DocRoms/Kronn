@@ -3,16 +3,13 @@ use crate::core::task_worker_env::ProbeCommand;
 use crate::core::task_worker_sandbox::{CommandConfinement, Mechanism};
 use crate::core::trust_sandbox::LevelConfinement;
 use serial_test::serial;
+use std::ffi::OsString;
 
 /// A home holding every store the module knows: a directory with a file in it,
 /// or a plain file, as the real tool would have left it.
 fn full_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
-    let paths = AGENT_STORES
-        .iter()
-        .map(|(_, rel)| *rel)
-        .chain(SHARED_STORES.iter().copied());
-    for rel in paths {
+    for rel in agent_rels().into_iter().chain(shared_rels()) {
         let path = home.path().join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // A parent store already made `rel` a directory (`.claude`, `.cargo`).
@@ -27,6 +24,14 @@ fn full_home() -> tempfile::TempDir {
         }
     }
     home
+}
+
+fn agent_rels() -> Vec<&'static str> {
+    AGENT_STORES.iter().map(|(_, store)| store.rel).collect()
+}
+
+fn shared_rels() -> Vec<&'static str> {
+    SHARED_STORES.iter().map(|store| store.rel).collect()
 }
 
 fn looks_like_file(rel: &str) -> bool {
@@ -75,7 +80,8 @@ fn every_store_of_another_agent_is_hidden_and_the_running_ones_stays_open() {
     let home = full_home();
     let hidden = hidden_in(home.path(), Some(AgentFamily::Gemini), Reach::FullAccess);
     let hidden = names(&hidden, home.path());
-    for (owner, rel) in AGENT_STORES {
+    for (owner, store) in AGENT_STORES {
+        let rel = store.rel;
         assert_eq!(
             hidden.iter().any(|path| path == rel),
             *owner != AgentFamily::Gemini,
@@ -91,7 +97,7 @@ fn a_process_whose_own_login_its_commands_never_need_hides_all_of_them() {
     let home = full_home();
     let hidden = hidden_in(home.path(), None, Reach::Sandboxed);
     let hidden = names(&hidden, home.path());
-    for (_, rel) in AGENT_STORES {
+    for rel in agent_rels() {
         assert!(hidden.iter().any(|path| path == rel), "{rel}");
     }
 }
@@ -107,7 +113,7 @@ fn the_shared_stores_are_for_the_sandboxed_launches_only() {
         &hidden_in(home.path(), Some(AgentFamily::Codex), Reach::FullAccess),
         home.path(),
     );
-    for rel in SHARED_STORES {
+    for rel in shared_rels() {
         assert!(sandboxed.iter().any(|path| path == rel), "{rel}");
         assert!(!open.iter().any(|path| path == rel), "{rel} in full access");
     }
@@ -122,7 +128,7 @@ fn the_shared_stores_are_for_the_sandboxed_launches_only() {
         ".aws",
         ".ssh",
     ] {
-        let tier = if SHARED_STORES.contains(&rel) {
+        let tier = if shared_rels().contains(&rel) {
             &sandboxed
         } else {
             &open
@@ -199,11 +205,7 @@ async fn a_sandboxed_command_cannot_read_any_credential_store() {
     let Some(confinement) = real_confinement(hidden) else {
         return;
     };
-    let rels = AGENT_STORES
-        .iter()
-        .map(|(_, rel)| *rel)
-        .chain(SHARED_STORES.iter().copied());
-    for rel in rels {
+    for rel in agent_rels().into_iter().chain(shared_rels()) {
         let file = readable_file(home.path(), rel);
         assert!(
             cat(&file, None).await,
@@ -251,11 +253,7 @@ fn a_claude_worker_is_told_every_store_in_its_settings() {
     }
 
     let real = real_path(home.path());
-    let rels = AGENT_STORES
-        .iter()
-        .map(|(_, rel)| *rel)
-        .chain(SHARED_STORES.iter().copied());
-    for rel in rels {
+    for rel in agent_rels().into_iter().chain(shared_rels()) {
         let path = real.join(rel);
         assert!(
             deny_read.contains(&path.to_string_lossy().into_owned()),
@@ -303,4 +301,212 @@ fn bubblewrap_masks_a_file_with_dev_null_and_a_directory_with_a_tmpfs() {
         assert!(rendered.contains(&dir), "{rendered:?}");
         assert_eq!(rendered.last().map(String::as_str), Some("--"));
     }
+}
+
+/// One relocation: the variable, its value (under the scratch directory, a
+/// list for `KUBECONFIG`), and the stores that must then be hidden there.
+struct Moved {
+    variable: &'static str,
+    value: &'static [&'static str],
+    stores: &'static [&'static str],
+}
+
+const MOVES: &[Moved] = &[
+    Moved {
+        variable: "CLAUDE_CONFIG_DIR",
+        value: &["claude"],
+        stores: &["claude/.credentials.json", "claude/.claude.json"],
+    },
+    Moved {
+        variable: "CODEX_HOME",
+        value: &["codex"],
+        stores: &["codex"],
+    },
+    Moved {
+        variable: "GEMINI_CLI_HOME",
+        value: &["gemini-home"],
+        stores: &["gemini-home/.gemini"],
+    },
+    Moved {
+        variable: "XDG_CONFIG_HOME",
+        value: &["xdg-config"],
+        stores: &[
+            "xdg-config/gh",
+            "xdg-config/gcloud",
+            "xdg-config/glab-cli",
+            "xdg-config/opencode",
+            "xdg-config/github-copilot",
+            "xdg-config/git/credentials",
+        ],
+    },
+    Moved {
+        variable: "XDG_DATA_HOME",
+        value: &["xdg-data"],
+        stores: &["xdg-data/opencode", "xdg-data/kiro-cli"],
+    },
+    Moved {
+        variable: "GNUPGHOME",
+        value: &["gnupg"],
+        stores: &["gnupg"],
+    },
+    Moved {
+        variable: "AWS_SHARED_CREDENTIALS_FILE",
+        value: &["aws-credentials"],
+        stores: &["aws-credentials"],
+    },
+    Moved {
+        variable: "AWS_CONFIG_FILE",
+        value: &["aws-config"],
+        stores: &["aws-config"],
+    },
+    Moved {
+        variable: "KUBECONFIG",
+        value: &["kube-a", "kube-b"],
+        stores: &["kube-a", "kube-b"],
+    },
+    Moved {
+        variable: "DOCKER_CONFIG",
+        value: &["docker"],
+        stores: &["docker/config.json"],
+    },
+    Moved {
+        variable: "CARGO_HOME",
+        value: &["cargo"],
+        stores: &["cargo/credentials", "cargo/credentials.toml"],
+    },
+    Moved {
+        variable: "NPM_CONFIG_USERCONFIG",
+        value: &["npmrc"],
+        stores: &["npmrc"],
+    },
+    Moved {
+        variable: "GH_CONFIG_DIR",
+        value: &["gh-dir"],
+        stores: &["gh-dir"],
+    },
+    Moved {
+        variable: "CLOUDSDK_CONFIG",
+        value: &["gcloud-dir"],
+        stores: &["gcloud-dir"],
+    },
+];
+
+/// Make a store of `scratch`: a file holding `secret`.
+fn plant(scratch: &Path, rel: &str) -> PathBuf {
+    let path = scratch.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "secret").unwrap();
+    path
+}
+
+fn env_of(scratch: &Path, moved: &Moved) -> impl Fn(&str) -> Option<OsString> + use<> {
+    let variable = moved.variable;
+    let value = std::env::join_paths(moved.value.iter().map(|rel| scratch.join(rel))).unwrap();
+    move |name| (name == variable).then(|| value.clone())
+}
+
+#[test]
+fn every_variable_that_moves_a_store_gets_the_new_place_hidden() {
+    for moved in MOVES {
+        // An empty home: only the relocated store exists.
+        let home = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let planted: Vec<PathBuf> = moved
+            .stores
+            .iter()
+            .map(|rel| plant(scratch.path(), rel))
+            .collect();
+        let env = env_of(scratch.path(), moved);
+        let hidden = hidden_with(home.path(), None, Reach::Sandboxed, &env);
+        for path in &planted {
+            assert!(
+                hidden.contains(path),
+                "{}: {} is not hidden ({hidden:?})",
+                moved.variable,
+                path.display()
+            );
+        }
+        // Without the variable, the same scratch store is not known.
+        let without = hidden_with(home.path(), None, Reach::Sandboxed, &|_| None);
+        assert!(without.is_empty(), "{}: {without:?}", moved.variable);
+    }
+}
+
+#[test]
+fn a_moved_store_keeps_its_default_place_hidden_too() {
+    let home = full_home();
+    let scratch = tempfile::tempdir().unwrap();
+    plant(scratch.path(), "codex");
+    let moved = &MOVES[1];
+    assert_eq!(moved.variable, "CODEX_HOME");
+    let env = env_of(scratch.path(), moved);
+    let hidden = hidden_with(home.path(), None, Reach::Sandboxed, &env);
+    let hidden = names(&hidden, home.path());
+    assert!(hidden.iter().any(|path| path == ".codex"));
+}
+
+#[test]
+fn the_running_agents_moved_store_stays_open_and_a_shared_one_is_for_sandboxed_launches() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let codex = plant(scratch.path(), "codex");
+    let gnupg = plant(scratch.path(), "gnupg");
+    let env = |name: &str| {
+        let place = match name {
+            "CODEX_HOME" => codex.clone(),
+            "GNUPGHOME" => gnupg.clone(),
+            _ => return None,
+        };
+        Some(place.into_os_string())
+    };
+    let codex_runs = Some(AgentFamily::Codex);
+    let running = hidden_with(home.path(), codex_runs, Reach::FullAccess, &env);
+    assert!(!running.contains(&codex), "the running agent's own store");
+    assert!(!running.contains(&gnupg), "a shared store in full access");
+    let gemini_runs = Some(AgentFamily::Gemini);
+    let others = hidden_with(home.path(), gemini_runs, Reach::FullAccess, &env);
+    assert!(others.contains(&codex));
+    assert!(!others.contains(&gnupg));
+    let sandboxed = hidden_with(home.path(), gemini_runs, Reach::Sandboxed, &env);
+    assert!(sandboxed.contains(&codex) && sandboxed.contains(&gnupg));
+}
+
+#[test]
+fn a_relative_value_is_ignored_and_a_variable_naming_the_home_does_not_hide_it() {
+    let home = full_home();
+    let relative = |name: &str| (name == "CODEX_HOME").then(|| OsString::from("codex"));
+    let hidden = hidden_with(home.path(), None, Reach::Sandboxed, &relative);
+    assert!(hidden.iter().all(|path| path.is_absolute()));
+
+    // `GNUPGHOME=$HOME` must not hide the home: its stores are listed by name.
+    let home_path = home.path().to_path_buf();
+    let whole_home = |name: &str| {
+        (name == "GNUPGHOME" || name == "CODEX_HOME").then(|| home_path.clone().into_os_string())
+    };
+    let hidden = hidden_with(home.path(), None, Reach::Sandboxed, &whole_home);
+    assert!(!hidden.contains(&home.path().to_path_buf()));
+    assert!(!hidden.contains(&real_path(home.path())));
+    let hidden = names(&hidden, home.path());
+    assert!(hidden.iter().any(|path| path == ".gnupg"));
+    assert!(hidden.iter().any(|path| path == ".codex"));
+}
+
+/// A store moved by `CODEX_HOME`, applied for real: unreadable from inside.
+#[tokio::test]
+#[serial]
+async fn a_sandboxed_command_cannot_read_a_store_moved_by_the_environment() {
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let secret = plant(scratch.path(), "codex/auth.json");
+    let moved = &MOVES[1];
+    let env = env_of(scratch.path(), moved);
+    let hidden = hidden_with(home.path(), None, Reach::Sandboxed, &env);
+    let Some(confinement) = real_confinement(hidden) else {
+        return;
+    };
+    assert!(cat(&secret, None).await, "control: readable unconfined");
+    assert!(
+        !cat(&secret, Some(&confinement)).await,
+        "the CODEX_HOME store was read from inside the sandbox"
+    );
 }

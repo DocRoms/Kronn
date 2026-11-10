@@ -2887,12 +2887,14 @@ pub fn insert_message(
 /// KT-1656 — what an agent wrote is stored masked: a worker that prints a
 /// credential file (`cat ~/.gemini/settings.json`) and quotes it in its reply
 /// must not leave the token in the transcript, which is kept and is sent back to
-/// the model provider on every later turn. The same heuristics as every other
-/// stored excerpt (vendor token shapes, secret-named assignments, secret-named
-/// JSON keys). Only the agent's own role: what a human typed is theirs.
+/// the model provider on every later turn. Vendor token shapes, and secret-named
+/// assignments and JSON keys whose value is a credential, not code or a
+/// placeholder (`redact::redact_agent_output`: its false-positive rate was
+/// measured, `db::insert_redaction_measure`). Only the agent's own role: what a
+/// human typed is theirs.
 pub(crate) fn mask_agent_output(role: &crate::models::MessageRole, content: String) -> String {
     if matches!(role, crate::models::MessageRole::Agent) {
-        crate::core::redact::redact_for_audit_artifact(&content).0
+        crate::core::redact::redact_agent_output(&content)
     } else {
         content
     }

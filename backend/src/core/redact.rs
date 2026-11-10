@@ -327,6 +327,20 @@ static ASSIGNMENT_PREFILTER: Prefilter = Prefilter::Separator;
 /// exact back-reference semantics used by `replace_all` while preserving the
 /// important invariant `count > 0` iff the returned text changed.
 fn apply_patterns(input: &str, patterns: &[Pattern], prefilter: &Prefilter) -> (String, usize) {
+    apply_patterns_guarded(input, patterns, prefilter, None)
+}
+
+/// Decides whether a match is a credential worth masking, from its captures and
+/// the text it was found in; a match it refuses is left as written.
+type MatchGuard<'a> = &'a dyn Fn(&regex_lite::Captures<'_>, &str) -> bool;
+
+/// [`apply_patterns`], with a `guard` that can leave a match as it is.
+fn apply_patterns_guarded(
+    input: &str,
+    patterns: &[Pattern],
+    prefilter: &Prefilter,
+    guard: Option<MatchGuard<'_>>,
+) -> (String, usize) {
     let mut out = input.to_string();
     let mut count = 0usize;
     // The prefilter's verdict on `out` as it stands: asked again each time a
@@ -354,6 +368,9 @@ fn apply_patterns(input: &str, patterns: &[Pattern], prefilter: &Prefilter) -> (
             let Some(matched) = captures.get(0) else {
                 continue;
             };
+            if guard.is_some_and(|guard| !guard(&captures, &out)) {
+                continue;
+            }
             next.push_str(&out[copied..matched.start()]);
             let written = next.len();
             captures.expand(pat.replacement, &mut next);
@@ -613,6 +630,253 @@ pub fn redact_stored_text(text: &str) -> String {
     .0
 }
 
+/// KT-1656 — redaction of what an **agent wrote**, which is stored, kept in the
+/// transcript and sent back to the model on every later turn.
+///
+/// The vendor shapes ([`redact_secrets`]) and the secret-named assignments and
+/// JSON keys of [`redact_for_audit_artifact`], but a secret-named assignment is
+/// only masked when its value is a credential ([`value_is_credential`]): an
+/// agent's reply is full of code and prose that names a token without holding
+/// one (`let token = lexer.next_token();`, `password: required`,
+/// `"token": "<your-token>"`, `Authorization: Bearer $TOKEN`), which the audit
+/// pass would rewrite irreversibly. A printed credential file keeps being
+/// masked (`"GITHUB_PERSONAL_ACCESS_TOKEN": "t0ken…"`, `GEMINI_API_KEY=…`).
+pub fn redact_agent_output(input: &str) -> String {
+    redact_json_aware_with(input, redact_agent_output_text, &|key, value| {
+        value_is_credential(key, value, true)
+    })
+    .0
+}
+
+/// KT-1656 — the credentials of a **known shape** only, for rewriting history
+/// that was stored unmasked: a vendor-prefixed token, a JWT, an `Authorization`
+/// or `Bearer` value, a connection-string password, a `"password": "…"` field,
+/// each left as written when it is a placeholder. No secret-named assignment or
+/// JSON key is read, and no JSON key masks its value, so a message that only
+/// names a token is never touched.
+pub fn redact_known_shapes(input: &str) -> String {
+    redact_json_aware_with(
+        input,
+        |text| {
+            apply_patterns_guarded(
+                text,
+                PATTERNS.as_slice(),
+                &VENDOR_PREFILTER,
+                Some(&vendor_match_is_credential),
+            )
+        },
+        &|_, _| false,
+    )
+    .0
+}
+
+fn redact_agent_output_text(input: &str) -> (String, usize) {
+    let (out, vendor_count) = apply_patterns_guarded(
+        input,
+        PATTERNS.as_slice(),
+        &VENDOR_PREFILTER,
+        Some(&vendor_match_is_credential),
+    );
+    let (out, assignment_count) = apply_patterns_guarded(
+        &out,
+        ASSIGNMENT.as_slice(),
+        &ASSIGNMENT_PREFILTER,
+        Some(&assignment_is_credential),
+    );
+    let count = vendor_count.saturating_add(assignment_count);
+    if out == input {
+        (out, 0)
+    } else {
+        (out, count.max(1))
+    }
+}
+
+/// A value that stands for a secret without being one: nothing, a value already
+/// masked, a template or an environment reference (`$TOKEN`, `${{ secrets.X }}`,
+/// `<your-token>`, `secret://NAME`), the name of an environment variable
+/// (`VOTRE_API_KEY`), an ellipsis (`kr-join-...`, `…`), a filler (`xxxxxxxx`,
+/// `0000000000`), a placeholder word (`your-api-key`, `changeme`, `string`), a
+/// text with no letter or digit in it (the `//!` that opens the next comment
+/// line), or prose in a script that has no spaces (Chinese, Japanese).
+fn is_placeholder(value: &str) -> bool {
+    const PLACEHOLDERS: &[&str] = &[
+        "your-",
+        "your_",
+        "xxx",
+        "0000000000",
+        "placeholder",
+        "changeme",
+        "change-me",
+        "example",
+        "redacted",
+        "dummy",
+        "<",
+        "todo",
+        "...",
+        "secret://",
+    ];
+    const WORDS: &[&str] = &[
+        "string",
+        "null",
+        "none",
+        "nil",
+        "true",
+        "false",
+        "undefined",
+        "secret",
+        "token",
+        "password",
+        "apikey",
+        "api_key",
+        "api-key",
+        "required",
+        "optional",
+        "pass",
+        "passwd",
+        "pwd",
+        "pw",
+    ];
+    // The quote or escape a match opens with (`\"{TOKEN}`) is not the value.
+    let value = value.trim().trim_start_matches(['\\', '"', '\'', '`']);
+    let first = value.chars().next();
+    let lowered = value.to_ascii_lowercase();
+    let env_name = value.contains('_')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && first.is_some_and(|c| c.is_ascii_uppercase());
+    value.is_empty()
+        || value.starts_with(['$', '<', '{', '%', '@'])
+        || value.starts_with("--")
+        || value.contains("${")
+        || value.contains("{{")
+        || value.contains('…')
+        || !value.chars().any(|c| c.is_ascii_alphanumeric())
+        || value.chars().any(|c| !c.is_ascii() && c.is_alphabetic())
+        || env_name
+        || value.chars().all(|c| Some(c) == first)
+        || PLACEHOLDERS.iter().any(|needle| lowered.contains(needle))
+        || WORDS.contains(&lowered.as_str())
+}
+
+/// Whether the value of a secret-named assignment (`password: …`,
+/// `API_KEY=…`, `"token": "…"`; `name` is the secret-ish name) is a credential
+/// rather than prose, code or a placeholder. Heuristic, and tuned to miss a
+/// short bare value rather than to rewrite a sentence of code.
+///
+/// Never a credential: a placeholder ([`is_placeholder`]), a value with
+/// Never a credential: a placeholder ([`is_placeholder`]), a value with
+/// whitespace (prose), a dotted identifier (`disc.inviteTabToken`, an i18n key)
+/// or a snake_case one (`test_does_not_fill_source_id`), a value under a `pin`
+/// name that is not a number of 4 to 12 digits. A **quoted** value is
+/// a credential from 8 characters, from 6 under a `password`-like name. A
+/// **bare** one must look like a token (12 characters or more, letters and
+/// digits, no trailing `-` / `_`) and not like code (a call, an access path, a
+/// URL, a file path, an operator).
+fn value_is_credential(name: &str, value: &str, quoted: bool) -> bool {
+    let value = value.trim();
+    let name = name.to_ascii_lowercase();
+    if is_placeholder(value) || value.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let dotted_identifier = value.contains('.')
+        && value.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+        });
+    let snake_identifier = value.contains('_')
+        && value
+            .split('_')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase()));
+    if dotted_identifier || snake_identifier {
+        return false;
+    }
+    // A PIN is a number; the word "pin" before anything else is prose or code.
+    if name.ends_with("pin") {
+        return (4..=12).contains(&value.len()) && value.chars().all(|c| c.is_ascii_digit());
+    }
+    if quoted {
+        const PASSWORDS: &[&str] = &[
+            "password",
+            "passwd",
+            "pwd",
+            "passphrase",
+            "passcode",
+            "secret",
+        ];
+        let floor = if PASSWORDS.iter().any(|word| name.ends_with(word)) {
+            6
+        } else {
+            8
+        };
+        return value.chars().count() >= floor;
+    }
+    value.chars().count() >= 12
+        && value.chars().any(|c| c.is_ascii_digit())
+        && value.chars().any(|c| c.is_ascii_alphabetic())
+        && !value.ends_with(['-', '_'])
+        && !value.contains([
+            '(', ')', '[', ']', '{', '}', '<', '>', ';', ',', '|', '&', '*',
+        ])
+        && !value.contains("://")
+        && !value.contains("::")
+        && !value.contains("->")
+        && !value.contains("=>")
+        && !value.starts_with(['/', '~', '.'])
+}
+
+/// The name in the text that opens a match (`  "GEMINI_API_KEY": "`,
+/// `export GITHUB_TOKEN=`, `password: `): the word before the separator.
+fn name_before_value(prefix: &str) -> &str {
+    let prefix = prefix.trim_end_matches(|c: char| {
+        c.is_whitespace() || matches!(c, ':' | '=' | '"' | '\'' | '`' | '\\')
+    });
+    let start = prefix
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .map_or(0, |at| at + 1);
+    &prefix[start..]
+}
+
+/// Guard of the secret-assignment patterns: group 1 holds the name, group 2 is
+/// the value, quoted when the character before it is a quote.
+fn assignment_is_credential(captures: &regex_lite::Captures<'_>, text: &str) -> bool {
+    let Some(value) = captures.get(2) else {
+        return true;
+    };
+    let quoted = text[..value.start()]
+        .chars()
+        .next_back()
+        .is_some_and(|before| matches!(before, '"' | '\'' | '`'));
+    let name = captures
+        .get(1)
+        .map_or("", |prefix| name_before_value(prefix.as_str()));
+    value_is_credential(name, value.as_str(), quoted)
+}
+
+/// Guard of [`PATTERNS`] for stored agent output. A vendor-prefixed token is
+/// masked unless it is a placeholder (`xoxb-xxxxxxxxxxxx`); the shapes that read
+/// a value next to a name (an `Authorization` header, a `"password": "…"` field,
+/// the password of a connection string) leave a placeholder as written.
+fn vendor_match_is_credential(captures: &regex_lite::Captures<'_>, _text: &str) -> bool {
+    let matched = captures.get(0).map_or("", |m| m.as_str());
+    let lowered = matched.to_ascii_lowercase();
+    if lowered.starts_with("authorization") {
+        let value = matched.rsplit(char::is_whitespace).next().unwrap_or("");
+        !is_placeholder(value)
+    } else if lowered.starts_with('"') {
+        let prefix = captures.get(1).map_or("", |prefix| prefix.as_str());
+        let value = matched
+            .get(prefix.len()..matched.len().saturating_sub(1))
+            .unwrap_or("");
+        value_is_credential(name_before_value(prefix), value, true)
+    } else if lowered.contains("://") {
+        captures
+            .get(3)
+            .is_none_or(|password| !is_placeholder(password.as_str()))
+    } else {
+        !is_placeholder(matched)
+    }
+}
+
 /// Object keys whose string value is a credential, whatever it holds. Same
 /// names as the `"password": "…"` pattern of [`RAW_PATTERNS`], which stops at
 /// the first `"` and so cannot read a value that carries an escaped one.
@@ -663,6 +927,18 @@ fn is_credential_key(key: &str) -> bool {
 /// document as a whole (NDJSON, an excerpt cut mid-document) takes `redact`
 /// as it is: its patterns keep the escapes around a value themselves.
 fn redact_json_aware(input: &str, redact: impl Fn(&str) -> (String, usize)) -> (String, usize) {
+    redact_json_aware_with(input, redact, &|_, _| true)
+}
+
+/// [`redact_json_aware`], where `masks_value(key, value)` decides whether the
+/// string value of a credential-named key is masked whatever it holds (`true`
+/// for the callers that mask every such value; stored agent output keeps a
+/// placeholder, and the known-shape pass never masks by key).
+fn redact_json_aware_with(
+    input: &str,
+    redact: impl Fn(&str) -> (String, usize),
+    masks_value: &dyn Fn(&str, &str) -> bool,
+) -> (String, usize) {
     let trimmed = input.trim_start();
     let is_container = trimmed.starts_with('{') || trimmed.starts_with('[');
     if !is_container || serde_json::from_str::<serde::de::IgnoredAny>(input).is_err() {
@@ -695,8 +971,10 @@ fn redact_json_aware(input: &str, redact: impl Fn(&str) -> (String, usize)) -> (
                     let redacted = redact(&decoded);
                     key = Some(decoded);
                     redacted
-                } else if key.take().is_some_and(|key| is_credential_key(&key))
-                    && !decoded.is_empty()
+                } else if key
+                    .take()
+                    .filter(|key| is_credential_key(key))
+                    .is_some_and(|key| !decoded.is_empty() && masks_value(&key, &decoded))
                 {
                     let masked = "***REDACTED***";
                     (masked.to_string(), usize::from(decoded != masked))

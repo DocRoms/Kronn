@@ -1278,6 +1278,8 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/agents/uninstall",
     "/api/rtk/deactivate",
     "/api/orchestration/provider-quotas/{provider}/rearm",
+    // Rewrites the stored transcript of one discussion, irreversibly (KT-1656).
+    "/api/maintenance/redact-discussion",
 ];
 
 /// POSTs that widen what this instance lets in: an allowed embed site, directly
@@ -3269,6 +3271,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         // KT-1318 — the disk view (free space, Kronn's usage by kind / task)
         // and its purge (orphans by default; named entries need `confirm`).
+        // KT-1656 — the audit redaction of one exposed discussion, by id.
+        .route(
+            "/api/maintenance/redact-discussion",
+            post(api::maintenance::redact_discussion),
+        )
         .route("/api/maintenance/disk", get(api::disk::get_disk_report))
         .route(
             "/api/maintenance/disk/purge",
@@ -4159,6 +4166,7 @@ mod auth_tests {
             "/api/agents/uninstall",
             "/api/rtk/deactivate",
             "/api/orchestration/provider-quotas/Codex/rearm",
+            "/api/maintenance/redact-discussion",
             "/api/mcps/custom/srv-1/cleanup-orphan-env",
             "/api/projects/p1/context-audit/baseline",
             "/api/projects/p1/audit-attestation",

@@ -1064,8 +1064,8 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/291_workflow_runs_heaviest_output.sql"),
     ),
     (
-        "292_kt1656_scrub_exposed_credentials",
-        include_str!("sql/292_kt1656_scrub_exposed_credentials.sql"),
+        "293_kt1656_scrub_stored_credentials",
+        include_str!("sql/293_kt1656_scrub_stored_credentials.sql"),
     ),
 ];
 
@@ -1145,65 +1145,11 @@ fn apply_migration(tx: &rusqlite::Transaction<'_>, name: &str, sql: &str) -> Res
         // Reads each repository's remote, which SQL cannot do.
         crate::db::github_connections::seed_on_upgrade(tx)?;
     }
-    if name == "292_kt1656_scrub_exposed_credentials" {
-        scrub_exposed_credentials(tx)?;
+    if name == "293_kt1656_scrub_stored_credentials" {
+        // Needs Kronn's redaction patterns, which SQL cannot call.
+        crate::db::credential_scrub::scrub_known_shapes(tx)?;
     }
     Ok(())
-}
-
-/// The sub-discussion in which a worker printed `~/.gemini/settings.json`
-/// (KT-1599's worker, KT-1656): matched by the prefix its id is quoted by.
-const EXPOSED_DISCUSSION_PREFIX: &str = "dcabb259";
-
-/// KT-1656 — mask the credentials a transcript already holds.
-///
-/// - every message of the exposed sub-discussion goes through the audit
-///   redaction (vendor token shapes, secret-named assignments and JSON keys),
-///   whatever its role;
-/// - anywhere else, an agent message that holds a token of a **known shape**
-///   (`ghp_…`, `AIza…`, `sk-…`, a JWT, a `Bearer` value, a `"token": "…"` field)
-///   is masked too: a message that quoted the same file, with the precision of
-///   those shapes alone so the rest of the history is left as written.
-///
-/// Both are idempotent. Returns the number of messages rewritten.
-fn scrub_exposed_credentials(conn: &Connection) -> Result<usize> {
-    let mut rewrites: Vec<(String, String)> = Vec::new();
-    {
-        let mut statement = conn.prepare(
-            "SELECT id, role, discussion_id, content FROM messages
-              WHERE role = 'Agent' OR discussion_id LIKE ?1 || '%'",
-        )?;
-        let mut rows = statement.query([EXPOSED_DISCUSSION_PREFIX])?;
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let role: String = row.get(1)?;
-            let discussion_id: String = row.get(2)?;
-            let content: String = row.get(3)?;
-            let masked = if discussion_id.starts_with(EXPOSED_DISCUSSION_PREFIX) {
-                crate::core::redact::redact_for_audit_artifact(&content).0
-            } else if role == "Agent" && crate::core::redact::looks_like_secret(&content) {
-                crate::core::redact::redact_secrets(&content)
-            } else {
-                continue;
-            };
-            if masked != content {
-                rewrites.push((id, masked));
-            }
-        }
-    }
-    for (id, content) in &rewrites {
-        conn.execute(
-            "UPDATE messages SET content = ?1 WHERE id = ?2",
-            rusqlite::params![content, id],
-        )?;
-    }
-    if !rewrites.is_empty() {
-        tracing::warn!(
-            "KT-1656: masked credentials in {} stored message(s)",
-            rewrites.len()
-        );
-    }
-    Ok(rewrites.len())
 }
 
 fn ensure_openrouter_preset(tx: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -3288,66 +3234,98 @@ mod tests {
         assert_eq!(reply_to.as_deref(), Some("u-1"));
     }
 
-    /// KT-1656 — the transcript of the exposed sub-discussion is masked on
-    /// upgrade, a vendor-shaped token quoted by an agent elsewhere too, and
-    /// every other message stays as written.
+    /// KT-1656 — the upgrade masks the vendor-shaped credentials that agent output
+    /// already holds, in every table that carries it, and nothing else: no
+    /// discussion is named, a human's message and an unshaped value stay.
     #[test]
-    fn exposed_credentials_are_masked_on_upgrade() {
-        const SETTINGS: &str = r#"```json
-{"mcpServers": {"github": {"env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "t0kenNotShapedLikeAVendor01", "LOG_LEVEL": "debug"}}}}
-```"#;
+    fn stored_credentials_of_a_known_shape_are_masked_on_upgrade() {
         let conn = Connection::open_in_memory().unwrap();
         run_through(&conn, "291_workflow_runs_heaviest_output").unwrap();
         conn.execute_batch(
-            "INSERT INTO discussions (id, title, created_at, updated_at) VALUES
-                 ('dcabb259-0000-4000-8000-000000000000', 'Exposed', '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z'),
-                 ('other-room', 'Other', '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z');",
+            "INSERT INTO discussions (id, title, created_at, updated_at, summary_cache, partial_response) VALUES
+                 ('room-a', 'A', '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z',
+                  'summary: key AIzaSy0123456789012345678901234567', 'partial: ghp_0123456789012345678901234567890123456'),
+                 ('room-b', 'B', '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z', 'plain summary', NULL);
+             INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) VALUES
+                 ('m-agent', 'room-a', 'Agent', 'key AIzaSy0123456789012345678901234567 end', '2026-11-10T00:00:00Z', 1),
+                 ('m-user', 'room-a', 'User', 'key AIzaSy0123456789012345678901234567 end', '2026-11-10T00:00:00Z', 2),
+                 ('m-plain', 'room-b', 'Agent', 'TOKEN_BUDGET: 5000 and sha 3f786850e387550fdab836ed7e6dc881de23001b', '2026-11-10T00:00:00Z', 1),
+                 ('m-unshaped', 'room-b', 'Agent', 'GEMINI_API_KEY=plainValueWithoutAVendorShape99', '2026-11-10T00:00:00Z', 2);
+             INSERT INTO message_tombstones (id, discussion_id, role, content, timestamp, sort_order, revision_event_id, tombstoned_at)
+                 VALUES ('t-1', 'room-a', 'Agent', 'deleted: ghp_0123456789012345678901234567890123456', '2026-11-10T00:00:00Z', 3, 'rev-1', '2026-11-10T00:00:00Z');
+             INSERT INTO message_revision_events (id, discussion_id, target_message_id, previous_content_hash, expected_revision, revision, content, idempotency_key, sort_order, created_at)
+                 VALUES ('rev-1', 'room-a', 'm-agent', 'h', 0, 1, 'edit: key AIzaSy0123456789012345678901234567', 'k-1', 4, '2026-11-10T00:00:00Z');
+             INSERT INTO disc_summary_ranges (discussion_id, from_idx, to_idx, summary, created_at)
+                 VALUES ('room-a', 0, 3, 'range: key AIzaSy0123456789012345678901234567', '2026-11-10T00:00:00Z');
+             INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('wf-1', 'wf', '{}', '[]', '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z');
+             INSERT INTO workflow_runs (id, workflow_id, started_at, step_results_json)
+                 VALUES ('run-1', 'wf-1', '2026-11-10T00:00:00Z', '[{\"output\": \"key AIzaSy0123456789012345678901234567\"}]');
+             ",
         )
         .unwrap();
-        let next_order = std::cell::Cell::new(0);
-        let insert = |id: &str, discussion: &str, role: &str, content: &str| {
-            next_order.set(next_order.get() + 1);
-            conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order)
-                 VALUES (?1, ?2, ?3, ?4, '2026-11-10T00:00:00Z', ?5)",
-                rusqlite::params![id, discussion, role, content, next_order.get()],
-            )
-            .unwrap();
-        };
-        let exposed = "dcabb259-0000-4000-8000-000000000000";
-        insert("m-agent", exposed, "Agent", SETTINGS);
-        insert("m-system", exposed, "System", SETTINGS);
-        insert("m-user", exposed, "User", "plain question");
-        let quoted = "key AIzaSy0123456789012345678901234567 end";
-        insert("o-vendor", "other-room", "Agent", quoted);
-        insert(
-            "o-plain",
-            "other-room",
-            "Agent",
-            "TOKEN_BUDGET: 5000 is fine",
-        );
-        insert("o-user", "other-room", "User", quoted);
 
         run(&conn).unwrap();
 
-        let content = |id: &str| -> String {
-            conn.query_row("SELECT content FROM messages WHERE id = ?1", [id], |row| {
-                row.get(0)
-            })
+        let value = |table: &str, column: &str, id_column: &str, id: &str| -> String {
+            conn.query_row(
+                &format!("SELECT {column} FROM {table} WHERE {id_column} = ?1"),
+                [id],
+                |row| row.get(0),
+            )
             .unwrap()
         };
-        for id in ["m-agent", "m-system"] {
-            assert!(!content(id).contains("t0kenNotShapedLikeAVendor01"), "{id}");
-            assert!(content(id).contains("\"LOG_LEVEL\": \"debug\""), "{id}");
+        let shaped = [
+            "0123456789012345678901234567",
+            "0123456789012345678901234567890123456",
+        ];
+        let cells = [
+            ("messages", "content", "id", "m-agent"),
+            ("message_tombstones", "content", "id", "t-1"),
+            ("message_revision_events", "content", "id", "rev-1"),
+            ("discussions", "summary_cache", "id", "room-a"),
+            ("discussions", "partial_response", "id", "room-a"),
+            ("disc_summary_ranges", "summary", "discussion_id", "room-a"),
+            ("workflow_runs", "step_results_json", "id", "run-1"),
+        ];
+        for (table, column, id_column, id) in cells {
+            let text = value(table, column, id_column, id);
+            assert!(
+                shaped.iter().all(|secret| !text.contains(secret)),
+                "{table}.{column} still holds the token: {text}"
+            );
+            assert!(text.contains("REDACTED"), "{table}.{column}: {text}");
         }
-        assert_eq!(content("m-user"), "plain question");
-        assert!(!content("o-vendor").contains("0123456789012345678901234567"));
-        assert_eq!(content("o-plain"), "TOKEN_BUDGET: 5000 is fine");
-        assert_eq!(content("o-user"), quoted, "a human's message is theirs");
+        // The workflow step results stay a JSON document.
+        serde_json::from_str::<serde_json::Value>(&value(
+            "workflow_runs",
+            "step_results_json",
+            "id",
+            "run-1",
+        ))
+        .unwrap();
+        // Left as written: a human's message, a value with no vendor shape (the
+        // owner-run audit of one discussion is for that), a hash, a plain summary.
+        assert!(
+            value("messages", "content", "id", "m-user").contains("0123456789012345678901234567")
+        );
+        assert_eq!(
+            value("messages", "content", "id", "m-plain"),
+            "TOKEN_BUDGET: 5000 and sha 3f786850e387550fdab836ed7e6dc881de23001b"
+        );
+        assert_eq!(
+            value("messages", "content", "id", "m-unshaped"),
+            "GEMINI_API_KEY=plainValueWithoutAVendorShape99"
+        );
+        assert_eq!(
+            value("discussions", "summary_cache", "id", "room-b"),
+            "plain summary"
+        );
 
         // Idempotent: a second pass rewrites nothing.
         let tx = conn.unchecked_transaction().unwrap();
-        assert_eq!(scrub_exposed_credentials(&tx).unwrap(), 0);
+        let again = crate::db::credential_scrub::scrub_known_shapes(&tx).unwrap();
+        assert_eq!(again.total, 0, "{again:?}");
     }
 
     #[test]

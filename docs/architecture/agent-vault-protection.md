@@ -133,7 +133,7 @@ exist on the host, as given and with their links resolved, in two tiers:
 | Other agents' | `~/.gemini`, `~/.codex`, `~/.claude.json`, `~/.claude/.credentials.json`, `~/.copilot`, `~/.config/github-copilot`, `~/.kiro`, `~/.local/share/kiro-cli`, `~/.vibe`, `~/.local/share/opencode`, `~/.config/opencode` | every confined launch, except the store of the agent that is running |
 | Shared | `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.config/gh`, `~/.config/glab-cli`, `~/.config/hub`, `~/.git-credentials`, `~/.netrc`, `~/.npmrc`, `~/.yarnrc.yml`, `~/.pypirc`, `~/.cargo/credentials*`, `~/.docker/config.json`, `~/.kube/config`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`, `~/.vault-token`, … | a **sandboxed** launch only |
 
-[src: file: backend/src/core/home_credentials.rs:93-121#hidden_in]
+[src: file: backend/src/core/home_credentials.rs:164-180#hidden_in]
 
 | Launch | Tiers hidden | Mechanism |
 |---|---|---|
@@ -148,20 +148,102 @@ exist on the host, as given and with their links resolved, in two tiers:
   files readable: a package manager or the Docker CLI fails on a file it is
   refused.
 - A path that does not exist is not listed (bubblewrap cannot mount over it);
-  a store created after the launch is not covered until the next one.
-  `XDG_CONFIG_HOME` and a `HOME` other than the user's are not followed.
+  a store created after the launch is not covered until the next one. A `HOME`
+  other than the user's is not followed.
+- **A store is hidden where the tools would put it on this host**, not only under
+  the home. Each store is also resolved through the environment of the Kronn
+  process (read through `core::child_env::var_os`): `CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME`, `GEMINI_CLI_HOME` (the Gemini CLI's home, which holds `.gemini`),
+  `XDG_CONFIG_HOME` (everything of `~/.config/…`: `gh`, `gcloud`, `glab-cli`,
+  `opencode`, `github-copilot`, `git/credentials`), `XDG_DATA_HOME`
+  (`~/.local/share/…`: `opencode`, `kiro-cli`), `GNUPGHOME`,
+  `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE`, `KUBECONFIG` (each entry
+  of the list), `DOCKER_CONFIG`, `CARGO_HOME`, `NPM_CONFIG_USERCONFIG`,
+  `GH_CONFIG_DIR`, `CLOUDSDK_CONFIG`. The default place stays hidden too: a tool
+  run without the variable still finds its store there. A relative value is
+  ignored (it is relative to the working directory of the tool, which Kronn does
+  not know), and so is one that names the home or a parent of it
+  (`GNUPGHOME=$HOME`), which would hide everything. The Gemini home override name
+  is the one the CLI documents as of this writing; check it against the CLI's
+  release notes when it changes.
+  [src: file: backend/src/core/home_credentials.rs:202-240#locations]
 - Linux masks a directory with an empty tmpfs and a file with `/dev/null`
   bound over it.
 - On a host with no sandbox, or with "Protect the Kronn vault from agents" off,
   the wrapped launches (full access, Codex) are not confined, so these stores are
   open to them; a Claude worker's settings carry the denial either way.
-- **Stored output is masked.** An Agent message is run through the audit
-  redaction when it is inserted (`db::discussions::insert_message`): vendor token
-  shapes, secret-named assignments and secret-named JSON keys, including the
-  `env` block of a CLI's `settings.json` (`"GITHUB_PERSONAL_ACCESS_TOKEN": "…"`).
-  The upgrade (migration 292) masks the transcript of the exposed sub-discussion
-  and any agent message with a vendor-shaped token. Anything the heuristics do not
-  recognise (a bare value under a harmless name) is still stored as written.
+- **Stored output is masked, with a measured false-positive rate.** An Agent
+  message is redacted when it is inserted (`db::discussions::mask_agent_output`
+  → `core::redact::redact_agent_output`), irreversibly, and what a human typed is
+  left alone. It masks the vendor token shapes, and a secret-named assignment or
+  JSON key (`"GITHUB_PERSONAL_ACCESS_TOKEN": "…"`, `GEMINI_API_KEY=…`, the `env`
+  block of a CLI's `settings.json`) **only when its value is a credential**: the
+  audit redaction used for audit artifacts also rewrote code and prose that merely
+  names a token (`let token = lexer.next_token();`, `Authorization: Bearer $TOKEN`),
+  which an agent's reply is full of. A value is not a credential when it is a
+  placeholder (`$TOKEN`, `<your-token>`, `your-api-key`, `changeme`, `xxxx`,
+  `kr-join-...`, `…`), the name of an environment variable (`VOTRE_API_KEY`),
+  prose (whitespace, or a script with no spaces), a dotted or snake_case
+  identifier, a CSS variable, a reference (`secret://NAME`), or, for a bare value,
+  shorter than 12 characters or without letters and digits or shaped like code (a
+  call, a path, a URL). A quoted value counts from 8 characters, 6 under a
+  `password`-like name; a `pin` name needs 4 to 12 digits. The price is the
+  inverse risk: a short bare secret under a harmless name is stored as written.
+  The regression samples are `AS_WRITTEN` in `db::insert_redaction_measure`.
+  [src: file: backend/src/core/redact.rs:644-651#redact_agent_output]
+- **Measured on a corpus, not yet on a database.** `db::insert_redaction_measure`
+  (ignored) runs the insert path over every Agent message of a copy of a database
+  and/or over text files cut into message-sized chunks. On this repository (prose,
+  code, hashes, git history: 21,926 chunks) the audit redaction changed 1,508 and
+  the insert path 227, each one reviewed: all are credential-shaped literals in
+  test fixtures and demo scripts (fake `sk-…` / `ghp_…` keys, `password=hunter2`,
+  `postgres://user:secret@…`), none is prose, code that only names a token, a
+  commit SHA, a UUID or a digest. The false positives the review found
+  (placeholders, ellipses, env-var names, an i18n key, a CJK sentence under a
+  `*_token` key, the word "pin", a CSS variable, `user:pass@host`) were fixed and
+  are regression samples. The run over a copy of a real database is the owner's:
+  `docs/operations/db-backup.md#redaction-of-stored-credentials-kt-1656`.
+
+#### What is scrubbed after the fact, and where
+
+A printed credential file is copied by more than the message it was quoted in.
+`db::credential_scrub::TARGETS` lists every column that can carry an agent
+transcript or tool output, and two passes read it:
+
+- **Migration 293, on every install** (`redact_known_shapes`): a value with a
+  vendor-shaped token (`ghp_…`, `AIza…`, `sk-…`, a JWT, a `Bearer` value, a
+  `"password": "…"` field) is masked, a placeholder and every other value stay as
+  written, and no secret-named JSON key masks by itself. Agent messages only for
+  `messages`; every listed column elsewhere.
+- **The owner-run audit of one discussion**, `POST /api/maintenance/redact-discussion`
+  with `{"discussion_id": "<id or its first 8+ characters>"}` (the full audit
+  redaction, whatever the role, over every table below that belongs to the
+  discussion). It names no discussion in the code, is gated like the other
+  destructive POSTs and is not reachable with an agent's bridge token.
+
+| Table.column | Carries | Pass |
+|---|---|---|
+| `messages.content` | the transcript | 293 (Agent), audit |
+| `message_tombstones.content`, `message_revision_events.content` | the copy a deletion or an edit keeps | 293, audit |
+| `discussions.partial_response`, `discussions.summary_cache`, `disc_summary_ranges.summary` | a turn in flight, text written from the transcript | 293, audit |
+| `discussion_important_messages.payload_json`, `discussion_questions.{payload_json,answer_json,resume_error}` | excerpts and answers | 293, audit |
+| `agent_dispatch_jobs.{last_error,progress_detail}`, `agent_resume_jobs.{result_json,last_error,reason}`, `shared_runs.{result_json,exec_details_json,diagnostic}` | job results and errors | 293, audit |
+| `task_execution_deliveries.manifest_json`, `task_execution_reviews.decision_json`, `task_execution_validation_runs.output`, `task_executions.{blocked_reason,outcome_reason}`, `task_execution_events.changes_json`, `delivery_summaries.canonical_json` | what a worker delivered, a principal decided, a command printed | 293, audit (by the execution's `sub_discussion_id`) |
+| `planning_task_dod_items.evidence`, `planning_task_events.changes_json`, `planning_tasks.{description,blocked_reason}`, `review_findings.evidence`, `learnings.evidence_json` | evidence and notes agents attach to tasks | 293 (audit for `learnings` by discussion) |
+| `workflow_runs.step_results_json`, `workflow_run_pins.content_json`, `workflow_watch_state.{last_result,last_error}`, `quick_exec_runs.{summary,diagnostics}`, `tasks.last_status_json` | step and run outputs | 293 |
+| `api_call_logs.{request_excerpt,response_excerpt,error_message}`, `media_jobs.last_error`, `mcp_probe_results.summary`, `mcp_auth_failures.message`, `lite_llm_model_failures.error_message`, `trust_audit_log.detail` | what a call, a probe or a job reported | 293 (audit by discussion where the row has one) |
+| `audit_runs.{documentary_notes,recommendations_json,step_outcomes_json}`, `audit_cross_findings.record_json` | what an audit agent wrote | 293 |
+
+Not listed, with the reason: **no FTS or other virtual table exists** (nothing
+creates one, and a test asserts the schema holds none), so there is no shadow copy
+to rebuild after a rewrite; `context_files.extracted_text` is a file a human
+uploaded, not agent output; configuration tables (`workflows.steps_json`,
+`quick_prompts`, `projects`, …) hold what a human wrote; hashes (`*_hash`) hold no
+text. A file on disk (`quick_exec_runs.artifact_path`, a run's artifacts
+directory, a backup) is outside the database and not rewritten; the pre-migration
+backup keeps the clear text (see `docs/operations/db-backup.md`). A test checks
+that every column of the list exists in the schema, so a renamed column cannot
+make a pass skip it silently.
 
 ### Run artifacts sit outside the vault (KT-1585)
 
@@ -211,7 +293,8 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
 | Where | What |
 |---|---|
 | `core/vault_guard.rs` | which launches are wrapped, the Claude rules |
-| `core/home_credentials.rs` | the credential stores of the home an agent must not read (KT-1656) |
+| `core/home_credentials.rs` | the credential stores of the home an agent must not read, and where the environment moves them (KT-1656) |
+| `db/credential_scrub.rs` | every column that can hold agent output, and the two passes that mask it after the fact (KT-1656) |
 | `agents/runner.rs` `try_spawn` | the one spawn point of every native agent |
 | `agents/runner.rs` `claude_task_worker_settings` | `denyRead` and `permissions.deny` of the worker |
 | `api/strong_confirm.rs` `strong_gate` | the code of the vault routes, on every channel |
