@@ -531,7 +531,7 @@ async fn quick_prompt_saved_http_settings_reach_each_provider_turn_after_templat
         .db
         .with_conn(move |conn| {
             conn.execute(
-                "UPDATE external_api_connections SET endpoint=?1, tools_enabled=1 WHERE id='saved-provider'",
+                "UPDATE external_api_connections SET endpoint=?1 WHERE id='saved-provider'",
                 [endpoint],
             )?;
             Ok(())

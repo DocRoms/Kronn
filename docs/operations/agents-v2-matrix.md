@@ -91,7 +91,7 @@ first turn; history-tool discovery remains deferred until the third user
 message. This instruction contract does not imply a live provider validation
 or change session-resume and pricing limitations.
 [src: file: backend/src/api/disc_prompts.rs:1123-1153#opencode_prompt_matches_its_injected_mcp_bridge_on_first_and_later_turns]
-[src: file: backend/src/acp.rs:1554-1593#native_session_mcp_servers]
+[src: file: backend/src/acp.rs:1607-1646#native_session_mcp_servers]
 
 The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
@@ -127,7 +127,7 @@ the same job.
   reads Claude, Codex and Gemini logs. Missing cost therefore remains unknown,
   never free. This is an implementation limit, not a protocol prohibition.
   [ACP v1 UsageUpdate, checked 2026-09-08](https://agentclientprotocol.com/protocol/v1/schema#usageupdate)
-  [src: file: backend/src/acp.rs:1422-1444#usage_from_prompt_result]
+  [src: file: backend/src/acp.rs:1470-1492#usage_from_prompt_result]
   [src: file: backend/src/acp/claude_adapter.rs:450-467#Cost]
 - **Statistics distinguish missing cost from a recorded zero.** Token-usage
   aggregates retain recorded amounts, fresh pricing estimates and unpriced
@@ -151,7 +151,7 @@ the same job.
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:3966-3984#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:4014-4032#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -171,9 +171,9 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:6048-6058#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:15955-16236#run_acp_session_streams_usage_through_agent_process]
-[src: file: backend/src/core/redact.rs:532-560#redact_for_audit_artifact]
+[src: file: backend/src/agents/runner.rs:6133-6143#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:16038-16319#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/core/redact.rs:626-654#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
 
@@ -189,11 +189,11 @@ read; opening a selector additionally refreshes stale CLI targets in the
 background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:197-198#useModelCatalogSnapshot]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1306-1331#SearchableSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:198-199#useModelCatalogSnapshot]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1332-1357#SearchableSelect]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
-[src: file: backend/src/core/model_catalog/mod.rs:363-373#discover_inner]
+[src: file: backend/src/core/model_catalog/mod.rs:423-433#discover_inner]
 
 Saving a tier rereads the current settings and replaces only the selected
 field, preserving other agents' values and showing the new value only after

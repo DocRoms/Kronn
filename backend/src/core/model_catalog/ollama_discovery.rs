@@ -159,10 +159,16 @@ pub fn catalog_capabilities(ollama: &[String]) -> Vec<String> {
         }
     }
     // `tools` qualifies a chat model rather than replacing its kind, so it
-    // rides along whichever way the kind was decided (KT-1600): the runner
-    // attaches its tool executor only to a model that lists it.
-    if ollama.iter().any(|word| word == "tools") && !capabilities.iter().any(|c| c == "tools") {
-        capabilities.push("tools".to_string());
+    // rides along whichever way the kind was decided (KT-1600). A chat model
+    // Ollama described without it is recorded as such, which is what tells it
+    // apart from a row saved before this word existed: the runner withholds its
+    // tool executor from the first and leaves it on the second.
+    if ollama.iter().any(|word| word == "tools") {
+        if !capabilities.iter().any(|c| c == "tools") {
+            capabilities.push("tools".to_string());
+        }
+    } else if capabilities.iter().any(|c| c == "chat") {
+        capabilities.push(super::CAPABILITY_NO_TOOLS.to_string());
     }
     capabilities
 }
@@ -222,11 +228,31 @@ mod tests {
         assert_eq!(catalog_capabilities(&words(&["audio"])), words(&["audio"]));
         assert_eq!(
             catalog_capabilities(&words(&["completion", "completion"])),
-            words(&["chat"])
+            words(&["chat", "no-tools"])
         );
         assert_eq!(
             catalog_capabilities(&words(&["insert", "tools"])),
             words(&["insert", "tools"])
+        );
+        assert!(catalog_capabilities(&[]).is_empty());
+    }
+
+    /// KT-1600 — a chat model Ollama described without `tools` says so, which
+    /// tells it from a row saved before the word existed; a model that is not a
+    /// chat model, or whose probe said nothing, carries no marker.
+    #[test]
+    fn a_chat_model_without_tools_is_marked_and_the_rest_are_left_unknown() {
+        assert_eq!(
+            catalog_capabilities(&words(&["completion", "vision"])),
+            words(&["chat", "vision", "no-tools"])
+        );
+        assert_eq!(
+            catalog_capabilities(&words(&["completion", "tools"])),
+            words(&["chat", "tools"])
+        );
+        assert_eq!(
+            catalog_capabilities(&words(&["decision"])),
+            words(&["decision"])
         );
         assert!(catalog_capabilities(&[]).is_empty());
     }

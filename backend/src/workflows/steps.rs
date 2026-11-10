@@ -3966,12 +3966,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             None,
             None,
             Some(&crate::models::setup::HttpEndpoints {
-                // KT-1600 — LiteLLM reports no capabilities, so its tools are
-                // an explicit setting.
-                tools: crate::models::setup::HttpToolSettings {
-                    lite_llm: Some(true),
-                    ..Default::default()
-                },
+                tools: Default::default(),
                 lite_llm: Some(server.uri()),
                 nvidia: None,
             }),
@@ -4027,8 +4022,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let previous_ctx_cap = crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
         crate::core::child_env::set_var("OLLAMA_HOST", server.uri());
         crate::core::child_env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
-        // KT-1600 — Ollama's catalogue must list `tools` for this model.
-        crate::core::model_catalog::set_tool_models_for_test(&[(AgentType::Ollama, "test-model")]);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let tools: Arc<dyn ToolExecutor> = Arc::new(ReadOnlyTools {
             calls: calls.clone(),

@@ -5,7 +5,7 @@ starts the installed CLI in stream-JSON mode and sends one SDK `initialize`
 control request. It reads the response's `models`, the same catalogue exposed
 by `supportedModels()` / `initializationResult().models`. It sends no user
 prompt, model selection, permission approval or inference request.
-[src: file: backend/src/core/model_catalog/mod.rs:363-374#discover_inner]
+[src: file: backend/src/core/model_catalog/mod.rs:423-434#discover_inner]
 [src: file: backend/src/core/model_catalog/claude_discovery.rs:88-106#discovery_args]
 [src: file: backend/src/core/model_catalog/claude_discovery.rs:214-270#initialize]
 [src: url: https://code.claude.com/docs/en/agent-sdk/typescript]
@@ -55,7 +55,7 @@ ten-minute retry TTL. HTTP and Ollama are excluded from this automatic CLI
 refresh; their existing explicit boundaries remain unchanged.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:6-30#refreshTarget]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
-[src: file: backend/src/core/model_catalog/mod.rs:988-1030#refresh_if_stale]
+[src: file: backend/src/core/model_catalog/mod.rs:1048-1090#refresh_if_stale]
 [src: file: backend/src/core/model_catalog/mod.rs:37-41#LIVE_CATALOG_TTL]
 [src: file: backend/src/db/mod.rs:440-452#lock_catalog_refresh]
 
@@ -73,7 +73,7 @@ selected model is still `Available`. It keeps cached provenance and the error
 visible and leaves authentication to the execution boundary. `AuthRequired`,
 `CliMissing`, absent identities and positively unavailable models remain blocked
 when accompanied by a blocking refresh error. Other runtimes are unchanged.
-[src: file: backend/src/core/model_catalog/mod.rs:1131-1162#retained_claude_model]
+[src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
 
 Regression coverage includes the initialization-only protocol, malformed and
 oversized responses, stderr EOF, namespace separation, missing effort levels,
@@ -81,8 +81,8 @@ concurrent refreshes, failure cooldown, disappearance/reappearance, late UI
 results and explicit Fable selection. Tests use isolated database/protocol
 fixtures and mocked UI APIs; they do not assert an authorized billable call.
 [src: file: backend/src/core/model_catalog/claude_discovery.rs:272-427#tests]
-[src: file: backend/src/core/model_catalog/mod.rs:1578-1616#overlapping_forced_refreshes_share_one_attempt_but_an_explicit_later_recheck_runs]
-[src: file: backend/src/core/model_catalog/mod.rs:1618-1748#claude_refresh_preserves_manual_tiers_http_namespace_and_last_good_on_failure]
+[src: file: backend/src/core/model_catalog/mod.rs:1638-1676#overlapping_forced_refreshes_share_one_attempt_but_an_explicit_later_recheck_runs]
+[src: file: backend/src/core/model_catalog/mod.rs:1678-1808#claude_refresh_preserves_manual_tiers_http_namespace_and_last_good_on_failure]
 [src: file: backend/src/db/model_catalog.rs:1310-1336#disappearance_downgrades_to_cached_never_deletes]
 [src: file: backend/src/db/model_catalog.rs:1375-1398#mark_unavailable_then_reappear_reactivates]
 [src: file: frontend/src/hooks/__tests__/useModelCatalogSnapshot.test.tsx:25-107#refreshes]

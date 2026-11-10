@@ -57,42 +57,34 @@ pub(crate) enum HttpToolsVerdict {
     Attach,
     /// The operator switched tools off for this agent or connection.
     OperatorOff,
-    /// The catalogue does not list `tools` for this model (Ollama).
+    /// The catalogue lists this Ollama model as a chat model without `tools`.
     ModelLacksTools,
-    /// A provider that cannot report capabilities (LiteLLM, NVIDIA, a custom
-    /// gateway) whose operator never declared that its models take tools.
-    NotDeclared,
 }
 
 /// Decide whether an HTTP run gets the tool executor.
 ///
-/// `setting` is the operator's explicit choice for the agent, or for its named
-/// connection when it runs on one. `model_has_tools` is the catalogue's answer
-/// for the exact model. Ollama reports capabilities, so its catalogue decides
-/// and `Some(true)` cannot force a model without `tools`. The OpenAI-wire
-/// providers report nothing a gate could read: they attach only on an explicit
-/// `Some(true)`, because a tool schema sent to a model that lacks the
-/// capability is rejected or answered in prose. `Some(false)` always wins.
+/// Tools are on by default: Kronn exposes them to every HTTP agent. The gate
+/// only withholds them from a run that cannot take tool calls.
+/// - `setting` is the operator's explicit choice for the agent, or for its
+///   named connection when it runs on one. `Some(false)` is the off switch and
+///   always wins; `None` and `Some(true)` both leave tools on.
+/// - `catalogue` is what discovery recorded for the exact model, `None` while
+///   it has not decided. Only Ollama reports capabilities, so only its answer
+///   counts (`Some(true)` cannot force tools onto a model listed without them);
+///   LiteLLM, NVIDIA and a custom gateway report none and are left to the
+///   operator. An unknown model keeps its tools.
 pub(crate) fn http_tools_verdict(
     agent_type: &AgentType,
     setting: Option<bool>,
-    model_has_tools: bool,
+    catalogue: Option<bool>,
 ) -> HttpToolsVerdict {
     if setting == Some(false) {
         return HttpToolsVerdict::OperatorOff;
     }
-    if crate::agents::runner::is_openai_wire_agent(agent_type) {
-        return if setting == Some(true) {
-            HttpToolsVerdict::Attach
-        } else {
-            HttpToolsVerdict::NotDeclared
-        };
+    if !crate::agents::runner::is_openai_wire_agent(agent_type) && catalogue == Some(false) {
+        return HttpToolsVerdict::ModelLacksTools;
     }
-    if model_has_tools {
-        HttpToolsVerdict::Attach
-    } else {
-        HttpToolsVerdict::ModelLacksTools
-    }
+    HttpToolsVerdict::Attach
 }
 
 /// Resolve a named connection's model for one tier — the single rule shared
@@ -176,6 +168,35 @@ mod tests {
     use super::*;
     use crate::models::{ModelAvailability, ModelProvenance};
     use chrono::Utc;
+
+    /// KT-1600 — tools are on by default; only the operator switch or an
+    /// Ollama catalogue that lists the model without `tools` withholds them.
+    #[test]
+    fn the_verdict_defaults_to_attach_and_only_an_off_switch_or_a_no_tools_model_withholds() {
+        use HttpToolsVerdict::*;
+        for agent in [AgentType::LiteLlm, AgentType::Nvidia, AgentType::Custom] {
+            assert_eq!(http_tools_verdict(&agent, None, None), Attach, "{agent:?}");
+            assert_eq!(http_tools_verdict(&agent, Some(true), None), Attach);
+            assert_eq!(http_tools_verdict(&agent, Some(false), None), OperatorOff);
+            // These providers report no capabilities: the catalogue is not a gate.
+            assert_eq!(http_tools_verdict(&agent, None, Some(false)), Attach);
+        }
+        let ollama = AgentType::Ollama;
+        assert_eq!(http_tools_verdict(&ollama, None, None), Attach, "unknown");
+        assert_eq!(http_tools_verdict(&ollama, None, Some(true)), Attach);
+        assert_eq!(
+            http_tools_verdict(&ollama, None, Some(false)),
+            ModelLacksTools
+        );
+        assert_eq!(
+            http_tools_verdict(&ollama, Some(true), Some(false)),
+            ModelLacksTools
+        );
+        assert_eq!(
+            http_tools_verdict(&ollama, Some(false), Some(true)),
+            OperatorOff
+        );
+    }
 
     fn entry(capabilities: Vec<&str>) -> CatalogModelEntry {
         let now = Utc::now();

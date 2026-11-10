@@ -4,7 +4,7 @@
 data` and names nothing. Four carriers produce that identical error — the
 program name, any argument, any environment entry, and the working directory —
 and Kronn's pre-spawn check examines all four.
-[src: file: backend/src/agents/runner.rs:14369-14417#nul_byte_offender]
+[src: file: backend/src/agents/runner.rs:14435-14483#nul_byte_offender]
 
 A `\0` is valid UTF-8, so `read_to_string` carries one out of a file without a
 word. Any value Kronn reads from disk or decrypts can therefore reach a command
@@ -19,11 +19,11 @@ into a C string, it substitutes the literal `<string-with-nul>`. Only
 
 A byte scan alone — the obvious implementation — therefore detects the
 environment case and stays blind to the other three, with nothing to signal it.
-Both checks are needed. [src: file: backend/src/agents/runner.rs:14346-14355#NUL_BEARING_PLACEHOLDER]
+Both checks are needed. [src: file: backend/src/agents/runner.rs:14411-14420#NUL_BEARING_PLACEHOLDER]
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
-detection. [src: file: backend/src/agents/runner_test.rs:11451-11485#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
+detection. [src: file: backend/src/agents/runner_test.rs:11572-11606#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
 
 ## Report the carrier, never the value
 
@@ -31,7 +31,7 @@ These fields hold API keys and tokens. The refusal names the environment
 variable by key, or the argument by the flag it follows — positions shift
 between agents — and never the content, matching the invocation receipt's own
 rule that no argument content is logged.
-[src: file: backend/src/agents/runner_test.rs:11383-11449#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
+[src: file: backend/src/agents/runner_test.rs:11504-11570#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
 
 ## It is settled before anything runs
 
@@ -75,7 +75,7 @@ existing hard preflight refusal rather than being silently repaired.
 [src: file: backend/src/api/disc_prompts.rs:387-398#build_agent_prompt]
 [src: file: backend/src/api/disc_prompts.rs:400-420#build_agent_delta_prompt]
 [src: file: backend/src/api/discussions/streaming.rs:2733#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:4126#build_agent_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:4127#build_agent_prompt]
 
 The new HTTP regressions use the real Router and SQLite with temporary config
 and files: upload preserves exact disk bytes, and export/import/re-export keeps

@@ -57,9 +57,10 @@ pub struct UpsertConnectionRequest {
     /// quality tier, like the media slots.
     #[serde(default)]
     pub decision_model: Option<String>,
-    /// Explicit tool-executor setting for this connection (KT-1600). Omitted
-    /// on an update, it keeps the stored value, so a client that does not know
-    /// the field cannot silently reset it.
+    /// Tool-executor switch for this connection (KT-1600): `false` turns the
+    /// tools off, `true` or omitted leaves them on. Omitted on an update, it
+    /// keeps the stored value, so a client that does not know the field cannot
+    /// silently reset it.
     #[serde(default)]
     pub tools_enabled: Option<bool>,
     /// Override for providers serving media from another host. Empty derives

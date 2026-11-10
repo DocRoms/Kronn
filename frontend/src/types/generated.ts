@@ -377,10 +377,10 @@ mention_color?: string | null,
 base_url?: string | null,
 /**
  * Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
- * `Some(false)` withholds the tools from every model of this agent;
- * `Some(true)` declares that its models take them, which is the only way
- * to enable them on a proxy that cannot report capabilities (LiteLLM).
- * `None` leaves the decision to the model catalogue. Ignored by CLI agents.
+ * Tools are on by default: `Some(false)` withholds them from every model
+ * of this agent (for one that cannot take tool calls); `None` and
+ * `Some(true)` leave them on, Ollama's catalogue still withholding them
+ * from a model it lists without `tools`. Ignored by CLI agents.
  */
 tools_enabled?: boolean | null, };
 
@@ -4632,9 +4632,10 @@ media_endpoint?: string | null,
  */
 decision_model?: string | null,
 /**
- * Whether the Kronn tool executor is attached to runs on this connection
- * (KT-1600). `None` = not declared: a proxy that cannot report model
- * capabilities gets no tools until an operator says its models take them.
+ * Operator switch for the Kronn tool executor on runs on this connection
+ * (KT-1600). Tools are on by default: `None` and `Some(true)` attach
+ * them, `Some(false)` withholds them, for a model that cannot take tool
+ * calls.
  */
 tools_enabled?: boolean | null, };
 
@@ -9890,7 +9891,7 @@ color?: string | null, };
 
 export type SetAgentToolsRequest = { agent: AgentType,
 /**
- * `None` clears the operator setting; see `AgentConfig::tools_enabled`.
+ * `None` clears the operator switch (tools on); see `AgentConfig::tools_enabled`.
  */
 enabled?: boolean | null, };
 

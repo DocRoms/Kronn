@@ -19,6 +19,15 @@ pub fn count_discussions(conn: &Connection) -> Result<u32> {
     Ok(count)
 }
 
+/// KT-1656 — the text of a turn still streaming is agent output too: it is kept in
+/// `discussions.partial_response` until the turn completes or boot recovery turns
+/// it into a message, so it is masked like a stored message
+/// ([`mask_agent_output`]), not only when it becomes one.
+fn mask_partial_response(conn: &Connection, disc_id: &str, text: &str) -> Result<String> {
+    let masked = crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, text)?;
+    Ok(crate::core::redact::redact_agent_output(&masked))
+}
+
 /// Checkpoint the in-flight agent response. Called periodically from
 /// `make_agent_stream` (every ~30s or ~100 chunks) so a backend restart
 /// preserves what the agent has produced so far.
@@ -42,8 +51,7 @@ pub fn set_partial_response(
 ) -> Result<()> {
     match partial {
         Some(text) => {
-            let masked =
-                crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, text)?;
+            let masked = mask_partial_response(conn, disc_id, text)?;
             let text = masked.as_str();
             let agent_type = provenance.map(|(agent, _)| format_agent_type(agent));
             let model = provenance.and_then(|(_, model)| model);
@@ -104,7 +112,7 @@ pub fn set_partial_response_for_dispatch(
     trigger_message_id: &str,
     connection_id: Option<&str>,
 ) -> Result<bool> {
-    let masked = crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, partial)?;
+    let masked = mask_partial_response(conn, disc_id, partial)?;
     let partial = masked.as_str();
     let agent_type = format_agent_type(provenance.0);
     let changed = conn.execute(
@@ -2884,6 +2892,22 @@ pub fn insert_message(
     insert_message_inner(conn, discussion_id, msg)
 }
 
+/// KT-1656 — what an agent wrote is stored masked: a worker that prints a
+/// credential file (`cat ~/.gemini/settings.json`) and quotes it in its reply
+/// must not leave the token in the transcript, which is kept and is sent back to
+/// the model provider on every later turn. Vendor token shapes, and secret-named
+/// assignments and JSON keys whose value is a credential, not code or a
+/// placeholder (`redact::redact_agent_output`: its false-positive rate was
+/// measured, `db::insert_redaction_measure`). Only the agent's own role: what a
+/// human typed is theirs.
+pub(crate) fn mask_agent_output(role: &crate::models::MessageRole, content: String) -> String {
+    if matches!(role, crate::models::MessageRole::Agent) {
+        crate::core::redact::redact_agent_output(&content)
+    } else {
+        content
+    }
+}
+
 fn insert_message_inner(
     conn: &Connection,
     discussion_id: &str,
@@ -2903,8 +2927,11 @@ fn insert_message_inner(
         .as_ref()
         .and_then(|r| serde_json::to_string(r).ok());
     // KT-1111 — every message of an assistant conversation, any author.
+    // KT-1656 — masked once, here: the row, the proposals, the actions, the
+    // questions and the audit hook below read this text, never `msg.content`.
     let content =
         crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, &msg.content)?;
+    let content = mask_agent_output(&msg.role, content);
 
     conn.execute(
         "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id, session_continuity, kind)
@@ -2959,19 +2986,14 @@ fn insert_message_inner(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
         )?;
-        super::discussion_actions::ingest_message_actions(
-            conn,
-            discussion_id,
-            &msg.id,
-            &msg.content,
-        )?;
+        super::discussion_actions::ingest_message_actions(conn, discussion_id, &msg.id, &content)?;
         let invalid_cards = super::discussion_questions::ingest_message_questions(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
         )?;
         super::discussion_questions::report_invalid_cards(
             conn,
@@ -2983,7 +3005,7 @@ fn insert_message_inner(
             conn,
             discussion_id,
             &msg.id,
-            &msg.content,
+            &content,
             &msg.timestamp.to_rfc3339(),
         )?;
     }

@@ -85,8 +85,8 @@ limit. The API/worker regression mixes filenames (including an accented name)
 and ids for three sources, for both image and video, then changes the local
 slot before the worker runs.
 [src: commit: 9f3889ee2]
-[src: file: backend/src/api/media.rs:2027#resolve_references]
-[src: file: backend/tests/api_tests.rs:28925#media_generate_accepts_an_exact_filename_of_this_rooms_image_only]
+[src: file: backend/src/api/media.rs:2029#resolve_references]
+[src: file: backend/tests/api_tests.rs:29033#media_generate_accepts_an_exact_filename_of_this_rooms_image_only]
 [src: file: backend/tests/support/api_media_references.rs:159#comfyui_three_sources_survive_a_slot_change_between_the_api_and_worker]
 
 The old CI catalogue failure was a 220-byte increase in the media tool

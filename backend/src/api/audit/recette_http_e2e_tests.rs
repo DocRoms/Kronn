@@ -152,8 +152,6 @@ struct Recette {
 fn http_state(db: Arc<crate::db::Database>, endpoint: &str) -> AppState {
     let mut config = crate::core::config::default_config();
     config.agents.lite_llm.base_url = Some(endpoint.to_string());
-    // KT-1600 — LiteLLM reports no capabilities: its tools are declared.
-    config.agents.lite_llm.tools_enabled = Some(true);
     config.agents.model_tiers.lite_llm.reasoning = Some("audit-model".into());
     config.agents.model_tiers.lite_llm.economy = Some("economy-model".into());
     AppState::new_defaults(

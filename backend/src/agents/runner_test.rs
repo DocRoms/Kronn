@@ -6417,10 +6417,6 @@ fi
             endpoint: server.uri(),
             api_key: None,
         };
-        let runtime = ExternalHttpRuntime {
-            tools_enabled: Some(true),
-            ..runtime
-        };
         let recorder = Arc::new(Recorder(Mutex::new(None)));
         // The provider fails; what matters is what the tools were told first.
         if let Ok(mut process) = start_agent_with_config(AgentStartConfig {
@@ -6478,46 +6474,64 @@ fi
         gate_http_tools(&config)
     }
 
-    /// KT-1600 — Ollama reports capabilities, so the executor reaches only a
-    /// model the catalogue lists with `tools`; an unknown model gets none, and
-    /// the operator switch turns even a capable one off.
+    /// KT-1600 — Ollama reports capabilities, so its catalogue decides: a model
+    /// listed with `tools` keeps the executor, one listed without it loses it,
+    /// and one the catalogue has not described since it learned the word
+    /// (unknown) keeps it, so an upgrade strips nothing from existing runs.
     #[test]
-    #[serial]
-    fn the_executor_attaches_to_an_ollama_model_only_when_the_catalogue_lists_tools() {
-        crate::core::model_catalog::set_tool_models_for_test(&[(
-            AgentType::Ollama,
-            "tool-capable:8b",
-        )]);
+    #[serial(tool_support)]
+    fn the_executor_follows_the_ollama_catalogue_and_an_unknown_model_keeps_it() {
+        crate::core::model_catalog::set_tool_support_for_test(&[
+            (AgentType::Ollama, "tool-capable:8b", true),
+            (AgentType::Ollama, "plain-chat:1b", false),
+        ]);
         assert!(gated(&AgentType::Ollama, "tool-capable:8b", None).is_some());
         assert!(gated(&AgentType::Ollama, "tool-capable:8b", Some(true)).is_some());
         assert!(
             gated(&AgentType::Ollama, "plain-chat:1b", None).is_none(),
-            "a model the catalogue does not list with tools gets no executor"
+            "a model the catalogue lists without tools gets no executor"
         );
         assert!(
             gated(&AgentType::Ollama, "plain-chat:1b", Some(true)).is_none(),
             "the switch cannot force tools onto a model that lacks them"
         );
         assert!(
+            gated(&AgentType::Ollama, "never-refreshed:7b", None).is_some(),
+            "unknown is not a refusal"
+        );
+        assert!(
             gated(&AgentType::Ollama, "tool-capable:8b", Some(false)).is_none(),
             "the operator switch withholds tools from a capable model"
         );
+        assert!(
+            gated(&AgentType::Ollama, "never-refreshed:7b", Some(false)).is_none(),
+            "the operator switch also withholds them from an unknown one"
+        );
     }
 
-    /// KT-1600 — LiteLLM, NVIDIA and a custom gateway report no capabilities:
-    /// the connection must say so explicitly, and a catalogued `tools` entry
-    /// alone is not enough.
+    /// KT-1600 — LiteLLM, NVIDIA and a custom gateway report no capabilities and
+    /// keep the executor unless the operator switched it off; no setting means
+    /// on, and a catalogue entry cannot withhold it.
     #[test]
-    #[serial]
-    fn an_openai_wire_provider_gets_the_executor_only_on_an_explicit_setting() {
-        crate::core::model_catalog::set_tool_models_for_test(&[
-            (AgentType::LiteLlm, "gw-model"),
-            (AgentType::Nvidia, "gw-model"),
+    #[serial(tool_support)]
+    fn an_openai_wire_provider_keeps_the_executor_unless_switched_off() {
+        crate::core::model_catalog::set_tool_support_for_test(&[
+            (AgentType::LiteLlm, "gw-model", false),
+            (AgentType::Nvidia, "gw-model", false),
         ]);
         for agent in [AgentType::LiteLlm, AgentType::Nvidia, AgentType::Custom] {
-            assert!(gated(&agent, "gw-model", None).is_none(), "{agent:?}: undeclared");
-            assert!(gated(&agent, "gw-model", Some(false)).is_none(), "{agent:?}: off");
-            assert!(gated(&agent, "gw-model", Some(true)).is_some(), "{agent:?}: declared");
+            assert!(
+                gated(&agent, "gw-model", None).is_some(),
+                "{agent:?}: no setting is on"
+            );
+            assert!(
+                gated(&agent, "gw-model", Some(true)).is_some(),
+                "{agent:?}: on"
+            );
+            assert!(
+                gated(&agent, "gw-model", Some(false)).is_none(),
+                "{agent:?}: off"
+            );
         }
     }
 
@@ -10344,6 +10358,16 @@ Suite de la réponse.";
             .unwrap()
             .iter()
             .any(|r| r == &rule));
+        // KT-1656 — the credential stores of the home (`~/.gemini`, `~/.ssh`, …)
+        // are denied to the worker's shell and to its Read tool as well.
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyRead"],
+            serde_json::json!(crate::core::vault_guard::claude_sandbox_deny_read())
+        );
+        assert_eq!(
+            settings["permissions"]["deny"],
+            serde_json::json!(crate::core::vault_guard::claude_permission_deny())
+        );
         assert_eq!(
             crate::core::vault_guard::launch_sandbox("claude", None, &args),
             crate::core::vault_guard::LaunchSandbox::Own,
@@ -10944,7 +10968,17 @@ Suite de la réponse.";
         assert_eq!(receipt.mcp_config_bytes, mcp_config.len());
         assert_eq!(receipt.system_prompt_bytes, "worker context".len());
         assert_eq!(receipt.stdin_bytes, "test prompt".len());
-        assert!(receipt.settings_bytes < 4096);
+        // KT-1656 — the credential stores of this host's home are named twice
+        // (`denyRead`, the Read tool's rule): a few dozen bytes per store that
+        // exists, whatever the catalogue holds.
+        let stores: usize = crate::core::home_credentials::hidden(
+            None,
+            crate::core::home_credentials::Reach::Sandboxed,
+        )
+        .iter()
+        .map(|path| 2 * (path.as_os_str().len() + 24))
+        .sum();
+        assert!(receipt.settings_bytes < 4096 + stores);
         assert!(receipt.max_argument_bytes < MAX_SINGLE_ARG_BYTES);
         assert_eq!(receipt.validate_single_argument_limit(), Ok(()));
         assert!(
@@ -11638,6 +11672,7 @@ Suite de la réponse.";
             &[],
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11681,6 +11716,7 @@ Suite de la réponse.";
             github_env,
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11746,6 +11782,7 @@ Suite de la réponse.";
             &[],
             None,
             crate::core::background_priority::Priority::Normal,
+            false,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -11844,6 +11881,7 @@ Suite de la réponse.";
                 &[],
                 None,
                 crate::core::background_priority::Priority::Normal,
+                false,
             )
         })
         .expect("the stand-in binary starts");
@@ -18671,5 +18709,66 @@ mod text_block_tests {
             ]
         );
         assert_eq!(narrowed[0].allowed_tools, declared.kronn_internal);
+    }
+
+    /// KT-1656 round 5 — the direct CLI route builds its command from the shared
+    /// reach rule. With read-only grants the launch is restricted: the command
+    /// carries `--allowedTools=mcp__kronn-internal` and no global bypass, and
+    /// keeps the allow-list once the policy is applied. Fed the raw
+    /// `launch_full_access` instead, the bypass is pushed, `policy.apply` strips
+    /// it, and the launch is left without its Kronn tools.
+    #[cfg(unix)] // ReadOnlyRepos::resolve* refuses Windows in check_platform
+    #[test]
+    fn a_direct_cli_launch_with_read_only_grants_keeps_its_kronn_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        let dir = temp.path().join("shared");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        let work = work.canonicalize().unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let policy = crate::agents::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
+            &AgentType::ClaudeCode,
+            &work,
+            &[],
+            &[dir.display().to_string()],
+        )
+        .unwrap()
+        .expect("a read-only directory needs the policy");
+        let launch_full_access = true;
+        let build = |full_access: bool| {
+            let (_, _, mut args, _, _, _) = super::super::agent_command_with_task_worker_policy(
+                &AgentType::ClaudeCode,
+                "prompt",
+                full_access,
+                "",
+                None,
+                None,
+                false,
+                None,
+                None,
+            );
+            let before = args.clone();
+            policy.apply(&AgentType::ClaudeCode, &work, &mut args);
+            (before, args)
+        };
+        let allow = "--allowedTools=mcp__kronn-internal".to_string();
+        let bypass = "--dangerously-skip-permissions".to_string();
+
+        // What the route now passes: the shared rule, read-only grants present.
+        let (before, after) = build(reach_is_full_access(launch_full_access, true));
+        assert!(!before.contains(&bypass), "{before:?}");
+        assert!(before.contains(&allow), "{before:?}");
+        assert!(after.contains(&allow), "{after:?}");
+        assert!(!after.contains(&bypass), "{after:?}");
+
+        // Without grants the owner's full access is unchanged.
+        let (before, _) = build(reach_is_full_access(launch_full_access, false));
+        assert!(before.contains(&bypass), "{before:?}");
+        assert!(!before.contains(&allow), "{before:?}");
+
+        // The leak this closes: the raw flag loses the allow-list under a policy.
+        let (_, raw_after) = build(launch_full_access);
+        assert!(!raw_after.contains(&allow), "{raw_after:?}");
     }
 }

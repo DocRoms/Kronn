@@ -779,10 +779,10 @@ pub struct AgentsConfig {
 pub struct HttpEndpoints {
     pub lite_llm: Option<String>,
     pub nvidia: Option<String>,
-    /// The operator's explicit tool-executor setting per HTTP agent (KT-1600),
-    /// carried with the endpoints because every call site already hands them
-    /// to the runner. `None` = not declared. A named `Custom` connection has
-    /// its own on `ExternalHttpRuntime::tools_enabled`.
+    /// The operator's tool-executor switch per HTTP agent (KT-1600), carried
+    /// with the endpoints because every call site already hands them to the
+    /// runner. `Some(false)` = off, anything else = on. A named `Custom`
+    /// connection has its own on `ExternalHttpRuntime::tools_enabled`.
     pub tools: HttpToolSettings,
 }
 
@@ -949,10 +949,10 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     /// Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
-    /// `Some(false)` withholds the tools from every model of this agent;
-    /// `Some(true)` declares that its models take them, which is the only way
-    /// to enable them on a proxy that cannot report capabilities (LiteLLM).
-    /// `None` leaves the decision to the model catalogue. Ignored by CLI agents.
+    /// Tools are on by default: `Some(false)` withholds them from every model
+    /// of this agent (for one that cannot take tool calls); `None` and
+    /// `Some(true)` leave them on, Ollama's catalogue still withholding them
+    /// from a model it lists without `tools`. Ignored by CLI agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_enabled: Option<bool>,
 }
@@ -1347,7 +1347,7 @@ pub struct SetAgentConcurrencyRequest {
 #[ts(export)]
 pub struct SetAgentToolsRequest {
     pub agent: AgentType,
-    /// `None` clears the operator setting; see `AgentConfig::tools_enabled`.
+    /// `None` clears the operator switch (tools on); see `AgentConfig::tools_enabled`.
     pub enabled: Option<bool>,
 }
 

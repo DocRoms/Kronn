@@ -19816,6 +19816,7 @@ async fn import_accepts_payload_over_2mb_default_body_limit() {
 }
 
 #[tokio::test]
+#[serial]
 async fn network_exposure_toggle_round_trips_and_secures() {
     let state = test_state();
 
@@ -19904,6 +19905,7 @@ async fn network_exposure_toggle_round_trips_and_secures() {
 }
 
 #[tokio::test]
+#[serial]
 async fn network_exposure_toggle_refuses_plain_http_and_writes_nothing() {
     let state = test_state();
     let before = state.config.read().await.server.clone();
@@ -19983,7 +19985,114 @@ async fn network_exposure_toggle_refuses_plain_http_and_writes_nothing() {
     assert!(state.config.read().await.server.tls_terminated_by_proxy);
 }
 
+/// The exposure route's request body for declaring the proxy, with its address.
+fn declare_proxy_body() -> Value {
+    serde_json::json!({
+        "exposed": true,
+        "tls_terminated_by_proxy": true,
+        "public_origin": "https://kronn.example.com",
+    })
+}
+
 #[tokio::test]
+#[serial]
+async fn network_exposure_post_never_discloses_a_standing_token() {
+    // KT-1675: before the proxy is declared a loopback caller must not read the
+    // standing token through this route; only a token minted by the call leaves.
+    let state = test_state();
+    let standing = "standing-token-0123456789".to_string();
+    state.config.write().await.server.auth_token = Some(standing.clone());
+
+    // Declaring the proxy rotates the standing token and hands out the new one.
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/config/network-exposure", declare_proxy_body()).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let issued = json["data"]["issued_auth_token"]
+        .as_str()
+        .expect("the rotated token is handed over")
+        .to_string();
+    assert_ne!(issued, standing, "the standing token is never returned");
+    assert_eq!(
+        Some(issued.as_str()),
+        state.config.read().await.server.auth_token.as_deref()
+    );
+    assert!(!json.to_string().contains(&standing), "{json}");
+
+    // Any later call, proxy already declared, mints nothing and returns nothing.
+    for body in [
+        declare_proxy_body(),
+        serde_json::json!({ "exposed": true, "tls_terminated_by_proxy": true }),
+        serde_json::json!({ "exposed": false, "tls_terminated_by_proxy": true }),
+    ] {
+        let app = kronn::build_router_with_auth(state.clone(), false);
+        let (status, json) = post_json(app, "/api/config/network-exposure", body).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(json["data"].get("issued_auth_token").is_none(), "{json}");
+        assert!(!json.to_string().contains(&issued), "{json}");
+        assert_eq!(
+            state.config.read().await.server.auth_token.as_deref(),
+            Some(issued.as_str()),
+            "no further rotation"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn network_exposure_with_the_proxy_declared_by_env_hands_over_the_minted_token() {
+    // KT-1675: KRONN_TLS_TERMINATED_BY_PROXY=1 and a body without the declaration:
+    // the token is minted and strict_localhost applies at once, so the owner's
+    // browser must receive it or it is locked out.
+    const ENV: &str = kronn::core::net_expose::TLS_TERMINATED_ENV;
+    struct RestoreEnv(Option<String>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => kronn::core::child_env::set_var(ENV, value),
+                None => kronn::core::child_env::remove_var(ENV),
+            }
+        }
+    }
+    let _restore = RestoreEnv(kronn::core::child_env::var(ENV).ok());
+    kronn::core::child_env::set_var(ENV, "1");
+
+    let state = test_state();
+    {
+        let mut cfg = state.config.write().await;
+        cfg.server.auth_token = None;
+        cfg.server.public_origin = Some("https://kronn.example.com".into());
+    }
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(
+        app,
+        "/api/config/network-exposure",
+        serde_json::json!({ "exposed": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let issued = json["data"]["issued_auth_token"]
+        .as_str()
+        .expect("the minted token is handed over, not withheld");
+    {
+        let cfg = state.config.read().await;
+        assert!(cfg.server.auth_enabled);
+        assert_eq!(Some(issued), cfg.server.auth_token.as_deref());
+    }
+
+    // Minted once: a second call hands nothing over.
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(
+        app,
+        "/api/config/network-exposure",
+        serde_json::json!({ "exposed": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["data"].get("issued_auth_token").is_none(), "{json}");
+}
+
+#[tokio::test]
+#[serial]
 async fn a_stale_exposed_config_reports_the_plain_http_banner() {
     // A config.toml written before KT-1596 (or by hand) asks for 0.0.0.0 with no
     // declaration: the backend started on loopback, and GET says why.

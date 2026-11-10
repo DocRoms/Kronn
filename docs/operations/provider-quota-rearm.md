@@ -4,7 +4,7 @@ Kronn blocks new delegations for a provider after a real quota-exhaustion recove
 
 A human confirmation in Config > Agents can acknowledge that one provider's quota is available again. The action records an idempotent provider-scoped audit event and watermark; it does not restart, cancel, or change any historical execution or recovery row. A later quota marker for that provider is newer than the watermark and blocks launches again. [src: file: backend/src/db/orchestration.rs:3358-3399#rearm_provider_quota]
 
-The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3310-3313#rearm_provider_quota] [src: file: backend/src/api/orchestration.rs:15873-15905#rearm_provider_quota]
+The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3319-3322#rearm_provider_quota] [src: file: backend/src/api/orchestration.rs:15873-15905#rearm_provider_quota]
 
 ## Reassigning to the same provider is a re-arm (KT-838)
 
@@ -12,7 +12,7 @@ One exhausted quota often stops several executions at once, each escalation taki
 
 ## Announced reset time
 
-When the provider's refusal names a reset time in a zone (Claude Code: `resets 4:20pm (Europe/Paris)`, or with a day: `resets Oct 3, 4pm (Europe/Paris)`), it is resolved to a UTC instant and stored on the provider's quota generation row (`provider_quota_generations.reset_at`). Settings > Agents shows it beside the re-arm button as "Rearmable at 16:20" in the browser's local time. Since KT-1564 it is also the refusal's expiry (next section). A refusal without a zone gets no instant, since the backend's own zone may not be the user's. A later refusal that names no time keeps a still-future announcement of the same outage and drops a passed one. [src: file: backend/src/api/discussions/orchestration.rs:1617-1681#announced_quota_reset] [src: file: backend/src/db/orchestration.rs:2616-2637#reset_at] [src: file: frontend/src/components/settings/AgentsSection.tsx:928-940#quotaResetTime]
+When the provider's refusal names a reset time in a zone (Claude Code: `resets 4:20pm (Europe/Paris)`, or with a day: `resets Oct 3, 4pm (Europe/Paris)`), it is resolved to a UTC instant and stored on the provider's quota generation row (`provider_quota_generations.reset_at`). Settings > Agents shows it beside the re-arm button as "Rearmable at 16:20" in the browser's local time. Since KT-1564 it is also the refusal's expiry (next section). A refusal without a zone gets no instant, since the backend's own zone may not be the user's. A later refusal that names no time keeps a still-future announcement of the same outage and drops a passed one. [src: file: backend/src/api/discussions/orchestration.rs:1617-1681#announced_quota_reset] [src: file: backend/src/db/orchestration.rs:2616-2637#reset_at] [src: file: frontend/src/components/settings/AgentsSection.tsx:954-966#quotaResetTime]
 
 ## The announced reset closes the escalation (KT-1564)
 

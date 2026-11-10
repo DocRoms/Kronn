@@ -53,33 +53,46 @@ type ReasoningModesByModel = HashMap<(String, String), Vec<String>>;
 static RESOLVED_REASONING_MODES: LazyLock<std::sync::RwLock<ReasoningModesByModel>> =
     LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
 
-/// Models the catalogue lists with the `tools` capability, projected like the
-/// tier map so the runner can gate its tool executor synchronously (KT-1600).
-type ToolModels = std::collections::HashSet<(String, String)>;
-static RESOLVED_TOOL_MODELS: LazyLock<std::sync::RwLock<ToolModels>> =
-    LazyLock::new(|| std::sync::RwLock::new(ToolModels::new()));
+/// What the catalogue says about tool calls per model, projected like the tier
+/// map so the runner can gate its tool executor synchronously (KT-1600):
+/// `true` = listed with `tools`, `false` = listed as a chat model without it.
+/// A model in neither state is *unknown* — never refreshed since the catalogue
+/// learned this word — and is not a "no".
+type ToolSupport = HashMap<(String, String), bool>;
+static RESOLVED_TOOL_SUPPORT: LazyLock<std::sync::RwLock<ToolSupport>> =
+    LazyLock::new(|| std::sync::RwLock::new(ToolSupport::new()));
 
 /// Capability word marking a model that accepts tool declarations.
 pub const CAPABILITY_TOOLS: &str = "tools";
+/// Capability word recorded when discovery read a chat model's capabilities
+/// and `tools` was not among them. Without it a row saved before `tools` was
+/// recorded would look the same as a model that cannot take tool calls.
+pub const CAPABILITY_NO_TOOLS: &str = "no-tools";
 
-/// Whether the live catalogue lists `tools` for this exact model. Absence is
-/// "no": a model the catalogue has not seen is not given a tool schema.
-pub fn model_accepts_tools(agent_type: &AgentType, model_id: &str) -> bool {
+/// What the live catalogue knows of this exact model's tool support: `Some`
+/// when discovery decided, `None` while it has not (the caller keeps the
+/// executor attached rather than strip tools from a run that had them).
+pub fn model_tool_support(agent_type: &AgentType, model_id: &str) -> Option<bool> {
     let target = db::agent_runtime_target_id(agent_type);
-    RESOLVED_TOOL_MODELS
+    RESOLVED_TOOL_SUPPORT
         .read()
-        .map(|models| models.contains(&(target, model_id.to_owned())))
-        .unwrap_or(false)
+        .ok()
+        .and_then(|models| models.get(&(target, model_id.to_owned())).copied())
 }
 
-/// Test seam: replace the projected tool-capable models.
+/// Test seam: replace the projected tool support, `(agent, model, supported)`.
 #[cfg(all(test, feature = "full-tests"))]
-pub(crate) fn set_tool_models_for_test(models: &[(AgentType, &str)]) {
+pub(crate) fn set_tool_support_for_test(models: &[(AgentType, &str, bool)]) {
     let projected = models
         .iter()
-        .map(|(agent, model)| (db::agent_runtime_target_id(agent), (*model).to_owned()))
+        .map(|(agent, model, supported)| {
+            (
+                (db::agent_runtime_target_id(agent), (*model).to_owned()),
+                *supported,
+            )
+        })
         .collect();
-    if let Ok(mut catalog) = RESOLVED_TOOL_MODELS.write() {
+    if let Ok(mut catalog) = RESOLVED_TOOL_SUPPORT.write() {
         *catalog = projected;
     }
 }
@@ -144,11 +157,20 @@ pub async fn refresh_runtime_cache(database: &Database) -> anyhow::Result<()> {
     let entries = database.with_read_conn(db::list_all).await?;
     let mut resolved = HashMap::new();
     let mut reasoning_modes = HashMap::new();
-    let mut tool_models = ToolModels::new();
+    let mut tool_support = ToolSupport::new();
     for entry in entries {
         if entry.availability == ModelAvailability::Available {
-            if entry.capabilities.iter().any(|c| c == CAPABILITY_TOOLS) {
-                tool_models.insert((entry.runtime_target_id.clone(), entry.model_id.clone()));
+            let listed = |word: &str| entry.capabilities.iter().any(|c| c == word);
+            if listed(CAPABILITY_TOOLS) {
+                tool_support.insert(
+                    (entry.runtime_target_id.clone(), entry.model_id.clone()),
+                    true,
+                );
+            } else if listed(CAPABILITY_NO_TOOLS) {
+                tool_support.insert(
+                    (entry.runtime_target_id.clone(), entry.model_id.clone()),
+                    false,
+                );
             }
             reasoning_modes.insert(
                 (entry.runtime_target_id.clone(), entry.model_id.clone()),
@@ -169,8 +191,8 @@ pub async fn refresh_runtime_cache(database: &Database) -> anyhow::Result<()> {
     if let Ok(mut catalog) = RESOLVED_REASONING_MODES.write() {
         *catalog = reasoning_modes;
     }
-    if let Ok(mut catalog) = RESOLVED_TOOL_MODELS.write() {
-        *catalog = tool_models;
+    if let Ok(mut catalog) = RESOLVED_TOOL_SUPPORT.write() {
+        *catalog = tool_support;
     }
     Ok(())
 }
@@ -2010,11 +2032,12 @@ mod tests {
     async fn an_ollama_decision_model_is_catalogued_without_chat_and_refused_for_chat() {
         let db = test_db();
         let (base, server) = mock_ollama_catalog(
-            &["clef-flash:9b", "qwen3:8b", "x/flux2-klein:4b"],
+            &["clef-flash:9b", "qwen3:8b", "x/flux2-klein:4b", "plain:1b"],
             HashMap::from([
                 ("clef-flash:9b", vec!["decision", "vision"]),
                 ("qwen3:8b", vec!["completion", "tools"]),
                 ("x/flux2-klein:4b", vec!["image"]),
+                ("plain:1b", vec!["completion"]),
             ]),
             false,
         )
@@ -2035,6 +2058,7 @@ mod tests {
         );
         assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat", "tools"]);
         assert_eq!(capabilities_of(&view, "x/flux2-klein:4b"), vec!["image"]);
+        assert_eq!(capabilities_of(&view, "plain:1b"), vec!["chat", "no-tools"]);
         assert!(preflight_check(
             &db,
             None,
@@ -2079,6 +2103,47 @@ mod tests {
             vec!["decision", "vision"]
         );
         assert_eq!(capabilities_of(&view, "qwen3:8b"), vec!["chat", "tools"]);
+    }
+
+    /// KT-1600 — the runtime projection keeps three answers apart: a model
+    /// listed with `tools`, one listed as chat without it, and one whose
+    /// capabilities were never read (a row saved before `tools` was recorded,
+    /// or a probe that failed), which stays unknown rather than becoming a "no".
+    #[tokio::test]
+    #[serial_test::serial(tool_support)]
+    async fn the_runtime_projection_tells_no_tools_from_not_yet_known() {
+        let db = test_db();
+        let (base, server) = mock_ollama_catalog(
+            &["qwen3:8b", "plain:1b"],
+            HashMap::from([
+                ("qwen3:8b", vec!["completion", "tools"]),
+                ("plain:1b", vec!["completion"]),
+            ]),
+            false,
+        )
+        .await;
+        let (_, outcome) = refresh_ollama_catalog_at(&db, &base).await.unwrap();
+        server.abort();
+        assert!(outcome.is_ok());
+        assert_eq!(
+            model_tool_support(&AgentType::Ollama, "qwen3:8b"),
+            Some(true)
+        );
+        assert_eq!(
+            model_tool_support(&AgentType::Ollama, "plain:1b"),
+            Some(false)
+        );
+        assert_eq!(model_tool_support(&AgentType::Ollama, "absent:1b"), None);
+
+        // A catalogue whose probes all fail and that saved nothing for a tag:
+        // the tag stays a plain chat model with no tool verdict either way.
+        let db = test_db();
+        let (failing, server) = mock_ollama_catalog(&["legacy:7b"], HashMap::new(), true).await;
+        let (_, outcome) = refresh_ollama_catalog_at(&db, &failing).await.unwrap();
+        server.abort();
+        assert!(outcome.is_ok());
+        assert_eq!(model_tool_support(&AgentType::Ollama, "legacy:7b"), None);
+        assert_eq!(model_tool_support(&AgentType::Ollama, "qwen3:8b"), None);
     }
 
     #[tokio::test]
