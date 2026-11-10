@@ -286,7 +286,7 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:654-664#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:689-700#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:8079-8086#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:8088-8095#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
@@ -660,7 +660,7 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
 `[src: file: backend/scripts/disc-introspection-mcp.py:10127-10162#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10496-10505#page_update_html]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10505-10514#page_update_html]`
 `[src: file: backend/src/skills/workflow-architect.md:392-399#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
@@ -1021,7 +1021,7 @@ the full run even when the compact list already contains its id.
 [src: file: backend/src/workflows/collect_api_data_step.rs:604-625#source_id]
 [src: file: backend/src/workflows/collect_api_data_step.rs:1075-1118#missing_required_api_keeps_its_alias_id_and_cause]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1037-1047#focusedRun]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1049-1059#focusedRun]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

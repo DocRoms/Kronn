@@ -112,7 +112,7 @@ the CLI alias.
 [src: file: backend/src/db/discussions.rs:2093-2096#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
 [src: file: backend/src/api/disc_invite.rs:1708-1718#addressed_to_caller]
-[src: file: backend/scripts/disc-introspection-mcp.py:11354-11364#attention_required]
+[src: file: backend/scripts/disc-introspection-mcp.py:11363-11373#attention_required]
 [src: file: backend/src/api/discussions/streaming.rs:2416-2464#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1622-1630#reply_target]

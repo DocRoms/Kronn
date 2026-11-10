@@ -221,7 +221,7 @@ killed on client-requested cancellation. Partial responses retain an explicit
 timeout notice.
 [src: file: backend/src/models/setup.rs:396-403#agent_global_timeout_min]
 [src: file: backend/src/models/setup.rs:600-613#MAX_AGENT_GLOBAL_TIMEOUT_MIN]
-[src: file: backend/src/api/setup.rs:1702-1704#clamp_stall_timeout_min]
+[src: file: backend/src/api/setup.rs:1706-1708#clamp_stall_timeout_min]
 [src: file: backend/src/api/discussions/streaming.rs:4501-4525#agent_stall_timeout_min]
 [src: file: backend/src/api/discussions/orchestration.rs:389-403#configured_agent_global_timeout]
 
@@ -549,6 +549,29 @@ pass (a frequent schedule adds no fire during the repeated hour).
   [src: file: backend/src/workflows/runner.rs:267-283#checkpoint]
   [src: file: backend/src/workflows/quota_wait.rs:392-435#reschedule_after_deadline]
   [src: file: backend/src/workflows/runner.rs:3108-3133#plan_wait]
+- **A quota-paused run is visible, re-checked and movable (KT-1657).**
+  `WaitingQuota` counts toward a workflow's concurrency limit, so a paused run
+  can refuse a launch: the refusal names the blocking runs (workflow, state,
+  wake time) and the actions that lift it, and `GET /api/workflows/active-runs`
+  (the MCP `workflow_active_runs`) lists every unfinished run, a paused one with
+  its `quota{agent, wake_at, reset_at, parked}`. The engine tick also asks the
+  provider of each top-level paused run (scheduled, or parked without a reset;
+  never one parked for a human) about every 20 minutes with a minimal
+  request, once per agent per pass, and resumes the run through the ordinary
+  claim as soon as it answers. A saved key, an activated key, a re-enabled agent
+  or a forced readiness check ask every provider at once. The refused Agent step
+  can be moved to another installed agent with
+  `POST /api/workflow-runs/{id}/quota-agent`: the choice is stored in the leaf
+  run's `__step_agents__` like a launch-time choice (the run that owns the
+  step, followed through the sub-workflow steps that mirror its wait), so the
+  next resume and the re-check use it. The UI reads one label for the state,
+  « Paused — provider quota, resumes automatically at <time> », on the
+  workflow list, the card and the run page, each with « Resume now »; the
+  existing active-runs popover lists paused runs apart from running ones. The
+  paused state has no header indicator of its own: the shape the notification
+  bell (KT-1658) aggregates is the `ActiveRunSummary` of the active-runs board
+  (`status: WaitingQuota`, `quota.wake_at`), read in the UI through
+  `useQuotaPausedRuns` and `lib/quotaPause.ts`.
 - **Worktrees nested in a run worktree (KT-985).** A step may add its own
   worktree inside the run's (`<run worktree>/.kronn/pr-N`). Deleting the run's
   directory alone leaves that entry `prunable` in `git worktree list`, so
@@ -782,7 +805,7 @@ NoTemplate → TemplateInstalled → Audited → Validated
 - **Detection**: `scanner::detect_audit_status()` checks `docs/AGENTS.md` existence, `KRONN:BOOTSTRAP`/`{{` markers, and `KRONN:VALIDATED` marker.
 - **TODO counting**: `scanner::count_ai_todos()` walks `docs/*.md` files and counts `<!-- TODO` occurrences. Exposed as `Project.ai_todo_count` (computed on-the-fly by `enrich_audit_status()`).
 - **Template install** (`POST /api/projects/:id/install-template`): copies `docs/` skeleton + redirectors (CLAUDE.md, .cursorrules, etc.) non-destructively, injects bootstrap prompt block (`KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
-- **AI audit** (`POST /api/projects/:id/full-audit`): SSE-streamed chained analysis — 9 foundation steps (`ANALYSIS_STEPS`) then the 7 focused sub-audits, 16 steps total under a single per-project lease. Each step runs an agent call with `full_access: true` and default profiles (Architect + Tech Lead + Mentor) for multi-perspective analysis. Bootstrap block removed before audit starts. Resume is by `resume_run_id` (server-derived kind + contiguous checkpoint). The legacy `/ai-audit` route was removed in 0.9.0. **Detached runs**: full, specialized and partial audit producers run independently of their SSE subscribers, so closing the interface or MCP bridge does not stop them. A backend restart still interrupts a running audit; boot reconciliation preserves its persisted checkpoint, and `audit_status` reports whether a `resume_run_id` is available. `[src: file: backend/src/api/audit/mod.rs:76-83#detach_sse_stream]` `[src: file: backend/src/api/audit/full.rs:3996#detach_sse_stream]` `[src: file: backend/src/api/audit/drift.rs:2368#detach_sse_stream]` `[src: file: backend/src/db/audit_runs.rs:910-941#reconcile_stale_runs]` `[src: file: backend/scripts/disc-introspection-mcp.py:10732-10746#audit_launch]`
+- **AI audit** (`POST /api/projects/:id/full-audit`): SSE-streamed chained analysis — 9 foundation steps (`ANALYSIS_STEPS`) then the 7 focused sub-audits, 16 steps total under a single per-project lease. Each step runs an agent call with `full_access: true` and default profiles (Architect + Tech Lead + Mentor) for multi-perspective analysis. Bootstrap block removed before audit starts. Resume is by `resume_run_id` (server-derived kind + contiguous checkpoint). The legacy `/ai-audit` route was removed in 0.9.0. **Detached runs**: full, specialized and partial audit producers run independently of their SSE subscribers, so closing the interface or MCP bridge does not stop them. A backend restart still interrupts a running audit; boot reconciliation preserves its persisted checkpoint, and `audit_status` reports whether a `resume_run_id` is available. `[src: file: backend/src/api/audit/mod.rs:76-83#detach_sse_stream]` `[src: file: backend/src/api/audit/full.rs:3996#detach_sse_stream]` `[src: file: backend/src/api/audit/drift.rs:2368#detach_sse_stream]` `[src: file: backend/src/db/audit_runs.rs:910-941#reconcile_stale_runs]` `[src: file: backend/scripts/disc-introspection-mcp.py:10741-10755#audit_launch]`
 - **What an agent prompt names about other repos (KT-926)**: a prompt goes to the model provider, which may be a remote service, so the only repo besides the project at hand that a Kronn prompt names is one the user explicitly linked to it (`Project.linked_repos`, a voluntary declaration). No prompt carries the list of the machine's other Kronn projects (name + absolute path): not a Full or partial audit step, not the audit's validation and briefing discussions, not any other discussion, orchestration round or workflow Agent step. The candidate-pool block (`format_kronn_projects_universe_for_prompt`), its wiring (`compute_companion_context`, the `extra_context` argument of `execute_step` and `build_step_prompt`) and its instructions — read another repo's `docs/AGENTS.md`, write a `## Suggested companion repos` section into the audited repo's own `docs/AGENTS.md` — are gone; what an audit records about neighbouring repos comes from what the audited repo says (manifests, compose files, `.gitmodules`, imports). A linked repo is named inline in every Full / partial audit step (`format_linked_repos_for_prompt`) and, for discussions and workflow Agent steps, read from `docs/linked-repos.md` (pull, not inlined — 0.8.4 #295). Pinned by running the real entry points on a scripted `claude` with three other projects registered and reading the prompt it was handed: both audit pipelines `[src: file: backend/src/api/audit/agent_launch_tests.rs:1236-1316#step_prompts_of]`, discussions including the audit briefing and validation `[src: file: backend/src/api/discussions/companion_privacy_tests.rs:220-229#no_discussion_names_an_unlinked_kronn_project]`, a workflow Agent step `[src: file: backend/src/workflows/runner.rs:8021-8080#an_agent_step_prompt_names_no_unlinked_kronn_project]`, over the shared fixture `[src: file: backend/src/api/other_projects_fixture.rs:1-24#KT-926]`. An earlier audit's `## Suggested companion repos` section in a `docs/AGENTS.md` is left as it is.
 - **Validation**: creates a Discussion with title "Validation audit AI" and a locked prompt — inserted in the SAME transaction as the run's terminal status, with the agent spawned only after that commit. The AI asks questions about ambiguities/TODOs, updates `docs/` files after each answer. Frontend detects validation-in-progress by matching discussion title + project_id. Project page only shows "validation en cours" + link (no validate button).
 - **Partial validation (KT-931)**: a Full run some of whose steps failed still gets this validation discussion, for the steps that succeeded — it just stays `Interrupted` (only a run where every step succeeded can earn the Validated badge), and the prompt's leading block names the steps a resume will redo. The one gate: the founding step (`docs/AGENTS.md`'s own step, step 1 of the chain, found by its `target_file` rather than a hard-coded index) must itself have succeeded — without the entry point the documentation has nowhere to start from, so that case gets no validation discussion at all, only the usual resumable-run checkpoint. A run where nothing succeeded, or whose documentary-optimization pass found an invented link, also gets none. `[src: file: backend/src/api/audit/full.rs:3456-3470#validation_wanted]` `[src: file: backend/src/api/audit/full.rs:4030-4042#founding_step_index]`

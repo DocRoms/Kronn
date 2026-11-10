@@ -96,8 +96,8 @@ workflow-filtered regressions, 6 clamping regressions, and all-target Clippy
 with warnings denied.
 [src: file: backend/scripts/ci/mcp_surface_budget.py:178#CATALOGUE_MAX_BYTES]
 [src: file: backend/scripts/ci/test_mcp_surface_budget.py:40-212#McpSurfaceBudgetTests]
-[src: file: backend/scripts/disc-introspection-mcp.py:9684-9686#call_workflow_step_schema]
-[src: file: backend/scripts/test_disc_introspection_mcp.py:7397-7399#test_step_schema_reads_the_shared_backend_contract]
+[src: file: backend/scripts/disc-introspection-mcp.py:9693-9695#call_workflow_step_schema]
+[src: file: backend/scripts/test_disc_introspection_mcp.py:7407-7409#test_step_schema_reads_the_shared_backend_contract]
 [src: file: backend/src/api/agent_workflow_tests.rs:23-248#workflow_authoring_creates_a_disabled_draft_and_preserves_omitted_fields]
 [src: file: backend/src/agents/runner_test.rs:2363-2543#clamp_trims_the_biggest_tool_result_to_fit_the_cap]
 

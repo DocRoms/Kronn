@@ -19,7 +19,7 @@ loss = **lost forever** without a copy.
 
 Kronn writes three kinds of copies. The scheduled one is built from the
 environment by `[src: file: backend/src/core/backup.rs:316-330#BackupScheduler]`;
-the manual one is `[src: file: backend/src/api/setup.rs:1920-1931#db_backup]`;
+the manual one is `[src: file: backend/src/api/setup.rs:1924-1935#db_backup]`;
 the pre-migration one is described below.
 
 | Copy | When | Where |
@@ -92,7 +92,7 @@ was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
   nothing until a human enables it.
   `[src: file: backend/src/core/run_retention.rs:50-68#window_hours]`
   `[src: file: backend/src/core/run_retention.rs:91-131#run_pass]`
-  `[src: file: backend/src/db/workflows.rs:2843-2854#retention_from_column]`
+  `[src: file: backend/src/db/workflows.rs:2955-2966#retention_from_column]`
 
 Never touched, whatever their age: runs that are not `Success`, `Partial`,
 `Failed`, `Cancelled` or `StoppedByGuard` (so not `Running`, `Pending`,

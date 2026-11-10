@@ -159,7 +159,7 @@ isolates the run in that project's worktree (KT-851):
   [src: file: backend/src/workflows/project_scope.rs:15-60#resolve_run_project]
   [src: file: backend/src/workflows/project_scope.rs:62-81#scheduled_projects]
   [src: file: backend/src/workflows/project_scope.rs:83-128#tracker_project]
-  [src: file: backend/src/workflows/mod.rs:314-324#tracker_project].
+  [src: file: backend/src/workflows/mod.rs:320-330#tracker_project].
 - The run records its project (`workflow_runs.project_id`, KT-1015) and runs
   in that project's checkout or worktree, with its environment. A
   multi-project sub-workflow follows its parent run's project when it serves

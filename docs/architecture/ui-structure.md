@@ -75,7 +75,7 @@ like any other.
   `[src: file: frontend/src/routes/appRoutes.tsx:14-31]`
   `[src: file: frontend/src/routes/dashboardRoutes.tsx:19-41#dashboardRoutes]`
   `[src: file: frontend/src/App.tsx:209-210#Outlet]`
-  `[src: file: frontend/src/pages/Dashboard.tsx:1341-1344#Outlet]`
+  `[src: file: frontend/src/pages/Dashboard.tsx:1349-1352#Outlet]`
 - **Paths** — spelled out once, in `lib/routes.ts`. Components navigate with
   `useKronnNavigate()`, never with a literal path.
   `[src: file: frontend/src/lib/routes.ts:1-8]`
@@ -175,7 +175,7 @@ Dashboard tabs (current / planned):
 
 ## Dashboard activity disclosures
 
-The Projects and Workflows tabs always navigate. Their live counts remain passive badges, while separate labelled activity disclosures are outside the horizontally scrolling tab container. Each disclosure owns its dialog only while open, keeps an empty dialog available if polling reaches zero, and routes row/footer navigation to the surviving destination tab. The shared overlay is portaled to the document body to escape the sticky navigation's stacking context; keyboard ownership and live-row focus recovery are scoped to that overlay. See [Activity navigation disclosures](../gotchas/activity-navigation.md). [src: file: frontend/src/pages/Dashboard.tsx:784-867#dash-nav-activity-group] [src: file: frontend/src/hooks/useActivityPopover.ts:9-81#useActivityPopover] [src: file: frontend/src/components/ActiveAuditsPopover.tsx:107#createPortal] [src: file: frontend/src/components/workflows/ActiveRunsPopover.tsx:82#createPortal]
+The Projects and Workflows tabs always navigate. Their live counts remain passive badges, while separate labelled activity disclosures are outside the horizontally scrolling tab container. Each disclosure owns its dialog only while open, keeps an empty dialog available if polling reaches zero, and routes row/footer navigation to the surviving destination tab. The shared overlay is portaled to the document body to escape the sticky navigation's stacking context; keyboard ownership and live-row focus recovery are scoped to that overlay. See [Activity navigation disclosures](../gotchas/activity-navigation.md). [src: file: frontend/src/pages/Dashboard.tsx:784-867#dash-nav-activity-group] [src: file: frontend/src/hooks/useActivityPopover.ts:9-81#useActivityPopover] [src: file: frontend/src/components/ActiveAuditsPopover.tsx:107#createPortal] [src: file: frontend/src/components/workflows/ActiveRunsPopover.tsx:89#createPortal]
 
 ## Discussion inline automation actions
 
@@ -239,9 +239,9 @@ Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5#collection-detail-header]`
 `[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1858#collection-detail-header]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3251#selectedQuickPromptId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3731#selectedQuickApiId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:4154#selectedQuickExecId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3271#selectedQuickPromptId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3751#selectedQuickApiId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:4174#selectedQuickExecId]`
 
 The Projects initial loading state keeps the complete master/detail shell
 mounted. Its indicators render inside the sidebar and detail slots rather than
@@ -266,8 +266,8 @@ categories only temporarily.
 `[src: file: frontend/src/lib/automationNavigation.ts:20-33#readAutomationLastVisit]`
 `[src: file: frontend/src/lib/automationNavigation.ts:35-41#writeAutomationLastVisit]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:263-273#readCollapsedAutomationSections]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:588-597#AUTOMATION_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2600-2605#isGroupCollapsed]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:600-609#AUTOMATION_COLLAPSED_STORAGE_KEY]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2612-2617#isGroupCollapsed]`
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
 `[src: file: frontend/src/pages/PagesPage.tsx:78-79#PAGE_NAVIGATION_STORAGE_KEY]`
