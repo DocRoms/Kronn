@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use ts_rs::TS;
 
+pub mod activity;
 pub mod agent_decisions;
 pub mod agent_jobs;
 pub mod agents;
@@ -43,6 +44,7 @@ pub mod strong_confirm;
 pub mod trust;
 pub mod workflows;
 
+pub use activity::*;
 pub use agent_decisions::*;
 pub use agent_jobs::*;
 pub use agents::*;
