@@ -4707,10 +4707,7 @@ fn claim_finished_checkout(
     conn: &rusqlite::Connection,
     exec_id: &str,
 ) -> Result<Option<ReleaseCandidate>> {
-    let Some(execution) = crate::db::orchestration::get_task_execution(conn, exec_id)? else {
-        return Ok(None);
-    };
-    if !execution.status.is_terminal() {
+    if crate::db::orchestration::get_task_execution(conn, exec_id)?.is_none() {
         return Ok(None);
     }
     let Some(workspace) =
@@ -4721,8 +4718,10 @@ fn claim_finished_checkout(
     let Some(path) = workspace.canonical_path.clone() else {
         return Ok(None);
     };
+    // A finished execution, or (KT-1676) an unfinished one whose task was
+    // closed and in whose checkout nothing works any more.
     if !matches!(
-        crate::db::orchestration::worktree_cleanup_liveness(conn, &path)?,
+        crate::db::orchestration::worktree_release_liveness(conn, &path)?,
         worktree::ExecutionLiveness::Terminal
     ) {
         return Ok(None);
@@ -4871,19 +4870,25 @@ where
 
 /// What a reclaim over one project's finished executions did.
 #[derive(Debug, Default)]
-struct FinishedWorktreeReclaim {
-    released: usize,
+pub(crate) struct FinishedWorktreeReclaim {
+    pub(crate) released: usize,
     /// Directory names of the finished executions' worktrees that were kept.
-    kept: Vec<String>,
+    pub(crate) kept: Vec<String>,
 }
 
-/// The finished executions of `project_id` that still hold a managed checkout.
+/// The finished executions of `project_id` that still hold a managed checkout:
+/// the terminal ones and (KT-1676) those of a task closed by hand, whose
+/// execution never reached a terminal state.
 fn finished_checkout_executions(
     conn: &rusqlite::Connection,
     project_id: &str,
 ) -> Result<Vec<String>> {
+    let terminal = crate::db::orchestration::terminal_executions_with_checkout(conn)?
+        .into_iter()
+        .map(|(exec_id, _)| exec_id);
+    let closed = crate::db::orchestration::closed_task_executions_with_checkout(conn)?;
     let mut ids = Vec::new();
-    for (exec_id, _) in crate::db::orchestration::terminal_executions_with_checkout(conn)? {
+    for exec_id in terminal.chain(closed) {
         let belongs = crate::db::discussion_workspaces::get_managed_for_execution(conn, &exec_id)?
             .is_some_and(|workspace| workspace.project_id == project_id);
         if belongs {
@@ -4913,6 +4918,62 @@ fn finished_checkout_names(conn: &rusqlite::Connection, project_id: &str) -> Res
     Ok(names)
 }
 
+/// The worktrees that keep `project`'s catalogue over its cap after the reclaim,
+/// each as `name (reason)` (KT-1676): the finished tasks' checkouts Kronn kept,
+/// the checkouts of tasks still running, those a CLI session attached, and the
+/// ones Kronn never created. Directory names only, never a path. `git worktree
+/// list` is read-only; where it fails the finished ones are still named from
+/// the database.
+fn catalogue_blockers(
+    conn: &rusqlite::Connection,
+    project: &crate::models::Project,
+) -> Vec<String> {
+    let dir_of = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+    };
+    let mut blockers = std::collections::BTreeMap::new();
+    for name in finished_checkout_names(conn, &project.id).unwrap_or_default() {
+        blockers.insert(
+            name,
+            "finished task, not clean: uncommitted changes, another branch or unreadable",
+        );
+    }
+    let known: std::collections::HashMap<String, bool> = conn
+        .prepare(
+            "SELECT canonical_path, ownership = 'managed' FROM discussion_workspaces
+              WHERE project_id = ?1 AND canonical_path IS NOT NULL",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([&project.id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(path, managed)| dir_of(&path).map(|name| (name, managed)))
+        .collect();
+    for path in crate::agents::runner::claude_task_worker_catalogue_worktrees(project) {
+        let Some(name) = dir_of(&path.to_string_lossy()) else {
+            continue;
+        };
+        blockers
+            .entry(name.clone())
+            .or_insert(match known.get(&name) {
+                Some(true) => "task still running",
+                Some(false) => "attached by a CLI session, not managed by Kronn",
+                None => "not created by Kronn",
+            });
+    }
+    blockers
+        .into_iter()
+        .map(|(name, reason)| format!("{name} ({reason})"))
+        .collect()
+}
+
 /// Reclaim the clean checkouts of every finished execution of `project_id`
 /// (KT-1646). One execution failing never stops the others.
 async fn reclaim_clean_finished_checkouts(
@@ -4923,6 +4984,15 @@ async fn reclaim_clean_finished_checkouts(
     let candidates = db
         .with_conn(move |conn| finished_checkout_executions(conn, &pid))
         .await?;
+    Ok(reclaim_clean_checkouts(db, candidates).await)
+}
+
+/// Reclaim the clean checkout of each of `candidates`, each judged on its own:
+/// one that is not finished is skipped, a dirty one is kept and reported.
+async fn reclaim_clean_checkouts(
+    db: &Database,
+    candidates: Vec<String>,
+) -> FinishedWorktreeReclaim {
     let mut report = FinishedWorktreeReclaim::default();
     for exec_id in candidates {
         match reclaim_clean_finished_checkout(db, &exec_id).await {
@@ -4940,7 +5010,44 @@ async fn reclaim_clean_finished_checkouts(
     }
     report.kept.sort();
     report.kept.dedup();
-    Ok(report)
+    report
+}
+
+/// Closing a task (`done` or `archived`) releases the managed checkouts of its
+/// executions (KT-1676): a clean one is removed, its branch kept; a dirty one,
+/// one on another branch or one a worker still uses is kept, and the first two
+/// are reported by name. Unlike the cancel with `preserve`, which keeps a
+/// checkout on purpose, a closed task has nothing left to preserve it for.
+///
+/// Never fails the caller: the task is already closed, and what stays is the
+/// periodic sweep's to take.
+pub(crate) async fn release_closed_task_checkouts(
+    db: &Database,
+    task_id: &str,
+) -> FinishedWorktreeReclaim {
+    let task = task_id.to_string();
+    let candidates = match db
+        .with_conn(move |conn| {
+            crate::db::orchestration::executions_of_task_with_checkout(conn, &task)
+        })
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(task = %task_id, "closed task checkouts unreadable: {error}");
+            return FinishedWorktreeReclaim::default();
+        }
+    };
+    let report = reclaim_clean_checkouts(db, candidates).await;
+    if report.released + report.kept.len() > 0 {
+        tracing::info!(
+            task = %task_id,
+            released = report.released,
+            kept = ?report.kept,
+            "task closed: released its managed worktrees"
+        );
+    }
+    report
 }
 
 /// How a launch measures the Claude sandbox catalogue of a project: injected so
@@ -4970,6 +5077,10 @@ async fn reclaim_over_catalogue_cap(
     };
     if receipt.within_caps() {
         return;
+    }
+    // KT-1676 — a worktree removed outside Kronn still counts until it is pruned.
+    if let Err(error) = reconcile_missing_managed_checkouts(db).await {
+        tracing::warn!(project = %project.id, "managed checkout reconcile failed: {error}");
     }
     let reclaim = match reclaim_clean_finished_checkouts(db, &project.id).await {
         Ok(reclaim) => reclaim,
@@ -5020,10 +5131,10 @@ pub(crate) async fn reclaim_finished_worktrees_for_launch(
 }
 
 /// The Claude sandbox catalogue verdict for a launch (KT-1646): measure, and when
-/// over a cap refuse, naming the finished worktrees still on disk so a human
-/// knows what to review and remove. Whatever could be reclaimed already was, by
-/// [`reclaim_over_catalogue_cap`], before the connection was taken. Database
-/// reads only: no Git runs here.
+/// over a cap refuse, naming the worktrees that block (KT-1676) so a human knows
+/// what to review and remove. Whatever could be reclaimed already was, by
+/// [`reclaim_over_catalogue_cap`], before the connection was taken. The only Git
+/// that runs here is the read-only listing of the registered worktrees.
 fn claude_catalogue_verdict(
     conn: &rusqlite::Connection,
     project: &crate::models::Project,
@@ -5035,8 +5146,7 @@ fn claude_catalogue_verdict(
     if receipt.within_caps() {
         return Ok(());
     }
-    let kept = finished_checkout_names(conn, &project.id).unwrap_or_default();
-    receipt.validate_listing(&kept)
+    receipt.validate_listing(&catalogue_blockers(conn, project))
 }
 
 /// Where the evidence of one execution's released checkout is kept.
@@ -5279,6 +5389,130 @@ pub async fn release_finished_worktrees(db: &Database) -> (usize, usize) {
     )
 }
 
+/// The checkouts of executions that never finished although their task was
+/// closed by hand (KT-1676): a clean one goes at once, a dirty one is kept and
+/// its reason recorded once. Executions that are really finished are the
+/// terminal pass's.
+async fn release_closed_task_executions(db: &Database, report: &mut OrchestrationBootReport) {
+    let candidates = match db
+        .with_conn(crate::db::orchestration::closed_task_executions_with_checkout)
+        .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("closed task worktree scan: {error}"));
+            return;
+        }
+    };
+    for exec_id in candidates {
+        match reclaim_clean_finished_checkout(db, &exec_id).await {
+            Ok(CleanCheckoutReclaim::Released) => {
+                report.terminal_worktrees_released += 1;
+                report.lane_target_report.push(format!(
+                    "released execution {exec_id} of a closed task: clean checkout removed, branch kept"
+                ));
+            }
+            Ok(CleanCheckoutReclaim::Kept { name, reason }) => {
+                tracing::info!(execution_id = %exec_id, worktree = %name, "closed task worktree kept: {reason}");
+                record_release_kept(db, &exec_id, &reason).await;
+                report.terminal_worktrees_kept += 1;
+            }
+            Ok(CleanCheckoutReclaim::NotApplicable) => {}
+            Err(error) => report.errors.push(format!(
+                "execution {exec_id} closed task checkout reclaim: {error}"
+            )),
+        }
+    }
+}
+
+/// Find the managed checkouts Kronn still records as `attached` although their
+/// directory was removed outside Kronn (`git worktree remove`, `rm -rf`), and
+/// make the record true (KT-1676). Returns how many were gone.
+///
+/// A finished execution's (or closed task's) checkout is released as usual,
+/// which retires the record. One a worker may still use is marked `missing`: the
+/// row, its branch and its lineage stay, so the execution remains resumable,
+/// and the event says what happened. Either way the dead Git entry is pruned, so
+/// it stops counting against the worktree cap. A project whose repository
+/// cannot be found is left alone: an unmounted disk is not a removal.
+pub(crate) async fn reconcile_missing_managed_checkouts(db: &Database) -> Result<usize> {
+    let workspaces = db
+        .with_conn(|conn| {
+            let mut gone = Vec::new();
+            for workspace in
+                crate::db::discussion_workspaces::list_attached_managed_with_path(conn)?
+            {
+                let Some(project) = crate::db::projects::get_project(conn, &workspace.project_id)?
+                else {
+                    continue;
+                };
+                gone.push((workspace, project.path));
+            }
+            Ok(gone)
+        })
+        .await?;
+    let missing = tokio::task::spawn_blocking(move || {
+        workspaces
+            .into_iter()
+            .filter(|(workspace, project_path)| {
+                let checkout = workspace
+                    .canonical_path
+                    .as_deref()
+                    .map(scanner::resolve_host_path);
+                let repo = scanner::resolve_host_path(project_path);
+                matches!(repo.try_exists(), Ok(true))
+                    && checkout.is_some_and(|path| matches!(path.try_exists(), Ok(false)))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("managed checkout scan failed: {error}"))?;
+    let mut gone = 0;
+    for (workspace, project_path) in missing {
+        let Some(exec_id) = workspace.task_execution_id.clone() else {
+            continue;
+        };
+        if crate::core::checkout_release::is_claimed(&exec_id) {
+            continue;
+        }
+        gone += 1;
+        tracing::info!(execution_id = %exec_id, "managed checkout is gone from disk");
+        if reclaim_clean_finished_checkout(db, &exec_id).await? == CleanCheckoutReclaim::Released {
+            continue;
+        }
+        let path = workspace.canonical_path.clone();
+        let branch = workspace.branch.clone();
+        let id = exec_id.clone();
+        db.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            crate::db::discussion_workspaces::mark_missing_for_execution(&tx, &id)?;
+            crate::db::orchestration::record_execution_event(
+                &tx,
+                &id,
+                "worktree_missing",
+                None,
+                None,
+                &backend_actor(),
+                serde_json::json!({ "path": path, "branch": branch }),
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await?;
+        let repo = scanner::resolve_host_path(&project_path);
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::core::cmd::git_cmd()
+                .args(["worktree", "prune"])
+                .current_dir(repo)
+                .output()
+        })
+        .await;
+    }
+    Ok(gone)
+}
+
 /// One pass over the finished executions that still hold a managed checkout
 /// (KT-1397). Only an execution durable state proves terminal, finished at
 /// least `min_idle` ago, whose workspace is Kronn's and unused, is released;
@@ -5288,6 +5522,18 @@ async fn release_terminal_worktrees(
     min_idle: std::time::Duration,
     report: &mut OrchestrationBootReport,
 ) {
+    // KT-1676 — first make the records true: a checkout removed outside Kronn
+    // must not stay `attached`, nor count against the worktree cap.
+    match reconcile_missing_managed_checkouts(db).await {
+        Ok(gone) if gone > 0 => report.lane_target_report.push(format!(
+            "{gone} managed checkout(s) removed outside Kronn: workspace record(s) updated"
+        )),
+        Ok(_) => {}
+        Err(error) => report
+            .errors
+            .push(format!("managed checkout reconcile: {error}")),
+    }
+    release_closed_task_executions(db, report).await;
     let candidates = match db
         .with_conn(crate::db::orchestration::terminal_executions_with_checkout)
         .await
@@ -42271,6 +42517,431 @@ pub(crate) mod tests {
         assert!(error.contains(&dir_name(&path)), "{error}");
         assert!(!error.contains(repo.path().to_str().unwrap()), "{error}");
         assert!(std::path::Path::new(&path).exists(), "dirty checkout kept");
+    }
+
+    /// Set the status of the task an execution belongs to, as a human does by
+    /// hand: the execution is left exactly where it was (KT-1676).
+    async fn set_task_status_of(db: &Database, exec_id: &str, status: &'static str) -> String {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            let task_id: String = conn.query_row(
+                "SELECT task_id FROM task_executions WHERE id = ?1",
+                [&id],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "UPDATE planning_tasks SET status = ?2 WHERE id = ?1",
+                rusqlite::params![task_id, status],
+            )?;
+            Ok(task_id)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn workspace_of(
+        db: &Database,
+        exec_id: &str,
+    ) -> crate::db::discussion_workspaces::DiscussionWorkspace {
+        let id = exec_id.to_string();
+        db.with_conn(move |conn| {
+            crate::db::discussion_workspaces::get_managed_for_execution(conn, &id)
+        })
+        .await
+        .unwrap()
+        .expect("the workspace row survives")
+    }
+
+    /// One more CLI worker, attached to a worktree of the same project as
+    /// [`attached_cli_worker`]'s, in its own task and principal room. Returns
+    /// its execution id and the id of its CLI session.
+    async fn another_attached_worker(db: &Database, project_id: &str, n: i64) -> (String, i64) {
+        let (pid, title) = (project_id.to_string(), format!("Task number {n}"));
+        let parent_id = format!("parent-{n}");
+        let (parent, session_id) = (parent_id.clone(), format!("sess-{n}"));
+        let task_ref = db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_discussion(conn, &plain_discussion(&parent, &pid))?;
+                Ok(create_todo_task(conn, &pid, &title).summary.reference)
+            })
+            .await
+            .unwrap();
+        let session_pk = 100 + n;
+        seed_cli_session(db, session_pk, &parent_id, &session_id).await;
+        {
+            let (parent, durable) = (parent_id.clone(), session_id.clone());
+            db.with_conn(move |conn| {
+                crate::db::disc_source::bind_to_source(conn, &parent, "ClaudeCode", &durable)
+            })
+            .await
+            .unwrap();
+        }
+        let execution = provision_single_task_execution(
+            db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: MessageTarget::cli(AgentType::ClaudeCode, session_pk),
+                base_rev: Some("main".into()),
+                idempotency_key: Some(format!("cli-run-{n}")),
+            },
+        )
+        .await
+        .unwrap();
+        let eid = execution.id.clone();
+        let offer_id = db
+            .with_conn(move |conn| {
+                crate::db::worker_offers::get_active_offer_for_attempt(conn, &eid, 0)
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        let outcome =
+            accept_worker_offer_and_attach(db, &offer_id, "ClaudeCode", &session_id, &session_id)
+                .await
+                .unwrap();
+        match outcome {
+            AcceptAttachOutcome::Attached { execution, .. } => (execution.id, session_pk),
+            other => panic!("expected Attached, got {other:?}"),
+        }
+    }
+
+    async fn leave_session(db: &Database, session_pk: i64) {
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussion_sessions SET status = 'left' WHERE id = ?1",
+                [session_pk],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-1676 — closing a task by hand releases the clean worktree of an
+    /// execution that never reached a terminal state (KT-1605): the checkout
+    /// and its lane go, the branch stays, the record is retired. While the CLI
+    /// worker is still attached nothing is touched, and the execution is not
+    /// rewritten either way.
+    #[tokio::test]
+    async fn closing_a_task_releases_the_clean_worktree_of_its_unfinished_execution() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let branch = exec_of(&db, &exec_id).await.child_branch.expect("branch");
+        let lane_target = seed_lane_target_of(repo.path(), &path);
+
+        // Not closed, still attached: not a candidate.
+        assert_eq!(
+            reclaim_clean_finished_checkout(&db, &exec_id)
+                .await
+                .unwrap(),
+            CleanCheckoutReclaim::NotApplicable
+        );
+
+        let task_id = set_task_status_of(&db, &exec_id, "done").await;
+        let report = release_closed_task_checkouts(&db, &task_id).await;
+        assert_eq!(report.released, 0, "the worker is still attached");
+        assert!(std::path::Path::new(&path).exists());
+
+        worker_session_left(&db).await;
+        let report = release_closed_task_checkouts(&db, &task_id).await;
+
+        assert_eq!(report.released, 1);
+        assert!(report.kept.is_empty());
+        assert!(!std::path::Path::new(&path).exists(), "checkout released");
+        assert!(!lane_target.exists(), "lane build dir purged");
+        assert_eq!(
+            git_rev(repo.path(), &format!("refs/heads/{branch}")).len(),
+            40,
+            "the branch is kept"
+        );
+        let workspace = workspace_of(&db, &exec_id).await;
+        assert_eq!(workspace.state, "detached");
+        assert_eq!(workspace.canonical_path, None);
+        assert_eq!(
+            exec_of(&db, &exec_id).await.status,
+            TaskExecutionStatus::Working,
+            "closing a task never rewrites its execution"
+        );
+    }
+
+    /// KT-1676 — a dirty worktree of a closed task is kept untouched and
+    /// reported by name, with the reason recorded once; an archived task counts
+    /// as closed, an open one does not.
+    #[tokio::test]
+    async fn closing_a_task_keeps_and_reports_a_dirty_worktree() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        std::fs::write(std::path::Path::new(&path).join("README.md"), "# edited").unwrap();
+        worker_session_left(&db).await;
+
+        let task_id = set_task_status_of(&db, &exec_id, "in_progress").await;
+        assert_eq!(
+            reclaim_clean_finished_checkout(&db, &exec_id)
+                .await
+                .unwrap(),
+            CleanCheckoutReclaim::NotApplicable,
+            "an open task keeps its worktree"
+        );
+
+        set_task_status_of(&db, &exec_id, "archived").await;
+        for _ in 0..2 {
+            let report = release_closed_task_checkouts(&db, &task_id).await;
+            assert_eq!(report.released, 0);
+            assert_eq!(report.kept, vec![dir_name(&path)]);
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(&path).join("README.md")).unwrap(),
+            "# edited"
+        );
+        assert_eq!(workspace_of(&db, &exec_id).await.state, "attached");
+        assert_eq!(kept_reasons(&db, &exec_id).await.len(), 1);
+    }
+
+    /// KT-1676 — a worktree kept by a cancel with `preserve` is released once
+    /// its task is closed, as long as it is clean.
+    #[tokio::test]
+    async fn a_preserved_worktree_is_released_when_its_task_closes() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        let outcome = cancelled_with_policy(
+            &db,
+            repo.path(),
+            &exec_id,
+            crate::models::CancellationCleanupPolicy::Preserve,
+        )
+        .await;
+        assert!(!outcome.contains("removed"), "{outcome}");
+        assert!(std::path::Path::new(&path).exists(), "kept on purpose");
+        worker_session_left(&db).await;
+
+        let task_id = set_task_status_of(&db, &exec_id, "done").await;
+        let report = release_closed_task_checkouts(&db, &task_id).await;
+
+        assert_eq!(report.released, 1);
+        assert!(!std::path::Path::new(&path).exists());
+        assert_eq!(workspace_of(&db, &exec_id).await.state, "detached");
+    }
+
+    /// KT-1676 — the periodic and boot sweeps take the worktrees of tasks that
+    /// were closed while no hook ran (a restart, an update from a workflow).
+    #[tokio::test]
+    async fn the_sweep_releases_the_worktree_of_a_task_closed_by_hand() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        let path = managed_worktree_path(&db, &exec_id).await;
+        worker_session_left(&db).await;
+        let mut report = OrchestrationBootReport::default();
+
+        release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+        assert_eq!(report.terminal_worktrees_released, 0, "the task is open");
+        assert!(std::path::Path::new(&path).exists());
+
+        set_task_status_of(&db, &exec_id, "done").await;
+        release_terminal_worktrees(&db, std::time::Duration::ZERO, &mut report).await;
+
+        assert_eq!(report.terminal_worktrees_released, 1, "{report:?}");
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    /// KT-1676 — a managed worktree removed outside Kronn is no longer recorded
+    /// as attached. A worker's own stays `missing` (lineage and branch kept, so
+    /// the execution is still resumable); a finished one is retired. A worktree
+    /// that is still there is left alone, and the dead Git entry is pruned.
+    #[tokio::test]
+    async fn a_worktree_removed_outside_kronn_is_marked_gone() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, live_exec) = attached_cli_worker(&db, repo.path()).await;
+        let live_path = managed_worktree_path(&db, &live_exec).await;
+        let branch = exec_of(&db, &live_exec).await.child_branch.expect("branch");
+        let project = project_of_execution(&db, &live_exec).await;
+        let (done_exec, done_session) = another_attached_worker(&db, &project.id, 2).await;
+        let done_path = managed_worktree_path(&db, &done_exec).await;
+        let (kept_exec, _) = another_attached_worker(&db, &project.id, 3).await;
+        let kept_path = managed_worktree_path(&db, &kept_exec).await;
+        force_status(&db, &done_exec, "Failed").await;
+        leave_session(&db, done_session).await;
+
+        assert_eq!(reconcile_missing_managed_checkouts(&db).await.unwrap(), 0);
+
+        for path in [&live_path, &done_path] {
+            let removed = git(repo.path(), &["worktree", "remove", "--force", path]);
+            assert!(removed.status.success(), "{removed:?}");
+        }
+        assert_eq!(reconcile_missing_managed_checkouts(&db).await.unwrap(), 2);
+
+        let live = workspace_of(&db, &live_exec).await;
+        assert_eq!(live.state, "missing");
+        assert_eq!(live.branch, branch, "the lineage stays");
+        let done = workspace_of(&db, &done_exec).await;
+        assert_eq!(done.state, "detached");
+        assert_eq!(done.canonical_path, None);
+        assert_eq!(workspace_of(&db, &kept_exec).await.state, "attached");
+        assert!(std::path::Path::new(&kept_path).exists());
+        let id = live_exec.clone();
+        let events = db
+            .with_conn(move |conn| crate::db::orchestration::list_execution_events(conn, &id))
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.action == "worktree_missing")
+                .count(),
+            1
+        );
+        assert_eq!(
+            git_rev(repo.path(), &format!("refs/heads/{branch}")).len(),
+            40
+        );
+        let listed =
+            String::from_utf8_lossy(&git(repo.path(), &["worktree", "list"]).stdout).to_string();
+        assert!(!listed.contains(&dir_name(&live_path)), "{listed}");
+
+        // Already settled: a second pass finds nothing to do.
+        assert_eq!(reconcile_missing_managed_checkouts(&db).await.unwrap(), 0);
+    }
+
+    /// KT-1676 — the reported case: 65 worktrees, one over the cap, eight of
+    /// them clean checkouts of finished or closed tasks. The launch reclaims
+    /// them and is accepted; the dirty one and the one a running task uses stay.
+    #[tokio::test]
+    async fn a_launch_at_65_worktrees_reclaims_the_eight_that_are_finished() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task, _parent, _child, first) = attached_cli_worker(&db, repo.path()).await;
+        let project = project_of_execution(&db, &first).await;
+        let mut reclaimable = vec![(first, 101)];
+        for n in 2..=8 {
+            reclaimable.push(another_attached_worker(&db, &project.id, n).await);
+        }
+        let (dirty_exec, dirty_session) = another_attached_worker(&db, &project.id, 9).await;
+        let (running_exec, _) = another_attached_worker(&db, &project.id, 10).await;
+        let dirty_path = managed_worktree_path(&db, &dirty_exec).await;
+        let running_path = managed_worktree_path(&db, &running_exec).await;
+        std::fs::write(
+            std::path::Path::new(&dirty_path).join("README.md"),
+            "# edited",
+        )
+        .unwrap();
+        let mut paths = Vec::new();
+        for (index, (exec_id, session)) in reclaimable.iter().enumerate() {
+            paths.push(managed_worktree_path(&db, exec_id).await);
+            leave_session(&db, *session).await;
+            match index {
+                // Finished the regular way.
+                0..=3 => {
+                    force_status(&db, exec_id, ["Done", "Failed", "Cancelled", "Done"][index]).await
+                }
+                // Closed by hand, the execution never finished (KT-1605).
+                _ => {
+                    set_task_status_of(&db, exec_id, "done").await;
+                }
+            }
+        }
+        force_status(&db, &dirty_exec, "Cancelled").await;
+        leave_session(&db, dirty_session).await;
+
+        // main + 8 + dirty + running = 11 real worktrees; the rest stand for
+        // the unrelated ones of the ticket's repository: 65 in all.
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<54>).await;
+        let verdict = {
+            let project = project.clone();
+            db.with_conn(move |conn| {
+                Ok(claude_catalogue_verdict(
+                    conn,
+                    &project,
+                    measure_with_excess::<54>,
+                ))
+            })
+            .await
+            .unwrap()
+        };
+
+        assert_eq!(verdict, Ok(()), "57 worktrees are within the cap");
+        for path in &paths {
+            assert!(!std::path::Path::new(path).exists(), "reclaimed: {path}");
+        }
+        assert!(std::path::Path::new(&dirty_path).exists(), "dirty: kept");
+        assert!(
+            std::path::Path::new(&running_path).exists(),
+            "running: kept"
+        );
+    }
+
+    /// KT-1676 — when the sweep cannot bring the count under the cap the
+    /// refusal names every worktree that blocks, why Kronn kept it, and what
+    /// frees it: a dirty finished checkout, one a running task uses and one
+    /// Kronn never created. No path is exposed.
+    #[tokio::test]
+    async fn a_refusal_names_what_blocks_and_how_to_free_it() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (dirty_exec, dirty_path, _lane) = finished_dirty_execution(&db, repo.path()).await;
+        let project = project_of_execution(&db, &dirty_exec).await;
+        let (running_exec, _) = another_attached_worker(&db, &project.id, 2).await;
+        let running_path = managed_worktree_path(&db, &running_exec).await;
+        let foreign = repo.path().join("../kt1676-foreign-worktree");
+        let added = git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "kt1676-foreign",
+                foreign.to_str().unwrap(),
+            ],
+        );
+        assert!(added.status.success(), "{added:?}");
+
+        reclaim_over_catalogue_cap(&db, &project, measure_with_excess::<64>).await;
+        let error = {
+            let project = project.clone();
+            db.with_conn(move |conn| {
+                Ok(claude_catalogue_verdict(
+                    conn,
+                    &project,
+                    measure_with_excess::<64>,
+                ))
+            })
+            .await
+            .unwrap()
+            .unwrap_err()
+        };
+
+        assert!(error.contains("max_git_worktrees=64"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "{} (finished task, not clean",
+                dir_name(&dirty_path)
+            )),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("{} (task still running)", dir_name(&running_path))),
+            "{error}"
+        );
+        assert!(
+            error.contains("kt1676-foreign-worktree (not created by Kronn)"),
+            "{error}"
+        );
+        assert!(error.contains("git worktree remove <name>"), "{error}");
+        assert!(error.contains("close their task"), "{error}");
+        assert!(!error.contains(repo.path().to_str().unwrap()), "{error}");
+        let _ = git(
+            repo.path(),
+            &["worktree", "remove", "--force", foreign.to_str().unwrap()],
+        );
     }
 
     /// KT-1397 — `finished_at` does not prove the checkout idle: a file written

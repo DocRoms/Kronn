@@ -4748,6 +4748,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
                 bridge_token: bridge_value.clone(),
                 priority: config.priority,
+                run_artifacts: read_only_repos
+                    .as_ref()
+                    .map(|policy| policy.granted_dirs().to_vec())
+                    .unwrap_or_default(),
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
@@ -4879,7 +4883,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     let github_env = crate::core::github_connection::env_for_launch(config.project_id).await;
     // Try direct binary first, then npx fallback
-    let mut child = match try_spawn(
+    // KT-1587 — the run directories the step was granted, from the policy Kronn
+    // resolved above; never from `args`, which carry the prompt.
+    let run_artifacts: Vec<PathBuf> = read_only_repos
+        .as_ref()
+        .map(|policy| policy.granted_dirs().to_vec())
+        .unwrap_or_default();
+    let mut child = match try_spawn_granted(
         binary,
         None,
         &args,
@@ -4896,6 +4906,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         bridge_value.as_deref(),
         config.priority,
         reach_is_full_access(launch_full_access, read_only_repos.is_some()),
+        &run_artifacts,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4914,7 +4925,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     runtime.command,
                     runtime.version,
                 );
-                try_spawn(
+                try_spawn_granted(
                     "npx",
                     Some(pkg),
                     &args,
@@ -4931,6 +4942,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     bridge_value.as_deref(),
                     config.priority,
                     reach_is_full_access(launch_full_access, read_only_repos.is_some()),
+                    &run_artifacts,
                 )
                 .map_err(|error| {
                     format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
@@ -5162,6 +5174,10 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) bridge_token: Option<String>,
     /// KT-1633 — see [`AgentStartConfig::priority`].
     pub(crate) priority: Priority,
+    /// KT-1587 — the run directories the step was granted: the typed
+    /// `ReadOnlyRepos::granted_dirs`, handed to the spawn of every turn (the
+    /// adapters spawn the CLI themselves, so the grant cannot be lost here).
+    pub(crate) run_artifacts: Vec<PathBuf>,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -13273,25 +13289,27 @@ impl ClaudeSandboxCatalogueReceipt {
             && self.worktree_bytes <= MAX_CLAUDE_SANDBOX_WORKTREE_BYTES
     }
 
-    /// [`Self::validate`], naming the worktrees (directory names only, never a
-    /// path) of finished executions that Kronn could not reclaim and a human
-    /// can review and remove (KT-1646).
-    pub(crate) fn validate_listing(self, removable: &[String]) -> Result<(), String> {
+    /// [`Self::validate`], naming the worktrees that keep the catalogue over
+    /// its cap (directory names only, never a path), each with why Kronn did
+    /// not reclaim it, and the action that frees them (KT-1646, KT-1676).
+    /// `blockers` holds one `name (reason)` entry per worktree.
+    pub(crate) fn validate_listing(self, blockers: &[String]) -> Result<(), String> {
         if self.within_caps() {
             return Ok(());
         }
-        let removable = if removable.is_empty() {
+        let removable = if blockers.is_empty() {
             String::new()
         } else {
             const LISTED: usize = 20;
-            let mut names: Vec<&str> = removable.iter().map(String::as_str).take(LISTED).collect();
-            if removable.len() > LISTED {
+            let mut names: Vec<&str> = blockers.iter().map(String::as_str).take(LISTED).collect();
+            if blockers.len() > LISTED {
                 names.push("...");
             }
             format!(
-                " Worktrees of finished executions Kronn could not reclaim because they have \
-                 uncommitted changes, sit on another branch or are still in use (review, then \
-                 `git worktree remove`): {}.",
+                " Worktrees Kronn could not reclaim: {}. Kronn only removes the clean worktrees \
+                 of finished tasks it manages. To free the others, close their task or review \
+                 them and run `git worktree remove <name>` (commit or discard uncommitted \
+                 changes first).",
                 names.join(", ")
             )
         };
@@ -13418,6 +13436,49 @@ pub(crate) fn claude_task_worker_catalogue_measure(
         return Ok(None);
     }
     claude_sandbox_catalogue_receipt(&claude_sandbox_catalogue_roots(project)).map(Some)
+}
+
+/// The registered worktrees of every Git root of `project`, the main checkout of
+/// each repository left out: what a refusal names so a human knows which ones
+/// keep the catalogue over its cap (KT-1676). Best effort, read-only: a root
+/// Git cannot list contributes nothing, the refusal itself is the measure's.
+pub(crate) fn claude_task_worker_catalogue_worktrees(
+    project: &crate::models::Project,
+) -> Vec<PathBuf> {
+    let mut common_dirs = std::collections::BTreeSet::new();
+    let mut worktrees = Vec::new();
+    for root in claude_sandbox_catalogue_roots(project) {
+        let Ok(common) = crate::core::cmd::git_cmd()
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(&root.path)
+            .output()
+        else {
+            continue;
+        };
+        let Ok(common_dir) =
+            PathBuf::from(String::from_utf8_lossy(&common.stdout).trim()).canonicalize()
+        else {
+            continue;
+        };
+        if !common_dirs.insert(common_dir) {
+            continue;
+        }
+        let Ok(listed) = crate::core::cmd::git_cmd()
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&root.path)
+            .output()
+        else {
+            continue;
+        };
+        worktrees.extend(
+            String::from_utf8_lossy(&listed.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .skip(1)
+                .map(PathBuf::from),
+        );
+    }
+    worktrees
 }
 
 async fn run_claude_task_worker_auth_probe(
@@ -14701,6 +14762,11 @@ fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> Str
 /// a launch the owner opened in full access. Any other launch, a task worker
 /// included whatever it passes, also loses the shared credential stores of
 /// the home (`~/.ssh`, `~/.aws`, `gh`, …), whichever agent it runs.
+///
+/// Tests only (KT-1587): a production launch always goes through
+/// [`try_spawn_granted`], so none can drop the run artifacts grant by calling
+/// this no-grant form.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn try_spawn(
     binary: &str,
@@ -14720,6 +14786,76 @@ pub(crate) fn try_spawn(
     priority: Priority,
     full_access: bool,
 ) -> Result<tokio::process::Child, String> {
+    // KT-1587 — a launch that is not handed a run artifacts grant reads none.
+    try_spawn_granted(
+        binary,
+        npx_package,
+        args,
+        work_dir,
+        env_key,
+        api_key,
+        io,
+        discussion_id,
+        task_worker_context,
+        room_agent_context,
+        workflow_step_context,
+        audit_run_id,
+        github_env,
+        bridge_token,
+        priority,
+        full_access,
+        &[],
+    )
+}
+
+/// Tests: the run artifacts grant each spawn was handed, by program.
+#[cfg(test)]
+pub(crate) mod spawn_grants {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<(String, Vec<PathBuf>)>> = Mutex::new(Vec::new());
+
+    pub(crate) fn record(binary: &str, granted: &[PathBuf]) {
+        SEEN.lock()
+            .unwrap()
+            .push((binary.to_owned(), granted.to_vec()));
+    }
+
+    /// The grant of the last spawn of `binary`; `None` when it never spawned.
+    pub(crate) fn last_for(binary: &str) -> Option<Vec<PathBuf>> {
+        let seen = SEEN.lock().unwrap();
+        let (_, granted) = seen.iter().rev().find(|(name, _)| name == binary)?;
+        Some(granted.clone())
+    }
+}
+
+/// [`try_spawn`] for a launch granted the run directories `run_artifacts`
+/// (KT-1587): the typed grant Kronn built for the step
+/// (`ReadOnlyRepos::granted_dirs`), never read back out of `args`, whose prompt
+/// and system prompt carry text no one vetted.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_spawn_granted(
+    binary: &str,
+    npx_package: Option<&str>,
+    args: &[String],
+    work_dir: &Path,
+    env_key: &str,
+    api_key: Option<&str>,
+    io: SpawnIo<'_>,
+    discussion_id: Option<&str>,
+    task_worker_context: Option<&TaskWorkerBridgeContext>,
+    room_agent_context: Option<&RoomAgentBridgeContext>,
+    workflow_step_context: Option<&WorkflowStepBridgeContext>,
+    audit_run_id: Option<&str>,
+    github_env: &[(String, String)],
+    bridge_token: Option<&str>,
+    priority: Priority,
+    full_access: bool,
+    run_artifacts: &[PathBuf],
+) -> Result<tokio::process::Child, String> {
+    #[cfg(test)]
+    spawn_grants::record(binary, run_artifacts);
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
         SpawnIo::Adapter(_) => None,
@@ -14789,7 +14925,9 @@ pub(crate) fn try_spawn(
         let roots = crate::core::vault_guard::LaunchRoots::discover(
             Path::new(&effective_work_dir),
             npx_package.is_some() && cmd_name != binary,
-        );
+        )
+        // KT-1587 — the run artifacts root, but for the run directory granted.
+        .with_run_artifacts(run_artifacts);
         // KT-1656 — and the credential files of the home that this agent does
         // not own (`~/.gemini` for a Claude, `~/.codex` for a Gemini, …).
         let sandbox = crate::core::vault_guard::launch_sandbox(binary, npx_package, args);

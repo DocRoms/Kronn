@@ -1,6 +1,7 @@
-# TD-20260724-workflow-agent-fallback
+# Workflow agent fallback
 
-- **ID**: TD-20260724-workflow-agent-fallback
+- **Kind**: feature (Planning), not tech debt. Moved out of the tech-debt
+  registry by KT-1603; it was `TD-20260724-workflow-agent-fallback`.
 - **Area**: Backend | Workflows | Discussions | Agents | Frontend | Config
 - **Status**: Open — product and safety design captured; implementation must be
   split into focused changes.

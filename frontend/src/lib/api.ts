@@ -1313,8 +1313,9 @@ export const projects = {
    * cumulative_tokens, cli_success + the optional step_warning. Empty
    * Vec for legacy runs (pre-0.8.4) or runs with no recorded steps.
    */
-  /** KT-977 — the Full audit's steps in run order, known before any run. */
-  auditSteps: () => api<AuditStepInfo[]>('GET', '/audit/steps'),
+  /** KT-977 — the Full audit's steps in run order, known before any run. KT-1603: targets sit under the project's docs root. */
+  auditSteps: (projectId: string) =>
+    api<AuditStepInfo[]>('GET', `/audit/steps?project_id=${encodeURIComponent(projectId)}`),
   /** KT-1084 — an audit run's tokens and cost per phase (briefing, audit, validation) and in total. */
   auditRunCost: (runId: string) => api<AuditRunCost>('GET', `/audit-runs/${runId}/cost`),
   auditRunSteps: (runId: string) =>

@@ -105,7 +105,7 @@ the asset goes:
   `<run artifacts dir>/<job id>.<ext>` and returns `asset.artifact_path` beside the context file
   id. The directory is the one `{{run.artifacts_dir}}` names, so a later Exec step or an Agent step
   reading it read-only can use the file; it lives as long as the run
-  [src: file: backend/src/workflows/run_artifacts.rs:250-262#keeps_directory]. The copy is written through
+  [src: file: backend/src/workflows/run_artifacts.rs:259-271#keeps_directory]. The copy is written through
   the run directory's file descriptor (KT-1585), because an Exec step can write there: a link
   planted at `<job id>.<ext>` is replaced, never written through
   [src: file: backend/src/api/agent_media_tools.rs:1051-1081#copy_into_run].
@@ -301,7 +301,7 @@ context fitting; an explicit thinking request removes Kronn's older Qwen
 round trips, rather than defining a total run budget. The provider may refuse
 a setting its selected model does not support. Kronn does not retry by dropping
 the saved control. [src: file: backend/src/agents/generation_settings.rs:39-71#apply_http]
-[src: file: backend/src/agents/runner.rs:9993#apply_http]
+[src: file: backend/src/agents/runner.rs:10009#apply_http]
 [src: url: https://docs.ollama.com/api/chat]
 [src: url: https://docs.ollama.com/capabilities/thinking]
 [src: url: https://docs.litellm.ai/docs/completion/input]
@@ -347,7 +347,7 @@ Tiering reduces the initial declaration text, not the context capacity required
 to reach every family. Window reservation counts the whole reachable catalogue,
 including JSON separators, before loading a family. A regression test checks
 exact byte counts and an unchanged window through every family load.
-[src: file: backend/src/agents/runner.rs:7247-7277#reachable_tools_bytes]
+[src: file: backend/src/agents/runner.rs:7266-7296#reachable_tools_bytes]
 [src: file: backend/src/agents/runner_test.rs:1724-1762#the_window_does_not_move_when_a_run_loads_a_tool_family]
 
 ## Audits (KT-924)
@@ -473,8 +473,8 @@ shipping it. Three things changed:
   on a later turn keeps it. A result that was already an extract gets no paths,
   which would not apply to the response the next `extract` runs on, and is told to
   select less. Other tools are shortened exactly as before
-  [src: file: backend/src/agents/runner.rs:7503-7531#shape_of]
-  [src: file: backend/src/agents/runner.rs:7533-7573#working_extract_examples].
+  [src: file: backend/src/agents/runner.rs:7522-7550#shape_of]
+  [src: file: backend/src/agents/runner.rs:7552-7592#working_extract_examples].
 - **A call that differs only by its `extract` or its query is not a repeat.** The
   duplicate guard compares the tool name and every argument, sorted by key, so an
   identical call is still replayed once and then refused, and a call with another
@@ -519,7 +519,7 @@ response>, "excerpt": "<start of the original>", "note": "…"}`, with the large
 excerpt that keeps the envelope inside the budget once embedded in `messages`. An
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
-[src: file: backend/src/agents/runner.rs:7974#truncated_json_envelope]
+[src: file: backend/src/agents/runner.rs:7990#truncated_json_envelope]
 [src: file: backend/src/agents/runner_test.rs:3327#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or

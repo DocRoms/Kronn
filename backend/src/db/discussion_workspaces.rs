@@ -401,6 +401,21 @@ pub fn mark_missing_for_execution(
     get_managed_for_execution(conn, task_execution_id)
 }
 
+/// The managed workspaces Kronn still records as `attached` to a checkout on
+/// disk (KT-1676): the ones whose directory a reconcile pass must find again.
+pub fn list_attached_managed_with_path(conn: &Connection) -> Result<Vec<DiscussionWorkspace>> {
+    let sql = format!(
+        "{SELECT_WORKSPACE} WHERE dw.ownership = 'managed' AND dw.state = 'attached' \
+         AND dw.canonical_path IS NOT NULL AND dw.task_execution_id IS NOT NULL \
+         ORDER BY dw.created_at, dw.id"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map([], map_workspace)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Retire a successfully removed managed checkout without erasing its lineage.
 ///
 /// `canonical_path` is cleared so the historical row cannot claim ownership of

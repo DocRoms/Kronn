@@ -49,6 +49,8 @@ and never touched**.
 | Execution **Cancelled**, checkout **dirty** or policy `Preserve` | nothing at cancel time: the worker may still be writing | released later by the terminal-checkout release |
 | Boot and **every 30 min**: a **Done, Failed or Cancelled** execution whose managed checkout is still on disk | the checkout (branch kept) and its lane build dir | the terminal-checkout release below |
 | Boot and **every 30 min**, and **before a Claude launch is refused for the worktree cap**: a finished execution whose checkout is **clean** | the checkout (branch kept) and its lane build dir, with no idle window | `reclaim_clean_finished_checkout` (KT-1646) |
+| A task is set to **done or archived** (by hand, or any update), and at boot / every 30 min: an execution of a closed task that never finished, or one kept by a `Preserve` cancel, whose checkout is **clean** and unused | the checkout (branch kept) and its lane build dir; the execution is not rewritten | `release_closed_task_checkouts`, `release_closed_task_executions` (KT-1676) |
+| A managed checkout **removed outside Kronn** (`git worktree remove`, `rm -rf`) | nothing on disk: the workspace record stops being `attached` (`missing` for a worker's, retired for a finished one), the dead Git entry is pruned | `reconcile_missing_managed_checkouts` (KT-1676) |
 | Boot: an orphaned managed checkout removed | its lane build dir, with it | `reconcile_at_boot` |
 | Worktree **kept** (diverged, over the evidence cap, written recently) | nothing: the lane is kept with it | same policy as the worktree |
 | Boot, **every 30 min**, and under pressure | **orphan** lane build dirs | the sweeper rules below |
@@ -80,12 +82,27 @@ holds unmerged paths, nothing is removed. Each distinct *kept* reason is recorde
 
 A Claude task worker is refused (`claude_sandbox_catalogue_unsafe`) once the repository lists more than 64 Git
 worktrees: the sandbox policy enumerates them. The cap is not raised. When a launch (or `task_exec_prepare`) is
-over it, Kronn first removes the **clean** checkouts of finished (Done, Failed, Cancelled) executions of that
-project, branch kept, measures again, and refuses only if it is still over. The refusal then names, by directory
-name only, the finished executions' worktrees it had to keep (uncommitted changes, another branch, or still in
-use) so a human can review them and run `git worktree remove`. Worktrees that belong to no finished execution
-(older lanes, discussion worktrees) are never touched. The catalogue listing (`task_worker_catalogue`) is
-advisory and does not reclaim.
+over it, Kronn first records the worktrees removed outside Kronn as gone (and prunes their Git entries), then
+removes the **clean** checkouts of finished (Done, Failed, Cancelled) executions of that project **and of
+executions of closed tasks** (KT-1676), branch kept, measures again, and refuses only if it is still over. The
+refusal then names every worktree that blocks, by directory name only, each with its reason, and the action that
+frees it: `finished task, not clean` (uncommitted changes, another branch or unreadable), `task still running`,
+`attached by a CLI session, not managed by Kronn`, `not created by Kronn`. Close the task, or review the
+worktree and run `git worktree remove <name>` (commit or discard uncommitted changes first). Worktrees that
+belong to no finished execution (older lanes, discussion worktrees) are never touched. The catalogue listing
+(`task_worker_catalogue`) is advisory and does not reclaim.
+
+### Closed tasks (KT-1676)
+
+Closing a task (`done` or `archived`) used to leave its worktrees behind when its execution never reached a
+terminal state (a task set to `done` by hand), and a cancel with `preserve` kept its worktree for good. Now the
+task update releases the managed checkouts of the task's executions in the background, and the boot and 30-minute
+sweeps do the same for tasks closed without that hook. The same guards as above apply, plus: the execution is
+not mid-integration (`Provisioning`, `Approved`, `Integrating`, `Validating`, `Applying`), has no pending or
+running dispatch, no unsettled commit lease and no active session. Only a **clean** checkout goes; a dirty one
+is kept and its reason recorded once (`worktree_release_kept`). A preserved checkout therefore waits at most for
+the idle window of the terminal-checkout release, or for its task to close. The execution itself is never
+changed by the release.
 
 **"Clean" means `git status` clean.** Ignored files do not count: a Rust `target/` or `node_modules/` inside a
 checkout that `.gitignore` covers goes with the worktree, and the lane build dir (`target/wt-<lane>`) is purged
@@ -102,7 +119,7 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
 [src: file: backend/src/api/orchestration.rs:4561-4573#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:13715-13726#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:13961-13972#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -144,7 +161,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:791-857#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:10045-10068#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:10291-10314#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.

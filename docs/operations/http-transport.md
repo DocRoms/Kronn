@@ -31,22 +31,22 @@ for repetition only; exhausted call budgets and open error circuits still
 apply, and effectful calls remain cached. Workers retain their separate bounded
 finalization policy. This prevents a post-edit verification from receiving the
 pre-edit file or a repetition refusal (KT-948).
-[src: file: backend/src/agents/runner.rs:12028-12071#observation_readers_to_restore]
+[src: file: backend/src/agents/runner.rs:12044-12087#observation_readers_to_restore]
 
 The HTTP runner also publishes structured input/output and reported cache-token
 counters through `AgentProcess`, which Full and partial audits consume. Each
 provider response contributes once, even when a stream repeats cumulative usage
 frames. Unreported usage stays unknown. Sums cover reported values only; they
 are not an independent billing reconciliation.
-[src: file: backend/src/agents/runner.rs:9135-9146#cached_prompt_tokens]
-[src: file: backend/src/agents/runner.rs:2178-2185#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10454-10484#task_usage]
+[src: file: backend/src/agents/runner.rs:9151-9162#cached_prompt_tokens]
+[src: file: backend/src/agents/runner.rs:2178-2185#reported_usage_counters] [src: file: backend/src/agents/runner.rs:10470-10500#task_usage]
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
 `None` means unknown, never zero (KT-997). If any response of the run reported
 no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160#cost_usd_micros]
-[src: file: backend/src/agents/runner.rs:8435-8441#request_provider_cost]
+[src: file: backend/src/agents/runner.rs:8451-8457#request_provider_cost]
 [src: file: backend/src/agents/runner.rs:2171-2176#cost_incomplete]
 [src: file: backend/src/api/audit/full.rs:2239#reported_cost_usd_micros]
 [src: file: backend/src/api/audit/drift.rs:1295#reported_cost_usd_micros]
@@ -71,9 +71,9 @@ spent 1 500 000 cumulative input tokens (`KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET`;
 the estimated prompt counts when the provider reports no usage). Tool results
 are not clamped on this wire, and discussion round caps still follow the
 advertised window (KT-998).
-[src: file: backend/src/agents/runner.rs:8449-8451#HOSTED_STEP_CTX_BUDGET]
-[src: file: backend/src/agents/runner.rs:8453-8455#HOSTED_AUDIT_STEP_INPUT_BUDGET]
-[src: file: backend/src/agents/runner.rs:12721-12736#audit_budget_spent]
+[src: file: backend/src/agents/runner.rs:8465-8467#HOSTED_STEP_CTX_BUDGET]
+[src: file: backend/src/agents/runner.rs:8469-8471#HOSTED_AUDIT_STEP_INPUT_BUDGET]
+[src: file: backend/src/agents/runner.rs:12737-12752#audit_budget_spent]
 
 Full audits check changed documents against the final documentary gate during
 each step. Comma-bundled file references (including a repeated `file:` prefix)
@@ -114,7 +114,7 @@ Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
 [src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
-[src: file: backend/src/agents/runner.rs:9184-9188#HTTP_PROVIDER_MAX_ATTEMPTS]
+[src: file: backend/src/agents/runner.rs:9200-9204#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
 documents that failed after their agent returned success. Recovery rechecks the

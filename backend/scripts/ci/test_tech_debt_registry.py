@@ -55,6 +55,20 @@ class TechDebtRegistryTest(unittest.TestCase):
         body = "- **Status**: partly resolved by KT-953; still open.\n"
         self.assertEqual(registry.problems(INDEX, {"TD-20260101-open-item": body}), [])
 
+    def test_accepted_entry_needs_a_reason_and_a_reopening_trigger(self):
+        accepted = "- **Disposition**: Accepted (KT-1603).\n"
+        bare = registry.problems(INDEX, {"TD-20260101-open-item": accepted})
+        self.assertEqual(len(bare), 1)
+        self.assertIn("accepted without", bare[0])
+        reason_only = accepted + "  - **Reason**: internal routes.\n"
+        self.assertEqual(len(registry.problems(INDEX, {"TD-20260101-open-item": reason_only})), 1)
+        complete = reason_only + "  - **Reopen when**: an integrator asks.\n"
+        self.assertEqual(registry.problems(INDEX, {"TD-20260101-open-item": complete}), [])
+
+    def test_other_dispositions_are_not_checked(self):
+        body = "- **Disposition**: Scheduled, KT-1.\n"
+        self.assertEqual(registry.problems(INDEX, {"TD-20260101-open-item": body}), [])
+
     def test_repository_registry_is_consistent(self):
         self.assertEqual(registry.main(), 0)
 

@@ -889,7 +889,8 @@ fn vault_confined(
         )
         .as_ref(),
         crate::core::vault_guard::LaunchSandbox::None,
-        &crate::core::vault_guard::LaunchRoots::default(),
+        // KT-1587 — an ACP runtime is granted no run directory.
+        &crate::core::vault_guard::LaunchRoots::default().with_run_artifacts(&[]),
         program.to_owned(),
         args,
     );

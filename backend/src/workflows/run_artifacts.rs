@@ -10,6 +10,9 @@
 //! worktree goes), and at startup for a run that ended, no longer exists, or
 //! stayed Interrupted beyond `interrupted_worktree_ttl_days`.
 //!
+//! Reach (KT-1587): an agent launch reads the directory of the run it was
+//! granted and no other (`core::artifacts_reach`).
+//!
 //! Location (KT-1585): never inside the Kronn data directory, which the vault
 //! protection hides from every agent process (KT-1495) whatever `--add-dir`
 //! says. Under [`ROOT_ENV`] when set, else the platform cache directory, and
@@ -149,7 +152,7 @@ fn safe_run_id(run_id: &str) -> bool {
 
 /// What the sweep and the migration may touch: a directory named exactly as
 /// Kronn names a run (a hyphenated lowercase UUID).
-fn is_run_dir_name(name: &str) -> bool {
+pub(crate) fn is_run_dir_name(name: &str) -> bool {
     uuid::Uuid::parse_str(name).is_ok_and(|id| id.hyphenated().to_string() == name)
 }
 
@@ -186,6 +189,13 @@ fn open_root(root: &Path, create: bool) -> std::io::Result<Option<fd::Dir>> {
         );
     }
     opened
+}
+
+/// Creates the root itself (owner-only), so a sandbox that hides it by mounting
+/// over it (bubblewrap) has a directory to mount on before any run exists.
+pub fn ensure_root() -> std::io::Result<()> {
+    let root = root().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    open_root(&root, true).map(|_| ())
 }
 
 /// Creates the run's directory (owner-only) and returns its canonical path.
