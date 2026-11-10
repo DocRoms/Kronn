@@ -76,7 +76,7 @@ pub async fn migrate_project(project_path: &Path, create_symlink: bool) -> Migra
         // reports `refs_rewritten = 0`. We don't touch `ai/` here:
         // if it lingers as a leftover, the operator can rm it after
         // verifying the rewrite landed.
-        let mut refs_rewritten = rewrite_internal_refs(&docs_dir);
+        let mut refs_rewritten = rewrite_internal_refs(project_path, &docs_dir);
         refs_rewritten += rewrite_root_redirectors(project_path);
         return MigrationOutcome::AlreadyMigrated { refs_rewritten };
     }
@@ -123,7 +123,7 @@ pub async fn migrate_project(project_path: &Path, create_symlink: bool) -> Migra
     }
     let files_moved = count_md_files(&docs_dir);
 
-    if let Err(e) = rename_index_to_agents(&docs_dir).await {
+    if let Err(e) = rename_index_to_agents(project_path, &docs_dir).await {
         return MigrationOutcome::Failed { reason: e };
     }
 
@@ -139,7 +139,7 @@ pub async fn migrate_project(project_path: &Path, create_symlink: bool) -> Migra
             "Failed to write docs/index.md: {} — migration still succeeded", e);
     }
 
-    refs_rewritten += rewrite_internal_refs(&docs_dir);
+    refs_rewritten += rewrite_internal_refs(project_path, &docs_dir);
     refs_rewritten += rewrite_root_redirectors(project_path);
 
     // No placeholder prefill here (Codex A2): the migration MOVES the
@@ -185,9 +185,12 @@ async fn git_mv_ai_to_docs(project_path: &Path) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    // Fallback : plain rename. History will be lost on the moved files
-    // but the move still happens.
-    std::fs::rename(project_path.join("ai"), project_path.join("docs"))
+    // Fallback : rename through the rooted primitive. History will be lost on
+    // the moved files but the move still happens. A linked `ai/` is refused:
+    // moving the link would make `docs/` point wherever it points.
+    let (ai, docs) = (project_path.join("ai"), project_path.join("docs"));
+    crate::core::fs_guard::assert_contained_no_symlink(project_path, &ai)?;
+    crate::core::fs_guard::guarded_rename(project_path, &ai, &docs)
         .map_err(|e| format!("rename ai → docs failed: {}", e))
 }
 
@@ -220,6 +223,12 @@ fn find_merge_conflicts(ai_dir: &Path, docs_dir: &Path) -> Vec<String> {
 /// Falls back to `fs::rename` per file if `git mv` fails (untracked
 /// content, .gitignore'd files, etc.). Removes the empty `ai/` dir
 /// at the end. Caller must have run `find_merge_conflicts` first.
+///
+/// Every filesystem change of ours is rooted at the project (KT-1595): a
+/// symlink COMMITTED in the repo (`docs/x` pointing outside, no race needed)
+/// or one swapped in mid-run is refused, never followed. The `git mv` itself
+/// is a spawned process and is not covered; the paths are checked before it
+/// runs, and the fallback below never reaches a link.
 async fn merge_ai_into_docs(project_path: &Path) -> Result<(), String> {
     let ai_dir = project_path.join("ai");
     let docs_dir = project_path.join("docs");
@@ -230,12 +239,15 @@ async fn merge_ai_into_docs(project_path: &Path) -> Result<(), String> {
 
     for rel in files {
         let dest = docs_dir.join(&rel);
+        let source = ai_dir.join(&rel);
+        // Before anything is spawned or moved: a link in the source or the
+        // destination path ends the merge here.
+        crate::core::fs_guard::assert_contained_no_symlink(project_path, &source)?;
         if let Some(parent) = dest.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("mkdir {} failed: {}", parent.display(), e))?;
-            }
+            crate::core::fs_guard::guarded_create_dir_all(project_path, parent)
+                .map_err(|e| format!("mkdir {} failed: {}", parent.display(), e))?;
         }
+        crate::core::fs_guard::assert_contained_no_symlink(project_path, &dest)?;
         let src_rel = std::path::PathBuf::from("ai").join(&rel);
         let dst_rel = std::path::PathBuf::from("docs").join(&rel);
         let src_str = src_rel.to_string_lossy();
@@ -248,16 +260,29 @@ async fn merge_ai_into_docs(project_path: &Path) -> Result<(), String> {
             .await;
         let git_ok = matches!(&r, Ok(o) if o.status.success());
         if !git_ok {
-            // Fallback : plain rename. Loses git history on this one
-            // file, but the merge still completes.
-            std::fs::rename(ai_dir.join(&rel), &dest).map_err(|e| {
-                format!("merge {} → {}: {}", src_rel.display(), dst_rel.display(), e)
-            })?;
+            // Fallback : move without replacing, through the rooted primitive.
+            // Loses git history on this one file, but the merge still
+            // completes. A destination holding the same bytes
+            // (`find_merge_conflicts` lets those through) just drops the
+            // `ai/` copy.
+            let fail =
+                |e: String| format!("merge {} → {}: {}", src_rel.display(), dst_rel.display(), e);
+            if let Err(e) = crate::core::fs_guard::guarded_move_new(project_path, &source, &dest) {
+                let read = |p: &Path| crate::core::fs_guard::guarded_read(project_path, p);
+                match (read(&source), read(&dest)) {
+                    (Ok(Some(a)), Ok(Some(b))) if a == b => {
+                        crate::core::fs_guard::guarded_remove_file(project_path, &source)
+                            .map_err(|e| fail(e.to_string()))?;
+                    }
+                    _ => return Err(fail(e)),
+                }
+            }
         }
     }
 
-    // 4. Clean up : remove the now-empty `ai/` tree.
-    if let Err(e) = std::fs::remove_dir_all(&ai_dir) {
+    // 4. Clean up : remove the now-empty `ai/` tree (a link inside it is
+    // unlinked as an entry, never followed).
+    if let Err(e) = crate::core::fs_guard::guarded_remove_tree(project_path, &ai_dir) {
         // Not fatal — operator can `rm -rf ai/` themselves; we logged
         // the migration as success because the move part worked.
         tracing::warn!(target: "kronn::docs_migration",
@@ -295,7 +320,12 @@ fn walk_files(dir: &Path, cb: &mut dyn FnMut(&Path, &Path)) {
     inner(dir, dir, cb);
 }
 
-async fn rename_index_to_agents(docs_dir: &Path) -> Result<(), String> {
+/// `docs/index.md` → `docs/AGENTS.md`, rooted at `project`. `git mv` is tried
+/// first (it stages the rename); it is a spawned process, so the folder is
+/// checked for a link beforehand. The fallback is a rooted `renameat`: a
+/// `docs/` swapped for a link meanwhile is never written through. The entry
+/// itself is moved as it is, never followed.
+async fn rename_index_to_agents(project: &Path, docs_dir: &Path) -> Result<(), String> {
     let from = docs_dir.join("index.md");
     let to = docs_dir.join("AGENTS.md");
     if !from.is_file() {
@@ -310,9 +340,10 @@ async fn rename_index_to_agents(docs_dir: &Path) -> Result<(), String> {
         );
         return Ok(());
     }
+    crate::core::fs_guard::assert_contained_no_symlink(project, docs_dir)?;
     let r = crate::core::cmd::async_git_cmd()
         .args(["mv", "docs/index.md", "docs/AGENTS.md"])
-        .current_dir(docs_dir.parent().unwrap_or(docs_dir))
+        .current_dir(project)
         .output()
         .await;
     if let Ok(out) = r {
@@ -320,7 +351,7 @@ async fn rename_index_to_agents(docs_dir: &Path) -> Result<(), String> {
             return Ok(());
         }
     }
-    std::fs::rename(&from, &to)
+    crate::core::fs_guard::guarded_rename(project, &from, &to)
         .map_err(|e| format!("rename docs/index.md → AGENTS.md failed: {}", e))
 }
 
@@ -458,7 +489,10 @@ fn build_docs_index_body(docs_dir: &Path) -> String {
 
 /// Walk every `.md` file under `docs/` and rewrite `ai/...` path refs
 /// to `docs/...`. Special-case : `ai/index.md` → `docs/AGENTS.md`.
-fn rewrite_internal_refs(docs_dir: &Path) -> usize {
+/// Each rewrite goes through the rooted primitive anchored at `root` (the
+/// project): the file is replaced, never written through a link, and only if
+/// it still holds what was read.
+fn rewrite_internal_refs(root: &Path, docs_dir: &Path) -> usize {
     let mut count = 0usize;
     walk_md_files(docs_dir, &mut |path| {
         let original = match std::fs::read_to_string(path) {
@@ -466,7 +500,15 @@ fn rewrite_internal_refs(docs_dir: &Path) -> usize {
             Err(_) => return,
         };
         let updated = rewrite_refs_in_text(&original);
-        if updated != original && std::fs::write(path, updated).is_ok() {
+        if updated != original
+            && crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+                root,
+                path,
+                &updated,
+                original.as_bytes(),
+            )
+            .is_ok()
+        {
             count += 1;
         }
     });
@@ -505,7 +547,15 @@ fn rewrite_root_redirectors(project_path: &Path) -> usize {
             Err(_) => continue,
         };
         let updated = rewrite_refs_in_text(&original);
-        if updated != original && std::fs::write(&path, updated).is_ok() {
+        if updated != original
+            && crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+                project_path,
+                &path,
+                &updated,
+                original.as_bytes(),
+            )
+            .is_ok()
+        {
             count += 1;
         }
     }
@@ -613,7 +663,7 @@ pub fn prefill_files(project_path: &Path, files: &[std::path::PathBuf]) -> usize
             tracing::warn!("prefill skipped non-contained path {}", path.display());
             continue;
         }
-        if path.is_file() && rewrite_file_with_replacements(path, &replacements) {
+        if path.is_file() && rewrite_file_with_replacements(project_path, path, &replacements) {
             files_changed += 1;
         }
     }
@@ -666,7 +716,11 @@ pub(crate) fn compute_replacements(project_path: &Path) -> Vec<(&'static str, St
 
 /// Replace every occurrence of each placeholder with its value, write back
 /// only if the content changed. Returns `true` on a real write.
-fn rewrite_file_with_replacements(path: &Path, replacements: &[(&'static str, String)]) -> bool {
+fn rewrite_file_with_replacements(
+    root: &Path,
+    path: &Path,
+    replacements: &[(&'static str, String)],
+) -> bool {
     let original = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,
@@ -680,7 +734,13 @@ fn rewrite_file_with_replacements(path: &Path, replacements: &[(&'static str, St
     if updated == original {
         return false;
     }
-    std::fs::write(path, updated).is_ok()
+    crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+        root,
+        path,
+        &updated,
+        original.as_bytes(),
+    )
+    .is_ok()
 }
 
 /// Compact view of which package managers / build tools are present in
@@ -1939,5 +1999,209 @@ mod tests {
             body.contains("{{TEST_CMD}}"),
             "migration must NOT prefill user placeholders — got: {body}"
         );
+    }
+}
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    #[test]
+    fn a_folder_swapped_after_the_walk_never_has_an_outside_file_prefilled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.md"), "name: {{PROJECT_NAME}}").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("a.md"), "name: {{PROJECT_NAME}}").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let _ = rewrite_file_with_replacements(
+            &root,
+            &root.join("docs/a.md"),
+            &[("{{PROJECT_NAME}}", "Repo".to_string())],
+        );
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("a.md")).unwrap(),
+            "name: {{PROJECT_NAME}}",
+            "the outside file is untouched"
+        );
+    }
+
+    #[test]
+    fn a_ref_rewrite_with_a_folder_swapped_after_the_walk_never_writes_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let original = "Read ai/index.md first\n";
+        std::fs::write(root.join("docs/a.md"), original).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("a.md"), original).unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        rewrite_internal_refs(&root, &root.join("docs"));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("a.md")).unwrap(),
+            original,
+            "the outside file is untouched"
+        );
+    }
+
+    #[test]
+    fn a_linked_readme_is_never_rewritten_through_its_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let original = "Read ai/index.md first\n";
+        std::fs::write(external.join("README.md"), original).unwrap();
+        std::os::unix::fs::symlink(external.join("README.md"), root.join("README.md")).unwrap();
+        assert_eq!(rewrite_root_redirectors(&root), 0);
+        assert_eq!(
+            std::fs::read_to_string(external.join("README.md")).unwrap(),
+            original
+        );
+    }
+    /// A project with `ai/x/f.md` to merge into a `docs/` that holds a human file.
+    fn merge_project(tmp: &Path) -> PathBuf {
+        let root = tmp.join("repo");
+        std::fs::create_dir_all(root.join("ai/x")).unwrap();
+        std::fs::write(root.join("ai/x/f.md"), "from ai\n").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/handbook.md"), "human\n").unwrap();
+        root
+    }
+
+    #[tokio::test]
+    async fn a_committed_link_in_docs_never_receives_a_merged_ai_file() {
+        // No race: `docs/x` is a symlink already in the repo, pointing outside.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = merge_project(tmp.path());
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("docs/x")).unwrap();
+        let result = merge_ai_into_docs(&root).await;
+        assert!(result.is_err(), "the link is refused: {result:?}");
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "nothing landed outside the project"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("ai/x/f.md")).unwrap(),
+            "from ai\n",
+            "the ai file stays where it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_docs_folder_swapped_after_the_walk_never_receives_a_merged_ai_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = merge_project(tmp.path());
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let result = merge_ai_into_docs(&root).await;
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(result.is_err(), "the swapped folder is refused: {result:?}");
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "nothing landed outside the project"
+        );
+        assert!(root.join("ai/x/f.md").is_file(), "the ai file is kept");
+    }
+
+    #[tokio::test]
+    async fn the_merge_fallback_moves_without_replacing_and_drops_identical_copies() {
+        // Not a git repo: every file goes through the rooted fallback.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = merge_project(tmp.path());
+        std::fs::write(root.join("ai/handbook.md"), "human\n").unwrap();
+        merge_ai_into_docs(&root).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/x/f.md")).unwrap(),
+            "from ai\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/handbook.md")).unwrap(),
+            "human\n"
+        );
+        assert!(!root.join("ai").exists(), "the ai tree is consumed");
+    }
+
+    #[tokio::test]
+    async fn the_index_rename_with_a_docs_folder_swapped_after_the_walk_never_touches_outside() {
+        // Not a git repo: the rooted fallback does the rename.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/index.md"), "inside\n").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("index.md"), "outside\n").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let result = rename_index_to_agents(&root, &root.join("docs")).await;
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join("index.md")).unwrap(),
+            "outside\n",
+            "the outside file is untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs.moved/index.md")).unwrap(),
+            "inside\n",
+            "the real docs folder keeps its index.md: {result:?}"
+        );
+        assert!(
+            !external.join("AGENTS.md").exists(),
+            "nothing was renamed outside the project"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_index_rename_works_and_refuses_a_linked_docs_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/index.md"), "inside\n").unwrap();
+        rename_index_to_agents(&root, &root.join("docs"))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap(),
+            "inside\n"
+        );
+        assert!(!root.join("docs/index.md").exists());
+
+        // A `docs` committed as a link to an outside folder: refused, no race.
+        let linked = tmp.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("index.md"), "outside\n").unwrap();
+        std::os::unix::fs::symlink(&external, linked.join("docs")).unwrap();
+        let result = rename_index_to_agents(&linked, &linked.join("docs")).await;
+        assert!(result.is_err(), "the linked docs/ is refused: {result:?}");
+        assert!(external.join("index.md").is_file());
+        assert!(!external.join("AGENTS.md").exists());
+    }
+
+    #[tokio::test]
+    async fn a_linked_ai_folder_is_never_renamed_into_docs() {
+        // `git mv ai docs` fallback: moving the link would make docs/ point out.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("a.md"), "outside\n").unwrap();
+        std::os::unix::fs::symlink(&external, root.join("ai")).unwrap();
+        let result = git_mv_ai_to_docs(&root).await;
+        assert!(result.is_err(), "the linked ai/ is refused: {result:?}");
+        assert!(!root.join("docs").exists());
+        assert!(external.join("a.md").is_file());
     }
 }

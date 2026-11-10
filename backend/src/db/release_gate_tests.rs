@@ -749,8 +749,13 @@ async fn persistent_0_12_upgrade_preserves_data_configuration_and_rollback_snaps
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("kronn.db");
     let config_path = dir.path().join("config.toml");
-    let config = "[server]\nport = 4178\nauth_token = 'fixture-only-not-a-real-secret'\n\n[agents.model_tiers.ollama]\ndefault = 'operator/local:v2'\n";
-    std::fs::write(&config_path, config).unwrap();
+    // A 0.12 install carries its key in config.toml: the rollback copy is
+    // encrypted with it.
+    let key = crate::core::crypto::generate_secret();
+    let config = format!(
+        "encryption_secret = '{key}'\n[server]\nport = 4178\nauth_token = 'fixture-only-not-a-real-secret'\n\n[agents.model_tiers.ollama]\ndefault = 'operator/local:v2'\n"
+    );
+    std::fs::write(&config_path, &config).unwrap();
 
     let legacy = Connection::open(&db_path).unwrap();
     legacy
@@ -847,17 +852,18 @@ async fn persistent_0_12_upgrade_preserves_data_configuration_and_rollback_snaps
         .await
         .unwrap();
     assert_eq!(std::fs::read(&config_path).unwrap(), config.as_bytes());
-    // The rollback copy keeps every setting but never the credentials (KT-1007).
-    let snapshot: toml::Table = std::fs::read_to_string(dir.path().join("config.toml.backup"))
-        .unwrap()
-        .parse()
-        .unwrap();
-    let mut expected_snapshot: toml::Table = config.parse().unwrap();
-    expected_snapshot["server"]
-        .as_table_mut()
-        .unwrap()
-        .remove("auth_token");
-    assert_eq!(snapshot, expected_snapshot);
+    // The rollback copy is the whole file, encrypted: nothing of it in clear.
+    let sealed = dir.path().join("config.toml.backup.enc");
+    let raw = std::fs::read_to_string(&sealed).unwrap();
+    assert!(
+        !raw.contains("fixture-only-not-a-real-secret") && !raw.contains("4178"),
+        "{raw}"
+    );
+    assert_eq!(
+        crate::core::config_copies::open_sealed(&sealed, &[key]).unwrap(),
+        config
+    );
+    assert!(!dir.path().join("config.toml.backup").exists());
 
     let backup_path = db_path.with_extension("db.backup");
     let backup = Connection::open(&backup_path).unwrap();
@@ -898,7 +904,6 @@ fn legacy_upgrade_snapshot(conn: &Connection, tables: &[&str]) -> LegacyUpgradeS
                 .unwrap();
             let columns = statement
                 .column_names()
-                .iter()
                 .map(|name| name.to_string())
                 .collect::<Vec<_>>();
             let rows = statement

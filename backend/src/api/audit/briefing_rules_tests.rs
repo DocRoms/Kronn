@@ -413,3 +413,21 @@ fn a_lost_end_marker_with_human_text_inside_keeps_it() {
     assert!(!fixed.contains("old ban"), "{fixed}");
     assert!(fixed.contains("## Global"), "{fixed}");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_docs_folder_swapped_after_the_walk_never_receives_the_coding_rules() {
+    use crate::core::fs_guard::swap_probe;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(root.join("docs/coding-rules.md"), CODING_RULES).unwrap();
+    let external = dir.path().join("external");
+    std::fs::create_dir_all(&external).unwrap();
+    swap_probe::arm(&root.join("docs"), &external);
+    let _ = sync_coding_rules_doc(&root, Some(&sample()));
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    let moved = std::fs::read_to_string(root.join("docs.moved/coding-rules.md")).unwrap();
+    assert!(moved.contains("ne jamais utiliser lodash"));
+}

@@ -1682,6 +1682,65 @@ pub fn parse_claude_worker_stream_line(line: &str) -> StreamJsonEvent {
     )
 }
 
+/// KT-1599 — one line of the headless "no popup" note, injected for CLI agents.
+/// A `--print` run has no permission channel: the model, trained on interactive
+/// Claude Code, otherwise tells the user to click an "Allow" that never appears
+/// (observed 2026-07-01, TD-20260701).
+pub(crate) const HEADLESS_NO_POPUP_NOTE: &str = "=== HEADLESS RUN ===\n\nYou run headless: there is no permission popup and nobody to click Allow, so if a tool is refused, say which one and stop instead of asking the user to approve it.";
+
+/// KT-1599 — the tool names a Claude `result` line reports in
+/// `permission_denials`, deduplicated and in first-seen order. Only the name is
+/// kept: `tool_input` can carry paths, commands or secrets.
+pub fn claude_permission_denials(line: &str) -> Vec<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return Vec::new();
+    };
+    if json.get("type").and_then(serde_json::Value::as_str) != Some("result") {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = Vec::new();
+    for denial in json
+        .get("permission_denials")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let name: String = denial
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown tool")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | ' '))
+            .take(120)
+            .collect();
+        let name = if name.trim().is_empty() {
+            "unknown tool".to_string()
+        } else {
+            name
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// KT-1599 — the System message body for refused tools: names each tool and the
+/// fix, so neither the user nor the model has to guess why the run stalled.
+pub fn permission_denials_message(tools: &[String]) -> String {
+    let listed = tools
+        .iter()
+        .map(|tool| format!("`{tool}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "🔒 **Tool call refused (headless run)**\n\nClaude Code refused {listed}: this run \
+         is non-interactive, so there was no popup to approve it and nothing the agent said \
+         about one is real. To allow it, enable full access for this agent in Settings, or \
+         add the tool to its allowed tools (`--allowedTools`)."
+    )
+}
+
 /// Result of parsing a single stream-json line
 #[derive(Debug)]
 pub enum StreamJsonEvent {
@@ -4297,8 +4356,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         } else {
             http_agent_tools_notice(config.tools.is_some()).to_string()
         });
-    } else if !mcp_context.is_empty() {
-        parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context));
+    } else {
+        if !mcp_context.is_empty() {
+            parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context));
+        }
+        parts.push(HEADLESS_NO_POPUP_NOTE.to_string());
     }
     if !directives_prompt.is_empty() {
         parts.push(format!(
@@ -6243,6 +6305,25 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
 
 /// Resolve the path to vibe-runner.py.
 /// Searches: env override → Docker bundle → next to executable → Tauri resource → cargo manifest (dev).
+/// KT-1599 — Gemini CLI policy (policy-engine TOML, `mcpName` rule) that allows
+/// every tool of the `kronn-internal` MCP server and nothing else. `toolName`
+/// is required alongside `mcpName`: gemini 0.66.0 rejects the rule without it
+/// (`Field "rule.0.toolName": Invalid input`), despite its docs.
+const GEMINI_KRONN_POLICY: &str = "[[rule]]\nmcpName = \"kronn-internal\"\ntoolName = \"*\"\ndecision = \"allow\"\npriority = 100\n";
+
+/// Path of the policy file for `--policy`, written under the Kronn data
+/// directory when missing or stale. `None` when it cannot be written: the run
+/// then degrades to Gemini's default confirmation behaviour, never to `--yolo`.
+fn gemini_kronn_policy_path() -> Option<String> {
+    let dir = crate::core::config::config_dir().ok()?.join("policies");
+    let path = dir.join("gemini-kronn-internal.toml");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(GEMINI_KRONN_POLICY) {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&path, GEMINI_KRONN_POLICY).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
 fn vibe_runner_path() -> String {
     // 0. Explicit override (allows custom deployments)
     if let Ok(custom) = crate::core::child_env::var("KRONN_VIBE_RUNNER") {
@@ -13957,6 +14038,14 @@ fn agent_command_with_task_worker_policy(
             }
             if full_access && !task_worker {
                 args.push("--yolo".into());
+            } else if !task_worker {
+                // KT-1599 — headless Gemini cannot ask, so it refuses any MCP
+                // tool it would have to confirm. A policy file allows Kronn's own
+                // server without the blanket `--yolo`.
+                if let Some(policy) = gemini_kronn_policy_path() {
+                    args.push("--policy".into());
+                    args.push(policy);
+                }
             }
             // Gemini CLI has no system prompt flag — prepend context to prompt
             let full_prompt = if mcp_context.is_empty() {

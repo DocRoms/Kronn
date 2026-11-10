@@ -558,9 +558,11 @@ pub fn retire_legacy_bootstrap_block(project_path: &Path) -> Result<bool, String
     let Some(cleaned) = without_legacy_bootstrap_block(content) else {
         return Ok(false);
     };
-    crate::core::fs_guard::assert_contained_no_symlink(project_path, &entry)?;
-    crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
-        &entry, &cleaned, &observed,
+    crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+        project_path,
+        &entry,
+        &cleaned,
+        &observed,
     )
     .map_err(|e| format!("Cannot rewrite {}: {e}", entry.display()))?;
     Ok(true)

@@ -38,7 +38,7 @@ to a managed workspace (see *Lane attribution* below). Everything else — an un
 row names, the interactive `target/debug`, any directory Kronn did not create — is **reported as `foreign`
 and never touched**.
 [src: file: backend/src/core/worktree.rs:523-570#mark_lane_target]
-[src: file: backend/src/core/worktree.rs:580-598#mark_lane_target_for_worktree]
+[src: file: backend/src/core/worktree.rs:575-593#mark_lane_target_for_worktree]
 
 ## When something is removed
 
@@ -102,7 +102,7 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
 [src: file: backend/src/api/orchestration.rs:4430-4442#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:13512-13523#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:13559-13570#settle_cancelled_workspace]
 
 ### The sweeper's rules
 

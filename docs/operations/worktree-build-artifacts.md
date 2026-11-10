@@ -42,7 +42,7 @@ The recurrence also exposed that non-terminal old executions and unregistered
 manual worktrees do not become reclaimable merely because a planning task is
 done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
 tests, scan recursively on a failing request, or authorise deletion of active
-or unowned targets. [src: file: backend/src/db/orchestration.rs:419-532#worktree_cleanup_liveness] [src: file: backend/src/core/worktree.rs:1141-1205#ensure_build_disk_headroom]
+or unowned targets. [src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness] [src: file: backend/src/core/worktree.rs:1141-1205#ensure_build_disk_headroom]
 
 The retained maintenance record distinguishes each authorised batch. These are
 dated physical free-space observations, not quotas or reusable deletion grants:
@@ -183,7 +183,7 @@ There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
 the existing managed-worktree path: ownership, terminal execution state,
 attached sessions, and worker leases are all checked before deletion. [src: file: backend/src/core/worktree.rs:293-388#clean_worktree_build_artifacts]
-[src: file: backend/src/db/orchestration.rs:419-532#worktree_cleanup_liveness]
+[src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness]
 
 For an interactive or qualification cache outside that managed ownership path,
 the bounded policy is refusal and escalation: the build guard names its exact
@@ -193,7 +193,7 @@ path-specific reclaim only after the inventory's ownership and terminal-state
 checks; this document does not authorise a broad purge or deletion of unknown,
 active, or leased targets. [src: file: backend/src/core/worktree.rs:1100-1135#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
 [src: file: backend/src/api/maintenance.rs:77-142#list_build_artifacts]
-[src: file: backend/src/db/orchestration.rs:419-532#worktree_cleanup_liveness]
+[src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness]
 
 ## KT-638 profile benchmark record
 
@@ -310,16 +310,16 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 
 [src: file: backend/src/core/background_priority.rs:104-133#background_priority]
 [src: file: backend/src/core/background_priority.rs:168-182#plan_here]
-[src: file: backend/src/core/background_priority.rs:283-286#check_launcher_at_boot]
+[src: file: backend/src/core/background_priority.rs:293-295#check_launcher_at_boot]
 [src: file: backend/src/core/cmd.rs:359-370#async_cmd_with]
 [src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
-[src: file: backend/src/core/task_worker_env.rs:719-719#ProbeCommand.priority]
-[src: file: backend/src/core/task_worker_lane_warm.rs:782-782#first-build-priority]
-[src: file: backend/src/agents/runner.rs:14471-14480#agent_launch_priority]
+[src: file: backend/src/core/task_worker_env.rs:839]
+[src: file: backend/src/core/task_worker_lane_warm.rs:843]
+[src: file: backend/src/agents/runner.rs:14560-14569#agent_launch_priority]
 [src: file: backend/src/core/quick_exec.rs:516-540#build_command]
-[src: file: backend/src/workflows/steps.rs:1393-1393#agent-step-priority]
+[src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
-[src: file: backend/src/core/config.rs:604-604#publish-setting]
+[src: file: backend/src/core/config.rs:610-611]
 
 ## Maintenance command
 

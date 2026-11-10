@@ -13,12 +13,14 @@
 -- `output` is emptied rather than removed. `StepResult::output` has no serde
 -- default, so a missing key fails the whole `Vec<StepResult>` decode and the
 -- step counters a listing needs would silently come back empty.
+-- `json()` keeps `$.steps` an array: SQLite drops the JSON subtype across a
+-- scalar subquery, which would store the steps as a string.
 UPDATE shared_runs
 SET result_json = json_set(
         result_json,
         '$.steps',
-        (SELECT json_group_array(json_set(value, '$.output', ''))
-         FROM json_each(shared_runs.result_json, '$.steps'))
+        json((SELECT json_group_array(json_set(value, '$.output', ''))
+         FROM json_each(shared_runs.result_json, '$.steps')))
     )
 WHERE kind = 'workflow'
   AND json_valid(result_json)

@@ -1,5 +1,5 @@
 use aes_gcm::{
-    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
+    aead::{rand_core::RngCore, Aead, KeyInit, OsRng, Payload},
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -42,6 +42,56 @@ pub fn decrypt(encoded: &str, key: &[u8; 32]) -> Result<String, String> {
         .map_err(|e| format!("Decryption failed: {}", e))?;
 
     String::from_utf8(plaintext).map_err(|e| format!("UTF-8 decode failed: {}", e))
+}
+
+/// Encrypt raw bytes with AES-256-GCM, binding `aad` (associated data, not
+/// stored) to the ciphertext: it opens only with the same `aad`. Same layout as
+/// [`encrypt`]: base64 of nonce || ciphertext.
+pub fn encrypt_bytes_aad(plaintext: &[u8], key: &[u8; 32], aad: &[u8]) -> Result<String, String> {
+    let cipher = Aes256Gcm::new(key.into());
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| format!("Encryption failed: {}", e))?;
+
+    let mut combined = nonce_bytes.to_vec();
+    combined.extend_from_slice(&ciphertext);
+    Ok(B64.encode(combined))
+}
+
+/// Decrypt what [`encrypt_bytes_aad`] wrote, to the exact bytes; fails when
+/// `aad` differs from the one it was sealed with.
+pub fn decrypt_bytes_aad(encoded: &str, key: &[u8; 32], aad: &[u8]) -> Result<Vec<u8>, String> {
+    let combined = B64
+        .decode(encoded)
+        .map_err(|e| format!("Base64 decode failed: {}", e))?;
+
+    if combined.len() < NONCE_LEN + 1 {
+        return Err("Ciphertext too short".into());
+    }
+
+    let (nonce_bytes, ciphertext) = combined.split_at(NONCE_LEN);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = Aes256Gcm::new(key.into());
+
+    cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|e| format!("Decryption failed: {}", e))
 }
 
 /// Generate a random 32-byte key, returned as hex string (64 chars).
@@ -227,6 +277,48 @@ mod tests {
         );
         assert_ne!(first, keyed_digest(&make_key(1), b"other", b"low-entropy"));
         assert_ne!(first, keyed_digest(&make_key(1), b"snapshot", b"different"));
+    }
+
+    #[test]
+    fn bytes_aad_roundtrip_opens_only_with_the_same_key_and_aad() {
+        let key = make_key(7);
+        let bytes = [0u8, 0xff, 0x80, b'\n', 0x7f];
+        let ct = encrypt_bytes_aad(&bytes, &key, b"mcp-config").unwrap();
+        assert_eq!(
+            decrypt_bytes_aad(&ct, &key, b"mcp-config").unwrap(),
+            bytes.to_vec()
+        );
+        // A copy sealed for one file never opens as another, nor under another key.
+        assert!(decrypt_bytes_aad(&ct, &key, b"agent-config")
+            .unwrap_err()
+            .contains("Decryption failed"));
+        assert!(decrypt_bytes_aad(&ct, &key, b"").is_err());
+        assert!(decrypt_bytes_aad(&ct, &make_key(8), b"mcp-config").is_err());
+        // The nonce is fresh each time, the content still opens.
+        let again = encrypt_bytes_aad(&bytes, &key, b"mcp-config").unwrap();
+        assert_ne!(ct, again);
+        assert_eq!(
+            decrypt_bytes_aad(&again, &key, b"mcp-config").unwrap(),
+            bytes.to_vec()
+        );
+    }
+
+    #[test]
+    fn bytes_aad_rejects_malformed_input_without_panicking() {
+        let key = make_key(9);
+        assert!(decrypt_bytes_aad("not base64 !!", &key, b"a")
+            .unwrap_err()
+            .contains("Base64"));
+        // A nonce alone, with no ciphertext byte, is too short to be a seal.
+        let nonce_only = B64.encode([0u8; NONCE_LEN]);
+        assert_eq!(
+            decrypt_bytes_aad(&nonce_only, &key, b"a").unwrap_err(),
+            "Ciphertext too short"
+        );
+        assert_eq!(
+            decrypt_bytes_aad("", &key, b"a").unwrap_err(),
+            "Ciphertext too short"
+        );
     }
 
     #[test]

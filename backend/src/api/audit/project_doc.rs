@@ -1193,7 +1193,7 @@ pub(crate) fn write_project_doc(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("read {}: {e}", target.display())),
     }
-    std::fs::write(&target, body).map_err(|e| format!("write {}: {e}", target.display()))?;
+    crate::core::fs_guard::guarded_replace(project_root, &target, body.as_bytes())?;
     Ok(ProjectDocWrite::Written)
 }
 
@@ -1369,3 +1369,27 @@ pub(crate) mod operating_seed;
 #[cfg(test)]
 #[path = "project_doc_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_project_doc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        swap_probe::arm(&docs, &external);
+        let _ = write_project_doc(&root, &docs, "body");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs.moved/project.md")).unwrap(),
+            "body"
+        );
+    }
+}

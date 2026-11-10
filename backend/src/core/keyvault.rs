@@ -280,6 +280,18 @@ pub struct VaultReadFailure {
     pub corrupted: bool,
 }
 
+/// The answer of [`KeyStore::lookup`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyLookup {
+    /// A tier holds this key (canonical hex, source name).
+    Found(String, &'static str),
+    /// Every tier was read and none holds a key.
+    Absent,
+    /// A tier could not be read (locked keychain, I/O error), or the tiers hold
+    /// nothing but values that are not keys: one may exist.
+    Unreadable(String),
+}
+
 /// The ordered ladder of writable vaults (keychain → sidecar), plus the
 /// read-only env override checked first.
 pub struct KeyStore {
@@ -346,6 +358,46 @@ impl KeyStore {
             }
         }
         None
+    }
+
+    /// What the tiers hold, telling "no key anywhere" from "could not read":
+    /// a tier that errors may hold the key, so only a read that came back empty
+    /// from every tier (and no env override) proves there is none.
+    ///
+    /// Like [`Self::snapshot`], it stops at the first tier that cannot be read
+    /// before a key is found: a lower tier (a sidecar left behind, say) may hold
+    /// an older key than the locked one above it, and must not stand in for it.
+    /// A value that is not a canonical key (empty, damaged) is skipped; when no
+    /// tier holds a valid key it is reported as unreadable, not as absence.
+    pub fn lookup(&self) -> KeyLookup {
+        let mut not_keys: Vec<String> = Vec::new();
+        if let Some(s) = Self::env_override() {
+            match crate::core::crypto::canonical_secret(&s) {
+                Ok(key) => return KeyLookup::Found(key, "env"),
+                Err(_) => not_keys.push("env: holds a value that is not a key".into()),
+            }
+        }
+        for v in &self.vaults {
+            match v.retrieve() {
+                Ok(Some(s)) => match crate::core::crypto::canonical_secret(&s) {
+                    Ok(key) => return KeyLookup::Found(key, v.name()),
+                    Err(_) => {
+                        tracing::warn!("keyvault {} holds a value that is not a key", v.name());
+                        not_keys.push(format!("{}: holds a value that is not a key", v.name()));
+                    }
+                },
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("keyvault {} retrieve errored: {e}", v.name());
+                    return KeyLookup::Unreadable(format!("{}: {e:#}", v.name()));
+                }
+            }
+        }
+        if not_keys.is_empty() {
+            KeyLookup::Absent
+        } else {
+            KeyLookup::Unreadable(not_keys.join("; "))
+        }
     }
 
     /// Every tier's current value, for split-brain detection by the reconciler.
@@ -580,6 +632,117 @@ mod tests {
         assert_eq!(ks.primary(), None);
     }
 
+    fn denied(name: &'static str) -> MockVault {
+        MockVault {
+            name,
+            state: std::sync::Arc::new(Mutex::new(MockState::Unreadable("held".into()))),
+        }
+    }
+
+    /// KT-1528 — a locked keychain (access denied) above a key file that holds
+    /// an older key: the lookup does not fall through to the older key, it says
+    /// the stores could not be read.
+    #[test]
+    #[serial]
+    fn lookup_stops_at_a_vault_that_refuses_access() {
+        crate::core::child_env::remove_var(ENV_KEK);
+        let stale = crate::core::crypto::generate_secret();
+        for locked in [denied("keychain"), MockVault::unavailable("keychain")] {
+            let ks = KeyStore::from_vaults(vec![
+                boxed(locked),
+                boxed(MockVault::with_value("sidecar", &stale)),
+            ]);
+            let KeyLookup::Unreadable(why) = ks.lookup() else {
+                panic!("a stale lower key stood in for the locked one");
+            };
+            assert!(why.starts_with("keychain: "), "{why}");
+        }
+        // The denial is the vault error itself.
+        let ks = KeyStore::from_vaults(vec![boxed(denied("keychain"))]);
+        let KeyLookup::Unreadable(why) = ks.lookup() else {
+            panic!("denied")
+        };
+        assert!(why.contains("prompt denied"), "{why}");
+        // A key found ABOVE the locked vault is still a key.
+        let ks = KeyStore::from_vaults(vec![
+            boxed(MockVault::with_value("sidecar", &stale)),
+            boxed(denied("keychain")),
+        ]);
+        assert_eq!(ks.lookup(), KeyLookup::Found(stale.clone(), "sidecar"));
+    }
+
+    /// KT-1528 — a value that is not a key (damaged, blank) is skipped for a
+    /// valid one below it; with none below, the stores are unreadable, never
+    /// absent; and the key found is the canonical one.
+    #[test]
+    #[serial]
+    fn lookup_skips_a_value_that_is_not_a_key() {
+        crate::core::child_env::remove_var(ENV_KEK);
+        let valid = crate::core::crypto::generate_secret();
+        for bad in ["garbage", "", "   "] {
+            let ks = KeyStore::from_vaults(vec![
+                boxed(MockVault::with_value("keychain", bad)),
+                boxed(MockVault::with_value("sidecar", &valid)),
+            ]);
+            assert_eq!(
+                ks.lookup(),
+                KeyLookup::Found(valid.clone(), "sidecar"),
+                "{bad:?}"
+            );
+            let ks = KeyStore::from_vaults(vec![
+                boxed(MockVault::with_value("keychain", bad)),
+                boxed(MockVault::empty("sidecar")),
+            ]);
+            let KeyLookup::Unreadable(why) = ks.lookup() else {
+                panic!("a value that is not a key read as absence: {bad:?}")
+            };
+            assert!(why.contains("keychain"), "{why}");
+        }
+        let ks = KeyStore::from_vaults(vec![boxed(MockVault::with_value(
+            "sidecar",
+            &format!("  {}\n", valid.to_uppercase()),
+        ))]);
+        assert_eq!(ks.lookup(), KeyLookup::Found(valid, "sidecar"));
+        let ks = KeyStore::from_vaults(vec![
+            boxed(MockVault::empty("keychain")),
+            boxed(MockVault::empty("sidecar")),
+        ]);
+        assert_eq!(ks.lookup(), KeyLookup::Absent);
+    }
+
+    /// KT-1528 — the env override is the first tier: a valid key there wins,
+    /// in canonical form; a value there that is not a key is skipped for a
+    /// vault key, and with none below it the stores read as unreadable.
+    #[test]
+    #[serial]
+    fn lookup_reads_the_env_override_first() {
+        let env_key = crate::core::crypto::generate_secret();
+        let vault_key = crate::core::crypto::generate_secret();
+        crate::core::child_env::set_var(ENV_KEK, format!(" {}\n", env_key.to_uppercase()));
+        let ks = KeyStore::from_vaults(vec![boxed(MockVault::with_value("keychain", &vault_key))]);
+        assert_eq!(ks.lookup(), KeyLookup::Found(env_key, "env"));
+
+        crate::core::child_env::set_var(ENV_KEK, "not-a-key");
+        assert_eq!(ks.lookup(), KeyLookup::Found(vault_key, "keychain"));
+        let ks = KeyStore::from_vaults(vec![boxed(MockVault::empty("keychain"))]);
+        let lookup = ks.lookup();
+        crate::core::child_env::remove_var(ENV_KEK);
+        assert!(
+            matches!(&lookup, KeyLookup::Unreadable(why) if why.starts_with("env: ")),
+            "a damaged env override read as absence: {lookup:?}"
+        );
+    }
+
+    #[test]
+    fn same_key_folds_case_and_whitespace_only_for_real_keys() {
+        let key = crate::core::crypto::generate_secret();
+        assert!(same_key(&key, &format!("  {}\n", key.to_uppercase())));
+        assert!(!same_key(&key, &crate::core::crypto::generate_secret()));
+        // Values that are not keys compare as written.
+        assert!(same_key("KEY", "KEY"));
+        assert!(!same_key("KEY", "key"));
+    }
+
     #[test]
     #[serial]
     fn snapshot_exposes_split_brain_disagreement() {
@@ -788,6 +951,23 @@ mod tests {
         let sc = SidecarFile::in_dir(dir.path());
         std::fs::write(sc.path(), "   \n").unwrap();
         assert_eq!(sc.retrieve().unwrap(), None);
+    }
+
+    /// A key file that is not text is damaged, not empty: it may be the only
+    /// copy of a key, so it must never read as "no key here".
+    #[test]
+    fn sidecar_holding_non_utf8_bytes_is_corrupted_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let sc = SidecarFile::in_dir(dir.path());
+        std::fs::write(sc.path(), [0xff, 0xfe, 0x00, 0xc3]).unwrap();
+        let err = sc.retrieve().unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<VaultError>(),
+                Some(VaultError::Corrupted(why)) if why.contains(SIDECAR_FILENAME)
+            ),
+            "{err:#}"
+        );
     }
 
     #[test]

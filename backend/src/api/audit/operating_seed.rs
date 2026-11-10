@@ -290,10 +290,7 @@ fn write_owned(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("read {}: {e}", target.display())),
     }
-    if let Some(parent) = target.parent() {
-        crate::core::fs_guard::guarded_create_dir_all(project_root, parent)?;
-    }
-    crate::core::mcp_scanner::atomic_write(target, body)?;
+    crate::core::fs_guard::guarded_replace(project_root, target, body.as_bytes())?;
     Ok(Outcome::Written)
 }
 
@@ -353,8 +350,7 @@ pub(crate) fn seed(project_root: &Path, docs_dir: &Path, notes: Option<&str>) ->
         if !is_generated(&existing) {
             continue;
         }
-        let removed = crate::core::fs_guard::assert_contained_no_symlink(project_root, &target)
-            .and_then(|_| std::fs::remove_file(&target).map_err(|e| e.to_string()));
+        let removed = crate::core::fs_guard::guarded_remove_file(project_root, &target);
         match removed {
             Ok(()) => report.removed.push(rel.to_string()),
             Err(e) => report.errors.push(format!("{rel}: {e}")),
@@ -395,3 +391,44 @@ pub(crate) fn seed(project_root: &Path, docs_dir: &Path, notes: Option<&str>) ->
 #[cfg(test)]
 #[path = "operating_seed_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix, feature = "full-tests"))]
+mod swap_tests {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    #[test]
+    fn a_parent_swapped_after_the_walk_never_receives_a_seeded_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs/glossary")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        swap_probe::arm(&root.join("docs/glossary"), &external);
+        let _ = write_owned(&root, &root.join("docs/glossary/a.md"), "body", None);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_parent_swapped_after_the_walk_never_loses_an_outside_generated_file_on_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let rel = SEEDED[0];
+        let (folder, name) = rel.split_once('/').unwrap();
+        std::fs::create_dir_all(root.join("docs").join(folder)).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let body = generated("stale");
+        std::fs::write(root.join("docs").join(rel), &body).unwrap();
+        std::fs::write(external.join(name), &body).unwrap();
+        swap_probe::arm(&root.join("docs").join(folder), &external);
+        let _ = seed(&root, &root.join("docs"), None);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.join(name)).unwrap(),
+            body,
+            "the outside file with the same name is still there"
+        );
+    }
+}
