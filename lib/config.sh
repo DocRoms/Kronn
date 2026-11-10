@@ -34,10 +34,47 @@ load_config() {
         SCAN_PATH=$(awk -F'"' '/^scan_path/ {print $2}' "$KRONN_CONFIG_DIR/config.toml" 2>/dev/null || true)
     fi
 
-    # Default: parent directory of the kronn repo.
-    if [[ -z "$SCAN_PATH" ]]; then
+    # Default: parent directory of the kronn repo. A CLI staged in a service
+    # release (current/cli, no Makefile) has no such parent: it is the service
+    # home. SCAN_PATH stays empty there until ensure_scan_path asks once.
+    if [[ -z "$SCAN_PATH" && -f "$KRONN_DIR/Makefile" ]]; then
         SCAN_PATH="$(dirname "${KRONN_DIR}")"
     fi
+}
+
+# What a command that cannot ask says when no repositories directory is set.
+scan_path_missing_hint() {
+    warn "No repositories directory configured."
+    printf "  ${DIM}Run ${BOLD}kronn${RESET}${DIM} and choose \"Continue in CLI\" to set it once.${RESET}\n"
+}
+
+_scan_path_can_ask() { [[ -t 0 ]]; }
+
+# Interactive commands: ask for the repositories directory once and save it to
+# cli.toml. Without a terminal, say so and fail instead of guessing.
+ensure_scan_path() {
+    [[ -n "$SCAN_PATH" ]] && return 0
+    if ! _scan_path_can_ask; then
+        scan_path_missing_hint
+        return 1
+    fi
+    local answer dir _
+    for _ in 1 2 3; do
+        printf "\n${BOLD}Where are your git repositories?${RESET} ${DIM}[%s]${RESET} " "$HOME"
+        IFS= read -r answer || return 1
+        answer="${answer:-$HOME}"
+        # A typed ~ is literal text here: expand it by hand.
+        # shellcheck disable=SC2088
+        [[ "$answer" == "~" || "$answer" == "~/"* ]] && answer="$HOME${answer#\~}"
+        if dir="$(cd "$answer" 2>/dev/null && pwd)"; then
+            SCAN_PATH="$dir"
+            save_config
+            success "Repositories directory saved: $SCAN_PATH"
+            return 0
+        fi
+        warn "Not a directory: $answer"
+    done
+    return 1
 }
 
 # Persist the CLI's chosen scan path + agent — to cli.toml ONLY, never
