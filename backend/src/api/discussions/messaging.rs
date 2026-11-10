@@ -315,6 +315,44 @@ pub(crate) async fn canonical_targets(
     Ok(targets)
 }
 
+/// Drops the requested targets that no longer exist in the discussion: a CLI
+/// session that left, or a connection that was deleted. Returns what is left
+/// and how many were dropped. Used by retry, which resends a turn whose
+/// original targets may be gone; a default-responder fallback is what an empty
+/// result means to `canonical_targets`.
+async fn drop_departed_targets(
+    state: &AppState,
+    discussion_id: &str,
+    requested: Vec<MessageTarget>,
+) -> Result<(Vec<MessageTarget>, u32), String> {
+    let did = discussion_id.to_string();
+    let (sessions, connections) = state
+        .db
+        .with_conn(move |conn| {
+            let sessions = crate::db::discussion_sessions::list_sessions(conn, &did, false)?;
+            let connections = crate::db::external_api_connections::list(conn)?;
+            Ok((sessions, connections))
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let total = requested.len();
+    let kept: Vec<MessageTarget> = requested
+        .into_iter()
+        .filter(|target| match target.kind {
+            MessageTargetKind::DiscussionAgent => true,
+            MessageTargetKind::Agent => target
+                .connection_id
+                .as_deref()
+                .is_none_or(|id| connections.iter().any(|connection| connection.id == id)),
+            MessageTargetKind::Cli => target
+                .cli_session_id
+                .is_some_and(|id| sessions.iter().any(|session| session.id == id)),
+        })
+        .collect();
+    let dropped = u32::try_from(total - kept.len()).unwrap_or(u32::MAX);
+    Ok((kept, dropped))
+}
+
 async fn human_dispatch_route(
     state: &AppState,
     discussion_id: &str,
@@ -944,11 +982,28 @@ pub async fn revise_message(
             .into_response();
     }
 
-    let requested_targets = normalized_targets(
+    let mut requested_targets = normalized_targets(
         request.targets.clone(),
         request.target_agents.clone(),
         request.target_agent.clone(),
     );
+    let mut dropped_targets = 0;
+    if request.drop_departed_targets {
+        match drop_departed_targets(&state, &id, requested_targets).await {
+            Ok((kept, dropped)) => {
+                requested_targets = kept;
+                dropped_targets = dropped;
+            }
+            Err(error) => {
+                tracing::error!("Revise target presence check failed for {id}: {error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::<()>::err("Failed to revise message")),
+                )
+                    .into_response();
+            }
+        }
+    }
     let targets = match canonical_targets(&state, &id, requested_targets, request.target_all).await
     {
         Ok(targets) => targets,
@@ -1085,9 +1140,11 @@ pub async fn revise_message(
         }
     };
 
+    let mut receipt = outcome.receipt.clone();
+    receipt.dropped_targets = dropped_targets;
     let revision_event = Event::default()
         .event("message_revised")
-        .data(serde_json::to_string(&outcome.receipt).unwrap_or_else(|_| "{}".into()));
+        .data(serde_json::to_string(&receipt).unwrap_or_else(|_| "{}".into()));
     if !outcome.receipt.duplicate {
         crate::api::federation::federate_message_revision(&state, &outcome.event).await;
     }
@@ -1183,9 +1240,81 @@ pub async fn run_agent(
         }
     };
     state.agent_dispatch_notify.notify_one();
-    super::runtime::stream_dispatch_job(state, job.id, None)
-        .await
-        .unwrap_or_else(|| sse_events(Vec::new()))
+    let job_id = job.id;
+    if let Some(stream) =
+        super::runtime::stream_dispatch_job(state.clone(), job_id.clone(), None).await
+    {
+        return stream;
+    }
+    // No stream means the job was not claimed here: the dispatcher may have taken
+    // it first, in which case the run is going and `complete` is the truth. But a
+    // job that already failed or was cancelled — a replayed idempotency key, a
+    // refused start — must not read as a finished run (KT-1607).
+    let lookup = job_id.clone();
+    let settled = state
+        .db
+        .with_read_conn(move |conn| crate::db::agent_dispatch::get(conn, &lookup))
+        .await;
+    let events = match settled {
+        Ok(Some(job)) => run_not_started_event(&job).into_iter().collect(),
+        Ok(None) => vec![Event::default().event("error").data(
+            serde_json::json!({ "error": "The agent run was not found", "dispatch_id": job_id })
+                .to_string(),
+        )],
+        Err(error) => {
+            tracing::error!("Unable to read dispatch {job_id} after an unclaimed /run: {error}");
+            Vec::new()
+        }
+    };
+    sse_events(events)
+}
+
+/// The event for a dispatch `/run` could not start. A settled failure (failed,
+/// cancelled, or pending with its attempts used up) is a terminal `error` with
+/// the cause and the dispatch it concerns. A pending job still owed an automatic
+/// retry is NOT a failure — the client treats `error` as terminal, so it gets a
+/// non-terminal `log` event with the reason and the next attempt time instead.
+/// `None` while it is queued, running or done, where the absence of a stream is
+/// not a failure.
+fn run_not_started_event(job: &crate::db::agent_dispatch::AgentDispatchJob) -> Option<Event> {
+    use crate::db::agent_dispatch::{DispatchStatus, MAX_DISPATCH_ATTEMPTS};
+    let last_error = job.last_error.as_deref().filter(|e| !e.trim().is_empty());
+    let reason = match (job.status, last_error) {
+        (DispatchStatus::Failed, Some(error)) => format!("The agent run failed: {error}"),
+        (DispatchStatus::Failed, None) => "The agent run failed without a recorded cause".into(),
+        (DispatchStatus::Cancelled, Some(cause)) => {
+            format!("The agent run was cancelled before it started ({cause})")
+        }
+        (DispatchStatus::Cancelled, None) => "The agent run was cancelled".into(),
+        (DispatchStatus::Pending, Some(error)) if job.attempts >= MAX_DISPATCH_ATTEMPTS => {
+            format!(
+                "The agent run failed after {} attempts: {error}",
+                job.attempts
+            )
+        }
+        (DispatchStatus::Pending, Some(error)) => {
+            let retry = format!(
+                "Retrying: the agent run failed ({error}); next attempt at {}",
+                job.available_at.to_rfc3339()
+            );
+            return Some(
+                Event::default().event("log").data(
+                    serde_json::json!({
+                        "text": retry,
+                        "dispatch_id": job.id,
+                        "retry_at": job.available_at.to_rfc3339(),
+                    })
+                    .to_string(),
+                ),
+            );
+        }
+        _ => return None,
+    };
+    Some(
+        Event::default()
+            .event("error")
+            .data(serde_json::json!({ "error": reason, "dispatch_id": job.id }).to_string()),
+    )
 }
 
 /// POST /api/discussions/:id/agent-dispatches/retry
@@ -2432,6 +2561,7 @@ mod tests {
             target_all: false,
             target_agent: None,
             target_agents: vec![],
+            drop_departed_targets: false,
         };
 
         let first = revise_message(
@@ -2465,6 +2595,308 @@ mod tests {
         )
         .await;
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
+
+    /// A joined MCP peer, one User turn addressed to it and one trailing reply.
+    /// Returns the peer's session id and the turn's revision.
+    async fn seed_peer_turn_with_reply(
+        state: &AppState,
+        disc: &'static str,
+        user_id: &'static str,
+    ) -> (i64, String) {
+        let session_id = state
+            .db
+            .with_conn(move |conn| {
+                let session_id = crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("live-retry-peer"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("live-retry-peer"),
+                    "listening",
+                    300,
+                )?;
+                let message = |id: &str, role: MessageRole, agent_type: Option<AgentType>| {
+                    DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
+                        session_continuity: None,
+                        kind: Default::default(),
+                        id: id.into(),
+                        role,
+                        channel: MessageChannel::Main,
+                        content: "review this diff".into(),
+                        timestamp: Utc::now(),
+                        model: None,
+                        lint_report: None,
+                        agent_type,
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
+                    }
+                };
+                crate::db::discussions::insert_message(
+                    conn,
+                    disc,
+                    &message(user_id, MessageRole::User, None),
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    user_id,
+                    &[MessageTarget::cli(AgentType::ClaudeCode, session_id)],
+                )?;
+                crate::db::discussions::insert_message(
+                    conn,
+                    disc,
+                    &message(
+                        "peer-reply",
+                        MessageRole::Agent,
+                        Some(AgentType::ClaudeCode),
+                    ),
+                )?;
+                Ok(session_id)
+            })
+            .await
+            .unwrap();
+        let revision = state
+            .db
+            .with_conn(move |conn| {
+                let messages = crate::db::discussions::list_messages(conn, disc)?;
+                let turn = messages
+                    .iter()
+                    .find(|message| message.id == user_id)
+                    .expect("seeded turn");
+                Ok(serde_json::to_value(turn)?["timestamp"]
+                    .as_str()
+                    .expect("serialized message timestamp")
+                    .to_string())
+            })
+            .await
+            .unwrap();
+        (session_id, revision)
+    }
+
+    async fn count_rows(state: &AppState, table: &'static str, disc: &'static str) -> i64 {
+        state
+            .db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE discussion_id = ?1"),
+                    [disc],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// KT-1598 — "Retry" is a revision of the last User turn, not a DELETE
+    /// followed by an unguarded run. With a joined MCP peer owning the turn it
+    /// archives the reply, publishes a revision event and starts no local CLI:
+    /// no dispatch job exists and the stream carries nothing but the receipt.
+    #[tokio::test]
+    async fn retry_through_revise_with_a_live_mcp_peer_starts_no_local_cli() {
+        let disc = "d-retry-peer";
+        let state = make_state_with_disc(disc).await;
+        let (session_id, revision) = seed_peer_turn_with_reply(&state, disc, "u-retry-peer").await;
+
+        let response = revise_message(
+            State(state.clone()),
+            Path(disc.into()),
+            Json(ReviseMessageRequest {
+                message_id: "u-retry-peer".into(),
+                content: "review this diff".into(),
+                expected_revision: revision,
+                idempotency_key: Uuid::new_v4().to_string(),
+                targets: vec![MessageTarget::cli(AgentType::ClaudeCode, session_id)],
+                target_all: false,
+                target_agent: None,
+                target_agents: vec![],
+                drop_departed_targets: false,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_to_string(response).await;
+        assert!(body.contains("event: message_revised"), "{body}");
+        assert!(body.contains("\"dispatch_job_id\":null"), "{body}");
+        assert!(
+            !body.contains("event: start") && !body.contains("event: chunk"),
+            "no local agent may stream: {body}"
+        );
+
+        assert_eq!(
+            count_rows(&state, "agent_dispatch_jobs", disc).await,
+            0,
+            "a peer-owned retry must not enqueue a local dispatch"
+        );
+        assert_eq!(count_rows(&state, "message_revision_events", disc).await, 1);
+        assert_eq!(
+            count_rows(&state, "message_tombstones", disc).await,
+            1,
+            "the superseded reply is tombstoned, not just deleted"
+        );
+        assert_eq!(
+            count_rows(&state, "messages", disc).await,
+            1,
+            "only the retried turn stays in the live projection"
+        );
+    }
+
+    /// KT-1598 — a retry whose original peer has since left the room must not
+    /// dead-end: the departed target is dropped, the default responder takes
+    /// the turn (a durable local dispatch) and the receipt says a target was
+    /// dropped so the UI can tell the user.
+    #[tokio::test]
+    async fn retry_drops_a_departed_target_and_falls_back_to_the_default_responder() {
+        let disc = "d-retry-departed";
+        let state = make_state_with_disc(disc).await;
+        let (session_id, revision) =
+            seed_peer_turn_with_reply(&state, disc, "u-retry-departed").await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::mark_session_left(conn, session_id)
+            })
+            .await
+            .unwrap();
+
+        let request = |drop_departed_targets: bool| ReviseMessageRequest {
+            message_id: "u-retry-departed".into(),
+            content: "review this diff".into(),
+            expected_revision: revision.clone(),
+            idempotency_key: Uuid::new_v4().to_string(),
+            targets: vec![MessageTarget::cli(AgentType::ClaudeCode, session_id)],
+            target_all: false,
+            target_agent: None,
+            target_agents: vec![],
+            drop_departed_targets,
+        };
+
+        // An explicit edit stays strict: naming a departed peer is refused.
+        let strict = revise_message(
+            State(state.clone()),
+            Path(disc.into()),
+            Json(request(false)),
+        )
+        .await;
+        assert_eq!(strict.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(count_rows(&state, "message_revision_events", disc).await, 0);
+
+        let response =
+            revise_message(State(state.clone()), Path(disc.into()), Json(request(true))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_to_string(response).await;
+        assert!(body.contains("event: message_revised"), "{body}");
+        assert!(body.contains("\"dropped_targets\":1"), "{body}");
+        assert_eq!(
+            count_rows(&state, "agent_dispatch_jobs", disc).await,
+            1,
+            "the default responder takes the turn through a durable dispatch"
+        );
+        assert_eq!(
+            count_rows(&state, "message_tombstones", disc).await,
+            1,
+            "the superseded reply is still tombstoned"
+        );
+    }
+
+    /// KT-1598 — retry while a reply is already running is a 409 whose body
+    /// says so, so the UI can show "a reply is already running".
+    #[tokio::test]
+    async fn retry_while_a_dispatch_is_active_is_a_409_naming_the_running_reply() {
+        let disc = "d-retry-busy";
+        let state = make_state_with_disc(disc).await;
+        let (_, revision) = seed_peer_turn_with_reply(&state, disc, "u-retry-busy").await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::replace_message_targets(conn, "u-retry-busy", &[])?;
+                let transaction = conn.unchecked_transaction()?;
+                enqueue_dispatches_for_trigger(&transaction, disc, "u-retry-busy", 1, "k-busy")?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = revise_message(
+            State(state.clone()),
+            Path(disc.into()),
+            Json(ReviseMessageRequest {
+                message_id: "u-retry-busy".into(),
+                content: "review this diff".into(),
+                expected_revision: revision,
+                idempotency_key: Uuid::new_v4().to_string(),
+                targets: vec![],
+                target_all: false,
+                target_agent: None,
+                target_agents: vec![],
+                drop_departed_targets: true,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_body_to_string(response).await;
+        assert!(body.contains("already in progress"), "{body}");
+        assert_eq!(count_rows(&state, "message_revision_events", disc).await, 0);
+    }
+
+    /// KT-1598 — `/run` is the explicit force-retry escape hatch. It takes a
+    /// durable local-runner obligation (a pending `force:` dispatch bound to
+    /// the latest User turn) instead of launching a bare stream.
+    #[tokio::test]
+    async fn forced_run_takes_a_durable_runner_obligation() {
+        let disc = "d-force-obligation";
+        let state = make_state_with_disc(disc).await;
+        let _ = seed_peer_turn_with_reply(&state, disc, "u-force").await;
+        state
+            .db
+            .with_conn(move |conn| {
+                // A native turn: the discussion agent owns it, not the peer.
+                crate::db::discussions::replace_message_targets(conn, "u-force", &[])?;
+                let transaction = conn.unchecked_transaction()?;
+                let jobs = enqueue_dispatches_for_trigger(&transaction, disc, "u-force", 1, "k-1")?;
+                transaction.commit()?;
+                assert_eq!(jobs.len(), 1);
+                assert_eq!(jobs[0].trigger_message_id, "u-force");
+                assert!(jobs[0].dedupe_key.starts_with("force:k-1:"), "{jobs:?}");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(count_rows(&state, "agent_dispatch_jobs", disc).await, 1);
+    }
+
+    /// The same escape hatch on a turn owned by a joined peer must not start a
+    /// local CLI either: it takes no obligation and streams nothing.
+    #[tokio::test]
+    async fn forced_run_on_a_peer_owned_turn_starts_no_local_cli() {
+        let disc = "d-force-peer";
+        let state = make_state_with_disc(disc).await;
+        let _ = seed_peer_turn_with_reply(&state, disc, "u-force-peer").await;
+
+        let response = run_agent(State(state.clone()), Path(disc.into()), None).await;
+        let body = sse_body_to_string(response).await;
+        assert!(
+            !body.contains("event: start") && !body.contains("event: chunk"),
+            "{body}"
+        );
+        assert_eq!(count_rows(&state, "agent_dispatch_jobs", disc).await, 0);
     }
 
     #[tokio::test]
@@ -3319,6 +3751,165 @@ mod tests {
         assert_eq!(
             awaiting, 0,
             "failed preflight must not leave the disc marked as owed a run"
+        );
+    }
+
+    /// KT-1607 — `/run` on a dispatch that already failed (here a replayed
+    /// idempotency key) used to answer a bare `complete`, which read as a run
+    /// that finished. It must say the run failed and why.
+    #[tokio::test]
+    async fn run_on_a_failed_dispatch_reports_the_failure_not_a_bare_complete() {
+        let disc = "d-run-replay";
+        let key = Uuid::new_v4().to_string();
+        let state = make_state_with_disc(disc).await;
+        let dedupe_key = format!("force:{key}:0:discussion-agent:default");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_message(
+                    conn,
+                    disc,
+                    &DiscussionMessage {
+                        recovered_partial: false,
+                        session_tokens_at_message: None,
+                        author_cli_ordinal: None,
+                        session_continuity: None,
+                        kind: Default::default(),
+                        id: "user-run-replay".into(),
+                        role: MessageRole::User,
+                        channel: MessageChannel::Main,
+                        content: "review this diff".into(),
+                        timestamp: Utc::now(),
+                        model: None,
+                        lint_report: None,
+                        agent_type: None,
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "job-run-replay",
+                        discussion_id: disc,
+                        dedupe_key: &dedupe_key,
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::mark_failed(
+                    conn,
+                    "job-run-replay",
+                    "HTTP 413 from the provider",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = run_agent(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Some(Json(RunAgentRequest {
+                idempotency_key: Some(key),
+            })),
+        )
+        .await;
+        let body = sse_body_to_string(resp).await;
+        assert!(
+            body.contains("event: error"),
+            "must report an error: {body}"
+        );
+        assert!(body.contains("HTTP 413 from the provider"), "{body}");
+        assert!(body.contains("job-run-replay"), "{body}");
+    }
+
+    /// The counterpart: a dispatch that is merely queued or running is not a
+    /// failure, so the absence of a stream there stays a plain `complete`.
+    #[tokio::test]
+    async fn a_queued_or_running_dispatch_is_not_reported_as_a_failed_run() {
+        use crate::db::agent_dispatch::{AgentDispatchJob, DispatchStatus, MAX_DISPATCH_ATTEMPTS};
+        let job_after = |status, last_error: Option<&str>, attempts: u32| {
+            let now = Utc::now();
+            AgentDispatchJob {
+                id: "j".into(),
+                discussion_id: "d".into(),
+                trigger_message_id: "m".into(),
+                trigger_sort_order: 1,
+                dedupe_key: "k".into(),
+                agent_override: None,
+                chain_prompt_ids: Vec::new(),
+                next_chain_index: 0,
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+                status,
+                attempts,
+                turn_attempts: 0,
+                available_at: now,
+                claimed_at: None,
+                agent_started_at: None,
+                completed_at: None,
+                last_error: last_error.map(str::to_string),
+                failure_kind: None,
+                watchdog_redispatches: 0,
+                created_at: now,
+                updated_at: now,
+                progress_phase: None,
+                progress_detail: None,
+                last_progress_at: None,
+                connection_id: None,
+            }
+        };
+        let job = |status, last_error: Option<&str>| job_after(status, last_error, 0);
+        assert!(run_not_started_event(&job(DispatchStatus::Running, None)).is_none());
+        assert!(run_not_started_event(&job(DispatchStatus::Pending, None)).is_none());
+        assert!(run_not_started_event(&job(DispatchStatus::Completed, None)).is_none());
+        assert!(run_not_started_event(&job(DispatchStatus::Failed, None)).is_some());
+        assert!(run_not_started_event(&job(DispatchStatus::Cancelled, None)).is_some());
+        // What the client actually receives, `complete` included.
+        let wire = |event: Event| sse_body_to_string(sse_events(vec![event]));
+        // Failed and cancelled are settled: a terminal `error`.
+        for settled in [DispatchStatus::Failed, DispatchStatus::Cancelled] {
+            let body = wire(run_not_started_event(&job(settled, Some("boom"))).unwrap()).await;
+            assert!(body.contains("event: error"), "{body}");
+        }
+        // Pending with attempts left is waiting for its automatic retry: the
+        // client treats `error` as terminal, so it must NOT be one.
+        let retrying = job_after(
+            DispatchStatus::Pending,
+            Some("boom"),
+            MAX_DISPATCH_ATTEMPTS - 1,
+        );
+        let body = wire(run_not_started_event(&retrying).unwrap()).await;
+        assert!(
+            !body.contains("event: error"),
+            "retry-pending is not an error: {body}"
+        );
+        assert!(body.contains("event: log"), "{body}");
+        assert!(body.contains("Retrying") && body.contains("boom"), "{body}");
+        assert!(body.contains("retry_at"), "{body}");
+        // Pending with the attempts used up will never retry: settled failure.
+        let exhausted = job_after(DispatchStatus::Pending, Some("boom"), MAX_DISPATCH_ATTEMPTS);
+        let body = wire(run_not_started_event(&exhausted).unwrap()).await;
+        assert!(
+            body.contains("event: error"),
+            "exhausted is an error: {body}"
+        );
+        assert!(
+            body.contains("boom") && !body.contains("event: log"),
+            "{body}"
         );
     }
 

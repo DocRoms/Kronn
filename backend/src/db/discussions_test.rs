@@ -192,6 +192,35 @@ mod tests {
     /// left to tell a queued agent from a working one. The flag is read by
     /// column position and a miss is swallowed as `false` — the very state that
     /// used to show an hourglass over a running job — so pin both ends.
+    /// KT-1656 — what an agent prints of a credential file is stored masked;
+    /// what a human wrote is kept as written.
+    #[test]
+    fn an_agent_message_quoting_a_credential_file_is_stored_masked() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-secret")).unwrap();
+        let file = r#"{"mcpServers": {"github": {"env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "t0kenNotShapedLikeAVendor01", "LOG_LEVEL": "debug"}}}}"#;
+        let quoted = format!("`cat ~/.gemini/settings.json` shows:\n```json\n{file}\n```");
+
+        let mut agent = make_message("m-agent", MessageRole::Agent, Some(AgentType::ClaudeCode));
+        agent.content = quoted.clone();
+        insert_message(&conn, "d-secret", &agent).unwrap();
+        let mut human = make_message("m-human", MessageRole::User, None);
+        human.content = quoted.clone();
+        insert_message(&conn, "d-secret", &human).unwrap();
+
+        let stored = |id: &str| -> String {
+            conn.query_row("SELECT content FROM messages WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        let agent = stored("m-agent");
+        assert!(!agent.contains("t0kenNotShapedLikeAVendor01"), "{agent}");
+        assert!(agent.contains("\"LOG_LEVEL\": \"debug\""), "{agent}");
+        assert!(agent.contains("`cat ~/.gemini/settings.json` shows:"));
+        assert_eq!(stored("m-human"), quoted);
+    }
+
     #[test]
     fn list_tells_a_running_agent_from_a_queued_one() {
         use crate::db::agent_dispatch::{self, NewAgentDispatchJob};
@@ -579,34 +608,6 @@ mod tests {
         assert!(!deleted);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // delete_last_agent_messages
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn delete_last_agent_messages_removes_agent_and_system() {
-        let conn = test_conn();
-        insert_discussion(&conn, &make_discussion("d1")).unwrap();
-
-        // User -> Agent -> System (trailing non-user messages)
-        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
-        insert_message(
-            &conn,
-            "d1",
-            &make_message("m2", MessageRole::Agent, Some(AgentType::ClaudeCode)),
-        )
-        .unwrap();
-        insert_message(&conn, "d1", &make_message("m3", MessageRole::System, None)).unwrap();
-
-        let deleted = delete_last_agent_messages(&conn, "d1").unwrap();
-        assert_eq!(deleted, 2);
-
-        let messages = list_messages(&conn, "d1").unwrap();
-        assert_eq!(messages.len(), 1);
-        assert!(matches!(messages[0].role, MessageRole::User));
-        assert_eq!(messages[0].id, "m1");
-    }
-
     /// KT-58 — a structured `@agent` mention used to vanish into the dispatch
     /// job: the message row kept no trace of who it was addressed to, so no
     /// reader could tell "names @codex" from "awaits @codex". The target is now
@@ -662,7 +663,14 @@ mod tests {
             .unwrap(),
             2
         );
-        assert_eq!(delete_last_agent_messages(&conn, "d-sequence").unwrap(), 1);
+        assert_eq!(
+            conn.execute(
+                "DELETE FROM messages WHERE discussion_id = 'd-sequence' AND role = 'Agent'",
+                [],
+            )
+            .unwrap(),
+            1
+        );
         assert_eq!(
             insert_message(
                 &conn,
@@ -716,60 +724,6 @@ mod tests {
         let conn = Connection::open(path).unwrap();
         let stored = list_messages(&conn, "d-concurrent-sequence").unwrap();
         assert_eq!(stored.len(), writers);
-    }
-
-    #[test]
-    fn delete_last_agent_messages_preserves_earlier_agent_messages() {
-        let conn = test_conn();
-        insert_discussion(&conn, &make_discussion("d1")).unwrap();
-
-        // User -> Agent -> User -> Agent (only the last Agent after last User should go)
-        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
-        insert_message(
-            &conn,
-            "d1",
-            &make_message("m2", MessageRole::Agent, Some(AgentType::ClaudeCode)),
-        )
-        .unwrap();
-        insert_message(&conn, "d1", &make_message("m3", MessageRole::User, None)).unwrap();
-        insert_message(
-            &conn,
-            "d1",
-            &make_message("m4", MessageRole::Agent, Some(AgentType::ClaudeCode)),
-        )
-        .unwrap();
-
-        let deleted = delete_last_agent_messages(&conn, "d1").unwrap();
-        assert_eq!(deleted, 1); // Only m4
-
-        let messages = list_messages(&conn, "d1").unwrap();
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].id, "m1");
-        assert_eq!(messages[1].id, "m2");
-        assert_eq!(messages[2].id, "m3");
-    }
-
-    #[test]
-    fn delete_last_agent_messages_no_user_messages_is_a_safe_noop() {
-        let conn = test_conn();
-        insert_discussion(&conn, &make_discussion("d1")).unwrap();
-
-        // Only agent messages, no user messages
-        insert_message(
-            &conn,
-            "d1",
-            &make_message("m1", MessageRole::Agent, Some(AgentType::ClaudeCode)),
-        )
-        .unwrap();
-        insert_message(&conn, "d1", &make_message("m2", MessageRole::System, None)).unwrap();
-
-        let deleted = delete_last_agent_messages(&conn, "d1").unwrap();
-        assert_eq!(deleted, 0);
-
-        let messages = list_messages(&conn, "d1").unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].id, "m1");
-        assert_eq!(messages[1].id, "m2");
     }
 
     #[test]
@@ -849,38 +803,6 @@ mod tests {
             job.status,
             crate::db::agent_dispatch::DispatchStatus::Pending
         );
-    }
-
-    #[test]
-    fn delete_last_agent_messages_nothing_to_delete() {
-        let conn = test_conn();
-        insert_discussion(&conn, &make_discussion("d1")).unwrap();
-
-        // Only a user message at the end
-        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
-
-        let deleted = delete_last_agent_messages(&conn, "d1").unwrap();
-        assert_eq!(deleted, 0);
-
-        let messages = list_messages(&conn, "d1").unwrap();
-        assert_eq!(messages.len(), 1);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // edit_last_user_message
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn edit_last_user_message_updates_content() {
-        let conn = test_conn();
-        insert_discussion(&conn, &make_discussion("d1")).unwrap();
-        insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
-
-        let edited = edit_last_user_message(&conn, "d1", "new content").unwrap();
-        assert!(edited);
-
-        let messages = list_messages(&conn, "d1").unwrap();
-        assert_eq!(messages[0].content, "new content");
     }
 
     #[test]
@@ -3984,6 +3906,7 @@ mod tests {
                 image_model: None,
                 video_model: None,
                 decision_model: None,
+                tools_enabled: None,
                 media_endpoint: None,
             },
         )

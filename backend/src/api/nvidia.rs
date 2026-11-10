@@ -425,6 +425,7 @@ mod tests {
         // never written, so a configured NVIDIA endpoint was ignored and the
         // public default silently won. A provider must never see another's.
         let endpoints = HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some("http://proxy.internal:4000".into()),
             nvidia: Some("https://nim.internal:8000".into()),
         };
@@ -447,6 +448,7 @@ mod tests {
         // And an unset slot stays unset rather than borrowing the other one,
         // so the fallback is the provider's own default.
         let only_proxy = HttpEndpoints {
+            tools: Default::default(),
             lite_llm: Some("http://proxy.internal:4000".into()),
             nvidia: None,
         };

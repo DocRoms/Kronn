@@ -138,7 +138,7 @@ describe('api module', () => {
 
     it('discussions has expected methods', async () => {
       const { discussions } = await getApi();
-      const expected = ['list', 'get', 'create', 'delete', 'update', '_streamSSE', 'sendMessageStream', 'reviseMessageStream', 'runAgent', 'orchestrate', 'deleteLastAgentMessages', 'deleteMessage', 'editLastUserMessage'];
+      const expected = ['list', 'get', 'create', 'delete', 'update', '_streamSSE', 'sendMessageStream', 'reviseMessageStream', 'runAgent', 'orchestrate', 'deleteMessage'];
       for (const method of expected) {
         expect(typeof (discussions as Record<string, unknown>)[method]).toBe('function');
       }
