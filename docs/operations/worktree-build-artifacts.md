@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1141-1205#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:5771-5828#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:5976-6072#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:5775-5792#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:6200-6266#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:6177-6234#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:6382-6478#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:6181-6198#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:6606-6672#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -246,8 +246,8 @@ temporary evidence directory. [src: file: docs/releases/0.13.0-rust-profile-benc
 This measurement completes the profile comparison, not release qualification.
 The combined unfiltered backend, frontend, Python, shell, desktop and browser
 gates remain separate requirements; backend tests must run against their own
-data directory, never the real install. [src: file: docs/testing-quality.md:44-62#test-backend] [src: file: docs/testing-quality.md:98-100#ci-test.yml]
-[src: file: docs/testing-quality.md:70-75#KRONN_DATA_DIR]
+data directory, never the real install. [src: file: docs/testing-quality.md:44-62#test-backend] [src: file: docs/testing-quality.md:102-104#ci-test.yml]
+[src: file: docs/testing-quality.md:78-83#KRONN_DATA_DIR]
 
 ## Background priority of workers and validations (KT-1633)
 
@@ -311,11 +311,11 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/background_priority.rs:104-133#background_priority]
 [src: file: backend/src/core/background_priority.rs:168-182#plan_here]
 [src: file: backend/src/core/background_priority.rs:283-286#check_launcher_at_boot]
-[src: file: backend/src/core/cmd.rs:334-345#async_cmd_with]
-[src: file: backend/src/core/cmd.rs:370-379#sync_cmd_with]
+[src: file: backend/src/core/cmd.rs:359-370#async_cmd_with]
+[src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
 [src: file: backend/src/core/task_worker_env.rs:719-719#ProbeCommand.priority]
 [src: file: backend/src/core/task_worker_lane_warm.rs:782-782#first-build-priority]
-[src: file: backend/src/agents/runner.rs:14312-14321#agent_launch_priority]
+[src: file: backend/src/agents/runner.rs:14350-14359#agent_launch_priority]
 [src: file: backend/src/core/quick_exec.rs:516-540#build_command]
 [src: file: backend/src/workflows/steps.rs:1393-1393#agent-step-priority]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]

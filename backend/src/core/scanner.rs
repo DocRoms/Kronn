@@ -1252,7 +1252,7 @@ mod tests {
         assert_eq!(status, crate::models::AiAuditStatus::NoTemplate);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlinked_override_reads_nothing_and_writes_nothing() {
         let tmp = tempfile::TempDir::new().unwrap();

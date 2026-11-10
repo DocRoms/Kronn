@@ -793,7 +793,7 @@ mod tests {
         assert!(root.path().join(".claude/skills/review").is_dir());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn a_symbolic_link_blocks_its_skill_and_nothing_follows_it() {
         let root = tempfile::tempdir().unwrap();
@@ -850,7 +850,7 @@ mod tests {
         assert!(!root.path().join(".agents/skills/leaked").exists());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn a_symlinked_target_is_never_written_through() {
         let root = tempfile::tempdir().unwrap();
@@ -867,7 +867,7 @@ mod tests {
         assert!(root.path().join(".claude/skills/review/SKILL.md").is_file());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn a_moved_script_keeps_its_executable_bit() {
         use std::os::unix::fs::PermissionsExt;

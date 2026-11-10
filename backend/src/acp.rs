@@ -3678,7 +3678,7 @@ mod tests {
     /// what OpenCode's `read` permission request carries), is refused, goes on
     /// with its turn and ends it reporting what it consumed. Before, the refusal
     /// ended the turn and the step with it, and the usage was never read.
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     async fn a_refused_read_does_not_end_the_turn_and_the_turn_reports_its_usage() {
@@ -3767,7 +3767,7 @@ mod tests {
 
     /// A non-UTF-8 byte on the agent's stdout costs one discarded frame, not
     /// the session: the dispatcher keeps reading and answers the next request.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_non_utf8_stdout_line_does_not_end_the_session() {
         let peer = r#"
@@ -3794,7 +3794,7 @@ for line in sys.stdin:
 
     /// KT-927 — stopping the agent stops what it started. Killing the ACP child
     /// alone left its shell commands running.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn shutdown_stops_the_processes_the_agent_started_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -3976,7 +3976,7 @@ for line in sys.stdin:
 
     /// KT-1158 — the live dispatcher reads Vibe's tool-call update before the
     /// permission request naming only its call id, and answers it from it.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn dispatcher_identifies_a_vibe_bridge_call_from_the_update_that_announced_it() {
         const VIBE_FIXTURE: &str = r#"
@@ -4416,7 +4416,7 @@ while True:
     /// DoD — abandonment: a transport dropped after a REJECTED negotiation must
     /// not leave its process behind. The fixture ignores stdin EOF, so only
     /// real process ownership can end it.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn a_rejected_negotiation_dropped_terminates_the_owned_fixture() {
         let link = FixtureLink::new();
@@ -4448,7 +4448,7 @@ while True:
     }
 
     /// DoD — idempotent reap: two shutdowns succeed, and the process is gone.
-    #[cfg(unix)]
+    #[cfg(unix)] // relies on POSIX process groups and signals
     #[tokio::test]
     async fn shutdown_is_idempotent_and_reaps_the_owned_fixture() {
         let link = FixtureLink::new();

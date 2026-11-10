@@ -507,6 +507,14 @@ pub async fn worktree_unlock(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    // KT-1645 — a review has no branch to re-lock, and without its worktree its
+    // agent would have only the project's main checkout left.
+    if disc.workspace_mode == crate::core::worktree::REVIEW_WORKSPACE_MODE {
+        return Json(ApiResponse::err(
+            "A review's worktree cannot be unlocked: delete the discussion to remove it",
+        ));
+    }
+
     let wp = match &disc.workspace_path {
         Some(p) if p.contains(".kronn/worktrees") || p.contains(".kronn-worktrees") => p.clone(),
         Some(_) => return Json(ApiResponse::err("Workspace is not a worktree")),

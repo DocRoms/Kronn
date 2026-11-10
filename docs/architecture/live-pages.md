@@ -608,10 +608,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1189-1212#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:13462-13651#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:14766-14808#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:15003-15045#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:14947-15017#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:14012-14201#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:15316-15358#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:15553-15595#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:15497-15567#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for

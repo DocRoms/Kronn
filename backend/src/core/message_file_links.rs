@@ -341,7 +341,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_symlink_cannot_smuggle_a_file_from_outside_the_root() {
         let allowed = tempfile::tempdir().unwrap();
@@ -415,7 +415,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn sensitive_aliases_are_refused_before_symlink_resolution() {
         let root = tempfile::tempdir().unwrap();

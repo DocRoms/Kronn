@@ -3,8 +3,11 @@
 //! request that carries no valid single-use proof, loopback and bridge token
 //! included; without an enrolment nothing changes; a grant is bound to one call.
 //!
-//! Each test sets `KRONN_DATA_DIR` for its process (the suite runs under
-//! nextest, one process per test).
+//! `Harness::new` sets `KRONN_DATA_DIR`, a process-global the routes read, so
+//! each test runs in its own process: nextest gives it one, and plain
+//! `cargo test` gets it from `own_process::delegated` at the top of the test
+//! (KT-1608). Without it the tests of this module, run as threads, overwrite
+//! each other's data directory and 19 of 25 fail.
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -221,6 +224,12 @@ fn families() -> Vec<(&'static str, &'static str, Option<Value>)> {
 /// bridge-less loopback agent alike.
 #[tokio::test]
 async fn enrolled_every_protected_route_family_refuses_a_request_without_a_valid_proof() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "enrolled_every_protected_route_family_refuses_a_request_without_a_valid_proof",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     for (method, path, body) in families() {
         let (status, refused) = harness.send(req(method, path, body.clone())).await;
@@ -250,6 +259,12 @@ async fn enrolled_every_protected_route_family_refuses_a_request_without_a_valid
 /// answers, the handler does.
 #[tokio::test]
 async fn without_an_enrolment_no_route_asks_for_a_proof() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "without_an_enrolment_no_route_asks_for_a_proof",
+    ) {
+        return;
+    }
     let harness = Harness::new(false).await;
     for (method, path, body) in families() {
         if path == "/api/setup/reset" || path.ends_with("/auth-token/regenerate") {
@@ -276,6 +291,12 @@ async fn without_an_enrolment_no_route_asks_for_a_proof() {
 /// family named by the owner, plus the other everyday ones.
 #[tokio::test]
 async fn an_everyday_deletion_goes_through_even_when_enrolled() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "an_everyday_deletion_goes_through_even_when_enrolled",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     for path in [
         // a discussion, a message
@@ -321,6 +342,12 @@ async fn an_everyday_deletion_goes_through_even_when_enrolled() {
 /// enrolled or not; it keeps its local-or-token gate.
 #[tokio::test]
 async fn a_maintenance_route_goes_through_even_when_enrolled() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_maintenance_route_goes_through_even_when_enrolled",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     for (method, path, body) in [
         ("POST", "/api/debug/logs/clear", Some(json!({}))),
@@ -371,6 +398,12 @@ async fn a_maintenance_route_goes_through_even_when_enrolled() {
 /// config.toml, human credential).
 #[tokio::test]
 async fn a_sensitive_deletion_needs_the_proof_each_family() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_sensitive_deletion_needs_the_proof_each_family",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let sensitive: Vec<_> = families()
         .into_iter()
@@ -396,6 +429,12 @@ async fn a_sensitive_deletion_needs_the_proof_each_family() {
 /// and object, journalled with its channel.
 #[tokio::test]
 async fn a_code_in_the_header_is_spent_on_one_route_and_one_object() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_code_in_the_header_is_spent_on_one_route_and_one_object",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let code = harness.codes[0].clone();
 
@@ -433,6 +472,12 @@ async fn a_code_in_the_header_is_spent_on_one_route_and_one_object() {
 /// neither locks the confirmation nor fills the journal.
 #[tokio::test]
 async fn a_request_without_any_code_is_not_a_failed_guess() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_request_without_any_code_is_not_a_failed_guess",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     for _ in 0..8 {
         let (status, refused) = harness.send(req("DELETE", "/api/projects/p1", None)).await;
@@ -447,6 +492,12 @@ async fn a_request_without_any_code_is_not_a_failed_guess() {
 /// Five wrong codes lock the confirmation, for every route.
 #[tokio::test]
 async fn five_wrong_codes_lock_every_protected_route() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "five_wrong_codes_lock_every_protected_route",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     for _ in 0..4 {
         let (status, refused) = harness
@@ -478,6 +529,9 @@ async fn five_wrong_codes_lock_every_protected_route() {
 /// The body field carries the code too, for a caller that cannot set a header.
 #[tokio::test]
 async fn a_body_field_carries_the_code() {
+    if crate::own_process::delegated(module_path!(), "a_body_field_carries_the_code") {
+        return;
+    }
     let harness = Harness::new(true).await;
     let (status, done) = harness
         .send(req(
@@ -501,6 +555,12 @@ async fn a_body_field_carries_the_code() {
 /// code, the grant is for one call only and is spent by its first use.
 #[tokio::test]
 async fn a_grant_needs_the_code_and_serves_one_call_once() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_grant_needs_the_code_and_serves_one_call_once",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let ask = |code: Option<&str>, path: &str| {
         let mut body = json!({"method": "DELETE", "path": path});
@@ -552,6 +612,9 @@ async fn a_grant_needs_the_code_and_serves_one_call_once() {
 /// Without an enrolment there is nothing to prove: no grant is sold.
 #[tokio::test]
 async fn no_grant_is_minted_without_an_enrolment() {
+    if crate::own_process::delegated(module_path!(), "no_grant_is_minted_without_an_enrolment") {
+        return;
+    }
     let harness = Harness::new(false).await;
     let (status, refused) = harness
         .send(req(
@@ -576,6 +639,12 @@ fn bridge() -> kronn::core::bridge_token::BridgeTokenGuard {
 /// carries a valid code (the owner gave it); nothing enrolled, nothing accepted.
 #[tokio::test]
 async fn a_bridge_token_reaches_a_protected_route_only_with_a_valid_code() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_bridge_token_reaches_a_protected_route_only_with_a_valid_code",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let guard = bridge();
     let token = guard.value().to_owned();
@@ -637,6 +706,12 @@ async fn a_bridge_token_reaches_a_protected_route_only_with_a_valid_code() {
 /// the setting says; and a bridge token keeps the gate when the setting is off.
 #[tokio::test]
 async fn lane_seeds_ask_for_the_code_unless_the_owner_released_them() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "lane_seeds_ask_for_the_code_unless_the_owner_released_them",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let seeds = || {
         req(
@@ -721,6 +796,12 @@ async fn lane_seeds_ask_for_the_code_unless_the_owner_released_them() {
 /// With no enrolment a bridge token carrying a code is still refused, as today.
 #[tokio::test]
 async fn a_bridge_token_with_a_code_stays_refused_when_nothing_is_enrolled() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_bridge_token_with_a_code_stays_refused_when_nothing_is_enrolled",
+    ) {
+        return;
+    }
     let harness = Harness::new(false).await;
     let guard = bridge();
     let (status, refused) = harness
@@ -736,6 +817,9 @@ async fn a_bridge_token_with_a_code_stays_refused_when_nothing_is_enrolled() {
 /// Conditional routes ask only when the call is sensitive.
 #[tokio::test]
 async fn a_bundle_export_asks_only_with_values() {
+    if crate::own_process::delegated(module_path!(), "a_bundle_export_asks_only_with_values") {
+        return;
+    }
     let harness = Harness::new(true).await;
     let (status, answer) = harness
         .send(req(
@@ -782,6 +866,12 @@ fn quick_exec(approved: bool) -> Value {
 /// A token-less loopback agent cannot approve its own command.
 #[tokio::test]
 async fn a_quick_exec_asks_for_the_proof_when_it_sets_the_human_approval() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_quick_exec_asks_for_the_proof_when_it_sets_the_human_approval",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let (status, answer) = harness
         .send(req("POST", "/api/quick-execs", Some(quick_exec(false))))
@@ -820,6 +910,12 @@ async fn a_quick_exec_asks_for_the_proof_when_it_sets_the_human_approval() {
 /// Stored credentials go to the base URL: changing it asks, saving the same one does not.
 #[tokio::test]
 async fn a_custom_plugin_asks_when_its_base_url_changes() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_custom_plugin_asks_when_its_base_url_changes",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let spec = kronn::models::ApiSpec {
         base_url: "https://old.example/v1".into(),
@@ -878,6 +974,12 @@ async fn a_custom_plugin_asks_when_its_base_url_changes() {
 /// Same for the endpoint of an external API connection.
 #[tokio::test]
 async fn an_external_connection_asks_when_its_endpoint_changes() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "an_external_connection_asks_when_its_endpoint_changes",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let now = chrono::Utc::now();
     let connection = kronn::models::ExternalApiConnection {
@@ -933,6 +1035,12 @@ async fn an_external_connection_asks_when_its_endpoint_changes() {
 /// the enrolment: project commands would read the vault from there.
 #[tokio::test]
 async fn a_project_path_overlapping_the_data_dir_is_refused_enrolled_or_not() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "a_project_path_overlapping_the_data_dir_is_refused_enrolled_or_not",
+    ) {
+        return;
+    }
     for enrolled in [false, true] {
         let harness = Harness::new(enrolled).await;
         let inside = harness.data.path().join("projects");
@@ -963,6 +1071,12 @@ async fn a_project_path_overlapping_the_data_dir_is_refused_enrolled_or_not() {
 /// loopback-only gate used to spend the same code first).
 #[tokio::test]
 async fn one_code_regenerates_the_operator_token_on_the_loopback() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "one_code_regenerates_the_operator_token_on_the_loopback",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let code = harness.codes[0].clone();
     let path = "/api/config/auth-token/regenerate";
@@ -980,6 +1094,12 @@ async fn one_code_regenerates_the_operator_token_on_the_loopback() {
 /// the key is absent, when the seed that would check a code is unreadable too.
 #[tokio::test]
 async fn the_recovery_routes_ask_for_no_code_even_when_enrolled() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "the_recovery_routes_ask_for_no_code_even_when_enrolled",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
 
     let (status, body) = harness
@@ -1035,6 +1155,12 @@ async fn room_with_projects(harness: &Harness) {
 /// planning, does not. The route stays human-only: a bridge token never reaches it.
 #[tokio::test]
 async fn granting_code_asks_for_the_proof_and_planning_does_not() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "granting_code_asks_for_the_proof_and_planning_does_not",
+    ) {
+        return;
+    }
     use kronn::db::discussion_scope::{file_request, Filed};
     use kronn::models::discussion_scope::ScopeAccess;
     let harness = Harness::new(true).await;
@@ -1119,6 +1245,12 @@ async fn granting_code_asks_for_the_proof_and_planning_does_not() {
 /// Without an enrolment the same grant goes through as before.
 #[tokio::test]
 async fn granting_code_asks_nothing_when_no_confirmation_is_enrolled() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "granting_code_asks_nothing_when_no_confirmation_is_enrolled",
+    ) {
+        return;
+    }
     let harness = Harness::new(false).await;
     room_with_projects(&harness).await;
     let (status, done) = harness
@@ -1158,6 +1290,12 @@ fn enrolment(authority: &str, label: &str) -> Value {
 /// does not.
 #[tokio::test]
 async fn once_enrolled_the_admin_secret_alone_mints_and_rotates_nothing() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "once_enrolled_the_admin_secret_alone_mints_and_rotates_nothing",
+    ) {
+        return;
+    }
     let harness = Harness::new(true).await;
     let admin = admin_secret(&harness).await;
     let enrol = "/api/human-credentials/enrol";
@@ -1225,6 +1363,12 @@ async fn once_enrolled_the_admin_secret_alone_mints_and_rotates_nothing() {
 /// Before an enrolment the admin secret works as before, without any code.
 #[tokio::test]
 async fn before_an_enrolment_the_admin_secret_mints_and_rotates_as_before() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "before_an_enrolment_the_admin_secret_mints_and_rotates_as_before",
+    ) {
+        return;
+    }
     let harness = Harness::new(false).await;
     let admin = admin_secret(&harness).await;
     let (status, minted) = harness

@@ -48,6 +48,31 @@ them on both campaign runs and the implicit run created by a single-task
 `task_exec_launch`; a worker manifest can report observations but cannot add,
 remove or replace these gates.
 
+### Default validations: fmt + clippy + targeted lib tests
+
+In the CI gate model the PR is the gate, so the full test suite belongs to the
+PR's CI, not to a local integration validation. A full local `cargo test`
+averages about 20 minutes (5 runs, max 24.5 min, KT-1630 audit) against 3.3
+minutes for `cargo test --lib`. The validations Kronn proposes are therefore:
+
+- `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`;
+- `cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings`;
+- targeted lib tests, `cargo test --lib --manifest-path backend/Cargo.toml <filter>`.
+
+The launch dialog states this under the validations field, and the worker brief
+tells the worker the same (fmt + clippy + targeted lib tests; the full suite is
+the PR's CI's). A validation that replays the full suite — bare `cargo test`,
+`cargo nextest run` with no `--lib`/`--bin`/`--test`/`--doc` target and no name
+filter, `make test-backend` or `make test-backend-cov` — is flagged as CI-owned:
+the dialog shows a hint, and `task_exec_prepare` adds a non-blocking
+`full_suite_ci_owned` entry to `warnings`. The flag never refuses: a principal
+who keeps the gate still gets it run at integration. Both detectors are pure
+string checks over the whitespace-split command:
+`backend/src/api/orchestration.rs` (`is_full_suite_validation`) and
+`frontend/src/lib/fullSuiteValidation.ts`. Both test suites read the one case
+table `backend/tests/fixtures/full_suite_validation_cases.json`, so a case added
+there is enforced on both sides and the detectors cannot drift.
+
 Task orchestration is available by default in 0.11.0; there is no hidden feature
 flag. Nothing starts automatically until an operator launches a task, and
 `auto_continue` remains off unless the campaign explicitly enables it.
@@ -135,10 +160,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:10057-10061#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:10063-10112#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:8569-8593#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:37790-37891#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:10463-10467#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:10469-10518#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:8975-8999#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:38409-38510#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -183,9 +208,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:2088-2116#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:2351-2371#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:2296-2348#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2301-2329#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:2564-2584#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:2509-2561#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -199,7 +224,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2268-2275#integration_target]
+[src: file: backend/src/core/worktree.rs:2481-2488#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This

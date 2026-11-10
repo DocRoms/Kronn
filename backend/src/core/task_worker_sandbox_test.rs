@@ -328,11 +328,9 @@ fn the_seatbelt_profile_cannot_write_or_ioctl_a_terminal() {
     );
 }
 
+#[cfg(target_os = "macos")] // runs /usr/bin/sandbox-exec, which only macOS has
 #[test]
 fn the_seatbelt_profile_is_valid_sbpl() {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
     let profile = seatbelt_profile(&[
         PathBuf::from("/lane/worktree"),
         PathBuf::from("/lane/target"),
@@ -524,7 +522,7 @@ fn a_probe_on_a_host_whose_launcher_is_not_installed_is_refused_and_nothing_runs
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // stands /usr/bin/false in for the bwrap launcher; Windows has no `false` program
 #[test]
 fn a_probe_on_a_host_whose_launcher_cannot_apply_its_sandbox_is_refused_not_failed() {
     let layout = layout();
@@ -796,7 +794,7 @@ fn the_priority_launcher_wraps_the_os_sandbox_launcher() {
 
 /// The same through the real spawn path of this host: `Confinement::command`
 /// puts the launcher in front of the sandbox program when the host runs one.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(all(unix, any(target_os = "macos", target_os = "linux")))] // seatbelt/bwrap plus taskpolicy/nice
 #[test]
 #[serial_test::serial(background_launcher)]
 fn a_confined_background_command_starts_behind_the_launcher_then_the_sandbox() {
@@ -1040,7 +1038,7 @@ fn an_ordinary_build_succeeds_under_the_os_sandbox() {
 
 /// A pty the test owns stands for the operator's terminal: the build script is
 /// handed its path and must neither open it for writing nor reach the master.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[test]
 fn a_build_script_writing_to_a_terminal_is_denied_by_the_os() {
     let Some(mechanism) = live_mechanism() else {
@@ -1092,7 +1090,7 @@ fn a_build_script_writing_to_a_terminal_is_denied_by_the_os() {
 
 /// macOS only: `launchctl submit` asks launchd — over a Mach service the
 /// profile does not list — to run a job outside the sandbox.
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")] // asks macOS launchd to run a job under sandbox-exec
 #[test]
 fn a_build_script_asking_launchd_to_run_a_job_is_denied_by_the_os() {
     let Some(mechanism) = live_mechanism() else {
@@ -1146,7 +1144,7 @@ fn a_build_script_asking_launchd_to_run_a_job_is_denied_by_the_os() {
 
 /// Helper of `a_probe_runs_in_a_session_of_its_own`, re-run by that test as a
 /// child process: it reports its own session and process ids.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[test]
 fn report_session_ids_for_the_session_test() {
     if std::env::var_os("KRONN_REPORT_SESSION").is_none() {
@@ -1161,7 +1159,7 @@ fn report_session_ids_for_the_session_test() {
 /// backend's session, hence its controlling terminal, and `TIOCSTI` could type
 /// into the operator's shell. `SandboxedProbeRunner` delegates to this runner,
 /// so every confined probe starts through `setsid`.
-#[cfg(unix)]
+#[cfg(unix)] // relies on POSIX process groups and signals
 #[test]
 fn a_probe_runs_in_a_session_of_its_own() {
     let module = module_path!()
@@ -1247,7 +1245,7 @@ fn a_sandbox_launcher_that_is_not_installed_is_refused_with_its_name_and_nothing
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // stands /usr/bin/false in for the bwrap launcher; Windows has no `false` program
 #[test]
 fn a_sandbox_launcher_that_cannot_apply_its_sandbox_is_refused_with_its_exit_status() {
     let layout = layout();
@@ -1509,7 +1507,7 @@ fn a_confined_validation_that_times_out_is_reported_timed_out() {
 /// `vite.config.ts` (vitest loads it), so it runs through the sandboxed
 /// runner. Under the deny-default profile it must still be able to load that
 /// config — otherwise every lane's frontend would read as unavailable.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn vitest_loads_the_worker_config_under_the_os_sandbox() {
     let Some(mechanism) = live_mechanism() else {
@@ -1672,7 +1670,7 @@ fn the_docker_socket_comes_from_docker_host_then_the_context_then_known_paths() 
 
 /// The live proof: under the real OS sandbox a Unix socket stands for Docker's.
 /// Refused without the allowance, reached with it.
-#[cfg(unix)]
+#[cfg(unix)] // binds a unix domain socket and reaches it with /usr/bin/python3 under the OS sandbox
 #[test]
 fn the_os_sandbox_reaches_the_docker_socket_only_when_the_policy_opens_it() {
     let Some(mechanism) = live_mechanism() else {

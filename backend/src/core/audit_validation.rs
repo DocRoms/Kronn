@@ -1554,7 +1554,7 @@ mod tests {
         assert_eq!(note, format!("- {}: refused", &long[..100]));
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn an_unreadable_index_reports_its_cause_not_a_missing_row() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1587,7 +1587,7 @@ mod tests {
         assert!(sheet.contains("- **Severity**: High"), "{sheet}");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_tech_debt_folder_that_leaves_the_docs_root_is_still_refused() {
         let tmp = tempfile::TempDir::new().unwrap();

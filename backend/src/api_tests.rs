@@ -91,7 +91,7 @@ mod tests {
         (status, json)
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     async fn source_directory_http_refuses_a_symlink_outside_the_project() {
         let root = tempfile::TempDir::new().unwrap();

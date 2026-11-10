@@ -10712,8 +10712,10 @@ fn worker_brief_markdown_in(
         "Run the **targeted** tests that cover your change and report each result \
          (`pass`/`fail`/`skipped` + non-empty evidence) in `tests`. A `pass` without a \
          verifiable command or output is refused.\n\
-         The long validations persisted by the principal (often the full suite) are run by \
-         Kronn at integration, after the review: do not replay them in full. The shell tool \
+         The default validations are fmt + clippy + targeted lib tests (`cargo test --lib \
+         <filter>`): the full suite is owned by the PR's CI, never by a local run. The long \
+         validations persisted by the principal are run by Kronn at integration, after the \
+         review: do not replay them in full. The shell tool \
          cuts a long command (Bash: 600 s): never start one in the background to wait for it, \
          because your process ends as soon as you hand the turn back and the execution ends \
          without a delivery. Chain it all in the same turn: targeted tests, commit, then \
@@ -10730,7 +10732,9 @@ fn worker_brief_markdown_in(
         "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
          (`pass`/`fail`/`skipped` + preuve non vide) dans `tests`. Un `pass` sans \
          commande ou sortie vérifiable est refusé.\n\
-         Les validations longues persistées par le principal (souvent la suite complète) sont \
+         Les validations par défaut sont fmt + clippy + tests lib ciblés (`cargo test --lib \
+         <filtre>`) : la suite complète appartient à la CI de la PR, jamais à un run local. \
+         Les validations longues persistées par le principal sont \
          jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
          L'outil shell coupe une commande longue (Bash : 600 s) : n'en lance jamais une en \
          arrière-plan pour l'attendre, car ton processus s'arrête dès que tu rends la main \
@@ -11471,6 +11475,116 @@ pub(crate) fn validations_refusal(
     validate_new_validation_specs(validations)
         .err()
         .map(|reason| preparation_reason("invalid_validations", reason))
+}
+
+/// KT-1636 — a validation that replays the whole Rust suite: bare
+/// `cargo test` / `cargo nextest run` (no `--lib`/`--bin`/`--test`/`--doc`/…
+/// target, no name filter after the subcommand or after `--`), or the
+/// `make test-backend` family. Averages ~20 min locally against 3.3 min for
+/// `cargo test --lib` (KT-1630 audit): in the CI gate model the PR owns it.
+/// Split on whitespace exactly as the runner does; not a shell parser.
+fn is_full_suite_validation(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    if let ["make", target, ..] = words.as_slice() {
+        return matches!(*target, "test-backend" | "test-backend-cov");
+    }
+    let Ok(Some(cargo)) = validation_cargo_argv(command) else {
+        return false;
+    };
+    // Global options may precede the subcommand (`cargo --offline test`).
+    let Some(subcommand) = cargo.iter().position(|word| !word.starts_with('-')) else {
+        return false;
+    };
+    let args = &cargo[subcommand + 1..];
+    let args = match cargo[subcommand] {
+        "test" => args,
+        "nextest" => match args {
+            ["run", rest @ ..] => rest,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    // Flags whose next word is their value, not a test-name filter.
+    const VALUE_FLAGS: &[&str] = &[
+        "--manifest-path",
+        "--target-dir",
+        "--config",
+        "--features",
+        "--package",
+        "--profile",
+        "--jobs",
+        "--color",
+        "--message-format",
+        "--cargo-profile",
+        "-p",
+        "-j",
+        "-F",
+        "-Z",
+    ];
+    const NARROWING_FLAGS: &[&str] = &[
+        "--lib",
+        "--bin",
+        "--bins",
+        "--test",
+        "--tests",
+        "--doc",
+        "--example",
+        "--examples",
+        "--bench",
+        "--benches",
+        "--no-run",
+        "--list",
+    ];
+    let mut index = 0;
+    while index < args.len() {
+        let word = args[index];
+        if word == "--" {
+            // Anything after the separator is a filter or a harness flag; a
+            // positional one narrows the run.
+            return !args[index + 1..].iter().any(|rest| !rest.starts_with('-'));
+        }
+        if NARROWING_FLAGS.contains(&word)
+            || NARROWING_FLAGS.iter().any(|flag| {
+                word.strip_prefix(flag)
+                    .is_some_and(|value| value.starts_with('='))
+            })
+        {
+            return false;
+        }
+        if VALUE_FLAGS.contains(&word) {
+            index += 2;
+            continue;
+        }
+        if !word.starts_with('-') {
+            return false; // a test-name filter
+        }
+        index += 1;
+    }
+    true
+}
+
+/// KT-1636 — non-blocking preflight note for each full-suite gate. The PR's CI
+/// owns the full suite; a local integration validation is fmt + clippy +
+/// targeted `--lib` tests. The gate still runs if the principal keeps it.
+pub(crate) fn full_suite_validation_warnings(
+    validations: &[crate::models::ValidationSpec],
+) -> Vec<crate::models::CampaignTaskReason> {
+    validations
+        .iter()
+        .filter(|spec| is_full_suite_validation(&spec.command))
+        .map(|spec| {
+            preparation_reason(
+                "full_suite_ci_owned",
+                format!(
+                    "`{}` replays the whole test suite (about 20 min locally, against 3.3 min for \
+                     `cargo test --lib`): the full suite belongs to the PR's CI. Prefer `cargo fmt \
+                     --check`, `cargo clippy` and targeted lib tests (`cargo test --lib <filter>`) \
+                     as integration validations.",
+                    spec.command.trim()
+                ),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn worker_scope_refusal(
@@ -15507,6 +15621,7 @@ pub async fn task_exec_prepare(
     let worker = request.worker;
     let scope_refusal = worker_scope_refusal(&worker, request.worker_scope.as_ref());
     let validations_refusal = validations_refusal(&request.validations);
+    let full_suite_warnings = full_suite_validation_warnings(&request.validations);
     let rounds_refusal = match review_rounds_argument(request.max_review_rounds.as_ref()) {
         Ok(_) => None,
         Err(detail) => Some(preparation_reason("invalid_max_review_rounds", detail)),
@@ -15527,6 +15642,7 @@ pub async fn task_exec_prepare(
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
             preparation.warnings.extend(catalog_warning);
+            preparation.warnings.extend(full_suite_warnings);
             preparation.default_max_review_rounds =
                 Some(crate::models::review_limit_json(default_rounds));
             for reason in [
@@ -21905,7 +22021,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[test]
     fn reap_child_stops_a_group_whose_leader_already_exited() {
         let dir = tempfile::tempdir().unwrap();
@@ -21917,7 +22033,7 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[test]
     fn reap_child_reads_early_exit_stderr_despite_a_live_descendant() {
         let dir = tempfile::tempdir().unwrap();
@@ -21937,7 +22053,7 @@ pub(crate) mod tests {
         assert_gone(descendant, "the diagnostic read must stop the group first");
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     async fn surviving_git_hook_blocks_restart_reap_until_it_exits() {
         let repo = init_repo();
@@ -23465,6 +23581,71 @@ pub(crate) mod tests {
         assert_eq!(resolved, target);
     }
 
+    /// KT-1636 — the full suite is the PR's CI's; fmt, clippy and targeted lib
+    /// tests are the local defaults and raise nothing.
+    #[test]
+    fn full_suite_validations_are_flagged_and_the_default_gates_are_not() {
+        // The table the frontend's `isFullSuiteValidation` test reads too
+        // (`frontend/src/lib/__tests__/fullSuiteValidation.test.ts`): one rule,
+        // two detectors, one list of cases.
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/full_suite_validation_cases.json"
+        ))
+        .unwrap();
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10, "the table must keep its coverage");
+        for case in cases {
+            let command = case["command"].as_str().unwrap();
+            let expected = case["full_suite"].as_bool().unwrap();
+            assert_eq!(
+                is_full_suite_validation(command),
+                expected,
+                "`{command}` full_suite should be {expected}"
+            );
+        }
+        let specs = |commands: &[&str]| -> Vec<crate::models::ValidationSpec> {
+            commands
+                .iter()
+                .map(|command| crate::models::ValidationSpec {
+                    command: (*command).to_string(),
+                    quick_exec_id: None,
+                    timeout_secs: None,
+                })
+                .collect()
+        };
+        assert!(full_suite_validation_warnings(&specs(&[
+            "cargo fmt --check",
+            "cargo test --lib x"
+        ]))
+        .is_empty());
+        let warnings = full_suite_validation_warnings(&specs(&["cargo fmt --check", "cargo test"]));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "full_suite_ci_owned");
+        assert!(warnings[0].detail.contains("`cargo test`"));
+        assert!(warnings[0].detail.contains("CI"));
+        // A warning never refuses: the same command is still a valid gate.
+        assert!(validations_refusal(&specs(&["cargo test"])).is_none());
+    }
+
+    /// KT-1636 — the worker brief names the default gates and who owns the suite.
+    #[test]
+    fn shell_worker_brief_names_the_default_validations_and_the_ci_owned_suite() {
+        let brief = worker_brief_markdown(
+            "KT-1636",
+            "CI owns the suite",
+            "Objective",
+            &[],
+            "/wt/kt1636",
+            "kronn/task/KT-1636",
+            "abc1234",
+            true,
+            true,
+            None,
+        );
+        assert!(brief.contains("fmt + clippy + tests lib ciblés"), "{brief}");
+        assert!(brief.contains("appartient à la CI de la PR"), "{brief}");
+    }
+
     #[test]
     fn validation_cargo_argv_recognises_only_quick_exec_cargo_forms() {
         assert_eq!(
@@ -23542,7 +23723,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn metadata_timeout_kills_and_reaps_the_owned_child() {
         use std::process::Stdio;
@@ -23959,7 +24140,7 @@ pub(crate) mod tests {
     /// KT-1268 review — a timed-out metadata resolution takes the whole group
     /// of the confined launch down, not only its leader: a grandchild of the
     /// worker's `rustc` wrapper must not outlive the timeout.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture; relies on POSIX process groups and signals
     #[tokio::test]
     async fn metadata_timeout_kills_the_grandchildren_of_a_group_leader() {
         use std::process::Stdio;

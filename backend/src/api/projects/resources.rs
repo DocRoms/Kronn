@@ -6758,7 +6758,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[tokio::test]
     #[serial_test::serial]
     async fn migrate_all_refuses_symbolic_links_and_paths_outside_the_repository() {

@@ -440,7 +440,7 @@ fn a_project_md_without_the_marker_belongs_to_humans() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn project_md_is_never_written_through_a_symlink() {
     let tmp = tempfile::tempdir().unwrap();

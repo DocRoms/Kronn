@@ -1,5 +1,5 @@
 //! KT-652 / KT-806: exercise production dispatch and inspect the actual CLI argv.
-#![cfg(unix)]
+#![cfg(unix)] // writes #!/bin/sh stand-in agents made executable with chmod mode bits through std::os::unix
 
 use std::{collections::HashSet, ffi::OsString, os::unix::fs::PermissionsExt, time::Duration};
 

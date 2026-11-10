@@ -9388,7 +9388,7 @@ mod tests {
     /// Saves then runs each step the way a workflow would: a hostile title
     /// must never create the marker, whether the validator refuses the step
     /// or the step runs the positional recipe.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a POSIX shell script fixture
     #[tokio::test]
     async fn a_hostile_title_never_runs_through_a_saved_exec_step() {
         let title = "x'\"\nEOF\n$(touch pwned)`touch pwned`;touch pwned #";
