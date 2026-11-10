@@ -338,6 +338,45 @@ mod tests {
     }
 
     #[test]
+    fn invite_code_is_derivable_from_the_stored_columns_so_hashing_it_protects_nothing() {
+        // KT-1597 verdict (docs/gotchas/contact-invite-code-not-a-secret.md): the
+        // code carries no secret, it is `scheme:pseudo@host:port`. Whoever can read
+        // the `pseudo` and `kronn_url` columns (stored in clear beside it) rebuilds
+        // the exact code and passes `authenticate_invite_code`, so a hash column
+        // would add no confidentiality.
+        let conn = test_conn();
+        for (id, code) in [
+            ("p", "kronn:alice@100.64.1.2:3456"),
+            ("t", "kronns:bob@kronn.example.com:443"),
+        ] {
+            let (pseudo, kronn_url) = parse_invite_code(code).unwrap();
+            insert_contact(
+                &conn,
+                &crate::models::Contact {
+                    id: id.into(),
+                    pseudo,
+                    avatar_email: None,
+                    kronn_url,
+                    invite_code: code.into(),
+                    status: "accepted".into(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
+            let stored = get_contact(&conn, id).unwrap().unwrap();
+            let (scheme, authority) = stored.kronn_url.split_once("://").unwrap();
+            let prefix = if scheme == "https" { "kronns" } else { "kronn" };
+            let rebuilt = format!("{prefix}:{}@{authority}", stored.pseudo);
+            assert_eq!(rebuilt, code);
+            assert!(matches!(
+                authenticate_invite_code(&conn, &rebuilt).unwrap(),
+                InviteAuth::Accepted(c) if c.id == id
+            ));
+        }
+    }
+
+    #[test]
     fn parse_invite_code_valid() {
         let (pseudo, url) = parse_invite_code("kronn:testuser@100.64.1.5:3456").unwrap();
         assert_eq!(pseudo, "testuser");
