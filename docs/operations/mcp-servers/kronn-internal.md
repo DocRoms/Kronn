@@ -427,7 +427,7 @@ Planning catalogue natively and executes it through the same HTTP handlers,
 with the discussion scope and actor provenance supplied server-side. Vibe's
 programmatic runner deliberately disables MCP; its supported Planning write
 path is the human-gated `kronn-plan-action` fence.
-`[src: file: backend/src/api/agent_tools.rs:577-584#tool_catalogue]`
+`[src: file: backend/src/api/agent_tools.rs:598-605#tool_catalogue]`
 `[src: file: backend/scripts/vibe-runner.py:2-6#run_programmatic]`
 
 ## Task execution lifecycle
@@ -452,7 +452,9 @@ runs in the room, for the same provider, and never for a delegated worker's
 dispatch.
 A Claude Code or Codex workflow Agent step with a `room_id` (a template
 rendering to a discussion id) is principal of that room without a `kr-join`
-token; other providers have no bridge to carry it, so the step is refused. On
+token; an HTTP agent (LiteLLM, Ollama, NVIDIA, a custom connection such as
+OpenRouter) is joined by the orchestrator instead (below); any other CLI has no
+bridge to carry it, so the step is refused. On
 every launch and every resume the runner injects `KRONN_WORKFLOW_STEP_CONTEXT`
 (room, run, step, capability); before the first Kronn tool, the bridge
 exchanges it at
@@ -465,8 +467,46 @@ is pinned by `task_exec_launch` like any principal, so deliveries wake it, and
 a replayed step takes over the live executions its interrupted session steered.
 Its untargeted `disc_append` reports to the room without waking the room's
 native agent; target that agent explicitly to ask it something (KT-1253).
-`[src: file: backend/src/workflows/step_room.rs:211-225#matches]`
+`[src: file: backend/src/workflows/step_room.rs:217-231#matches]`
 `[src: file: backend/src/db/workflow_step_rooms.rs:178-293#join]`
+
+**An HTTP Agent step with a `room_id` (KT-1244).** An HTTP agent has no bridge
+process and nothing to exchange the capability with, so it does not use
+`workflow-step-join`: `activate` joins the step itself, in the same
+`workflow_step_room_sessions` table, as a session of the step's provider
+(`LiteLlm`, `Custom`, …) with a `kronn-step-…` id, and hands the executor a
+`StepRoomMember` (room, capability, session). The membership has the lifetime
+of a bridge's: it leaves with the step (finished, failed, cancelled or dropped)
+and `revoke_all_after_restart` revokes it at boot. The room shows the step
+working (KT-883) and what it posts is authored by the step's agent, with the
+workflow-step provenance of any step message; it is never exposed as a CLI N.
+`[src: file: backend/src/workflows/step_room.rs:574-607#join_http_step]`
+`[src: file: backend/src/workflows/step_room.rs:285-287#joined_by_orchestrator]`
+
+Only for such a step, the native workflow catalogue gains three tools, bound to
+THAT room and named as their bridge equivalents: `disc_read` (the tail of the
+room, `limit` 1–200, default 40), `disc_append` (a message on the `main`
+channel; a closed `kronn-question` fence in `content` publishes a decision card,
+and a card that could not be recorded comes back in `invalid_cards` to be
+reposted) and `disc_question_list` (pending questions, or the durable answer of
+an exact `key`; same result shape and the same 50-row cap as the bridge's). Their
+schemas are closed (`additionalProperties: false`) and declare no room argument:
+a `discussion_id` or `disc_id` naming another discussion, and any other
+undeclared field (even the step's own room), is refused, not ignored. The
+KT-1346 bridge-token gate decides `disc_append` and `disc_question_list` like any
+other tool, on the bridge's own routes (`POST /api/disc/append`, an `Own` route,
+and `GET /api/discussions/{id}/questions`): the step's room is the only
+discussion its grant owns, and an executor with no membership has no rule for
+either tool, so it is refused. Every call also checks that the step still
+runs in this process and that its session is still active, so a finished,
+replaced or restarted step is refused with "membership has ended". A step with no
+`room_id` keeps exactly the catalogue it had (no extra tool in a small model's
+context), and cannot call these names. No other room tool is added: the step is
+already a member, so there is no `disc_join` or `disc_wait_for_peer`.
+`[src: file: backend/src/api/agent_room_tools.rs:19-65#declarations]`
+`[src: file: backend/src/api/agent_room_tools.rs:68-93#execute_step_room_tool]`
+`[src: file: backend/src/api/agent_room_tools.rs:239-252#foreign_room_refusal]`
+`[src: file: backend/src/api/agent_tools.rs:1803-1805#catalogue]`
 The optional `validations` passed to `task_exec_launch` are principal-owned and
 persisted on the implicit single-task run. They use the same `ValidationSpec`
 contract as campaign runs and cannot be supplied or changed by the delivery
@@ -723,7 +763,7 @@ of the same provider remain distinguishable in the audit trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5892-5901#_task_exec_principal]`
 `[src: file: backend/src/api/orchestration.rs:14434-14444#principal_cli_is_authorized]`
 `[src: file: backend/src/api/orchestration.rs:14482-14520#room_agent_is_authorized]`
-`[src: file: backend/src/api/agent_tools.rs:4087-4123#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:4103-4139#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
 For a native HTTP worker, the execution id is also server-derived. The executor
@@ -733,8 +773,8 @@ worker schema contains no execution-id field; if a client nevertheless injects
 one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
-`[src: file: backend/src/api/agent_tools.rs:4125-4147#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api_tests.rs:7047-7186#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4141-4163#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api_tests.rs:6976-7115#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
 two deliberately distinct identity domains. The live
@@ -833,7 +873,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:13472-13522#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2768-2796#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:13527-13577#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2768-2796#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5904-5936#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5931-5944#_spawned_task_worker_mode]`
 
@@ -848,7 +888,7 @@ local Ollama/LiteLLM/NVIDIA worker capable of producing the clean committed HEAD
 required by `task_exec_deliver` without turning the HTTP tool catalogue into
 arbitrary Git access.
 `[src: file: backend/src/api/agent_workspace_tools.rs:567-574#git_commit_payload] [src: file: backend/src/api/agent_workspace_tools.rs:615-692#git_commit_payload_with_data_dir_lock]`
-`[src: file: backend/src/api/agent_tools.rs:3683-3755#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1559-1570#DISCUSSION_ONLY]`
+`[src: file: backend/src/api/agent_tools.rs:3699-3771#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1580-1591#DISCUSSION_ONLY]`
 `[src: file: backend/src/db/orchestration.rs:947-979#managed_working_execution_for_workspace]`
 
 ## Rich discussion output
@@ -895,7 +935,7 @@ catalogue does not pay for a long manual.
 `[src: file: backend/scripts/disc-introspection-mcp.py:4489-4505#MAX_DISC_APPEND_ATTACHMENTS] [src: file: backend/scripts/disc-introspection-mcp.py:53#MAX_DISC_APPEND_ATTACHMENTS]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:4580-4646#_attach_files_to_appended_message]`
 `[src: file: frontend/src/components/MessageAttachments.tsx:114-299#AttachmentThumb]`
-`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:138-149#filteredFiles] [src: file: frontend/src/components/DiscussionAssetsPanel.tsx:259-275#disc-assets-filters] [src: file: frontend/src/pages/DiscussionsPage.tsx:5600-5612#assets]`
+`[src: file: frontend/src/components/DiscussionAssetsPanel.tsx:138-149#filteredFiles] [src: file: frontend/src/components/DiscussionAssetsPanel.tsx:259-275#disc-assets-filters] [src: file: frontend/src/pages/DiscussionsPage.tsx:5642-5654#assets]`
 
 Agent-library catalogs deliberately stay compact:
 `skills_list` / `profiles_list` / `directives_list` omit their potentially long

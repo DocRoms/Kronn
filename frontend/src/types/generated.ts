@@ -6129,7 +6129,12 @@ export type MessageChannel = "main" | "note";
  */
 export type MessageKind = "standard" | "orchestration";
 
-export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null, };
+export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null,
+/**
+ * Requested targets dropped because they left the discussion
+ * (`drop_departed_targets`); the client says so instead of failing.
+ */
+dropped_targets?: number, };
 
 export type MessageRole = "User" | "Agent" | "System";
 
@@ -8863,7 +8868,14 @@ export type ReviseMessageRequest = { message_id: string, content: string, expect
 /**
  * Plural replacement for `target_agent`; empty preserves legacy clients.
  */
-target_agents?: Array<AgentType>, };
+target_agents?: Array<AgentType>,
+/**
+ * Retry resends a turn whose original targets may have left the room
+ * since. With this set, targets that are no longer part of the
+ * discussion are dropped (and counted in the receipt) instead of failing
+ * the whole revision; an explicit edit leaves it unset and stays strict.
+ */
+drop_departed_targets?: boolean, };
 
 /**
  * DELETE /api/discussions/:id/messages/:message_id

@@ -141,7 +141,7 @@ Mention the saved alias, such as `@nvidia` or `@company-proxy`, in the message.
 Kronn resolves named connection mentions before canonicalizing the requested
 agent targets, and carries the exact connection identifier in that target.
 [src: file: backend/src/db/external_api_connections.rs:201-235#target_for_connection]
-[src: file: backend/src/api/discussions/messaging.rs:526-558#resolve_connection_mentions]
+[src: file: backend/src/api/discussions/messaging.rs:571-603#resolve_connection_mentions]
 
 The new-discussion form merges configured OpenRouter/Other aliases with native
 agent aliases. Each alias exposes its Economy, Default and Reasoning model in
@@ -157,7 +157,7 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:15109-15140#ollama_tokens]
+[src: file: backend/src/agents/runner.rs:15164-15195#ollama_tokens]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the

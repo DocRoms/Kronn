@@ -490,7 +490,6 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       listContextFiles: resolve([]),
       deleteContextFile: resolve(undefined),
       uploadContextFile: resolve({}),
-      deleteLastAgentMessages: resolve(undefined),
       retryAgentDispatch: resolve({
         dispatch_id: '', trigger_message_id: '', agent_type: 'ClaudeCode', duplicate: false,
       }),

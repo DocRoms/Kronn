@@ -13380,7 +13380,40 @@ async fn discover_repos_route_exists() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn discover_repos_no_token_returns_error() {
+    // The env-token fallback is a feature: a shell exporting GITHUB_TOKEN /
+    // GH_TOKEN / GITLAB_TOKEN legitimately yields a source, so "no token"
+    // must hold whatever the host exports.
+    const PROVIDER_ENV: [&str; 7] = [
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITLAB_TOKEN",
+        "GITLAB_PERSONAL_ACCESS_TOKEN",
+        "GITLAB_HOST",
+        "GL_HOST",
+        "GITLAB_API_URL",
+    ];
+    struct RestoreEnv(Vec<(&'static str, Option<String>)>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => kronn::core::child_env::set_var(name, value),
+                    None => kronn::core::child_env::remove_var(name),
+                }
+            }
+        }
+    }
+    let _restore = RestoreEnv(
+        PROVIDER_ENV
+            .iter()
+            .map(|name| (*name, kronn::core::child_env::var(name).ok()))
+            .collect(),
+    );
+    for name in PROVIDER_ENV {
+        kronn::core::child_env::remove_var(name);
+    }
     let app = test_app();
     let (status, json) =
         post_json(app, "/api/projects/discover-repos", serde_json::json!({})).await;
@@ -22540,10 +22573,6 @@ mod cold_api_handlers_tests {
         disc_send_message_unknown_disc,
         "/api/discussions/nope/messages",
         serde_json::json!({ "content": "hi" })
-    );
-    envelope_delete!(
-        disc_delete_last_agent_messages_unknown,
-        "/api/discussions/nope/messages/last"
     );
 
     // api/disc_git.rs (was 26 % Lines)

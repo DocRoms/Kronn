@@ -281,7 +281,6 @@ const OPEN_ON_PURPOSE: &[(&str, &str)] = &[
     ("DELETE", "/api/directives/{id}"),
     ("DELETE", "/api/discussions/{id}"),
     ("DELETE", "/api/discussions/{id}/context-files/{file_id}"),
-    ("DELETE", "/api/discussions/{id}/messages/last"),
     ("DELETE", "/api/discussions/{id}/messages/{message_id}"),
     ("DELETE", "/api/lite-llm/model-failures"),
     ("DELETE", "/api/live-page-actions/{id}/trust"),

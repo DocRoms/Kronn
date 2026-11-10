@@ -195,7 +195,14 @@ impl KronnToolExecutor {
             .filter(|run| run != TEST_STEP_RUN_ID);
         let is_room_agent = !self.worker_room && self.workflow_run_id.is_none();
         BridgeScope {
-            discussion_ids: disc.clone().into_iter().collect(),
+            // An HTTP step's room is the one discussion it owns, as a CLI
+            // step's is once it has joined (KT-1244): `disc_append` is an
+            // `Own` route and refuses any other.
+            discussion_ids: disc
+                .clone()
+                .into_iter()
+                .chain(self.step_room_id())
+                .collect(),
             room_grant_discussions: disc.filter(|_| is_room_agent).into_iter().collect(),
             task_execution_id: None,
             workflow_run_id: run,
@@ -206,6 +213,13 @@ impl KronnToolExecutor {
                 .ok()
                 .and_then(|identity| identity.clone()),
         }
+    }
+
+    /// The room this executor's step is a member of, if it is one.
+    fn step_room_id(&self) -> Option<String> {
+        self.step_room
+            .as_ref()
+            .map(|member| member.context.discussion_id.clone())
     }
 
     /// This run's grant, minted on first use and held as long as the executor:
@@ -298,6 +312,26 @@ impl KronnToolExecutor {
                         }),
                     ),
                 }
+            }
+            // An HTTP step's room tools (KT-1244): the room is the step's
+            // membership, never an argument. A caller with no membership has
+            // no rule, so the gate refuses it.
+            "disc_append" => {
+                let room = self.step_room_id()?;
+                send(
+                    "POST",
+                    "/api/disc/append",
+                    Vec::new(),
+                    json!({ "disc_id": room }),
+                )
+            }
+            "disc_question_list" => {
+                let room = self.step_room_id()?;
+                get(
+                    "/api/discussions/{id}/questions",
+                    vec![("id".into(), room)],
+                    None,
+                )
             }
             "plan_get" => {
                 let disc = own_disc.or_else(|| text(args, "discussion_id"));
@@ -655,6 +689,7 @@ mod tests {
         let mut all = full_discussion_catalogue();
         all.extend(workflow_tool_catalogue(true));
         all.extend(workflow_workspace_tool_catalogue());
+        all.extend(room_tools::declarations());
         all.push(tools_load_declaration());
         let mut names: Vec<String> = all
             .iter()
@@ -677,7 +712,18 @@ mod tests {
             db,
             crate::DEFAULT_MAX_CONCURRENT_AGENTS,
         );
-        let executor = KronnToolExecutor::new(state, Some("room".into()));
+        let mut executor = KronnToolExecutor::new(state, Some("room".into()));
+        // The room tools are classified for a step that is a member of a room.
+        executor.step_room = Some(crate::workflows::step_room::StepRoomMember {
+            context: crate::agents::runner::WorkflowStepBridgeContext {
+                discussion_id: "room".into(),
+                run_id: "run".into(),
+                step_key: "step".into(),
+                capability: "capability".into(),
+            },
+            agent_type: AgentType::LiteLlm,
+            session_id: "session".into(),
+        });
         let mut unclassified = Vec::new();
         for name in every_tool() {
             if UNGATED_TOOLS.iter().any(|(tool, _)| *tool == name) {

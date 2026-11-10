@@ -49,7 +49,7 @@ alone does not establish a user-visible duration.
 1. The active transcript is rendered as the complete `activeDiscussion.messages`
    collection inside one scrolling container; this code does not window or
    paginate visible message rows.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:4606-4626#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:4648-4668#transcriptElements]
    Each normal item creates a
    `MessageBubble`; tool groups create `ToolCallsGroup`.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:4043-4101#MessageBubble]
@@ -58,7 +58,7 @@ alone does not establish a user-visible duration.
    the memoized element list then makes several more passes to calculate
    metadata and reply/turn anchors.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:3260-3277#transcriptIndex]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3816-3897#transcriptElements]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3858-3939#transcriptElements]
 3. The conversation-order projection maps every message and sorts the resulting
    array; resolving a reply chain can walk up to 16 links for an eligible row.
    [src: file: frontend/src/lib/messageTargets.ts:319-367#messagesInConversationOrder]
@@ -100,7 +100,7 @@ alone does not establish a user-visible duration.
    The active streaming text is
    deferred before being passed to the streaming reply renderer.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:1558#deferredStreamingText]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:3916-3924#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:3958-3966#deferredStreamingText]
 
 ## Findings and priorities
 

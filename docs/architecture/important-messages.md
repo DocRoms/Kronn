@@ -100,7 +100,7 @@ is selected without moving the transcript. A page reload starts navigation
 fresh. Publication invalidations during a pending GET coalesce into a fresh
 follow-up read rather than accepting the old snapshot as the final state.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:194-264#goTo]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4579-4583#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4621-4625#ImportantMessagesBar]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:151-180#selections]
 [src: file: frontend/src/lib/importantMessages.ts:50-75#load]
 [src: file: frontend/src/lib/importantMessages.ts:84-90#refreshImportantMessages]
@@ -123,7 +123,7 @@ The bar re-fetches when the transcript's newest durable message id changes
 fetch per arrival, not one per render or per bubble, and never stuck on the
 first GET while a new card lands.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:182-192#messageRevision]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4579-4583#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4621-4625#ImportantMessagesBar]
 
 ## Human form (0.13.0, KT-643)
 
@@ -133,7 +133,7 @@ select an existing task from this discussion's plan. This does not create,
 complete or otherwise modify a task. The card's task link resolves a fresh plan
 and opens that exact task; a removed link or unavailable plan is explained
 instead of selecting an unrelated task.
-[src: file: frontend/src/pages/DiscussionsPage.tsx:5496-5520#ImportantMessageForm]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:5538-5562#ImportantMessageForm]
 [src: file: frontend/src/components/ImportantMessageForm.tsx:90-104#taskRef]
 [src: file: frontend/src/pages/DiscussionsPage.tsx:1376-1406#openPlan]
 [src: file: frontend/src/components/DiscussionPlanPanel.tsx:88-91#initialTaskId]
