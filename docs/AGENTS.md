@@ -166,7 +166,7 @@ Never load everything "just in case".
 - Include **edge cases**: empty input, large input, unicode, error paths.
 - Assertions must be **meaningful** — not just "renders without crashing".
 - Mocks must match **real API shapes** (check `types/generated.ts`).
-- Run `cargo test` (backend) and `npx vitest run` (frontend) **before declaring a task done**.
+- Before done: targeted tests + fmt + clippy; full suites are CI's (guides/task-orchestration.md).
 - If a test is flaky, fix the root cause — do not add retries or sleeps.
 
 ---

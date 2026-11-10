@@ -74,6 +74,48 @@ connection_id?: string,
  */
 progress_phase?: string, };
 
+/**
+ * What a `WaitingQuota` run is parked on.
+ */
+export type ActiveRunQuota = {
+/**
+ * The step that was refused.
+ */
+step_name: string,
+/**
+ * The agent the refused step runs on, when it is an Agent step.
+ */
+agent?: AgentType,
+/**
+ * When the engine resumes the run on its own; `None` while parked.
+ */
+wake_at?: string,
+/**
+ * The reset the provider announced.
+ */
+reset_at?: string, parked?: QuotaParkReason, };
+
+/**
+ * One run that is not finished (KT-1657): the board `workflow_active_runs`
+ * and the UI's active-run indicators read. A run paused on a provider quota
+ * is listed with its wake time, so it is never mistaken for a run that is
+ * working, nor invisible while it still holds a concurrency slot.
+ */
+export type ActiveRunSummary = { run_id: string, workflow_id: string, workflow_name: string, project_id: string | null, status: RunStatus, started_at: string,
+/**
+ * The sub-workflow's parent run; a child's wait is resumed through it.
+ */
+parent_run_id?: string,
+/**
+ * The quota wait, for a `WaitingQuota` run.
+ */
+quota?: ActiveRunQuota,
+/**
+ * The last sign of life the run records: the end of its latest finished
+ * step, else its start. A step in progress records nothing until it ends.
+ */
+last_activity_at?: string, };
+
 export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string,
 /**
  * KT-1252 — the `run_id` of the room's live `AgentRunProgress` frames for
@@ -89,11 +131,100 @@ progress_run_id?: string,
 preparing?: boolean, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
+ * An existing action a row offers. `id` names the UI handler that performs it
+ * with `args` (the same call the page's own button makes).
+ */
+export type ActivityAction = { id: string, kind: ActivityActionKind, args: { [key in string]: string }, };
+
+/**
+ * How an action reads on its button. The label follows this, never the row's type.
+ */
+export type ActivityActionKind = "stop" | "cancel" | "resume_now";
+
+/**
  * What kind of action an agent's tool call is, from a fixed table
  * (`agents::activity::category_of`). The only description of a call that
  * leaves the agent's run: its name, arguments and targets never do.
  */
 export type ActivityCategory = "Read" | "Search" | "Edit" | "Execute" | "Web" | "Mcp" | "Kronn" | "Think" | "Other";
+
+/**
+ * Where a row sits in the panel. Phase 1 fills `Running` only; the other two
+ * are the KT-334 compartments the next phase fills, reserved so adding them
+ * reworks neither the endpoint nor the panel.
+ */
+export type ActivityCompartment = "running" | "needs_decision" | "unseen_done";
+
+export type ActivityLink = { target: ActivityLinkTarget, id: string, run_id?: string, };
+
+/**
+ * The kinds of place a row's deep link can open. Resolved to an address by the
+ * UI's route table, so a path is never spelled in the backend.
+ */
+export type ActivityLinkTarget = "discussion" | "workflow" | "project" | "planning_task";
+
+/**
+ * `GET /api/activity`.
+ */
+export type ActivityOverview = { rows: Array<ActivityRow>,
+/**
+ * Inactivity after which a running row is flagged `stalled`.
+ */
+stall_after_secs: number, generated_at: string,
+/**
+ * Sources that could not be read this time: the list is partial, and says so.
+ */
+unavailable_sources: Array<string>, };
+
+/**
+ * One thing in the attention center.
+ */
+export type ActivityRow = {
+/**
+ * `<source>:<native id>`: stable across polls, unique across sources.
+ */
+id: string,
+/**
+ * What the row is (`agent_turn`, `workflow_run`, `audit`, `task_worker`, …).
+ * An open set: the panel shows a type it does not know without special-casing.
+ */
+type: string, compartment: ActivityCompartment, state: ActivityState,
+/**
+ * The state the row is derived from (`workflow_runs`, `agent_dispatch_jobs`,
+ * `task_executions`, `audit_tracker`).
+ */
+source: string, title: string,
+/**
+ * A second line of context that is data, not prose (project, step, progress).
+ */
+detail?: string,
+/**
+ * The project it belongs to, when it has one.
+ */
+project_name?: string,
+/**
+ * Elapsed time is `now - started_at`, counted by the UI.
+ */
+started_at: string,
+/**
+ * The last sign of life Kronn has for the row. `None` is "no continuous
+ * signal" and is never read as a stall.
+ */
+last_activity_at?: string,
+/**
+ * A running row whose last sign of life is older than the overview's
+ * `stall_after_secs`. A hint to look, not a verdict: the row may be thinking.
+ */
+stalled: boolean,
+/**
+ * When a `Paused` row resumes on its own; `None` while it waits for a person.
+ */
+wake_at?: string, link?: ActivityLink, actions: Array<ActivityAction>, };
+
+/**
+ * What a `Running`-compartment row is doing right now.
+ */
+export type ActivityState = "running" | "queued" | "paused";
 
 /**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
@@ -243,7 +374,15 @@ mention_color?: string | null,
  * under the `litellm` provider, never here — this struct is serialised
  * to the frontend.
  */
-base_url?: string | null, };
+base_url?: string | null,
+/**
+ * Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
+ * Tools are on by default: `Some(false)` withholds them from every model
+ * of this agent (for one that cannot take tool calls); `None` and
+ * `Some(true)` leave them on, Ollama's catalogue still withholding them
+ * from a model it lists without `tools`. Ignored by CLI agents.
+ */
+tools_enabled?: boolean | null, };
 
 /**
  * One agent's effective context.
@@ -1912,6 +2051,26 @@ dod_progress: string | null, };
 
 export type BundleWorkflowCreated = { id: string, name: string, };
 
+/**
+ * The reviewer a campaign names at creation. A delivery is never addressed to
+ * an agent no session serves: `agent` and `model` are what the campaign room
+ * is configured with, `Human` leaves the room to the person.
+ */
+export type CampaignReviewer = { kind: CampaignReviewerKind, agent?: AgentType, model?: string,
+/**
+ * The named connection of a `Custom` remote model.
+ */
+connection_id?: string,
+/**
+ * The campaign did not ask for this reviewer: Kronn chose it.
+ */
+defaulted: boolean, };
+
+/**
+ * Who reviews the deliveries of a campaign (KT-1643).
+ */
+export type CampaignReviewerKind = "agent" | "remote_model" | "human";
+
 export type CampaignTaskCandidate = { task: PlanningTaskSummary, plan_position: number, launchable: boolean, reasons: Array<CampaignTaskReason>, };
 
 /**
@@ -2120,6 +2279,19 @@ found: boolean, shared_id: string | null, title: string | null, };
 export type CleanupOrphanEnvRequest = { keys: Array<string>, };
 
 export type CleanupOrphanEnvResponse = { configs_updated: number, total_keys_removed: number, };
+
+/**
+ * A credential found in clear in a file, without its value.
+ */
+export type ClearCredentialView = {
+/**
+ * `provider_key` or `auth_token`.
+ */
+kind: string, name: string, provider: string,
+/**
+ * The same value is in `stored_credentials` and the key in use decrypts it.
+ */
+verified: boolean, };
 
 export type CliReleaseInfo = { installed: string | null, latest: string | null, checked_at: string | null, check_error: string | null, update_available: boolean, };
 
@@ -2540,6 +2712,18 @@ connection_id?: string | null, language?: string, initial_prompt: string,
  * overrides selected from the new-discussion composer.
  */
 initial_targets?: Array<MessageTarget>, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, workspace_mode?: string | null, base_branch?: string | null,
+/**
+ * KT-1645 — the commit a review discussion looks at. Setting it gives the
+ * discussion its own detached worktree at that commit (workspace mode
+ * `Review`): the agent never runs in the project's main checkout, whatever
+ * `workspace_mode` asked for. Needs a `project_id`.
+ */
+review_head?: string,
+/**
+ * KT-1645 — start of the reviewed range (`review_base..review_head`).
+ * Checked to exist; only valid together with `review_head`.
+ */
+review_base?: string,
 /**
  * Model capability tier (economy / default / reasoning).
  */
@@ -4446,7 +4630,14 @@ media_endpoint?: string | null,
  * The model Decision steps call on this connection (KT-1366). A
  * capability like the media slots, not a quality tier.
  */
-decision_model?: string | null, };
+decision_model?: string | null,
+/**
+ * Operator switch for the Kronn tool executor on runs on this connection
+ * (KT-1600). Tools are on by default: `None` and `Some(true)` attach
+ * them, `Some(false)` withholds them, for a model that cannot take tool
+ * calls.
+ */
+tools_enabled?: boolean | null, };
 
 export type ExternalApiConnectionPreset = "lite_llm" | "nvidia" | "open_router" | "other";
 
@@ -5113,6 +5304,73 @@ export type KronnOwnership = { "type": "NotManaged" } | { "type": "ManagedByMark
 
 export type KronnWrite = { writer: DocWriter, at: string, };
 
+/**
+ * A gitignored path the project's tracked code mentions: a likely seed.
+ */
+export type LaneSeedCandidate = {
+/**
+ * Repository-relative, `/` separated, no trailing slash.
+ */
+path: string,
+/**
+ * Size on disk; `None` when the directory is too large to measure.
+ */
+size_bytes: number | null,
+/**
+ * Why it is suggested.
+ */
+reason: string, };
+
+/**
+ * What the last task worktree seeding did with one path.
+ */
+export type LaneSeedReport = { path: string,
+/**
+ * `seeded`, `up_to_date` or `skipped`.
+ */
+outcome: string,
+/**
+ * Why a path was skipped, or what a seeded one left out.
+ */
+detail?: string, };
+
+/**
+ * A declared seed that is, or holds, something that looks like a secret.
+ */
+export type LaneSeedSecretFinding = {
+/**
+ * The declared seed.
+ */
+path: string,
+/**
+ * What looks secret, relative to the repository: the seed itself when its
+ * own path does, else the files and directories found under it.
+ */
+files: Array<string>,
+/**
+ * More were found than `files` lists.
+ */
+truncated: boolean,
+/**
+ * Some of these files are not confirmed by a human: the seed is not copied
+ * into task worktrees until they are.
+ */
+held: boolean, };
+
+/**
+ * The latest seeding of a task worktree of this project.
+ */
+export type LaneSeedsLastRun = { execution_id: string, at: string, seeds: Array<LaneSeedReport>, };
+
+/**
+ * Where the seeds a project is seeded with come from. The `[lane_seeds]` table
+ * of `kronn/project.toml` is not a source: it reaches the repository through a
+ * pull request, not through the human gate, so it is only *proposed* in the
+ * settings and takes effect once a human adopts it there (which declares it in
+ * Kronn).
+ */
+export type LaneSeedsSource = "project" | "adopted" | "none";
+
 export type LaunchAuditRequest = { agent: AgentType,
 /**
  * KT-980 — the named external API connection an HTTP agent uses. Required
@@ -5600,6 +5858,28 @@ export type ManifestTest = { name: string, status: TestStatus, evidence: string 
 export type MappingAction = "extracted" | "target_exists" | "unmapped" | "not_prose" | "kronn_managed";
 
 /**
+ * The last authentication refusal recorded on one API connection.
+ */
+export type McpAuthFailure = { kind: McpAuthFailureKind,
+/**
+ * HTTP status of the refusal; `None` for a failed token refresh.
+ */
+http_status?: number,
+/**
+ * The provider's own message, scrubbed of credentials and truncated.
+ */
+message: string,
+/**
+ * RFC3339 timestamp of the refused call.
+ */
+failed_at: string, };
+
+/**
+ * Why an API connection's credentials are refused (KT-1524).
+ */
+export type McpAuthFailureKind = "refused" | "forbidden" | "refresh_failed";
+
+/**
  * A configured instance of an MCP server — with label, env secrets, etc.
  * Multiple projects can share the same config (deduplication by config_hash).
  */
@@ -5664,7 +5944,13 @@ merged_into_existing?: string,
  * without re-running a probe on every page load. Empty when this
  * config was never tested.
  */
-last_probes: Array<McpLastProbe>, };
+last_probes: Array<McpLastProbe>,
+/**
+ * KT-1524 — set while the provider refuses this connection's credentials
+ * (401/403 auth error, failed token refresh); cleared by the next
+ * successful call.
+ */
+auth_failure?: McpAuthFailure, };
 
 /**
  * KT-829 — one config's probe outcome inside a `POST /api/mcps/test-all` run.
@@ -6037,7 +6323,12 @@ export type MessageChannel = "main" | "note";
  */
 export type MessageKind = "standard" | "orchestration";
 
-export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null, };
+export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null,
+/**
+ * Requested targets dropped because they left the discussion
+ * (`drop_departed_targets`); the client says so instead of failing.
+ */
+dropped_targets: number, };
 
 export type MessageRole = "User" | "Agent" | "System";
 
@@ -6272,9 +6563,10 @@ export type NetworkExposure = {
  */
 exposed: boolean,
 /**
- * The configured exposure differs from what the process bound at boot →
- * a restart is needed for it to take effect. Never true in Docker, where
- * the exposure is set by `KRONN_BIND` in the compose file, not by Settings.
+ * The host the next boot would bind differs from what the process bound
+ * at boot → a restart is needed for it to take effect. Never true in
+ * Docker, where the exposure is set by `KRONN_BIND` in the compose file,
+ * not by Settings.
  */
 restart_required: boolean,
 /**
@@ -6293,7 +6585,33 @@ reachable_ips: Array<DetectedIp>,
 /**
  * A network access token is in force: auth is on and a token exists.
  */
-auth_token_set: boolean, };
+auth_token_set: boolean,
+/**
+ * KT-1596 — a TLS-terminating proxy on this machine is declared (Settings
+ * or `KRONN_TLS_TERMINATED_BY_PROXY`): the only way, until Kronn serves
+ * TLS itself, to be exposed without plain HTTP.
+ */
+tls_terminated_by_proxy: boolean,
+/**
+ * The declaration comes from the environment, so Settings cannot withdraw it.
+ */
+tls_declared_by_env: boolean,
+/**
+ * The proxy's public `https://` origin, the address invites advertise.
+ */
+public_origin: string | null,
+/**
+ * The configuration, or `KRONN_HOST`, asks for exposure that nothing
+ * encrypts. The backend started (or will start) on loopback instead, and
+ * hands out no invite code; Settings says why.
+ */
+plain_http_blocked: boolean,
+/**
+ * Only in the reply to a declaration: the network access token, handed over
+ * once because the loopback bypass is withdrawn from now on and the local
+ * UI must hold it before its next call. Never part of a GET.
+ */
+issued_auth_token?: string, };
 
 /**
  * Network info for multi-user connectivity.
@@ -6594,7 +6912,12 @@ quota_fallback: boolean,
  * The alternatives a single-task launch named for its own fallback. Empty
  * for a campaign, which falls back among `allowed_agents`.
  */
-quota_fallback_agents: Array<AgentType>, created_at: string, updated_at: string, };
+quota_fallback_agents: Array<AgentType>,
+/**
+ * KT-1643 — who reviews each delivery of this campaign, named when it was
+ * created. `None` only for a campaign that predates the field.
+ */
+reviewer?: CampaignReviewer | null, created_at: string, updated_at: string, };
 
 /**
  * The V1 shape is one implicit run per launch (`single_task`); `campaign` is
@@ -7165,6 +7488,29 @@ export type PortablePluginConfig = { source_config_id: string, server: McpServer
  */
 placeholders?: Array<ExportPlaceholder>, };
 
+export type PreflightCheck = {
+/**
+ * `gh_installed`, `gh_auth`, `gh_scopes`, `repo_access`, `project`, `worker`.
+ */
+id: string, ok: boolean,
+/**
+ * What was found, or what to do about it.
+ */
+message: string, };
+
+export type PreflightReport = { ok: boolean, repo: string, target_branch: string, max_review_rounds: number, checks: Array<PreflightCheck>, project_id?: string, publication?: PublicationPlan,
+/**
+ * The remote model this instance proposes as the campaign's reviewer, when
+ * one is configured; the workflow passes it explicitly. Absent: the
+ * campaign room keeps its own setup.
+ */
+suggested_reviewer?: CampaignReviewer,
+/**
+ * The local agents a task can be launched on, for the workflow to pick
+ * its default worker from instead of assuming one is installed.
+ */
+workers: Array<AgentType>, };
+
 /**
  * 0.9.2-G — honest presence state, server-derived (never a bare "connected"
  * badge inferred from a lingering session row). See [`derive_presence_state`].
@@ -7347,6 +7693,64 @@ scope: GithubScope | null,
  * Kept connected by the upgrade that introduced this setting; drives a one-time notice.
  */
 connected_on_upgrade: boolean, updated_at: string | null, };
+
+export type ProjectLaneSeeds = {
+/**
+ * The paths seeded into each task worktree: what a human declared here.
+ */
+seeds: Array<string>, source: LaneSeedsSource,
+/**
+ * Settings > Worktrees: copying lane seeds is on (off = nothing is copied,
+ * whatever is declared here).
+ */
+copy_enabled: boolean,
+/**
+ * Settings > Worktrees: Kronn's suggestions seed a project that declared none.
+ */
+adopt_suggested: boolean,
+/**
+ * What the adoption seeds right now (`source` is `adopted`): Kronn's
+ * suggestions. One holding an unconfirmed secret-looking file is in
+ * `secret_findings` as `held` and is not copied.
+ */
+adopted_seeds: Array<string>,
+/**
+ * Why the suggestions could not be read.
+ */
+adopted_error?: string,
+/**
+ * What `kronn/project.toml` on the default branch proposes, when it does.
+ * Nothing is seeded from it until a human adopts it.
+ */
+profile_seeds?: Array<string>,
+/**
+ * Why that file could not be read.
+ */
+profile_error?: string,
+/**
+ * Newly declared paths that are, or hold, a secret-looking file and were NOT
+ * saved: send their `path` back in `confirm_secret_paths` once the human
+ * has seen the files and accepted them.
+ */
+needs_confirmation: Array<LaneSeedSecretFinding>,
+/**
+ * Secret-looking files the declared seeds hold right now. A finding is
+ * `held` when some of its files are not confirmed: that seed is not copied
+ * into task worktrees until the human confirms them.
+ */
+secret_findings: Array<LaneSeedSecretFinding>,
+/**
+ * Why the declared seeds could not be checked for secrets.
+ */
+secret_scan_error?: string,
+/**
+ * A save rewrote the working copy of `kronn/project.toml` (uncommitted).
+ */
+profile_file_written: boolean,
+/**
+ * Why the working copy of `kronn/project.toml` could not be kept in step.
+ */
+profile_file_error?: string, last_run?: LaneSeedsLastRun, };
 
 export type ProjectLanguageStat = { language: string, bytes: number, };
 
@@ -7717,6 +8121,39 @@ export type ProviderQuotaState = { provider: AgentType, blocked: boolean,
 reset_at: string | null, };
 
 export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost: CostAggregate, };
+
+export type PublicationMode = "maintainer" | "fork";
+
+/**
+ * Where the branch is pushed and what the pull request is opened with.
+ */
+export type PublicationPlan = { mode: PublicationMode,
+/**
+ * `owner/name` the pull request is opened against.
+ */
+base_repo: string, base_branch: string,
+/**
+ * `owner/name` the branch is pushed to.
+ */
+push_repo: string,
+/**
+ * `gh pr create --head`: `branch`, or `login:branch` from a fork.
+ */
+pr_head: string,
+/**
+ * The fork has to be created (`gh repo fork`) before the push.
+ */
+needs_fork: boolean,
+/**
+ * What publishing does, in order: the workflow's publish step runs
+ * exactly these, so the plan read here is the plan carried out.
+ */
+steps: Array<PublicationStep>, };
+
+/**
+ * One action of a publication.
+ */
+export type PublicationStep = { "action": "fork_repo", repo: string, } | { "action": "push", repo: string, branch: string, } | { "action": "open_pull_request", repo: string, base: string, head: string, };
 
 export type PublishLivePageRequest = { workflow_id?: string | null, workflow_run_id?: string | null, writes: Array<LivePageWrite>, };
 
@@ -8100,7 +8537,17 @@ recovery_unverified: boolean,
  * recovery.key parses but its payload is damaged: replaced without a
  * passphrase (kept aside).
  */
-recovery_damaged: boolean, };
+recovery_damaged: boolean,
+/**
+ * Credentials config.toml still carries in clear (names only, never
+ * values): a locked or missing key at boot leaves them there (KT-1594).
+ */
+clear_credentials: Array<ClearCredentialView>,
+/**
+ * The `config.toml.corrupt.*` files kept aside, each with the credentials
+ * it holds and whether the owner may delete it now (KT-1594).
+ */
+set_aside_files: Array<SetAsideFileView>, };
 
 export type RedactedField = {
 /**
@@ -8676,7 +9123,14 @@ export type ReviseMessageRequest = { message_id: string, content: string, expect
 /**
  * Plural replacement for `target_agent`; empty preserves legacy clients.
  */
-target_agents?: Array<AgentType>, };
+target_agents?: Array<AgentType>,
+/**
+ * Retry resends a turn whose original targets may have left the room
+ * since. With this set, targets that are no longer part of the
+ * discussion are dropped (and counted in the receipt) instead of failing
+ * the whole revision; an explicit edit leaves it unset and stays strict.
+ */
+drop_departed_targets?: boolean, };
 
 /**
  * DELETE /api/discussions/:id/messages/:message_id
@@ -9339,6 +9793,18 @@ disk_launch_min_free_gib: number,
  */
 disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
+ * KT-1438 - copy lane seeds into task worktrees (default on).
+ */
+lane_seeds_copy_enabled: boolean,
+/**
+ * KT-1438 - seed Kronn's secret-free suggestions for a project that declared none.
+ */
+lane_seeds_adopt_suggested: boolean,
+/**
+ * KT-1438 - changing a project's lane seeds asks for the strong confirmation.
+ */
+lane_seeds_strong_confirm: boolean,
+/**
  * The zone set in Settings; `None` follows the machine.
  */
 timezone: string | null,
@@ -9423,10 +9889,35 @@ export type SetAgentMentionColorRequest = { agent: AgentType,
  */
 color?: string | null, };
 
+export type SetAgentToolsRequest = { agent: AgentType,
+/**
+ * `None` clears the operator switch (tools on); see `AgentConfig::tools_enabled`.
+ */
+enabled?: boolean | null, };
+
 /**
  * `PUT /api/mcps/servers/{id}/access-policy`; `policy: null` removes it.
  */
 export type SetApiAccessPolicyRequest = { policy?: ApiAccessPolicy | null, };
+
+/**
+ * A set-aside `config.toml.corrupt.<ts>` and what deleting it would lose.
+ */
+export type SetAsideFileView = { name: string, credentials: Array<ClearCredentialView>,
+/**
+ * The file carries an encryption key.
+ */
+holds_key: boolean,
+/**
+ * Every credential is verified and no key or row depends on the file.
+ */
+deletable: boolean,
+/**
+ * Why it is not deletable: `unreadable`, `sealed`, `key_locked`,
+ * `unparsed`, `unknown_value`, `unverified`, `key_needed`, `key_bound_files`,
+ * `key_check_unavailable` or `only_key_copy`.
+ */
+blocker: string | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
 
@@ -9486,6 +9977,12 @@ dir?: string | null, };
  * `PUT /api/projects/{id}/github`. `token` is read only for `stored_token`.
  */
 export type SetProjectGithubConnectionRequest = { mode: GithubConnectionMode, token?: string, };
+
+export type SetProjectLaneSeeds = { seeds: Array<string>,
+/**
+ * Newly declared seeds holding secret-looking files that the human confirmed.
+ */
+confirm_secret_paths?: Array<string>, };
 
 export type SetProjectValidationsAccess = { access: ValidationsAccess, };
 
@@ -10094,7 +10591,14 @@ quota_wait?: QuotaWait | null,
  * Why the run ends at this step for good: no `on_failure`, no quota wait,
  * no recovery rule (a Security limit, a counter failure).
  */
-terminal_stop?: string | null, };
+terminal_stop?: string | null,
+/**
+ * KT-1525 — UTF-8 bytes of `output`, stamped when the step completes. A
+ * heavy output slows every run, the run storage and the page it feeds;
+ * the run view grades it against the configured threshold. `None` on a
+ * run recorded before this field existed.
+ */
+output_bytes?: number, };
 
 /**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
@@ -10186,6 +10690,16 @@ tokens_used: number, };
  * from the agent or from a human reopening a long room — writes into it.
  */
 export type SummaryStrategy = "OnDemand" | "Off";
+
+/**
+ * Response for [`switch_quota_agent`].
+ */
+export type SwitchQuotaAgentResponse = {
+/**
+ * The run that owns the refused step (a sub-workflow child, when the
+ * wait is mirrored from one).
+ */
+run_id: string, step_name: string, agent: AgentType, };
 
 export type TaskBoardConfig = {
 /**
@@ -10390,7 +10904,21 @@ warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null,
  */
 default_max_review_rounds?: number | "unlimited" | undefined, };
 
-export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
+export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode,
+/**
+ * KT-1637 — how long each sub-step of the warming phase took, for the steps
+ * that have finished, in the order they run. Present in every phase (the
+ * worker's own phase included), so the time spent before the dispatch stays
+ * readable once it is over.
+ */
+warming_steps: Array<TaskExecutionWarmingStep>,
+/**
+ * KT-1637 — wall time from the creation of the execution to its worker's
+ * dispatch (to now, while it is still provisioning), for a deferred warm-up.
+ * What `warming_steps` leaves unaccounted for is `warming_total_ms` minus
+ * their sum.
+ */
+warming_total_ms?: number, };
 
 export type TaskExecutionProgressPhase = "warming" | "queued" | "launching" | "upstream_wait" | "tool_activity" | "delivering" | "completed" | "failed" | "unknown";
 
@@ -10438,6 +10966,8 @@ in_app_cost_unknown_reasons: Array<string>, cli_traffic_tokens: number | null, c
  * One recorded validation run (ADR §6). `exit_code` IS the verdict.
  */
 export type TaskExecutionValidationRun = { id: string, task_execution_id: string, candidate_merge_sha: string | null, command: string, exit_code: number | null, duration_ms: number | null, output: string | null, quick_exec_id: string | null, created_at: string, };
+
+export type TaskExecutionWarmingStep = { step: WarmingStepKind, duration_ms: number, };
 
 /**
  * A durable CLI worker control offer (KT-328). Links a TaskExecution + attempt to
@@ -11732,6 +12262,11 @@ withheld_by_routing: number, };
 export type WakeMode = "native_dispatch" | "external_poll";
 
 /**
+ * A sub-step of the warming phase (KT-1637), in the order they run.
+ */
+export type WarmingStepKind = "worktree_creation" | "lane_provision" | "seed_clone" | "lane_seeds" | "gate_wait" | "first_build" | "smoke_check";
+
+/**
  * How a `Watch` poll decides the source changed. Every mode sends the
  * stored `If-None-Match` / `If-Modified-Since` first: a 304 is "unchanged".
  */
@@ -11815,7 +12350,30 @@ default_max_review_rounds: number,
  * `token_budget`, when set, still stops every further correction attempt; the
  * cost is tokens spent on a review that may never converge.
  */
-review_rounds_unlimited: boolean, };
+review_rounds_unlimited: boolean,
+/**
+ * KT-1633 — run task workers (first dispatch and re-dispatch), their
+ * validations and workflow Agent / Exec steps at background priority
+ * (`taskpolicy -b`, `nice -n 10`, below-normal on Windows), so the owner's
+ * applications and Kronn's own UI stay responsive. On by default; off keeps
+ * every spawn at the backend's priority. `KRONN_BACKGROUND_PRIORITY=0` turns
+ * it off too, whatever this says.
+ */
+background_priority: boolean,
+/**
+ * KT-1632 — local task workers (a CLI agent in its own worktree) running at
+ * once. A launch or re-dispatch beyond it waits `Queued`, in launch order,
+ * and starts when a slot frees. Remote (HTTP) and Ollama workers do not
+ * count. `max_concurrent_agents` counts agent processes, not the builds
+ * behind them, so it cannot bound the machine load on its own.
+ */
+max_concurrent_task_workers: number,
+/**
+ * KT-1525 — a workflow step output above this many KB is shown as a
+ * « heavy output » warning in the run view and on the workflow card.
+ * The run itself is never refused.
+ */
+heavy_output_kb: number, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
@@ -12134,6 +12692,10 @@ export type WorkflowReadiness = { workflow_id: string, workflow_name: string, en
  */
 ready: boolean, blockers: Array<WorkflowBlocker>, human_approval_count: number,
 /**
+ * Design drift (KT-1216): advisory, never a blocker, never part of `ready`.
+ */
+warnings?: Array<WorkflowWarning>,
+/**
  * The workflows checked: this one, then its sub-workflows.
  */
 checked_workflow_ids: Array<string>,
@@ -12248,7 +12810,13 @@ parent_workflow_id?: string | null, parent_workflow_name?: string | null, parent
  */
 export type WorkflowRunOutcome = "no_op" | "changed";
 
-export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: string, finished_at: string | null, tokens_used: number, };
+export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: string, finished_at: string | null, tokens_used: number,
+/**
+ * KT-1525 — bytes of the run's heaviest step output (0 when unknown) and
+ * that step's name, so the workflow card can warn without reading the
+ * run's payload. The UI grades it against the configured threshold.
+ */
+heaviest_output_bytes?: number, heaviest_output_step?: string, };
 
 export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_lines?: number | null, require_approval: boolean, };
 
@@ -12756,6 +13324,21 @@ export type WorkflowTrigger = { "type": "Cron", schedule: string,
  * global timezone. Triggers saved before it were pinned to UTC.
  */
 timezone?: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" } | { "type": "Watch" } & WatchTrigger;
+
+/**
+ * An advisory finding: the workflow can still start, but it was built against
+ * the doctrine served by `workflow_step_schema` (`authoring_doctrine`).
+ */
+export type WorkflowWarning = { workflow_id: string, workflow_name: string,
+/**
+ * The steps that show it, in workflow order.
+ */
+steps: Array<string>, kind: WorkflowWarningKind, message: string, action: string, };
+
+/**
+ * A sign that a workflow drifts from the authoring doctrine (KT-1216).
+ */
+export type WorkflowWarningKind = "duplicated_exec_script" | "exec_bypasses_plugin";
 
 export type WorkspaceConfig = { hooks: WorkspaceHooks,
 /**

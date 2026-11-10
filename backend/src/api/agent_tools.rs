@@ -59,6 +59,9 @@ mod workflow_tools;
 #[path = "agent_page_tools.rs"]
 mod page_tools;
 
+#[path = "agent_room_tools.rs"]
+mod room_tools;
+
 #[path = "agent_media_tools.rs"]
 mod media_tools;
 
@@ -111,6 +114,9 @@ pub struct KronnToolExecutor {
     bridge_token: std::sync::Mutex<Option<crate::core::bridge_token::BridgeTokenGuard>>,
     /// What a workflow step's media generations are keyed on (KT-1605).
     step_media: media_tools::StepMedia,
+    /// The room an HTTP Agent step with a `room_id` is a member of (KT-1244).
+    /// Its presence is what adds the room tools to the step's catalogue.
+    step_room: Option<crate::workflows::step_room::StepRoomMember>,
 }
 
 impl KronnToolExecutor {
@@ -131,6 +137,7 @@ impl KronnToolExecutor {
             launch_identity: Default::default(),
             bridge_token: Default::default(),
             step_media: Default::default(),
+            step_room: None,
         }
     }
 
@@ -159,6 +166,7 @@ impl KronnToolExecutor {
             launch_identity: Default::default(),
             bridge_token: Default::default(),
             step_media: Default::default(),
+            step_room: None,
         })
     }
 
@@ -190,6 +198,7 @@ impl KronnToolExecutor {
             launch_identity: Default::default(),
             bridge_token: Default::default(),
             step_media: Default::default(),
+            step_room: None,
         })
     }
 
@@ -202,13 +211,23 @@ impl KronnToolExecutor {
         workflow_run_id: String,
         step_name: String,
     ) -> std::sync::Arc<dyn ToolExecutor> {
-        std::sync::Arc::new(Self::workflow_executor(
-            state,
-            project_id,
-            workflow_run_id,
-            step_name,
-            false,
-        ))
+        Self::workflow_room_arc(state, project_id, workflow_run_id, step_name, None)
+    }
+
+    /// [`Self::workflow_arc`] for a step that may be a member of a room
+    /// (KT-1244): only then is the catalogue extended with the room tools, all
+    /// bound to that room.
+    pub fn workflow_room_arc(
+        state: AppState,
+        project_id: Option<String>,
+        workflow_run_id: String,
+        step_name: String,
+        room: Option<crate::workflows::step_room::StepRoomMember>,
+    ) -> std::sync::Arc<dyn ToolExecutor> {
+        let mut executor =
+            Self::workflow_executor(state, project_id, workflow_run_id, step_name, false);
+        executor.step_room = room;
+        std::sync::Arc::new(executor)
     }
 
     /// The same catalogue for the Test button of one step. It has no run, so a
@@ -258,6 +277,7 @@ impl KronnToolExecutor {
                 test_invocation,
                 dry_run,
             },
+            step_room: None,
         }
     }
 
@@ -338,6 +358,7 @@ impl KronnToolExecutor {
             launch_identity: Default::default(),
             bridge_token: Default::default(),
             step_media: Default::default(),
+            step_room: None,
         })
     }
 }
@@ -1777,6 +1798,11 @@ impl ToolExecutor for KronnToolExecutor {
         if self.project_id.is_some() {
             catalogue.extend(workflow_workspace_tool_catalogue());
         }
+        // KT-1244 — the step is a member of its room: read it, post in it, ask
+        // in it. A step without a room is offered none of these.
+        if self.step_room.is_some() {
+            catalogue.extend(room_tools::declarations());
+        }
         catalogue
     }
 
@@ -1890,6 +1916,12 @@ impl ToolExecutor for KronnToolExecutor {
 
         // Handlers are invoked directly rather than over loopback HTTP: same
         // code path as the bridge's calls, minus a round-trip and an auth hop.
+        // The step's own room tools (KT-1244) share their names with the CLI
+        // bridge's, not its handlers: the catalogue check above already refused
+        // them to a step that is not a member of a room.
+        if self.workflow_run_id.is_some() && room_tools::NAMES.contains(&call.name.as_str()) {
+            return self.execute_step_room_tool(call).await;
+        }
         match tool_dispatch(&call.name) {
             ToolDispatch::DiscussionRead => return self.read_other_discussion(call).await,
             ToolDispatch::DiscussionList => return self.list_project_discussions(call).await,
@@ -2336,7 +2368,10 @@ impl ToolExecutor for KronnToolExecutor {
                     Json(req),
                 )
                 .await;
-                unwrap_api(call, res.success, res.data, res.error)
+                cap_api_call_outcome(
+                    unwrap_api(call, res.success, res.data, res.error),
+                    API_CALL_RESULT_MAX_BYTES,
+                )
             }
             "room_scope" => {
                 // Only a room's own agent holds or asks for the room's reach; a
@@ -2752,13 +2787,23 @@ impl KronnToolExecutor {
                 // Optional here, like a scope: when the principal already knows its
                 // gates, an unrunnable one makes the preflight refuse, not the
                 // integration hours later.
-                let validations_refusal = match validations_argument(call) {
-                    Ok(validations) => crate::api::orchestration::validations_refusal(
-                        &validations.unwrap_or_default(),
-                    ),
+                let (validations_refusal, full_suite_warnings) = match validations_argument(call) {
+                    Ok(validations) => {
+                        let validations = validations.unwrap_or_default();
+                        (
+                            crate::api::orchestration::validations_refusal(&validations),
+                            crate::api::orchestration::full_suite_validation_warnings(&validations),
+                        )
+                    }
                     Err(error) => return fail(call, error),
                 };
                 let parent = discussion_id;
+                crate::api::orchestration::reclaim_finished_worktrees_for_launch(
+                    &self.state.db,
+                    &task_reference,
+                    &worker,
+                )
+                .await;
                 match self
                     .state
                     .db
@@ -2769,6 +2814,7 @@ impl KronnToolExecutor {
                             &parent,
                             &worker,
                         )?;
+                        preparation.warnings.extend(full_suite_warnings);
                         preparation.default_max_review_rounds =
                             Some(crate::models::review_limit_json(default_rounds));
                         for reason in [scope_refusal, validations_refusal, rounds_refusal]
@@ -2825,6 +2871,12 @@ impl KronnToolExecutor {
                     let task = task_reference.clone();
                     let parent = discussion_id.clone();
                     let selected = worker.clone();
+                    crate::api::orchestration::reclaim_finished_worktrees_for_launch(
+                        &self.state.db,
+                        &task,
+                        &selected,
+                    )
+                    .await;
                     self.state
                         .db
                         .with_conn(move |conn| {
@@ -3500,23 +3552,7 @@ impl KronnToolExecutor {
         }
         // Keep the tail: the recent exchange is what a reader needs, and the whole
         // history would blow the window on a long room.
-        let total = messages.len();
-        let tail: Vec<Value> = messages
-            .into_iter()
-            .rev()
-            .take(limit)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|message| {
-                let body = message.content.chars().take(4_000).collect::<String>();
-                serde_json::json!({
-                    "role": format!("{:?}", message.role),
-                    "agent_type": message.agent_type.map(|a| format!("{a:?}")),
-                    "content": body,
-                })
-            })
-            .collect();
+        let (total, tail) = message_tail(messages, limit);
         ok(
             call,
             serde_json::json!({
@@ -4478,9 +4514,10 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
         ("qp_get", QP_GET_MANUAL),
         (
             "workflow_create_draft",
-            "Before composing, read the workflow guide: tool_manual({tool: \"workflow-architect\"}), then the sections you need. \
+            "Before composing, read `authoring_doctrine` (workflow_step_schema, same text as the guide's Authoring doctrine section): it says which step type to prefer, e.g. HTTP to a service with a plugin through ApiCall, Exec for logic only, one script never copied, state through step outputs. \
+             Then the workflow guide: tool_manual({tool: \"workflow-architect\"}), and the sections you need. \
              Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
-             Shared templating and data pipeline contracts are available by section. \
+             Shared templating, data pipeline and doctrine contracts are available by section. \
              Read workflow_get on an accessible example. Send name, trigger (e.g. {type: Manual}) \
              and 1–20 steps; each has name and step_type:{type: ...}. Optional authoring fields: \
              actions, safety, workspace_config, guards, artifacts, on_failure (0–20 steps), \
@@ -4493,7 +4530,7 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
         ),
         (
             "workflow_update",
-            "Read workflow_get first. Pass workflow_id and only changed authoring fields from \
+            "Read workflow_get first, and `authoring_doctrine` (workflow_step_schema) before changing steps. Pass workflow_id and only changed authoring fields from \
              workflow_create_draft. Omitted fields survive; supplied arrays replace the whole \
              array, so include all intended steps when editing steps. The project never moves \
              and enabled cannot be set. Only disabled workflows can be updated; disable an \
@@ -4592,6 +4629,17 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              --pretty false`, `cargo test --manifest-path backend/Cargo.toml --target-dir <dir>` \
              (there is no `CARGO_TARGET_DIR=` prefix; `--target-dir` is its form);\n\
              • `timeout_secs` defaults to 600 and is capped at 1800.\n\n\
+             **Default gates** — the CI lint gate is EXACTLY `cargo fmt --check` and `cargo \
+             clippy --all-targets -- -D warnings` (never `--lib` or `--lib --tests`, which skip \
+             `tests/`); the worker must report each exit code in its delivery. From the worktree \
+             root propose `cargo fmt --manifest-path backend/Cargo.toml --all -- \
+             --check`, `cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D \
+             warnings` and targeted lib tests (`cargo test --lib --manifest-path \
+             backend/Cargo.toml <filter>`). The FULL suite (bare `cargo test`, `cargo nextest \
+             run`, `make test-backend`: ~20 min locally against 3.3 min for `--lib`) belongs to \
+             the PR's CI, not to a local integration validation: a gate that replays it is \
+             still accepted, but the preflight adds a non-blocking `full_suite_ci_owned` entry \
+             to `warnings`.\n\n\
              A command that breaks this contract makes the preflight answer `launchable: false` \
              with reason `invalid_validations` and the form that runs, and makes \
              task_exec_launch refuse it the same way — it is never accepted to fail at \
@@ -4887,6 +4935,80 @@ pub(super) fn unwrap_api_noticed<T: serde::Serialize>(
         value
     });
     unwrap_api(call, response.success, data, response.error)
+}
+
+/// The last `limit` messages of a room, each cut to what a model can use, and
+/// how many the room holds.
+fn message_tail(
+    messages: Vec<crate::models::DiscussionMessage>,
+    limit: usize,
+) -> (usize, Vec<Value>) {
+    let total = messages.len();
+    let tail = messages
+        .into_iter()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|message| {
+            let body = message.content.chars().take(4_000).collect::<String>();
+            serde_json::json!({
+                "role": format!("{:?}", message.role),
+                "agent_type": message.agent_type.map(|a| format!("{a:?}")),
+                "content": body,
+            })
+        })
+        .collect();
+    (total, tail)
+}
+
+/// Most bytes of an `api_call` result a model is handed (KT-1600). A provider
+/// answers with whatever it likes — a full analytics report, a page of
+/// records — and a local model's context is the scarce resource: one unbounded
+/// result pushes the conversation out of the window and the turn fails or
+/// loses its instructions.
+pub(crate) const API_CALL_RESULT_MAX_BYTES: usize = 16 * 1024;
+
+/// Bound an `api_call` outcome to `max_bytes` of serialised `data`.
+///
+/// Over the cap, `data` becomes the leading excerpt of its own JSON text and
+/// the result says so — `truncated`, the sizes, and a marker that tells the
+/// model to narrow the request (`extract`, a smaller range, pagination)
+/// instead of treating the excerpt as the whole answer. A result within the
+/// cap, and a failed call, pass through untouched.
+fn cap_api_call_outcome(mut outcome: ToolOutcome, max_bytes: usize) -> ToolOutcome {
+    if !outcome.ok {
+        return outcome;
+    }
+    let Some(object) = outcome.content.as_object_mut() else {
+        return outcome;
+    };
+    let Some(data) = object.get("data").filter(|data| !data.is_null()) else {
+        return outcome;
+    };
+    let rendered = data.to_string();
+    if rendered.len() <= max_bytes {
+        return outcome;
+    }
+    let mut cut = max_bytes;
+    while !rendered.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let total = rendered.len();
+    let excerpt = rendered[..cut].to_string();
+    object.insert("data".into(), Value::String(excerpt));
+    object.insert("truncated".into(), Value::Bool(true));
+    object.insert("data_bytes_total".into(), json!(total));
+    object.insert("data_bytes_shown".into(), json!(cut));
+    object.insert(
+        "truncation_marker".into(),
+        Value::String(format!(
+            "[truncated: showing the first {cut} of {total} bytes of `data`, as JSON text that stops mid-value — \
+             narrow the request (`extract`, a smaller date range or page size) rather than relying on this excerpt]"
+        )),
+    );
+    outcome
 }
 
 fn unwrap_api<T: serde::Serialize>(
@@ -5373,6 +5495,7 @@ mod tests {
                     image_model: None,
                     video_model: Some("google/veo-3.1-lite".into()),
                     decision_model: None,
+                    tools_enabled: None,
                     media_endpoint: None,
                 },
             )?;
@@ -6101,6 +6224,10 @@ mod tests {
             "cargo test --manifest-path backend/Cargo.toml --target-dir",
             "invalid_validations",
             "task_exec_reassign",
+            // KT-1654 — the CI lint gate verbatim, and the exit code asked for.
+            "`cargo fmt --check`",
+            "`cargo clippy --all-targets -- -D warnings`",
+            "report each exit code",
         ] {
             assert!(
                 text.contains(fact),
@@ -6270,6 +6397,56 @@ mod tests {
         let rendered = out.to_string();
         assert!(!rendered.contains("api_extract"));
         assert!(!rendered.contains("created_at"));
+    }
+
+    fn api_outcome(content: Value, ok: bool) -> ToolOutcome {
+        ToolOutcome {
+            call: ToolCall {
+                id: "call_1".into(),
+                name: "api_call".into(),
+                arguments: json!({}),
+            },
+            content,
+            ok,
+        }
+    }
+
+    #[test]
+    fn an_api_call_result_over_the_cap_is_cut_and_marked() {
+        let big = "é".repeat(50_000);
+        let outcome = cap_api_call_outcome(
+            api_outcome(
+                json!({ "success": true, "status": "OK", "summary": "ok", "data": { "rows": big } }),
+                true,
+            ),
+            1_000,
+        );
+        assert!(outcome.ok);
+        assert_eq!(outcome.content["truncated"], true);
+        // The cut lands on a character boundary: "é" is two bytes.
+        let shown = outcome.content["data_bytes_shown"].as_u64().unwrap();
+        assert!((998..=1_000).contains(&shown), "shown {shown}");
+        assert!(outcome.content["data_bytes_total"].as_u64().unwrap() > 100_000);
+        assert!(outcome.content["truncation_marker"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("[truncated: showing the first {shown} of")));
+        let excerpt = outcome.content["data"].as_str().expect("data became text");
+        assert!(excerpt.len() <= 1_000);
+        assert_eq!(outcome.content["status"], "OK", "the envelope survives");
+    }
+
+    #[test]
+    fn an_api_call_result_within_the_cap_or_failed_is_left_alone() {
+        let small = json!({ "success": true, "data": { "rows": [1, 2, 3] } });
+        let kept = cap_api_call_outcome(api_outcome(small.clone(), true), 1_000);
+        assert_eq!(kept.content, small);
+        let failed = json!({ "error": "x".repeat(5_000) });
+        let kept = cap_api_call_outcome(api_outcome(failed.clone(), false), 10);
+        assert_eq!(kept.content, failed);
+        let empty = json!({ "success": true, "data": null });
+        let kept = cap_api_call_outcome(api_outcome(empty.clone(), true), 1);
+        assert_eq!(kept.content, empty);
     }
 
     #[test]

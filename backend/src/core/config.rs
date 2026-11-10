@@ -603,6 +603,12 @@ pub async fn save(config: &AppConfig) -> Result<()> {
         config.server.disk_launch_min_free_gib,
         config.server.disk_sweep_idle_hours,
     );
+    crate::core::task_worker_lane_seeds::set_seed_policy(
+        config.server.lane_seeds_copy_enabled,
+        config.server.lane_seeds_adopt_suggested,
+    );
+    // KT-1633 — Settings > Workers: background priority of the workers' processes.
+    crate::core::background_priority::set_enabled(config.workers.background_priority);
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())
@@ -887,7 +893,12 @@ pub fn default_config() -> AppConfig {
             auth_locked: false,
             auth_token_session_only: false,
             auth_strict_localhost: false,
+            tls_terminated_by_proxy: false,
+            public_origin: None,
             protect_vault_from_agents: true,
+            lane_seeds_copy_enabled: true,
+            lane_seeds_adopt_suggested: false,
+            lane_seeds_strong_confirm: true,
             p2p_enabled: false,
             frontend_origins: vec![],
             failure_notify_url: None,
@@ -971,6 +982,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                tools_enabled: None,
             },
             codex: AgentConfig {
                 concurrency: None,
@@ -980,6 +992,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                tools_enabled: None,
             },
             open_code: AgentConfig::default(),
             gemini_cli: AgentConfig::default(),
@@ -1085,6 +1098,14 @@ pub fn set_aside_notice(dir: &std::path::Path) -> Option<String> {
         .unwrap_or_else(|p| p.into_inner())
         .get(dir)
         .cloned()
+}
+
+/// Forget the notice about a set-aside file the owner deleted (KT-1594).
+pub fn forget_set_aside(dir: &std::path::Path, name: &str) {
+    let mut notices = SET_ASIDE.lock().unwrap_or_else(|p| p.into_inner());
+    if notices.get(dir).is_some_and(|n| n.contains(name)) {
+        notices.remove(dir);
+    }
 }
 
 /// Take an unreadable config.toml out of the way without leaving its content in
@@ -1435,7 +1456,7 @@ mod tests {
 
     /// C2-17 — the temp file is created owner-only and never follows a
     /// symlink planted at its name.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[test]
     fn write_config_atomic_never_follows_a_planted_temp_symlink() {
         let dir = scratch_dir("atomic-symlink");
@@ -2438,7 +2459,7 @@ image_family = "flux9_future"
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     fn write_config_atomic_sets_file_0600() {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch_dir("atomic0600");
@@ -2857,7 +2878,7 @@ image_family = "flux9_future"
         assert!(parsed.server.auth_token.is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix; asserts POSIX mode bits, which Windows does not have
     #[tokio::test]
     #[serial]
     async fn save_chmods_dir_700_and_file_600_on_unix() {

@@ -832,6 +832,10 @@
 .orch-exec-facts { display: grid; grid-template-columns: minmax(70px, auto) minmax(0, 1fr); gap: 4px 8px; margin: 0; font-size: var(--kr-fs-2xs); }
 .orch-exec-facts dt { color: var(--kr-text-dim); }
 .orch-exec-facts dd { overflow-wrap: anywhere; margin: 0; color: var(--kr-text-secondary); font-family: var(--kr-font-mono); }
+.orch-exec-warming { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--kr-border-subtle); font-size: var(--kr-fs-2xs); }
+.orch-exec-warming h4 { margin: 0; color: var(--kr-text-dim); font-size: var(--kr-fs-2xs); text-transform: uppercase; }
+.orch-exec-warming ul { display: grid; gap: 2px; margin: 0; padding: 0; color: var(--kr-text-secondary); font-family: var(--kr-font-mono); list-style: none; }
+.orch-exec-warming p { margin: 0; color: var(--kr-text-primary); font-family: var(--kr-font-mono); }
 .orch-exec-partial { display: block; color: var(--kr-warning); font-family: var(--kr-font-sans); }
 .orch-exec-failing,
 .orch-exec-recovery { padding: 7px; border-left: 2px solid var(--kr-warning); background: rgba(var(--kr-warning-rgb), .07); color: var(--kr-warning); font-size: var(--kr-fs-2xs); }
@@ -911,6 +915,7 @@
 .orch-launch-auto { display: grid; gap: 4px; color: var(--kr-text-secondary); font-size: var(--kr-fs-xs); }
 .orch-launch-validations { grid-column: 1 / -1; }
 .orch-launch-validations textarea { min-height: 72px; resize: vertical; }
+.orch-launch-validations-hint { grid-column: 1 / -1; margin: 0; }
 .orch-launch-fallbacks { display: flex; flex-wrap: wrap; gap: 8px 14px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-radius-sm); }
 .orch-launch-fallbacks legend { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
 .orch-launch-fallbacks label,
@@ -920,7 +925,8 @@
   .orch-launch-backdrop { align-items: end; padding: 0; }
   .orch-launch-dialog { max-height: 92vh; border-radius: var(--kr-r-lg) var(--kr-r-lg) 0 0; }
   .orch-launch-grid { grid-template-columns: 1fr; }
-  .orch-launch-validations { grid-column: auto; }
+  .orch-launch-validations,
+  .orch-launch-validations-hint { grid-column: auto; }
   .orch-campaign-item { align-items: stretch; flex-direction: column; }
 }
 

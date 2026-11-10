@@ -16,6 +16,7 @@ pub mod dependencies;
 pub mod docker;
 pub mod docs_location;
 pub mod git;
+pub mod lane_seeds;
 pub mod migrate;
 pub mod resource_links;
 pub mod resource_prewarm;

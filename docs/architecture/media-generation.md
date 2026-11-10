@@ -166,7 +166,7 @@ without a reload.
 * Agents: `media_generate` and `media_job_status`, by two independent routes —
   CLI agents through the `kronn-internal` MCP bridge, HTTP agents through the
   native orchestration catalogue
-  [src: file: backend/src/api/agent_tools.rs:1264-1304#media_generate]. The bridge route came
+  [src: file: backend/src/api/agent_tools.rs:1285-1325#media_generate]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
 * A workflow Agent step on an HTTP or local agent has the same two tools since 0.15.3, through
   the same handler. Its asset lands in a room opened for the run (linked to it) and, when the
@@ -244,7 +244,7 @@ trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
 slot concurrently, each under its own 8 s window, and attaches what came back
-[src: file: backend/src/api/orchestration.rs:14541-14594#bounded_media_capabilities]; the catalogue builder
+[src: file: backend/src/api/orchestration.rs:15961-16014#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the
@@ -439,7 +439,7 @@ credential, no text tier), and every media path resolves it: generation and
 its preflights, `/api/media/models`, the estimate, the worker, the bridge
 guard and the `agent_list` catalogue.
 [src: file: backend/src/api/comfyui.rs:1283-1307#local_connection]
-[src: file: backend/src/api/orchestration.rs:14591-14597#with_local_media_source]
+[src: file: backend/src/api/orchestration.rs:16017-16023#with_local_media_source]
 
 ComfyUI runs a node graph, so a model is usable only when Kronn has a
 compatible integrated workflow for its family (FLUX.1 schnell, SDXL such as

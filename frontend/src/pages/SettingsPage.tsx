@@ -17,7 +17,7 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink, Gamepad2,
-  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge, Bot, KeyRound,
+  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow, Gauge, FolderInput, Bot, KeyRound,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
@@ -81,6 +81,7 @@ import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DbUsageChart } from '../components/settings/DbUsageChart';
 import { DiskSection } from '../components/settings/DiskSection';
+import { WorktreesSection } from '../components/settings/WorktreesSection';
 import { WorkersSection } from '../components/settings/WorkersSection';
 import { RunRetentionBanner, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
 import { AppLink } from '../components/AppLink';
@@ -155,6 +156,7 @@ const SETTINGS_SECTION_IDS = [
   'settings-server',
   'settings-debug',
   'settings-api-audit',
+  'settings-worktrees',
   'settings-disk',
   'settings-database',
   'settings-general',
@@ -532,6 +534,7 @@ export function SettingsPage({
     ...(hasConfiguredApi
       ? [{ id: 'settings-api-audit', label: t('apiCallLogs.title'), icon: <Globe size={15} /> }]
       : []),
+    { id: 'settings-worktrees', label: t('settings.worktrees.title'), icon: <FolderInput size={15} /> },
     { id: 'settings-disk', label: t('settings.disk.title'), icon: <Gauge size={15} /> },
     { id: 'settings-database', label: t('config.database'), icon: <HardDrive size={15} /> },
     { id: 'settings-general', label: t('config.general'), icon: <Settings2 size={15} /> },
@@ -1956,6 +1959,9 @@ export function SettingsPage({
           <ApiCallLogsPage />
         </div>
       )}
+
+      {/* KT-1438 — what a task worktree is seeded with besides the tracked files */}
+      <WorktreesSection toast={toast} t={t} />
 
       {/* KT-1318 — what Kronn keeps on the disk, and its purge */}
       <DiskSection toast={toast} t={t} />

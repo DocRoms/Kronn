@@ -548,25 +548,38 @@ fn older_runnable_in_discussion(alias: &str) -> String {
     )
 }
 
+/// Due `Pending` jobs the dispatcher should try now, oldest first. Local task
+/// workers and every other job are windowed apart: `limit` of each. Task
+/// workers waiting on the KT-1632 cap stay `Pending` and are re-tried every scan,
+/// so one shared window would let a long queue of them hide the reviews and
+/// ordinary turns created after it — which the cap must never hold back.
 pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     let older = older_runnable_in_discussion("candidate");
+    let task_worker = local_task_worker_job("candidate");
     let mut statement = conn.prepare(&format!(
-        "SELECT candidate.id
-         FROM agent_dispatch_jobs AS candidate
-         JOIN discussions AS discussion ON discussion.id = candidate.discussion_id
-         WHERE candidate.status = 'Pending'
-           AND candidate.available_at <= ?1
-           AND (
-               (discussion.no_agent = 0 AND candidate.attempts < ?2)
-               OR discussion.no_agent = 1
-               OR EXISTS (
-                   SELECT 1 FROM task_executions AS owner
-                   WHERE owner.sub_discussion_id = candidate.discussion_id
-                     AND owner.worker_target_kind = 'cli'
+        "SELECT id FROM (
+             SELECT candidate.id AS id, candidate.created_at AS created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY {task_worker}
+                        ORDER BY candidate.created_at, candidate.id
+                    ) AS place
+             FROM agent_dispatch_jobs AS candidate
+             JOIN discussions AS discussion ON discussion.id = candidate.discussion_id
+             WHERE candidate.status = 'Pending'
+               AND candidate.available_at <= ?1
+               AND (
+                   (discussion.no_agent = 0 AND candidate.attempts < ?2)
+                   OR discussion.no_agent = 1
+                   OR EXISTS (
+                       SELECT 1 FROM task_executions AS owner
+                       WHERE owner.sub_discussion_id = candidate.discussion_id
+                         AND owner.worker_target_kind = 'cli'
+                   )
                )
-           )
-           AND NOT {older}
-         ORDER BY candidate.created_at, candidate.id LIMIT ?3",
+               AND NOT {older}
+         )
+         WHERE place <= ?3
+         ORDER BY created_at, id",
     ))?;
     let rows = statement.query_map(
         params![
@@ -614,13 +627,268 @@ const EFFECTIVE_AGENT: &str = "COALESCE(
     (SELECT agent FROM discussions WHERE id = %T%.discussion_id)
 )";
 
-/// Providers that consume the machine-wide local pool. Remote HTTP routes are
-/// intentionally absent: their capacity belongs to the remote service.
-const LOCAL_AGENT_SQL_LIST: &str =
-    "'ClaudeCode','Codex','GeminiCli','Kiro','Vibe','CopilotCli','Ollama'";
+/// The local CLI agents both lists below share: one source, so a CLI added here
+/// is seen by the machine-wide pool and by the task-worker cap alike.
+macro_rules! local_cli_agents {
+    () => {
+        "'ClaudeCode','Codex','GeminiCli','Kiro','Vibe','CopilotCli'"
+    };
+}
+
+/// Providers that consume the machine-wide local pool (`__local_global`): the
+/// local CLIs plus Ollama. Remote HTTP routes are intentionally absent: their
+/// capacity belongs to the remote service. OpenCode is not in this pool, as it
+/// never was; the task-worker list below differs on purpose.
+const LOCAL_AGENT_SQL_LIST: &str = concat!(local_cli_agents!(), ",'Ollama'");
 
 fn effective_agent(alias: &str) -> String {
     EFFECTIVE_AGENT.replace("%T%", alias)
+}
+
+/// KT-1632 — reserved admission key of the limits map: how many local task
+/// workers may be `Running` at once. Like `__local_global` it is not an agent.
+pub const TASK_WORKER_LIMIT_KEY: &str = "__task_workers";
+
+/// Prefix of the `progress_detail` a refused task-worker claim leaves on its
+/// still-`Pending` job (`task_worker_limit:<running>/<cap>`): the durable,
+/// restart-proof reason a queued execution reports.
+pub const TASK_WORKER_QUEUED_DETAIL_PREFIX: &str = "task_worker_limit:";
+
+/// What a task worker runs as when it is a local process: the shared local
+/// CLIs plus OpenCode, which spawns builds like any of them. Ollama and the HTTP
+/// routes are absent on purpose: their capacity is not this machine's builds,
+/// so a cap on local workers must never hold them back. This is why it differs
+/// from `LOCAL_AGENT_SQL_LIST` (Ollama in, OpenCode out, as before KT-1632).
+const LOCAL_TASK_WORKER_SQL_LIST: &str = concat!(local_cli_agents!(), ",'OpenCode'");
+
+/// SQL predicate: the job at `alias` is the dispatch of a local task worker —
+/// the turn of an execution's own sub-discussion, run by a local CLI agent.
+/// A joined CLI worker never has a dispatch job, so `cli` owners are excluded
+/// only to keep the definition exact.
+fn local_task_worker_job(alias: &str) -> String {
+    format!(
+        "(EXISTS (
+              SELECT 1 FROM task_executions AS worker_owner
+              WHERE worker_owner.sub_discussion_id = {alias}.discussion_id
+                AND worker_owner.worker_target_kind IS NOT 'cli'
+          )
+          AND ({agent}) IN ({agents}))",
+        agent = effective_agent(alias),
+        agents = LOCAL_TASK_WORKER_SQL_LIST,
+    )
+}
+
+/// SQL predicate: the job at `alias` is a local task worker that is waiting for
+/// a slot — `Pending`, due (`?2` now), within its attempt budget (`?3`) and in a
+/// room an agent answers. One definition for the claim, the queue position and
+/// the reason, so they can never disagree on who is in line.
+fn waiting_task_worker(alias: &str) -> String {
+    format!(
+        "({alias}.status = 'Pending'
+          AND {alias}.available_at <= ?2
+          AND {alias}.attempts < ?3
+          AND EXISTS (
+              SELECT 1 FROM discussions AS {alias}_room
+              WHERE {alias}_room.id = {alias}.discussion_id
+                AND {alias}_room.no_agent = 0
+          )
+          AND {worker})",
+        worker = local_task_worker_job(alias),
+    )
+}
+
+/// SQL predicate (`?2` now, `?3` the attempt budget, `?4` the limits): every
+/// admission condition of a claim on the job at `alias` except the task-worker
+/// cap — no joined CLI owner, nothing else running in its room, no older job
+/// ahead in the room, its group limit, its agent's cap and the local pool.
+/// The claim applies it to its candidate; the queue applies it to the older
+/// jobs, so a job that could not start right now never holds a free slot.
+fn admissible_apart_from_task_cap(alias: &str) -> String {
+    let agent = effective_agent(alias);
+    let family_agent = effective_agent("family");
+    let local_family_agent = effective_agent("local_family");
+    let older = older_runnable_in_discussion(alias);
+    format!(
+        "(EXISTS (
+              SELECT 1 FROM discussions AS {alias}_discussion
+              WHERE {alias}_discussion.id = {alias}.discussion_id
+                AND {alias}_discussion.no_agent = 0
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM task_executions AS owner
+              WHERE owner.sub_discussion_id = {alias}.discussion_id
+                AND owner.worker_target_kind = 'cli'
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_dispatch_jobs AS same_discussion
+              WHERE same_discussion.discussion_id = {alias}.discussion_id
+                AND same_discussion.status = 'Running'
+          )
+          AND NOT {older}
+          AND (
+              {alias}.group_id IS NULL
+              OR {alias}.group_concurrency_limit IS NULL
+              OR (
+                  SELECT COUNT(*) FROM agent_dispatch_jobs AS running
+                  WHERE running.group_id = {alias}.group_id
+                    AND running.status = 'Running'
+              ) < {alias}.group_concurrency_limit
+          )
+          AND (
+              ?4 IS NULL
+              OR json_extract(?4, '$.' || ({agent})) IS NULL
+              OR (
+                  SELECT COUNT(*) FROM agent_dispatch_jobs AS family
+                  WHERE family.status = 'Running'
+                    AND ({family_agent}) = ({agent})
+              ) < json_extract(?4, '$.' || ({agent}))
+          )
+          AND (
+              ?4 IS NULL
+              OR json_extract(?4, '$.__local_global') IS NULL
+              OR ({agent}) NOT IN ({local_agents})
+              OR (
+                  SELECT COUNT(*) FROM agent_dispatch_jobs AS local_family
+                  WHERE local_family.status = 'Running'
+                    AND ({local_family_agent}) IN ({local_agents})
+              ) < json_extract(?4, '$.__local_global')
+          ))",
+        local_agents = LOCAL_AGENT_SQL_LIST,
+    )
+}
+
+/// SQL predicate (`candidate` is the job being claimed): no older local task
+/// worker is waiting that could actually take a slot right now. The scanner
+/// races one claim per `Pending` job, so without this the slot would go to
+/// whichever claim wins, not to the first launch. An older job that would not be
+/// admitted anyway (its agent's or group's cap, a job ahead of it in its room,
+/// a backoff) does not count, or one blocked job would starve every other.
+fn no_older_task_worker_waiting() -> String {
+    let waiting = waiting_task_worker("waiting");
+    let admissible = admissible_apart_from_task_cap("waiting");
+    format!(
+        "NOT EXISTS (
+             SELECT 1 FROM agent_dispatch_jobs AS waiting
+             WHERE {waiting}
+               AND (waiting.created_at, waiting.rowid)
+                   < (candidate.created_at, candidate.rowid)
+               AND {admissible}
+         )"
+    )
+}
+
+/// Local task workers `Running` now (claimed, whether or not the runtime has
+/// started yet).
+fn running_task_workers(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM agent_dispatch_jobs AS running
+             WHERE running.status = 'Running' AND {}",
+            local_task_worker_job("running")
+        ),
+        [],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+/// Leave the reason a task worker is waiting on its job: the cap is full. Only
+/// written when the cap itself holds the job — it is a due local task worker
+/// that every other admission condition lets through — and only when the text
+/// changes, so the scanner re-trying a held job every few milliseconds does not
+/// write each time. A reason the cap left on a job that something else now holds
+/// back is removed rather than left wrong.
+fn note_task_worker_queued(conn: &Connection, id: &str, limits: Option<&str>) -> Result<()> {
+    let Some(cap) = limits
+        .and_then(|limits| serde_json::from_str::<serde_json::Value>(limits).ok())
+        .and_then(|limits| limits.get(TASK_WORKER_LIMIT_KEY).and_then(|v| v.as_i64()))
+    else {
+        return Ok(());
+    };
+    let held_by_the_cap_alone = conn.query_row(
+        &format!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM agent_dispatch_jobs AS candidate
+                 WHERE candidate.id = ?1 AND {} AND {}
+             )",
+            waiting_task_worker("candidate"),
+            admissible_apart_from_task_cap("candidate"),
+        ),
+        params![
+            id,
+            Utc::now().to_rfc3339(),
+            i64::from(MAX_DISPATCH_ATTEMPTS),
+            limits
+        ],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !held_by_the_cap_alone {
+        conn.execute(
+            "UPDATE agent_dispatch_jobs
+             SET progress_phase = NULL, progress_detail = NULL
+             WHERE id = ?1 AND status = 'Pending' AND progress_phase = 'queued'
+               AND substr(progress_detail, 1, length(?2)) = ?2",
+            params![id, TASK_WORKER_QUEUED_DETAIL_PREFIX],
+        )?;
+        return Ok(());
+    }
+    let running = running_task_workers(conn)?;
+    if running < cap {
+        return Ok(());
+    }
+    let detail = format!("{TASK_WORKER_QUEUED_DETAIL_PREFIX}{running}/{cap}");
+    conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET progress_phase = 'queued', progress_detail = ?2
+         WHERE id = ?1 AND status = 'Pending'
+           AND (progress_phase IS NOT 'queued' OR progress_detail IS NOT ?2)",
+        params![id, detail],
+    )?;
+    Ok(())
+}
+
+/// 1-based place of a local task worker in the queue of its peers, in launch
+/// order. Only workers actually waiting count ahead of it (not one in a backoff,
+/// or past its attempts). `None` when the job is not itself waiting — not a
+/// local task worker, not `Pending`, or in a backoff — so it has no place.
+pub fn task_worker_queue_position(conn: &Connection, id: &str) -> Result<Option<u32>> {
+    let own: Option<(String, i64)> = conn
+        .query_row(
+            &format!(
+                "SELECT candidate.created_at, candidate.rowid
+                 FROM agent_dispatch_jobs AS candidate
+                 WHERE candidate.id = ?1 AND {}",
+                waiting_task_worker("candidate")
+            ),
+            params![
+                id,
+                Utc::now().to_rfc3339(),
+                i64::from(MAX_DISPATCH_ATTEMPTS)
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((created_at, rowid)) = own else {
+        return Ok(None);
+    };
+    let ahead: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM agent_dispatch_jobs AS waiting
+             WHERE waiting.id <> ?1
+               AND (waiting.created_at, waiting.rowid) < (?4, ?5)
+               AND {}",
+            waiting_task_worker("waiting")
+        ),
+        params![
+            id,
+            Utc::now().to_rfc3339(),
+            i64::from(MAX_DISPATCH_ATTEMPTS),
+            created_at,
+            rowid
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(Some(ahead.max(0) as u32 + 1))
 }
 
 pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
@@ -640,10 +908,10 @@ pub fn claim_with_limits(
     limits: Option<&str>,
 ) -> Result<Option<AgentDispatchJob>> {
     let now = Utc::now().to_rfc3339();
-    let candidate_agent = effective_agent("candidate");
-    let family_agent = effective_agent("family");
-    let local_family_agent = effective_agent("local_family");
-    let older = older_runnable_in_discussion("candidate");
+    let admissible = admissible_apart_from_task_cap("candidate");
+    let candidate_task_worker = local_task_worker_job("candidate");
+    let running_task_worker = local_task_worker_job("task_worker");
+    let no_older_task_worker = no_older_task_worker_waiting();
     conn.query_row(
         &format!(
             "UPDATE agent_dispatch_jobs AS candidate
@@ -652,62 +920,37 @@ pub fn claim_with_limits(
                  turn_attempts = turn_attempts + 1,
                  claimed_at = ?2,
                  updated_at = ?2,
-                 last_error = NULL
+                 last_error = NULL,
+                 progress_phase = CASE
+                     WHEN progress_phase = 'queued'
+                          AND substr(progress_detail, 1, length('{TASK_WORKER_QUEUED_DETAIL_PREFIX}'))
+                              = '{TASK_WORKER_QUEUED_DETAIL_PREFIX}'
+                     THEN NULL ELSE progress_phase END,
+                 progress_detail = CASE
+                     WHEN progress_phase = 'queued'
+                          AND substr(progress_detail, 1, length('{TASK_WORKER_QUEUED_DETAIL_PREFIX}'))
+                              = '{TASK_WORKER_QUEUED_DETAIL_PREFIX}'
+                     THEN NULL ELSE progress_detail END
              WHERE id = ?1
                AND status = 'Pending'
                AND available_at <= ?2
                AND attempts < ?3
-               AND EXISTS (
-                   SELECT 1
-                   FROM discussions AS discussion
-                   WHERE discussion.id = candidate.discussion_id
-                     AND discussion.no_agent = 0
-               )
-               AND NOT EXISTS (
-                   SELECT 1 FROM task_executions AS owner
-                   WHERE owner.sub_discussion_id = candidate.discussion_id
-                     AND owner.worker_target_kind = 'cli'
-               )
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM agent_dispatch_jobs AS same_discussion
-                   WHERE same_discussion.discussion_id = candidate.discussion_id
-                     AND same_discussion.status = 'Running'
-               )
-               AND NOT {older}
-               AND (
-                    group_id IS NULL
-                    OR group_concurrency_limit IS NULL
-                    OR (
-                        SELECT COUNT(*)
-                        FROM agent_dispatch_jobs AS running
-                        WHERE running.group_id = candidate.group_id
-                          AND running.status = 'Running'
-                    ) < group_concurrency_limit
-               )
+               AND {admissible}
                AND (
                     ?4 IS NULL
-                    OR json_extract(?4, '$.' || ({candidate_agent})) IS NULL
+                    OR json_extract(?4, '$.' || '{TASK_WORKER_LIMIT_KEY}') IS NULL
+                    OR NOT {candidate_task_worker}
                     OR (
-                        SELECT COUNT(*)
-                        FROM agent_dispatch_jobs AS family
-                        WHERE family.status = 'Running'
-                          AND ({family_agent}) = ({candidate_agent})
-                    ) < json_extract(?4, '$.' || ({candidate_agent}))
+                        (
+                            SELECT COUNT(*)
+                            FROM agent_dispatch_jobs AS task_worker
+                            WHERE task_worker.status = 'Running'
+                              AND {running_task_worker}
+                        ) < json_extract(?4, '$.' || '{TASK_WORKER_LIMIT_KEY}')
+                        AND {no_older_task_worker}
+                    )
                )
-               AND (
-                    ?4 IS NULL
-                    OR json_extract(?4, '$.__local_global') IS NULL
-                    OR ({candidate_agent}) NOT IN ({local_agents})
-                    OR (
-                        SELECT COUNT(*)
-                        FROM agent_dispatch_jobs AS local_family
-                        WHERE local_family.status = 'Running'
-                          AND ({local_family_agent}) IN ({local_agents})
-                    ) < json_extract(?4, '$.__local_global')
-               )
-             RETURNING {JOB_COLUMNS}",
-            local_agents = LOCAL_AGENT_SQL_LIST,
+             RETURNING {JOB_COLUMNS}"
         ),
         params![id, now, i64::from(MAX_DISPATCH_ATTEMPTS), limits],
         map_job,
@@ -718,6 +961,9 @@ pub fn claim_with_limits(
         if claimed.is_some() {
             return Ok(claimed);
         }
+
+        // KT-1632 — a task worker held back by the cap says so on its job.
+        note_task_worker_queued(conn, id, limits)?;
 
         // A human can disable the native responder after a route decided to
         // enqueue but before this claim. Refuse the launch atomically above,
@@ -3001,5 +3247,640 @@ mod tests {
         .unwrap();
         assert_eq!(keyed.id, "job-keyed");
         assert_eq!(jobs_in_room(&connection).len(), 3);
+    }
+
+    // ── KT-1632 — the cap on local task workers ──
+
+    const CAP_TWO: &str = r#"{"__task_workers":2}"#;
+
+    /// One task worker: an execution, its sub-discussion run by `agent`, and
+    /// the worker's pending dispatch. `kind` is the execution's worker kind.
+    fn task_worker(connection: &Connection, name: &str, agent: &str, kind: &str) -> String {
+        let now = Utc::now().to_rfc3339();
+        let room = format!("room-{name}");
+        let job = format!("job-{name}");
+        connection
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO discussions (id, title, agent, created_at, updated_at)
+                 VALUES (?1, 'worker room', ?2, ?3, ?3)",
+                params![room, agent, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES (?1, ?2, 'User', 'brief', ?3, 1, ?3)",
+                params![format!("brief-{name}"), room, now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO task_executions
+                 (id, orchestration_run_id, task_id, parent_discussion_id,
+                  sub_discussion_id, worker_target_kind, worker_agent_type,
+                  created_at, updated_at)
+                 VALUES (?1, 'run', ?1, 'd1', ?2, ?3, ?4, ?5, ?5)",
+                params![format!("exec-{name}"), room, kind, agent, now],
+            )
+            .unwrap();
+        enqueue(
+            connection,
+            NewAgentDispatchJob {
+                id: &job,
+                discussion_id: &room,
+                trigger_message_id: &format!("brief-{name}"),
+                trigger_sort_order: 1,
+                dedupe_key: &format!("orch-dispatch:{name}:1"),
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        // Launch order is (created_at, rowid): jobs enqueued in turn keep it
+        // even inside one clock tick, so no pause is needed here.
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        job
+    }
+
+    fn claim_capped(connection: &Connection, id: &str) -> bool {
+        claim_with_limits(connection, id, Some(CAP_TWO))
+            .unwrap()
+            .is_some()
+    }
+
+    fn progress_of(connection: &Connection, id: &str) -> (Option<String>, Option<String>) {
+        let job = get(connection, id).unwrap().unwrap();
+        (job.progress_phase, job.progress_detail)
+    }
+
+    fn user_turn_in(connection: &Connection, room: &str, id: &str, sort_order: i64) {
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES (?1, ?2, 'User', 'rework', ?3, ?4, ?3)",
+                params![id, room, now, sort_order],
+            )
+            .unwrap();
+    }
+
+    /// DoD 1 — beyond the cap a worker stays `Pending`, says why, and starts
+    /// as soon as a slot frees.
+    #[test]
+    fn a_task_worker_beyond_the_cap_queues_with_its_reason_and_starts_when_a_slot_frees() {
+        let connection = connection();
+        let first = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let second = task_worker(&connection, "b", "Codex", "agent");
+        let third = task_worker(&connection, "c", "ClaudeCode", "agent");
+
+        assert!(claim_capped(&connection, &first));
+        assert!(claim_capped(&connection, &second));
+        assert!(!claim_capped(&connection, &third), "two slots are taken");
+        let held = get(&connection, &third).unwrap().unwrap();
+        assert_eq!(held.status, DispatchStatus::Pending);
+        assert_eq!(
+            progress_of(&connection, &third),
+            (
+                Some("queued".to_string()),
+                Some("task_worker_limit:2/2".to_string())
+            )
+        );
+        assert_eq!(
+            task_worker_queue_position(&connection, &third).unwrap(),
+            Some(1)
+        );
+        // Retrying a held job is a no-op write: the reason does not churn.
+        assert!(!claim_capped(&connection, &third));
+
+        mark_completed(&connection, &first).unwrap();
+        assert!(claim_capped(&connection, &third), "a freed slot starts it");
+        assert_eq!(
+            task_worker_queue_position(&connection, &third).unwrap(),
+            None
+        );
+    }
+
+    /// DoD 2 — launch order: whatever claim wins the race, the oldest launch
+    /// takes the freed slot.
+    #[test]
+    fn a_freed_slot_goes_to_the_oldest_launch_whatever_the_claim_order() {
+        for newest_first in [false, true] {
+            let connection = connection();
+            let running_a = task_worker(&connection, "a", "ClaudeCode", "agent");
+            let running_b = task_worker(&connection, "b", "ClaudeCode", "agent");
+            let older = task_worker(&connection, "c", "ClaudeCode", "agent");
+            let newer = task_worker(&connection, "d", "ClaudeCode", "agent");
+            assert!(claim_capped(&connection, &running_a));
+            assert!(claim_capped(&connection, &running_b));
+            assert_eq!(
+                task_worker_queue_position(&connection, &older).unwrap(),
+                Some(1)
+            );
+            assert_eq!(
+                task_worker_queue_position(&connection, &newer).unwrap(),
+                Some(2)
+            );
+
+            mark_completed(&connection, &running_a).unwrap();
+            let order = if newest_first {
+                [&newer, &older]
+            } else {
+                [&older, &newer]
+            };
+            let winners: Vec<&String> = order
+                .into_iter()
+                .filter(|id| claim_capped(&connection, id))
+                .collect();
+            assert_eq!(winners, [&older], "newest_first={newest_first}");
+        }
+    }
+
+    /// One saturated provider must not starve the others: an older job that its
+    /// own agent cap holds back does not hold the queue.
+    #[test]
+    fn an_older_worker_held_by_its_own_agent_cap_does_not_block_a_younger_one() {
+        let connection = connection();
+        let limits = r#"{"__task_workers":3,"Codex":1}"#;
+        let running = task_worker(&connection, "a", "Codex", "agent");
+        let older = task_worker(&connection, "b", "Codex", "agent");
+        let younger = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_with_limits(&connection, &running, Some(limits))
+            .unwrap()
+            .is_some());
+        assert!(claim_with_limits(&connection, &older, Some(limits))
+            .unwrap()
+            .is_none());
+        assert!(claim_with_limits(&connection, &younger, Some(limits))
+            .unwrap()
+            .is_some());
+    }
+
+    /// DoD 2 — remote (HTTP) and Ollama workers and ordinary discussion turns
+    /// neither count against the cap nor wait on it.
+    #[test]
+    fn the_cap_never_holds_remote_workers_nor_ordinary_turns() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+
+        for (name, agent) in [
+            ("litellm", "LiteLlm"),
+            ("nvidia", "Nvidia"),
+            ("custom", "Custom"),
+            ("ollama", "Ollama"),
+        ] {
+            let job = task_worker(&connection, name, agent, "agent");
+            assert!(claim_capped(&connection, &job), "{agent} is not capped");
+            assert_eq!(
+                get(&connection, &job).unwrap().unwrap().progress_phase,
+                None,
+                "{agent} is never reported queued"
+            );
+        }
+        // The same remote workers are not counted as running local ones.
+        assert_eq!(running_task_workers(&connection).unwrap(), 2);
+
+        // An ordinary room turn is not a task worker.
+        enqueue_default(&connection, "plain", "plain-key");
+        assert!(claim_capped(&connection, "plain"));
+        assert_eq!(running_task_workers(&connection).unwrap(), 2);
+    }
+
+    /// DoD 1 — a re-dispatch (a rework round queues a new turn in the same
+    /// room) obeys the same cap.
+    #[test]
+    fn a_rework_redispatch_queues_behind_the_cap_too() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        mark_completed(&connection, &a).unwrap();
+        // A fresh launch takes the freed slot; then room `a` is reworked.
+        let launch = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &launch));
+        user_turn_in(&connection, "room-a", "rework-a", 2);
+        enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "job-a-rework",
+                discussion_id: "room-a",
+                trigger_message_id: "rework-a",
+                trigger_sort_order: 2,
+                dedupe_key: "orch-dispatch:a:2",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        assert!(!claim_capped(&connection, "job-a-rework"));
+        assert_eq!(
+            progress_of(&connection, "job-a-rework").1.as_deref(),
+            Some("task_worker_limit:2/2")
+        );
+        mark_completed(&connection, &b).unwrap();
+        assert!(claim_capped(&connection, "job-a-rework"));
+    }
+
+    /// DoD 2 — the queue is the durable `Pending` rows: a restart keeps their
+    /// order, the claimed ones go back in line at their original place, and the
+    /// cap still bounds what starts next.
+    #[test]
+    fn the_queue_survives_a_restart_in_launch_order() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let c = task_worker(&connection, "c", "ClaudeCode", "agent");
+        let d = task_worker(&connection, "d", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert!(!claim_capped(&connection, &d));
+        assert!(!claim_capped(&connection, &c));
+        let reason = progress_of(&connection, &c);
+        assert_eq!(reason.1.as_deref(), Some("task_worker_limit:2/2"));
+
+        recover_after_restart(&connection).unwrap();
+
+        // Nothing runs, everything is waiting, in the order of the launches.
+        assert_eq!(running_task_workers(&connection).unwrap(), 0);
+        for (job, place) in [(&a, 1), (&b, 2), (&c, 3), (&d, 4)] {
+            assert_eq!(
+                task_worker_queue_position(&connection, job).unwrap(),
+                Some(place)
+            );
+        }
+        assert_eq!(
+            progress_of(&connection, &c),
+            reason,
+            "the reason is durable"
+        );
+
+        // The cap is enforced again, and the oldest are the ones that start.
+        let mut started: Vec<&String> = Vec::new();
+        for _ in 0..2 {
+            for id in [&d, &c, &b, &a] {
+                if !started.contains(&id) && claim_capped(&connection, id) {
+                    started.push(id);
+                }
+            }
+        }
+        assert_eq!(started, [&a, &b]);
+        assert_eq!(running_task_workers(&connection).unwrap(), 2);
+    }
+
+    /// Without the key in the limits the claim is unchanged: the in-transaction
+    /// callers and every older test keep their behaviour.
+    #[test]
+    fn no_cap_in_the_limits_means_no_task_worker_cap() {
+        let connection = connection();
+        let jobs: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|name| task_worker(&connection, name, "ClaudeCode", "agent"))
+            .collect();
+        for job in &jobs {
+            assert!(claim(&connection, job).unwrap().is_some());
+        }
+        assert_eq!(running_task_workers(&connection).unwrap(), 3);
+    }
+
+    /// Cancelling a queued worker frees its place for the ones behind it.
+    #[test]
+    fn cancelling_a_queued_worker_moves_the_queue_up() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let c = task_worker(&connection, "c", "ClaudeCode", "agent");
+        let d = task_worker(&connection, "d", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert_eq!(
+            task_worker_queue_position(&connection, &d).unwrap(),
+            Some(2)
+        );
+        assert!(cancel_for_discussion_by_id(&connection, "room-c", &c).unwrap());
+        assert_eq!(
+            task_worker_queue_position(&connection, &d).unwrap(),
+            Some(1)
+        );
+        assert_eq!(task_worker_queue_position(&connection, &c).unwrap(), None);
+    }
+
+    fn set_group(connection: &Connection, job: &str, group: &str, limit: u32) {
+        connection
+            .execute(
+                "UPDATE agent_dispatch_jobs
+                 SET group_id = ?2, group_concurrency_limit = ?3 WHERE id = ?1",
+                params![job, group, limit],
+            )
+            .unwrap();
+    }
+
+    fn put_in_backoff(connection: &Connection, job: &str) {
+        connection
+            .execute(
+                "UPDATE agent_dispatch_jobs SET available_at = ?2 WHERE id = ?1",
+                params![job, (Utc::now() + Duration::hours(1)).to_rfc3339()],
+            )
+            .unwrap();
+    }
+
+    /// An older worker that its own group limit holds back would not start
+    /// right now, so it must not keep a free slot from a younger one.
+    #[test]
+    fn an_older_worker_blocked_by_its_group_limit_does_not_stop_a_younger_one() {
+        let connection = connection();
+        let running = task_worker(&connection, "g1", "ClaudeCode", "agent");
+        let older = task_worker(&connection, "g2", "ClaudeCode", "agent");
+        let younger = task_worker(&connection, "y", "ClaudeCode", "agent");
+        set_group(&connection, &running, "batch", 1);
+        set_group(&connection, &older, "batch", 1);
+        assert!(claim_capped(&connection, &running));
+        assert!(!claim_capped(&connection, &older), "its group is full");
+        assert_eq!(
+            progress_of(&connection, &older),
+            (None, None),
+            "the group, not the task-worker cap, holds it: no cap reason"
+        );
+        assert!(
+            claim_capped(&connection, &younger),
+            "a slot is free and nothing older could take it"
+        );
+    }
+
+    /// Same for an older job that waits behind a running turn of its own room
+    /// (a rework queued while the previous round still runs).
+    #[test]
+    fn an_older_worker_waiting_on_its_own_room_does_not_stop_a_younger_one() {
+        let connection = connection();
+        let limits = r#"{"__task_workers":3}"#;
+        let running = task_worker(&connection, "x", "ClaudeCode", "agent");
+        assert!(claim_with_limits(&connection, &running, Some(limits))
+            .unwrap()
+            .is_some());
+        user_turn_in(&connection, "room-x", "rework-x", 2);
+        enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "job-x-rework",
+                discussion_id: "room-x",
+                trigger_message_id: "rework-x",
+                trigger_sort_order: 2,
+                dedupe_key: "orch-dispatch:x:2",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+        let younger = task_worker(&connection, "y", "ClaudeCode", "agent");
+        assert!(claim_with_limits(&connection, "job-x-rework", Some(limits))
+            .unwrap()
+            .is_none());
+        assert!(claim_with_limits(&connection, &younger, Some(limits))
+            .unwrap()
+            .is_some());
+    }
+
+    /// The reason says the cap held the worker only when the cap did: a job
+    /// refused by its own agent's cap is not told "limit 2/2", and a job a
+    /// backoff keeps out neither gets the reason nor inflates the places behind.
+    #[test]
+    fn the_queued_reason_and_positions_count_only_what_the_cap_holds() {
+        let connection = connection();
+        let limits = r#"{"__task_workers":2,"Codex":1}"#;
+        let codex = task_worker(&connection, "a", "Codex", "agent");
+        let claude = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let held_by_agent = task_worker(&connection, "c", "Codex", "agent");
+        let backoff = task_worker(&connection, "d", "ClaudeCode", "agent");
+        let waiting = task_worker(&connection, "e", "ClaudeCode", "agent");
+        put_in_backoff(&connection, &backoff);
+        for id in [&codex, &claude] {
+            assert!(claim_with_limits(&connection, id, Some(limits))
+                .unwrap()
+                .is_some());
+        }
+
+        // The pool is full, but the Codex cap holds `c` too: no cap reason.
+        for id in [&held_by_agent, &backoff] {
+            assert!(claim_with_limits(&connection, id, Some(limits))
+                .unwrap()
+                .is_none());
+            assert_eq!(progress_of(&connection, id), (None, None));
+        }
+        // `e` is held by the cap alone.
+        assert!(claim_with_limits(&connection, &waiting, Some(limits))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            progress_of(&connection, &waiting).1.as_deref(),
+            Some("task_worker_limit:2/2")
+        );
+        // The backoff job is not in line: only `c` is ahead of `e`.
+        assert_eq!(
+            task_worker_queue_position(&connection, &waiting).unwrap(),
+            Some(2)
+        );
+
+        // A reason left by the cap is dropped once something else holds the job.
+        put_in_backoff(&connection, &waiting);
+        assert!(claim_with_limits(&connection, &waiting, Some(limits))
+            .unwrap()
+            .is_none());
+        assert_eq!(progress_of(&connection, &waiting), (None, None));
+    }
+
+    /// A review runs in the principal's room and a cancel is a state change:
+    /// neither waits on a full cap, and cancelling a worker frees its slot.
+    #[test]
+    fn reviews_and_cancels_proceed_while_the_cap_is_full() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let queued = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert!(!claim_capped(&connection, &queued));
+
+        // The principal's review of a delivery: a turn of the parent room.
+        enqueue_default(&connection, "review", "orch-recovery-review:a:1");
+        assert!(
+            claim_capped(&connection, "review"),
+            "a review is not capped"
+        );
+        assert_eq!(running_task_workers(&connection).unwrap(), 2);
+
+        // Cancelling a running worker goes through at once and frees its slot.
+        assert!(cancel_for_discussion_by_id(&connection, "room-a", &a).unwrap());
+        assert_eq!(
+            get(&connection, &a).unwrap().unwrap().status,
+            DispatchStatus::Cancelled
+        );
+        assert_eq!(running_task_workers(&connection).unwrap(), 1);
+        assert!(claim_capped(&connection, &queued));
+    }
+
+    /// A quota escalation settles the worker's dispatch as failed and parks the
+    /// execution for a human: its slot goes to the next in line.
+    #[test]
+    fn a_quota_escalation_frees_the_slot_of_its_worker() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let queued = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert!(!claim_capped(&connection, &queued));
+
+        crate::db::orchestration::attach_execution_dispatch(&connection, "exec-a", &a).unwrap();
+        assert!(mark_failed(&connection, &a, "quota exhausted").unwrap());
+        crate::db::orchestration::escalate_execution_for_dispatch_quota(
+            &connection,
+            &a,
+            "ClaudeCode",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(running_task_workers(&connection).unwrap(), 1);
+        assert!(claim_capped(&connection, &queued), "the slot is handed on");
+    }
+
+    /// `task_exec_reassign` cancels the replaced dispatch and queues the new
+    /// worker's turn in the same room: the slot frees, and the replacement
+    /// obeys the cap behind the workers already waiting.
+    #[test]
+    fn a_reassignment_frees_the_slot_and_its_replacement_queues_in_order() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let queued = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert!(!claim_capped(&connection, &queued));
+
+        assert!(cancel_for_discussion_by_id(&connection, "room-b", &b).unwrap());
+        user_turn_in(&connection, "room-b", "handoff-b", 2);
+        enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "job-b-reassigned",
+                discussion_id: "room-b",
+                trigger_message_id: "handoff-b",
+                trigger_sort_order: 2,
+                dedupe_key: "orch-reassign:b:1",
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap();
+
+        // The freed slot belongs to the older launch, not to the replacement.
+        assert!(!claim_capped(&connection, "job-b-reassigned"));
+        assert!(claim_capped(&connection, &queued));
+        assert!(!claim_capped(&connection, "job-b-reassigned"));
+        assert_eq!(
+            progress_of(&connection, "job-b-reassigned").1.as_deref(),
+            Some("task_worker_limit:2/2")
+        );
+        assert_eq!(
+            task_worker_queue_position(&connection, "job-b-reassigned").unwrap(),
+            Some(1)
+        );
+    }
+
+    /// The path a real job takes into a backoff: queued by the cap, claimed by
+    /// the scanner when a slot frees, then sent back for a delay. The cap's
+    /// reason must not outlive the claim, or the job would keep telling "2/2"
+    /// while it sits out its backoff (the scanner skips it, so nothing else
+    /// would ever rewrite it).
+    #[test]
+    fn a_queued_worker_put_into_backoff_after_its_claim_drops_the_cap_reason() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let c = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert!(!claim_capped(&connection, &c));
+        assert_eq!(
+            progress_of(&connection, &c).1.as_deref(),
+            Some("task_worker_limit:2/2")
+        );
+
+        // A slot frees; the scanner offers `c`, and the claim wins it.
+        assert!(cancel_for_discussion_by_id(&connection, "room-a", &a).unwrap());
+        assert!(list_runnable_ids(&connection, 64).unwrap().contains(&c));
+        assert!(claim_capped(&connection, &c));
+        assert_eq!(progress_of(&connection, &c), (None, None));
+
+        // The run could not start: back to `Pending`, in a backoff.
+        assert!(retry_after(&connection, &c, 3600, "spawn failed").unwrap());
+        assert_eq!(progress_of(&connection, &c), (None, None));
+        assert!(
+            !list_runnable_ids(&connection, 64).unwrap().contains(&c),
+            "the scanner skips a job in backoff"
+        );
+        assert_eq!(task_worker_queue_position(&connection, &c).unwrap(), None);
+    }
+
+    /// A reason already stored on a job that is out of line (a backoff set
+    /// without a claim) is not given a place in the queue, which is what the
+    /// execution status keys its wording on.
+    #[test]
+    fn a_worker_in_backoff_has_no_place_in_the_queue() {
+        let connection = connection();
+        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
+        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
+        let c = task_worker(&connection, "c", "ClaudeCode", "agent");
+        assert!(claim_capped(&connection, &a));
+        assert!(claim_capped(&connection, &b));
+        assert!(!claim_capped(&connection, &c));
+        assert_eq!(
+            task_worker_queue_position(&connection, &c).unwrap(),
+            Some(1)
+        );
+        put_in_backoff(&connection, &c);
+        assert_eq!(task_worker_queue_position(&connection, &c).unwrap(), None);
+    }
+
+    /// Queued task workers are re-tried every scan, so a long queue of them
+    /// must not push a review or an ordinary turn out of the scan window.
+    #[test]
+    fn a_long_task_worker_queue_does_not_hide_a_review_from_the_scan() {
+        let connection = connection();
+        let workers: Vec<String> = (0..70)
+            .map(|i| task_worker(&connection, &format!("w{i:02}"), "ClaudeCode", "agent"))
+            .collect();
+        enqueue_default(&connection, "review", "orch-recovery-review:w:1");
+
+        let scanned = list_runnable_ids(&connection, 64).unwrap();
+        assert!(
+            scanned.contains(&"review".to_string()),
+            "the review is scanned behind 70 queued workers"
+        );
+        assert_eq!(
+            scanned.iter().filter(|id| workers.contains(id)).count(),
+            64,
+            "workers keep a window of their own"
+        );
+        assert!(claim_capped(&connection, "review"));
     }
 }

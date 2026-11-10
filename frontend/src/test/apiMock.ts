@@ -33,6 +33,7 @@ const resolve = <T>(value: T) => vi.fn().mockResolvedValue(value);
 /** All top-level namespaces exposed by `lib/api.ts`. Kept in sync by the
  *  completeness test. */
 export const API_NAMESPACES = [
+  'activity',
   'setup',
   'media',
   'config',
@@ -99,6 +100,7 @@ interface DefaultMock {
   getApiBase: AnyFn;
   fetchHealth: AnyFn;
   health: Record<string, AnyFn>;
+  activity: Record<string, AnyFn>;
   setup: Record<string, AnyFn>;
   config: Record<string, AnyFn>;
   contacts: Record<string, AnyFn>;
@@ -163,6 +165,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       get: resolve({ ok: true, version: '0.0.0', host_os: 'linux', in_docker: false }),
     },
 
+    activity: {
+      overview: resolve({ rows: [], stall_after_secs: 900, generated_at: '2026-01-01T00:00:00Z', unavailable_sources: [] }),
+    },
+
     setup: {
       getStatus: resolve({ is_first_run: false, current_step: 'done', agents_detected: [], repos_detected: [], scan_paths_set: true }),
     },
@@ -184,8 +190,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getScanDepth: resolve(2),
       getDefaultDocsDir: resolve(null),
       saveDefaultDocsDir: resolve(null),
-      getWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false }),
-      saveWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false }),
+      getWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256 }),
+      saveWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256 }),
       getAgentAccess: resolve({ agents: {} }),
       getAgentAccessEffective: resolve([]),
       getModelTiers: resolve({ tiers: {} }),
@@ -193,11 +199,12 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       saveGlobalContext: resolve(undefined),
       getGlobalContextMode: resolve('always'),
       saveGlobalContextMode: resolve(undefined),
-      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [], execution_variable_retention_days: 30, timezone: null, timezone_effective: 'UTC', timezone_detected: 'UTC' }),
+      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [], execution_variable_retention_days: 30, lane_seeds_copy_enabled: true, lane_seeds_adopt_suggested: false, lane_seeds_strong_confirm: true, timezone: null, timezone_effective: 'UTC', timezone_detected: 'UTC' }),
       setServerConfig: resolve(undefined),
-      getNetworkExposure: resolve({ exposed: false, restart_required: false, in_docker: false, kronn_bind: null, port: 3140, reachable_ips: [] }),
-      setNetworkExposure: resolve({ exposed: false, restart_required: false, in_docker: false, kronn_bind: null, port: 3140, reachable_ips: [] }),
-      getRecoveryStatus: resolve({ configured: false, matches_key: false, key_locked: false, key_copies_kept: true, config_holds_key: false }),
+      getNetworkExposure: resolve({ exposed: false, restart_required: false, in_docker: false, kronn_bind: null, port: 3140, reachable_ips: [], auth_token_set: false, tls_terminated_by_proxy: false, tls_declared_by_env: false, public_origin: null, plain_http_blocked: false }),
+      setNetworkExposure: resolve({ exposed: false, restart_required: false, in_docker: false, kronn_bind: null, port: 3140, reachable_ips: [], auth_token_set: false, tls_terminated_by_proxy: false, tls_declared_by_env: false, public_origin: null, plain_http_blocked: false }),
+      getRecoveryStatus: resolve({ configured: false, matches_key: false, key_locked: false, key_copies_kept: true, config_holds_key: false, clear_credentials: [], set_aside_files: [] }),
+      deleteSetAsideFile: resolve(undefined),
       reencryptImported: resolve({ rewritten: 0, already_current: 0, untouched: 0 }),
       setRecovery: resolve({ recovery_code: 'KRECOV1.mock.mock' }),
       restoreRecovery: resolve(undefined),
@@ -219,6 +226,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       setAgentFiles: resolve({ policy: 'repo' }),
   validationsAccess: resolve({ access: 'sandbox' }),
   setValidationsAccess: resolve({ access: 'sandbox' }),
+      laneSeeds: resolve({ seeds: [], source: 'none', copy_enabled: true, adopt_suggested: false, adopted_seeds: [], needs_confirmation: [], secret_findings: [], profile_file_written: false }),
+      setLaneSeeds: resolve({ seeds: [], source: 'project', needs_confirmation: [], secret_findings: [], profile_file_written: false }),
+      laneSeedCandidates: resolve([]),
       docsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       setDocsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       scan: resolve([]),
@@ -417,6 +427,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     agents: {
+      detect: resolve([]),
       listAll: resolve([]),
       versionCheck: resolve([]),
       reachability: resolve([]),
@@ -486,7 +497,6 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       listContextFiles: resolve([]),
       deleteContextFile: resolve(undefined),
       uploadContextFile: resolve({}),
-      deleteLastAgentMessages: resolve(undefined),
       retryAgentDispatch: resolve({
         dispatch_id: '', trigger_message_id: '', agent_type: 'ClaudeCode', duplicate: false,
       }),
@@ -559,6 +569,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       deleteRun: resolve(undefined),
       deleteAllRuns: resolve(undefined),
       cancelRun: resolve({ run_cancelled: false, child_discs_cancelled: 0 }),
+      resumeRun: resolve({ run_id: '', new_status: 'Running' }),
+      activeRuns: resolve([]),
+      switchQuotaAgent: resolve({ run_id: '', step_name: '', agent: 'ClaudeCode' }),
       testBatchStep: resolve({ eligible_items: [], sample_rendered_prompts: [], warnings: [] }),
       suggestions: resolve([]),
       listBatchRunSummaries: resolve([]),
