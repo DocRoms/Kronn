@@ -192,7 +192,7 @@ managed candidates and their refusal reason. An operator may request a manual,
 path-specific reclaim only after the inventory's ownership and terminal-state
 checks; this document does not authorise a broad purge or deletion of unknown,
 active, or leased targets. [src: file: backend/src/core/worktree.rs:1100-1135#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
-[src: file: backend/src/api/maintenance.rs:77-142#list_build_artifacts]
+[src: file: backend/src/api/maintenance.rs:125-190#list_build_artifacts]
 [src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness]
 
 ## KT-638 profile benchmark record
@@ -315,7 +315,7 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
 [src: file: backend/src/core/task_worker_env.rs:839]
 [src: file: backend/src/core/task_worker_lane_warm.rs:843]
-[src: file: backend/src/agents/runner.rs:14560-14569#agent_launch_priority]
+[src: file: backend/src/agents/runner.rs:14572-14581#agent_launch_priority]
 [src: file: backend/src/core/quick_exec.rs:516-540#build_command]
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]

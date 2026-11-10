@@ -143,7 +143,7 @@ machine (no sandbox-exec or bubblewrap)" (or "turned off in the config"), the ri
 panel repeats it, and a raise while the vault is unprotected needs its own
 acknowledgement: the PUT answers 400 unless `acknowledged_vault_unprotected` is
 true, and the panel adds a checkbox for it. The raise still needs the TOTP proof.
-[src: file: backend/src/core/trust_sandbox.rs:376-383#vault_protection]
+[src: file: backend/src/core/trust_sandbox.rs:405-412#vault_protection]
 
 ## Raising a level needs a proof an agent cannot produce
 

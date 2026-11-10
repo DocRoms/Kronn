@@ -408,9 +408,7 @@ pub fn bubblewrap_args_hiding(
         let at = socket.to_string_lossy().into_owned();
         args.extend(["--bind".to_string(), real, at]);
     }
-    for dir in crate::core::trust_sandbox::bubblewrap_mount_points(hidden) {
-        args.extend(["--tmpfs".to_string(), dir]);
-    }
+    args.extend(crate::core::trust_sandbox::bubblewrap_hide_args(hidden));
     args.extend(
         [
             "--unshare-net",
@@ -586,8 +584,20 @@ pub struct Confinement {
 impl Confinement {
     /// The confinement of a task worktree on this host: its mechanism, once
     /// the host proved it can apply it ([`Mechanism::check_usable`]).
+    ///
+    /// KT-1656 — it also closes the agents' credential stores of the owner's
+    /// home (`~/.gemini`, `~/.codex`, `~/.claude.json`, …): the build and the
+    /// tests of a worker's tree are worker-written code, and the worker must not
+    /// reach through them what its own sandbox refuses it. The shared tools'
+    /// files (`~/.npmrc`, `~/.docker/config.json`) stay readable here: a package
+    /// manager or the Docker CLI that a validation runs fails on a file it is
+    /// refused, where the worker's shell is told what it may not run.
     pub fn for_worktree(work_dir: &Path) -> Result<Self, String> {
-        Self::with_mechanism(work_dir, Some(Mechanism::usable_on_host()?))
+        let confinement = Self::with_mechanism(work_dir, Some(Mechanism::usable_on_host()?))?;
+        Ok(confinement.hiding(crate::core::home_credentials::hidden(
+            None,
+            crate::core::home_credentials::Reach::FullAccess,
+        )))
     }
 
     /// [`Confinement::for_worktree`] with the host's mechanism and the check of
@@ -641,9 +651,12 @@ impl Confinement {
         self
     }
 
-    /// This confinement with `dirs` closed to the command (KT-1492).
+    /// This confinement with `dirs` closed to the command (KT-1492), on top of
+    /// what it already hides.
     pub fn hiding(mut self, dirs: Vec<PathBuf>) -> Self {
-        self.policy.hidden = dirs;
+        self.policy.hidden.extend(dirs);
+        self.policy.hidden.sort();
+        self.policy.hidden.dedup();
         self
     }
 

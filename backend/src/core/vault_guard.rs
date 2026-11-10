@@ -46,6 +46,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::core::child_env::AgentFamily;
+use crate::core::home_credentials;
 use crate::core::task_worker_sandbox::{real_path, seatbelt_literal, Mechanism};
 use crate::core::trust_sandbox::{self, LevelConfinement};
 
@@ -305,9 +307,7 @@ pub fn codex_bubblewrap_args(
         let text = dir.to_string_lossy().into_owned();
         args.extend(["--ro-bind".to_string(), text.clone(), text]);
     }
-    for dir in trust_sandbox::bubblewrap_mount_points(protected) {
-        args.extend(["--tmpfs".to_string(), dir]);
-    }
+    args.extend(trust_sandbox::bubblewrap_hide_args(protected));
     args.extend(
         ["--share-net", "--die-with-parent", "--"]
             .into_iter()
@@ -332,7 +332,7 @@ pub fn wrap_launch(
         return (
             program,
             args,
-            Confined::Unchanged("vault protection is off"),
+            Confined::Unchanged("vault protection is off or the host has no sandbox"),
         );
     };
     match sandbox {
@@ -413,7 +413,7 @@ fn hidden_dirs() -> Vec<PathBuf> {
 /// `permissions.deny` for every Claude launch: the Read, Edit and Write tools
 /// refuse the data directory, `--dangerously-skip-permissions` included (a deny
 /// rule is checked before the permission mode).
-pub fn claude_permission_deny() -> Vec<String> {
+fn claude_vault_permission_deny() -> Vec<String> {
     hidden_dirs()
         .iter()
         .flat_map(|dir| {
@@ -424,10 +424,43 @@ pub fn claude_permission_deny() -> Vec<String> {
         .collect()
 }
 
-/// `sandbox.filesystem.denyRead` of Claude's own sandbox (the task workers).
+/// The Read tool's rule for a credential store (KT-1656): `Read(//abs/dir/**)`
+/// for a directory, `Read(//abs/file)` for a file, which `/**` would not match.
+fn claude_credential_rule(path: &Path) -> String {
+    if path.is_dir() {
+        claude_rule("Read", path)
+    } else {
+        format!("Read(/{})", path.to_string_lossy())
+    }
+}
+
+/// The credential stores of the home that the **shell** of a sandboxed Claude
+/// (a task worker, a read-only review) must not read (KT-1656). Nothing is
+/// spared: the CLI reads its own login from outside its sandbox, and the
+/// commands it runs never need it. Independent of the "protect the Kronn vault"
+/// setting, which is about Kronn's own data.
+fn claude_credential_stores() -> Vec<PathBuf> {
+    home_credentials::hidden(None, home_credentials::Reach::Sandboxed)
+}
+
+/// `permissions.deny` of a Claude whose settings enable its own sandbox: the
+/// vault rules, and the Read tool refused the credential stores of the home.
+pub fn claude_permission_deny() -> Vec<String> {
+    let mut deny = claude_vault_permission_deny();
+    deny.extend(
+        claude_credential_stores()
+            .iter()
+            .map(|path| claude_credential_rule(path)),
+    );
+    deny
+}
+
+/// `sandbox.filesystem.denyRead` of Claude's own sandbox (the task workers):
+/// the data directory and the credential stores of the home (KT-1656).
 pub fn claude_sandbox_deny_read() -> Vec<String> {
     hidden_dirs()
-        .iter()
+        .into_iter()
+        .chain(claude_credential_stores())
         .map(|dir| dir.to_string_lossy().into_owned())
         .collect()
 }
@@ -435,7 +468,7 @@ pub fn claude_sandbox_deny_read() -> Vec<String> {
 /// The `--settings` value every Claude launch without a sandbox of its own
 /// carries, or `None` when the protection is off.
 pub fn claude_vault_settings() -> Option<String> {
-    let deny = claude_permission_deny();
+    let deny = claude_vault_permission_deny();
     if deny.is_empty() {
         return None;
     }
@@ -445,14 +478,15 @@ pub fn claude_vault_settings() -> Option<String> {
 /// A policy that brings its own Claude `--settings` (the read-only repositories)
 /// replaces the standalone vault one: two `--settings` flags are not merged by
 /// Claude, so the vault rules are folded into the policy's own document instead.
-/// Does nothing when the protection is off or no policy document is present.
+/// A policy whose own sandbox is on also gets the credential stores of the home
+/// (KT-1656), whatever the vault setting says. Does nothing when there is
+/// nothing to add or no policy document is present.
 pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
-    let Some(vault) = claude_vault_settings() else {
-        return;
-    };
-    let standalone = args
-        .windows(2)
-        .position(|pair| pair[0] == "--settings" && pair[1] == vault);
+    let vault = claude_vault_settings();
+    let standalone = vault.as_ref().and_then(|vault| {
+        args.windows(2)
+            .position(|pair| pair[0] == "--settings" && &pair[1] == vault)
+    });
     let Some(own) = args.iter().enumerate().position(|(at, arg)| {
         arg == "--settings"
             && Some(at) != standalone
@@ -463,6 +497,10 @@ pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
     let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&args[own + 1]) else {
         return;
     };
+    let sandboxed = settings["sandbox"]["enabled"] == true;
+    if vault.is_none() && !sandboxed {
+        return;
+    }
     let push_unique = |target: &mut serde_json::Value, values: Vec<String>| {
         if !target.is_array() {
             *target = serde_json::json!([]);
@@ -476,9 +514,13 @@ pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
     };
     push_unique(
         &mut settings["permissions"]["deny"],
-        claude_permission_deny(),
+        if sandboxed {
+            claude_permission_deny()
+        } else {
+            claude_vault_permission_deny()
+        },
     );
-    if settings["sandbox"]["enabled"] == true {
+    if sandboxed {
         push_unique(
             &mut settings["sandbox"]["filesystem"]["denyRead"],
             claude_sandbox_deny_read(),
@@ -494,6 +536,57 @@ pub fn fold_vault_into_claude_settings(args: &mut Vec<String>) {
     if let Some(at) = standalone {
         args.drain(at..at + 2);
     }
+}
+
+/// The tier of home credential stores a launch loses (KT-1656), from its real
+/// trust level and not from the kind of its sandbox. Only a launch the owner
+/// opened in full access, with no sandbox of its own, keeps the shared stores
+/// (`~/.ssh`, `~/.aws`, `~/.config/gh`, …), as the tools of the owner's
+/// terminal; every other launch (a worker, a read-only review, a restricted
+/// Gemini, Kiro, Copilot, Vibe, Claude or ACP launch, a Codex `read-only` /
+/// `workspace-write` one) loses them too.
+pub fn launch_reach(sandbox: LaunchSandbox, full_access: bool) -> home_credentials::Reach {
+    match sandbox {
+        LaunchSandbox::None if full_access => home_credentials::Reach::FullAccess,
+        LaunchSandbox::None | LaunchSandbox::Own | LaunchSandbox::Codex(_) => {
+            home_credentials::Reach::Sandboxed
+        }
+    }
+}
+
+/// [`launch_confinement`] for the agent a launch starts (KT-1656): the same
+/// confinement, with the credential stores of the home that agent does not own
+/// hidden as well, and the shared ones according to [`launch_reach`]. The
+/// agent's own store stays open: its process needs it.
+///
+/// The stores are hidden **whatever the "protect the vault" setting says**:
+/// with it off the launch is confined to hide them only, no Kronn data. The
+/// result is `None` only when the host has no sandbox, or when the setting is
+/// off and there is no store to hide.
+pub fn launch_confinement_for(
+    family: AgentFamily,
+    sandbox: LaunchSandbox,
+    full_access: bool,
+) -> Option<LevelConfinement> {
+    #[cfg(test)]
+    {
+        if !test_wrap() {
+            return None;
+        }
+    }
+    confinement_hiding(home_credentials::hidden(
+        Some(family),
+        launch_reach(sandbox, full_access),
+    ))
+}
+
+/// The vault confinement with `stores` hidden as well; with no vault
+/// confinement (the setting is off), a confinement of the stores alone.
+fn confinement_hiding(stores: Vec<PathBuf>) -> Option<LevelConfinement> {
+    if stores.is_empty() {
+        return trust_sandbox::confinement();
+    }
+    trust_sandbox::credential_confinement().map(|confinement| confinement.hiding_also(stores))
 }
 
 #[cfg(test)]
@@ -513,3 +606,7 @@ fn test_wrap() -> bool {
 #[cfg(test)]
 #[path = "vault_guard_tests.rs"]
 mod vault_guard_tests;
+
+#[cfg(test)]
+#[path = "vault_guard_reach_tests.rs"]
+mod vault_guard_reach_tests;
