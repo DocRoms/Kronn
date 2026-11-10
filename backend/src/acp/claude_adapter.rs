@@ -350,7 +350,7 @@ impl AcpTransport for ClaudeAcpAdapter {
                 mcp_env.push(("ENABLE_TOOL_SEARCH".into(), "false".into()));
             }
         }
-        let mut child = crate::agents::runner::try_spawn(
+        let mut child = crate::agents::runner::try_spawn_granted(
             &self.program,
             None,
             &args,
@@ -367,6 +367,7 @@ impl AcpTransport for ClaudeAcpAdapter {
             self.launch.bridge_token.as_deref(),
             self.launch.priority,
             self.broker.full_access(),
+            &self.launch.run_artifacts,
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child
@@ -1135,5 +1136,89 @@ exec sleep 30"#,
             std::fs::read_to_string(discussion_file).unwrap().trim(),
             "disc-prod"
         );
+    }
+
+    const OWN_RUN: &str = "3e7f4d85-af84-4c3b-8a0d-4a5b6c7d8e9f";
+    const OTHER_RUN: &str = "4f805e96-b095-4d4c-9b1e-5b6c7d8e9fa0";
+
+    fn run_dir(run: &str) -> std::path::PathBuf {
+        crate::workflows::run_artifacts::ensure(run)
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// KT-1587 — the default route (this adapter) hands the step's typed run
+    /// artifacts grant to the spawn, and the policy arguments it runs the CLI
+    /// with re-open the own run only: the other run is denied by its literal
+    /// path, and the own one is neither denied nor withheld.
+    #[tokio::test]
+    #[serial_test::serial]
+    #[cfg(unix)] // fixture is a POSIX shell script standing in for the claude CLI
+    async fn a_claude_turn_on_the_adapted_route_spawns_with_its_typed_run_grant() {
+        let own = run_dir(OWN_RUN);
+        let other = run_dir(OTHER_RUN);
+        let dir = tempfile::tempdir().unwrap();
+        let argv_file = dir.path().join("argv.txt");
+        let fixture = crate::acp::test_support::write_fixture_script(
+            dir.path(),
+            &format!(
+                "printf '%s\\n' \"$*\" > '{}'\ncat >/dev/null\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\"}}'",
+                argv_file.display()
+            ),
+        );
+        let policy = crate::agents::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
+            &crate::models::AgentType::ClaudeCode,
+            dir.path(),
+            &[],
+            &[own.display().to_string()],
+        )
+        .unwrap()
+        .unwrap();
+        let adapter = ClaudeAcpAdapter {
+            program: fixture.to_string_lossy().into_owned(),
+            launch: AdapterLaunchOptions {
+                worker_args: Some(crate::agents::runner::adapter_policy_args(
+                    &crate::models::AgentType::ClaudeCode,
+                    dir.path(),
+                    &policy,
+                )),
+                run_artifacts: policy.granted_dirs().to_vec(),
+                ..AdapterLaunchOptions::default()
+            },
+            ..ClaudeAcpAdapter::new(
+                None,
+                None,
+                false,
+                None,
+                AcpSessionScope::new(Some(dir.path().to_path_buf()), "artifacts"),
+            )
+        };
+        let mut host = AcpHost::new(1, std::sync::Arc::new(adapter));
+        host.negotiate(init_request(&dir.path().to_string_lossy()))
+            .await
+            .unwrap();
+        let target = host.create_session().await.unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        host.prompt(&target, "hello", tx).await.unwrap();
+
+        let granted = crate::agents::runner::spawn_grants::last_for(&fixture.to_string_lossy())
+            .expect("the turn spawned the CLI");
+        assert_eq!(granted, vec![own.clone()], "the spawn lost the grant");
+        let argv = std::fs::read_to_string(argv_file).unwrap();
+        assert!(
+            argv.contains(&format!("--add-dir {}", own.display())),
+            "{argv}"
+        );
+        assert!(
+            argv.contains(&format!("Read(/{}/**)", other.display())),
+            "{argv}"
+        );
+        assert!(
+            !argv.contains(&format!("Read(/{}/**)", own.display())),
+            "{argv}"
+        );
+        crate::workflows::run_artifacts::remove(OWN_RUN);
+        crate::workflows::run_artifacts::remove(OTHER_RUN);
     }
 }

@@ -3,8 +3,9 @@
 
 docs/inconsistencies-tech-debt.md lists open items only, one table row per
 ID; docs/tech-debt/<ID>.md holds the details. This check fails when a row has
-no detail file, a detail file has no row, a row is marked closed, or a detail
-file's Status says the item is fixed.
+no detail file, a detail file has no row, a row is marked closed, a detail
+file's Status says the item is fixed, or a detail file whose Disposition is
+"Accepted" gives no reason and no condition that reopens it.
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ PENDING_REMOVAL: set[str] = set()
 _ROW_RE = re.compile(r"^\|\s*(TD-\d{8}-[a-z0-9-]+)\s*\|(.*)\|\s*$")
 _STATUS_RE = re.compile(r"\*\*Status\*\*\s*:\s*(.*)", re.I)
 _CLOSED_WORD = re.compile(r"^(fixed|resolved|closed|done)\b", re.I)
+_DISPOSITION_RE = re.compile(r"\*\*Disposition\*\*\s*:\s*(.*)", re.I)
+_REASON_RE = re.compile(r"\*\*Reason\*\*\s*:", re.I)
+_REOPEN_RE = re.compile(r"\*\*Reopen when\*\*\s*:", re.I)
 
 
 def index_rows(text: str) -> dict[str, list[str]]:
@@ -55,6 +59,12 @@ def problems(index_text: str, details: dict[str, str]) -> list[str]:
         status = _STATUS_RE.search(body)
         if status and _says_closed(status.group(1)):
             found.append(f"docs/tech-debt/{td_id}.md: Status says closed; remove the file and its row")
+        disposition = _DISPOSITION_RE.search(body)
+        if disposition and disposition.group(1).strip().lower().startswith("accepted"):
+            if not _REASON_RE.search(body) or not _REOPEN_RE.search(body):
+                found.append(
+                    f"docs/tech-debt/{td_id}.md: accepted without a **Reason**: and a **Reopen when**: line"
+                )
     return found
 
 

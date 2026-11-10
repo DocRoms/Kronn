@@ -41,7 +41,7 @@ Kronn's thesis is **de-agentification**: orchestrate real CLI agents and burn to
 |----------------|--------|-----------|
 | Voice (TTS/STT — Piper/Whisper WASM) | Works, no new work | Doesn't serve de-agentification; local-only design is fine as-is |
 | Secret themes (arcade/matrix/gotham/sakura/euronews) | Works, no new work | Cosmetic; each new theme is more `tokens.css` surface + drift risk. Scope decision 2026-10 (maintainer, PR #264): the default dark theme becomes VS Code Dark Modern and the former purple default moves to the secret `arcade` theme. A replacement, not an extra theme: the public theme count stays at light + dark |
-| P2P / contacts / rooms | Works where it works | Can't work in native (see `TD-20260629-p2p-native-binding`); Tauri+Docker cover the real single-user need |
+| P2P / contacts / rooms | Works where it works | Cross-machine from a native or WSL install needs Tailscale or a portproxy (see `docs/operations/auth-and-tls.md`, "Reaching a Kronn that runs inside WSL"); Tauri+Docker cover the real single-user need |
 | Mobile | As-is | No responsive investment planned before 1.0 |
 
 **Do NOT** add features to these areas before 1.0 without an explicit scope decision. New effort goes to the core (workflows, local models, MCP surface) and, once the socle is clean, continual learning. Reassess at 1.0.

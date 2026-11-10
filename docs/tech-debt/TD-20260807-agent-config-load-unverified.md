@@ -37,4 +37,15 @@
   3. **Fold into `kronn doctor` as the single operator surface**, mirroring how `warn_missing_host_binaries` [src: file: backend/src/core/mcp_scanner.rs:2897-2905#warn_missing_host_binaries] already routes there.
   4. Consider a post-write readback for the cheap cases (config re-parsed through the agent's own schema) before reaching for anything that spawns an agent.
 
-- **Next step**: create a ticket for item 1 (per-agent `verify_config_loadable` contract). Items 2–4 are design constraints on that ticket, not separate work.
+- **Disposition**: Accepted (KT-1603).
+  - **Reason**: the proven failure (Vibe) is detected and reported, and Kronn
+    must not repair another tool's trust store. A general probe would need an
+    agent-specific status command or an agent spawn on a sync path that runs at
+    every config save, and no other agent has been shown to reject a config
+    Kronn wrote.
+  - **Reopen when**: a second agent (Vibe was the first) is shown to ignore a
+    config Kronn wrote, or an agent exposes a cheap read-back of its loaded
+    MCP servers. Then item 1 (the per-agent `verify_config_loadable` contract)
+    becomes the ticket; items 2–4 are design constraints on it, not separate
+    work.
+- **Next step**: none while accepted.

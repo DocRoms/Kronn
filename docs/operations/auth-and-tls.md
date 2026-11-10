@@ -63,6 +63,32 @@ Tailscale interface directly is not offered: it would still leave plain HTTP
 open on the physical LAN and the machine's own loopback address would stop
 answering.
 
+### Reaching a Kronn that runs inside WSL (contacts / P2P)
+
+A native Kronn inside WSL2 in the default NAT mode advertises the VM's
+internal address (`172.x`), which no other machine can route to. A contact
+added from another machine stays `pending`: the check is reachability only
+(`GET {peer}/api/health`), so an unreachable address is never accepted. Two
+ways out:
+
+1. **Tailscale (recommended).** Install it on both machines (inside WSL or on
+   the Windows host), let the peer use the tailnet address, and put
+   `tailscale serve --bg 3140` in front as described above. The address is
+   stable across NAT, LAN and WSL, and it is the one `network-info` is built to
+   advertise.
+2. **Windows `netsh interface portproxy`.** Forward a port of the Windows host
+   to the VM (`netsh interface portproxy add v4tov4 listenport=3140
+   listenaddress=0.0.0.0 connectport=3140 connectaddress=<WSL address>`), open
+   that port in Windows Firewall, then give the peer the Windows host's LAN
+   address. The WSL address changes at each `wsl --shutdown`, so the rule has to
+   be refreshed. The exposure rules above still apply: turn on "Allow
+   connections from other devices" (Settings › Identity), keep authentication
+   on, and declare the TLS proxy.
+
+This paragraph assumes the default NAT mode; the mirrored mode that
+[windows-wsl-agents.md](windows-wsl-agents.md) describes was not tried for
+contacts.
+
 ### What each runtime does
 
 | Situation | Native / desktop | Docker |

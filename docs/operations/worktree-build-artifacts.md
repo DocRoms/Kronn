@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1141-1205#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:6319-6376#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:6534-6630#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:6323-6340#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:6759-6825#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:6565-6622#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:6780-6876#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:6569-6586#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:7005-7071#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -315,7 +315,7 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
 [src: file: backend/src/core/task_worker_env.rs:839]
 [src: file: backend/src/core/task_worker_lane_warm.rs:843]
-[src: file: backend/src/agents/runner.rs:14572-14581#agent_launch_priority]
+[src: file: backend/src/agents/runner.rs:14633-14642#agent_launch_priority]
 [src: file: backend/src/core/quick_exec.rs:516-540#build_command]
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
