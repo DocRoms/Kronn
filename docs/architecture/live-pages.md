@@ -91,7 +91,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1431-1452#artifact_portability]
+[src: file: backend/src/lib.rs:1499-1520#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1119-1137#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -230,6 +230,15 @@ often grows the database by its size on each save. The revision list
 (`GET /api/pages/{id}/revisions`) carries sizes, not HTML; the editor loads the
 one revision it compares from `GET /api/pages/{id}/revisions/{revision_id}`.
 
+The datasets a Page receives are graded the same way (KT-1525), whoever
+publishes them (a workflow's PublishPageData step, an agent, the UI): the sum of
+`LivePageDatasetView.data_size_bytes` is flagged in the Page header, and each
+dataset in the sync panel, above 256 KiB (heavy) and 1 MiB (very heavy), with
+the fix (select fields, limit or paginate in the publishing workflow). The
+workflow side is graded per step: see « Heavy step outputs » in
+`docs/operations/workflow-heavy-outputs.md`.
+`[src: file: frontend/src/lib/live-page-weight.ts:15-26]`
+
 JSON is the dataset payload format. Snapshot and collection values are stored
 as one JSON value. Time-series observations are stored as individual rows so a
 new point does not rewrite the full history.
@@ -277,7 +286,7 @@ block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
 `[src: file: backend/src/api/live_pages.rs:654-664#delete_dataset]`
 `[src: file: backend/src/api/live_pages.rs:689-700#update_dataset]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:8068-8075#call_page_delete_dataset]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:8088-8095#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
@@ -439,8 +448,8 @@ keeps its previous data. A stdout that starts with `{` or `[` is parsed and
 stored as the JSON value; if it does not parse, the step fails the same way.
 Other text is published as a string. The Exec output is scrubbed of the
 project's GitHub token before it reaches the run record or a Page.
-`[src: file: backend/src/workflows/exec_step.rs:59-61#MAX_PUBLISH_OUTPUT_BYTES]`
-`[src: file: backend/src/workflows/exec_step.rs:411-416#secrets]`
+`[src: file: backend/src/workflows/exec_step.rs:60-62#MAX_PUBLISH_OUTPUT_BYTES]`
+`[src: file: backend/src/workflows/exec_step.rs:453-458#secrets]`
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
@@ -607,11 +616,11 @@ tokens. Recheck the selected target with execution preflight before launching,
 preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
-[src: file: backend/src/models/orchestration.rs:1189-1212#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:13186-13375#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:14489-14531#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:14735-14777#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:14695-14765#task_exec_prepare]
+[src: file: backend/src/models/orchestration.rs:1230-1253#TaskWorkerTier]
+[src: file: backend/src/api/orchestration.rs:14612-14801#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:15869-15911#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:16153-16195#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:16097-16167#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -651,8 +660,8 @@ Agents learn this contract where they write Page HTML: the MCP manuals of
 block's reference must stay stable across revisions since it ties a button to
 its past launches, and the `workflow-architect` skill carries the same rules.
 `[src: file: backend/scripts/disc-introspection-mcp.py:10127-10162#_PAGE_ACTION_CONTRACT]`
-`[src: file: backend/scripts/disc-introspection-mcp.py:10482-10491#page_update_html]`
-`[src: file: backend/src/skills/workflow-architect.md:384-391#data-kronn-action-state]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:10505-10514#page_update_html]`
+`[src: file: backend/src/skills/workflow-architect.md:392-399#data-kronn-action-state]`
 Active and terminal execution rendering delegates to the common
 `RunStatusCard` contract used by Discussions. A Quick Prompt result records
 both the action's result-discussion anchor and the existing Page-to-discussion
@@ -690,7 +699,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:4854-4862#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:4957-4965#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -738,7 +747,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:4980-4990#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5077-5087#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
@@ -1010,9 +1019,9 @@ list deliberately omits outputs; expanding a run fetches its full detail and
 reports a failed detail read with a retry action. A focused navigation keeps
 the full run even when the compact list already contains its id.
 [src: file: backend/src/workflows/collect_api_data_step.rs:604-625#source_id]
-[src: file: backend/src/workflows/collect_api_data_step.rs:947-990#missing_required_api_keeps_its_alias_id_and_cause]
+[src: file: backend/src/workflows/collect_api_data_step.rs:1075-1118#missing_required_api_keeps_its_alias_id_and_cause]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1033-1043#focusedRun]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1049-1059#focusedRun]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

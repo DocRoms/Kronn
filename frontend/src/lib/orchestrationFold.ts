@@ -42,18 +42,42 @@ const HUMAN_GATE_ID = /^orch-campaign-gate:[^:]*:[^:]*:awaiting:/;
  * without delivering, a review waiting too long. */
 const HUMAN_DECISION_ID = /^(orch-escalation|provider-quota-escalation|orch-disk-pressure|orch-integration-refused|orch-worker-undelivered|orch-principal-timeout):/;
 
+/** KT-1664 — an exhausted-quota escalation (`provider-quota-escalation:{job}`)
+ *  closes itself when the provider answers again: the orchestrator then posts
+ *  `provider-quota-resumed:{job}` for the same refused dispatch. */
+const QUOTA_ESCALATION_PREFIX = 'provider-quota-escalation:';
+const QUOTA_RESUMED_PREFIX = 'provider-quota-resumed:';
+const EMPTY_IDS: ReadonlySet<string> = new Set();
+
+/** The quota escalations of `messages` that were resumed since: nobody has to
+ *  act on them any more. */
+export function resolvedQuotaEscalations(
+  messages: readonly Pick<DiscussionMessage, 'id'>[],
+): Set<string> {
+  const ids = new Set(messages.map(({ id }) => id));
+  const resolved = new Set<string>();
+  for (const id of ids) {
+    if (!id.startsWith(QUOTA_RESUMED_PREFIX)) continue;
+    const escalation = `${QUOTA_ESCALATION_PREFIX}${id.slice(QUOTA_RESUMED_PREFIX.length)}`;
+    if (ids.has(escalation)) resolved.add(escalation);
+  }
+  return resolved;
+}
+
 /**
  * A message that needs the user's action is never hidden: a question card, a
  * message carrying actions the user can still take, or a human gate. Folding
- * it would leave the campaign waiting on something nobody can see.
+ * it would leave the campaign waiting on something nobody can see. A
+ * `resolved` notice (a quota escalation the worker resumed from) asks nothing.
  */
 export function requiresUserAction(
   message: DiscussionMessage,
   hasActions: (messageId: string) => boolean = () => false,
+  resolved: ReadonlySet<string> = EMPTY_IDS,
 ): boolean {
   return QUESTION_FENCE.test(message.content)
     || HUMAN_GATE_ID.test(message.id)
-    || HUMAN_DECISION_ID.test(message.id)
+    || (HUMAN_DECISION_ID.test(message.id) && !resolved.has(message.id))
     || hasActions(message.id);
 }
 
@@ -66,6 +90,8 @@ export interface OrchestrationFoldOptions {
   hasActions?: (messageId: string) => boolean;
   /** Messages that must stay visible regardless (search hit, deep link). */
   forceVisibleIds?: ReadonlySet<string>;
+  /** Notices already settled (see `resolvedQuotaEscalations`): they fold again. */
+  resolvedIds?: ReadonlySet<string>;
 }
 
 /**
@@ -79,7 +105,7 @@ export function foldOrchestrationRuns(
   options: OrchestrationFoldOptions,
 ): FoldedRenderItem[] {
   if (!options.hide) return items;
-  const { expandedRunIds, hasActions, forceVisibleIds } = options;
+  const { expandedRunIds, hasActions, forceVisibleIds, resolvedIds } = options;
   const folded: FoldedRenderItem[] = [];
   let run: DiscussionRenderItem[] = [];
 
@@ -97,7 +123,7 @@ export function foldOrchestrationRuns(
     const foldable = item.kind === 'message'
       && item.msg.channel !== 'note'
       && isOrchestrationMessage(item.msg)
-      && !requiresUserAction(item.msg, hasActions)
+      && !requiresUserAction(item.msg, hasActions, resolvedIds)
       && !forceVisibleIds?.has(item.msg.id);
     if (foldable) {
       // A day separator hangs off the first message of an item, so a run never

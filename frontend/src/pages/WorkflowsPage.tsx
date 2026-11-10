@@ -30,6 +30,9 @@ import {
   PlugZap, MessageSquareText, TerminalSquare, Sparkles,
 } from 'lucide-react';
 import { WatchStatusLine } from '../components/workflows/WatchStatusLine';
+import { QuotaPauseNotice } from '../components/workflows/QuotaPauseControls';
+import { useQuotaPausedRuns } from '../hooks/useQuotaPausedRuns';
+import { quotaResumeTarget } from '../lib/quotaPause';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { AutoDisabledReview } from '../components/workflows/AutoDisabledReview';
@@ -57,6 +60,9 @@ import { detectAutomationImport, type AutomationImportKind } from '../lib/automa
 import { describeRedacted, exportRedactionNotice, redactedFieldsIn } from '../lib/redactedFields';
 import { AGENT_LABELS } from '../lib/constants';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
+import { isHeavyOutput } from '../lib/heavyOutput';
+import { formatBytes } from '../lib/live-page-weight';
+import { useHeavyOutputThreshold } from '../hooks/useHeavyOutputThreshold';
 import type { AgentSwitchTarget } from '../components/AgentSwitchPicker';
 import { AgentCompareSelector } from '../components/AgentCompareSelector';
 import { defaultCompareTargets, type CompareTarget } from '../lib/compareTargets';
@@ -344,7 +350,8 @@ const WORKFLOW_RUN_STATUS_KEYS: Record<RunStatus, string> = {
   WaitingApproval: 'run.status.waiting_approval',
   StoppedByGuard: 'run.status.stopped_by_guard',
   Interrupted: 'run.status.interrupted',
-  WaitingQuota: 'run.status.quota',
+  // KT-1657 — paused, not running: it resumes by itself or by hand.
+  WaitingQuota: 'wf.quota.pausedShort',
 };
 
 const RUN_FETCH_PAGE_SIZE = 10;
@@ -352,6 +359,7 @@ const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
 function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, highlightQuickPromptId = null, onHighlightConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings, onNavigateSettingsAnchor }: WorkflowsPageProps) {
   const { t } = useT();
+  const heavyOutputKb = useHeavyOutputThreshold();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
   // navigation on tablets too, before the detail content becomes cramped.
@@ -409,6 +417,14 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     refetchWorkflowList();
     refetchAutoDisabled();
   }, [refetchWorkflowList, refetchAutoDisabled]);
+  // KT-1657 — runs paused on a provider quota, by workflow: a paused run is
+  // labelled as such on its card, with the wake time and a "Resume now".
+  const { runs: quotaPausedRuns, refetch: refetchQuotaRuns } = useQuotaPausedRuns();
+  const quotaPausedByWorkflow = useMemo(() => {
+    const byWorkflow = new Map<string, (typeof quotaPausedRuns)[number]>();
+    for (const run of quotaPausedRuns) if (!byWorkflow.has(run.workflow_id)) byWorkflow.set(run.workflow_id, run);
+    return byWorkflow;
+  }, [quotaPausedRuns]);
   const autoDisabled = useMemo(() => autoDisabledList ?? [], [autoDisabledList]);
   const autoDisabledById = useMemo(
     () => new Map(autoDisabled.map(item => [item.id, item])),
@@ -2898,6 +2914,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                   // glance in long workflow lists.
                   const live = liveRun && liveRun.workflowId === wf.id && !liveRun.finished ? liveRun : null;
                   const lastStatus = wf.last_run?.status;
+                  const quotaPaused = quotaPausedByWorkflow.get(wf.id);
                   const isRunning = !!live || lastStatus === 'Running' || lastStatus === 'Pending';
                   const storedRunIsActive = lastStatus === 'Running' || lastStatus === 'Pending';
                   const runIdToCancel = live?.runId
@@ -2990,9 +3007,27 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                           {t('wf.needsConfig').replace('{0}', String(wf.misconfigured_step_count))}
                         </span>
                       )}
+                      {/* KT-1525 — the last run's heaviest step output, named. */}
+                      {wf.last_run?.heaviest_output_step && isHeavyOutput(wf.last_run.heaviest_output_bytes, heavyOutputKb) && (
+                        <span
+                          className="wf-needs-config-badge wf-unsafe-badge"
+                          data-testid="wf-heavy-output-card"
+                          title={t('wf.heavyOutput.cardTip', wf.last_run.heaviest_output_step, formatBytes(wf.last_run.heaviest_output_bytes ?? 0))}
+                        >
+                          <AlertTriangle size={10} />
+                          {t('wf.heavyOutput.cardBadge', wf.last_run.heaviest_output_step, formatBytes(wf.last_run.heaviest_output_bytes ?? 0))}
+                        </span>
+                      )}
                     </div>
                     {wf.watch && <WatchStatusLine status={wf.watch} />}
 
+                    {(quotaPaused || lastStatus === 'WaitingQuota') && wf.last_run && (
+                      <QuotaPauseNotice
+                        quota={quotaPaused?.quota}
+                        resumeRunId={quotaPaused ? quotaResumeTarget(quotaPaused) : wf.last_run.id}
+                        onResumed={() => { refetch(); refetchQuotaRuns(); }}
+                      />
+                    )}
                     <div className="wf-card-footer">
                       <div className="wf-card-run-summary">
                         {wf.last_run && (
@@ -3002,7 +3037,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                               data-status={wf.last_run.status}
                               data-current="true"
                             >
-                              {wf.last_run.status}
+                              {wf.last_run.status === 'WaitingQuota' ? t('wf.quota.pausedShort') : wf.last_run.status}
                             </span>
                             <span className="wf-card-run-date">
                               {new Date(wf.last_run.started_at).toLocaleString()}

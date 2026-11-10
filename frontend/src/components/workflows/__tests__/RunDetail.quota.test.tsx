@@ -65,7 +65,11 @@ describe('a run waiting for a provider quota', () => {
       />,
     );
     const notice = screen.getByTestId('wf-quota-notice');
-    expect(notice.textContent).toContain(`wf.quota.waitingUntil:${new Date(WAKE).toLocaleString()}`);
+    expect(notice.textContent).toContain(`wf.quota.pausedUntil:${new Date(WAKE).toLocaleString()}`);
+    expect(screen.getByTestId('wf-quota-paused-label').textContent)
+      .toBe(`wf.quota.pausedUntil:${new Date(WAKE).toLocaleString()}`);
+    // The engine asks the provider on its own: the notice says so.
+    expect(notice.textContent).toContain('wf.quota.recheckHint');
     expect(notice.textContent).toContain(`wf.quota.reset:${new Date(RESET).toLocaleString()}`);
     expect(notice.dataset.parked).toBeUndefined();
     expect(screen.getAllByText(/run\.status\.quota/).length).toBeGreaterThan(0);
@@ -87,7 +91,9 @@ describe('a run waiting for a provider quota', () => {
     const notice = screen.getByTestId('wf-quota-notice');
     expect(notice.dataset.parked).toBe('true');
     expect(notice.textContent).toContain('wf.quota.parked.noResetTime');
+    expect(screen.getByTestId('wf-quota-paused-label').textContent).toBe('wf.quota.pausedParked');
     const resume = screen.getByTitle('wf.quota.resumeHint');
+    expect(resume.textContent).toContain('wf.quota.resumeNow');
     fireEvent.click(resume);
     expect(onResume).toHaveBeenCalledWith(false);
     fireEvent.click(screen.getByTitle('wf.cancelRun'));
@@ -132,7 +138,7 @@ describe('a run waiting for a provider quota', () => {
 
     const { container } = render(<LiveFinishedBanner status="WaitingQuota" stepsExecuted={2} t={t} />);
     expect(container.querySelector('.wf-live-finished')?.getAttribute('data-status')).toBe('waiting');
-    expect(container.textContent).toContain('run.status.quota');
+    expect(container.textContent).toContain('wf.quota.paused');
   });
 
   it('is labelled quota, not failure, in every locale', () => {

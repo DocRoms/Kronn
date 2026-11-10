@@ -13,8 +13,8 @@ get SIGTERM, then SIGKILL, and the table is re-read for what was started
 meanwhile. Only the ended dispatch's id is matched.
 [src: file: backend/src/core/dispatch_reaper.rs:29-30#DISPATCH_ENV]
 [src: file: backend/src/core/child_env.rs:941-953#DISPATCH_ENV]
-[src: file: backend/src/api/discussions/runtime.rs:629-631#reap_task_worker_processes]
-[src: file: backend/src/api/orchestration.rs:920-922#reap_task_worker_processes]
+[src: file: backend/src/api/discussions/runtime.rs:626-628#reap_task_worker_processes]
+[src: file: backend/src/api/orchestration.rs:991-993#reap_task_worker_processes]
 [src: file: backend/src/api/discussions/runtime.rs:626-642#reap_task_worker_processes]
 [src: file: backend/src/core/dispatch_reaper.rs:638-693#reap_dispatch]
 
@@ -72,9 +72,9 @@ lane and no `--configLoader native` is needed. A whole-directory link from an
 earlier launch is replaced; packages installed in the main checkout since are
 linked at the next launch. An entry the lane already holds as a real directory
 is left alone and does not stop the entries after it.
-[src: file: backend/src/core/task_worker_env.rs:359-397#link_frontend_deps]
-[src: file: backend/src/core/task_worker_env.rs:399-434#layer_frontend_deps]
-[src: file: backend/src/core/task_worker_env.rs:437-455#link_entries]
+[src: file: backend/src/core/task_worker_env.rs:465-503#link_frontend_deps]
+[src: file: backend/src/core/task_worker_env.rs:505-540#layer_frontend_deps]
+[src: file: backend/src/core/task_worker_env.rs:543-561#link_entries]
 
 The smoke check also loads the config (`vitest run --passWithNoTests <no
 match>`), which `--version` never did. That executes the worker-authored
@@ -82,5 +82,5 @@ match>`), which `--version` never did. That executes the worker-authored
 lane's first build (KT-1255): the deny-default profile, never the backend's own
 rights. If vitest cannot load its config under that profile the frontend reads
 as unavailable, with the command's output as the reason.
-[src: file: backend/src/core/task_worker_env.rs:985-1045#check_frontend]
-[src: file: backend/src/api/orchestration.rs:2451-2471#worker_probe_runner]
+[src: file: backend/src/core/task_worker_env.rs:1124-1184#check_frontend]
+[src: file: backend/src/api/orchestration.rs:2562-2582#worker_probe_runner]

@@ -36,7 +36,7 @@ What the code does today:
   atomically, so renaming keeps its id and a run that resolves it later still
   finds it
   [src: file: backend/src/api/skills.rs:133-201#update]
-  [src: file: backend/src/core/skills.rs:901-962#update_custom_skill]
+  [src: file: backend/src/core/skills.rs:908-969#update_custom_skill]
   [src: file: backend/src/core/directives.rs:345-380#update_custom_directive]
   [src: file: backend/src/core/profiles.rs:521-547#update_custom_profile].
 - Exports exist per type (workflow bundle v3, `kronn.artifact`,
@@ -159,7 +159,7 @@ isolates the run in that project's worktree (KT-851):
   [src: file: backend/src/workflows/project_scope.rs:15-60#resolve_run_project]
   [src: file: backend/src/workflows/project_scope.rs:62-81#scheduled_projects]
   [src: file: backend/src/workflows/project_scope.rs:83-128#tracker_project]
-  [src: file: backend/src/workflows/mod.rs:314-324#tracker_project].
+  [src: file: backend/src/workflows/mod.rs:320-330#tracker_project].
 - The run records its project (`workflow_runs.project_id`, KT-1015) and runs
   in that project's checkout or worktree, with its environment. A
   multi-project sub-workflow follows its parent run's project when it serves
@@ -212,7 +212,7 @@ parent `node_modules`, Python's site-packages) are not covered
 [src: file: backend/src/core/approved_scripts.rs:181-231#prepare_copy]
 [src: file: backend/src/api/workflows.rs:1617-1689#pin_exec_script_files]
 [src: file: backend/src/workflows/runner.rs:1334-1371#carrying_repository]
-[src: file: backend/src/workflows/exec_step.rs:107-153#approved_script_child].
+[src: file: backend/src/workflows/exec_step.rs:136-182#approved_script_child].
 
 **Implementation note (KT-920, 0.15.0).** Templated step fields read the
 target project's profile as `{{project.<path>}}` (`project.*` is reserved).
@@ -238,12 +238,12 @@ lacks the key; a workflow that reads none is unaffected. A completed Full
 audit drafts a starter profile and stores it with the audit run, shown
 read-only with a Copy button in the audit view; it never writes into the
 checkout, and only a human publishes it
-[src: file: backend/src/core/project_profile.rs:392-460#default_branch_ref]
-[src: file: backend/src/core/project_profile.rs:187-238#schema_error]
+[src: file: backend/src/core/project_profile.rs:408-476#default_branch_ref]
+[src: file: backend/src/core/project_profile.rs:203-254#schema_error]
 [src: file: backend/src/workflows/run_pins.rs:33#PROJECT_PROFILE]
 [src: file: backend/src/workflows/run_pins.rs:263-283#record_project_profile]
 [src: file: backend/src/workflows/run_pins.rs:485-497#revision_fingerprint_with_profiles]
-[src: file: backend/src/core/project_profile.rs:739-758#draft_if_missing]
+[src: file: backend/src/core/project_profile.rs:856-875#draft_if_missing]
 [src: file: docs/guides/project-profile.md:166-177].
 
 ### Other resources
@@ -307,7 +307,7 @@ offered only in its project, listed on its AI & automation tab as a project
 skill without being a default of its discussions, and refused by name when an
 agent launch of another project names it.
 `[src: file: backend/src/core/skills.rs:202#KRONN_PROJECT_KEY]`
-`[src: file: backend/src/core/skills.rs:653-676#refuse_foreign_project_skills]`
+`[src: file: backend/src/core/skills.rs:660-683#refuse_foreign_project_skills]`
 A workflow Agent step also loads the project's repository skills: the run pin
 reads each one as committed on the default branch and pins it, so neither the
 checkout's branch nor the run's worktree changes it; one the pin lacks stops
@@ -331,7 +331,7 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:4256-4289#rebind_api_configs].
+  already does for API configs [src: file: backend/src/api/workflows.rs:4359-4392#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
   already does [src: file: backend/src/api/artifact_portability/import.rs:338-377#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,
