@@ -63,7 +63,7 @@ This is stored as the workflow's `shadow`: `enabled`, `project_ids`, `skills`
 [src: file: backend/src/models/workflows.rs:170-190#WorkflowShadow]
 Only a person sets it: a shadow starts extra runs, so an agent's save that
 sets or changes it is refused.
-[src: file: backend/src/api/workflows.rs:2741-2743#AGENT_SHADOW_REFUSAL]
+[src: file: backend/src/api/workflows.rs:2750-2752#AGENT_SHADOW_REFUSAL]
 
 A shadow run costs as much as a normal one: its agent steps are paid twice.
 
@@ -114,7 +114,7 @@ normal run's and the one the shadow tests.
 Either way the shadow stops testing it. Promotion is a person's decision too:
 the route has no agent access.
 [src: file: backend/src/workflows/shadow.rs:307-361#promote]
-[src: file: backend/src/api/workflows.rs:2718-2739#promote_shadow]
+[src: file: backend/src/api/workflows.rs:2727-2748#promote_shadow]
 
 ## Current limits
 

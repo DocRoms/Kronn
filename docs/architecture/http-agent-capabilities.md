@@ -312,7 +312,7 @@ with an instruction to clear the setting or choose an HTTP provider. An explicit
 effort on an unsupported transport is also refused. The runner applies the same
 validation to explicit workflow Agent-step controls. Legacy batch/compare target
 overrides are outside this single-launch snapshot change.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:571-624#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:591-644#quick_prompt_unsupported_saved_limit_refuses_without_a_child_or_dispatch_job]
 [src: file: backend/src/agents/generation_settings.rs:5-28#validate]
 [src: file: backend/src/workflows/steps.rs:1377-1381#reasoning_effort_override]
 [src: file: backend/src/agents/runner.rs:3971-3975#validate]
@@ -322,7 +322,7 @@ stream, edits the template while the job is queued, then inspects both requests
 received by a loopback provider. A separate Ollama fixture checks the actual
 request after context fitting. These fixtures prove transport and persistence,
 not live hosted-provider availability or model quality.
-[src: file: backend/src/api/agent_quick_prompt_tests.rs:491-569#quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit]
+[src: file: backend/src/api/agent_quick_prompt_tests.rs:506-584#quick_prompt_saved_http_settings_reach_each_provider_turn_after_template_edit]
 [src: file: backend/src/agents/generation_settings.rs:119-188#ollama_generation_controls_reach_the_actual_http_request_after_context_fitting]
 
 ## Full catalogue by default; progressive loading is experimental (KT-685)
@@ -504,16 +504,16 @@ writes are scoped to general workflows plus the current discussion's project.
 Create inherits that project unless an explicit null requests a general draft.
 Update preserves the existing project and all omitted fields; supplied arrays
 replace their stored array. Workers and workflow Agent steps cannot use this
-authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:124-231#execute_workflow_tool]
+authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:142-249#execute_workflow_tool]
 
 Authoring always leaves the workflow disabled. Updating an enabled workflow
 returns an explicit alternative: disable it in the Workflows UI or create a new
 disabled draft. Neither enabling, triggering nor deletion is exposed here.
 Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
-[src: file: backend/src/api/agent_workflow_tools.rs:65-122#draft_patch]
-[src: file: backend/src/api/agent_workflow_tools.rs:215-217#enabled]
-[src: file: backend/src/api/workflows.rs:2808-2868#validate_step_references]
+[src: file: backend/src/api/agent_workflow_tools.rs:80-137#draft_patch]
+[src: file: backend/src/api/agent_workflow_tools.rs:228-230#enabled]
+[src: file: backend/src/api/workflows.rs:2817-2877#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same
@@ -521,7 +521,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-467#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9673-9675#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9684-9686#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON

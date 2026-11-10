@@ -38223,9 +38223,13 @@ pub(crate) mod tests {
         let path = managed_worktree_path(db, &exec_id).await;
         let head = git_rev(Path::new(&path), "HEAD");
         let manifest = clean_manifest_for_execution(db, &exec_id).await;
-        deliver_worker_manifest(db, &exec_id, "ClaudeCode", "sess-a", &manifest)
+        let delivered = deliver_worker_manifest(db, &exec_id, "ClaudeCode", "sess-a", &manifest)
             .await
             .unwrap();
+        assert!(
+            matches!(delivered, DeliverOutcome::Delivered { .. }),
+            "the fixture delivery must land before the review: {delivered:?}"
+        );
         seed_cli_session(db, 102, &parent_id, "sess-b").await;
         (parent_id, child_id, exec_id, head, path)
     }
@@ -39030,7 +39034,7 @@ pub(crate) mod tests {
         let path = managed_worktree_path(db, &exec_id).await;
         let head = git_rev(Path::new(&path), "HEAD");
         let dod_id = dod_id_for_execution(db, &exec_id).await;
-        deliver_worker_manifest(
+        let delivered = deliver_worker_manifest(
             db,
             &exec_id,
             "ClaudeCode",
@@ -39039,6 +39043,10 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        assert!(
+            matches!(delivered, DeliverOutcome::Delivered { .. }),
+            "the fixture delivery must land before the review: {delivered:?}"
+        );
         seed_cli_session(db, 102, &parent_id, "sess-b").await;
         (exec_id, head, dod_id)
     }

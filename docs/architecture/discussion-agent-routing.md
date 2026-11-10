@@ -43,7 +43,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5173-5184#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5184-5195#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -86,8 +86,8 @@ time, so any other Kronn call ends that wait; the call's result carries
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
 [src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES]
-[src: file: backend/scripts/disc-introspection-mcp.py:7401-7432#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12349-12356#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:7412-7443#_WAIT_PREEMPTED_NOTICE]
+[src: file: backend/scripts/disc-introspection-mcp.py:12363-12370#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -101,9 +101,9 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/sql/105_user_turn_catchup.sql:12-23#user_catchup_cursor]
 [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 [src: file: backend/src/api/disc_invite.rs:1362-1390#ack_awareness_upto]
-[src: file: backend/scripts/disc-introspection-mcp.py:3517-3526#_PENDING_AWARENESS_ACK_BY_DISC]
-[src: file: backend/scripts/disc-introspection-mcp.py:4024-4041#_ack_pending_read_cursors]
-[src: file: backend/scripts/disc-introspection-mcp.py:4066-4078#_stage_awareness_ack]
+[src: file: backend/scripts/disc-introspection-mcp.py:3528-3537#_PENDING_AWARENESS_ACK_BY_DISC]
+[src: file: backend/scripts/disc-introspection-mcp.py:4037-4054#_ack_pending_read_cursors]
+[src: file: backend/scripts/disc-introspection-mcp.py:4077-4089#_stage_awareness_ack]
 [src: file: backend/src/db/discussion_sessions.rs:450-484#create_session]
 
 ## Queue, restart, and edit/resend
@@ -123,9 +123,9 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1313-1333#insert_user_message_with_dispatches]
 [src: file: backend/src/db/agent_dispatch.rs:997-1146#recover_after_restart]
-[src: file: backend/src/db/discussions.rs:3614-3616#DispatchInProgress]
-[src: file: backend/src/api/discussions/messaging.rs:1050-1058#DispatchInProgress]
-[src: file: backend/src/db/discussions.rs:3565-3825#revise_message_with_dispatch]
+[src: file: backend/src/db/discussions.rs:3567-3569#DispatchInProgress]
+[src: file: backend/src/api/discussions/messaging.rs:1105-1113#DispatchInProgress]
+[src: file: backend/src/db/discussions.rs:3517-3779#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:102-147#federate_message_revision]
 [src: file: backend/src/api/ws.rs:1179-1187#resolved_targets]
@@ -180,7 +180,7 @@ from exact joined aliases (`@codex-cli`, `@codex-cli-2`, …) using the
 discussion's participant order. Several mentions fan out once per durable
 identity. The legacy single `target_agent` field remains accepted during
 rolling upgrades, with its historical provider-level semantics.
-[src: file: backend/scripts/disc-introspection-mcp.py:5177-5263#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5188-5274#_structured_message_targets]
 [src: file: backend/src/api/disc_source.rs:434-454#legacy_requested_target]
 
 For each native identity, the message and its dispatch obligation commit in one

@@ -1129,41 +1129,6 @@ fn messages_update_tokens() {
 }
 
 #[test]
-fn messages_delete_last_agent() {
-    let conn = test_db();
-    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
-        .unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent))
-        .unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m3", MessageRole::System))
-        .unwrap();
-
-    let deleted = crate::db::discussions::delete_last_agent_messages(&conn, "d1").unwrap();
-    assert_eq!(deleted, 2); // Agent + System messages after last User
-
-    let messages = crate::db::discussions::list_messages(&conn, "d1").unwrap();
-    assert_eq!(messages.len(), 1);
-    assert!(matches!(messages[0].role, MessageRole::User));
-}
-
-#[test]
-fn messages_edit_last_user() {
-    let conn = test_db();
-    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
-        .unwrap();
-
-    let edited =
-        crate::db::discussions::edit_last_user_message(&conn, "d1", "updated content").unwrap();
-    assert!(edited);
-
-    let messages = crate::db::discussions::list_messages(&conn, "d1").unwrap();
-    assert_eq!(messages[0].content, "updated content");
-}
-
-#[test]
 fn discussions_loaded_with_messages() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();

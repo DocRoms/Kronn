@@ -2049,6 +2049,8 @@ const zh: TranslationDict = {
   "disc.batchReviewOpen": "打开",
   "disc.batchReviewContinue": "继续",
   "disc.batchReviewDraftReady": "续写草稿已在讨论中准备就绪。",
+  "disc.retry.targetsDropped": "原收件方已不在此讨论中 — 改由默认响应者回复。",
+  "disc.retry.alreadyRunning": "已有回复正在进行 — 请等待其完成或先停止，再重试。",
   "disc.batchDeleteConfirm": "删除此批处理及其 {0} 个讨论？\n\n« {1} »\n\n此操作不可撤销。",
   "disc.batchDeletedToast": "批处理已删除（{0} 个讨论已移除）",
   "disc.batchDeleteError": "删除失败：{0}",

@@ -9798,8 +9798,10 @@ mod http_run_progress_tests {
     /// bubble waits for the model with its deadline before any header, shows
     /// a reasoning-only chunk as thinking, and ends on the run's own stop.
     #[tokio::test]
+    #[serial_test::serial] // HOME is process-wide: the discussion folder must land in a scratch home
     async fn an_http_discussion_turn_reports_its_wait_its_reasoning_and_its_end() {
         use axum::response::IntoResponse;
+        let _home = crate::agents::runner::ScratchHome::enter();
         let gate = Arc::new(Notify::new());
         let base = gated_proxy(gate.clone()).await;
         let mut config = crate::core::config::default_config();

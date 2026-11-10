@@ -3097,11 +3097,6 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             delete(api::discussions::delete_message),
         )
         .route(
-            "/api/discussions/{id}/messages/last",
-            delete(api::discussions::delete_last_agent_messages)
-                .patch(api::discussions::edit_last_user_message),
-        )
-        .route(
             "/api/discussions/{id}/run",
             post(api::discussions::run_agent),
         )

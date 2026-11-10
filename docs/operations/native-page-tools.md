@@ -9,7 +9,7 @@ exists on the MCP bridge only; native discussion agents do not get it. See
 objects, not an HTML preview.
 [src: file: backend/src/api/agent_tools.rs:2000-2002#execute_page_tool]
 [src: file: backend/src/api/agent_page_tools.rs:171-384#execute_page_tool]
-[src: file: backend/scripts/disc-introspection-mcp.py:8068-8074#call_page_delete_dataset]
+[src: file: backend/scripts/disc-introspection-mcp.py:8079-8085#call_page_delete_dataset]
 
 Native and bridge access are two policies, not one:
 
@@ -37,7 +37,7 @@ An unknown project or discussion fails through the shared foreign-key checks;
 a failed creation does not leave a partial Page.
 [src: file: backend/src/api/agent_page_tools.rs:84-116#page_in_scope]
 [src: file: backend/src/api/agent_page_tools.rs:118-169#scoped_links]
-[src: file: backend/src/api/agent_tools.rs:4720-4722#project_is_in_scope]
+[src: file: backend/src/api/agent_tools.rs:4721-4723#project_is_in_scope]
 [src: file: backend/src/api/agent_page_tests.rs:18-99#native_pages_follow_mcp_project_scope_inheritance_and_selector_contracts]
 [src: file: backend/src/api/agent_page_tests.rs:86-88#standalone]
 [src: file: backend/src/api/agent_page_tests.rs:110-173#native_page_validation_failures_leave_no_partial_page]
@@ -133,4 +133,4 @@ other declaration changes, the Page delta does not. These are byte counts, not
 provider token measurements. The bridge
 declarations keep their own byte ceiling (84,396 bytes, `mcp_surface_budget.py`).
 [src: file: backend/src/api/agent_page_tests.rs:380-405#native_page_surface_has_a_bounded_measured_cost]
-[src: file: backend/scripts/ci/mcp_surface_budget.py:173#CATALOGUE_MAX_BYTES]
+[src: file: backend/scripts/ci/mcp_surface_budget.py:178#CATALOGUE_MAX_BYTES]

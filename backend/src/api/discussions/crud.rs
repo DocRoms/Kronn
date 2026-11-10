@@ -1337,34 +1337,6 @@ pub async fn share(
     }
 }
 
-/// DELETE /api/discussions/:id/messages/last
-pub async fn delete_last_agent_messages(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Json<ApiResponse<()>> {
-    let id_clone = id.clone();
-    match state
-        .db
-        .with_conn(move |conn| crate::db::discussions::delete_last_agent_messages(conn, &id))
-        .await
-    {
-        Ok(_) => {
-            // Invalidate summary cache since messages were deleted
-            if let Err(e) = state
-                .db
-                .with_conn(move |conn| {
-                    crate::db::discussions::invalidate_summary_cache(conn, &id_clone)
-                })
-                .await
-            {
-                tracing::error!("Failed to invalidate summary cache after delete: {e}");
-            }
-            Json(ApiResponse::ok(()))
-        }
-        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
-    }
-}
-
 /// DELETE /api/discussions/:id/messages/:message_id
 #[derive(Debug, serde::Deserialize, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
@@ -1484,23 +1456,6 @@ pub async fn delete_message(
             )
                 .into_response()
         }
-    }
-}
-
-/// PATCH /api/discussions/:id/messages/last
-pub async fn edit_last_user_message(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<SendMessageRequest>,
-) -> Json<ApiResponse<()>> {
-    let content = req.content;
-    match state
-        .db
-        .with_conn(move |conn| crate::db::discussions::edit_last_user_message(conn, &id, &content))
-        .await
-    {
-        Ok(_) => Json(ApiResponse::ok(())),
-        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
 

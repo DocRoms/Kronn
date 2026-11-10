@@ -9919,6 +9919,59 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn scratch_home_guard_accepts_only_a_home_strictly_inside_the_temp_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let scratch = temp.path().join("home");
+        std::fs::create_dir(&scratch).unwrap();
+        super::super::scratch_home_guard(&scratch, temp.path()).expect("a scratch home is fine");
+        // The temp dir itself is not a scratch home, nor is a sibling of it.
+        assert!(super::super::scratch_home_guard(temp.path(), temp.path()).is_err());
+        let error = super::super::scratch_home_guard(Path::new("/Users/someone"), temp.path())
+            .expect_err("a home outside the temp dir is a real home");
+        assert!(error.contains("real home /Users/someone"), "{error}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_test_resolving_the_discussion_folder_under_the_real_home_fails_loudly() {
+        let previous = crate::core::child_env::var_os("HOME");
+        let real_home = Path::new("/nonexistent-kronn-real-home");
+        crate::core::child_env::set_var("HOME", real_home);
+        let outcome =
+            std::panic::catch_unwind(|| super::super::discussion_scratch_dir("guard-discussion"));
+        match previous {
+            Some(value) => crate::core::child_env::set_var("HOME", value),
+            None => crate::core::child_env::remove_var("HOME"),
+        }
+        let payload = outcome.expect_err("the real home must be refused, not used");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|m| m.to_string()))
+            .unwrap_or_default();
+        assert!(message.contains("under the real home"), "{message}");
+        assert!(!real_home.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_scratch_home_keeps_the_discussion_folder_under_the_temp_dir() {
+        let home = super::super::ScratchHome::enter();
+        let dir = super::super::discussion_scratch_dir("scratch-discussion").unwrap();
+        assert_eq!(
+            dir.canonicalize().unwrap(),
+            home.path()
+                .join(".kronn/discussions/scratch-discussion")
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(dir
+            .canonicalize()
+            .unwrap()
+            .starts_with(std::env::temp_dir().canonicalize().unwrap()));
+    }
+
+    #[test]
     fn claude_task_worker_keeps_its_narrow_tool_allowance() {
         let worktree = tempfile::tempdir().unwrap();
         let (_, _, args, _, _, _) = super::super::agent_command_with_task_worker_policy(
