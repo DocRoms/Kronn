@@ -3554,6 +3554,7 @@ pub fn revise_message_with_dispatch(
             sort_order: existing.sort_order,
             duplicate: true,
             dispatch_job_id: existing.dispatch_job_id.clone(),
+            dropped_targets: 0,
         };
         transaction.commit()?;
         return Ok(ReviseMessageOutcome {
@@ -3771,6 +3772,7 @@ pub fn revise_message_with_dispatch(
             sort_order: event_sort_order,
             duplicate: false,
             dispatch_job_id,
+            dropped_targets: 0,
         },
         event,
         claimed_dispatch,

@@ -2074,6 +2074,8 @@ const fr: TranslationDict = {
   'disc.batchReviewOpen': 'Ouvrir',
   'disc.batchReviewContinue': 'Continuer',
   'disc.batchReviewDraftReady': 'Brouillon de continuation préparé dans la discussion.',
+  'disc.retry.targetsDropped': 'Le destinataire d\'origine a quitté la discussion — le répondeur par défaut répond à sa place.',
+  'disc.retry.alreadyRunning': 'Une réponse est déjà en cours — attendez qu\'elle se termine, ou arrêtez-la, avant de réessayer.',
   'disc.batchDeleteConfirm': 'Supprimer ce batch et ses {0} discussions ?\n\n« {1} »\n\nCette action est irréversible.',
   'disc.batchDeletedToast': 'Batch supprimé ({0} discussions effacées)',
   'disc.batchDeleteError': 'Échec de la suppression : {0}',

@@ -3311,13 +3311,18 @@ export function DiscussionsPage({
           target_all: false,
           target_agent: targetAgent,
           target_agents: targets.map(target => target.agent_type),
+          // The original recipient may have left the room: drop it rather
+          // than dead-ending the user's Retry on a 400.
+          drop_departed_targets: true,
         },
         (text) => appendRememberedStreamChunk(discId, text),
         () => cleanupStream(discId),
         (error) => {
           console.error('Agent error:', error);
           const errStr = userError(error);
-          if (errStr.includes('checked out') || errStr.includes('worktree')) {
+          if (errStr.startsWith('HTTP 409') && errStr.includes('already in progress')) {
+            toast(t('disc.retry.alreadyRunning'), 'warning');
+          } else if (errStr.includes('checked out') || errStr.includes('worktree')) {
             setWorktreeError(errStr);
           } else {
             toast(errStr, 'error');
@@ -3327,8 +3332,11 @@ export function DiscussionsPage({
         controller.signal,
         undefined,
         onAgentLog,
-        () => {
+        (receipt) => {
           retryRevisionKeyRef.current = null;
+          if ((receipt.dropped_targets ?? 0) > 0) {
+            toast(t('disc.retry.targetsDropped'), 'info');
+          }
           refetchDiscussions();
           reloadDiscussion(discId);
         },

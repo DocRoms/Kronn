@@ -315,6 +315,44 @@ pub(crate) async fn canonical_targets(
     Ok(targets)
 }
 
+/// Drops the requested targets that no longer exist in the discussion: a CLI
+/// session that left, or a connection that was deleted. Returns what is left
+/// and how many were dropped. Used by retry, which resends a turn whose
+/// original targets may be gone; a default-responder fallback is what an empty
+/// result means to `canonical_targets`.
+async fn drop_departed_targets(
+    state: &AppState,
+    discussion_id: &str,
+    requested: Vec<MessageTarget>,
+) -> Result<(Vec<MessageTarget>, u32), String> {
+    let did = discussion_id.to_string();
+    let (sessions, connections) = state
+        .db
+        .with_conn(move |conn| {
+            let sessions = crate::db::discussion_sessions::list_sessions(conn, &did, false)?;
+            let connections = crate::db::external_api_connections::list(conn)?;
+            Ok((sessions, connections))
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let total = requested.len();
+    let kept: Vec<MessageTarget> = requested
+        .into_iter()
+        .filter(|target| match target.kind {
+            MessageTargetKind::DiscussionAgent => true,
+            MessageTargetKind::Agent => target
+                .connection_id
+                .as_deref()
+                .is_none_or(|id| connections.iter().any(|connection| connection.id == id)),
+            MessageTargetKind::Cli => target
+                .cli_session_id
+                .is_some_and(|id| sessions.iter().any(|session| session.id == id)),
+        })
+        .collect();
+    let dropped = u32::try_from(total - kept.len()).unwrap_or(u32::MAX);
+    Ok((kept, dropped))
+}
+
 async fn human_dispatch_route(
     state: &AppState,
     discussion_id: &str,
@@ -944,11 +982,28 @@ pub async fn revise_message(
             .into_response();
     }
 
-    let requested_targets = normalized_targets(
+    let mut requested_targets = normalized_targets(
         request.targets.clone(),
         request.target_agents.clone(),
         request.target_agent.clone(),
     );
+    let mut dropped_targets = 0;
+    if request.drop_departed_targets {
+        match drop_departed_targets(&state, &id, requested_targets).await {
+            Ok((kept, dropped)) => {
+                requested_targets = kept;
+                dropped_targets = dropped;
+            }
+            Err(error) => {
+                tracing::error!("Revise target presence check failed for {id}: {error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::<()>::err("Failed to revise message")),
+                )
+                    .into_response();
+            }
+        }
+    }
     let targets = match canonical_targets(&state, &id, requested_targets, request.target_all).await
     {
         Ok(targets) => targets,
@@ -1085,9 +1140,11 @@ pub async fn revise_message(
         }
     };
 
+    let mut receipt = outcome.receipt.clone();
+    receipt.dropped_targets = dropped_targets;
     let revision_event = Event::default()
         .event("message_revised")
-        .data(serde_json::to_string(&outcome.receipt).unwrap_or_else(|_| "{}".into()));
+        .data(serde_json::to_string(&receipt).unwrap_or_else(|_| "{}".into()));
     if !outcome.receipt.duplicate {
         crate::api::federation::federate_message_revision(&state, &outcome.event).await;
     }
@@ -2504,6 +2561,7 @@ mod tests {
             target_all: false,
             target_agent: None,
             target_agents: vec![],
+            drop_departed_targets: false,
         };
 
         let first = revise_message(
@@ -2668,6 +2726,7 @@ mod tests {
                 target_all: false,
                 target_agent: None,
                 target_agents: vec![],
+                drop_departed_targets: false,
             }),
         )
         .await;
@@ -2685,10 +2744,7 @@ mod tests {
             0,
             "a peer-owned retry must not enqueue a local dispatch"
         );
-        assert_eq!(
-            count_rows(&state, "message_revision_events", disc).await,
-            1
-        );
+        assert_eq!(count_rows(&state, "message_revision_events", disc).await, 1);
         assert_eq!(
             count_rows(&state, "message_tombstones", disc).await,
             1,
@@ -2699,6 +2755,105 @@ mod tests {
             1,
             "only the retried turn stays in the live projection"
         );
+    }
+
+    /// KT-1598 — a retry whose original peer has since left the room must not
+    /// dead-end: the departed target is dropped, the default responder takes
+    /// the turn (a durable local dispatch) and the receipt says a target was
+    /// dropped so the UI can tell the user.
+    #[tokio::test]
+    async fn retry_drops_a_departed_target_and_falls_back_to_the_default_responder() {
+        let disc = "d-retry-departed";
+        let state = make_state_with_disc(disc).await;
+        let (session_id, revision) =
+            seed_peer_turn_with_reply(&state, disc, "u-retry-departed").await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::mark_session_left(conn, session_id)
+            })
+            .await
+            .unwrap();
+
+        let request = |drop_departed_targets: bool| ReviseMessageRequest {
+            message_id: "u-retry-departed".into(),
+            content: "review this diff".into(),
+            expected_revision: revision.clone(),
+            idempotency_key: Uuid::new_v4().to_string(),
+            targets: vec![MessageTarget::cli(AgentType::ClaudeCode, session_id)],
+            target_all: false,
+            target_agent: None,
+            target_agents: vec![],
+            drop_departed_targets,
+        };
+
+        // An explicit edit stays strict: naming a departed peer is refused.
+        let strict = revise_message(
+            State(state.clone()),
+            Path(disc.into()),
+            Json(request(false)),
+        )
+        .await;
+        assert_eq!(strict.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(count_rows(&state, "message_revision_events", disc).await, 0);
+
+        let response =
+            revise_message(State(state.clone()), Path(disc.into()), Json(request(true))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_to_string(response).await;
+        assert!(body.contains("event: message_revised"), "{body}");
+        assert!(body.contains("\"dropped_targets\":1"), "{body}");
+        assert_eq!(
+            count_rows(&state, "agent_dispatch_jobs", disc).await,
+            1,
+            "the default responder takes the turn through a durable dispatch"
+        );
+        assert_eq!(
+            count_rows(&state, "message_tombstones", disc).await,
+            1,
+            "the superseded reply is still tombstoned"
+        );
+    }
+
+    /// KT-1598 — retry while a reply is already running is a 409 whose body
+    /// says so, so the UI can show "a reply is already running".
+    #[tokio::test]
+    async fn retry_while_a_dispatch_is_active_is_a_409_naming_the_running_reply() {
+        let disc = "d-retry-busy";
+        let state = make_state_with_disc(disc).await;
+        let (_, revision) = seed_peer_turn_with_reply(&state, disc, "u-retry-busy").await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::replace_message_targets(conn, "u-retry-busy", &[])?;
+                let transaction = conn.unchecked_transaction()?;
+                enqueue_dispatches_for_trigger(&transaction, disc, "u-retry-busy", 1, "k-busy")?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = revise_message(
+            State(state.clone()),
+            Path(disc.into()),
+            Json(ReviseMessageRequest {
+                message_id: "u-retry-busy".into(),
+                content: "review this diff".into(),
+                expected_revision: revision,
+                idempotency_key: Uuid::new_v4().to_string(),
+                targets: vec![],
+                target_all: false,
+                target_agent: None,
+                target_agents: vec![],
+                drop_departed_targets: true,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_body_to_string(response).await;
+        assert!(body.contains("already in progress"), "{body}");
+        assert_eq!(count_rows(&state, "message_revision_events", disc).await, 0);
     }
 
     /// KT-1598 — `/run` is the explicit force-retry escape hatch. It takes a
@@ -2715,8 +2870,7 @@ mod tests {
                 // A native turn: the discussion agent owns it, not the peer.
                 crate::db::discussions::replace_message_targets(conn, "u-force", &[])?;
                 let transaction = conn.unchecked_transaction()?;
-                let jobs =
-                    enqueue_dispatches_for_trigger(&transaction, disc, "u-force", 1, "k-1")?;
+                let jobs = enqueue_dispatches_for_trigger(&transaction, disc, "u-force", 1, "k-1")?;
                 transaction.commit()?;
                 assert_eq!(jobs.len(), 1);
                 assert_eq!(jobs[0].trigger_message_id, "u-force");

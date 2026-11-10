@@ -2064,6 +2064,8 @@ const en: TranslationDict = {
   'disc.batchReviewOpen': 'Open',
   'disc.batchReviewContinue': 'Continue',
   'disc.batchReviewDraftReady': 'Continuation draft prepared in the discussion.',
+  'disc.retry.targetsDropped': 'The original recipient is no longer in this discussion — the default responder answers instead.',
+  'disc.retry.alreadyRunning': 'A reply is already running — wait for it to finish, or stop it, before retrying.',
   'disc.batchDeleteConfirm': 'Delete this batch and its {0} discussions?\n\n« {1} »\n\nThis cannot be undone.',
   'disc.batchDeletedToast': 'Batch deleted ({0} discussions removed)',
   'disc.batchDeleteError': 'Delete failed: {0}',

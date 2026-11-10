@@ -2064,6 +2064,8 @@ const es: TranslationDict = {
   'disc.batchReviewOpen': 'Abrir',
   'disc.batchReviewContinue': 'Continuar',
   'disc.batchReviewDraftReady': 'Borrador de continuación preparado en la discusión.',
+  'disc.retry.targetsDropped': 'El destinatario original ya no está en la discusión — responde el respondedor predeterminado.',
+  'disc.retry.alreadyRunning': 'Ya hay una respuesta en curso — espera a que termine, o deténla, antes de reintentar.',
   'disc.batchDeleteConfirm': '¿Eliminar este batch y sus {0} discusiones?\n\n« {1} »\n\nEsta acción es irreversible.',
   'disc.batchDeletedToast': 'Batch eliminado ({0} discusiones eliminadas)',
   'disc.batchDeleteError': 'Error al eliminar: {0}',

@@ -888,6 +888,12 @@ pub struct ReviseMessageRequest {
     /// Plural replacement for `target_agent`; empty preserves legacy clients.
     #[serde(default)]
     pub target_agents: Vec<AgentType>,
+    /// Retry resends a turn whose original targets may have left the room
+    /// since. With this set, targets that are no longer part of the
+    /// discussion are dropped (and counted in the receipt) instead of failing
+    /// the whole revision; an explicit edit leaves it unset and stays strict.
+    #[serde(default)]
+    pub drop_departed_targets: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, TS)]
@@ -927,6 +933,10 @@ pub struct MessageRevisionReceipt {
     pub sort_order: i64,
     pub duplicate: bool,
     pub dispatch_job_id: Option<String>,
+    /// Requested targets dropped because they left the discussion
+    /// (`drop_departed_targets`); the client says so instead of failing.
+    #[serde(default)]
+    pub dropped_targets: u32,
 }
 
 #[derive(Debug, Clone)]
