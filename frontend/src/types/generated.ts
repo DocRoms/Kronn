@@ -1912,6 +1912,26 @@ dod_progress: string | null, };
 
 export type BundleWorkflowCreated = { id: string, name: string, };
 
+/**
+ * The reviewer a campaign names at creation. A delivery is never addressed to
+ * an agent no session serves: `agent` and `model` are what the campaign room
+ * is configured with, `Human` leaves the room to the person.
+ */
+export type CampaignReviewer = { kind: CampaignReviewerKind, agent?: AgentType, model?: string,
+/**
+ * The named connection of a `Custom` remote model.
+ */
+connection_id?: string,
+/**
+ * The campaign did not ask for this reviewer: Kronn chose it.
+ */
+defaulted: boolean, };
+
+/**
+ * Who reviews the deliveries of a campaign (KT-1643).
+ */
+export type CampaignReviewerKind = "agent" | "remote_model" | "human";
+
 export type CampaignTaskCandidate = { task: PlanningTaskSummary, plan_position: number, launchable: boolean, reasons: Array<CampaignTaskReason>, };
 
 /**
@@ -6746,7 +6766,12 @@ quota_fallback: boolean,
  * The alternatives a single-task launch named for its own fallback. Empty
  * for a campaign, which falls back among `allowed_agents`.
  */
-quota_fallback_agents: Array<AgentType>, created_at: string, updated_at: string, };
+quota_fallback_agents: Array<AgentType>,
+/**
+ * KT-1643 — who reviews each delivery of this campaign, named when it was
+ * created. `None` only for a campaign that predates the field.
+ */
+reviewer?: CampaignReviewer | null, created_at: string, updated_at: string, };
 
 /**
  * The V1 shape is one implicit run per launch (`single_task`); `campaign` is
@@ -7316,6 +7341,18 @@ export type PortablePluginConfig = { source_config_id: string, server: McpServer
  * What a configuration-only export withheld from `server` (KT-1040).
  */
 placeholders?: Array<ExportPlaceholder>, };
+
+export type PreflightCheck = {
+/**
+ * `gh_installed`, `gh_auth`, `gh_scopes`, `repo_access`, `project`, `worker`.
+ */
+id: string, ok: boolean,
+/**
+ * What was found, or what to do about it.
+ */
+message: string, };
+
+export type PreflightReport = { ok: boolean, repo: string, target_branch: string, max_review_rounds: number, checks: Array<PreflightCheck>, project_id?: string, publication?: PublicationPlan, };
 
 /**
  * 0.9.2-G — honest presence state, server-derived (never a bare "connected"
@@ -7927,6 +7964,29 @@ export type ProviderQuotaState = { provider: AgentType, blocked: boolean,
 reset_at: string | null, };
 
 export type ProviderUsage = { provider: string, tokens_used: number, tokens_limit: number | null, cost: CostAggregate, };
+
+export type PublicationMode = "maintainer" | "fork";
+
+/**
+ * Where the branch is pushed and what the pull request is opened with.
+ */
+export type PublicationPlan = { mode: PublicationMode,
+/**
+ * `owner/name` the pull request is opened against.
+ */
+base_repo: string, base_branch: string,
+/**
+ * `owner/name` the branch is pushed to.
+ */
+push_repo: string,
+/**
+ * `gh pr create --head`: `branch`, or `login:branch` from a fork.
+ */
+pr_head: string,
+/**
+ * The fork has to be created (`gh repo fork`) before the push.
+ */
+needs_fork: boolean, };
 
 export type PublishLivePageRequest = { workflow_id?: string | null, workflow_run_id?: string | null, writes: Array<LivePageWrite>, };
 
@@ -10365,7 +10425,7 @@ terminal_stop?: string | null,
  * the run view grades it against the configured threshold. `None` on a
  * run recorded before this field existed.
  */
-output_bytes?: number | null, };
+output_bytes?: number, };
 
 /**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
@@ -12573,7 +12633,7 @@ export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: st
  * that step's name, so the workflow card can warn without reading the
  * run's payload. The UI grades it against the configured threshold.
  */
-heaviest_output_bytes?: number | null, heaviest_output_step?: string | null, };
+heaviest_output_bytes?: number, heaviest_output_step?: string, };
 
 export type WorkflowSafety = { sandbox: boolean, max_files?: number | null, max_lines?: number | null, require_approval: boolean, };
 

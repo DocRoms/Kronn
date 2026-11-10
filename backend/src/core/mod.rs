@@ -35,6 +35,7 @@ pub mod config_salvage;
 pub mod content_memo;
 pub mod context_audit;
 pub mod context_files;
+pub mod contribution;
 pub mod credential_store;
 pub mod cross_audit;
 pub mod cross_audit_decision;

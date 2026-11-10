@@ -1788,6 +1788,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/resolve/{id}", get(api::id_resolver::resolve))
         // KT-917: symbolic resource reference -> local id, per project.
         .route("/api/resources/resolve", get(api::resource_refs::resolve))
+        // KT-1643: can this machine contribute to a repository, and how.
+        .route(
+            "/api/contribution/preflight",
+            get(api::contribution::preflight),
+        )
         // Whole-DB restore: exports routinely exceed axum's ~2 MB default body
         // limit (a few hundred discussions ≈ 2 MB ZIP). Without this, any
         // non-trivial export fails the upload with "Error parsing

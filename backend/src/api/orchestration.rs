@@ -11429,6 +11429,10 @@ pub struct CreateCampaignRequest {
     /// Explicit opt-in to a provider fallback on quota exhaustion (KT-1564).
     #[serde(default)]
     pub quota_fallback: bool,
+    /// KT-1643 — who reviews each delivery. Absent: a configured remote model,
+    /// else the human; never an agent nobody serves.
+    #[serde(default)]
+    pub reviewer: Option<crate::models::CampaignReviewer>,
 }
 
 fn default_campaign_concurrency() -> u32 {
@@ -11919,6 +11923,23 @@ pub async fn create_campaign(
             .effective_max_review_rounds(),
         Err(detail) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, detail)),
     };
+    let reviewer = {
+        let config = state.config.read().await;
+        let candidates = crate::core::contribution::remote_reviewer_candidates(&config);
+        match crate::core::contribution::resolve_reviewer(request.reviewer.clone(), &candidates) {
+            Ok(reviewer) => reviewer,
+            Err(detail) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, detail)),
+        }
+    };
+    let announcement = crate::core::contribution::room_announcement(
+        &target_branch,
+        &if max_review_rounds == crate::models::UNLIMITED_REVIEW_ROUNDS {
+            "unlimited".to_string()
+        } else {
+            max_review_rounds.to_string()
+        },
+        &reviewer,
+    );
     let resilience = crate::models::OrchestrationResiliencePolicy {
         activity_timeout_secs: request.activity_timeout_secs,
         review_timeout_secs: request.review_timeout_secs,
@@ -11936,6 +11957,7 @@ pub async fn create_campaign(
             if crate::db::discussions::get_discussion(&tx, &request.discussion_id)?.is_none() {
                 bail!("principal discussion not found");
             }
+            let discussion_id = request.discussion_id.clone();
             let input = crate::models::OrchestrationRunInput {
                 kind: crate::models::OrchestrationRunKind::Campaign,
                 discussion_id: request.discussion_id,
@@ -11955,9 +11977,16 @@ pub async fn create_campaign(
                 auto_continue: request.auto_continue,
                 quota_fallback: request.quota_fallback,
                 quota_fallback_agents: Vec::new(),
+                reviewer: Some(reviewer.clone()),
             };
             let run = crate::db::orchestration::create_orchestration_run(&tx, &input)?;
             crate::db::orchestration::set_resilience_policy(&tx, &run.id, &resilience)?;
+            crate::db::orchestration::apply_campaign_reviewer(
+                &tx,
+                &discussion_id,
+                &reviewer,
+                &announcement,
+            )?;
             let view = campaign_view(&tx, &run.id)?;
             tx.commit()?;
             Ok(view)
@@ -46986,6 +47015,177 @@ pub(crate) mod tests {
         .await;
         assert!(!refused.success);
         assert_eq!(refused.error_code.as_deref(), Some("validation"));
+    }
+
+    /// KT-1643 — a campaign names its reviewer at creation, so a delivery is
+    /// never addressed to an agent no session serves.
+    mod campaign_reviewer {
+        use super::*;
+        use crate::models::{AgentType, CampaignReviewer, CampaignReviewerKind};
+
+        async fn create(
+            db: &std::sync::Arc<Database>,
+            state: AppState,
+            parent_id: &str,
+            reviewer: Option<serde_json::Value>,
+        ) -> ApiResponse<CampaignView> {
+            let mut request = serde_json::json!({
+                "discussion_id": parent_id,
+                "target_branch": "main",
+                "max_review_rounds": 10,
+            });
+            if let Some(reviewer) = reviewer {
+                request["reviewer"] = reviewer;
+            }
+            let _ = db;
+            let Json(created) =
+                create_campaign(State(state), Json(serde_json::from_value(request).unwrap())).await;
+            created
+        }
+
+        async fn room(
+            db: &Database,
+            parent_id: &str,
+        ) -> (crate::models::Discussion, bool, Vec<String>) {
+            let id = parent_id.to_string();
+            db.with_conn(move |conn| {
+                let disc = crate::db::discussions::get_discussion(conn, &id)?.unwrap();
+                let no_agent = crate::db::discussions::disc_is_no_agent(conn, &id)?;
+                let notices = disc
+                    .messages
+                    .iter()
+                    .filter(|m| m.id.starts_with("orch-campaign-reviewer:"))
+                    .map(|m| m.content.clone())
+                    .collect();
+                Ok((disc, no_agent, notices))
+            })
+            .await
+            .unwrap()
+        }
+
+        async fn orphaned_room(db: &Database, parent_id: &str) {
+            let id = parent_id.to_string();
+            db.with_conn(move |conn| {
+                // How the autoCode issue room was created: nobody answers in it.
+                crate::db::discussions::set_disc_no_agent(conn, &id, true)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn without_a_remote_model_the_default_reviewer_is_the_human_and_the_room_says_so() {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            orphaned_room(&db, &parent_id).await;
+
+            let created = create(&db, state_for(&db), &parent_id, None).await;
+            assert!(created.success, "{:?}", created.error);
+            let run = created.data.unwrap().run;
+            let reviewer = run.reviewer.expect("the campaign names its reviewer");
+            assert_eq!(reviewer.kind, CampaignReviewerKind::Human);
+            assert!(reviewer.defaulted);
+
+            let (_, no_agent, notices) = room(&db, &parent_id).await;
+            assert!(no_agent, "a human reviewer keeps the room human-only");
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(notices[0].contains("`main`") && notices[0].contains("10 review round"));
+            assert!(notices[0].contains("**you**"), "{}", notices[0]);
+
+            // It is stored with the run, not only said once.
+            let stored = db
+                .with_conn(move |conn| {
+                    crate::db::orchestration::get_orchestration_run(conn, &run.id)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.reviewer.unwrap().kind, CampaignReviewerKind::Human);
+        }
+
+        #[tokio::test]
+        async fn a_configured_remote_model_is_the_default_reviewer_and_answers_in_the_room() {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            orphaned_room(&db, &parent_id).await;
+            let state = state_for(&db);
+            {
+                let mut config = state.config.write().await;
+                config.agents.lite_llm.base_url = Some("http://127.0.0.1:4000".into());
+                config.agents.model_tiers.lite_llm.reasoning = Some("reviewer-model".into());
+                config.tokens.keys.push(crate::models::ApiKey {
+                    id: "k1".into(),
+                    name: "litellm".into(),
+                    provider: "litellm".into(),
+                    value: "sk-test-not-a-secret".into(),
+                    active: true,
+                });
+            }
+
+            let created = create(&db, state, &parent_id, None).await;
+            assert!(created.success, "{:?}", created.error);
+            let reviewer = created.data.unwrap().run.reviewer.unwrap();
+            assert_eq!(reviewer.kind, CampaignReviewerKind::RemoteModel);
+            assert_eq!(reviewer.agent, Some(AgentType::LiteLlm));
+            assert!(reviewer.defaulted);
+
+            let (disc, no_agent, notices) = room(&db, &parent_id).await;
+            assert_eq!(
+                disc.agent,
+                AgentType::LiteLlm,
+                "the review request is served"
+            );
+            assert_eq!(disc.model.as_deref(), Some("reviewer-model"));
+            assert!(!no_agent, "the remote model answers in the room");
+            assert!(notices[0].contains("remote model"), "{}", notices[0]);
+        }
+
+        #[tokio::test]
+        async fn an_agent_reviewer_with_its_model_replaces_the_unserved_room_agent() {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            orphaned_room(&db, &parent_id).await;
+
+            let reviewer = serde_json::to_value(CampaignReviewer {
+                kind: CampaignReviewerKind::Agent,
+                agent: Some(AgentType::Codex),
+                model: Some("gpt-review".into()),
+                connection_id: None,
+                defaulted: false,
+            })
+            .unwrap();
+            let created = create(&db, state_for(&db), &parent_id, Some(reviewer)).await;
+            assert!(created.success, "{:?}", created.error);
+            assert!(!created.data.unwrap().run.reviewer.unwrap().defaulted);
+
+            let (disc, no_agent, notices) = room(&db, &parent_id).await;
+            assert_eq!(disc.agent, AgentType::Codex);
+            assert_eq!(disc.model.as_deref(), Some("gpt-review"));
+            assert_eq!(disc.participants, vec![AgentType::Codex]);
+            assert!(!no_agent);
+            assert!(notices[0].contains("gpt-review"), "{}", notices[0]);
+        }
+
+        #[tokio::test]
+        async fn a_reviewer_that_cannot_review_is_refused_and_creates_nothing() {
+            let repo = init_repo();
+            let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+            let (_task, parent_id, _) = seed(&db, repo.path()).await;
+            let no_model = serde_json::json!({"kind": "agent", "agent": "Codex"});
+            let created = create(&db, state_for(&db), &parent_id, Some(no_model)).await;
+            assert!(!created.success);
+            assert_eq!(created.error_code.as_deref(), Some("validation"));
+            assert_eq!(
+                count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+                0
+            );
+            let (_, _, notices) = room(&db, &parent_id).await;
+            assert!(notices.is_empty());
+        }
     }
 
     /// The prepare and launch bodies tell « no key » from « key: null »: the first inherits

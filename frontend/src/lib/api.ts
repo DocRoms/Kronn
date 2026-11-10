@@ -278,6 +278,7 @@ import type {
   UpdateLivePageRequest,
   LinkLivePageDiscussionRequest,
   CampaignTaskCandidate as GeneratedCampaignTaskCandidate,
+  CampaignReviewer,
   CampaignWorkerSelection,
   ExecutionDiscussionLink,
   IntegrationStrategy,
@@ -3926,6 +3927,8 @@ export interface CreateCampaignRequest {
   auto_continue?: boolean;
   /** Explicit opt-in: move to another allowed provider on quota exhaustion, and back after the reset. */
   quota_fallback?: boolean;
+  /** Who reviews each delivery. Omitted: a configured remote model, else you. */
+  reviewer?: CampaignReviewer | null;
 }
 
 export const orchestration = {

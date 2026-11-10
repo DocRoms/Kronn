@@ -174,4 +174,53 @@ describe('TaskCampaignPanel', () => {
     fireEvent.click(screen.getByTestId('orch-launch-KT-4'));
     expect(onLaunch).not.toHaveBeenCalled();
   });
+
+  describe('campaign rules (KT-1643)', () => {
+    const withRun = (run: Partial<CampaignView['run']>) =>
+      view({
+        run: { id: 'run-1', status: 'active', ...run } as CampaignView['run'],
+        candidates: [candidate({ reference: 'KT-1' })],
+      });
+
+    it('states the target branch, the review rounds and who reviews', () => {
+      wrap(
+        <TaskCampaignPanel
+          view={withRun({
+            target_branch: 'main',
+            max_review_rounds: 10,
+            reviewer: { kind: 'remote_model', agent: 'LiteLlm', model: 'gpt-x', defaulted: true },
+          })}
+          onLaunch={vi.fn()}
+        />
+      );
+      const rules = screen.getByTestId('orch-campaign-rules').textContent ?? '';
+      expect(rules).toContain('main');
+      expect(rules).toContain('10');
+      expect(rules).toContain('LiteLlm (gpt-x)');
+      expect(rules.match(/\([^)]+\)$/)).not.toBeNull(); // the "default" origin suffix
+    });
+
+    it('says the human decides when no agent answers, and shows an unlimited budget as such', () => {
+      wrap(
+        <TaskCampaignPanel
+          view={withRun({
+            target_branch: 'main',
+            max_review_rounds: 4_294_967_295,
+            reviewer: { kind: 'human', defaulted: false },
+          })}
+          onLaunch={vi.fn()}
+        />
+      );
+      const rules = screen.getByTestId('orch-campaign-rules').textContent ?? '';
+      expect(rules).toContain('\u221e');
+      expect(rules).not.toContain('LiteLlm');
+      expect(rules.endsWith(')')).toBe(true); // "(…review card)", not a "(default)" suffix
+      expect(rules.match(/\)\s*\(/)).toBeNull();
+    });
+
+    it('shows nothing for a campaign that predates the reviewer', () => {
+      wrap(<TaskCampaignPanel view={withRun({ target_branch: 'main' })} onLaunch={vi.fn()} />);
+      expect(screen.queryByTestId('orch-campaign-rules')).toBeNull();
+    });
+  });
 });

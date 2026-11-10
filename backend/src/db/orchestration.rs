@@ -64,7 +64,8 @@ const RUN_COLS: &str = "id, kind, discussion_id, project_id, target_workspace_id
     integration_strategy, validation_json, escalation_notify_url, status, \
     created_at, updated_at, allow_self_review, control_state, control_reason, \
     timeout_secs, max_cli_concurrent_executions, allowed_agents_json, \
-    default_worker_json, auto_continue, quota_fallback, quota_fallback_agents_json";
+    default_worker_json, auto_continue, quota_fallback, quota_fallback_agents_json, \
+    reviewer_json";
 
 fn parse_dt(value: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&value)
@@ -114,6 +115,7 @@ fn row_to_run(row: &Row) -> rusqlite::Result<OrchestrationRun> {
     let allowed_agents_json: String = row.get(20)?;
     let default_worker_json: Option<String> = row.get(21)?;
     let quota_fallback_agents_json: String = row.get(24)?;
+    let reviewer_json: Option<String> = row.get(25)?;
     Ok(OrchestrationRun {
         id: row.get(0)?,
         kind: OrchestrationRunKind::from_str(&kind).unwrap_or_default(),
@@ -143,6 +145,10 @@ fn row_to_run(row: &Row) -> rusqlite::Result<OrchestrationRun> {
         auto_continue: row.get::<_, i64>(22)? != 0,
         quota_fallback: row.get::<_, i64>(23)? != 0,
         quota_fallback_agents: parse_json_column(24, &quota_fallback_agents_json)?,
+        reviewer: reviewer_json
+            .as_deref()
+            .map(|json| parse_json_column(25, json))
+            .transpose()?,
     })
 }
 
@@ -980,6 +986,73 @@ pub fn managed_working_execution_for_workspace(
     }
 }
 
+/// KT-1643 — make the campaign room match the reviewer the campaign named, and
+/// say so in the room. A delivery's review request is addressed to the room's
+/// agent: left as it was created (`no_agent`, a `ClaudeCode` nobody serves), it
+/// was orphaned. An agent or remote-model reviewer becomes the room's agent and
+/// model and the room answers again; a human reviewer keeps the room
+/// human-only, so the review card is the whole conversation.
+pub fn apply_campaign_reviewer(
+    tx: &rusqlite::Transaction<'_>,
+    discussion_id: &str,
+    reviewer: &crate::models::CampaignReviewer,
+    announcement: &str,
+) -> Result<()> {
+    use crate::models::CampaignReviewerKind;
+    match (reviewer.kind, reviewer.agent.as_ref()) {
+        (CampaignReviewerKind::Human, _) => {
+            crate::db::discussions::set_disc_no_agent_within_tx(tx, discussion_id, true)?;
+        }
+        (_, Some(agent)) => {
+            // One statement: `update_discussion_agent` and `_connection` each
+            // open their own transaction, which cannot nest in the caller's.
+            tx.execute(
+                "UPDATE discussions \
+                    SET agent = ?2, participants_json = ?3, model = ?4, \
+                        connection_id = ?5, updated_at = ?6 \
+                  WHERE id = ?1",
+                params![
+                    discussion_id,
+                    crate::db::discussions::format_agent_type(agent),
+                    serde_json::to_string(&[agent])?,
+                    reviewer.model,
+                    reviewer.connection_id,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            crate::db::discussions::set_disc_no_agent_within_tx(tx, discussion_id, false)?;
+        }
+        (_, None) => bail!("a non-human reviewer names the agent that reviews"),
+    }
+    let message = DiscussionMessage {
+        id: format!("orch-campaign-reviewer:{}", Uuid::new_v4()),
+        role: MessageRole::User,
+        channel: MessageChannel::Main,
+        content: announcement.to_string(),
+        agent_type: None,
+        timestamp: Utc::now(),
+        tokens_used: 0,
+        session_tokens_at_message: None,
+        recovered_partial: false,
+        auth_mode: None,
+        model_tier: None,
+        model: None,
+        cost_usd: None,
+        author_pseudo: Some("Orchestrateur".to_string()),
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
+        lint_report: None,
+        target_agent: None,
+        reply_to_message_id: None,
+        author_cli_ordinal: None,
+        session_continuity: None,
+        kind: crate::models::MessageKind::Orchestration,
+    };
+    crate::db::discussions::insert_message(tx, discussion_id, &message)?;
+    Ok(())
+}
+
 pub fn create_orchestration_run(
     conn: &Connection,
     input: &OrchestrationRunInput,
@@ -1015,11 +1088,16 @@ pub fn create_orchestration_run(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let reviewer_json = input
+        .reviewer
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     conn.execute(
         &format!(
             "INSERT INTO orchestration_runs ({RUN_COLS}) \
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
-                    ?17, NULL, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+                    ?17, NULL, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"
         ),
         params![
             id,
@@ -1048,6 +1126,7 @@ pub fn create_orchestration_run(
             i64::from(input.auto_continue),
             i64::from(input.quota_fallback),
             quota_fallback_agents_json,
+            reviewer_json,
         ],
     )?;
     get_orchestration_run(conn, &id)?

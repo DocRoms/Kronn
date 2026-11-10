@@ -1797,6 +1797,18 @@ async fn execute_run_body(
     // After trigger fields and variables, so neither can stand in for the run.
     ctx.set_builtin("run.id", run.id.clone());
     ctx.set_builtin("run.variant", super::shadow::variant(run).to_string());
+    // KT-1643 — the instance's own address, as a step it spawns reaches it, so
+    // a shared workflow carries no literal `localhost:3140`.
+    let listening_port = state.config.read().await.server.listening_port();
+    ctx.set_builtin(
+        "run.kronn_url",
+        crate::core::contribution::kronn_url(
+            crate::core::child_env::var("KRONN_BACKEND_URL")
+                .ok()
+                .as_deref(),
+            listening_port,
+        ),
+    );
     ctx.set_refs(&workflow.refs);
     // KT-910 — Exec steps write here, Agent steps that name it read it.
     match super::run_artifacts::ensure(&run.id) {
