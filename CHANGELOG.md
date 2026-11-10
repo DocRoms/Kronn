@@ -13,6 +13,27 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Workflows: the design doctrine now reaches the agents that author them over
+  MCP. One short file (decision tree, "at equal cost, choose for
+  maintainability" rules, ApiCall limits) is served as `authoring_doctrine` by
+  `workflow_step_schema` and is the « Authoring doctrine » section of the
+  `workflow-architect` guide, so the two cannot diverge. The rules: any HTTP call
+  to a service that has a plugin goes through ApiCall / BatchApiCall /
+  CollectApiData, Exec is for logic only, a script is shared (Quick Exec or
+  `exec_script_files`) and never copied, state passes through step outputs. The
+  schema now says what an ApiCall does past its 50-page cap (the items so far,
+  a success, and the `PAGINATION_TRUNCATED` signal), that `Auto` pagination
+  does not walk, and how a GraphQL query is sent (and that it is not paginated).
+  `workflow_create_draft` and `workflow_update` tell the agent to read it, and
+  `kronn_readiness` gains non-blocking `warnings` for a script copied into
+  several Exec steps and for an Exec calling `gh`/`curl` toward a service with a
+  configured plugin. The step-type list is generated from the code everywhere
+  (schema, guide, MCP greeting, draft description: fifteen types, no longer 12
+  or 13); the guide no longer says "limit to 4-5 steps" (the cap is 20), "never
+  end on Structured", "fall back to Agent + bash for `bash -c`", or pins the
+  plugin list to 0.6.0. `backend/src/api/agent_workflow_bench.rs` scores the PR
+  review chain a model builds, with and without the doctrine (KT-1216).
+
 - CI: Kronn is started on Windows on every backend or frontend change. The
   `test-boot-windows` job builds `kronn.exe` and boots it on a fresh data
   directory and on the previous release's database (migrations pending, backup

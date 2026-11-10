@@ -309,7 +309,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 - **One name on every surface.** The MCP descriptions and manuals say
   “Verify docs” like the English label, present the full audit as an advanced
   option, and carry none of the retired CTA names.
-  [src: file: backend/scripts/test_disc_introspection_mcp.py:8485-8511#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:8527-8553#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
 - **Header layout.** The compact header keeps the status, one next action, the
   doc-state summary and the « Détails » disclosure without overlap at 360, 768
   and 1440 px, closed and open.
@@ -679,7 +679,7 @@ not assign them an audit step.
 [src: file: backend/src/core/template_manifest.rs:82-109#check]
 [src: file: backend/src/api/audit/helpers.rs:173-178#template_update]
 [src: file: frontend/src/components/TemplateUpdateNotice.tsx:34-40#installTemplate]
-[src: file: backend/scripts/disc-introspection-mcp.py:2735-2743#audit_prepare]
+[src: file: backend/scripts/disc-introspection-mcp.py:2746-2754#audit_prepare]
 
 A rename requires a unique match between a removed recorded template hash and
 an added upstream file. The move keeps the project's bytes; an occupied target

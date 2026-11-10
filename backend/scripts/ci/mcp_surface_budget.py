@@ -170,7 +170,12 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # that repeated their tool's manual: ceiling lowered by 36 B (84_379 -> 84_343).
 # KT-1403: `media_generate` takes several references and `expected_model`, paid
 # for by tightening its media guidance: ceiling lowered by 61 B (84_343 -> 84_282).
-CATALOGUE_MAX_BYTES = 84_282
+# KT-1216: `workflow_create_draft`, `workflow_update` and `workflow_step_schema`
+# point at `authoring_doctrine` and the draft lists all fifteen step types (it
+# listed thirteen). Paid for by tightening the same declaration (its discovery
+# sentence, the `steps` and `trigger` descriptions): ceiling lowered by 38 B
+# (84_282 -> 84_244).
+CATALOGUE_MAX_BYTES = 84_244
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

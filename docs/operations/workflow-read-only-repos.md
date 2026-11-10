@@ -25,7 +25,7 @@ agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
 [src: file: backend/src/agents/read_only_repos.rs:672-776#resolve_with_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:701-731#canonical_directory]
-[src: file: backend/src/api/workflow_step_schema.json:32#read_only_repos]
+[src: file: backend/src/api/workflow_step_schema.json:16#read_only_repos]
 
 Claude receives `--add-dir` together with `Edit` deny rules and sandbox
 `denyWrite` entries. Its read block remains enabled, the OS sandbox is

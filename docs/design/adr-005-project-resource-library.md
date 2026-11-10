@@ -36,7 +36,7 @@ What the code does today:
   atomically, so renaming keeps its id and a run that resolves it later still
   finds it
   [src: file: backend/src/api/skills.rs:133-201#update]
-  [src: file: backend/src/core/skills.rs:901-962#update_custom_skill]
+  [src: file: backend/src/core/skills.rs:908-969#update_custom_skill]
   [src: file: backend/src/core/directives.rs:345-380#update_custom_directive]
   [src: file: backend/src/core/profiles.rs:521-547#update_custom_profile].
 - Exports exist per type (workflow bundle v3, `kronn.artifact`,
@@ -307,7 +307,7 @@ offered only in its project, listed on its AI & automation tab as a project
 skill without being a default of its discussions, and refused by name when an
 agent launch of another project names it.
 `[src: file: backend/src/core/skills.rs:202#KRONN_PROJECT_KEY]`
-`[src: file: backend/src/core/skills.rs:653-676#refuse_foreign_project_skills]`
+`[src: file: backend/src/core/skills.rs:660-683#refuse_foreign_project_skills]`
 A workflow Agent step also loads the project's repository skills: the run pin
 reads each one as committed on the default branch and pins it, so neither the
 checkout's branch nor the run's worktree changes it; one the pin lacks stops
@@ -331,7 +331,7 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:4262-4295#rebind_api_configs].
+  already does for API configs [src: file: backend/src/api/workflows.rs:4271-4304#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
   already does [src: file: backend/src/api/artifact_portability/import.rs:338-377#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,
