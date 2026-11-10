@@ -3256,6 +3256,33 @@ fi
         }
     }
 
+    /// KT-1527: the shortening fixtures no longer pin the real 32K window, so
+    /// this is the one place that watches it. A 32K Ollama window must leave the
+    /// messages (system, question, tool results) enough room beside the declared
+    /// catalogue; when the catalogue eats it, this fails on its own, without
+    /// touching the shortening fixtures.
+    #[test]
+    fn the_declared_catalogue_leaves_a_32k_window_enough_message_room() {
+        // Same arithmetic as `clamp_ollama_tool_results`: 2 bytes a token, 2 048
+        // tokens kept for the reply, the declarations paid out of the rest.
+        const WINDOW_TOKENS: usize = 32_768;
+        // Measured with today's catalogue: 9 450 B. The floor sits
+        // ~4.4 KB under it, so ordinary schema growth does not trip it, but a
+        // catalogue that squeezes a 32K run well below today's room does.
+        const MIN_MESSAGE_ROOM: usize = 5_000;
+        let declared =
+            serde_json::Value::Array(crate::api::agent_tools::full_discussion_catalogue())
+                .to_string()
+                .len();
+        let room = ((WINDOW_TOKENS - 2_048) * 2).saturating_sub(declared);
+        assert!(
+            room >= MIN_MESSAGE_ROOM,
+            "the declared tool catalogue ({declared} B) outgrew the 32K budget: a 32K window \
+             leaves {room} B for the messages, under the {MIN_MESSAGE_ROOM} B this guard \
+             requires. Trim the tool declarations or raise the default Ollama window."
+        );
+    }
+
     /// KT-1527: when nothing smarter shortens a JSON result and it falls to the
     /// plain cut, the model must still get valid JSON, marked as truncated.
     #[test]
