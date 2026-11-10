@@ -42,7 +42,7 @@ their actual type to the authored string type.
 
 Ollama still receives the same envelope through its native `format` field,
 with a non-streaming request. No change to its decoding schema is required.
-[src: file: backend/src/agents/runner.rs:8236-8290#build_ollama_chat_body]
+[src: file: backend/src/agents/runner.rs:8286-8340#build_ollama_chat_body]
 [src: file: backend/src/workflows/steps.rs:1352-1354#ollama_envelope_format]
 
 ## Guarantees and regression coverage

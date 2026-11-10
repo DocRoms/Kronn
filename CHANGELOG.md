@@ -13,6 +13,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- HTTP agents: an operator switch for Kronn's tools, and a gate on models that
+  cannot take them (KT-1600). Tools stay on by default for every HTTP agent. Turn
+  them off per agent (Settings > Agents: Ollama, LiteLLM, NVIDIA) or per external
+  API connection when a model does not support tool calls. Ollama also withholds
+  them from a model its catalogue lists as a chat model without `tools`; a model
+  not yet re-read since the upgrade keeps them. An `api_call` result is capped at
+  16 KiB with a `truncation_marker` telling the model to narrow its request.
+  Migration 294 adds the nullable `tools_enabled` column; nothing is backfilled.
 - Orchestration: an integration whose only conflicts are doc-citation line
   numbers no longer goes back to the worker (KT-1669). The integration takes the
   target's side. Every candidate, conflicted or not, is re-anchored across all

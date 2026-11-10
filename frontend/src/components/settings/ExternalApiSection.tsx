@@ -41,8 +41,10 @@ import {
   Save,
   Server,
   Trash2,
+  Wrench,
   X,
 } from 'lucide-react';
+import { ToolsSwitch } from './ToolsSwitch';
 import '../../pages/SettingsPage.css';
 
 interface ExternalApiSectionProps {
@@ -85,6 +87,8 @@ interface FormState {
   image_model: string;
   video_model: string;
   decision_model: string;
+  /** Kronn tools, on by default (KT-1600). */
+  tools_enabled: boolean;
   api_key: string;
   keyTouched: boolean;
 }
@@ -101,6 +105,7 @@ function emptyForm(): FormState {
     image_model: '',
     video_model: '',
     decision_model: '',
+    tools_enabled: true,
     api_key: '',
     keyTouched: false,
   };
@@ -126,6 +131,7 @@ function formFromConnection(c: ExternalApiConnectionView): FormState {
     image_model: c.image_model ?? '',
     video_model: c.video_model ?? '',
     decision_model: c.decision_model ?? '',
+    tools_enabled: c.tools_enabled !== false,
     api_key: '',
     keyTouched: false,
   };
@@ -143,6 +149,7 @@ function toPayload(form: FormState): UpsertExternalApiConnection {
     image_model: form.image_model.trim() || null,
     video_model: form.video_model.trim() || null,
     decision_model: form.decision_model.trim() || null,
+    tools_enabled: form.tools_enabled,
     // Only send the key when the user actually typed one, so editing a
     // connection without retyping its key keeps the stored credential.
     api_key: form.keyTouched ? form.api_key : null,
@@ -355,6 +362,14 @@ function ConnectionForm({
           ) : null}
         </div>
       </div>
+
+      <ToolsSwitch
+        variant="field"
+        subject={form.display_name.trim() || t('config.extApi.displayName')}
+        checked={form.tools_enabled}
+        onChange={next => setForm(prev => ({ ...prev, tools_enabled: next }))}
+        testId="ext-api-tools"
+      />
 
       <div className="set-ext-api-test-zone" data-models-unlocked={modelsUnlocked}>
         <div className="set-ext-api-test-actions">
@@ -997,6 +1012,15 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                       <span className="set-ext-api-conn-title-row">
                         <span className="set-ext-api-conn-name">{c.display_name}</span>
                         <span className="set-ext-api-conn-preset">{presetLabel(c.origin_preset)}</span>
+                        {c.tools_enabled === false ? (
+                          <span
+                            className="set-ext-api-conn-tools-off"
+                            title={t('agents.toolsHint')}
+                            data-testid={`ext-api-tools-off-${c.id}`}
+                          >
+                            <Wrench size={10} aria-hidden="true" /> {t('agents.toolsOff')}
+                          </span>
+                        ) : null}
                       </span>
                       <span className="set-ext-api-conn-alias">@{c.mention_alias}</span>
                     </span>

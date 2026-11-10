@@ -30,6 +30,7 @@ async fn fixture(endpoint: &str) -> (AppState, ExternalApiConnection) {
         image_model: None,
         video_model: None,
         decision_model: None,
+        tools_enabled: None,
         media_endpoint: None,
         created_at: now,
         updated_at: now,

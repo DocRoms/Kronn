@@ -300,7 +300,7 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
         ["media_reference_limits", "[]", "max_input_references"] => Number,
         ["agents", agent, field] if AGENTS.contains(agent) => match *field {
             "path" | "version" | "mention_color" => Text,
-            "installed" | "full_access" => Flag,
+            "installed" | "full_access" | "tools_enabled" => Flag,
             "concurrency" => Number,
             "base_url" => Url,
             _ => return None,

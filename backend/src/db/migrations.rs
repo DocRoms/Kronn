@@ -1071,6 +1071,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "293_kt1656_scrub_stored_credentials",
         include_str!("sql/293_kt1656_scrub_stored_credentials.sql"),
     ),
+    (
+        "294_external_api_tools_enabled",
+        include_str!("sql/294_external_api_tools_enabled.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole

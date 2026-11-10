@@ -143,6 +143,7 @@ mod wire_tests {
             .mount(&server)
             .await;
         let runtime = ExternalHttpRuntime {
+            tools_enabled: None,
             display_name: "fixture".into(),
             mention_alias: "fixture".into(),
             endpoint: server.uri(),

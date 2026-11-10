@@ -32,6 +32,7 @@ const {
   effectiveAccessMock,
   setAgentMentionColorMock,
   setAgentConcurrencyMock,
+  setAgentToolsMock,
   usageGetMock,
   getModelTiersMock,
   quotaStatesMock,
@@ -48,6 +49,7 @@ const {
   effectiveAccessMock: vi.fn(),
   setAgentMentionColorMock: vi.fn(),
   setAgentConcurrencyMock: vi.fn(),
+  setAgentToolsMock: vi.fn(),
   usageGetMock: vi.fn(),
   getModelTiersMock: vi.fn(),
   quotaStatesMock: vi.fn(),
@@ -63,6 +65,7 @@ vi.mock('../../../lib/api', () => buildApiMock({
     getAgentAccessEffective: effectiveAccessMock as never,
     setAgentMentionColor: setAgentMentionColorMock as never,
     setAgentConcurrency: setAgentConcurrencyMock as never,
+    setAgentTools: setAgentToolsMock as never,
     getModelTiers: getModelTiersMock as never,
   },
   agents: {
@@ -149,6 +152,8 @@ beforeEach(() => {
   versionCheckMock.mockReset().mockResolvedValue([]);
   setAgentConcurrencyMock.mockReset();
   setAgentConcurrencyMock.mockResolvedValue(undefined);
+  setAgentToolsMock.mockReset();
+  setAgentToolsMock.mockResolvedValue(undefined);
   setAgentAccessMock.mockReset();
   setAgentAccessMock.mockResolvedValue(undefined);
   effectiveAccessMock.mockReset();
@@ -1241,5 +1246,61 @@ describe('AgentsSection — CLI / Local / External zones', () => {
     const css = readFileSync('src/pages/SettingsPage.css', 'utf8');
     const rule = css.match(/\.set-agent-mode-col\s*\{([^}]*)\}/)?.[1] ?? '';
     expect(rule).toContain('flex-direction: column');
+  });
+});
+
+describe('AgentsSection — Kronn tools switch (KT-1600)', () => {
+  it('shows the switch on by default for Ollama, with the hint', () => {
+    renderSection({ agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })] });
+    const toggle = screen.getByTestId('agent-tools-Ollama') as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    expect(toggle.closest('label')?.getAttribute('title')).toBe('agents.toolsHint');
+  });
+
+  it('turning it off stores false, and turning it back on clears the setting', async () => {
+    const { refetchAgentAccess } = renderSection({
+      agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })],
+    });
+    fireEvent.click(screen.getByTestId('agent-tools-Ollama'));
+    await waitFor(() =>
+      expect(setAgentToolsMock).toHaveBeenCalledWith({ agent: 'Ollama', enabled: false }),
+    );
+    await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
+  });
+
+  it('reflects a stored off switch and clears it when switched on again', async () => {
+    renderSection({
+      agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })],
+      agentAccess: { ollama: { tools_enabled: false } } as never,
+    });
+    const toggle = screen.getByTestId('agent-tools-Ollama') as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(setAgentToolsMock).toHaveBeenCalledWith({ agent: 'Ollama', enabled: null }),
+    );
+  });
+
+  it('gives LiteLLM and NVIDIA, which have no card, their own switch', async () => {
+    renderSection({ agents: [] });
+    expect((screen.getByTestId('agent-tools-LiteLlm') as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByTestId('agent-tools-Nvidia'));
+    await waitFor(() =>
+      expect(setAgentToolsMock).toHaveBeenCalledWith({ agent: 'Nvidia', enabled: false }),
+    );
+  });
+
+  it('gives a CLI agent no tools switch: it brings its own tools', () => {
+    renderSection({ agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true })] });
+    expect(screen.queryByTestId('agent-tools-ClaudeCode')).toBeNull();
+  });
+
+  it('reports a failed save instead of swallowing it', async () => {
+    setAgentToolsMock.mockRejectedValueOnce(new Error('disk full'));
+    const { toastFn } = renderSection({
+      agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })],
+    });
+    fireEvent.click(screen.getByTestId('agent-tools-Ollama'));
+    await waitFor(() => expect(toastFn).toHaveBeenCalledWith('common.actionFailed:disk full', 'error'));
   });
 });

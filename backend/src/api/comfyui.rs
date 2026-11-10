@@ -1303,6 +1303,7 @@ pub fn local_connection(config: &ComfyUiConfig) -> Option<ExternalApiConnection>
         video_model,
         media_endpoint: None,
         decision_model: None,
+        tools_enabled: None,
     })
 }
 

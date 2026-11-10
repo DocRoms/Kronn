@@ -19516,6 +19516,7 @@ pub(crate) mod tests {
             image_model: image.map(str::to_string),
             video_model: video.map(str::to_string),
             decision_model: None,
+            tools_enabled: None,
             media_endpoint: None,
         }
     }

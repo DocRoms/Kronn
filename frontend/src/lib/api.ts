@@ -985,6 +985,8 @@ export const config = {
   getAgentAccessEffective: () => api<AgentEffectiveAccess[]>('GET', '/config/agent-access/effective'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
   setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
+  /** Kronn tool executor switch of an HTTP agent (KT-1600): `false` = off, `null` = the default (on). */
+  setAgentTools: (req: { agent: AgentType; enabled: boolean | null }) => api<void>('POST', '/config/agent-tools', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>
     api<void>('POST', '/config/agent-mention-color', req),
   getModelTiers: () => api<ModelTiersConfig>('GET', '/config/model-tiers'),
@@ -3684,6 +3686,8 @@ export interface ExternalApiConnectionView {
   media_endpoint?: string | null;
   /** The model Decision steps call (KT-1366); a capability, not a tier. */
   decision_model?: string | null;
+  /** Kronn tools: on unless `false` (KT-1600). */
+  tools_enabled?: boolean | null;
   created_at: string;
   updated_at: string;
   /** Whether a credential is currently stored; the value never crosses the wire. */
@@ -3703,6 +3707,8 @@ export interface UpsertExternalApiConnection {
   video_model?: string | null;
   media_endpoint?: string | null;
   decision_model?: string | null;
+  /** Kronn tools: `false` turns them off, anything else leaves them on (KT-1600). */
+  tools_enabled?: boolean | null;
   /** Tri-state: omitted/null keeps the stored key, '' clears it, a value replaces it. */
   api_key?: string | null;
   /** Keep a tier model the proxy just refused; otherwise the save fails with `unreachable_model`. */
