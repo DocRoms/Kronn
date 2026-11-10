@@ -31,8 +31,10 @@
 //!   from the project. So both run in a private scratch directory holding only
 //!   what Kronn generated from the validated lock: for Cargo a lock of the
 //!   registry packages and a manifest depending on each of them at its exact
-//!   locked version, for pnpm the lock re-serialised from the parsed document
-//!   (so what pnpm parses is what Kronn validated), an empty manifest and a
+//!   locked version, for pnpm a lock rebuilt from an allow-list (the
+//!   `lockfileVersion` and the validated `packages` and `snapshots`: `settings`,
+//!   `overrides`, `patchedDependencies` and any other field are dropped, so
+//!   what pnpm parses is what Kronn validated), an empty manifest and a
 //!   workspace file rebuilt from an allow-list of inert keys (the registry,
 //!   proxy, store, cache, hook and certificate settings are never copied). No
 //!   `.cargo/` and no `.npmrc` is staged. Neither command runs a build script
@@ -40,10 +42,15 @@
 //!   `--ignore-scripts`) and the registry and the store are given on the command
 //!   line;
 //! * **the environment is cleared** (`ProbeCommand::clean_env`) and rebuilt from
-//!   an allow-list: `PATH`, `HOME`, the locale, the toolchain homes, the
-//!   operator's proxy and CA variables, and the cache directories Kronn chose. A
-//!   host `NPM_CONFIG_REGISTRY`, a `CARGO_REGISTRIES_*` override or a registry
-//!   token in the environment reaches neither command;
+//!   an allow-list: `PATH`, the locale, the toolchain homes, the operator's proxy
+//!   and CA variables, and the directories Kronn chose. A host
+//!   `NPM_CONFIG_REGISTRY`, a `CARGO_REGISTRIES_*` override or a registry token in
+//!   the environment reaches neither command;
+//! * **the operator's home is not theirs to read.** `HOME`, `USERPROFILE`,
+//!   `APPDATA`, `LOCALAPPDATA` and `XDG_CONFIG_HOME` point into the scratch
+//!   directory, so `~/.npmrc`, `~/.config/pnpm/rc` and `~/.cargo` are out of reach;
+//!   Cargo's `CARGO_HOME` is a staged directory that links only the host's
+//!   `registry` (and `git`) — never `credentials.toml` or `config.toml`;
 //! * the scratch directory lives under Kronn's data directory (which the worker
 //!   cannot read), is removed when the step ends, and anything a killed process
 //!   left behind is swept at startup ([`sweep_stale_scratch`]);
@@ -64,7 +71,8 @@ use uuid::Uuid;
 
 use crate::core::background_priority::Priority;
 use crate::core::task_worker_env::{
-    ProbeCommand, ProbeRunner, SharedCaches, WorkerLane, CARGO_HOME_ENV, CARGO_NET_OFFLINE_ENV,
+    ensure_symlink, ProbeCommand, ProbeRunner, SharedCaches, WorkerLane, CARGO_HOME_ENV,
+    CARGO_NET_OFFLINE_ENV,
 };
 
 /// `task_execution_events.action` of the fetch record.
@@ -101,6 +109,11 @@ const STAGED_MANIFEST: &str = "{\"name\":\"kronn-lane-dependency-fetch\",\"priva
 /// An empty `.npmrc`, which the user and global npm configuration are pointed at.
 const EMPTY_NPMRC: &str = "empty.npmrc";
 const STAGED_CARGO_PACKAGE: &str = "kronn-lane-dependency-fetch";
+/// The home directory of a fetch command, inside its scratch project.
+const SCRATCH_HOME: &str = "home";
+/// The `CARGO_HOME` of a cargo fetch, inside its scratch project: it links the
+/// host's `registry` (and `git`), and nothing else.
+const STAGED_CARGO_HOME: &str = "cargo-home";
 
 /// The only keys of `pnpm-workspace.yaml` copied to the scratch project. Every
 /// one is inert data a fetch does not act on (script policy, overrides, catalogs,
@@ -121,10 +134,12 @@ const WORKSPACE_KEYS: [&str; 9] = [
 
 /// What a fetch command inherits from Kronn's environment: nothing else.
 /// Credentials and registry settings (`NPM_CONFIG_*`, `CARGO_REGISTRIES_*`,
-/// `CARGO_HTTP_*`, tokens) are not on it.
-const FETCH_ENV_NAMES: [&str; 33] = [
+/// `CARGO_HTTP_*`, tokens) are not on it, and neither is any home directory
+/// (`HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH`,
+/// `XDG_*`): a fetch is given the scratch project's own ([`Scratch::home_env`]),
+/// so `~/.npmrc`, `~/.config/pnpm/rc` and `~/.cargo` are out of its reach.
+const FETCH_ENV_NAMES: [&str; 27] = [
     "PATH",
-    "HOME",
     "LANG",
     "LANGUAGE",
     "TZ",
@@ -154,11 +169,6 @@ const FETCH_ENV_NAMES: [&str; 33] = [
     "windir",
     "ComSpec",
     "PATHEXT",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "HOMEDRIVE",
-    "HOMEPATH",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,24 +392,68 @@ fn is_crate_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
-/// A `pnpm-lock.yaml` that is in bounds, as Kronn re-serialised it.
+/// A `pnpm-lock.yaml` that is in bounds, as Kronn rebuilt it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PnpmLockScan {
-    /// The validated document, written out again: what the scratch project's
-    /// pnpm parses is the document Kronn validated, not the worker's text (two
-    /// YAML parsers may read an exotic file differently).
+    /// The lock the scratch project gets, rebuilt from an allow-list: the
+    /// `lockfileVersion`, the validated `packages` and `snapshots`, and nothing
+    /// else the worker's file carried (`settings`, `overrides`,
+    /// `patchedDependencies`, `pnpmfileChecksum`, `importers`, any other field
+    /// of an entry). What the scratch project's pnpm parses is what Kronn
+    /// validated, not the worker's text (two YAML parsers may read an exotic
+    /// file differently).
     pub lock: String,
     pub packages: usize,
 }
 
-/// Read a `pnpm-lock.yaml` with a YAML parser and walk every entry of
-/// `packages`. `Ok(None)` when it lists none. The lock names no resolution of
-/// its own: each entry must be a registry package (its key carries no URL or
-/// path) whose `resolution` is an `integrity` hash, plus at most a `tarball` on
-/// [`NPM_REGISTRY`]'s host. A `tarball` anywhere else, `type`, `repo`, `commit`,
-/// `directory`, `path` or any other field refuses the whole lock — however the
-/// YAML spells it (anchors and aliases, merge keys, folded or flow scalars all
-/// resolve before the walk; a tag or a non-string value is refused).
+/// How a field of a `packages` or `snapshots` entry is validated.
+#[derive(Clone, Copy)]
+enum FieldShape {
+    Flag,
+    Text,
+    Strings,
+    FlagOrStrings,
+    /// Names to version ranges (`engines`, `peerDependencies`).
+    RangeMap,
+    /// Names to a version or the key of another snapshot.
+    ReferenceMap,
+    /// `peerDependenciesMeta`: names to `{optional: bool}`.
+    MetaMap,
+}
+
+/// The fields of a `packages` entry kept besides `resolution`. They steer what a
+/// fetch downloads (`os`, `cpu` and `libc` filter optional packages) or are
+/// inert metadata; any other field (`version`, `name`, `prepare`, …) is dropped.
+const PNPM_PACKAGE_FIELDS: [(&str, FieldShape); 9] = [
+    ("engines", FieldShape::RangeMap),
+    ("cpu", FieldShape::Strings),
+    ("os", FieldShape::Strings),
+    ("libc", FieldShape::Strings),
+    ("deprecated", FieldShape::Text),
+    ("hasBin", FieldShape::Flag),
+    ("bundledDependencies", FieldShape::FlagOrStrings),
+    ("peerDependencies", FieldShape::RangeMap),
+    ("peerDependenciesMeta", FieldShape::MetaMap),
+];
+
+/// The fields of a `snapshots` entry that are kept: the graph pnpm walks.
+const PNPM_SNAPSHOT_FIELDS: [(&str, FieldShape); 4] = [
+    ("dependencies", FieldShape::ReferenceMap),
+    ("optionalDependencies", FieldShape::ReferenceMap),
+    ("transitivePeerDependencies", FieldShape::Strings),
+    ("optional", FieldShape::Flag),
+];
+
+/// Read a `pnpm-lock.yaml` with a YAML parser, walk every entry of `packages`
+/// and `snapshots`, and rebuild the lock from an allow-list. `Ok(None)` when it
+/// lists no package. The lock names no resolution of its own: each entry must
+/// be a registry package (its key carries no URL or path) whose `resolution` is
+/// an `integrity` hash, plus at most a `tarball` on [`NPM_REGISTRY`]'s host. A
+/// `tarball` anywhere else, `type`, `repo`, `commit`, `directory`, `path` or any
+/// other resolution field refuses the whole lock — however the YAML spells it
+/// (anchors and aliases, merge keys, folded or flow scalars all resolve before
+/// the walk; a tag or a non-string value is refused). Fields outside the
+/// allow-list are stripped, not copied.
 pub fn scan_pnpm_lock(text: &str) -> Result<Option<PnpmLockScan>, String> {
     let mut document: serde_yaml::Value = serde_yaml::from_str(text)
         .map_err(|error| format!("pnpm-lock.yaml is not valid YAML: {}", first_line(&error)))?;
@@ -422,16 +476,52 @@ pub fn scan_pnpm_lock(text: &str) -> Result<Option<PnpmLockScan>, String> {
     if packages.is_empty() {
         return Ok(None);
     }
+    let version = match root.get("lockfileVersion") {
+        Some(version @ serde_yaml::Value::String(text)) if is_lock_version(text) => version.clone(),
+        Some(version @ serde_yaml::Value::Number(_)) => version.clone(),
+        _ => return Err("pnpm-lock.yaml has no usable `lockfileVersion`".into()),
+    };
+    let mut kept_packages = serde_yaml::Mapping::new();
     for (key, entry) in packages {
-        check_pnpm_package(key, entry)?;
+        let name = pnpm_key(key)?;
+        kept_packages.insert(key.clone(), rebuild_pnpm_package(name, entry)?);
     }
-    let count = packages.len();
-    let lock = serde_yaml::to_string(&document)
+    let mut kept_snapshots = serde_yaml::Mapping::new();
+    match root.get("snapshots") {
+        None | Some(serde_yaml::Value::Null) => {}
+        Some(serde_yaml::Value::Mapping(snapshots)) => {
+            for (key, entry) in snapshots {
+                let name = pnpm_key(key)?;
+                let kept = rebuild_pnpm_entry(name, entry, &PNPM_SNAPSHOT_FIELDS)?;
+                kept_snapshots.insert(key.clone(), serde_yaml::Value::Mapping(kept));
+            }
+        }
+        Some(_) => return Err("pnpm-lock.yaml `snapshots` is not a mapping".into()),
+    }
+    let count = kept_packages.len();
+    // The one project is the staged empty manifest's, whatever the worker's said.
+    let mut importers = serde_yaml::Mapping::new();
+    importers.insert(".".into(), serde_yaml::Value::Mapping(Default::default()));
+    let mut lock = serde_yaml::Mapping::new();
+    lock.insert("lockfileVersion".into(), version);
+    lock.insert("importers".into(), serde_yaml::Value::Mapping(importers));
+    lock.insert("packages".into(), serde_yaml::Value::Mapping(kept_packages));
+    if !kept_snapshots.is_empty() {
+        lock.insert(
+            "snapshots".into(),
+            serde_yaml::Value::Mapping(kept_snapshots),
+        );
+    }
+    let lock = serde_yaml::to_string(&serde_yaml::Value::Mapping(lock))
         .map_err(|error| format!("cannot write the staged pnpm lock: {error}"))?;
     Ok(Some(PnpmLockScan {
         lock,
         packages: count,
     }))
+}
+
+fn is_lock_version(text: &str) -> bool {
+    !text.is_empty() && text.len() <= 16 && text.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 fn contains_tag(value: &serde_yaml::Value) -> bool {
@@ -446,7 +536,9 @@ fn contains_tag(value: &serde_yaml::Value) -> bool {
     }
 }
 
-fn check_pnpm_package(key: &serde_yaml::Value, entry: &serde_yaml::Value) -> Result<(), String> {
+/// A `packages` / `snapshots` key: a plain string naming a registry package (it
+/// carries no URL or path).
+fn pnpm_key(key: &serde_yaml::Value) -> Result<&str, String> {
     let Some(name) = key.as_str() else {
         return Err("a pnpm-lock.yaml `packages` key is not a plain string".into());
     };
@@ -461,6 +553,15 @@ fn check_pnpm_package(key: &serde_yaml::Value, entry: &serde_yaml::Value) -> Res
             shorten(name)
         ));
     }
+    Ok(name)
+}
+
+/// A `packages` entry rebuilt from its validated `resolution` and the
+/// [`PNPM_PACKAGE_FIELDS`] it carries.
+fn rebuild_pnpm_package(
+    name: &str,
+    entry: &serde_yaml::Value,
+) -> Result<serde_yaml::Value, String> {
     let resolution = entry
         .as_mapping()
         .and_then(|entry| entry.get("resolution"))
@@ -493,13 +594,96 @@ fn check_pnpm_package(key: &serde_yaml::Value, entry: &serde_yaml::Value) -> Res
             }
         }
     }
-    if integrity {
-        Ok(())
-    } else {
-        Err(format!(
+    if !integrity {
+        return Err(format!(
             "pnpm-lock.yaml package `{}` has no integrity hash",
             shorten(name)
-        ))
+        ));
+    }
+    let fields = rebuild_pnpm_entry(name, entry, &PNPM_PACKAGE_FIELDS)?;
+    // `resolution` first, as pnpm writes it.
+    let mut kept = serde_yaml::Mapping::new();
+    kept.insert(
+        "resolution".into(),
+        serde_yaml::Value::Mapping(resolution.clone()),
+    );
+    kept.extend(fields);
+    Ok(serde_yaml::Value::Mapping(kept))
+}
+
+/// A mapping of the `fields` of `entry` that are present and well-formed; every
+/// other field is dropped. A present field of the wrong shape refuses the lock.
+fn rebuild_pnpm_entry(
+    name: &str,
+    entry: &serde_yaml::Value,
+    fields: &[(&str, FieldShape)],
+) -> Result<serde_yaml::Mapping, String> {
+    let map = match entry {
+        serde_yaml::Value::Null => return Ok(serde_yaml::Mapping::new()),
+        serde_yaml::Value::Mapping(map) => map,
+        _ => {
+            return Err(format!(
+                "pnpm-lock.yaml entry `{}` is not a mapping",
+                shorten(name)
+            ))
+        }
+    };
+    let mut kept = serde_yaml::Mapping::new();
+    for (field, shape) in fields {
+        let Some(value) = map.get(*field) else {
+            continue;
+        };
+        if !in_shape(value, *shape) {
+            return Err(format!(
+                "pnpm-lock.yaml entry `{}` has a malformed `{field}`",
+                shorten(name)
+            ));
+        }
+        kept.insert((*field).into(), value.clone());
+    }
+    Ok(kept)
+}
+
+fn in_shape(value: &serde_yaml::Value, shape: FieldShape) -> bool {
+    use serde_yaml::Value;
+    let text = |value: &Value| {
+        value.as_str().is_some_and(|text| {
+            text.len() <= 4096 && !text.chars().any(|c| c.is_control() && c != '\n')
+        })
+    };
+    // A dependency is a version or the key of another snapshot: never a URL, a
+    // path or a protocol (`link:`, `file:`, `https:`).
+    let reference = |value: &Value| {
+        value.as_str().is_some_and(|text| {
+            text.len() <= 512
+                && !text
+                    .chars()
+                    .any(|c| c == ':' || c == '\\' || c.is_whitespace() || c.is_control())
+        })
+    };
+    let strings = |value: &Value| {
+        value
+            .as_sequence()
+            .is_some_and(|items| items.len() <= 1024 && items.iter().all(text))
+    };
+    let map_of = |value: &Value, accepts: &dyn Fn(&Value) -> bool| {
+        value.as_mapping().is_some_and(|map| {
+            map.len() <= 8192 && map.iter().all(|(key, value)| text(key) && accepts(value))
+        })
+    };
+    match shape {
+        FieldShape::Flag => value.is_bool(),
+        FieldShape::Text => text(value),
+        FieldShape::Strings => strings(value),
+        FieldShape::FlagOrStrings => value.is_bool() || strings(value),
+        FieldShape::RangeMap => map_of(value, &text),
+        FieldShape::ReferenceMap => map_of(value, &reference),
+        FieldShape::MetaMap => map_of(value, &|meta| {
+            meta.as_mapping().is_some_and(|meta| {
+                meta.iter()
+                    .all(|(field, flag)| field.as_str() == Some("optional") && flag.is_bool())
+            })
+        }),
     }
 }
 
@@ -644,13 +828,7 @@ pub fn fetch_env(
     parent: &[(OsString, OsString)],
     set: &[(&str, OsString)],
 ) -> Vec<(String, OsString)> {
-    let same = |left: &str, right: &str| {
-        if cfg!(windows) {
-            left.eq_ignore_ascii_case(right)
-        } else {
-            left == right
-        }
-    };
+    let same = env_name_eq;
     let mut env: Vec<(String, OsString)> = parent
         .iter()
         .filter_map(|(name, value)| {
@@ -665,6 +843,52 @@ pub fn fetch_env(
         env.push(((*name).to_string(), value.clone()));
     }
     env
+}
+
+fn env_name_eq(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+/// The toolchain homes a fetch command still needs from the operator's real
+/// home, which it is no longer given: `cargo` and `pnpm` are usually shims
+/// (rustup, Volta, corepack) that look their toolchain up under `HOME` unless
+/// `RUSTUP_HOME`, `VOLTA_HOME` or `COREPACK_HOME` say where. Each is pinned to
+/// its default location when `parent` sets none and that directory exists.
+/// These hold toolchains and caches, never registry credentials.
+fn toolchain_homes(parent: &[(OsString, OsString)]) -> Vec<(&'static str, OsString)> {
+    let var = |name: &str| {
+        parent
+            .iter()
+            .find(|(key, _)| key.to_str().is_some_and(|key| env_name_eq(key, name)))
+            .map(|(_, value)| PathBuf::from(value))
+    };
+    let Some(home) = var("HOME").or_else(|| var("USERPROFILE")) else {
+        return Vec::new();
+    };
+    let corepack_cache = if cfg!(windows) {
+        var("LOCALAPPDATA")
+    } else {
+        var("XDG_CACHE_HOME").or_else(|| Some(home.join(".cache")))
+    };
+    [
+        ("RUSTUP_HOME", Some(home.join(".rustup"))),
+        ("VOLTA_HOME", Some(home.join(".volta"))),
+        (
+            "COREPACK_HOME",
+            corepack_cache.map(|cache| cache.join("node").join("corepack")),
+        ),
+    ]
+    .into_iter()
+    .filter(|(name, _)| var(name).is_none())
+    .filter_map(|(name, dir)| {
+        dir.filter(|dir| dir.is_dir())
+            .map(|dir| (name, dir.into_os_string()))
+    })
+    .collect()
 }
 
 /// Where the scratch projects go: a directory of Kronn's data directory, which
@@ -716,6 +940,28 @@ impl Scratch {
 
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
+    }
+
+    /// Create the home directory of the fetch command and name it in every
+    /// variable a tool takes its user configuration from: `HOME` (cargo, pnpm,
+    /// npm: `~/.npmrc`, `~/.config/pnpm/rc`), the Windows profile variables and
+    /// `XDG_CONFIG_HOME` (pnpm: `$XDG_CONFIG_HOME/pnpm/rc`). All of them point
+    /// into the scratch project, which holds nothing but what Kronn wrote.
+    fn home_env(&self) -> std::io::Result<Vec<(&'static str, OsString)>> {
+        let home = self.path(SCRATCH_HOME);
+        let config = home.join(".config");
+        let roaming = home.join("AppData").join("Roaming");
+        let local = home.join("AppData").join("Local");
+        for dir in [&config, &roaming, &local] {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(vec![
+            ("HOME", home.clone().into_os_string()),
+            ("USERPROFILE", home.into_os_string()),
+            ("XDG_CONFIG_HOME", config.into_os_string()),
+            ("APPDATA", roaming.into_os_string()),
+            ("LOCALAPPDATA", local.into_os_string()),
+        ])
     }
 }
 
@@ -790,13 +1036,37 @@ fn step(
     }
 }
 
+/// The `CARGO_HOME` of a cargo fetch: a directory of the scratch project that
+/// links the host's `registry` (what the step fills) and `git`, and nothing else.
+/// The operator's own `credentials.toml` (registry tokens, credential
+/// providers) and `config.toml` (source replacement, an authenticated mirror)
+/// are never in it, so the networked Cargo cannot read them — the same shape as
+/// `WorkerLane::link_cargo_home`, minus the configuration.
+fn stage_cargo_home(scratch: &Scratch, host_cargo_home: &Path) -> Result<PathBuf, String> {
+    let staged = scratch.path(STAGED_CARGO_HOME);
+    let stage_error = |error: std::io::Error| format!("cannot stage the cargo home: {error}");
+    std::fs::create_dir(&staged).map_err(stage_error)?;
+    // A host that never fetched has no registry directory yet: it is what the
+    // fetch is for, so it is created rather than left to the scratch project.
+    let registry = host_cargo_home.join("registry");
+    std::fs::create_dir_all(&registry).map_err(stage_error)?;
+    ensure_symlink(&registry, &staged.join("registry"))?;
+    let git = host_cargo_home.join("git");
+    if git.is_dir() {
+        ensure_symlink(&git, &staged.join("git"))?;
+    }
+    Ok(staged)
+}
+
 /// The crates the lock at `manifest_dir/Cargo.lock` references and `cargo_home`
 /// lacks, fetched from crates.io. `None` when there is nothing to fetch (no
 /// lock, or no registry package in it).
 ///
 /// Only the lock file of the worktree is read, and what is staged from it goes
 /// to a scratch project: Cargo never runs in the worktree, never reads its
-/// `Cargo.toml` (`[patch]`, `[source]`, `[registries]`) or its `.cargo/`.
+/// `Cargo.toml` (`[patch]`, `[source]`, `[registries]`) or its `.cargo/`, and
+/// never reads the operator's `CARGO_HOME` configuration or credentials
+/// ([`stage_cargo_home`]) nor any file of the operator's home.
 pub fn fetch_cargo(
     worktree: &Path,
     manifest_dir: &Path,
@@ -831,17 +1101,21 @@ pub fn fetch_cargo(
         ));
     };
     let staged = staged_cargo_manifest(&scan.crates).and_then(|manifest| {
-        let scratch = Scratch::create(host.scratch_root)
-            .map_err(|error| format!("cannot stage the cargo fetch: {error}"))?;
+        let stage_error = |error: std::io::Error| format!("cannot stage the cargo fetch: {error}");
+        let scratch = Scratch::create(host.scratch_root).map_err(stage_error)?;
         scratch
             .write("Cargo.toml", &manifest)
             .and_then(|()| scratch.write("Cargo.lock", &scan.lock))
             .and_then(|()| scratch.write("lib.rs", ""))
-            .map_err(|error| format!("cannot stage the cargo fetch: {error}"))?;
-        Ok(scratch)
+            .map_err(stage_error)?;
+        let mut set = scratch.home_env().map_err(stage_error)?;
+        let staged_home = stage_cargo_home(&scratch, cargo_home)?;
+        set.push((CARGO_HOME_ENV, staged_home.into_os_string()));
+        set.extend(toolchain_homes(host.env));
+        Ok((scratch, set))
     });
-    let scratch = match staged {
-        Ok(scratch) => scratch,
+    let (scratch, set) = match staged {
+        Ok(staged) => staged,
         Err(reason) => return Some(refused(reason)),
     };
     let args = |offline: bool| {
@@ -856,16 +1130,12 @@ pub fn fetch_cargo(
         args
     };
     let env = |offline: bool| {
-        fetch_env(
-            host.env,
-            &[
-                (CARGO_HOME_ENV, cargo_home.as_os_str().to_os_string()),
-                (
-                    CARGO_NET_OFFLINE_ENV,
-                    OsString::from(if offline { "true" } else { "false" }),
-                ),
-            ],
-        )
+        let mut set = set.clone();
+        set.push((
+            CARGO_NET_OFFLINE_ENV,
+            OsString::from(if offline { "true" } else { "false" }),
+        ));
+        fetch_env(host.env, &set)
     };
     let outcome = probe_then_fetch(
         host.runner,
@@ -899,7 +1169,10 @@ pub fn fetch_cargo(
 ///
 /// pnpm runs in a scratch project built from the validated lock: the worker's
 /// `.npmrc`, `package.json` and (but for its inert keys) workspace file are not
-/// there, and the user and global npm configuration are pointed at an empty file.
+/// there, the user and global npm configuration are pointed at an empty file,
+/// and `HOME` (with the Windows profile variables and `XDG_CONFIG_HOME`) is a
+/// directory of the scratch project, so `~/.npmrc` and pnpm's own `rc` files
+/// are the operator's no more.
 pub fn fetch_pnpm(
     worktree: &Path,
     frontend: &Path,
@@ -943,16 +1216,18 @@ pub fn fetch_pnpm(
     } else {
         None
     };
-    let scratch = match Scratch::create(host.scratch_root).and_then(|scratch| {
+    let staged = Scratch::create(host.scratch_root).and_then(|scratch| {
         scratch.write(PNPM_LOCK, &scan.lock)?;
         scratch.write("package.json", STAGED_MANIFEST)?;
         scratch.write(EMPTY_NPMRC, "")?;
         if let Some(workspace) = &workspace {
             scratch.write(PNPM_WORKSPACE, workspace)?;
         }
-        Ok(scratch)
-    }) {
-        Ok(scratch) => scratch,
+        let set = scratch.home_env()?;
+        Ok((scratch, set))
+    });
+    let (scratch, mut set) = match staged {
+        Ok(staged) => staged,
         Err(error) => return Some(refused(format!("cannot stage the pnpm fetch: {error}"))),
     };
     let store_arg = store.to_string_lossy().into_owned();
@@ -967,13 +1242,10 @@ pub fn fetch_pnpm(
         args
     };
     let npmrc = scratch.path(EMPTY_NPMRC).into_os_string();
-    let env = fetch_env(
-        host.env,
-        &[
-            ("npm_config_userconfig", npmrc.clone()),
-            ("npm_config_globalconfig", npmrc),
-        ],
-    );
+    set.push(("npm_config_userconfig", npmrc.clone()));
+    set.push(("npm_config_globalconfig", npmrc));
+    set.extend(toolchain_homes(host.env));
+    let env = fetch_env(host.env, &set);
     let outcome = probe_then_fetch(
         host.runner,
         host.cancel,

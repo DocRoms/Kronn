@@ -233,7 +233,7 @@ mode (`Settings → Anti-hallucination`, or `config.toml anti_hallucination_mode
 |---|---|
 | `off` | Nothing. |
 | `warn` (default) | **P1** sourcing directive injected into every agent prompt + **P2** post-output lint, surfaced as a non-blocking pill. |
-| `enforce` | Same as `warn` today; reserved for future write-time refusal. |
+| `enforce` | `warn`, **plus** a hard gate on fabricated `[src: …]` citations (see below). Not "same as `warn`". |
 
 **P2 lint, concretely** — what is mechanically checked on each agent reply:
 1. A prose heuristic flags confident technical claims left **unsourced** (one confidence tier).
@@ -241,12 +241,31 @@ mode (`Settings → Anti-hallucination`, or `config.toml anti_hallucination_mode
    the project root, line/range is in bounds, a `#symbol` anchor appears in the range (and opens it when the range contains its definition). A citation pointing at a non-existent or
    out-of-project path is flagged **fabricated**; a `training-data` source is **rejected**.
 
+**What `enforce` adds** — a *fabricated* citation (`NotFound`, `OutOfBounds`, `EmptyRef`,
+`OutsideProject` or `Rejected`; soft `unverified` anchors never count) is blocking:
+- **Audit steps** that write a `docs/` file are re-linted after the agent finishes. On a
+  fabricated citation the step is **re-run** with a corrective addendum naming each one, up to
+  **3 attempts in total**; if the last attempt is still not clean, the **step fails** and the
+  audit ends *Interrupted* instead of committing the doc. `off` / `warn` run each step once
+  with no gate.
+- **Discussion replies**: a finalized agent message carrying ≥1 fabricated citation gets a
+  System **refusal note** appended. The reply itself is **kept, not deleted or retried** — the
+  note marks it as not validated and the human arbitrates the correction.
+- **Doc authoring**: when the project has a `docs/AGENTS.md`, the `kronn-doc-author` skill is
+  auto-attached to the agent run.
+
+Where this lives in the Kronn repository (paths relative to its root, not to your project):
+`backend/src/api/audit/anti_hallu_enforce.rs` (`MAX_ATTEMPTS`, `decide`, `evaluate_enforce_gate`),
+`backend/src/core/anti_halluc.rs` (`SourceStatus::is_fabricated`, `enforce_refusal_needed`,
+`enforce_refusal_message`, `should_auto_attach_doc_author`) and
+`backend/src/api/discussions/streaming.rs` (refusal note on a finalized reply).
+
 **Convention vs enforcement.** The markers and citation grammar above are a *writing
-convention* — real and usable today, with or without Kronn. What 0.8.7 mechanically gates is
-exactly the two P2 steps. Section-level validation, MUST/SHOULD/MAY level-aware linting, and
-write-time refusal are part of the convention's design but are **not** machine-enforced yet —
-see the RFC for the roadmap. (No scattered "coming soon" notes elsewhere: this section is the
-single source of truth for what's live.)
+convention* — real and usable today, with or without Kronn. What Kronn mechanically gates is
+the two P2 steps in `warn`, plus the `enforce` gate above. Section-level validation and
+MUST/SHOULD/MAY level-aware linting are part of the convention's design but are **not**
+machine-enforced yet — see the RFC for the roadmap. (No scattered "coming soon" notes
+elsewhere: this section is the single source of truth for what's live.)
 
 ---
 
