@@ -292,6 +292,9 @@ describe('api.rtk', () => {
 describe('api.usage', () => {
   it('get default', async () => { await exec(usage.get(), 'GET', '/usage?period=daily'); });
   it('get weekly', async () => { await exec(usage.get('weekly'), 'GET', '/usage?period=weekly'); });
+  it('get monthly history', async () => {
+    await exec(usage.get('monthly', { history: true }), 'GET', '/usage?period=monthly&history=true');
+  });
 });
 describe('api.ollama', () => {
   if ('health' in ollama) {

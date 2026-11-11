@@ -8,13 +8,13 @@
 // attribution is a deliberate follow-up.
 
 import { useState, useEffect, useCallback } from 'react';
-import { BarChart3, ExternalLink, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
+import { BarChart3, ExternalLink, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
 import { usage as usageApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import type { UsageReport } from '../../types/generated';
 import { ContextHelp } from '../ContextHelp';
 import { TelemetryCoveragePanel } from '../TelemetryCoveragePanel';
-import { formatPeriod, rowsPerPage } from './usageFormat';
+import { formatPeriod } from './usageFormat';
 import {
   ALL_USAGE_FILTER,
   CCUSAGE_GITHUB_URL,
@@ -94,7 +94,6 @@ export function UsageSection(_props: UsageSectionProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openPanel, setOpenPanel] = useState<'analysis' | 'details' | null>(null);
-  const [page, setPage] = useState(0);
   const [agentFilter, setAgentFilter] = useState(ALL_USAGE_FILTER);
   const [modelFilter, setModelFilter] = useState(ALL_USAGE_FILTER);
 
@@ -164,7 +163,6 @@ export function UsageSection(_props: UsageSectionProps) {
                     className="set-usage-toggle-btn"
                     data-active={period === p}
                     onClick={() => {
-                      setPage(0);
                       setAgentFilter(ALL_USAGE_FILTER);
                       setModelFilter(ALL_USAGE_FILTER);
                       setLoading(true);
@@ -199,7 +197,6 @@ export function UsageSection(_props: UsageSectionProps) {
                   onChange={event => {
                     setAgentFilter(event.target.value);
                     setModelFilter(ALL_USAGE_FILTER);
-                    setPage(0);
                   }}
                   data-testid="usage-agent-filter"
                 >
@@ -215,7 +212,6 @@ export function UsageSection(_props: UsageSectionProps) {
                   value={modelFilter}
                   onChange={event => {
                     setModelFilter(event.target.value);
-                    setPage(0);
                   }}
                   data-testid="usage-model-filter"
                 >
@@ -399,73 +395,37 @@ export function UsageSection(_props: UsageSectionProps) {
                 </div>
               )}
 
-              {/* Recent rows (most-recent first, paginated) */}
+              {/* Rows of the selected period (most-recent first) */}
               {filteredReport.rows.length === 0 ? (
                 <p className="text-muted text-sm" data-testid="usage-empty">{t('usage.empty')}</p>
-              ) : (() => {
-                const ordered = [...filteredReport.rows].reverse();
-                const perPage = rowsPerPage(filteredReport.period_kind);
-                const pageCount = Math.max(1, Math.ceil(ordered.length / perPage));
-                const safePage = Math.min(page, pageCount - 1);
-                const pageRows = ordered.slice(safePage * perPage, safePage * perPage + perPage);
-                return (
-                  <>
-                    <table className="usage-table" data-testid="usage-table">
-                      <thead>
-                        <tr>
-                          <th style={{ textAlign: 'left' }}>{t('usage.col.period')}</th>
-                          <th style={{ textAlign: 'right' }}>{t('usage.col.input')}</th>
-                          <th style={{ textAlign: 'right' }}>{t('usage.col.output')}</th>
-                          <th style={{ textAlign: 'right' }}>{t('usage.col.cache')}</th>
-                          <th style={{ textAlign: 'right' }}>{t('usage.col.total')}</th>
-                          <th style={{ textAlign: 'right' }}>{t('usage.col.cost')}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {pageRows.map((r, i) => (
-                          <tr key={`${r.period}-${i}`}>
-                            <td>{formatPeriod(filteredReport.period_kind, r.period, locale)}</td>
-                            <td style={{ textAlign: 'right' }}>{fmtTokens(r.input_tokens)}</td>
-                            <td style={{ textAlign: 'right' }}>{fmtTokens(r.output_tokens)}</td>
-                            <td style={{ textAlign: 'right' }} title={t('usage.cacheTooltip')}>
-                              {fmtTokens(r.cache_creation_tokens + r.cache_read_tokens)}
-                            </td>
-                            <td style={{ textAlign: 'right' }}>{fmtTokens(r.total_tokens)}</td>
-                            <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtCost(r.total_cost)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {pageCount > 1 && (
-                      <div className="usage-pager" data-testid="usage-pager">
-                        <button
-                          type="button"
-                          className="set-action-btn"
-                          onClick={() => setPage(p => Math.max(0, p - 1))}
-                          disabled={safePage === 0}
-                          aria-label={t('usage.prevPage')}
-                          data-testid="usage-prev-page"
-                        >
-                          <ChevronLeft size={12} />
-                        </button>
-                        <span className="usage-pager-label" data-testid="usage-page-indicator">
-                          {t('usage.pageOf', safePage + 1, pageCount)}
-                        </span>
-                        <button
-                          type="button"
-                          className="set-action-btn"
-                          onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
-                          disabled={safePage >= pageCount - 1}
-                          aria-label={t('usage.nextPage')}
-                          data-testid="usage-next-page"
-                        >
-                          <ChevronRight size={12} />
-                        </button>
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
+              ) : (
+                <table className="usage-table" data-testid="usage-table">
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left' }}>{t('usage.col.period')}</th>
+                      <th style={{ textAlign: 'right' }}>{t('usage.col.input')}</th>
+                      <th style={{ textAlign: 'right' }}>{t('usage.col.output')}</th>
+                      <th style={{ textAlign: 'right' }}>{t('usage.col.cache')}</th>
+                      <th style={{ textAlign: 'right' }}>{t('usage.col.total')}</th>
+                      <th style={{ textAlign: 'right' }}>{t('usage.col.cost')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...filteredReport.rows].reverse().map((r, i) => (
+                      <tr key={`${r.period}-${i}`}>
+                        <td>{formatPeriod(filteredReport.period_kind, r.period, locale)}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtTokens(r.input_tokens)}</td>
+                        <td style={{ textAlign: 'right' }}>{fmtTokens(r.output_tokens)}</td>
+                        <td style={{ textAlign: 'right' }} title={t('usage.cacheTooltip')}>
+                          {fmtTokens(r.cache_creation_tokens + r.cache_read_tokens)}
+                        </td>
+                        <td style={{ textAlign: 'right' }}>{fmtTokens(r.total_tokens)}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtCost(r.total_cost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           )}
         </>
