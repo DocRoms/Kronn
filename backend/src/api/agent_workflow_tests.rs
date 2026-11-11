@@ -147,8 +147,9 @@ async fn workflow_tools_are_unavailable_to_workers_even_if_called_directly() {
 
 #[test]
 fn workflow_schema_sections_preserve_the_canonical_contract() {
-    let schema = crate::api::workflows::canonical_step_schema();
-    assert_eq!(schema_section(&json!({})).unwrap(), schema);
+    let lean = crate::api::workflows::canonical_step_schema();
+    let schema = crate::api::workflows::full_step_schema();
+    assert_eq!(schema_section(&json!({})).unwrap(), lean);
     assert_eq!(
         schema_section(&json!({})).unwrap()["step_types_closed_set"],
         schema["step_types_closed_set"]
@@ -173,6 +174,80 @@ fn workflow_schema_sections_preserve_the_canonical_contract() {
     }
     assert!(schema_section(&json!({"step_type":"invented"})).is_err());
     assert!(schema_section(&json!({"section":"invented"})).is_err());
+}
+
+/// KT-1681 — what an agent always pays for carries the required fields and one
+/// pointer per step type; every note, runtime contract and example stays one
+/// `step_type` read away, and the doctrine still comes with the default.
+#[test]
+fn the_default_contract_is_lean_and_every_step_type_stays_authorable() {
+    let lean = crate::api::workflows::canonical_step_schema();
+    let full = crate::api::workflows::full_step_schema();
+    assert!(
+        lean.to_string().len() * 2 < full.to_string().len(),
+        "lean {} B, full {} B",
+        lean.to_string().len(),
+        full.to_string().len()
+    );
+    // KT-1216: the doctrine reaches an agent with the default read.
+    assert_eq!(lean["authoring_doctrine"], full["authoring_doctrine"]);
+    assert_eq!(lean["step_types_closed_set"], full["step_types_closed_set"]);
+    assert_eq!(lean["shape"], full["shape"]);
+    assert!(lean["how_to_read"]
+        .as_str()
+        .unwrap()
+        .contains("workflow_step_schema({step_type})"));
+    for kind in full["step_types_closed_set"].as_array().unwrap() {
+        let name = kind.as_str().unwrap();
+        let summary = &lean["fields_by_type"][name];
+        let whole = &full["fields_by_type"][name];
+        // Required fields travel whole; optional ones by name.
+        assert_eq!(summary["required"], whole["required"], "{name}");
+        let optional: Vec<&str> = summary["optional"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field.as_str().unwrap())
+            .collect();
+        for (listed, entry) in optional
+            .iter()
+            .zip(whole["optional"].as_array().into_iter().flatten())
+        {
+            assert!(entry.as_str().unwrap().starts_with(listed), "{name}");
+        }
+        // Whatever the summary leaves out, it says where to read it, and the
+        // read serves it: the working example and every named guidance key.
+        let more: Vec<&str> = summary["more"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|key| key.as_str().unwrap())
+            .collect();
+        assert!(more.contains(&"example"), "{name} has no example pointer");
+        let read = schema_section(&json!({"step_type":name})).unwrap();
+        for key in more {
+            assert!(!read["contract"][key].is_null(), "{name}.{key}");
+        }
+        assert!(summary.get("example").is_none() && summary.get("note").is_none());
+    }
+    // The shared contracts left out of the default are whole behind `section`.
+    assert!(lean["template_vars"]["namespaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|name| name == "run.variant"));
+    assert!(lean["template_vars"].get("time_expressions").is_none());
+    let templates = schema_section(&json!({"section":"template_vars"})).unwrap();
+    assert!(templates["contract"]["time_expressions"]["canonical"].is_string());
+    assert!(templates["contract"]["namespaces"]["refs.<name>"].is_string());
+    // Guidance that moved is reachable from the tool the agent reads it with.
+    let declared = declarations();
+    let tool = declared
+        .iter()
+        .find(|tool| tool["function"]["name"] == "workflow_step_schema")
+        .unwrap();
+    let properties = &tool["function"]["parameters"]["properties"];
+    assert!(properties["step_type"].is_object() && properties["section"].is_object());
 }
 
 /// B7-07 — an in-process principal's `last_run` is one of its project's runs.

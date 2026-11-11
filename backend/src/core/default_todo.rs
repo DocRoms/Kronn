@@ -212,7 +212,6 @@ fn workflow(
         variables,
         enabled: true,
         retention: None,
-        shadow: None,
         pinned: false,
         created_at: now,
         updated_at: now,

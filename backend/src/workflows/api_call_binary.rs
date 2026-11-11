@@ -766,7 +766,6 @@ mod broker_tests {
         let workflow = Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             id: "wf-team".into(),
             name: "Team board thumbnails".into(),

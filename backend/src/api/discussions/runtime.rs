@@ -569,15 +569,22 @@ pub(crate) async fn stream_claimed_dispatch_job(
         handoff_guard.disarm();
         return None;
     }
+    // KT-1518 — an agent on cooldown is skipped: the turn starts on its fallback.
+    let job = super::agent_fallback_start::start_on_fallback(&state, job).await;
 
     let power_lease = crate::core::power_guard::acquire();
     let target_tier = {
         let trigger_message_id = job.trigger_message_id.clone();
         let agent_override = job.agent_override.clone();
         let connection_id = job.connection_id.clone();
+        let job_id = job.id.clone();
         state
             .db
             .with_read_conn(move |conn| {
+                // KT-1518 — a turn that moved to a fallback keeps its tier.
+                if let Some(pin) = crate::core::agent_fallback::get_pin(conn, &job_id)? {
+                    return Ok(Some(pin.tier));
+                }
                 let targets =
                     crate::db::discussions::list_message_targets(conn, &trigger_message_id)?;
                 Ok(dispatch_target_tier(
@@ -711,7 +718,7 @@ pub(crate) async fn reap_task_worker_processes(state: &AppState, dispatch_job_id
     }
 }
 
-fn dispatch_target_tier(
+pub(super) fn dispatch_target_tier(
     targets: &[crate::models::MessageTarget],
     agent_override: Option<&crate::models::AgentType>,
     connection_id: Option<&str>,
@@ -911,6 +918,14 @@ async fn finish_dispatch_turn(
     response: String,
     execution_succeeded: bool,
 ) {
+    // KT-1518 — a provider that could not serve the turn (rate limit, quota,
+    // outage past its retries, not authenticated) hands it to the agent's
+    // fallback chain; a failure of the work itself never does.
+    if !execution_succeeded
+        && super::agent_fallback::intercept_failed_turn(state, &job, &response).await
+    {
+        return;
+    }
     if !execution_succeeded && super::is_hard_quota_exhausted(&response) {
         let detail = provider_quota_message(&response);
         let durable_error = if detail.is_empty() {
@@ -1316,6 +1331,17 @@ async fn fail_dispatch_job_with_outcome_kind(
             fallback => {
                 if let Err(error) = fallback {
                     tracing::warn!(dispatch_job_id = %job.id, "authorized quota fallback failed: {error}");
+                }
+                // KT-1518 — no campaign opt-in applied: the agent's own chain.
+                match super::agent_fallback::worker_after_quota(state, job, error).await {
+                    Ok(true) => {
+                        state.agent_dispatch_notify.notify_waiters();
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(chain_error) => {
+                        tracing::warn!(dispatch_job_id = %job.id, "agent fallback chain failed: {chain_error}");
+                    }
                 }
                 let dispatch_id = job.id.clone();
                 let provider_for_db = provider.clone();

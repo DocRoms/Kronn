@@ -1,128 +1,246 @@
-# Test a new version without risk: shadow runs
+# Test a new version without risk: step shadows
 
 You changed a skill or a Quick Prompt and you think the new version is better.
-A shadow run lets you check that on real work before your normal runs use it:
-each normal run of the workflow also starts a shadow run, with the same inputs
-and the version you are testing, and every step that acts outside Kronn is
-skipped in it. The run list then compares the two runs, step by step. When the
-new version wins, one click hands it to the normal runs.
+Or you want a second opinion from another model, or a local one that costs no
+tokens. Or you want to know how much the same agent changes its mind on the same
+input. A **shadow** is a second execution of one step, started beside its main
+execution, on exactly the same input, with the agent, model, prompt and skills
+you chose. The run view then sets the main execution and its shadows side by
+side. When a new version wins, one click hands it to the step.
 
-## What a shadow run is
+Measured on a pull-request review (99 known problems on 16 pull requests): one
+reviewer found 84 % of the problems at its first pass, the same reviewer run
+twice 85 %, two different reviewers merged 90 %. Diversity beats repetition, and
+a shadow on a local model makes it cheap.
 
-A shadow run is a copy of a normal run: same workflow, same trigger context
-and launch variables, its own id, and a link to the normal run it shadows.
-[src: file: backend/src/workflows/shadow.rs:59-89#shadow_of]
-It starts in the background once the normal run is pinned, and never blocks or
-fails it: a shadow that cannot start is only logged.
-[src: file: backend/src/workflows/shadow.rs:91-116#spawn_if_wanted]
+## What a step shadow is
 
-A normal run gets a shadow when the workflow's shadow is on, on its first
-execution only (a resumed run does not start another one), and when the run's
-project is one the shadow covers; an empty project list covers every run.
-[src: file: backend/src/workflows/shadow.rs:47-58#wants_shadow]
+A step carries `shadows`, 0 to 8 of them. Every time the step runs in a project
+a shadow covers, the shadow re-runs **only that step**, with the step's rendered
+prompt context, previous outputs and variables as the main step received them.
+**Only the main output continues the workflow**: a shadow's output never feeds a
+later step.
+[src: file: backend/src/workflows/shadow.rs:494#start_for_step]
 
-Two things differ in the shadow run:
+Only an Agent step can carry shadows, and not one marked **Acts outside Kronn**.
+[src: file: backend/src/workflows/shadow.rs:465#can_run_shadows]
 
-- **the versions it loads**: each skill named in the shadow is swapped by its
-  base id, and each Quick Prompt step loads the chosen version's template and
-  bindings;
-  [src: file: backend/src/workflows/shadow.rs:136-239#apply_versions]
-- **its worktree**: the normal run may hold the project's checkout, so the
-  shadow runs in its own worktree unless the workflow never writes the
-  checkout.
-  [src: file: backend/src/workflows/shadow.rs:118-134#isolate]
+Each shadow has:
 
-Steps and templates can tell the two apart: `{{run.variant}}` is `normal` or
-`shadow`. Sub-workflows started by a shadow run are shadow runs too.
+- **an id and a label**: the id is a short slug (`qwen-local`, `v3.10.1`),
+  unique in the step; the label is what the comparison shows; `enabled: false`
+  keeps a shadow saved without running it;
+  [src: file: backend/src/models/workflows.rs:235#StepShadow]
+- **what it changes**, all optional, one level or several:
+  - **an agent and a model** (`agent`): a local Ollama, a LiteLLM proxy or
+    another hosted model, with its `model`, its `reasoning_effort` and, for a
+    custom HTTP agent, its `connection_id`;
+    [src: file: backend/src/models/workflows.rs:170#ShadowAgent]
+  - **a prompt**: another Quick Prompt (optionally a version of it) or a prompt
+    written in the shadow;
+    [src: file: backend/src/models/workflows.rs:189#ShadowPrompt]
+  - **skills**: `skills` swaps a skill by its base id (`custom-x` →
+    `custom-x@3`), or drops it with an empty replacement, to measure what a
+    skill brings; `quick_prompt_versions` loads a version of a Quick Prompt;
+    [src: file: backend/src/workflows/shadow.rs:313#apply_versions]
+- **its scope**: `project_ids` (empty means every project) and `sample_every`
+  (one run in N gets the shadow, to bound the cost);
+  [src: file: backend/src/workflows/shadow.rs:458#is_sampled]
+- **a budget**: `max_tokens`, `max_duration_secs`, `max_cost_usd`.
+  [src: file: backend/src/models/workflows.rs:205#ShadowBudget]
 
-## Pin the versions your normal runs load
+A shadow that changes nothing is **identical** to its step. It re-runs the same
+agent on the same input, to show how many different outputs that agent gives.
 
-A comparison means something only if the normal run loads a known version.
+What a shadow changes is applied to a copy of the step, never to the step
+itself.
+[src: file: backend/src/workflows/shadow.rs:294#apply_shadow]
+
+## Pin the versions your steps load
+
+A comparison means something only if the step loads a known version.
 
 - **Skills.** On an Agent step, each custom skill loads its latest version, or
   a pinned one written `custom-x@N`. Only custom skills have versions; built-in
   and repository skills have none.
-  [src: file: backend/src/core/skill_versions.rs:149-168#split_pin]
+  [src: file: backend/src/core/skill_versions.rs:151#split_pin]
 - **Quick Prompts.** An Agent step linked to a Quick Prompt has a version
   picker next to it (`quick_prompt_version`); unset, the step follows the
   latest version.
-  [src: file: backend/src/models/workflows.rs:712-715#quick_prompt_version]
+  [src: file: backend/src/models/workflows.rs:901#quick_prompt_version]
 
-## Turn on the shadow of a workflow
+## Set up the shadows of a step
 
-In the workflow editor, open **Shadow runs**:
+In the workflow editor, open the step and its **Shadows** section (a simple
+workflow has it under its one task):
 
-1. tick **Start a shadow run with each normal run**;
-2. keep every project, or pick the projects whose runs get a shadow;
-3. under **Versions compared**, choose the version the shadow run tests for
-   each skill and Quick Prompt the steps load.
+1. **Add a shadow**, then give it an id and a label;
+2. leave it as it is to measure determinism, or choose its agent and model;
+3. choose its prompt, and under **Versions compared** the version or the
+   dropped skill it tests for each skill and Quick Prompt the step loads;
+4. limit it to some projects, sample it one run in N, set its budget.
 
-This is stored as the workflow's `shadow`: `enabled`, `project_ids`, `skills`
-(a skill id → its replacement, such as `custom-x@3`) and
-`quick_prompt_versions` (a Quick Prompt id → a version number).
-[src: file: backend/src/models/workflows.rs:170-190#WorkflowShadow]
-Only a person sets it: a shadow starts extra runs, so an agent's save that
-sets or changes it is refused.
-[src: file: backend/src/api/workflows.rs:2750-2752#AGENT_SHADOW_REFUSAL]
+Only a person sets shadows: they start extra executions, so an agent's save that
+sets or changes them is refused, and a save that sends the steps back keeps the
+stored ones.
+[src: file: backend/src/api/workflows.rs:2894#AGENT_SHADOW_REFUSAL]
+[src: file: backend/src/workflows/shadow.rs:1032#keep_stored_shadows]
+A save is checked: the ids, the sampling, the overrides, the budgets, and that
+the step is an Agent step that stays inside Kronn.
+[src: file: backend/src/workflows/shadow.rs:877#validate]
+A Page's **Quick Prompts and skills** panel also adds a shadow that tests a
+version on a step, changes the version a shadow tests, and removes a shadow.
 
-A shadow run costs as much as a normal one: its agent steps are paid twice.
+A shadow costs as much as its step: its agent is paid again, unless it runs on a
+local model. The budget caps it.
 
-## What the shadow run skips
+## What a shadow never does
 
-Mark every step that posts, sends or writes outside Kronn (a message, a
-ticket, an API call) with **Acts outside Kronn**, under the step's advanced
-settings. That is the step's `external_effect` flag.
-[src: file: backend/src/models/workflows.rs:628-631#external_effect]
+Mark every step that posts, sends or writes outside Kronn (a message, a ticket,
+an API call) with **Acts outside Kronn**, under the step's advanced settings.
+That is the step's `external_effect` flag.
+[src: file: backend/src/models/workflows.rs:808#external_effect]
 
-The shadow run skips those steps and every Gate, since a trial run must never
-wait for a person.
-[src: file: backend/src/workflows/runner.rs:2519-2525#skip_in_shadow]
-A skipped step records a success with `[SIGNAL: SKIPPED_SHADOW]` and the run
-goes on with the next step.
-[src: file: backend/src/workflows/shadow.rs:262-294#skipped]
+A shadow never runs such a step, and never a Gate: saving refuses shadows on
+them, and one saved by hand is recorded as *skipped* instead of run. A later step
+marked `external_effect` runs once, in the main path: no GitHub write, no message,
+no publication happens because of a shadow.
+[src: file: backend/src/workflows/shadow.rs:670#run_one]
 
-Two cautions, both shown in the Shadow runs card:
+Two cautions:
 
-- a step not marked **Acts outside Kronn** runs in the shadow too, including
-  what it publishes or sends;
-- both runs start at the same time, so a step writing to a fixed path outside
-  the run's worktree writes to the same place twice: add `{{run.variant}}` to
-  that path.
+- a shadow runs in the main run's working directory, with no room and no Kronn
+  tool: put shadows on steps that analyse or review, not on steps that edit
+  files;
+- a shadow of an Agent step that writes elsewhere through a tool would write
+  too: keep that work in a step marked **Acts outside Kronn**, after the step
+  that carries the shadows.
+
+## A shadow never hurts the main step
+
+A shadow that fails, stalls or spends its budget settles its own result and
+nothing else: the main step keeps its status, its duration and its output, and
+does not wait for the shadow. Each shadow runs in the background, one task per
+shadow, and a crash in it is recorded on its own row.
+[src: file: backend/src/workflows/shadow.rs:544#run_step_shadows]
+
+- the **time budget** is enforced: the shadow is stopped (status *time limit
+  reached*) and `max_duration_secs` replaces the workflow's timeout for it, so a
+  slow local model may outlast the main step;
+- the **token and cost budgets** are checked when the shadow ends: one that
+  spent more is marked *over budget* with the limit, its output kept;
+  `max_tokens` is also handed to an agent that takes a generation cap;
+  [src: file: backend/src/workflows/shadow.rs:810#budget_exceeded]
+- a shadow left running by a restart is marked *interrupted*.
+  [src: file: backend/src/db/step_shadows.rs:144#interrupt_running]
+
+What each execution loaded and produced is stored in `step_shadow_runs`, with its
+tokens, duration and cost, and removed with its run; run retention blanks the
+outputs with the run's.
 
 ## Read the comparison
 
-In the run list, a run that has a shadow shows three views: **Normal run**,
-**Comparison** and **Shadow run**. The comparison goes step by step: a verdict
-per step (identical, different, skipped in shadow, missing on one side), each
-side's status, duration and tokens, and a line diff where the outputs differ.
-**Differences only** hides the identical steps. While the shadow run is still
-going, the comparison says it is partial.
+Open a run: for each step that ran shadows, the run view shows the main
+execution beside its shadows.
+[src: file: backend/src/workflows/shadow.rs:1258#comparisons]
+`GET /api/workflows/{id}/runs/{run_id}/step-shadows` returns the same data.
+
+- **a header per execution** says what differs from the others (agent, model,
+  prompt version, skill versions) and groups what is identical;
+  [src: file: frontend/src/lib/shadowRuns.ts:69#compareIdentities]
+- **tokens, cost and duration** of each, and how far a shadow is from the main
+  execution;
+- **the output of each shadow against the main one**, with a line diff where
+  they differ, and any two executions side by side;
+- **a determinism summary** when some shadows are identical to the step: how many
+  distinct outputs there are out of N+1.
+  [src: file: frontend/src/lib/shadowRuns.ts:147#determinism]
+
+While a shadow is still going, the comparison refreshes and shows it as running.
+
+## Merge the shadows into the step's output
+
+Off by default, a step with shadows only compares them. Under the step's
+**Shadows**, **Merge with the main execution** condenses the main execution and
+the shadows you pick into one result, which becomes the step's output for the
+rest of the workflow. Measured on the pull-request review above, two different
+first passes merged find more than either alone; but a shadow on a small local
+model may invent a finding, so the merge **verifies every point before it keeps
+it**.
+[src: file: backend/src/workflows/shadow_merge.rs:551#merge_step]
+
+- **Which shadows merge**: one, several or all of the step's shadows
+  (`shadows`, empty means all). The others still run and are compared.
+- **The wait**: the merge waits for the selected shadows up to `timeout_secs`
+  (10 minutes by default, 60 at most), goes on with those that finished and
+  lists the missing ones with the reason (failed, timed out, still running, not
+  sampled). A dead shadow never hangs the run.
+- **The condense pass** is an Agent step on the step's own agent, or the one you
+  name (usually the strongest model). It dedups the points of the main execution
+  and of each shadow, verifies each point a shadow raised against the code,
+  calibrates severity, writes the single result in the step's own output format
+  and records the provenance of every point: which executions found it, and
+  whether it was kept, was a duplicate or was dropped as unverified.
+- **A point it cannot verify is never published.** The engine refuses a result
+  where a shadow-only point is kept without a verification and its evidence, or
+  where a dropped point's text still appears; the main output then stays the
+  step's output and the run view says why. The same goes when no selected
+  shadow finished or the condense pass fails.
+- **The merged result becomes the step's output**; the main and shadow outputs
+  stay visible for comparison.
+
+The run view shows, under the step, how the merge ended, the missing shadows,
+each execution's contribution (kept, only this one, duplicate, dropped as
+unverified), the provenance of every point, what the condense pass spent and the
+merged result against each execution. Only a person sets a merge, like a shadow.
 
 ## Promote the better version
 
 A Page shows, in its **Quick Prompts and skills** panel, every Quick Prompt and
-skill used by the workflows behind it, with the version each lane loads: the
-normal run's and the one the shadow tests.
-[src: file: backend/src/db/live_pages.rs:2051-2197#list_live_page_resources]
-**Promote** hands the tested version to the normal runs in one click:
+skill used by the workflows behind it, step by step, with the version each step
+loads and the one each of its shadows tests.
+[src: file: backend/src/db/live_pages.rs:2071#list_live_page_resources]
+**Promote** hands the version a shadow tested to its step in one click:
 
-- a skill: every step of that workflow that loads it now loads the tested
-  version, pinned;
-- a Quick Prompt: the workflow's steps that load it pin the tested version; the
-  Quick Prompt itself is unchanged, so other workflows keep theirs.
+- a skill: the step now loads the tested version, pinned (a skill the shadow
+  drops is dropped from the step);
+- a Quick Prompt: the step pins the tested version; the Quick Prompt itself is
+  unchanged, so other workflows keep theirs.
 
-Either way the shadow stops testing it. Promotion is a person's decision too:
-the route has no agent access.
-[src: file: backend/src/workflows/shadow.rs:307-361#promote]
-[src: file: backend/src/api/workflows.rs:2727-2748#promote_shadow]
+Either way that shadow stops testing it; the other shadows keep theirs. Promotion
+is a person's decision too: the route has no agent access.
+[src: file: backend/src/workflows/shadow.rs:1092#promote]
+[src: file: backend/src/api/workflows.rs:2873#promote_shadow]
+
+## From the workflow-level shadow
+
+Before step shadows, a workflow had one `shadow` with lanes that replayed the
+whole workflow. A workflow that had one now carries one shadow on each of its
+Agent steps (those that stay inside Kronn), with the same overrides: the shadow
+of a flat shadow is named `shadow`, a lane keeps its id, label, projects,
+sampling, skills, prompt and budget, and an agent set for a named step goes to
+that step. The role (`witness`, `contributor`) is gone. The migration moves only
+the stored shadow: the steps are left as they were.
+[src: file: backend/src/workflows/shadow.rs:1364#legacy_shadow_to_steps]
+[src: file: backend/src/workflows/shadow.rs:1415#migrate_workflow_shadows]
+[src: file: backend/src/db/workflows.rs:2985#split_shadows]
+
+Runs the former shadow recorded stay in the run list with a **Shadow** badge.
+An export written before this change carries a `shadow` key that an import now
+ignores.
 
 ## Current limits
 
-- **One shadow lane.** A workflow has one shadow, which changes only skill and
-  Quick Prompt versions: the agent, the model and the prompt text stay the
-  normal run's.
-- Several lanes per run, each with its own agent, model, prompt and skills,
-  are planned in KT-1459.
+- **A shadow that runs a different workflow** is not supported: a shadow
+  re-runs its own step.
+- **The merge costs one more agent call**, and reads the outputs, not the whole
+  input again, unless a point needs verification. Its tokens are reported, and
+  counted in the step's tokens.
+- **Tokens and cost** are checked when a shadow ends, not while it runs: a single
+  long shadow can spend more than its budget before it is marked.
+- A step carries at most eight shadows.
+- Only Agent steps carry shadows.
 
 See also: [the Kronn way](the-kronn-way.md) and the
-[glossary](../glossary.md) entries *Shadow run* and *Page resources*.
+[glossary](../glossary.md) entries *Step shadow*, *Shadow run* and *Page
+resources*.

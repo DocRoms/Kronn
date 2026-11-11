@@ -893,6 +893,7 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
             | StepType::TransformData
             | StepType::PublishPageData
             | StepType::TaskBoard
+            | StepType::Decide
             // SubWorkflow's output is the child run's final envelope
             // (standardised) → `{{steps.<subwf>.data}}` is valid.
             | StepType::SubWorkflow
@@ -2715,6 +2716,8 @@ mod tests {
             retry: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             directive_ids: vec![],
             profile_ids: vec![],
             delay_after_secs: None,
@@ -2760,6 +2763,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

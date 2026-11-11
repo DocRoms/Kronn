@@ -40,6 +40,9 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
   const [proxyOrigin, setProxyOrigin] = useState('');
   const [proxyBusy, setProxyBusy] = useState(false);
   const [proxyInviteCode, setProxyInviteCode] = useState<string | null>(null);
+  // KT-1650 — a pairing code is invite code + a one-time secret; shown once.
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [pairingBusy, setPairingBusy] = useState(false);
   const [showConnectionGuide, setShowConnectionGuide] = useState(false);
   const [p2pEnabled, setP2pEnabled] = useState<boolean | null>(null);
   const [frontendOrigins, setFrontendOrigins] = useState('');
@@ -85,6 +88,17 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
       .catch(() => { if (live) setProxyInviteCode(null); });
     return () => { live = false; };
   }, [proxyDeclared, exposure?.public_origin, pseudo]);
+
+  const generatePairingCode = async () => {
+    setPairingBusy(true);
+    try {
+      setPairingCode(await contactsApi.pairingCode());
+    } catch (error) {
+      reportSaveError(error);
+    } finally {
+      setPairingBusy(false);
+    }
+  };
 
   const refusalMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -489,6 +503,35 @@ export function IdentitySection({ toast, t, onExposureChange }: IdentitySectionP
                     <Copy size={12} />
                   </button>
                 </div>
+                <div className="set-hint-xs">{t('contacts.pairingHint')}</div>
+                <div className="set-invite-code-row">
+                  <button
+                    type="button"
+                    className="set-ip-btn"
+                    onClick={generatePairingCode}
+                    disabled={pairingBusy}
+                    data-testid="pairing-code-generate"
+                  >
+                    {t('contacts.pairingGenerate')}
+                  </button>
+                </div>
+                {pairingCode && (
+                  <div className="set-invite-code-row">
+                    <AtSign size={14} aria-hidden="true" />
+                    <code className="set-invite-code" data-testid="pairing-code">{pairingCode}</code>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(pairingCode);
+                        toast(t('disc.copy'), 'success');
+                      }}
+                      className="set-icon-btn"
+                      title={t('disc.copy')}
+                      aria-label={t('disc.copy')}
+                    >
+                      <Copy size={12} />
+                    </button>
+                  </div>
+                )}
                 {networkInfo?.tailscale_ip && networkInfo.advertised_host === networkInfo.tailscale_ip && (
                   <div className="set-hint-xs">{t('contacts.tailscaleHint')}</div>
                 )}
