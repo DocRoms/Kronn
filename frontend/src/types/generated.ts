@@ -2626,6 +2626,21 @@ cost_usd: number | null,
  */
 is_byok: boolean, };
 
+/**
+ * A `context_files` row as exported. The bytes are a separate, optional ZIP
+ * entry (`has_blob`), and the source machine's `disk_path` is kept out of the
+ * archive: an import writes the bytes under its own context-file store.
+ */
+export type ContextFileRecord = { id: string, discussion_id: string, filename: string, mime_type: string, original_size: number, extracted_text: string, extracted_size: number, message_id: string | null, extracted_from_asset_id: string | null,
+/**
+ * The column as stored (`YYYY-MM-DD HH:MM:SS`), kept verbatim.
+ */
+created_at: string,
+/**
+ * The file's bytes are in the archive as `context-files/<id>`.
+ */
+has_blob: boolean, };
+
 export type CorrectionKind = "recheck" | "replace_or_remove" | "remove_section" | "check_or_anchor";
 
 export type Correspondence = {
@@ -3003,7 +3018,13 @@ api_access_policies?: Array<ApiAccessPolicyEntry>,
  * KT-1017 — a MAC, under this instance's key, over the workflows and
  * Quick Execs: a restore keeps their approvals only when it verifies.
  */
-trust_seal?: string, };
+trust_seal?: string,
+/**
+ * v8 (KT-1602) — uploaded context files: the rows only. The bytes travel
+ * as `context-files/<id>` entries of the ZIP, not inside this JSON. An
+ * older archive has none: the local context files are left as they are.
+ */
+context_files: Array<ContextFileRecord>, };
 
 export type DbInfo = { size_bytes: number, project_count: number, discussion_count: number, message_count: number, mcp_count: number, workflow_count: number, workflow_run_count: number, custom_skill_count: number, custom_profile_count: number, custom_directive_count: number, };
 
