@@ -1281,13 +1281,22 @@ describe('AgentsSection — Kronn tools switch (KT-1600)', () => {
     );
   });
 
-  it('gives LiteLLM and NVIDIA, which have no card, their own switch', async () => {
+  it('keeps the Ollama switch inside its card, with the plain help printed under it', () => {
+    renderSection({ agents: [makeAgent({ name: 'Ollama', agent_type: 'Ollama', installed: true })] });
+    const toggle = screen.getByTestId('agent-tools-Ollama');
+    expect(toggle.closest('.set-ollama-card')).not.toBeNull();
+    expect(screen.getByTestId('ollama-tools')).toHaveTextContent('agents.toolsHint');
+  });
+
+  it('leaves no Kronn-tools control outside a card: LiteLLM and NVIDIA live on their connection', () => {
     renderSection({ agents: [] });
-    expect((screen.getByTestId('agent-tools-LiteLlm') as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(screen.getByTestId('agent-tools-Nvidia'));
-    await waitFor(() =>
-      expect(setAgentToolsMock).toHaveBeenCalledWith({ agent: 'Nvidia', enabled: false }),
-    );
+    expect(screen.queryByTestId('external-agent-tools')).toBeNull();
+    expect(screen.queryByTestId('agent-tools-LiteLlm')).toBeNull();
+    expect(screen.queryByTestId('agent-tools-Nvidia')).toBeNull();
+    expect(document.querySelector('.set-agent-tools-defaults')).toBeNull();
+    document.querySelectorAll('.set-tools-switch').forEach(node => {
+      expect(node.closest('.set-ollama-card, .set-ext-api-form')).not.toBeNull();
+    });
   });
 
   it('gives a CLI agent no tools switch: it brings its own tools', () => {
