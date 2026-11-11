@@ -1050,6 +1050,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     let mut used_step_ids = std::collections::HashSet::new();
     let steps = steps_with_durable_ids(&wf.steps, None, &mut used_step_ids);
     let on_failure = steps_with_durable_ids(&wf.on_failure, None, &mut used_step_ids);
+    let (steps, on_failure, shadows) = split_shadows(steps, on_failure)?;
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
          safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key, project_scope_json, retention_json, refs_json, shadow_json)
@@ -1081,7 +1082,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             wf.project_scope.as_ref().map(serde_json::to_string).transpose()?,
             wf.retention.as_ref().map(serde_json::to_string).transpose()?,
             refs_column(&wf.refs)?,
-            wf.shadow.as_ref().map(serde_json::to_string).transpose()?,
+            shadows,
         ],
     )?;
     Ok(())
@@ -1175,6 +1176,7 @@ fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Resu
             .map(|workflow| workflow.on_failure.as_slice()),
         &mut used_step_ids,
     );
+    let (steps, on_failure, shadows) = split_shadows(steps, on_failure)?;
     let n = conn.execute(
         UPDATE_WORKFLOW_SQL,
         params![
@@ -1225,7 +1227,7 @@ fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Resu
                 .map(serde_json::to_string)
                 .transpose()?,
             refs_column(&wf.refs)?,
-            wf.shadow.as_ref().map(serde_json::to_string).transpose()?,
+            shadows,
         ],
     )?;
     Ok(n > 0)
@@ -1973,17 +1975,18 @@ pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
     Ok(run)
 }
 
-/// The shadow run started alongside run `normal_id` (KT-1449), if any.
-pub fn shadow_run_of(conn: &Connection, normal_id: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row(
-            "SELECT id FROM workflow_runs
-             WHERE json_valid(trigger_context)
-               AND json_extract(trigger_context, '$.__shadow_of__') = ?1 LIMIT 1",
-            params![normal_id],
-            |row| row.get(0),
-        )
-        .optional()?)
+/// Rank of `run` among its workflow's normal runs, the first being 1: what
+/// a lane sampling one run in N counts on.
+pub fn normal_run_ordinal(conn: &Connection, run: &WorkflowRun) -> Result<u64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM workflow_runs
+         WHERE workflow_id = ?1 AND started_at <= ?2 AND parent_run_id IS NULL
+           AND COALESCE(CASE WHEN json_valid(trigger_context)
+                THEN json_extract(trigger_context, '$.__variant__') END, 'normal') = 'normal'",
+        params![run.workflow_id, run.started_at.to_rfc3339()],
+        |row| row.get(0),
+    )?;
+    Ok(count.max(1) as u64)
 }
 
 pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
@@ -2844,7 +2847,7 @@ const ADMITTED_RUNS_WHERE: &str = "workflow_id = ?1
             AND id IS NOT ?4
             AND (?5 = 0 OR project_id IS ?6)
             AND COALESCE(CASE WHEN json_valid(trigger_context)
-                THEN json_extract(trigger_context, '$.__variant__') END, '') <> 'shadow'";
+                THEN json_extract(trigger_context, '$.__variant__') END, 'normal') = 'normal'";
 
 /// Every run that is not finished (KT-1657), oldest first, a run parked on a
 /// provider quota included with the wake time of its wait. Shadow variants
@@ -2857,7 +2860,7 @@ pub fn list_active_runs(
         "SELECT {WORKFLOW_RUN_COLS} FROM workflow_runs
           WHERE status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
             AND COALESCE(CASE WHEN json_valid(trigger_context)
-                THEN json_extract(trigger_context, '$.__variant__') END, '') <> 'shadow'{}
+                THEN json_extract(trigger_context, '$.__variant__') END, 'normal') = 'normal'{}
           ORDER BY started_at ASC",
         visible_clause(visibility, 1)
     );
@@ -2958,6 +2961,78 @@ fn refs_column(refs: &crate::models::WorkflowRefs) -> Result<Option<String>> {
     })
 }
 
+/// The shadows of every step as stored in `shadow_json`: a map from step id to
+/// the step's shadows (KT-1459), with the step's merge when it has one
+/// (KT-1544). They live outside `steps_json`, which the trust checks compare,
+/// because a shadow never changes what the main run does.
+type StepShadowMap = std::collections::BTreeMap<String, StoredStepShadows>;
+
+/// What `shadow_json` keeps for one step: a bare list of shadows (what KT-1459
+/// wrote, still read), or the list with the step's merge.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum StoredStepShadows {
+    Shadows(Vec<StepShadow>),
+    WithMerge {
+        shadows: Vec<StepShadow>,
+        merge: crate::models::ShadowMerge,
+    },
+}
+
+/// Takes the shadows out of steps carrying a durable id; what the steps column
+/// stores holds none, and the shadow column holds them by step id. NULL for no
+/// shadow at all, like the other empty collections.
+fn split_shadows(
+    mut steps: Vec<WorkflowStep>,
+    mut on_failure: Vec<WorkflowStep>,
+) -> Result<(Vec<WorkflowStep>, Vec<WorkflowStep>, Option<String>)> {
+    let mut map = StepShadowMap::new();
+    for step in steps.iter_mut().chain(on_failure.iter_mut()) {
+        let shadows = std::mem::take(&mut step.shadows);
+        let merge = step.shadow_merge.take();
+        if let (Some(id), false) = (&step.id, shadows.is_empty()) {
+            map.insert(
+                id.clone(),
+                match merge {
+                    Some(merge) => StoredStepShadows::WithMerge { shadows, merge },
+                    None => StoredStepShadows::Shadows(shadows),
+                },
+            );
+        }
+    }
+    let column = if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&map)?)
+    };
+    Ok((steps, on_failure, column))
+}
+
+/// Gives each step the shadows the column holds for its id. An unreadable
+/// column is no shadow: it never starts an extra execution.
+fn attach_shadows(id: &str, raw: Option<String>, steps: &mut [WorkflowStep]) {
+    let Some(raw) = raw else {
+        return;
+    };
+    let map: StepShadowMap = match serde_json::from_str(&raw) {
+        Ok(map) => map,
+        Err(error) => {
+            tracing::error!(workflow_id = %id, %error, "corrupt shadow_json — no shadows");
+            return;
+        }
+    };
+    for step in steps {
+        match step.id.as_ref().and_then(|id| map.get(id)) {
+            Some(StoredStepShadows::Shadows(shadows)) => step.shadows = shadows.clone(),
+            Some(StoredStepShadows::WithMerge { shadows, merge }) => {
+                step.shadows = shadows.clone();
+                step.shadow_merge = Some(merge.clone());
+            }
+            None => {}
+        }
+    }
+}
+
 /// A ref map that does not parse is dropped, loudly: steps rendering one of
 /// its names then fail instead of running against a guessed object.
 fn refs_from_column(id: &str, raw: Option<String>) -> crate::models::WorkflowRefs {
@@ -2998,11 +3073,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
     let variables_str: Option<String> = row.get(16).unwrap_or(None);
     let retention = retention_from_column(&id, row.get(20).unwrap_or(None));
     let refs = refs_from_column(&id, row.get(21).unwrap_or(None));
-    // An unreadable shadow is no shadow: it never starts extra runs.
-    let shadow = row
-        .get::<_, Option<String>>(22)
-        .unwrap_or(None)
-        .and_then(|raw| serde_json::from_str::<WorkflowShadow>(&raw).ok());
+    let shadows_column: Option<String> = row.get(22).unwrap_or(None);
 
     // These two fallbacks keep a workflow with corrupt JSON loadable (booting
     // matters), but they MUST be loud: a silently-Manual trigger kills a cron
@@ -3016,7 +3087,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         );
         WorkflowTrigger::Manual
     });
-    let steps: Vec<WorkflowStep> = serde_json::from_str(&steps_str).unwrap_or_else(|e| {
+    let mut steps: Vec<WorkflowStep> = serde_json::from_str(&steps_str).unwrap_or_else(|e| {
         tracing::error!(
             workflow_id = %id,
             error = %e,
@@ -3024,6 +3095,12 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         );
         Vec::new()
     });
+    let mut on_failure: Vec<WorkflowStep> = on_failure_str
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<WorkflowStep>>(s).ok())
+        .unwrap_or_default();
+    attach_shadows(&id, shadows_column.clone(), &mut steps);
+    attach_shadows(&id, shadows_column, &mut on_failure);
 
     Workflow {
         id,
@@ -3048,7 +3125,6 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
             .and_then(|s| serde_json::from_str(&s).ok()),
         retention,
         refs,
-        shadow,
         // Defensive: a corrupt JSON blob in `guards` should NOT silently
         // disable the safety net — fall back to the column being absent
         // (= backend defaults applied) so the runner still kills runaway
@@ -3070,10 +3146,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         // Same defensive pattern as artifacts: corrupt JSON or missing
         // column → empty rollback chain. The main pipeline still runs;
         // only the safety net is silently skipped.
-        on_failure: on_failure_str
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Vec<WorkflowStep>>(s).ok())
-            .unwrap_or_default(),
+        on_failure,
         // 0.7.0 Phase 5 — defensive parse; corrupt allowlist JSON →
         // empty (Exec disabled). Failing closed is the right default
         // for a security-sensitive feature.

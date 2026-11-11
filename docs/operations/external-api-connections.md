@@ -4,7 +4,7 @@ Kronn's **Settings → Agents → External API mode** manages named connections 
 OpenAI-compatible chat services. LiteLLM, NVIDIA and OpenRouter provide endpoint
 presets; `Other` uses the same contract for an operator-supplied service. Every
 connection owns a display name, a unique discussion alias, an endpoint and
-optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1822-1837#ExternalApiSection]
+optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1853-1868#ExternalApiSection]
 [src: file: backend/src/models/external_api_connection.rs:11-20#ExternalApiConnection]
 
 The required HTTP surface is `GET /v1/models` plus
@@ -206,7 +206,7 @@ previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2125-2129#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1841-1846#onModelTiersChanged]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1872-1877#onModelTiersChanged]
 
 The former standalone LiteLLM settings card (`LiteLlmCard`) and its frontend
 client were removed (KT-668): nothing mounted them, and the named connection
@@ -228,6 +228,58 @@ connection across ordinary replies — is covered in
 [`docs/operations/http-transport.md`](http-transport.md). This page stays
 the configuration guide (creating/testing/tiering a connection); that one is
 the runtime-resolution guide.
+
+## Token checks of API plugin connections (KT-1692)
+
+This page is about the model-provider connections above. The **API plugin
+connections** of Settings → APIs (GitHub, Slides.com, Fastly, a custom API…)
+hold a token too, and a token that expired or was revoked while nobody called the
+connection used to stay unnoticed until a workflow or Quick API failed on it:
+KT-1524 flags a connection only after a real call was refused. Kronn now probes
+those tokens ahead of the call.
+
+- **Which connections have a probe.** Those with a declared readiness endpoint
+  (GitHub `/user`, Fastly `/current_user`…) or, for a custom API, a selected or
+  identity-named GET endpoint without path parameters — the endpoint the card's
+  "Test" already calls. A connection without one cannot be checked.
+  [src: file: backend/src/core/token_checks.rs:73-79#has_token_probe]
+- **When.** About 20 seconds after Kronn starts, then every 24 hours, for every
+  connection that has a probe; on demand with the **Check** button on the
+  connection card (`POST /api/mcps/configs/{id}/check-token`) and **Check all
+  tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
+  app starts the same scheduler.
+  [src: file: backend/src/core/token_checks.rs:326-331#spawn_scheduler]
+  [src: file: backend/src/lib.rs:2541-2543#check_token]
+- **What it sends.** One authenticated GET to the connection's own provider,
+  through the same ApiCall path as any call (SSRF policy, secret injection and
+  OAuth / token-exchange refresh included), with the 15 s timeout of the
+  readiness probe. The token goes nowhere else.
+- **What is stored.** One row per connection in `mcp_token_checks` (migration
+  `300_mcp_token_checks`): when it was probed, the outcome (`ok`, `refused` or
+  `inconclusive`), a redacted detail (the connection's own secret values masked,
+  the heuristic redaction of stored run output, 240 characters at most) and the
+  date of its last good probe or good call. The card shows them
+  (`McpConfigDisplay.token_check`).
+  [src: file: backend/src/db/mcps.rs:670-690#record_token_check]
+- **A refused probe is a refused call.** The probe runs `track_outcome`, so a 401,
+  a 403 that blames the credential or a refused OAuth refresh flags the
+  connection exactly as in KT-1524 (`mcp_auth_failures`, the "token refused"
+  notice, the `token_refused` health); a good probe clears the flag. Any other
+  failure (5xx, network, a missing scope) is `inconclusive`: the flag stays as it
+  was.
+- **The bell.** A flagged connection is a row of the activity bell, "Update
+  *name*", under "needs a decision", opening the connection. It is derived from
+  the flag, so it disappears with it: nothing is stored for the bell.
+  [src: file: backend/src/api/activity.rs:444-444#ConnectionTokenSource]
+- **No probe.** A connection that cannot be probed shows "Not checked since
+  *date of its last good call*", or "Never checked" when no call has worked yet.
+  Every good call records that date.
+  [src: file: backend/src/workflows/api_auth_failure.rs:203-203#mark_good_call]
+- **Rate limits.** A connection is never probed twice within five minutes (a
+  click storm, a restart loop or a second request while one is running gets the
+  stored answer, marked `rate_limited`), and a batch runs two probes at a time.
+  [src: file: backend/src/core/token_checks.rs:34-34#MIN_RECHECK]
+  [src: file: backend/src/core/token_checks.rs:43-43#CHECK_CONCURRENCY]
 
 ## Troubleshooting
 

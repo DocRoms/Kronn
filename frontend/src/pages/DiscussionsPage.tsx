@@ -4233,6 +4233,7 @@ export function DiscussionsPage({
           }}
           onClose={() => setSidebarOpen(false)}
           onContactAdd={handleContactAdd}
+          onContactRepair={(id) => contactsApi.pairingCode(id)}
           onJoinByCode={handleJoinByCode}
           onStartChat={handleStartChatWithContact}
           onContactDelete={handleContactDelete}

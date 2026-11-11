@@ -337,7 +337,7 @@ async fn probe_plugin(
     build_probe_response(&server.id, checks)
 }
 
-async fn probe_api(
+pub(crate) async fn probe_api(
     state: &AppState,
     server: &McpServer,
     config: &McpConfig,
@@ -355,7 +355,7 @@ async fn probe_api(
     .await
 }
 
-async fn probe_api_with_policy(
+pub(crate) async fn probe_api_with_policy(
     state: &AppState,
     server: &McpServer,
     config: &McpConfig,
@@ -2122,6 +2122,29 @@ pub async fn refresh(
 /// timeout; this just caps how many run at once so testing a large plugin
 /// list doesn't fork dozens of CLIs simultaneously.
 const TEST_ALL_CONCURRENCY: usize = 4;
+
+/// POST /api/mcps/configs/{id}/check-token — probe one connection's token now
+/// (KT-1692), unless it was probed a moment ago (`rate_limited`).
+pub async fn check_token(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<McpTokenCheckResult>> {
+    match crate::core::token_checks::check_connection(&state, &id).await {
+        Ok(result) => Json(ApiResponse::ok(result)),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
+/// POST /api/mcps/check-tokens — "Check all" (KT-1692): probe every connection
+/// that has a test endpoint.
+pub async fn check_all_tokens(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<McpTokenCheckAllResponse>> {
+    match crate::core::token_checks::check_all(&state).await {
+        Ok(results) => Json(ApiResponse::ok(McpTokenCheckAllResponse { results })),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
 
 /// POST /api/mcps/test-all — probe every visible config, per access, with a
 /// bounded concurrency. Persists the same way a single `probe_config` call
@@ -4892,6 +4915,8 @@ mod tests {
             merged_into_existing: None,
             last_probes: vec![],
             auth_failure: None,
+            token_probe: false,
+            token_check: None,
         }
     }
 

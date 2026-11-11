@@ -1,14 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 464"
      role="img" aria-labelledby="shadow-title shadow-desc"
      font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-  <!-- Un run normal y su run shadow. Fondo oscuro propio, legible igual
+  <!-- Un paso y sus shadows: comparación por paso y fusión opcional. Fondo oscuro propio, legible igual
        con un tema claro u oscuro. -->
-  <title id="shadow-title">Runs shadow: probar una nueva versión con entradas reales sin efectos secundarios</title>
+  <title id="shadow-title">Shadows de un paso: repetir un paso junto a la ejecución principal, comparar, fusionar si se quiere</title>
   <desc id="shadow-desc">
-    Las mismas entradas reales lanzan dos runs. El run normal se publica y carga Prompt v2 y Skill v1. El run shadow carga Prompt v2 y Skill v2, la versión en prueba, y se salta cada paso que actúa fuera de Kronn. Los dos runs alimentan una comparación lado a lado, paso a paso. Si la versión del shadow es mejor, un clic la promueve a los runs normales.
+    Un paso recibe su entrada. La ejecución principal es el paso tal cual, y solo su salida continúa el workflow. A su lado, de 0 a N shadows repiten únicamente ese paso con exactamente la misma entrada: un shadow idéntico prueba lo determinista que es el agente, un shadow variante cambia el agente, el modelo, el prompt o los skills, en un nivel o en todos. Un shadow nunca ejecuta un paso que actúa fuera de Kronn, ni un Gate. Para cada paso, la comparación muestra una cabecera con lo que difiere, los tokens, el coste y la duración, un diff de las salidas y un resumen de determinismo, y la versión que probó un shadow se promueve en un clic. Una fusión opcional, desactivada por defecto, condensa la ejecución principal con uno, varios o todos sus shadows: cada punto se verifica y se conserva su procedencia, y el resultado fusionado pasa a ser la salida del paso. Sin fusión, o si un punto no se puede verificar, la salida principal sigue siendo la salida del paso.
   </desc>
 
-  <rect x="0" y="0" width="1200" height="380" fill="#0d1117"/>
+  <rect x="0" y="0" width="1200" height="464" fill="#0d1117"/>
 
   <style>
     .title  { font-size: 22px; font-weight: 700; fill: #f9fafb; }
@@ -20,53 +20,91 @@
     .chip   { font-size: 12px; font-weight: 600; fill: #f9fafb; }
   </style>
 
-  <text x="600" y="36" text-anchor="middle" class="title">Probar una nueva versión sin riesgo</text>
+  <text x="600" y="36" text-anchor="middle" class="title">Shadows de un paso: compáralos, fusiónalos si quieres</text>
 
-  <g role="group" aria-label="Mismas entradas reales">
-    <rect x="30" y="128" width="212" height="96" rx="10" fill="#38bdf8" fill-opacity="0.10" stroke="#38bdf8" stroke-width="1.5"/>
-    <text x="46" y="153" class="label">Mismas entradas reales</text>
-    <text x="46" y="174" class="small">disparador, variables,</text>
-    <text x="46" y="191" class="small">mismo ticket o PR</text>
+  <g role="group" aria-label="Un paso: misma entrada">
+    <rect x="30" y="170" width="170" height="108" rx="10" fill="#38bdf8" fill-opacity="0.10" stroke="#38bdf8" stroke-width="1.5"/>
+    <text x="46" y="191" class="kind" fill="#38bdf8">Un paso</text>
+    <text x="46" y="214" class="label">Misma entrada</text>
+    <text x="46" y="235" class="small">contexto del prompt,</text>
+    <text x="46" y="252" class="small">salidas anteriores,</text>
+    <text x="46" y="269" class="small">variables</text>
   </g>
-  <g role="group" aria-label="Run normal, publicado: Prompt v2 y Skill v1">
-    <rect x="290" y="70" width="280" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
-    <text x="306" y="91" class="kind" fill="#34d399">Publicado</text>
-    <text x="306" y="114" class="label">Run normal</text>
-    <text x="306" y="135" class="small">Prompt v2 · Skill v1</text>
+  <g role="group" aria-label="Ejecución principal, publicada">
+    <rect x="240" y="66" width="270" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="256" y="87" class="kind" fill="#34d399">Publicado</text>
+    <text x="256" y="110" class="label">Ejecución principal</text>
+    <text x="256" y="131" class="small">el paso tal cual;</text>
+    <text x="256" y="148" class="small">su salida continúa el workflow</text>
   </g>
-  <g role="group" aria-label="Run shadow, sin efectos secundarios: Prompt v2 y Skill v2">
-    <rect x="290" y="190" width="280" height="96" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="6 3"/>
-    <text x="306" y="211" class="kind" fill="#a78bfa">Sin efectos secundarios</text>
-    <text x="306" y="234" class="label">Run shadow</text>
-    <text x="306" y="255" class="small">Prompt v2 · Skill v2</text>
+  <g role="group" aria-label="Shadow idéntico, sin efectos secundarios">
+    <rect x="240" y="176" width="270" height="96" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="256" y="197" class="kind" fill="#a78bfa">Sin efectos secundarios</text>
+    <text x="256" y="220" class="label">Shadow · idéntico</text>
+    <text x="256" y="241" class="small">mismo agente, misma entrada:</text>
+    <text x="256" y="258" class="small">¿es determinista?</text>
   </g>
-  <text x="306" y="306" class="tiny">✕ los pasos que actúan fuera de Kronn se saltan</text>
-  <g role="group" aria-label="Comparación lado a lado">
-    <rect x="640" y="128" width="240" height="96" rx="10" fill="#f9fafb" fill-opacity="0.06" stroke="#f9fafb" stroke-width="1.5"/>
-    <text x="656" y="153" class="label">Comparación</text>
-    <text x="656" y="174" class="small">paso a paso: idéntico,</text>
-    <text x="656" y="191" class="small">distinto o saltado</text>
+  <g role="group" aria-label="Shadow variante, sin efectos secundarios">
+    <rect x="240" y="286" width="270" height="96" rx="10" fill="#a78bfa" fill-opacity="0.14" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="256" y="307" class="kind" fill="#a78bfa">Sin efectos secundarios</text>
+    <text x="256" y="330" class="label">Shadow · variante</text>
+    <text x="256" y="351" class="small">otro agente, modelo, prompt o</text>
+    <text x="256" y="368" class="small">skills: un nivel, o todos</text>
   </g>
-  <g role="group" aria-label="Promover la mejor versión en un clic">
-    <rect x="940" y="128" width="230" height="96" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
-    <text x="956" y="153" class="label">Promover</text>
-    <text x="956" y="174" class="small">la mejor versión,</text>
-    <text x="956" y="191" class="small">en un clic</text>
+  <g role="group" aria-label="Comparación por paso">
+    <rect x="560" y="66" width="290" height="140" rx="10" fill="#f9fafb" fill-opacity="0.06" stroke="#f9fafb" stroke-width="1.5"/>
+    <text x="576" y="110" class="label">Comparación por paso</text>
+    <text x="576" y="131" class="small">una cabecera: qué difiere</text>
+    <text x="576" y="148" class="small">tokens · coste · duración</text>
+    <text x="576" y="165" class="small">diff de salidas, línea a línea</text>
+    <text x="576" y="182" class="small">resumen de determinismo</text>
   </g>
+  <g role="group" aria-label="Fusión opcional">
+    <rect x="560" y="244" width="290" height="140" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="6 3"/>
+    <text x="576" y="265" class="kind" fill="#fbbf24">Opcional · off por defecto</text>
+    <text x="576" y="288" class="label">Fusión</text>
+    <text x="576" y="309" class="small">principal + uno, varios o todos</text>
+    <text x="576" y="326" class="small">los shadows; una pasada condensa,</text>
+    <text x="576" y="343" class="small">verifica cada punto y guarda</text>
+    <text x="576" y="360" class="small">su procedencia</text>
+  </g>
+  <g role="group" aria-label="Promover la versión probada en un clic">
+    <rect x="890" y="66" width="280" height="140" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="906" y="87" class="kind" fill="#34d399">Un clic</text>
+    <text x="906" y="110" class="label">Promover</text>
+    <text x="906" y="131" class="small">la versión que probó un shadow,</text>
+    <text x="906" y="148" class="small">fijada en el paso</text>
+  </g>
+  <g role="group" aria-label="Salida del paso">
+    <rect x="890" y="244" width="280" height="140" rx="10" fill="#34d399" fill-opacity="0.12" stroke="#34d399" stroke-width="1.5"/>
+    <text x="906" y="265" class="kind" fill="#34d399">Resultado</text>
+    <text x="906" y="288" class="label">Salida del paso</text>
+    <text x="906" y="309" class="small">el resultado fusionado, si fusionas;</text>
+    <text x="906" y="326" class="small">si no, la salida principal</text>
+    <text x="906" y="343" class="small">(también si un punto no se verifica)</text>
+  </g>
+  <text x="240" y="406" class="tiny">✕ nunca en un paso que actúa fuera de Kronn ni en un Gate · 0 a N shadows por paso</text>
   <g aria-hidden="true">
-    <path d="M 242 176 C 266 176 266 118 284 118" stroke="#d1d5db" stroke-width="2" fill="none"/>
-    <polygon points="290,118 281,114 281,122" fill="#d1d5db"/>
-    <path d="M 242 176 C 266 176 266 238 284 238" stroke="#d1d5db" stroke-width="2" fill="none"/>
-    <polygon points="290,238 281,234 281,242" fill="#d1d5db"/>
-    <path d="M 570 118 C 605 118 605 176 634 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
-    <polygon points="640,176 631,172 631,180" fill="#d1d5db"/>
-    <path d="M 570 238 C 605 238 605 176 634 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
-    <polygon points="640,176 631,172 631,180" fill="#d1d5db"/>
-    <path d="M 880 176 L 934 176" stroke="#d1d5db" stroke-width="2" fill="none"/>
-    <polygon points="940,176 931,172 931,180" fill="#d1d5db"/>
+    <path d="M 200 224 C 220 224 220 114 234 114" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="240,114 231,110 231,118" fill="#d1d5db"/>
+    <path d="M 200 224 L 234 224" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="240,224 231,220 231,228" fill="#d1d5db"/>
+    <path d="M 200 224 C 220 224 220 334 234 334" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="240,334 231,330 231,338" fill="#d1d5db"/>
+    <path d="M 510 114 L 530 114 M 510 224 L 530 224 M 510 334 L 530 334 M 530 114 L 530 334" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <circle cx="530" cy="136" r="3.5" fill="#d1d5db"/>
+    <circle cx="530" cy="314" r="3.5" fill="#fbbf24"/>
+    <path d="M 530 136 L 554 136" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="560,136 551,132 551,140" fill="#d1d5db"/>
+    <path d="M 530 314 L 554 314" stroke="#fbbf24" stroke-width="2" fill="none" stroke-dasharray="5 3"/>
+    <polygon points="560,314 551,310 551,318" fill="#fbbf24"/>
+    <path d="M 850 136 L 884 136" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="890,136 881,132 881,140" fill="#d1d5db"/>
+    <path d="M 850 314 L 884 314" stroke="#d1d5db" stroke-width="2" fill="none"/>
+    <polygon points="890,314 881,310 881,318" fill="#d1d5db"/>
   </g>
 
-  <text x="600" y="352" text-anchor="middle" class="small">
-    Medir si una nueva versión de un skill o de un prompt es realmente mejor, con datos reales, sin publicar ni romper nada.
+  <text x="600" y="442" text-anchor="middle" class="small">
+    Repite un paso con datos reales, tal cual o con otro agente, modelo, prompt o skills, sin publicar ni romper nada.
   </text>
 </svg>

@@ -197,7 +197,12 @@ pub async fn track_outcome(
         let id = config_id.to_string();
         let cleared = state
             .db
-            .with_conn(move |conn| crate::db::mcps::clear_auth_failure(conn, &id))
+            .with_conn(move |conn| {
+                // KT-1692: the token worked now — the date a connection without
+                // a probe shows as "last good call".
+                crate::db::mcps::mark_good_call(conn, &id, chrono::Utc::now())?;
+                crate::db::mcps::clear_auth_failure(conn, &id)
+            })
             .await;
         if let Err(error) = cleared {
             tracing::warn!(target: "kronn::api_auth", "clearing the auth flag failed: {error}");
@@ -598,6 +603,15 @@ mod tests {
             failure(&state).await.is_none(),
             "a working token unflags it"
         );
+        // KT-1692: and dates the last good call.
+        let check = state
+            .db
+            .with_conn(|conn| crate::db::mcps::get_token_check(conn, "cfg-gh"))
+            .await
+            .unwrap()
+            .expect("the good call is recorded");
+        assert!(check.last_good_at.is_some());
+        assert_eq!(check.checked_at, None, "a call is not a probe");
     }
 
     #[tokio::test]

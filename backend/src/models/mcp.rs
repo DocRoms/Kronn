@@ -589,6 +589,69 @@ pub struct McpConfigDisplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub auth_failure: Option<McpAuthFailure>,
+    /// KT-1692 — true when Kronn can probe this connection's token (a declared
+    /// or selected test endpoint). Without one the card shows the last good
+    /// call instead of a check.
+    #[serde(default)]
+    pub token_probe: bool,
+    /// KT-1692 — the last proactive check and the last time the token worked.
+    /// `None` when the connection was never probed and never called.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub token_check: Option<McpTokenCheck>,
+}
+
+/// What a proactive token probe found (KT-1692).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum McpTokenCheckOutcome {
+    /// The provider accepted the token.
+    Ok,
+    /// The provider refused the token: the connection is flagged (KT-1524).
+    Refused,
+    /// The probe could not tell (network, 5xx, missing scope, bad config): the
+    /// token is neither cleared nor flagged.
+    Inconclusive,
+}
+
+/// The proactive check of one connection (KT-1692).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpTokenCheck {
+    /// RFC3339 time of the last probe; `None` when never probed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub checked_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub outcome: Option<McpTokenCheckOutcome>,
+    /// What the probe said, redacted and truncated.
+    pub detail: String,
+    /// RFC3339 time of the last good probe or real call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_good_at: Option<String>,
+}
+
+/// `POST /api/mcps/configs/{id}/check-token` and `POST /api/mcps/check-tokens`
+/// (KT-1692): one connection's answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpTokenCheckResult {
+    pub config_id: String,
+    /// The stored check after this request.
+    pub check: McpTokenCheck,
+    /// True when the probe was skipped because the connection was probed a
+    /// moment ago: `check` is then the previous answer.
+    pub rate_limited: bool,
+}
+
+/// `POST /api/mcps/check-tokens`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpTokenCheckAllResponse {
+    pub results: Vec<McpTokenCheckResult>,
 }
 
 /// Why an API connection's credentials are refused (KT-1524).

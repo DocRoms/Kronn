@@ -1075,6 +1075,27 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "294_external_api_tools_enabled",
         include_str!("sql/294_external_api_tools_enabled.sql"),
     ),
+    (
+        "295_agent_fallback",
+        include_str!("sql/295_agent_fallback.sql"),
+    ),
+    ("296_step_shadows", include_str!("sql/296_step_shadows.sql")),
+    (
+        "297_contact_pairing_secrets",
+        include_str!("sql/297_contact_pairing_secrets.sql"),
+    ),
+    (
+        "298_contact_pairing_offer_contact",
+        include_str!("sql/298_contact_pairing_offer_contact.sql"),
+    ),
+    (
+        "299_step_shadow_merges",
+        include_str!("sql/299_step_shadow_merges.sql"),
+    ),
+    (
+        "300_mcp_token_checks",
+        include_str!("sql/300_mcp_token_checks.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
@@ -1156,6 +1177,10 @@ fn apply_migration(tx: &rusqlite::Transaction<'_>, name: &str, sql: &str) -> Res
     if name == "293_kt1656_scrub_stored_credentials" {
         // Needs Kronn's redaction patterns, which SQL cannot call.
         crate::db::credential_scrub::scrub_known_shapes(tx)?;
+    }
+    if name == "296_step_shadows" {
+        // Reads each workflow's steps to place its shadow, which SQL cannot do.
+        crate::workflows::shadow::migrate_workflow_shadows(tx)?;
     }
     Ok(())
 }
@@ -3240,6 +3265,69 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reply_to.as_deref(), Some("u-1"));
+    }
+
+    /// KT-1650 (owner decision: existing contacts RE-PAIR) — a contact made before
+    /// pairing secrets keeps its row but is neither dialled nor admitted, and no
+    /// public value stands in for the secret it never got.
+    #[test]
+    fn contacts_without_pairing_secrets_must_pair_again_on_upgrade() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "294_external_api_tools_enabled").unwrap();
+        for (id, status) in [
+            ("c-acc", "accepted"),
+            ("c-pen", "pending"),
+            ("c-req", "requested"),
+            ("c-ref", "refused"),
+        ] {
+            conn.execute(
+                "INSERT INTO contacts (id, pseudo, kronn_url, invite_code, status, created_at, updated_at)
+                 VALUES (?1, ?1, 'http://10.0.0.1:3456', ?2, ?3, '2026-11-10T00:00:00Z', '2026-11-10T00:00:00Z')",
+                rusqlite::params![id, format!("kronn:{id}@10.0.0.1:3456"), status],
+            )
+            .unwrap();
+        }
+
+        run(&conn).unwrap();
+
+        let status = |id: &str| -> String {
+            conn.query_row("SELECT status FROM contacts WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(status("c-acc"), "needs_repair");
+        assert_eq!(status("c-pen"), "needs_repair");
+        assert_eq!(
+            status("c-req"),
+            "requested",
+            "a request never had a secret to lose"
+        );
+        assert_eq!(status("c-ref"), "refused");
+        for id in ["c-acc", "c-pen", "c-req", "c-ref"] {
+            assert!(!crate::db::contacts::is_paired(&conn, id).unwrap(), "{id}");
+            assert!(
+                crate::db::contacts::outbound_secret(&conn, id)
+                    .unwrap()
+                    .is_none(),
+                "{id}"
+            );
+        }
+        assert!(!crate::db::contacts::dials_outbound(&status("c-acc")));
+        for presented in ["", "kronn:c-acc@10.0.0.1:3456"] {
+            assert!(
+                !matches!(
+                    crate::db::contacts::authenticate_peer(
+                        &conn,
+                        "kronn:c-acc@10.0.0.1:3456",
+                        presented
+                    )
+                    .unwrap(),
+                    crate::db::contacts::InviteAuth::Accepted(_)
+                ),
+                "{presented:?}"
+            );
+        }
     }
 
     /// KT-1656 — the upgrade masks the vendor-shaped credentials that agent output

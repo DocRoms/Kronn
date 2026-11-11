@@ -25,6 +25,7 @@ import {
   Folder, ChevronRight, Plus, X, MessageSquare, Archive, Search,
   Filter, Users2, Trash2, CheckCheck, Columns3, ListChecks, LogIn,
   Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown, LayoutGrid, Bot,
+  RefreshCw, Copy,
 } from 'lucide-react';
 import { ASSISTANT_CONVERSATIONS_CHANGED } from './assistantConversation';
 
@@ -63,6 +64,10 @@ export interface DiscussionSidebarProps {
    *  and updates sendingMap on success. */
   onStopDiscussion?: (discId: string) => void;
   onContactAdd: (code: string) => Promise<void>;
+  /** Re-pair a `needs_repair` contact: returns a pairing code issued for that
+   *  contact only (it cannot pair anybody else). Optional — the action is
+   *  hidden when absent. */
+  onContactRepair?: (contactId: string) => Promise<string>;
   /** Unified "join by code": resolves a kr-join token local OR cross-instance
    *  (mirrors the disc back over WS) and opens it. Rejects with a message on
    *  failure (expired / not found). Optional — the button is hidden when absent. */
@@ -173,6 +178,7 @@ export function DiscussionSidebar({
   onClose,
   onStopDiscussion,
   onContactAdd,
+  onContactRepair,
   onJoinByCode,
   onStartChat,
   onContactDelete,
@@ -215,6 +221,8 @@ export function DiscussionSidebar({
   const [showArchives, setShowArchives] = useState(false);
   const [archivedVisibleCount, setArchivedVisibleCount] = useState(50);
   const [showAddContact, setShowAddContact] = useState(false);
+  // Pairing codes issued for contacts being re-paired, by contact id.
+  const [repairCodes, setRepairCodes] = useState<Record<string, string>>({});
   const [addContactCode, setAddContactCode] = useState('');
   const [showJoin, setShowJoin] = useState(false);
   const [joinCode, setJoinCode] = useState('');
@@ -458,10 +466,23 @@ export function DiscussionSidebar({
       await onContactAdd(addContactCode.trim());
       setAddContactCode('');
       setShowAddContact(false);
-    } catch {
-      toast(t('contacts.addError'), 'error');
+    } catch (error) {
+      // The backend says why (bare invite code, peer unreachable, already paired…).
+      const reason = error instanceof Error && error.message ? `: ${error.message}` : '';
+      toast(`${t('contacts.addError')}${reason}`, 'error');
     } finally {
       addContactInFlightRef.current = false;
+    }
+  };
+
+  const handleContactRepair = async (contactId: string) => {
+    if (!onContactRepair) return;
+    try {
+      const code = await onContactRepair(contactId);
+      setRepairCodes(prev => ({ ...prev, [contactId]: code }));
+    } catch (error) {
+      const reason = error instanceof Error && error.message ? `: ${error.message}` : '';
+      toast(`${t('contacts.repairError')}${reason}`, 'error');
     }
   };
 
@@ -1623,6 +1644,9 @@ export function DiscussionSidebar({
                 {c.status === 'pending' && !contactsOnline[c.id] && (
                   <span className="disc-contact-pending" title="Contact injoignable — vérifiez que les deux machines sont sur le même réseau">{t('contacts.pending')}</span>
                 )}
+                {c.status === 'needs_repair' && (
+                  <span className="disc-contact-pending" title={t('contacts.needsRepairHint')}>{t('contacts.needsRepair')}</span>
+                )}
                 {c.status === 'requested' && (
                   <span className="disc-contact-pending" title={t('contacts.requestedHint')}>{t('contacts.requested')}</span>
                 )}
@@ -1632,7 +1656,8 @@ export function DiscussionSidebar({
               </>
             );
             return (
-              <div key={c.id} className="disc-contact-row">
+              <Fragment key={c.id}>
+              <div className="disc-contact-row">
                 {onStartChat ? (
                   <button
                     type="button"
@@ -1645,6 +1670,18 @@ export function DiscussionSidebar({
                 ) : (
                   <span className="disc-contact-open">{identity}</span>
                 )}
+                {c.status === 'needs_repair' && onContactRepair && (
+                  <button
+                    type="button"
+                    onClick={() => handleContactRepair(c.id)}
+                    className="disc-contact-del-btn"
+                    title={t('contacts.repair')}
+                    aria-label={t('contacts.repair')}
+                    data-testid={`contact-repair-${c.id}`}
+                  >
+                    <RefreshCw size={10} />
+                  </button>
+                )}
                 <button
                   onClick={() => onContactDelete(c.id)}
                   className="disc-contact-del-btn"
@@ -1653,6 +1690,27 @@ export function DiscussionSidebar({
                   <X size={10} />
                 </button>
               </div>
+              {repairCodes[c.id] && (
+                <div className="disc-contact-row" data-testid={`contact-repair-code-${c.id}`}>
+                  <code className="set-invite-code">{repairCodes[c.id]}</code>
+                  <button
+                    type="button"
+                    className="disc-contact-del-btn"
+                    title={t('disc.copy')}
+                    aria-label={t('disc.copy')}
+                    onClick={() => {
+                      navigator.clipboard.writeText(repairCodes[c.id]);
+                      toast(t('disc.copy'), 'success');
+                    }}
+                  >
+                    <Copy size={10} />
+                  </button>
+                </div>
+              )}
+              {repairCodes[c.id] && (
+                <div className="set-hint-xs">{t('contacts.repairHint')}</div>
+              )}
+              </Fragment>
             );
           })}
             </>

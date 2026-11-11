@@ -86,6 +86,7 @@ Spec: [`agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest b
 |------|---------------|
 | Backend API changes | `docs/repo-map.md`, `docs/coding-rules.md` |
 | Frontend UI changes | `docs/repo-map.md`, `docs/coding-rules.md`, `docs/architecture/ui-structure.md` |
+| PR changing the UI (before/after captures) | `docs/conventions/pull-requests.md` |
 | Add new API endpoint | `docs/repo-map.md`, `docs/architecture/overview.md` |
 | RTK / compression integration | `docs/architecture/rtk-integration.md` |
 | Workflow engine work | `docs/architecture/overview.md`, `docs/inconsistencies-tech-debt.md`, `docs/coding-rules.md` |
@@ -129,20 +130,20 @@ Never load everything "just in case".
 - Do **not** register two `.route()` calls with the same path in axum — chain methods: `.route("/path", get(h1).post(h2))`.
 - Do **not** forget `#[derive(PartialEq)]` on enums used in comparisons (`AgentType`, `MessageRole`).
 - Do **not** use the old axum 0.7 path-param syntax `:id` — axum 0.8 expects `{id}`; the old form panics on registration.
-- Do **not** wrap an extractor in `Option<Query<…>>` or `Option<ConnectInfo<…>>` — axum 0.8 dropped `OptionalFromRequestParts` for those. Use the concrete extractor with a sentinel default (`Query<…>` with `page=0` "no pagination") or wrap via `Option<Extension<…>>`.
+- Do **not** wrap an extractor in `Option<Query<…>>` or `Option<ConnectInfo<…>>` — axum 0.8 dropped `OptionalFromRequestParts` for those. Use the concrete extractor with a sentinel default (`page=0` = no pagination) or `Option<Extension<…>>`.
 - Do **not** slice `&str` with a hard-coded byte index (`&s[..N]`) when truncating user/agent text — UTF-8 (French, emoji, accented filenames) panics at non-boundary bytes. Use `s.chars().take(N).collect::<String>()` instead.
 - Do **not** rely on `disabled={state}` alone to gate an async button handler — React's state update is async, so two synchronous clicks read the stale closure and fire two API calls. Use `useRef` + check at top of handler. Helper: `useAsyncGuard` in `frontend/src/hooks/useAsyncGuard.ts`.
-- Do **not** nest a `<button>` inside another `<button>` — invalid HTML and produces a React dev warning. Convert the outer to `<div role="button" tabIndex={0}>` with explicit `onKeyDown` for Enter/Space.
+- Do **not** nest a `<button>` inside another `<button>` — invalid HTML, React warns. Convert the outer to `<div role="button" tabIndex={0}>` with explicit `onKeyDown` for Enter/Space.
 ---
 
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
 - **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must be running, Vite is auto-spawned). Fixtures, page objects and specs: `frontend/e2e/README.md`.
-- **Release versions are mechanically synchronized**: use `make bump V=x.y.z`,
-  then `make check-version` before tagging. The guard compares `VERSION`, app
-  manifests and lockfiles, the first changelog release, both READMEs (including
-  clone commands), and the FR/EN/ES public site; CI runs the same check.
+- **Release versions are mechanically synchronized**: `make bump V=x.y.z`, then
+  `make check-version` before tagging. The guard compares `VERSION`, manifests,
+  lockfiles, the first changelog release, both READMEs and the FR/EN/ES public
+  site; CI runs it too.
   `[src: file: Makefile:541-589#bump]`
   `[src: file: scripts/check-version-sync.sh:1-106]`
 - **Type generation**: Rust models are the source of truth. TypeScript types are auto-generated via `ts-rs`.

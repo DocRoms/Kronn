@@ -76,7 +76,7 @@ alone does not establish a user-visible duration.
    There is a per-message
    200,000-character fallback that avoids this Markdown path for very large
    individual messages; it does not cap the count of ordinary messages.
-   [src: file: frontend/src/components/MessageBubble.tsx:2002-2009#MAX_MARKDOWN_CHARS]
+   [src: file: frontend/src/components/MessageBubble.tsx:2008-2015#MAX_MARKDOWN_CHARS]
 5. The active-detail change also triggers an effect that filters the complete
    array to mark the discussion seen.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:1959-1973#markDiscussionSeen]

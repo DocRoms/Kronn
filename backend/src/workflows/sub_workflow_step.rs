@@ -458,11 +458,8 @@ pub async fn execute_sub_workflow_step(
     if parent_resumes_quota {
         trigger.insert(super::quota_wait::PARENT_RESUMES_KEY.into(), json!(true));
     }
-    if super::shadow::parent_is_shadow(state, parent_run_id).await {
-        trigger.insert(
-            super::shadow::VARIANT_KEY.into(),
-            json!(super::shadow::SHADOW),
-        );
+    if let Some(variant) = super::shadow::parent_variant(state, parent_run_id).await {
+        trigger.insert(super::shadow::VARIANT_KEY.into(), json!(variant));
     }
     // Its variables were resolved when it started: a resume neither resolves
     // them again nor moves the child to another concurrency bucket.
@@ -1020,7 +1017,7 @@ async fn execute_foreach(
     start: Instant,
     launch: ChildLaunch<'_>,
 ) -> StepOutcome {
-    let parent_shadow = super::shadow::parent_is_shadow(state, parent_run_id).await;
+    let parent_variant = super::shadow::parent_variant(state, parent_run_id).await;
     // The fan-out is defined around the SHARED worktree (the items file +
     // current_task.json + the children's commits all live there).
     let ws = match parent_workspace {
@@ -1417,11 +1414,8 @@ async fn execute_foreach(
         if parent_resumes_quota {
             tctx.insert(super::quota_wait::PARENT_RESUMES_KEY.into(), json!(true));
         }
-        if parent_shadow {
-            tctx.insert(
-                super::shadow::VARIANT_KEY.into(),
-                json!(super::shadow::SHADOW),
-            );
+        if let Some(variant) = &parent_variant {
+            tctx.insert(super::shadow::VARIANT_KEY.into(), json!(variant));
         }
         for (k, v) in current_task_template_vars(item) {
             tctx.insert(k, serde_json::Value::String(v));
@@ -1590,6 +1584,7 @@ async fn execute_foreach(
                     Some(st) if st.tier.is_none() => st.tier = Some(tier),
                     None => {
                         s.agent_settings = Some(crate::models::AgentSettings {
+                            fallback: None,
                             tools: None,
                             model: None,
                             tier: Some(tier),
@@ -1858,7 +1853,6 @@ mod tests {
         let child_wf = crate::models::Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: "child-wf".into(),

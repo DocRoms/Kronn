@@ -1,4 +1,5 @@
 pub mod adr;
+pub mod agent_fallback;
 pub mod agent_orphans;
 pub mod agent_skill;
 pub mod anti_halluc;
@@ -154,10 +155,12 @@ pub mod td_review;
 pub mod td_tasks;
 pub mod template_manifest;
 pub mod timezone;
+pub mod token_checks;
 pub mod totp;
 pub mod trust;
 pub mod trust_proof;
 pub mod trust_sandbox;
+pub mod ui_captures;
 pub mod upstream_mirror;
 pub mod usage;
 pub mod user_context;
