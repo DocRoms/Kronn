@@ -959,6 +959,9 @@ pub fn claim_with_limits(
     .map_err(anyhow::Error::from)
     .and_then(|claimed| {
         if claimed.is_some() {
+            // KT-1689 — the worker's turn starts here, not when it was queued:
+            // the silent-worker clock restarts at the claim.
+            let _ = super::orchestration::note_dispatch_activity(conn, id);
             return Ok(claimed);
         }
 
@@ -1185,6 +1188,10 @@ pub fn mark_agent_started(conn: &Connection, id: &str) -> Result<bool> {
                    )",
             [id],
         )?;
+    }
+    if changed > 0 {
+        // KT-1689 — the agent really starts: the silent-worker clock starts too.
+        let _ = super::orchestration::note_dispatch_activity(conn, id);
     }
     Ok(changed > 0)
 }
