@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
+    let out = crate::core::cmd::git_cmd()
         .args([
             "-c",
             "user.name=t",
