@@ -182,26 +182,29 @@ fn existing_clear_copies_are_sealed_once_at_start() {
     assert_eq!(names(d), after);
 }
 
-/// A copy that cannot be written (full disk) stays as it is, key line and all,
-/// and the next start converts it; it is never deleted for the failure.
+/// A copy that cannot be sealed (full disk) is cut down to its key line, never
+/// kept whole; the next start seals what is left.
 #[test]
-fn a_copy_that_cannot_be_sealed_is_kept_and_retried() {
+fn a_copy_that_cannot_be_sealed_is_cut_down_and_retried() {
     let (dir, key) = dir_with_key();
     let d = dir.path();
-    let text = format!(
-        "encryption_secret = \"{}\"\n{LEAKY}",
-        crypto::generate_secret()
-    );
+    let k = crypto::generate_secret();
+    let text = format!("encryption_secret = \"{k}\"\n{LEAKY}");
     std::fs::write(d.join("config.toml.backup"), &text).unwrap();
     // The temp file of the write cannot be created.
     std::fs::create_dir(d.join(".config.toml.backup.enc.tmp")).unwrap();
 
     let report = protect_clear_copies(d, Some(&key));
-    assert_eq!(report.failures.len(), 1, "{report:?}");
+    assert_eq!(
+        (report.reduced, report.failures.len()),
+        (1, 0),
+        "{report:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
-        text
+        format!("encryption_secret = \"{k}\"\n")
     );
+    assert!(files_holding(d, NEEDLES, &[]).is_empty());
     assert!(!d.join("config.toml.backup.enc").exists());
 
     std::fs::remove_dir(d.join(".config.toml.backup.enc.tmp")).unwrap();
@@ -209,7 +212,35 @@ fn a_copy_that_cannot_be_sealed_is_kept_and_retried() {
     assert_eq!((report.sealed, report.failures.len()), (1, 0), "{report:?}");
     assert!(!d.join("config.toml.backup").exists());
     assert_eq!(
-        open_sealed(&d.join("config.toml.backup.enc"), &[key]).unwrap(),
+        open_sealed(
+            &d.join("config.toml.backup.enc"),
+            std::slice::from_ref(&key)
+        )
+        .unwrap(),
+        format!("encryption_secret = \"{k}\"\n")
+    );
+    assert_eq!(protect_clear_copies(d, Some(&key)), Protected::default());
+}
+
+/// A copy that can be neither sealed nor cut down stays as it is and is
+/// reported (the boot never panics); the next start retries.
+#[test]
+fn a_copy_that_can_be_neither_sealed_nor_cut_down_is_left_and_reported() {
+    let (dir, key) = dir_with_key();
+    let d = dir.path();
+    let text = format!(
+        "encryption_secret = \"{}\"\n{LEAKY}",
+        crypto::generate_secret()
+    );
+    std::fs::write(d.join("config.toml.backup"), &text).unwrap();
+    // Both writes use the same temp name when a directory holds it.
+    std::fs::create_dir(d.join(".config.toml.backup.enc.tmp")).unwrap();
+    std::fs::create_dir(d.join(".config.toml.backup.tmp")).unwrap();
+
+    let report = protect_clear_copies(d, Some(&key));
+    assert_eq!(report.failures.len(), 1, "{report:?}");
+    assert_eq!(
+        std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
         text
     );
 }

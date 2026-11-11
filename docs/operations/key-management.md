@@ -258,8 +258,10 @@ Safe to interrupt at any point; a rerun converges:
    `config.toml.retired-key.<timestamp>`, and the temp files of the old
    writers): encrypted whole, the clear file removed only once the encrypted
    one is written and read back. A copy that cannot be written (full disk) is
-   left as it is, logged, and retried at the next start; one failure does not
-   stop the others. The key lookup tells three cases apart. A key is found:
+   cut down to its `encryption_secret` line (every credential lives in the
+   encrypted store, so only that key line is irreplaceable) and the encryption
+   is retried at the next start; if the cut-down write fails too, the file is
+   left as it is and logged once. One failure does not stop the others. The key lookup tells three cases apart. A key is found:
    everything is encrypted under it. The lookup stops at the first store that
    cannot be read: a lower store (a key file left behind) may hold an older key
    than the locked one above it, so it never stands in for it; a value that is

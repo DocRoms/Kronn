@@ -26,8 +26,8 @@
 //! one thing a later start needs to recover) or dropped; when the stores cannot
 //! be read, the copies are left exactly as they are and the next start or unlock
 //! retries. A clear copy found at start (written by 0.15.x) is converted once by
-//! [`protect_copies`]; a copy that cannot be written is left as it is and
-//! retried at the next start, never deleted for it (a key may sit in it).
+//! [`protect_copies`]; a copy that cannot be written is cut down to its key
+//! line (the one value that exists nowhere else) and sealed at the next start.
 
 use std::path::{Path, PathBuf};
 
@@ -335,8 +335,9 @@ pub fn protect_copies(dir: &Path, sealing: &Sealing) -> Protected {
 /// Convert every clear copy of config.toml in `dir` once, idempotently: sealed
 /// under `key_hex` when there is one; else (`None`: the caller PROVED that no
 /// key exists, see [`protect_copies`]) cut down to its key line, or dropped when
-/// it has none. A copy whose conversion fails is left untouched and reported in
-/// `failures`; the next start retries.
+/// it has none. A copy that cannot be sealed while a key exists is cut down the
+/// same way (counted in `reduced`) and sealed at the next start; only when that
+/// cut-down fails too is it left untouched and reported in `failures`.
 pub fn protect_clear_copies(dir: &Path, key_hex: Option<&str>) -> Protected {
     let mut report = Protected::default();
     remove_old_temps(dir, &mut report);
@@ -381,23 +382,51 @@ fn protect_one(dir: &Path, copy: &ConfigCopy, key_hex: Option<&str>) -> Result<D
     // Looked at for a key line only; what is sealed is the raw bytes.
     let text = String::from_utf8_lossy(&bytes).into_owned();
     if let Some(key) = key_hex {
-        // The sealed name is free unless a crash left both forms: then the
-        // clear one is sealed under a name of its own.
-        let sealed_name = if dir
-            .join(format!("{}{SEALED_SUFFIX}", copy.name))
-            .symlink_metadata()
-            .is_ok()
-        {
-            free_name(dir, &format!("{}.{}", copy.name, stamp()), SEALED_SUFFIX)
-        } else {
-            format!("{}{SEALED_SUFFIX}", copy.name)
+        return match seal_and_remove(dir, copy, &bytes, key) {
+            Ok(()) => Ok(Done::Sealed),
+            // The seal failed (full disk, ...) while a key exists: the clear copy
+            // is not kept whole. Only its key line is irreplaceable (every
+            // credential lives in the encrypted store), so it is cut down exactly
+            // as when no key exists; the next start seals what is left. When the
+            // cut-down fails too, the copy stays as it is and the failure is
+            // reported once.
+            Err(e) => match reduce(dir, copy, &text) {
+                Ok(done) => {
+                    tracing::warn!(
+                        "{} could not be encrypted ({e:#}); it was cut down to its key line, \
+                         the next start retries",
+                        copy.name
+                    );
+                    Ok(done)
+                }
+                Err(cut) => Err(e.context(format!("and it could not be cut down: {cut:#}"))),
+            },
         };
-        let target = dir.join(&sealed_name);
-        write_sealed(dir, &target, &bytes, key)?;
-        remove(&copy.path)?;
-        return Ok(Done::Sealed);
     }
-    match key_of(&text) {
+    reduce(dir, copy, &text)
+}
+
+/// Encrypt the raw `bytes` of `copy` under `key` and remove the clear file once
+/// the encrypted one is written and read back.
+fn seal_and_remove(dir: &Path, copy: &ConfigCopy, bytes: &[u8], key: &str) -> Result<()> {
+    // The sealed name is free unless a crash left both forms: then the
+    // clear one is sealed under a name of its own.
+    let sealed_name = if dir
+        .join(format!("{}{SEALED_SUFFIX}", copy.name))
+        .symlink_metadata()
+        .is_ok()
+    {
+        free_name(dir, &format!("{}.{}", copy.name, stamp()), SEALED_SUFFIX)
+    } else {
+        format!("{}{SEALED_SUFFIX}", copy.name)
+    };
+    write_sealed(dir, &dir.join(&sealed_name), bytes, key)?;
+    remove(&copy.path)
+}
+
+/// Cut a clear copy down to its key line, or drop it when it has none.
+fn reduce(dir: &Path, copy: &ConfigCopy, text: &str) -> Result<Done> {
+    match key_of(text) {
         Some(key) => {
             let only = key_only(&key);
             if text == only {
