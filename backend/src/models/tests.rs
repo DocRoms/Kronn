@@ -535,6 +535,7 @@ fn ws_message_presence_round_trip() {
     let msg = WsMessage::Presence {
         from_pseudo: "PeerAlpha".into(),
         from_invite_code: "kronn:PeerAlpha@100.64.1.5:3456".into(),
+        from_secret: String::new(),
         online: true,
     };
     let json = serde_json::to_string(&msg).unwrap();
@@ -584,6 +585,7 @@ fn ws_message_presence_offline() {
     let msg = WsMessage::Presence {
         from_pseudo: "PeerBeta".into(),
         from_invite_code: "kronn:PeerBeta@10.0.0.2:3456".into(),
+        from_secret: String::new(),
         online: false,
     };
     let json = serde_json::to_string(&msg).unwrap();
@@ -812,6 +814,8 @@ fn workflow_step_api_call_roundtrip() {
         delay_after_secs: None,
         skill_ids: vec![],
         external_effect: false,
+        shadows: Vec::new(),
+        shadow_merge: None,
         profile_ids: vec![],
         directive_ids: vec![],
         batch_quick_prompt_id: None,
@@ -860,6 +864,7 @@ fn workflow_step_api_call_roundtrip() {
         transform_data: None,
         page_publish: None,
         task_board: None,
+        decide: None,
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,

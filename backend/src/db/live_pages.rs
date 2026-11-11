@@ -2003,7 +2003,6 @@ mod tests {
         let workflow = crate::models::Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             id: "wf-old-slug".into(),
             name: "Feeder".into(),
@@ -2048,9 +2047,27 @@ mod tests {
     }
 }
 
+/// Per enabled shadow of a step, what `pick` says it loads for a resource.
+fn shadow_versions(
+    step: &crate::models::WorkflowStep,
+    pick: impl Fn(&crate::models::StepShadow) -> Option<String>,
+) -> Vec<crate::models::LivePageResourceShadow> {
+    step.shadows
+        .iter()
+        .filter(|shadow| shadow.enabled)
+        .filter_map(|shadow| {
+            Some(crate::models::LivePageResourceShadow {
+                shadow_id: shadow.id.clone(),
+                label: shadow.display_label().to_string(),
+                version: pick(shadow)?,
+            })
+        })
+        .collect()
+}
+
 /// The Quick Prompts and skills behind a Page (KT-1450): those its publishing
 /// workflows, the workflows its actions launch, and their sub-workflows use,
-/// with what each lane (normal, shadow) loads.
+/// with what the normal execution and each shadow of a step loads.
 pub fn list_live_page_resources(
     conn: &Connection,
     page_id_or_slug: &str,
@@ -2130,7 +2147,6 @@ pub fn list_live_page_resources(
         let Some(workflow) = all.get(&workflow_id) else {
             continue;
         };
-        let shadow = workflow.shadow.as_ref().filter(|s| s.enabled);
         for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
             if let Some(child) = &step.sub_workflow_id {
                 queue.push(child.clone());
@@ -2161,9 +2177,20 @@ pub fn list_live_page_resources(
                     workflow_name: workflow.name.clone(),
                     step_name: step.name.clone(),
                     normal: pinned.map(|index| format!("v{index}")),
-                    shadow: shadow
-                        .and_then(|s| s.quick_prompt_versions.get(qp_id))
-                        .map(|n| format!("v{n}")),
+                    shadows: shadow_versions(step, |shadow| {
+                        shadow
+                            .quick_prompt_versions
+                            .get(qp_id)
+                            .map(|n| format!("v{n}"))
+                            .or_else(|| match &shadow.prompt {
+                                Some(crate::models::ShadowPrompt::QuickPrompt { id, version })
+                                    if id == qp_id =>
+                                {
+                                    Some(version.map_or_else(String::new, |n| format!("v{n}")))
+                                }
+                                _ => None,
+                            })
+                    }),
                 };
                 add("quick_prompt", qp_id, name, latest, Some(used));
             }
@@ -2176,10 +2203,11 @@ pub fn list_live_page_resources(
                     workflow_name: workflow.name.clone(),
                     step_name: step.name.clone(),
                     normal: Some(skill_id.clone()),
-                    shadow: shadow.and_then(|s| {
-                        s.skills
+                    shadows: shadow_versions(step, |shadow| {
+                        shadow
+                            .skills
                             .get(&skill_id)
-                            .or_else(|| s.skills.get(&base))
+                            .or_else(|| shadow.skills.get(&base))
                             .cloned()
                     }),
                 };

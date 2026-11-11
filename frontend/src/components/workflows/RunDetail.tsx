@@ -17,6 +17,8 @@ import { formatBytes } from '../../lib/live-page-weight';
 import { useHeavyOutputThreshold } from '../../hooks/useHeavyOutputThreshold';
 import { HeavyOutputBadge, HeavyOutputNotice, SourceWeights } from './HeavyOutput';
 import { CopyIdPill } from '../CopyIdPill';
+import { splitStepNotices } from '../../lib/fallbackNotice';
+import { FallbackNoticeLine } from '../FallbackNoticeLine';
 import { authRefusalSentence, runAuthRefusals } from '../../lib/authRefusal';
 import {
   runStatusTimeline,
@@ -924,6 +926,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'TransformData' ? 'data'
                       : ws_step.step_type.type === 'PublishPageData' ? 'page'
                       : ws_step.step_type.type === 'TaskBoard' ? 'data'
+                      : ws_step.step_type.type === 'Decide' ? 'gate'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'subwf'
                       : ws_step.step_type.type === 'TriggerWorkflow' ? 'subwf'
                       : 'agent'
@@ -939,6 +942,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'TransformData' ? 'TRANSFORM'
                       : ws_step.step_type.type === 'PublishPageData' ? 'PAGE'
                       : ws_step.step_type.type === 'TaskBoard' ? 'BOARD'
+                      : ws_step.step_type.type === 'Decide' ? 'DECIDE'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'SUB-WF'
                       : ws_step.step_type.type === 'TriggerWorkflow' ? 'TRIGGER'
                       : 'AGENT'}
@@ -1264,9 +1268,18 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       <HeavyOutputNotice stepName={sr.step_name} bytes={outputBytes} sources={sourceWeights} />
                     )}
                     {!heavyOutput && <SourceWeights sources={sourceWeights} />}
-                    <div className="wf-step-output-code">
-                      {sr.output || t('wf.noOutput')}
-                    </div>
+                    {(() => {
+                      // KT-1518 — the step moved on its agent's fallback chain.
+                      const { notices, rest } = splitStepNotices(sr.output ?? '');
+                      return (
+                        <>
+                          {notices.map((notice, at) => <FallbackNoticeLine key={at} notice={notice} />)}
+                          <div className="wf-step-output-code">
+                            {(notices.length > 0 ? rest : sr.output) || t('wf.noOutput')}
+                          </div>
+                        </>
+                      );
+                    })()}
                     <div className="flex-row gap-6 mt-3 text-xs text-faint">
                       <span>{t('wf.status')}: <span style={{ color: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}>{sr.status}</span></span>
                       {sr.duration_ms > 0 && <span>{t('wf.duration')}: {(sr.duration_ms / 1000).toFixed(1)}s</span>}

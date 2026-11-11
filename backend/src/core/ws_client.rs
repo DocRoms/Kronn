@@ -172,6 +172,7 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
                 let _ = state.ws_broadcast.send(WsMessage::Presence {
                     from_pseudo: contact.pseudo.clone(),
                     from_invite_code: contact.invite_code.clone(),
+                    from_secret: String::new(),
                     online: true,
                 });
 
@@ -183,6 +184,7 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
                 let _ = state.ws_broadcast.send(WsMessage::Presence {
                     from_pseudo: contact.pseudo.clone(),
                     from_invite_code: contact.invite_code.clone(),
+                    from_secret: String::new(),
                     online: false,
                 });
 
@@ -263,9 +265,26 @@ where
             return false;
         }
     };
+    // The secret this contact was paired with proves who we are; the invite
+    // code only names us. A contact without one must re-pair (KT-1650).
+    let id = contact_id.to_owned();
+    let secret = state
+        .db
+        .with_conn(move |conn| crate::db::contacts::outbound_secret(conn, &id))
+        .await
+        .ok()
+        .flatten();
+    let Some(secret) = secret else {
+        tracing::warn!(
+            "WS client: contact {contact_id} has no pairing secret, not announcing. {}",
+            crate::db::contacts::REPAIR_HINT
+        );
+        return false;
+    };
     let presence_msg = WsMessage::Presence {
         from_pseudo: our_pseudo,
         from_invite_code: our_invite_code,
+        from_secret: secret,
         online: true,
     };
     if !send_if_authorized(ws_sender, state, peer, &presence_msg).await {
@@ -412,7 +431,18 @@ async fn handle_peer_connection(
             };
             let text = match msg {
                 tungstenite::Message::Text(text) => text,
-                tungstenite::Message::Close(_) => break,
+                tungstenite::Message::Close(frame) => {
+                    // A peer that refuses us says how to re-pair: show it to the
+                    // operator instead of retrying in silence.
+                    if let Some(frame) = frame.filter(|f| !f.reason.is_empty()) {
+                        tracing::warn!(
+                            "WS client: peer closed the connection: {} ({})",
+                            frame.reason,
+                            crate::db::contacts::REPAIR_HINT
+                        );
+                    }
+                    break;
+                }
                 _ => continue,
             };
             let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) else {

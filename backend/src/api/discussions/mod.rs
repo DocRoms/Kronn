@@ -15,6 +15,9 @@ use std::time::Duration;
 use axum::response::sse::Event;
 use futures::stream::Stream;
 
+pub(crate) mod agent_fallback;
+pub(crate) mod agent_fallback_override;
+pub(crate) mod agent_fallback_start;
 pub(crate) mod ceilings;
 #[cfg(all(test, unix, feature = "full-tests"))]
 // scripts a POSIX sh stand-in for the claude CLI (other_projects_fixture::recording_claude), which Windows cannot exec

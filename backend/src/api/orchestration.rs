@@ -9741,7 +9741,7 @@ fn build_review_findings_message(
     };
     orchestrator_message(
         format!("orch-review-findings:{exec_id}:{attempt_no}"),
-        content,
+        content + crate::core::ui_captures::retake_hint(lang),
     )
 }
 
@@ -11560,9 +11560,8 @@ fn worker_brief_markdown_in(
          l'intégration.\n\n"
             .to_string()
     };
-    // KT-1669 — a lane re-anchors only the citations its own gate reads. The
-    // integration settles a conflict that is only citation line numbers, so a
-    // lane never rewrites the target's anchors to avoid one.
+    // KT-1669 — a lane re-anchors only the citations its own gate reads; the
+    // integration settles a citation-only conflict, never the lane.
     let citations = if !fr {
         "## Doc citations\n\
          Keep the `[src:]` citations of the docs you edit resolving: that is your own \
@@ -11582,6 +11581,7 @@ fn worker_brief_markdown_in(
          renvoyer ton travail. Une citation que ton changement casse pour de bon (symbole \
          supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
     };
+    let ui_captures = crate::core::ui_captures::brief_section(lang);
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -11603,7 +11603,7 @@ fn worker_brief_markdown_in(
              is done by Kronn AFTER review.\n\
              - Stay within the DoD's scope.\n\n\
              {target_integration}\
-             {citations}\
+             {citations}{ui_captures}\
              ## Tests\n\
              {tests}\n\n\
              ## Workspace\n\
@@ -11644,7 +11644,7 @@ fn worker_brief_markdown_in(
          protégée est faite par Kronn APRÈS revue.\n\
          - Reste dans le périmètre de la DoD.\n\n\
          {target_integration}\
-         {citations}\
+         {citations}{ui_captures}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -49042,8 +49042,15 @@ pub(crate) mod tests {
         assert!(extended.success, "{:?}", extended.error);
         assert_eq!(exec_of(&db, &exec_id).await.max_review_rounds, 9);
     }
+
+    // KT-1518 — the agent fallback chain on a task worker.
+    mod agent_fallback_runs;
 }
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "orchestration_trust_tests.rs"]
 mod orchestration_trust_tests;
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "orchestration_ui_capture_tests.rs"]
+mod orchestration_ui_capture_tests;

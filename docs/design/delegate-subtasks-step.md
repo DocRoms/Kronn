@@ -15,7 +15,7 @@ only judgement in that loop is reading a delivery against its DoD.
 
 At 0.14.3 no workflow step could delegate: `StepType` had no variant that
 drives a task execution (0.15.0 adds `DelegateSubtasks`).
-`[src: file: backend/src/models/workflows.rs:1378-1381#DelegateSubtasks]`
+`[src: file: backend/src/models/workflows.rs:1568-1571#DelegateSubtasks]`
 
 ## 2. What already exists (and is reused as is)
 
@@ -54,7 +54,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
   `[src: file: backend/src/workflows/steps.rs:2083-2117#evaluate_conditions]`
-  `[src: file: backend/src/models/workflows.rs:1045-1049#room_id]`
+  `[src: file: backend/src/models/workflows.rs:1238-1242#room_id]`
   `[src: file: backend/src/workflows/sub_workflow_step.rs:982-999#record_foreach_done]`
 
 So the step does not need a new orchestration engine: it needs a **mechanical

@@ -204,6 +204,20 @@ pub async fn readiness(
     // ask their provider on the next engine pass (KT-1657).
     if request.force {
         crate::workflows::quota_wait::request_recheck();
+        // KT-1518 — and the agents asked about are tried again, not held back.
+        let asked = request.agents.clone();
+        if let Err(error) = state
+            .db
+            .with_conn(move |conn| {
+                for agent in &asked {
+                    crate::core::agent_fallback::clear_cooldown(conn, agent)?;
+                }
+                Ok(())
+            })
+            .await
+        {
+            tracing::warn!("agent cooldowns could not be cleared: {error}");
+        }
     }
     let context = agents::readiness::ProbeContext {
         project_id: request.project_id,

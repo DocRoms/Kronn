@@ -66,6 +66,8 @@ pub mod run_retention;
 pub mod run_state;
 pub mod schema_check;
 pub mod shared_runs;
+pub mod step_shadow_merges;
+pub mod step_shadows;
 pub mod stored_credentials;
 pub mod task_boards;
 pub mod trust;
@@ -345,6 +347,16 @@ impl Database {
             Ok(0) => {}
             Ok(n) => tracing::info!("Revoked {n} room membership(s) of workflow steps that died with the previous process"),
             Err(e) => tracing::warn!("Failed to revoke stale workflow step room memberships: {e}"),
+        }
+        match step_shadows::interrupt_running(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Marked {n} step shadow(s) interrupted by the restart"),
+            Err(e) => tracing::warn!("Failed to settle running step shadows: {e}"),
+        }
+        match step_shadow_merges::interrupt_running(&conn) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Marked {n} step merge(s) failed by the restart"),
+            Err(e) => tracing::warn!("Failed to settle running step merges: {e}"),
         }
         match shared_runs::repair_stale_workflow_projections(&conn) {
             Ok(0) => {}
