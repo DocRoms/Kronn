@@ -131,3 +131,59 @@
 .wf-unsafe-fix .qe-command {
   margin: var(--kr-sp-3) 0;
 }
+
+/* KT-1695 — « Activate all »: one confirmation for every Quick Exec that
+ * waits, each command collapsed, one checkbox per distinct program. */
+.qe-activate-all {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-3);
+}
+
+.qe-activate-all__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.3);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  line-height: 1.45;
+}
+
+.qe-activate-all__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.qe-activate-all__item summary {
+  cursor: pointer;
+  color: var(--kr-text-primary);
+}
+
+.qe-activate-all__item summary span {
+  color: var(--kr-text-secondary);
+}
+
+.qe-activate-all__item .qe-command {
+  margin-top: var(--kr-sp-2);
+}
+
+.qe-activate-all__check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  cursor: pointer;
+}
+
+.qe-activate-all__check input {
+  margin-top: var(--kr-sp-1);
+  accent-color: var(--kr-accent);
+}
