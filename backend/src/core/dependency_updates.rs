@@ -2324,7 +2324,7 @@ mod tests {
         assert_eq!(update.status, DependencyCheckStatus::Error);
         let reason = update.reason.unwrap();
         assert!(
-            reason.contains("request to https://registry.npmjs.org/ failed"),
+            reason.contains("request to https://registry.npmjs.org failed"),
             "{reason}"
         );
     }
