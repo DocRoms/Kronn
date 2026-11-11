@@ -113,6 +113,10 @@ import type {
   DbUsage,
   DbCompaction,
   SetAgentAccessRequest,
+  SetAgentFallbackRequest,
+  DiscussionFallback,
+  AgentFallback,
+  FallbackOverview,
   SetAgentMentionColorRequest,
   AgentsConfig,
   AgentEffectiveAccess,
@@ -269,7 +273,7 @@ import type {
   LivePagePublication,
   LivePageRevision,
   LivePageRevisionSummary,
-  LivePageWorkflowLink, LivePageResource, PromoteShadowRequest,
+  LivePageWorkflowLink, LivePageResource, PromoteShadowRequest, StepShadowComparison,
   LivePagesCapability,
   PublishLivePageRequest,
   PublishLivePageResult,
@@ -985,6 +989,11 @@ export const config = {
   getAgentAccessEffective: () => api<AgentEffectiveAccess[]>('GET', '/config/agent-access/effective'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
   setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
+  /** KT-1518 — every agent's fallback chain and the cooldowns still running. */
+  getAgentFallback: () => api<FallbackOverview>('GET', '/config/agent-fallback'),
+  /** Sets the whole chain of agents that take over, in order, when this one is unavailable (empty cuts it); a loop, an over-long chain or a broader access is refused with the reason. */
+  setAgentFallback: (req: SetAgentFallbackRequest) =>
+    api<FallbackOverview>('POST', '/config/agent-fallback', req),
   /** Kronn tool executor switch of an HTTP agent (KT-1600): `false` = off, `null` = the default (on). */
   setAgentTools: (req: { agent: AgentType; enabled: boolean | null }) => api<void>('POST', '/config/agent-tools', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>
@@ -1070,7 +1079,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; lane_seeds_copy_enabled?: boolean; lane_seeds_adopt_suggested?: boolean; lane_seeds_strong_confirm?: boolean; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; disk_stalled_build_days?: number; lane_seeds_copy_enabled?: boolean; lane_seeds_adopt_suggested?: boolean; lane_seeds_strong_confirm?: boolean; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1081,6 +1090,12 @@ export const contacts = {
   add: (invite_code: string) => api<AddContactResult>('POST', '/contacts', { invite_code }),
   delete: (id: string) => api<void>('DELETE', `/contacts/${id}`),
   inviteCode: () => api<string>('GET', '/contacts/invite-code'),
+  // A pairing code (invite code + fresh secret, KT-1650): the only thing that
+  // lets another instance add this one as a contact. It pairs a NEW contact;
+  // with a `contactId` it is issued for that existing contact (a re-pair) and
+  // pairs only it.
+  pairingCode: (contactId?: string) =>
+    api<string>('POST', '/contacts/pairing-offer', contactId ? { contact_id: contactId } : {}),
   ping: (id: string) => api<boolean>('GET', `/contacts/${id}/ping`),
   networkInfo: () => api<NetworkInfo>('GET', '/contacts/network-info'),
 };
@@ -2134,6 +2149,11 @@ export const discussions = {
     api<DiscussionAgentHandoffMode>('GET', `/discussions/${id}/agent-handoffs`),
   executionVariableRetention: (id: string) =>
     api<DiscussionExecutionVariableRetention>('GET', `/discussions/${id}/execution-variable-retention`),
+  /** KT-1518 — this discussion's own fallback chain (`chain_override` absent: the agent's default chain applies). */
+  fallback: (id: string) => api<DiscussionFallback>('GET', `/discussions/${id}/fallback`),
+  /** `null` removes the override; `[]` cancels the fallback in this discussion; a refused chain rejects with its reason. */
+  setFallback: (id: string, chainOverride: AgentFallback[] | null) =>
+    api<DiscussionFallback>('PUT', `/discussions/${id}/fallback`, { chain_override: chainOverride }),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Unified "join by code": paste any `kr-join-…` token and the backend
    *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend
@@ -2889,6 +2909,8 @@ export const workflows = {
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
   promoteShadow: (id: string, req: PromoteShadowRequest) => api<Workflow>('POST', `/workflows/${id}/shadow/promote`, req),
+  /** KT-1459 — per step that ran shadows, the main execution beside what each shadow was and produced. */
+  stepShadows: (id: string, runId: string) => api<StepShadowComparison[]>('GET', `/workflows/${id}/runs/${runId}/step-shadows`),
 
   /** Trigger with SSE streaming for real-time progress.
    *  0.6.0 UX pass — accepts optional `variables` payload for workflows
@@ -4251,7 +4273,7 @@ export const runsApi = {
 
 // ─── Disk (KT-1318) ───────────────────────────────────────────────────────────
 export type DiskKind = 'worktree' | 'lane_build_dir' | 'cache';
-export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign';
+export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign' | 'stalled';
 
 export interface DiskOwner {
   task_ref: string | null;
@@ -4264,8 +4286,10 @@ export interface DiskEntry {
   kind: DiskKind;
   path: string;
   name: string;
-  /** A floor when `bytes_are_partial`. */
+  /** Apparent bytes: blocks a cloned build dir shares with the seed are counted in full. A floor when `bytes_are_partial`. */
   bytes: number;
+  /** Real bytes (no other file shares them): what deleting really frees. Null when the file system cannot say. */
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   idle_seconds: number | null;
   owner: DiskOwner | null;
@@ -4279,13 +4303,18 @@ export interface DiskKindTotal {
   kind: DiskKind;
   entries: number;
   bytes: number;
+  /** Null as soon as one entry of the kind could not say. */
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   orphan_bytes: number;
+  orphan_unique_bytes: number;
 }
 
 export interface DiskPolicy {
   launch_min_free_gib: number;
   sweep_idle_hours: number;
+  /** Days a Blocked/Interrupted execution's build dir must be idle before it is purgeable. */
+  stalled_build_days: number;
   warning_gib: number;
   critical_gib: number;
 }
@@ -4296,7 +4325,10 @@ export interface DiskReport {
   policy: DiskPolicy;
   volumes: { project_id: string; project_name: string; path: string; available_bytes: number | null; total_bytes: number | null }[];
   totals: DiskKindTotal[];
+  apparent_bytes: number;
+  unique_bytes: number | null;
   orphan_bytes: number;
+  orphan_unique_bytes: number;
   orphan_count: number;
   entries: DiskEntry[];
 }
@@ -4305,6 +4337,7 @@ export interface DiskPurgeItem {
   path: string;
   purged: boolean;
   bytes: number;
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   reason: string | null;
 }
@@ -4313,7 +4346,10 @@ export interface DiskPurgeResult {
   mode: 'orphans' | 'entries';
   items: DiskPurgeItem[];
   freed_bytes: number;
+  /** What the volume really gained (unique bytes where known, else apparent). */
+  freed_unique_bytes: number;
   kept: number;
+  available_bytes_before: number | null;
   available_bytes_after: number | null;
 }
 

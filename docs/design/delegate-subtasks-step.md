@@ -15,7 +15,7 @@ only judgement in that loop is reading a delivery against its DoD.
 
 At 0.14.3 no workflow step could delegate: `StepType` had no variant that
 drives a task execution (0.15.0 adds `DelegateSubtasks`).
-`[src: file: backend/src/models/workflows.rs:1378-1381#DelegateSubtasks]`
+`[src: file: backend/src/models/workflows.rs:1568-1571#DelegateSubtasks]`
 
 ## 2. What already exists (and is reused as is)
 
@@ -27,11 +27,11 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   within the concurrency, budget and escalation limits, and, with
   `auto_continue`, launches the next launchable task after each integration
   under the idempotency key `campaign-auto:<run>:<task>`.
-  `[src: file: backend/src/db/orchestration.rs:1637-1777#campaign_task_candidates]`
+  `[src: file: backend/src/db/orchestration.rs:1741-1881#campaign_task_candidates]`
   `[src: file: backend/src/api/orchestration.rs:4431-4531#advance_campaign_after_integration]`
 - **Worker resolution.** Explicit override, then the campaign default worker,
   then the principal discussion's identity.
-  `[src: file: backend/src/db/orchestration.rs:1447-1475#resolve_campaign_worker]`
+  `[src: file: backend/src/db/orchestration.rs:1551-1579#resolve_campaign_worker]`
 - **Review contract.** `ReviewDecisionV1` with a verdict `approve |
   request_changes`, the reviewed HEAD, findings and DoD verifications.
   `decide_review` bumps the round on `request_changes`, sends the findings to
@@ -39,8 +39,8 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   is spent. `[src: file: backend/src/models/orchestration.rs:2004-2010#ReviewVerdict]`
   `[src: file: backend/src/models/orchestration.rs:2047-2070#ReviewDecisionV1]`
   `[src: file: backend/src/api/orchestration.rs:8677-8684#decide_review]`
-  `[src: file: backend/src/db/orchestration.rs:4696-4705#ReviewCheckpoint]`
-  `[src: file: backend/src/db/orchestration.rs:4727-4739#ReviewCheckpointOutcome]`
+  `[src: file: backend/src/db/orchestration.rs:4800-4809#ReviewCheckpoint]`
+  `[src: file: backend/src/db/orchestration.rs:4831-4843#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
   decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:14612-14624#reassign_execution]`
   `[src: file: backend/src/api/orchestration.rs:18270-18279#human_review]`
@@ -49,12 +49,12 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   checked out (or by moving the ref when no worktree has it), refusing a dirty
   checkout, and sends a conflict back to the worker.
   `[src: file: backend/src/api/orchestration.rs:3275-3533#run_integration]`
-  `[src: file: backend/src/core/worktree.rs:2624-2646#IntegrationTarget]`
+  `[src: file: backend/src/core/worktree.rs:2746-2768#IntegrationTarget]`
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
   `[src: file: backend/src/workflows/steps.rs:2083-2117#evaluate_conditions]`
-  `[src: file: backend/src/models/workflows.rs:1045-1049#room_id]`
+  `[src: file: backend/src/models/workflows.rs:1238-1242#room_id]`
   `[src: file: backend/src/workflows/sub_workflow_step.rs:982-999#record_foreach_done]`
 
 So the step does not need a new orchestration engine: it needs a **mechanical
@@ -81,7 +81,7 @@ branch. Checked against the code:
   `[src: file: backend/src/api/orchestration.rs:15097-15110#principal_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:15072-15114#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:7614-7621#deliver_worker_manifest]`
-  `[src: file: backend/src/db/orchestration.rs:4643-4650#EscalationDelivery]`
+  `[src: file: backend/src/db/orchestration.rs:4747-4754#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
   `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
 

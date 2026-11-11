@@ -9741,7 +9741,7 @@ fn build_review_findings_message(
     };
     orchestrator_message(
         format!("orch-review-findings:{exec_id}:{attempt_no}"),
-        content,
+        content + crate::core::ui_captures::retake_hint(lang),
     )
 }
 
@@ -11560,9 +11560,8 @@ fn worker_brief_markdown_in(
          l'intégration.\n\n"
             .to_string()
     };
-    // KT-1669 — a lane re-anchors only the citations its own gate reads. The
-    // integration settles a conflict that is only citation line numbers, so a
-    // lane never rewrites the target's anchors to avoid one.
+    // KT-1669 — a lane re-anchors only the citations its own gate reads; the
+    // integration settles a citation-only conflict, never the lane.
     let citations = if !fr {
         "## Doc citations\n\
          Keep the `[src:]` citations of the docs you edit resolving: that is your own \
@@ -11582,6 +11581,7 @@ fn worker_brief_markdown_in(
          renvoyer ton travail. Une citation que ton changement casse pour de bon (symbole \
          supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
     };
+    let ui_captures = crate::core::ui_captures::brief_section(lang);
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -11603,7 +11603,7 @@ fn worker_brief_markdown_in(
              is done by Kronn AFTER review.\n\
              - Stay within the DoD's scope.\n\n\
              {target_integration}\
-             {citations}\
+             {citations}{ui_captures}\
              ## Tests\n\
              {tests}\n\n\
              ## Workspace\n\
@@ -11644,7 +11644,7 @@ fn worker_brief_markdown_in(
          protégée est faite par Kronn APRÈS revue.\n\
          - Reste dans le périmètre de la DoD.\n\n\
          {target_integration}\
-         {citations}\
+         {citations}{ui_captures}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -43700,6 +43700,387 @@ pub(crate) mod tests {
         assert!(fx.repo.path().join("README.md").exists());
     }
 
+    // ── KT-1691 — foreign, ownerless and stalled build dirs; real sizes ───────
+
+    impl LaneFixture {
+        async fn set_status(&self, status: &'static str) {
+            let eid = self.exec_id.clone();
+            self.db
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE task_executions SET status = ?1 WHERE id = ?2",
+                        rusqlite::params![status, eid],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+
+        /// Nothing attached to the execution any more: what a Blocked one that
+        /// really stopped looks like.
+        async fn detach_sessions(&self) {
+            self.db
+                .with_conn(|conn| {
+                    conn.execute("UPDATE discussion_sessions SET status = 'left'", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn lane_entry(&self) -> crate::api::disk::DiskEntry {
+            crate::api::disk::build_disk_report(&self.db, Some(&self.project_id))
+                .await
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.path == self.lane_target.to_string_lossy())
+                .expect("the lane is listed")
+        }
+
+        async fn purge(&self, paths: &[&std::path::Path]) -> crate::api::disk::PurgeResult {
+            crate::api::disk::run_purge(
+                &self.db,
+                crate::api::disk::PurgeRequest {
+                    project_id: Some(self.project_id.clone()),
+                    paths: paths
+                        .iter()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .collect(),
+                    confirm: true,
+                },
+            )
+            .await
+            .unwrap()
+        }
+    }
+
+    const FOUR_DAYS: Duration = Duration::from_secs(4 * 24 * 3600);
+
+    /// KT-1691 — the build dir of an execution Blocked or Interrupted for days
+    /// (KT-1520, idle 58 h) is purgeable per entry; its worktree stays; a build
+    /// dir of anything live, or recent, never is.
+    #[tokio::test]
+    async fn a_blocked_executions_idle_build_dir_is_purgeable_and_a_live_ones_never() {
+        use crate::core::disk_usage::DiskState;
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+        let _days = crate::core::disk_usage::TestStalledDays::set(3);
+        age_lane(&fx.lane_target, FOUR_DAYS);
+
+        // A running execution: idle for days, still never purgeable.
+        let live = fx.lane_entry().await;
+        assert_eq!((live.state, live.purgeable), (DiskState::Active, false));
+        let refused = fx.purge(&[&fx.lane_target]).await;
+        assert!(!refused.items[0].purged, "{refused:?}");
+        assert!(fx.lane_target.join("debug/kronn").exists());
+
+        // Blocked, but a session is still attached: something works for it.
+        fx.set_status("Blocked").await;
+        let attached = fx.lane_entry().await;
+        assert_eq!(
+            (attached.state, attached.purgeable),
+            (DiskState::Active, false)
+        );
+        assert!(!fx.purge(&[&fx.lane_target]).await.items[0].purged);
+
+        // Blocked and abandoned, but written yesterday: not yet.
+        fx.detach_sessions().await;
+        age_lane(&fx.lane_target, Duration::from_secs(24 * 3600));
+        let recent = fx.lane_entry().await;
+        assert_eq!((recent.state, recent.purgeable), (DiskState::Active, false));
+        assert!(
+            recent
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("3 day(s)"),
+            "{recent:?}"
+        );
+        assert!(!fx.purge(&[&fx.lane_target]).await.items[0].purged);
+
+        // Blocked, abandoned and idle past the threshold: offered, then purged on
+        // confirmation only. The default purge never takes it.
+        age_lane(&fx.lane_target, FOUR_DAYS);
+        let stalled = fx.lane_entry().await;
+        assert_eq!(
+            (stalled.state, stalled.purgeable),
+            (DiskState::Stalled, true)
+        );
+        assert!(stalled.idle_seconds.unwrap() >= FOUR_DAYS.as_secs() - 5);
+        assert_eq!(
+            stalled.owner.as_ref().map(|owner| owner.status.as_str()),
+            Some("Blocked")
+        );
+        let by_default = crate::api::disk::purge_orphans(&fx.db, Some(&fx.project_id))
+            .await
+            .unwrap();
+        assert!(
+            by_default.items.is_empty(),
+            "never automatic: {by_default:?}"
+        );
+        assert!(fx.lane_target.exists());
+
+        let confirmed = fx.purge(&[&fx.lane_target]).await;
+        assert!(confirmed.items[0].purged, "{confirmed:?}");
+        assert!(!fx.lane_target.exists());
+        assert!(
+            std::path::Path::new(&fx.path).join(".git").exists(),
+            "the worktree stays: the next resume rebuilds the lane only"
+        );
+        // The removal is on the execution's record.
+        assert_eq!(lane_target_events(&fx.db, "lane_target_reclaimed").await, 1);
+    }
+
+    /// KT-1691 — Interrupted counts like Blocked; Working never does, however idle.
+    #[tokio::test]
+    async fn an_interrupted_execution_is_stalled_like_a_blocked_one_and_a_working_one_is_not() {
+        use crate::core::disk_usage::DiskState;
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+        let _days = crate::core::disk_usage::TestStalledDays::set(3);
+        fx.detach_sessions().await;
+        age_lane(&fx.lane_target, FOUR_DAYS);
+        for (status, state) in [
+            ("Working", DiskState::Active),
+            ("AwaitingReview", DiskState::Active),
+            ("Interrupted", DiskState::Stalled),
+        ] {
+            fx.set_status(status).await;
+            assert_eq!(fx.lane_entry().await.state, state, "{status}");
+        }
+    }
+
+    /// KT-1691 — a `wt-*` Kronn did not create is listed with its age and offered
+    /// to the owner, one entry at a time and on confirmation; a fresh one (a build
+    /// may be running), a lane a live execution claims without its marker, and a
+    /// non-lane path are refused.
+    #[tokio::test]
+    async fn a_foreign_build_dir_is_purgeable_per_entry_once_quiet_and_nothing_live_is() {
+        use crate::core::disk_usage::DiskState;
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+        let foreign = |report: &crate::api::disk::DiskReport| {
+            report
+                .entries
+                .iter()
+                .find(|entry| entry.path == fx.human_target.to_string_lossy())
+                .cloned()
+                .expect("the foreign dir is listed")
+        };
+
+        let fresh = foreign(
+            &crate::api::disk::build_disk_report(&fx.db, Some(&fx.project_id))
+                .await
+                .unwrap(),
+        );
+        assert_eq!((fresh.state, fresh.purgeable), (DiskState::Foreign, false));
+        assert!(!fx.purge(&[&fx.human_target]).await.items[0].purged);
+
+        // The default purge never takes it, however old.
+        age_lane(&fx.human_target, LANE_IDLE * 10);
+        assert!(
+            crate::api::disk::purge_orphans(&fx.db, Some(&fx.project_id))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let quiet = foreign(
+            &crate::api::disk::build_disk_report(&fx.db, Some(&fx.project_id))
+                .await
+                .unwrap(),
+        );
+        assert_eq!((quiet.state, quiet.purgeable), (DiskState::Foreign, true));
+        assert!(quiet.idle_seconds.unwrap() >= (LANE_IDLE * 10).as_secs() - 5);
+        assert!(quiet.owner.is_none());
+
+        // A live execution's lane that lost its marker is attributed by lineage:
+        // not foreign, not purgeable.
+        fx.strip_marker();
+        age_lane(&fx.lane_target, LANE_IDLE * 10);
+        let live = fx.lane_entry().await;
+        assert_eq!((live.state, live.purgeable), (DiskState::Active, false));
+        let refused = fx.purge(&[&fx.lane_target]).await;
+        assert!(!refused.items[0].purged, "{refused:?}");
+        assert!(fx.lane_target.join("debug/kronn").exists());
+
+        let result = fx.purge(&[&fx.human_target]).await;
+        assert!(result.items[0].purged, "{result:?}");
+        assert!(!fx.human_target.exists());
+        assert!(fx.lane_target.exists());
+    }
+
+    /// A worktree no workspace row names (database reset, row deleted) is kept and
+    /// offered, with its `target/`, once quiet. A checkout a row names is never
+    /// offered; one with uncommitted work is refused; the branch stays.
+    #[tokio::test]
+    async fn an_ownerless_worktree_and_its_target_are_purgeable_per_entry_and_an_owned_one_never() {
+        use crate::core::disk_usage::{DiskKind, DiskState};
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+        let stray = fx.repo.path().join(".kronn/worktrees/stray-checkout");
+        git(
+            fx.repo.path(),
+            &["worktree", "add", "-b", "stray", stray.to_str().unwrap()],
+        );
+        std::fs::create_dir_all(stray.join("target/debug")).unwrap();
+        std::fs::write(stray.join("target/debug/artefact"), vec![0u8; 4096]).unwrap();
+        let listed = |kind: DiskKind, path: std::path::PathBuf| {
+            let db = &fx.db;
+            let project = fx.project_id.clone();
+            async move {
+                crate::api::disk::build_disk_report(db, Some(&project))
+                    .await
+                    .unwrap()
+                    .entries
+                    .into_iter()
+                    .find(|entry| entry.kind == kind && entry.path == path.to_string_lossy())
+                    .expect("listed")
+            }
+        };
+
+        // Just written: it may be in use.
+        let recent = listed(DiskKind::Worktree, stray.clone()).await;
+        assert_eq!((recent.state, recent.purgeable), (DiskState::Kept, false));
+        assert!(recent.owner.is_none());
+        assert!(!fx.purge(&[&stray]).await.items[0].purged);
+        assert!(stray.exists());
+
+        age_lane(&stray, LANE_IDLE * 10);
+        let checkout = listed(DiskKind::Worktree, stray.clone()).await;
+        assert_eq!(
+            (checkout.state, checkout.purgeable),
+            (DiskState::Kept, true)
+        );
+        assert!(checkout.reason.unwrap().contains("no workspace row"));
+        let cache = listed(DiskKind::Cache, stray.join("target")).await;
+        assert!(cache.purgeable, "{cache:?}");
+
+        // A task's own checkout (a row names it): never offered, never purged.
+        let owned = fx.path.clone();
+        let owned_entry = listed(DiskKind::Worktree, std::path::PathBuf::from(&owned)).await;
+        assert!(!owned_entry.purgeable, "{owned_entry:?}");
+        age_lane(std::path::Path::new(&owned), LANE_IDLE * 10);
+        let refused = fx.purge(&[std::path::Path::new(&owned)]).await;
+        assert!(!refused.items[0].purged, "{refused:?}");
+        assert!(std::path::Path::new(&owned).exists());
+        let owned_cache = std::path::Path::new(&owned).join("target");
+        std::fs::create_dir_all(&owned_cache).unwrap();
+        assert!(!fx.purge(&[&owned_cache]).await.items[0].purged);
+        assert!(owned_cache.exists());
+
+        // The cache goes first, on its own.
+        let freed = fx.purge(&[&stray.join("target")]).await;
+        assert!(freed.items[0].purged, "{freed:?}");
+        assert!(!stray.join("target").exists() && stray.exists());
+
+        // Uncommitted work is never lost: git refuses, nothing is removed.
+        std::fs::write(stray.join("notes.txt"), "mine").unwrap();
+        age_lane(&stray, LANE_IDLE * 10);
+        let dirty = fx.purge(&[&stray]).await;
+        assert!(!dirty.items[0].purged, "{dirty:?}");
+        assert!(dirty.items[0]
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("uncommitted"));
+        assert!(stray.join("notes.txt").exists());
+
+        // Clean, the checkout goes and its branch stays.
+        std::fs::remove_file(stray.join("notes.txt")).unwrap();
+        age_lane(&stray, LANE_IDLE * 10);
+        let gone = fx.purge(&[&stray]).await;
+        assert!(gone.items[0].purged, "{gone:?}");
+        assert!(!stray.exists());
+        assert!(
+            !git_rev(fx.repo.path(), "stray").is_empty(),
+            "the branch stays"
+        );
+    }
+
+    /// KT-1691 — the 2026-11-11 measure: lanes cloned from the seed counted their
+    /// shared blocks in full. The report and the pressure guard carry the real
+    /// (unique) figure next to the apparent one.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn real_bytes_not_cloned_ones_are_reported_and_swept() {
+        use crate::core::task_worker_lane_warm::clone_tree;
+        let fx = lane_fixture().await;
+        let _policy = DiskPolicyGuard::set(0, 6);
+        // The lane is a clone of a 3 MiB seed, as every worker lane is.
+        let seed = fx.repo.path().join("seed-debug");
+        std::fs::create_dir_all(&seed).unwrap();
+        let blocks: Vec<u8> = (0..3 * 1024 * 1024u32)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        std::fs::write(seed.join("kronn"), &blocks).unwrap();
+        std::fs::remove_dir_all(fx.lane_target.join("debug")).unwrap();
+        if clone_tree(&seed, &fx.lane_target.join("debug")).is_err() {
+            return;
+        }
+        fx.orphan_the_lane(LANE_IDLE + Duration::from_secs(60))
+            .await;
+
+        let entry = fx.lane_entry().await;
+        assert!(entry.bytes >= 3 * 1024 * 1024, "apparent: {}", entry.bytes);
+        let unique = entry.unique_bytes.expect("APFS answers");
+        assert!(
+            unique < entry.bytes / 4,
+            "real {unique} of apparent {}",
+            entry.bytes
+        );
+        let report = crate::api::disk::build_disk_report(&fx.db, Some(&fx.project_id))
+            .await
+            .unwrap();
+        assert!(report
+            .unique_bytes
+            .is_some_and(|real| real < report.apparent_bytes));
+        assert!(report.orphan_unique_bytes < report.orphan_bytes);
+
+        let gib = 1024 * 1024 * 1024u64;
+        let lane = fx.lane_target.clone();
+        let outcome =
+            crate::api::disk::ensure_launch_headroom_with(&fx.db, &fx.project_id, 30, &|| {
+                Some(if lane.exists() { 5 * gib } else { 80 * gib })
+            })
+            .await;
+        assert_eq!(outcome, Ok(()));
+        let swept = crate::api::disk::purge_orphans(&fx.db, Some(&fx.project_id))
+            .await
+            .unwrap();
+        assert!(swept.items.is_empty(), "the guard already took it");
+
+        // Refused after a sweep: the figure it reports is the real one.
+        let fx = lane_fixture().await;
+        std::fs::remove_dir_all(fx.lane_target.join("debug")).unwrap();
+        clone_tree(&seed_of(&fx, &blocks), &fx.lane_target.join("debug")).unwrap();
+        fx.orphan_the_lane(LANE_IDLE + Duration::from_secs(60))
+            .await;
+        let refusal =
+            crate::api::disk::ensure_launch_headroom_with(&fx.db, &fx.project_id, 30, &|| {
+                Some(5 * gib)
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(refusal.swept_lanes, 1);
+        assert!(
+            refusal.swept_bytes < 3 * 1024 * 1024 / 4,
+            "the guard reports real bytes, not the {} apparent ones: {}",
+            3 * 1024 * 1024,
+            refusal.swept_bytes
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn seed_of(fx: &LaneFixture, blocks: &[u8]) -> std::path::PathBuf {
+        let seed = fx.repo.path().join("seed-debug-2");
+        std::fs::create_dir_all(&seed).unwrap();
+        std::fs::write(seed.join("kronn"), blocks).unwrap();
+        seed
+    }
+
     /// KT-1318 — DoD 2: under the threshold Kronn sweeps its orphans first and
     /// the launch goes on when that was enough.
     #[tokio::test]
@@ -49042,8 +49423,15 @@ pub(crate) mod tests {
         assert!(extended.success, "{:?}", extended.error);
         assert_eq!(exec_of(&db, &exec_id).await.max_review_rounds, 9);
     }
+
+    // KT-1518 — the agent fallback chain on a task worker.
+    mod agent_fallback_runs;
 }
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "orchestration_trust_tests.rs"]
 mod orchestration_trust_tests;
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "orchestration_ui_capture_tests.rs"]
+mod orchestration_ui_capture_tests;

@@ -8,7 +8,7 @@ way to set the limit, so every principal-driven lane was capped at the SQL defau
 
 A task execution gets `max_review_rounds` rounds of `request_changes`. `N` allows `N` re-offers and
 escalates on the `N+1`-th (`new_rounds > max_review_rounds`).
-`[src: file: backend/src/db/orchestration.rs:4869-4965#commit_review_checkpoint]`
+`[src: file: backend/src/db/orchestration.rs:4973-5069#commit_review_checkpoint]`
 
 - **Integer:** 1 to 1000. `0` is refused at every boundary.
   `[src: file: backend/src/models/setup.rs:219-240#parse_review_rounds_arg]`
@@ -27,7 +27,7 @@ the extend form say so next to the checkbox.
 A campaign's `token_budget` (`NULL` = none; single-task launches have none) is checked, against the tokens
 its executions' messages already consumed, before **every additional worker attempt**, not only when
 picking new tasks. `execution_token_budget_stop` is the one check;
-`[src: file: backend/src/db/orchestration.rs:1604#execution_token_budget_stop]`
+`[src: file: backend/src/db/orchestration.rs:1708#execution_token_budget_stop]`
 three places use it, whatever the round limit (including unlimited):
 
 - **`request_changes`:** inside the review checkpoint transaction. A spent budget parks the execution
@@ -51,7 +51,7 @@ defaults. `[src: file: backend/src/models/setup.rs:100-110#WorkersConfig]`
 | Surface | How |
 |---|---|
 | UI | Settings > Workers: current value, where it applies, number field, « Unlimited » checkbox with the token-burn warning |
-| API | `GET` / `POST /api/config/workers` (`POST` validates: 400 `validation` and the saved value is kept) `[src: file: backend/src/api/setup.rs:759-783#save_workers_config]` |
+| API | `GET` / `POST /api/config/workers` (`POST` validates: 400 `validation` and the saved value is kept) `[src: file: backend/src/api/setup.rs:769-793#save_workers_config]` |
 | MCP | `task_exec_prepare` answers `default_max_review_rounds` (an integer or `"unlimited"`); `task_exec_status` shows `review_rounds` as `used/limit` |
 
 ## Who uses it
@@ -71,7 +71,7 @@ touches an execution that exists.
 `target_ref` used to be ignored by `task_exec_launch`, which silently launched from `main`. Both principal
 channels now refuse an argument the tool does not declare, naming it and listing the accepted ones:
 the Python bridge checks against its own `inputSchema` and the native tool layer against its catalogue.
-`[src: file: backend/scripts/disc-introspection-mcp.py:6135#_refuse_unknown_arguments]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:6137#_refuse_unknown_arguments]`
 `[src: file: backend/src/api/agent_tools.rs:1453#unknown_argument_refusal]`
 Note that `task_exec_prepare` does not declare `base_rev` / `idempotency_key`: those belong to the launch.
 
@@ -96,7 +96,7 @@ The browser's « Extend rounds » button on the execution card calls
   A token that owns both rooms (a principal that adopted the child room) is refused as well; that principal
   extends from a token owning only the parent room, or from the UI.
 - The limit changes on that execution only, and the change is journaled (`review_rounds_extended`: actor,
-  reason, previous and new limit). `[src: file: backend/src/db/orchestration.rs:7726#extend_review_rounds]`
+  reason, previous and new limit). `[src: file: backend/src/db/orchestration.rs:7830#extend_review_rounds]`
 - At the cap but still `AwaitingReview`, extending is all it takes: the next `request_changes` is
   accepted instead of escalating.
 - An execution **the limit itself escalated** is also re-offered: the stored findings (the exhausted
@@ -114,7 +114,7 @@ Every declaration is paid for on every session. The new arguments are `{"type": 
 with their contract in the `task_exec_prepare` / `task_exec_reassign` manuals; the bytes were found by
 moving the return shape of `workflow_run_status` into its manual and tightening three descriptions, and
 `CATALOGUE_MAX_BYTES` went **down** by 33 B (84,450 → 84,417).
-`[src: file: backend/scripts/ci/mcp_surface_budget.py:180#CATALOGUE_MAX_BYTES]`
+`[src: file: backend/scripts/ci/mcp_surface_budget.py:184#CATALOGUE_MAX_BYTES]`
 
 ## Tests
 

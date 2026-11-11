@@ -13,6 +13,71 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- **KT-1544 — Merge a step's main execution with its shadows.** A step with shadows can now condense the main execution and the shadows it selects (one, several or all) into one result that becomes the step's output. The merge waits for the shadows with a timeout and reports the missing ones; a condense pass dedups their points, verifies each against the code and records which executions found it, and a point it cannot verify is never published. The run view shows each execution's contribution and the merged result against each execution. Off by default.
+
+- **KT-1691 — Disk hygiene, second pass.** Three fixes after the 2026-11-11
+  incident (a 2 TB disk down to 173 GB free while 33 lane build dirs read ~190 GB
+  each). A lane's seed (`target/debug` of the main checkout) is now **pruned to its
+  latest build before it is cloned**: units superseded within the same package and
+  kind, and units of packages `Cargo.lock` no longer lists, go with every file of
+  their hash; a unit is never pruned by age alone, and never while a build holds
+  Cargo's lock. Sizes are reported **real next to apparent**: `unique_bytes` is what
+  deleting an entry frees (APFS private size), `bytes` counts shared clone blocks in
+  full; the Disk panel, `disk_usage`, purge results and the pressure guard's "swept"
+  figure carry both, and say apparent where the file system cannot tell. Foreign
+  `wt-*` dirs, worktrees (and their `target/`) no workspace row names, and the build
+  dirs of executions Blocked or Interrupted for `server.disk_stalled_build_days`
+  (default 3) are listed with their age and **purgeable one entry at a time behind a
+  confirmation, never by a sweep**; the worktree and branch of a stalled execution
+  stay and the next resume rebuilds. No migration. See
+  [disk-usage.md](docs/operations/disk-usage.md).
+
+### Security
+
+- P2P contacts authenticate with a per-contact secret, not the public invite code
+  (KT-1650). The invite code `kronn:pseudo@host:port` is only an address, so anyone
+  who knew a contact's pseudo and address could pass the WebSocket presence,
+  `claim-by-token`, `fetch-file` and the file-announcement host resolution as that
+  contact. Each paired contact now holds two random 256-bit secrets, one per
+  direction: the verifying side keeps only a SHA-256 hash and compares it in
+  constant time. **Breaking, by decision: existing contacts must re-pair, and a
+  peer that does not present its secret is refused** (the refusal says how to
+  re-pair). Settings > Identity now generates a pairing code
+  (`kronn:pseudo@host:port#secret`, single use, 7 days); paste it in Add contact
+  on the other side. Migration 297 adds the secret columns and the offer table and
+  moves existing accepted/pending contacts to `needs_repair`, keeping their rows
+  and shared discussions. An export never carries the secrets, so an import
+  brings contacts back as `needs_repair`. A pairing code pairs a new contact only:
+  to re-pair an existing contact use Re-pair on its entry, which issues a code bound
+  to that contact (migration 298); a code can never rebind another contact's row. A contact has at most one
+  live Re-pair code, and the 20-code cap only ever evicts unbound codes.
+  Pairing writes are transactional and conditional: a spent code cannot pair twice
+  and a contact paired, refused or deleted while a pairing is in flight is not
+  overwritten.
+
+### Added
+
+- Agents: a fallback chain (KT-1518). Settings > Agents shows each agent's
+  fallback chain as a timeline read left to right (« Claude Code → Codex →
+  Ollama »): add, change, give a model, move earlier or later, stop the chain at
+  a point, or cut it; paid fallbacks (API key) need the owner's opt-in. Every
+  discussion (discussion settings) and every workflow Agent step (step editor)
+  can override the chain or cancel it; with no override the agent's default chain
+  applies. When an agent's provider cannot serve a turn — a rate limit, a quota or
+  credits spent, an outage past its retries, a CLI not signed in — the turn
+  continues on the next entry with the SAME tier, on a discussion turn, a
+  workflow Agent step and a task worker, and the room or run shows from which
+  agent/model, why, until when and to which agent/model
+  (« Codex (gpt-5.6-sol): quota exhausted until 14:00 UTC -> continued with
+  Claude Code (sonnet) »). A task failure, a refusal, a failing test or the work's
+  own timeout never triggers it. The failing agent is left alone until its
+  announced reset (or a short re-try window), new turns going straight to the
+  fallback, then returns by itself. A loop, a chain past 4 entries or an entry
+  with more access than the agent it replaces is refused with the reason. The
+  KT-1657 quota pause and the KT-1664 quota escalation offer the chain as their
+  alternative to waiting.
+  See
+  `docs/operations/agent-fallback-chain.md`.
 - HTTP agents: an operator switch for Kronn's tools, and a gate on models that
   cannot take them (KT-1600). Tools stay on by default for every HTTP agent. Turn
   them off per agent (Settings > Agents: Ollama, LiteLLM, NVIDIA) or per external
@@ -21,6 +86,28 @@ Release notes for 0.9.3 and earlier are available in the
   not yet re-read since the upgrade keeps them. An `api_call` result is capped at
   16 KiB with a `truncation_marker` telling the model to narrow its request.
   Migration 294 adds the nullable `tools_enabled` column; nothing is backfilled.
+- Workflows: shadows on the step (KT-1459). An Agent step carries 0 to 8
+  `shadows`; each re-runs only that step beside its main execution, on exactly
+  its input (same rendered prompt context, previous outputs and variables). A
+  shadow can be identical to the step (to measure how deterministic its agent is)
+  or change its agent, model and connection, its prompt (another Quick Prompt, a
+  version or an inline text) and its skills (pinned, swapped or dropped); it can
+  be limited to some projects, sampled one run in N, and given a budget (tokens,
+  duration, cost). Only the main output continues the workflow; a shadow never
+  runs an `external_effect` step or a Gate, and one that fails, stalls or spends
+  its budget never fails or delays the main step (the time budget is enforced,
+  tokens and cost are checked when it ends). The run view compares, per step, the
+  main execution and its shadows: what differs (agent, model, prompt version,
+  skill versions) and what is identical, tokens, cost and duration, each shadow's
+  output against the main one or any two side by side, and for identical shadows
+  how many distinct outputs there are out of N+1. Shadows are edited in the
+  step's Shadows section and in the Page resources panel (human-only; a save by
+  an agent keeps them); `GET /api/workflows/{id}/runs/{run_id}/step-shadows`
+  returns the comparison. The workflow-level `shadow` and its lanes are gone: a
+  workflow that had one now carries one shadow on each of its Agent steps with
+  the same overrides (migration 296, which also adds `step_shadow_runs`). Runs
+  recorded by the former shadow stay listed. An export written before this
+  change carries a `shadow` key that an import now ignores.
 - Orchestration: an integration whose only conflicts are doc-citation line
   numbers no longer goes back to the worker (KT-1669). The integration takes the
   target's side. Every candidate, conflicted or not, is re-anchored across all
@@ -161,6 +248,17 @@ Release notes for 0.9.3 and earlier are available in the
   at 12 generations (`KRONN_WORKFLOW_MEDIA_JOBS_PER_RUN`, at most 100), on top of
   six per step, and a dry-run Test no longer bills. A reference that matches
   nothing gets the one scope refusal (KT-1605, #502).
+
+### Changed
+
+- Workflow authoring: `workflow_step_schema` serves a lean contract by default
+  (KT-1681). The full one sat 18 estimated tokens under the 32 768-token MLX
+  window, so the next step type would have overflowed it; the lean one leaves
+  about 8 000. Per step type it carries the required fields and the names of the
+  optional ones, and the authoring doctrine whole. `step_type` returns one type's
+  whole contract (notes, runtime rules, example); `section` returns
+  `template_vars`, `data_pipeline_contract` or `authoring_doctrine`. The MCP
+  bridge and `GET /api/workflows/step-schema` take the same two arguments.
 
 ### Security
 
@@ -671,6 +769,15 @@ Release notes for 0.9.3 and earlier are available in the
   for RUSTSEC-2026-0436: 0.37 panics or allocates without bound on a malformed
   CFB/OLE2 file (a legacy `.xls`), and Kronn reads untrusted spreadsheets in
   context files.
+- A « Décision (IA) » workflow step (KT-1367). It asks the decision model set
+  on the Ollama card typed questions (yes/no, choice, score) about a previous
+  output, in one local call of under a second, and branches the run through
+  the existing conditions: each answer becomes a signal such as `ship_yes` or
+  `route_economy`, and an answer the model is not sure of emits
+  `low_confidence` instead, to hand to a stronger agent or a Gate. No agent
+  tokens. The step stays greyed out, and a workflow using it is refused at
+  launch, while no decision model is configured. Default confidence thresholds
+  come from a measured bench (docs/research/decision-step-bench-2026-10-21.md).
 
 ## [0.15.1] - 2026-10-22
 

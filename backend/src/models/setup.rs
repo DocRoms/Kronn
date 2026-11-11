@@ -385,6 +385,11 @@ pub struct ServerConfig {
     /// live worktree, before a sweep (boot, periodic, pressure) may remove it.
     #[serde(default = "default_disk_sweep_idle_hours")]
     pub disk_sweep_idle_hours: u64,
+    /// KT-1691 — days a Blocked or Interrupted execution's lane build dir must
+    /// have been unwritten before it becomes purgeable (by a confirmed
+    /// per-entry delete, never by a sweep). Its worktree and branch stay.
+    #[serde(default = "default_disk_stalled_build_days")]
+    pub disk_stalled_build_days: u64,
     /// Maximum concurrent agent processes (default: 5)
     #[serde(default = "default_max_agents")]
     pub max_concurrent_agents: usize,
@@ -569,11 +574,17 @@ pub(crate) const DEFAULT_DISK_WARNING_GIB: u64 = 20;
 /// been measured at 5-30 GiB; 30 GiB is the room a launch needs to finish.
 pub(crate) const DEFAULT_DISK_LAUNCH_MIN_FREE_GIB: u64 = 30;
 pub(crate) const DEFAULT_DISK_SWEEP_IDLE_HOURS: u64 = 6;
+/// KT-1691 — a Blocked or Interrupted execution that left its build dir alone
+/// this long is not coming back soon; the next resume rebuilds.
+pub(crate) const DEFAULT_DISK_STALLED_BUILD_DAYS: u64 = 3;
 fn default_disk_launch_min_free_gib() -> u64 {
     DEFAULT_DISK_LAUNCH_MIN_FREE_GIB
 }
 fn default_disk_sweep_idle_hours() -> u64 {
     DEFAULT_DISK_SWEEP_IDLE_HOURS
+}
+fn default_disk_stalled_build_days() -> u64 {
+    DEFAULT_DISK_STALLED_BUILD_DAYS
 }
 fn default_disk_critical_gib() -> u64 {
     DEFAULT_DISK_CRITICAL_GIB
@@ -847,6 +858,41 @@ impl HttpEndpoints {
 }
 
 impl AgentsConfig {
+    /// The stored settings of one agent. `Custom` is a bucket of named
+    /// connections, not an agent with a card, so it has none.
+    pub fn agent_config(&self, agent: &AgentType) -> Option<&AgentConfig> {
+        Some(match agent {
+            AgentType::ClaudeCode => &self.claude_code,
+            AgentType::Codex => &self.codex,
+            AgentType::OpenCode => &self.open_code,
+            AgentType::GeminiCli => &self.gemini_cli,
+            AgentType::Kiro => &self.kiro,
+            AgentType::Vibe => &self.vibe,
+            AgentType::CopilotCli => &self.copilot_cli,
+            AgentType::Ollama => &self.ollama,
+            AgentType::LiteLlm => &self.lite_llm,
+            AgentType::Nvidia => &self.nvidia,
+            AgentType::Custom => return None,
+        })
+    }
+
+    /// Mutable twin of [`Self::agent_config`].
+    pub fn agent_config_mut(&mut self, agent: &AgentType) -> Option<&mut AgentConfig> {
+        Some(match agent {
+            AgentType::ClaudeCode => &mut self.claude_code,
+            AgentType::Codex => &mut self.codex,
+            AgentType::OpenCode => &mut self.open_code,
+            AgentType::GeminiCli => &mut self.gemini_cli,
+            AgentType::Kiro => &mut self.kiro,
+            AgentType::Vibe => &mut self.vibe,
+            AgentType::CopilotCli => &mut self.copilot_cli,
+            AgentType::Ollama => &mut self.ollama,
+            AgentType::LiteLlm => &mut self.lite_llm,
+            AgentType::Nvidia => &mut self.nvidia,
+            AgentType::Custom => return None,
+        })
+    }
+
     /// Set `full_access` for a CLI agent. Every one of them reads it: Claude and
     /// Codex through their adapter's flag, the others by widening the ACP broker.
     pub fn set_full_access(&mut self, agent: &AgentType, value: bool) -> Result<(), &'static str> {
@@ -948,6 +994,12 @@ pub struct AgentConfig {
     /// to the frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// KT-1518 — the agents that take over, in this order, when THIS one is
+    /// unavailable on the provider side (rate limit, quota or credits spent,
+    /// outage, CLI not authenticated). Empty: the turn stops with the provider's
+    /// own message. A discussion or a workflow step may override it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_chain: Vec<AgentFallback>,
     /// Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
     /// Tools are on by default: `Some(false)` withholds them from every model
     /// of this agent (for one that cannot take tool calls); `None` and
@@ -955,6 +1007,30 @@ pub struct AgentConfig {
     /// from a model it lists without `tools`. Ignored by CLI agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_enabled: Option<bool>,
+}
+
+/// KT-1518 — one link of an agent fallback chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentFallback {
+    pub agent: AgentType,
+    /// A specific model on the fallback. `None`: the SAME tier as the turn that
+    /// was interrupted, resolved on the fallback agent (a model name is
+    /// provider-specific, so the failing agent's model is never carried over).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The owner's opt-in to a fallback that bills by API key (LiteLLM, NVIDIA,
+    /// a custom connection). Without it a paid link is skipped, never used.
+    #[serde(default)]
+    pub allow_paid: bool,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetAgentFallbackRequest {
+    pub agent: AgentType,
+    /// The whole chain, in order. Empty cuts it.
+    pub fallback_chain: Vec<AgentFallback>,
 }
 
 // ─── Model tiers ──────────────────────────────────────────────────────────
@@ -1402,6 +1478,9 @@ pub struct ServerConfigPublic {
     pub disk_launch_min_free_gib: u64,
     /// KT-1318 - hours a lane build dir must be idle before a sweep may take it.
     pub disk_sweep_idle_hours: u64,
+    /// KT-1691 - days a Blocked/Interrupted execution's build dir must be idle
+    /// before it becomes purgeable.
+    pub disk_stalled_build_days: u64,
     pub p2p_enabled: bool,
     pub frontend_origins: Vec<String>,
     /// KT-1438 - copy lane seeds into task worktrees (default on).
@@ -1464,6 +1543,9 @@ pub struct UpdateServerConfigRequest {
     /// KT-1318 - `server.disk_sweep_idle_hours`.
     #[serde(default)]
     pub disk_sweep_idle_hours: Option<u64>,
+    /// KT-1691 - `server.disk_stalled_build_days`.
+    #[serde(default)]
+    pub disk_stalled_build_days: Option<u64>,
     /// KT-1438 - `server.lane_seeds_copy_enabled`.
     #[serde(default)]
     pub lane_seeds_copy_enabled: Option<bool>,

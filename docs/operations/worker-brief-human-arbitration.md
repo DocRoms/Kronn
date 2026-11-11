@@ -27,7 +27,7 @@ through their actually available output and to explicitly ask the principal to
 relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
 [src: file: backend/src/api/orchestration.rs:10973-11026#parent_milestones]
-[src: file: backend/src/db/orchestration.rs:7896-7940#get_execution_lineage]
+[src: file: backend/src/db/orchestration.rs:8000-8044#get_execution_lineage]
 [src: file: backend/src/api/orchestration.rs:20768-20921#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
 [src: file: backend/src/models/orchestration.rs:1384-1397#TaskExecutionLineage]
 
@@ -39,4 +39,4 @@ ignores any id argument.
 [src: file: backend/scripts/disc-introspection-mcp.py:232-234#disc_question_list]
 [src: file: backend/scripts/disc-introspection-mcp.py:688-690#disc_append]
 [src: file: backend/scripts/disc-introspection-mcp.py:5495-5513#call_disc_append]
-[src: file: backend/scripts/disc-introspection-mcp.py:4677-4687#call_disc_question_list]
+[src: file: backend/scripts/disc-introspection-mcp.py:4683-4693#call_disc_question_list]

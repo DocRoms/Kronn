@@ -32,6 +32,7 @@ const {
   effectiveAccessMock,
   setAgentMentionColorMock,
   setAgentConcurrencyMock,
+  setAgentFallbackMock,
   setAgentToolsMock,
   usageGetMock,
   getModelTiersMock,
@@ -49,6 +50,7 @@ const {
   effectiveAccessMock: vi.fn(),
   setAgentMentionColorMock: vi.fn(),
   setAgentConcurrencyMock: vi.fn(),
+  setAgentFallbackMock: vi.fn(),
   setAgentToolsMock: vi.fn(),
   usageGetMock: vi.fn(),
   getModelTiersMock: vi.fn(),
@@ -65,6 +67,7 @@ vi.mock('../../../lib/api', () => buildApiMock({
     getAgentAccessEffective: effectiveAccessMock as never,
     setAgentMentionColor: setAgentMentionColorMock as never,
     setAgentConcurrency: setAgentConcurrencyMock as never,
+    setAgentFallback: setAgentFallbackMock as never,
     setAgentTools: setAgentToolsMock as never,
     getModelTiers: getModelTiersMock as never,
   },
@@ -1302,5 +1305,39 @@ describe('AgentsSection — Kronn tools switch (KT-1600)', () => {
     });
     fireEvent.click(screen.getByTestId('agent-tools-Ollama'));
     await waitFor(() => expect(toastFn).toHaveBeenCalledWith('common.actionFailed:disk full', 'error'));
+  });
+});
+
+// KT-1518 — the fallback chain of an agent card, persisted through the backend,
+// which refuses a loop with its reason.
+describe('AgentsSection — per-agent fallback chain', () => {
+  const installed = (name: string, agent_type: AgentType) => makeAgent({ name, agent_type, installed: true, enabled: true });
+  const timeline = 'agent-fallback-timeline-ClaudeCode';
+
+  it('offers the other installed agents on a card and persists the whole chain, then refetches', async () => {
+    setAgentFallbackMock.mockResolvedValue({ chains: [], cooldowns: [] });
+    const { refetchAgentAccess } = renderSection({
+      agents: [installed('Claude Code', 'ClaudeCode'), installed('Codex', 'Codex')],
+    });
+    const add = screen.getByTestId(`${timeline}-add`) as HTMLSelectElement;
+    expect(Array.from(add.querySelectorAll('option')).map(o => o.value)).toEqual(['', 'Codex']);
+    fireEvent.change(add, { target: { value: 'Codex' } });
+    await waitFor(() =>
+      expect(setAgentFallbackMock).toHaveBeenCalledWith({
+        agent: 'ClaudeCode',
+        fallback_chain: [{ agent: 'Codex', model: null, allow_paid: false }],
+      }),
+    );
+    await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
+  });
+
+  it('shows the refusal of the backend and does not refetch as if it had been stored', async () => {
+    setAgentFallbackMock.mockRejectedValue(new Error('Codex has full access and Claude Code does not.'));
+    const { refetchAgentAccess } = renderSection({
+      agents: [installed('Claude Code', 'ClaudeCode'), installed('Codex', 'Codex')],
+    });
+    fireEvent.change(screen.getByTestId(`${timeline}-add`), { target: { value: 'Codex' } });
+    expect(await screen.findByTestId(`${timeline}-refused`)).toHaveTextContent('fallback.refused');
+    expect(refetchAgentAccess).not.toHaveBeenCalled();
   });
 });

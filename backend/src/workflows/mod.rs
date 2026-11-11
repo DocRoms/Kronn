@@ -3,6 +3,7 @@
 //! Ticks every 30s, checks triggers, enforces concurrency limits,
 //! and spawns runs.
 
+pub mod agent_fallback_step;
 pub mod api_auth_failure;
 pub mod api_call_binary;
 pub mod api_call_executor;
@@ -17,6 +18,7 @@ pub mod big_ticket_template;
 pub mod cancellation;
 pub mod collect_api_data_step;
 pub mod concurrency;
+pub mod decide_step;
 pub mod delegate_subtasks_step;
 pub mod doctrine_warnings;
 pub mod exec_step;
@@ -40,6 +42,7 @@ pub mod run_scope;
 pub mod runner;
 pub mod safety;
 pub mod shadow;
+pub mod shadow_merge;
 pub mod step_agents;
 pub mod step_output_format;
 pub mod step_room;
@@ -615,6 +618,7 @@ mod tests {
                 StepType::TriggerWorkflow => "TriggerWorkflow",
                 StepType::DelegateSubtasks => "DelegateSubtasks",
                 StepType::TaskBoard => "TaskBoard",
+                StepType::Decide => "Decide",
             }
         }
         let rust: std::collections::BTreeSet<&str> = [
@@ -633,6 +637,7 @@ mod tests {
             StepType::TriggerWorkflow,
             StepType::DelegateSubtasks,
             StepType::TaskBoard,
+            StepType::Decide,
         ]
         .iter()
         .map(variant_name)
@@ -679,7 +684,6 @@ mod tests {
         Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             id: id.into(),
             name: id.into(),
@@ -1023,6 +1027,8 @@ mod tests {
             retry: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             directive_ids: vec![],
             profile_ids: vec![],
             delay_after_secs: None,
@@ -1068,6 +1074,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

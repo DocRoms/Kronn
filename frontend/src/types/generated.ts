@@ -376,6 +376,13 @@ mention_color?: string | null,
  */
 base_url?: string | null,
 /**
+ * KT-1518 — the agents that take over, in this order, when THIS one is
+ * unavailable on the provider side (rate limit, quota or credits spent,
+ * outage, CLI not authenticated). Empty: the turn stops with the provider's
+ * own message. A discussion or a workflow step may override it.
+ */
+fallback_chain?: Array<AgentFallback>,
+/**
  * Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
  * Tools are on by default: `Some(false)` withholds them from every model
  * of this agent (for one that cannot take tool calls); `None` and
@@ -500,6 +507,22 @@ export type AgentEffectiveAccess = { agent: AgentType, full_access: boolean,
  * Why it differs from the stored setting, when it does.
  */
 reason?: string, };
+
+/**
+ * KT-1518 — one link of an agent fallback chain.
+ */
+export type AgentFallback = { agent: AgentType,
+/**
+ * A specific model on the fallback. `None`: the SAME tier as the turn that
+ * was interrupted, resolved on the fallback agent (a model name is
+ * provider-specific, so the failing agent's model is never carried over).
+ */
+model?: string | null,
+/**
+ * The owner's opt-in to a fallback that bills by API key (LiteLLM, NVIDIA,
+ * a custom connection). Without it a paid link is skipped, never used.
+ */
+allow_paid: boolean, };
 
 export type AgentFilesPolicy = "repo" | "outside";
 
@@ -640,7 +663,12 @@ connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: nu
  * launch exactly; a declaration replaces the catalogue, the MCP servers
  * and the CLI's skill listing with what it names.
  */
-tools?: StepTools, };
+tools?: StepTools,
+/**
+ * KT-1518 — this step's own fallback chain. `None`: the agent's default
+ * chain applies; `Some(empty)`: no fallback for this step.
+ */
+fallback?: Array<AgentFallback>, };
 
 export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
@@ -1918,7 +1946,7 @@ export type BundleChildWorkflow = { bundle_id: string, name: string, project_id:
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, shadow?: WorkflowShadow, refs?: { [key in string]: ResourceRef }, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, refs?: { [key in string]: ResourceRef }, };
 
 /**
  * One artifact that was created by the bundle endpoint. The
@@ -2234,6 +2262,21 @@ detail?: string | null,
  */
 notice?: string | null, };
 
+/**
+ * One link as the Settings card shows it.
+ */
+export type ChainLinkView = { agent: AgentType, model?: string, paid: boolean, allow_paid: boolean,
+/**
+ * What a turn could need that this link cannot give, as warnings.
+ */
+gaps: Array<string>, };
+
+/**
+ * The chain of one agent, for display: its links with their gaps, or the
+ * reason it is refused.
+ */
+export type ChainView = { agent: AgentType, links: Array<ChainLinkView>, error?: string, };
+
 export type CheckBriefingDocRequest = { path: string, };
 
 /**
@@ -2261,12 +2304,14 @@ current_line: number | null, };
 /**
  * Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
  * host the room behind this invite code?". Authenticated by `from_invite_code`
- * matching one of our contacts — the same self-auth credential as the WS
- * Presence handshake (so this endpoint is exempt from the bearer middleware).
+ * naming one of our contacts AND `secret`, the per-contact secret it was paired
+ * with — the same credential as the WS Presence handshake (so this endpoint is
+ * exempt from the bearer middleware).
  */
 export type ClaimByTokenRequest = { token: string,
 /**
- * The CALLING peer's own invite code — must match a known contact here.
+ * The CALLING peer's own invite code — names a known contact here. It is
+ * public: it proves nothing without `secret`.
  */
 from_invite_code: string, };
 
@@ -2641,6 +2686,15 @@ created_at: string,
  */
 has_blob: boolean, };
 
+/**
+ * An agent left alone until `until`: new turns go straight to its fallback.
+ */
+export type Cooldown = { agent: AgentType, until: string,
+/**
+ * A [`Trigger::code`].
+ */
+reason: string, };
+
 export type CorrectionKind = "recheck" | "replace_or_remove" | "remove_section" | "check_or_anchor";
 
 export type Correspondence = {
@@ -2849,7 +2903,7 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, shadow?: WorkflowShadow, refs?: { [key in string]: ResourceRef }, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, refs?: { [key in string]: ResourceRef }, };
 
 /**
  * Where a plugin's outbound API credential actually comes from, computed
@@ -3072,6 +3126,45 @@ free_bytes: number,
  * folding the tail is the chart's decision, not the measurement's.
  */
 tables: Array<DbTableUsage>, };
+
+/**
+ * KT-1367 — what a `Decide` step asks its decision model.
+ */
+export type DecideConfig = {
+/**
+ * What the model reads, templated like a prompt (`{{steps.x.output}}`).
+ */
+state: string,
+/**
+ * Asked in one call, 1 to 64.
+ */
+questions: Array<DecideQuestion>,
+/**
+ * Below this confidence an answer is not trusted: the step emits
+ * `<id>_unsure` and `low_confidence` instead. `None` = the default of
+ * each question kind, measured in docs/research.
+ */
+min_confidence?: number, };
+
+export type DecideKind = "noul" | "choice" | "score";
+
+/**
+ * One typed question. Its answer becomes the signal `<id>_<answer>`.
+ */
+export type DecideQuestion = {
+/**
+ * Lowercase letters, digits and `_`; unique in the step.
+ */
+id: string, kind: DecideKind, instructions: string,
+/**
+ * `choice`: 2 to 26 options, id → what it means. `noul`: optional
+ * meanings of `true` and `false`.
+ */
+options?: { [key in string]: string },
+/**
+ * `score`: 2 to 10 levels, lowest first.
+ */
+levels?: Array<string>, };
 
 /**
  * 0.7.0 Phase 4 — payload for `POST /api/workflows/:id/runs/:run_id/decide`.
@@ -3801,6 +3894,16 @@ export type DiscussionExportEnvelope = { kind: string, version: number, exported
  * writing `"exported_by": null`.
  */
 exported_by?: PortableExporterIdentity | null, };
+
+export type DiscussionFallback = {
+/**
+ * `None`: the agent's default chain applies; `Some([])`: no fallback.
+ */
+chain_override?: Array<AgentFallback>,
+/**
+ * The override as the editor shows it (gaps, refusal), when there is one.
+ */
+view?: ChainView, };
 
 /**
  * KT-74 — provenance of an imported discussion, as the sidebar needs it.
@@ -4586,11 +4689,52 @@ export type ExecScriptFileStatus = { path: string, state: ExecScriptFileState, c
 export type ExecScriptStatusRequest = { project_id?: string, files: Array<ExecScriptFile>, };
 
 /**
+ * What one execution brought to the merged result.
+ */
+export type ExecutionContribution = {
+/**
+ * `main` or `shadow:<id>`.
+ */
+execution: string,
+/**
+ * Points it found that the merged result keeps and that no execution
+ * before it in the list found.
+ */
+kept: number,
+/**
+ * Of those kept, the points only this execution found.
+ */
+unique: number,
+/**
+ * Points it found that another execution already brought.
+ */
+duplicate: number,
+/**
+ * Points it found that could not be verified and were not published.
+ */
+dropped_unverified: number, };
+
+/**
  * Compact sidebar edge. The canonical relation already lives on
  * `task_executions`; this projection avoids overloading the workflow-run FK on
  * discussions or making clients fetch every execution detail separately.
  */
 export type ExecutionDiscussionLink = { execution_id: string, orchestration_run_id: string, task_id: string, task_reference: string, task_title: string, parent_discussion_id: string, sub_discussion_id: string, status: TaskExecutionStatus, };
+
+/**
+ * What one execution of a step loaded: what the comparison header sets side
+ * by side to say what differs.
+ */
+export type ExecutionIdentity = { agent: string, model?: string, connection_id?: string,
+/**
+ * `qp-id@N` for a Quick Prompt version, `inline:<hash>` for a prompt
+ * written in the step or the shadow.
+ */
+prompt: string,
+/**
+ * The skills the execution loads, versions pinned as `custom-x@3`.
+ */
+skills: Array<string>, };
 
 /**
  * Durable decision produced by boot reconciliation. `Interrupted` remains the
@@ -4697,10 +4841,15 @@ fail_on_empty: boolean, };
 export type Faithfulness = "entailment" | "neutral" | "contradiction";
 
 /**
+ * What Settings > Agents shows: every chain, and who is on cooldown.
+ */
+export type FallbackOverview = { chains: Array<ChainView>, cooldowns: Array<Cooldown>, };
+
+/**
  * Body of `POST /api/disc/fetch-file` (F8). A peer that received a
  * `FileAttached` announcement calls this to pull the binary of a context file
- * it doesn't have. Authenticated by `from_invite_code` matching a contact
- * (same trust model as `claim-by-token`).
+ * it doesn't have. Authenticated by `from_invite_code` naming a contact and its
+ * pairing `secret` (same trust model as `claim-by-token`).
  */
 export type FetchFileRequest = { file_id: string, from_invite_code: string, };
 
@@ -5819,19 +5968,29 @@ export type LivePageResource = {
 kind: string, id: string, name: string, latest_version: number | null, uses: Array<LivePageResourceUse>, };
 
 /**
- * One step that loads a Page resource, with the version each lane loads.
+ * The version one shadow of a step tests for a resource a Page's workflow uses.
+ */
+export type LivePageResourceShadow = { shadow_id: string, label: string,
+/**
+ * A skill id (`custom-x@3`), `v3` for a Quick Prompt version, or an empty
+ * string when the shadow drops the skill.
+ */
+version: string, };
+
+/**
+ * One step that loads a Page resource, with the version each of its shadows loads.
  */
 export type LivePageResourceUse = { workflow_id: string, workflow_name: string, step_name: string,
 /**
- * What the normal run loads: a skill id (`custom-x@3` when pinned) or,
- * for a Quick Prompt, `None` (its current version).
+ * What the normal execution loads: a skill id (`custom-x@3` when pinned)
+ * or, for a Quick Prompt, `None` (its current version).
  */
 normal: string | null,
 /**
- * What the workflow's shadow run loads instead, when its shadow is on
- * and names this resource.
+ * What each enabled shadow of the step loads instead, when it names this
+ * resource (KT-1459).
  */
-shadow: string | null, };
+shadows: Array<LivePageResourceShadow>, };
 
 export type LivePageRevision = { id: string, page_id: string, revision: number, html: string, created_by_agent: string | null, created_at: string, };
 
@@ -6332,6 +6491,34 @@ export type MergeFileDiff = { path: string,
 outcome: WriteOutcome | null, imported_sections: number, diff: string, };
 
 /**
+ * One point of an execution's output (a finding, a claim) and what became of
+ * it: which executions found it, whether it was verified, why it was dropped.
+ */
+export type MergePoint = { id: string, summary: string,
+/**
+ * The point as the execution worded it: a dropped point's text never
+ * appears in the merged result.
+ */
+text?: string,
+/**
+ * `main` and `shadow:<id>`.
+ */
+found_by: Array<string>, verdict: PointVerdict, verified: boolean,
+/**
+ * What confirmed it: the file and line, the output read.
+ */
+evidence?: string,
+/**
+ * Why it was dropped or calibrated.
+ */
+reason?: string, duplicate_of?: string, };
+
+/**
+ * How a merge stands.
+ */
+export type MergeStatus = "waiting" | "condensing" | "merged" | "skipped" | "rejected" | "failed";
+
+/**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
  * `disk_path` lets a file-tool-capable agent open the image directly.
  */
@@ -6425,6 +6612,11 @@ reason?: string, };
  * both sides compare the same strings. A failure is an API error instead.
  */
 export type MigrateDocsStatus = "migrated" | "already_migrated" | "not_applicable";
+
+/**
+ * A selected shadow that did not contribute, and why.
+ */
+export type MissingShadow = { shadow_id: string, label: string, reason: string, };
 
 export type ModelAvailability = "available" | "unavailable";
 
@@ -7466,6 +7658,11 @@ export type PluginInterface = "api" | "mcp" | "cli";
 export type PluginKind = "mcp" | "api" | "hybrid" | "cli";
 
 /**
+ * What the condense pass decided about one point.
+ */
+export type PointVerdict = "kept" | "duplicate" | "dropped_unverified";
+
+/**
  * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
  * `disc_meta` and `peer-join` instead of living as an implicit convention
  * in each agent's prompt. Agents walk `poll_backoff_seconds` while the
@@ -7976,15 +8173,23 @@ export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: st
 export type ProjectWriteAccessStatus = "Writable" | "ReadOnly" | "Missing" | "Unknown";
 
 /**
- * What the normal lane takes over from the shadow (KT-1450): the tested
- * version of a skill in every step that loads it, or the tested version of a
- * Quick Prompt made its current one. The shadow's override goes away.
+ * What the normal execution takes over from a shadow (KT-1450): the tested
+ * version of a skill in the step that carries the shadow, or the tested
+ * version of a Quick Prompt pinned there. The shadow's override goes away.
  */
 export type PromoteShadowRequest = {
 /**
  * `skill` or `quick_prompt`.
  */
-kind: string, id: string, };
+kind: string, id: string,
+/**
+ * The step carrying the shadow (id or name).
+ */
+step: string,
+/**
+ * The shadow that tested it; optional while the step has one shadow.
+ */
+shadow?: string, };
 
 export type PromptVariable = { name: string, label: string, placeholder: string,
 /**
@@ -9610,6 +9815,12 @@ disk_launch_min_free_gib: number,
  */
 disk_sweep_idle_hours: number,
 /**
+ * KT-1691 — days a Blocked or Interrupted execution's lane build dir must
+ * have been unwritten before it becomes purgeable (by a confirmed
+ * per-entry delete, never by a sweep). Its worktree and branch stay.
+ */
+disk_stalled_build_days: number,
+/**
  * Maximum concurrent agent processes (default: 5)
  */
 max_concurrent_agents: number,
@@ -9812,7 +10023,12 @@ disk_launch_min_free_gib: number,
 /**
  * KT-1318 - hours a lane build dir must be idle before a sweep may take it.
  */
-disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+disk_sweep_idle_hours: number,
+/**
+ * KT-1691 - days a Blocked/Interrupted execution's build dir must be idle
+ * before it becomes purgeable.
+ */
+disk_stalled_build_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
  * KT-1438 - copy lane seeds into task worktrees (default on).
  */
@@ -9904,6 +10120,12 @@ export type SetAgentConcurrencyRequest = { agent: AgentType,
  */
 concurrency?: number | null, };
 
+export type SetAgentFallbackRequest = { agent: AgentType,
+/**
+ * The whole chain, in order. Empty cuts it.
+ */
+fallback_chain: Array<AgentFallback>, };
+
 export type SetAgentMentionColorRequest = { agent: AgentType,
 /**
  * `None` or an empty string restores the built-in color.
@@ -9962,6 +10184,12 @@ endpoint?: string | null,
 install_dir?: string | null, image_settings?: ComfyGenSettings, video_settings?: ComfyGenSettings, };
 
 export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
+
+export type SetDiscussionFallbackRequest = {
+/**
+ * `None` removes the override (back to the default chain).
+ */
+chain_override?: Array<AgentFallback> | null, };
 
 export type SetMediaReferenceLimitRequest = { connection_id: string, model: string, modality: MediaModality, max_input_references?: number | null, };
 
@@ -10068,9 +10296,123 @@ confirm?: string | null,
 expected_fingerprint?: string | null, };
 
 /**
+ * The agent a shadow runs its step on instead of the step's own.
+ */
+export type ShadowAgent = { agent: AgentType, model?: string,
+/**
+ * The named HTTP connection (local Ollama, LiteLLM, OpenRouter…) the
+ * agent talks to, when the agent type alone does not say which.
+ */
+connection_id?: string, reasoning_effort?: string, };
+
+/**
+ * What a shadow may spend before it is stopped. A stopped shadow never fails
+ * or delays its step.
+ */
+export type ShadowBudget = {
+/**
+ * Also the generation cap handed to an agent that takes one; checked on
+ * the tokens the shadow spent when it ends.
+ */
+max_tokens?: number,
+/**
+ * Wall-clock limit of the shadow, enforced: it replaces the workflow's
+ * timeout for the shadow, so a slow local model may run longer than the
+ * main step, which never waits for it.
+ */
+max_duration_secs?: number, max_cost_usd?: number, };
+
+/**
  * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
  */
 export type ShadowedInstall = { path: string, version: string, };
+
+/**
+ * One execution of a step, as the comparison shows it.
+ */
+export type ShadowExecution = {
+/**
+ * `None` for the main execution.
+ */
+shadow_id?: string, label: string, status: ShadowStatus, identity: ExecutionIdentity, output: string, tokens_used?: number, duration_ms?: number, cost_usd?: number,
+/**
+ * The model the execution resolved, when it ran.
+ */
+model?: string,
+/**
+ * Why a budget, the time limit or a skip ended the shadow, when one did.
+ */
+stopped?: string, };
+
+/**
+ * The optional merge of a step (KT-1544): the main execution and the shadows
+ * it selects are condensed into one result, which becomes the step's output.
+ * Without it a step with shadows only compares them (KT-1459).
+ *
+ * The merge waits for the selected shadows up to `timeout_secs`, goes on with
+ * those that finished and says which are missing. A condense pass (an Agent)
+ * then dedups the points, verifies each against the code and records which
+ * executions found it: a point it cannot verify is never published.
+ */
+export type ShadowMerge = {
+/**
+ * Off keeps the setting saved without merging.
+ */
+enabled: boolean,
+/**
+ * The shadows that merge with the main execution, by id; empty means every
+ * shadow of the step.
+ */
+shadows?: Array<string>,
+/**
+ * How long to wait for the selected shadows; unset is
+ * `DEFAULT_SHADOW_MERGE_TIMEOUT_SECS`.
+ */
+timeout_secs?: number,
+/**
+ * The agent of the condense pass, usually the strongest model; unset runs
+ * it on the step's own agent.
+ */
+agent?: ShadowAgent, };
+
+/**
+ * The merge of one step, as the run view shows it.
+ */
+export type ShadowMergeReport = { status: MergeStatus,
+/**
+ * The shadows the merge selected, by id.
+ */
+selected: Array<string>,
+/**
+ * The shadows whose output went into the condense pass.
+ */
+contributors: Array<string>,
+/**
+ * The selected shadows that did not make it, with the reason.
+ */
+missing: Array<MissingShadow>, timeout_secs: number, points: Array<MergePoint>, contributions: Array<ExecutionContribution>,
+/**
+ * Why the main output stayed, or anything the reader should know.
+ */
+note?: string,
+/**
+ * The condense pass's own spend: hosted tokens the merge cost.
+ */
+tokens_used?: number, cost_usd?: number, model?: string, duration_ms?: number,
+/**
+ * The merged result: the step's output when `status` is `merged`.
+ */
+merged_output: string, };
+
+/**
+ * The prompt a shadow loads instead of its step's own.
+ */
+export type ShadowPrompt = { "type": "quick_prompt", id: string, version?: number, } | { "type": "inline", template: string, };
+
+/**
+ * How a stored execution stands.
+ */
+export type ShadowStatus = "running" | "success" | "failed" | "skipped" | "over_budget" | "timed_out" | "interrupted";
 
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
 
@@ -10622,6 +10964,63 @@ terminal_stop?: string | null,
 output_bytes?: number, };
 
 /**
+ * A shadow of a step (KT-1449, KT-1459): the step runs once more beside the
+ * main execution, on exactly the same input, with what the shadow changes. A
+ * shadow that changes nothing measures the determinism of the step's agent.
+ * Only the main output continues the workflow; a shadow never runs a step that
+ * acts outside Kronn and never fails or delays the main step.
+ */
+export type StepShadow = {
+/**
+ * Short slug, unique in the step: the key of the shadow's column in the
+ * comparison.
+ */
+id: string,
+/**
+ * Shown in the comparison; the id when empty.
+ */
+label: string,
+/**
+ * Off keeps the shadow saved without running it.
+ */
+enabled: boolean,
+/**
+ * Only runs of these projects get this shadow; empty means every run.
+ */
+project_ids?: Array<string>,
+/**
+ * One run in N gets this shadow. Unset or 1 is every run.
+ */
+sample_every?: number,
+/**
+ * The agent, model and connection the shadow runs on.
+ */
+agent?: ShadowAgent,
+/**
+ * The prompt the shadow loads.
+ */
+prompt?: ShadowPrompt,
+/**
+ * Skill replaced in the shadow: `custom-x` → `custom-x@3`, or any other
+ * skill id; an empty replacement drops the skill. Matched on the base id
+ * of what the step loads.
+ */
+skills?: Record<string, string>,
+/**
+ * Quick Prompt version the shadow loads instead of the current one.
+ */
+quick_prompt_versions?: Record<string, number>, budget?: ShadowBudget, };
+
+/**
+ * The main execution of a step and its shadows.
+ */
+export type StepShadowComparison = { step_name: string, result_index: number, main: ShadowExecution, shadows: Array<ShadowExecution>,
+/**
+ * The merge of the step's executions, when the step carries one (KT-1544).
+ */
+merge?: ShadowMergeReport, };
+
+/**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
  */
 export type StepTools = {
@@ -10635,7 +11034,7 @@ cli: Array<string>,
  */
 kronn_internal: Array<string>, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" } | { "type": "DelegateSubtasks" } | { "type": "TaskBoard" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" } | { "type": "DelegateSubtasks" } | { "type": "TaskBoard" } | { "type": "Decide" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -11955,10 +12354,6 @@ project_scope?: WorkflowProjectScope | null,
  */
 retention?: WorkflowRetention | null,
 /**
- * `null` removes the shadow variant; omitted keeps it.
- */
-shadow?: WorkflowShadow | null,
-/**
  * Replaces every named ref when present; omitted keeps them.
  */
 refs?: { [key in string]: ResourceRef }, };
@@ -12472,11 +12867,6 @@ project_scope?: WorkflowProjectScope,
  */
 retention?: WorkflowRetention,
 /**
- * KT-1449 — a shadow run started alongside each normal one, with other
- * skill/QP versions and its external effects skipped. Human-only.
- */
-shadow?: WorkflowShadow,
-/**
  * KT-1448 — named references to Kronn objects, rendered by steps as
  * `{{refs.<name>}}` and remapped by export/import like other dependencies.
  */
@@ -12868,26 +13258,6 @@ export type WorkflowScopeEntry = { project_id: string, project_name: string | nu
 
 export type WorkflowScopeItem = { project_id: string, access: ScopeAccess, };
 
-/**
- * The shadow variant of a workflow (KT-1449). Each normal run of a matching
- * project also starts a shadow run on the same inputs; steps flagged
- * `external_effect` are skipped there, so it can be compared without acting.
- */
-export type WorkflowShadow = { enabled: boolean,
-/**
- * Only runs of these projects get a shadow; empty means every run.
- */
-project_ids?: Array<string>,
-/**
- * Skill replaced in the shadow run: `custom-x` → `custom-x@3`, or any
- * other skill id. Matched on the base id of what the step loads.
- */
-skills?: Record<string, string>,
-/**
- * Quick Prompt version the shadow run loads instead of the current one.
- */
-quick_prompt_versions?: Record<string, number>, };
-
 export type WorkflowStep = {
 /**
  * Durable opaque identity of this step. `name` remains the editable
@@ -12906,9 +13276,19 @@ id?: string | null, name: string, step_type: StepType, description?: string | nu
 on_timeout?: ConditionAction | null, stall_timeout_secs?: number | null, retry?: RetryConfig | null, delay_after_secs?: number | null, skill_ids?: Array<string>,
 /**
  * KT-1449 — the step acts outside Kronn (posts, writes, sends): a shadow
- * run skips it.
+ * never runs it, and it cannot carry shadows.
  */
-external_effect?: boolean, profile_ids?: Array<string>, directive_ids?: Array<string>,
+external_effect?: boolean,
+/**
+ * KT-1459 — the shadows of this step: each re-runs only this step beside
+ * the main execution, on the same input. Human-only.
+ */
+shadows?: Array<StepShadow>,
+/**
+ * KT-1544 — optional: condense the main execution with the selected
+ * shadows into the step's output. Off by default; human-only.
+ */
+shadow_merge?: ShadowMerge, profile_ids?: Array<string>, directive_ids?: Array<string>,
 /**
  * Id of the Quick Prompt to fan out. Required for BatchQuickPrompt steps.
  */
@@ -12983,7 +13363,7 @@ quick_api_id?: string | null,
 quick_prompt_id?: string | null,
 /**
  * Version of `quick_prompt_id` the step loads; unset follows its latest
- * version. A shadow run may still test another one.
+ * version. A shadow of the step may still test another one.
  */
 quick_prompt_version?: number | null,
 /**
@@ -13246,6 +13626,10 @@ page_publish?: PublishPageDataConfig | null,
  */
 task_board?: TaskBoardConfig,
 /**
+ * KT-1367 — for `StepType::Decide`.
+ */
+decide?: DecideConfig,
+/**
  * 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
  * workflow to run as a nested child. Required for that step type
  * (enforced at save). `None` for every other step type. Mirrors the
@@ -13400,7 +13784,11 @@ export type WriteState = "ok" | "failed" | "unknown";
 /**
  * Real-time message exchanged between Kronn instances via WebSocket.
  */
-export type WsMessage = { "type": "presence", from_pseudo: string, from_invite_code: string, online: boolean, } | { "type": "ping", timestamp: number, } | { "type": "pong", timestamp: number, } | { "type": "chat_message", shared_discussion_id: string, message_id: string, from_pseudo: string, from_avatar_email: string | null, from_invite_code: string, content: string, timestamp: number,
+export type WsMessage = { "type": "presence", from_pseudo: string,
+/**
+ * The sender's public address. It names the contact; it proves nothing.
+ */
+from_invite_code: string, online: boolean, } | { "type": "ping", timestamp: number, } | { "type": "pong", timestamp: number, } | { "type": "chat_message", shared_discussion_id: string, message_id: string, from_pseudo: string, from_avatar_email: string | null, from_invite_code: string, content: string, timestamp: number,
 /**
  * Author role + agent identity, so a federated AGENT reply lands as
  * an Agent message (with its CLI name) on the peer instead of a

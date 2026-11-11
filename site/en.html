@@ -1581,7 +1581,7 @@
     <a class="level-tag" href="#kronn-way">SIDE QUEST · THE KRONN WAY</a>
     <h2 class="section-title">Engineering,<br><span class="li">not incantation</span>.</h2>
     <p class="section-intro">
-      <strong>Decompose</strong>: code does what code can do (fetch, transform, run a command) at 0 tokens, and the agent only steps in where judgement is needed, with a small, bounded prompt. <strong>Measure</strong>: skills and Quick Prompts are versioned, and a shadow run shows whether a new version is really better before it goes live. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/the-kronn-way.md" target="_blank" rel="noopener">The Kronn way, in detail</a>.
+      <strong>Decompose</strong>: code does what code can do (fetch, transform, run a command) at 0 tokens, and the agent only steps in where judgement is needed, with a small, bounded prompt. <strong>Measure</strong>: skills and Quick Prompts are versioned, and a step shadow shows whether a new version is really better before it goes live. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/the-kronn-way.md" target="_blank" rel="noopener">The Kronn way, in detail</a>.
     </p>
 
     <!-- Decomposition diagram : mega-prompt vs Kronn workflow -->
@@ -1689,15 +1689,15 @@
       </svg>
     </div>
 
-    <h3 class="qs-title subsection-title">Test a new version without risk (shadow runs)</h3>
+    <h3 class="qs-title subsection-title">Test a new version without risk (step shadows)</h3>
     <p class="section-intro">
-      Each normal run of a workflow can start a <strong>shadow run</strong> on the same real inputs, loading the skill or Quick Prompt version you are testing. Every step marked as acting outside Kronn (posting, sending, writing elsewhere) is skipped, and so is every Gate: it publishes and breaks nothing. The run list compares both runs step by step, and one click promotes the better version. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/shadow-runs.md" target="_blank" rel="noopener">Shadow runs guide</a>.
+      A step can carry <strong>shadows</strong>: each one re-runs that step beside its main execution, on exactly the same input, with another agent, model, prompt or skill versions (or with none of these, to see how deterministic the step is). Only the main output continues the workflow. A shadow never runs a step marked as acting outside Kronn (posting, sending, writing elsewhere), nor a Gate, and a shadow that fails or overspends never fails the step. The run view compares the main execution and its shadows step by step (what differs, tokens, cost, duration, output diff, and how many distinct outputs an identical shadow gives), and one click promotes the better version. Optionally, a step can also <strong>merge</strong> its main execution with one, several or all of its shadows (off by default): a condense pass dedups their points, verifies each point a shadow raised and keeps the provenance of every point, and the merged result becomes the step's output. A point it cannot verify is never published: the main output then stays the step's output. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/shadow-runs.md" target="_blank" rel="noopener">Shadow runs guide</a>.
     </p>
 
     <div class="decomp-wrap">
-      <div class="decomp-wrap-label">▸ Fig. III · shadow runs</div>
-      <a href="diagrams/shadow-runs.en.svg" target="_blank" rel="noopener"><img class="decomp-diagram" src="diagrams/shadow-runs.en.svg" width="1200" height="380" loading="lazy" decoding="async"
-           alt="The same real inputs start a normal run, published, with Prompt v2 and Skill v1, and a shadow run without side effects, with Prompt v2 and Skill v2. Both feed a step-by-step comparison, then the better version is promoted in one click."></a>
+      <div class="decomp-wrap-label">▸ Fig. III · step shadows</div>
+      <a href="diagrams/shadow-runs.en.svg" target="_blank" rel="noopener"><img class="decomp-diagram" src="diagrams/shadow-runs.en.svg" width="1200" height="464" loading="lazy" decoding="async"
+           alt="One step receives its input. The main execution, published, is the step as it is. Beside it, an identical shadow and a varied shadow (another agent, model, prompt or skills) re-run only that step on the same input, without side effects. A per-step comparison shows what differs, tokens, cost, duration, an output diff and a determinism summary, and the tested version can be promoted in one click. An optional merge condenses the main execution with the chosen shadows, with verification and provenance, and the merged result becomes the step output."></a>
     </div>
   </section>
 
@@ -2205,8 +2205,8 @@
       </div>
 
       <div class="concept-card">
-        <div class="concept-term">Shadow run</div>
-        <p class="concept-def">A run started alongside a normal run, on the same inputs, with other skill or Quick Prompt versions. Gates and steps acting outside Kronn are skipped: <strong>compare first</strong>, switch after (<a href="#kronn-way">how</a>).</p>
+        <div class="concept-term">Step shadow</div>
+        <p class="concept-def">A re-run of one step beside its main execution, on the same input, with another agent, model, prompt or skill versions. Gates and steps acting outside Kronn never run one; optionally merged into the step's output: <strong>compare first</strong>, switch after (<a href="#kronn-way">how</a>).</p>
       </div>
 
       <div class="concept-card">

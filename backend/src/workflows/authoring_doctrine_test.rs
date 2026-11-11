@@ -137,7 +137,7 @@ fn the_stale_passages_are_gone() {
 
 #[test]
 fn the_schema_states_what_happens_past_the_pagination_cap_and_for_graphql() {
-    let schema = crate::api::workflows::canonical_step_schema();
+    let schema = crate::api::workflows::full_step_schema();
     let api = &schema["fields_by_type"]["ApiCall"];
     let limits = api["pagination_limits"].as_str().unwrap();
     assert!(limits.contains("PAGINATION_TRUNCATED") && limits.contains("50"));
