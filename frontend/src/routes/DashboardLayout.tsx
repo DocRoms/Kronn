@@ -1,17 +1,17 @@
-import { BackendStatus } from '../components/BackendStatus';
 import { AuthFailureBanner } from '../components/AuthFailureBanner';
 import { KeyLockedBanner } from '../components/KeyLockedBanner';
 import { UpdateBanner } from '../components/UpdateBanner';
+import { useBackendMonitor } from '../hooks/useBackendMonitor';
 import { useAppContext } from '../lib/appContext';
 import { Dashboard } from '../pages/Dashboard';
 
 /** The dashboard shell and the banners that only make sense around it. */
 export function DashboardLayout() {
   const { resetSetup, resetError, dismissResetError } = useAppContext();
+  useBackendMonitor();
   return (
     <>
       <UpdateBanner />
-      <BackendStatus />
       <KeyLockedBanner />
       <AuthFailureBanner />
       {resetError && (

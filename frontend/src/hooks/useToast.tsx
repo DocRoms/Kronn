@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
+import { useT } from '../lib/I18nContext';
+import { isServerFailureMessage } from '../lib/notifications';
 import { ToastItem } from './ToastItem';
 import type { Toast, ToastFn, ToastType } from './toastTypes';
 
@@ -22,7 +24,18 @@ let styleInjected = false;
  *  shows up. */
 const DEDUP_WINDOW_MS = 1500;
 
+/** KT-1684 — server errors and outages live in the bell: at most one short
+ *  "see in the bell" toast in this window, whoever fires it. */
+const SERVER_FAILURE_TOAST_WINDOW_MS = 30_000;
+let lastServerFailureToastAt = 0;
+
+/** For tests: the "see in the bell" toast may fire again. */
+export function resetServerFailureToast(): void {
+  lastServerFailureToastAt = 0;
+}
+
 export function useToast() {
+  const { t } = useT();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const idRef = useRef(0);
   /** Last-seen-at map keyed by `${type}::${message}`. Persists for the
@@ -36,6 +49,16 @@ export function useToast() {
   }, []);
 
   const toast: ToastFn = useCallback((message, type = 'info', options) => {
+    // A 5xx or an unreachable backend is a notification, not a stack of toasts
+    // (4xx stay next to the action: they are not matched here).
+    if (type === 'error' && isServerFailureMessage(message)) {
+      const at = Date.now();
+      if (at - lastServerFailureToastAt < SERVER_FAILURE_TOAST_WINDOW_MS) return;
+      lastServerFailureToastAt = at;
+      message = t('notif.toast.seeBell');
+      type = 'warning';
+      options = { persistent: false, dedup: false };
+    }
     // Dedup-by-content: if the SAME (message, type) was fired in the
     // last DEDUP_WINDOW_MS, drop the new fire. Pin: TD-20260510-multi-
     // agent-disc-finished-toasts — multi-agent QP runs broadcast N
@@ -67,7 +90,7 @@ export function useToast() {
     if (!persistent) {
       window.setTimeout(() => dismiss(id), AUTO_DISMISS_MS[type]);
     }
-  }, [dismiss]);
+  }, [dismiss, t]);
 
   const ToastContainer = useCallback(() => {
     if (!styleInjected) styleInjected = true;
@@ -91,8 +114,8 @@ export function useToast() {
             pointerEvents: 'none',
           }}
         >
-          {toasts.map(t => (
-            <ToastItem key={t.id} toast={t} onDismiss={() => dismiss(t.id)} />
+          {toasts.map(item => (
+            <ToastItem key={item.id} toast={item} onDismiss={() => dismiss(item.id)} />
           ))}
         </div>
       </>

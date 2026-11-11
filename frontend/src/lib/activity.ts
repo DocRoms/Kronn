@@ -80,6 +80,26 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(hours / 24)}d ${String(hours % 24).padStart(2, '0')}h`;
 }
 
+/** `0:42`, `12:05`, `1:02:03`: how long an outage has lasted, as a clock. */
+export function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = String(total % 60).padStart(2, '0');
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`;
+}
+
+/** `14:02`: a moment of today in the reader's own format. */
+export function formatTimeOfDay(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** Every row of a list in reading order: the compartments in order, then each as
+ *  `rowsOfCompartment` sorts it. */
+export function sortRowsForPanel(rows: readonly ActivityRow[]): ActivityRow[] {
+  return ACTIVITY_COMPARTMENTS.flatMap(({ id }) => rowsOfCompartment(rows, id));
+}
+
 /** A translation, or `fallback` when the key has none (a row type the locale files do not name yet). */
 export function translateOr(t: Translate, key: string, fallback: string): string {
   const text = t(key);

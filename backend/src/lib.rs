@@ -1860,6 +1860,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects", get(api::projects::list))
         .route("/api/projects", post(api::projects::create))
         .route("/api/projects/scan", post(api::projects::scan))
+        .route(
+            "/api/projects/scan/hide",
+            post(api::projects::hide_scanned_repo),
+        )
         .route("/api/projects/add-folder", post(api::projects::add_folder))
         .route("/api/projects/bootstrap", post(api::projects::bootstrap))
         .route("/api/projects/clone", post(api::projects::clone_project))

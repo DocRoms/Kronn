@@ -581,29 +581,6 @@ export function Dashboard({ onReset }: DashboardProps) {
     }
   };
 
-  const [scanning, setScanning] = useState(false);
-  const handleScan = async () => {
-    if (scanning) return;
-    setScanning(true);
-    try {
-      const repos = await projectsApi.scan();
-      let added = 0;
-      for (const repo of repos) {
-        if (!repo.has_project && !repo.hidden) {
-          await projectsApi.create(repo);
-          added++;
-        }
-      }
-      refetch();
-      if (added > 0) toast(t('projects.scanFound', added), 'success');
-      else toast(t('projects.scanNone'), 'info');
-    } catch {
-      toast(t('projects.scanError'), 'error');
-    } finally {
-      setScanning(false);
-    }
-  };
-
   // The start-up screen stays until the first projects and discussions are
   // in (or failed, so the page can say so); then every tab is fetched in the
   // background so switching never waits on a chunk.
@@ -784,10 +761,12 @@ export function Dashboard({ onReset }: DashboardProps) {
           return btn;
         })}
         </div>
+        <div className="dash-nav-spacer" data-mobile={isMobile} />
         <div className="dash-nav-activity-group" data-mobile={isMobile}>
           {/* KT-1658 — the one permanent entry to everything running in Kronn:
               it replaces the per-kind spinners, their popovers and the
-              "N en cours" text. */}
+              "N en cours" text. KT-1684 — it sits at the right, next to the
+              help button, and also carries the outage and server errors. */}
           <ActivityBell
             onOpenLink={link => openActivityLink(nav, link)}
             onActionSettled={() => {
@@ -798,11 +777,6 @@ export function Dashboard({ onReset }: DashboardProps) {
             }}
           />
         </div>
-        <div className="dash-nav-spacer" data-mobile={isMobile} />
-        <button className="dash-scan-btn" data-tour-id="scan-btn" onClick={handleScan} disabled={scanning} title={t('nav.scan')}>
-          {scanning ? <Loader2 size={14} className="spin" /> : <Search size={14} />}
-          {!isMobile && (scanning ? t('projects.scanning') : t('nav.scan'))}
-        </button>
         <TourHelpButton />
       </nav>
 

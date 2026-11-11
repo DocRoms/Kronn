@@ -51,7 +51,6 @@ vi.mock('../pages/StandaloneDiscussionMosaic', () => ({
 
 // The banners around the dashboard poll the backend; inert here.
 vi.mock('../components/UpdateBanner', () => ({ UpdateBanner: () => null }));
-vi.mock('../components/BackendStatus', () => ({ BackendStatus: () => null }));
 
 // Mock the API
 vi.mock('../lib/api', () => ({

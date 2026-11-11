@@ -312,6 +312,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { registerGrantMinter, strongFetch, withStrongConfirm } from './strongConfirm';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
+import { isGatewayStatus, noteBackendAnswered, noteSuspectedOutage, recordServerError } from './notifications';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
 import type { AgentFilesPolicy, LaneSeedCandidate, ProjectLaneSeeds, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
@@ -755,6 +756,21 @@ interface ApiResponse<T> {
   error_code?: string;
 }
 
+/**
+ * Tells the notification store what an answer means. Returns, for a failure
+ * worth a notification (a 5xx that is not a gateway answer), the call that
+ * records it once the body — the server's own message — has been read.
+ */
+function reportAnswer(status: number, method: string, path: string): ((message: string) => void) | undefined {
+  if (isGatewayStatus(status)) {
+    noteSuspectedOutage();
+    return undefined;
+  }
+  noteBackendAnswered();
+  if (status < 500) return undefined;
+  return message => recordServerError({ status, method, path, message });
+}
+
 async function api<T>(
   method: string,
   path: string,
@@ -782,9 +798,17 @@ async function api<T>(
         signal,
       });
     } catch (error) {
-      if (looksLikeBackendDown(error)) reportBackendSuspect();
+      if (looksLikeBackendDown(error)) {
+        noteSuspectedOutage();
+        reportBackendSuspect();
+      }
       throw error;
     }
+
+    // KT-1684 — the one place that feeds the bell's notifications: a gateway
+    // answer is a suspected outage, any other 5xx a grouped server error, and
+    // an answer that is neither means the backend is there.
+    const reportedFailure = reportAnswer(res.status, method, path);
 
     const contentType = res.headers.get('content-type') ?? '';
     if (!contentType.includes('application/json')) {
@@ -801,12 +825,17 @@ async function api<T>(
       const responseBody = await res.text().catch(() => '');
       const trimmed = responseBody.trim();
       const suffix = trimmed ? ` — ${trimmed.slice(0, 500)}` : '';
+      reportedFailure?.(trimmed);
       throw new Error(`Server error (HTTP ${res.status})${suffix}`);
     }
 
     const json: ApiResponse<T> = await res.json();
 
     if (!json.success) {
+      if (res.status >= 500) {
+        reportedFailure?.(json.error ?? '');
+        throw new ApiRequestError(`Server error (HTTP ${res.status}) — ${json.error ?? 'Unknown API error'}`, json.error_code);
+      }
       throw new ApiRequestError(json.error ?? 'Unknown API error', json.error_code);
     }
 
@@ -1161,6 +1190,8 @@ export const projects = {
   dockerLogs: (id: string, service: string, tail = 200) =>
     api<ProjectDockerLogs>('GET', `/projects/${id}/docker/logs?service=${encodeURIComponent(service)}&tail=${tail}`),
   scan: () => api<DetectedRepo[]>('POST', '/projects/scan'),
+  /** "Hide" in Detect repositories (KT-1684): the scan never offers this path again. */
+  hideScanned: (path: string) => api<void>('POST', '/projects/scan/hide', { path }),
   create: (repo: DetectedRepo) => api<Project>('POST', '/projects', repo),
   addFolder: (req: { path: string; name?: string }) => api<Project>('POST', '/projects/add-folder', req),
   bootstrap: (req: BootstrapProjectRequest) => api<BootstrapProjectResponse>('POST', '/projects/bootstrap', req),

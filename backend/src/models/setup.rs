@@ -734,6 +734,10 @@ pub struct ScanConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub default_docs_dir: Option<String>,
+    /// Repositories the owner hid from "Detect repositories" (KT-1684), by
+    /// path: a hidden one is reported `hidden` by the scan and never offered again.
+    #[serde(default)]
+    pub hidden_repos: Vec<String>,
 }
 
 fn default_scan_depth() -> usize {

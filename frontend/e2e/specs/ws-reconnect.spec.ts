@@ -1,14 +1,15 @@
 /**
  * WS / health reconnect — UI must surface backend unreachable + recover.
  *
- * Validates the BackendStatus pill behaviour against `/api/health`:
+ * Validates the outage entry of the bell's Notifications tab against
+ * `/api/health` (it was the BackendStatus pill until KT-1684):
  *
- *   1. Steady-state: pill is hidden (zero chrome noise on happy path).
- *   2. /api/health starts failing (route-aborted to simulate
- *      Tailscale drop, gateway crash, network partition) → pill
- *      becomes visible with `[role="status"]` and the
- *      `kronn-backend-status` class.
- *   3. /api/health recovers → pill auto-hides on the next poll.
+ *   1. Steady-state: the bell carries no alert (zero chrome noise on happy path).
+ *   2. /api/health starts failing (fulfilled with 503 to simulate Tailscale
+ *      drop, gateway crash, network partition) → the bell turns red with "!"
+ *      and, opened, shows ONE System entry on the Notifications tab.
+ *   3. /api/health recovers → the alert clears on the next poll and the entry
+ *      moves to the history ("Back after …").
  *
  * Closes the health-surface part of
  * TD-20260715-ws-dead-after-restart-silent-send. WebSocket heartbeat and
@@ -20,8 +21,7 @@
  * `page.context().setOffline(true)` works for navigation-driven flows
  * but is flaky for in-flight `fetch()` polls — Playwright's
  * intercepting layer doesn't always cancel an already-in-flight
- * request. Routing the specific endpoint to abort gives a
- * deterministic signal.
+ * request. Routing the specific endpoint gives a deterministic signal.
  *
  * # Cost
  *
@@ -32,22 +32,20 @@ import { test, expect } from '../fixtures/kronn-fixture';
 
 test.describe.configure({ timeout: 120_000, retries: 0 });
 
-test.describe('Backend status pill — surfaces health failures + auto-recovers', () => {
-  test('pill is hidden in steady state', async ({ page }) => {
+test.describe('Bell outage entry — surfaces health failures + auto-recovers', () => {
+  test('the bell carries no alert in steady state', async ({ page }) => {
     await page.goto('/');
     // Give the first health check a beat to fire and resolve OK.
     await page.waitForTimeout(2_000);
-    const pill = page.locator('.kronn-backend-status');
-    await expect(pill).toHaveCount(0);
+    await expect(page.getByTestId('activity-bell')).not.toHaveAttribute('data-alert', 'outage');
+    await expect(page.getByTestId('activity-bell-alert')).toHaveCount(0);
   });
 
-  test('pill appears when /api/health starts failing and disappears on recovery', async ({ page }) => {
+  test('the bell turns red when /api/health starts failing and clears on recovery', async ({ page }) => {
     let mockedRequests = 0;
-    // Start failing /api/health BEFORE navigation so the very first
-    // poll fails. We fulfill with 503 rather than abort because fetch's
-    // catch handler in `BackendStatus` reads `res.ok` — a 503 reliably
-    // throws via the existing `if (!res.ok)` check, whereas
-    // `route.abort` can sometimes hang the fetch in jsdom-style harness.
+    // Start failing /api/health BEFORE navigation so the very first poll fails.
+    // A 503 reliably throws through the existing `!res.ok` check, whereas
+    // `route.abort` can sometimes hang the fetch in the harness.
     await page.route('**/api/health', route => {
       mockedRequests++;
       void route.fulfill({
@@ -57,32 +55,27 @@ test.describe('Backend status pill — surfaces health failures + auto-recovers'
       });
     });
     await page.goto('/');
-    // Sanity log: the route should have intercepted at least one
-    // health call by the time we look for the pill.
     await page.waitForTimeout(2_000);
     // eslint-disable-next-line no-console
     console.log(`[ws-reconnect] /api/health intercepts so far: ${mockedRequests}`);
 
-    // Wait for the pill to mount. We poll on innerHTML rather than the
-    // `.kronn-backend-status` selector directly because PW's locator
-    // engine sometimes loses the element when React re-renders the
-    // Suspense boundary above it (Dashboard mount sequence). Polling
-    // via `evaluate` sidesteps that.
-    await expect.poll(async () => {
-      return await page.evaluate(() => !!document.querySelector('.kronn-backend-status'));
-    }, {
-      timeout: 30_000,
-      intervals: [500, 1_000, 2_000],
-      message: 'pill should mount after the first /api/health failure',
-    }).toBe(true);
+    const bell = page.getByTestId('activity-bell');
+    await expect(bell, 'the bell should turn red after the first /api/health failure')
+      .toHaveAttribute('data-alert', 'outage', { timeout: 30_000 });
+    await expect(page.getByTestId('activity-bell-alert')).toHaveText('!');
 
-    const pill = page.locator('.kronn-backend-status').first();
-    await expect(pill).toHaveAttribute('role', 'status');
-    // A restart is the usual cause: the pill says it reconnects, not that it broke.
-    await expect(pill).toContainText(/reconnexion|reconnecting|reconectando/);
+    // The panel opens on Notifications by itself once the outage lasts; open it
+    // by hand if the test got there first. One entry, whatever the retries.
+    if (!(await page.getByTestId('notifications-tab').isVisible())) {
+      await bell.click();
+    }
+    const entry = page.getByTestId('notif-outage');
+    await expect(entry).toHaveCount(1);
+    // A restart is the usual cause: the entry says it reconnects, not that it broke.
+    await expect(entry).toContainText(/reconnexion|reconnecting|reconectando|重新连接/);
 
     // Restore /api/health. Offline polling is deliberately accelerated, so a
-    // restarted backend clears the warning in roughly two seconds.
+    // restarted backend clears the alert in roughly two seconds.
     await page.unroute('**/api/health');
     await page.route('**/api/health', route => {
       void route.fulfill({
@@ -91,6 +84,8 @@ test.describe('Backend status pill — surfaces health failures + auto-recovers'
         body: JSON.stringify({ ok: true, in_docker: false, version: 'e2e' }),
       });
     });
-    await expect(pill, 'pill should detach once /api/health recovers').toHaveCount(0, { timeout: 15_000 });
+    await expect(bell, 'the alert should clear once /api/health recovers')
+      .not.toHaveAttribute('data-alert', 'outage', { timeout: 15_000 });
+    await expect(page.getByTestId('notif-outage')).toHaveCount(0);
   });
 });

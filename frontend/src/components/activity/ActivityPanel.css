@@ -1,4 +1,4 @@
-/* The attention center's panel (KT-1658). Rendered into document.body by
+/* The attention center's panel (KT-1658; two tabs and category chips, KT-1684). Rendered into document.body by
  * ActivityPanel (the sticky nav would clip it) and positioned under the bell by
  * useActivityPopover, which sets left/top/width/maxHeight inline. Tokens only. */
 
@@ -21,16 +21,95 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--kr-sp-4) var(--kr-sp-6);
+  gap: var(--kr-sp-3);
+  padding: 0 var(--kr-sp-4) 0 var(--kr-sp-2);
   border-bottom: 1px solid var(--kr-border-soft);
   font-size: var(--kr-fs-xs);
   font-weight: 600;
   color: var(--kr-text-secondary);
 }
 
-.activity-panel-title {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+/* ── Tabs (In progress / Notifications) ─────────────────── */
+.activity-tabs {
+  display: flex;
+  min-width: 0;
+}
+
+.activity-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.activity-tab:hover {
+  color: var(--kr-text-primary);
+}
+
+.activity-tab[aria-selected="true"] {
+  color: var(--kr-text-primary);
+  border-bottom-color: var(--kr-accent);
+}
+
+.activity-tab-counter {
+  min-width: 14px;
+  padding: 0 var(--kr-sp-3);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-warning-amber);
+  color: var(--kr-on-warning);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 800;
+  line-height: 14px;
+  text-align: center;
+}
+
+/* ── Category chips (All / Discussions / Automations / Kronn) ── */
+.activity-chips {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  border-bottom: 1px solid var(--kr-border-soft);
+}
+
+.activity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-1) var(--kr-sp-4);
+  background: transparent;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-pill);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.activity-chip:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.activity-chip[aria-pressed="true"] {
+  background: var(--kr-accent-bg-strong);
+  border-color: var(--kr-accent-border);
+  color: var(--kr-text-primary);
+}
+
+.activity-chip-count {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
 }
 
 .activity-panel-close {
@@ -49,16 +128,49 @@
 }
 
 .activity-panel-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.activity-tabpanel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Only the list scrolls: the chips and the pinned outage stay in view. */
+.activity-tabbody {
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
 }
 
+/* An outage: what In progress shows is the last known state, so it is greyed. */
+.activity-tabpanel[data-stale="true"] .activity-progress-body {
+  opacity: 0.55;
+  filter: grayscale(1);
+}
+
+.activity-stale-note {
+  border-top: none;
+  border-bottom: 1px solid var(--kr-border-soft);
+}
+
+.activity-row-compartment {
+  color: var(--kr-accent-text);
+  font-weight: 600;
+}
+
 /* ── Compartments ───────────────────────────────────────── */
-.activity-compartment + .activity-compartment {
+.activity-section + .activity-section {
   border-top: 1px solid var(--kr-border-soft);
 }
 
-.activity-compartment-title {
+.activity-section-title {
   display: flex;
   align-items: center;
   gap: var(--kr-sp-3);
@@ -264,6 +376,9 @@ button.activity-row-link:hover .activity-row-name {
 @media (pointer: coarse) {
   .activity-panel-close,
   .activity-action-btn,
+  .activity-tab,
+  .activity-chip,
+  .notif-btn,
   button.activity-row-link {
     min-width: 44px;
     min-height: 44px;
@@ -272,4 +387,125 @@ button.activity-row-link:hover .activity-row-name {
   .activity-panel-close {
     justify-content: center;
   }
+}
+
+/* ── Notifications tab (KT-1684) ────────────────────────── */
+
+/* The outage is pinned above the chips and the list, whatever the filter. */
+.notif-pinned {
+  flex-shrink: 0;
+}
+
+.notif-outage {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  background: rgba(var(--kr-error-rgb), 0.12);
+  border-bottom: 1px solid rgba(var(--kr-error-rgb), 0.35);
+  border-left: 3px solid var(--kr-error);
+}
+
+.notif-outage-icon {
+  flex-shrink: 0;
+  color: var(--kr-error);
+}
+
+.notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  border-bottom: 1px solid var(--kr-border-soft);
+  border-left: 3px solid var(--kr-warning-amber);
+}
+
+.notif-row:last-child {
+  border-bottom: none;
+}
+
+.notif-error-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--kr-warning-amber);
+}
+
+.notif-row-resolved {
+  border-left-color: var(--kr-border-medium);
+  opacity: 0.8;
+}
+
+.notif-resolved-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--kr-success);
+}
+
+.notif-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--kr-sp-1);
+  min-width: 0;
+}
+
+.notif-title {
+  font-size: var(--kr-fs-sm);
+  font-weight: 500;
+  color: var(--kr-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.notif-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.notif-meta {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+}
+
+.notif-message {
+  overflow-wrap: anywhere;
+}
+
+.notif-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-2);
+}
+
+.notif-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  flex-shrink: 0;
+  padding: var(--kr-sp-1) var(--kr-sp-4);
+  background: transparent;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-xl);
+  color: var(--kr-text-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.notif-btn:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.notif-outage .notif-btn {
+  border-color: rgba(var(--kr-error-rgb), 0.45);
+  color: var(--kr-error);
+}
+
+.notif-footer {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  border-top: 1px solid var(--kr-border-soft);
 }

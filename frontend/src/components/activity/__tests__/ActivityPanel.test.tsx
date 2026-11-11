@@ -74,14 +74,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('ActivityPanel — the "En cours" compartment', () => {
+describe('ActivityPanel — the "En cours" tab', () => {
   it('lists discussions, workflow runs, audits and task workers with their state, project and elapsed time', () => {
     vi.useFakeTimers({ now: NOW, toFake: ['Date', 'setInterval', 'clearInterval'] });
     renderPanel(FOUR_KINDS);
 
-    const section = screen.getByRole('region', { name: /En cours/ });
-    expect(section).toHaveAttribute('data-compartment', 'running');
-    const rows = within(section).getAllByTestId('activity-row');
+    // "Tout" groups the list into one titled section per category (KT-1684).
+    const sections = Array.from(document.querySelectorAll('[data-section]'));
+    expect(sections.map(section => section.getAttribute('data-section'))).toEqual(['discussions', 'automations', 'kronn']);
+    expect(screen.getByRole('region', { name: /Discussions/ })).toHaveTextContent('Fix the login');
+    expect(screen.getByRole('region', { name: /Automatisations/ })).toHaveTextContent('Nightly review');
+    expect(screen.getByRole('region', { name: /^Kronn/ })).toHaveTextContent('KT-12 · Ship the bell');
+    const rows = screen.getAllByTestId('activity-row');
     expect(rows.map(r => r.getAttribute('data-row-type'))).toEqual(['agent_turn', 'workflow_run', 'audit', 'task_worker']);
 
     const turn = rows[0];
@@ -198,10 +202,10 @@ describe('ActivityPanel — the "En cours" compartment', () => {
 
   it('shows an empty "En cours" with nothing running, and a loading hint before the first answer', () => {
     renderPanel([]);
-    expect(screen.getByRole('region', { name: /En cours/ })).toHaveTextContent('Rien ne tourne pour le moment.');
+    expect(screen.getByTestId('progress-tab')).toHaveTextContent('Rien ne tourne pour le moment.');
     cleanup();
     renderPanel(null);
-    expect(screen.getByRole('region', { name: /En cours/ })).toHaveTextContent('Chargement…');
+    expect(screen.getByTestId('progress-tab')).toHaveTextContent('Chargement…');
   });
 
   it('says when the list may be incomplete or out of date', () => {
@@ -250,29 +254,22 @@ describe('ActivityPanel — a row it has never seen (DoD 1)', () => {
 });
 
 describe('ActivityPanel — the KT-334 compartments are reserved', () => {
-  it('shows only "En cours" until another compartment has a row', () => {
-    renderPanel(FOUR_KINDS);
-    const sections = document.querySelectorAll('[data-compartment]');
-    expect(Array.from(sections, s => s.getAttribute('data-compartment'))).toEqual(['running']);
-  });
-
-  it('places a row of a later compartment under its own heading, in reading order, with no panel change', () => {
+  it('tags a row of a later compartment and puts it first in its section, with no panel change', () => {
     renderPanel([
-      row({ id: 'done:1', type: 'workflow_run', title: 'Finished earlier', compartment: 'unseen_done', state: 'running' }),
       row({ id: 'run:1', type: 'agent_turn', title: 'Working now' }),
+      row({ id: 'done:1', type: 'agent_turn', title: 'Finished earlier', compartment: 'unseen_done', state: 'running' }),
       row({ id: 'ask:1', type: 'agent_turn', title: 'Needs you', compartment: 'needs_decision' }),
     ]);
-    const sections = Array.from(document.querySelectorAll('[data-compartment]'));
-    expect(sections.map(s => s.getAttribute('data-compartment'))).toEqual(['needs_decision', 'running', 'unseen_done']);
-    expect(screen.getByRole('region', { name: /Attend une décision/ })).toHaveTextContent('Needs you');
-    expect(screen.getByRole('region', { name: /Terminé non-vu/ })).toHaveTextContent('Finished earlier');
-    expect(screen.getByRole('region', { name: /En cours/ })).toHaveTextContent('Working now');
+    const titles = screen.getAllByTestId('activity-row').map(r => within(r).getByText(/Working now|Finished earlier|Needs you/).textContent);
+    expect(titles).toEqual(['Needs you', 'Working now', 'Finished earlier']);
+    const tags = screen.getAllByTestId('activity-row-compartment').map(tag => tag.textContent);
+    expect(tags).toEqual(['Attend une décision', 'Terminé non-vu']);
   });
 
-  it('orders a compartment working first, then queued, then paused, oldest first', () => {
+  it('orders a section working first, then queued, then paused, oldest first', () => {
     renderPanel([
-      row({ id: 'p', type: 'workflow_run', title: 'Paused', state: 'paused', started_at: ago(50) }),
-      row({ id: 'q', type: 'task_worker', title: 'Queued', state: 'queued', started_at: ago(40) }),
+      row({ id: 'p', type: 'agent_turn', title: 'Paused', state: 'paused', started_at: ago(50) }),
+      row({ id: 'q', type: 'agent_turn', title: 'Queued', state: 'queued', started_at: ago(40) }),
       row({ id: 'r2', type: 'agent_turn', title: 'Newer', started_at: ago(3) }),
       row({ id: 'r1', type: 'agent_turn', title: 'Older', started_at: ago(30) }),
     ]);
