@@ -162,3 +162,24 @@ describe('useToast — warning variant', () => {
     expect(screen.getAllByText('Welcome')).toHaveLength(2);
   });
 });
+
+describe('useToast — unmount', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('clears pending auto-dismiss timers on unmount', () => {
+    const { unmount } = render(<ToastDemo run={(t) => t('Saved', 'success')} />);
+    act(() => {
+      screen.getByText('fire').click();
+    });
+    expect(vi.getTimerCount()).toBe(1);
+    unmount();
+    // A leaked timer would call setState after teardown; in CI it fired
+    // after jsdom was gone (`window is not defined`).
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
