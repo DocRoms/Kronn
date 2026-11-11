@@ -421,15 +421,13 @@ impl Plan {
     /// none.
     pub fn argv(&self, program: &std::ffi::OsStr) -> (std::ffi::OsString, Vec<std::ffi::OsString>) {
         match self.launcher {
-            // A missing program is spawned as is: behind the launcher its
-            // spawn error would become the launcher's exit 127.
-            Some(launcher) if which::which(program).is_ok() => {
+            Some(launcher) => {
                 let mut args: Vec<std::ffi::OsString> =
                     launcher.args.iter().map(Into::into).collect();
                 args.push(program.to_os_string());
                 (launcher.program.into(), args)
             }
-            _ => (program.to_os_string(), Vec::new()),
+            None => (program.to_os_string(), Vec::new()),
         }
     }
 }
@@ -509,21 +507,6 @@ mod tests {
             let (program, args) = plan.argv(OsStr::new("kronn"));
             assert_eq!(program, OsStr::new("kronn"));
             assert!(args.is_empty());
-        }
-    }
-
-    #[test]
-    fn a_missing_program_is_not_hidden_behind_the_launcher() {
-        for os in [HostOs::MacOs, HostOs::Linux] {
-            let plan = plan(Priority::Background, true, os, everything_installed);
-            assert!(plan.launcher.is_some(), "{os:?}");
-            let (program, args) = plan.argv(OsStr::new("kronn_nonexistent_test_binary"));
-            assert_eq!(
-                program,
-                OsStr::new("kronn_nonexistent_test_binary"),
-                "{os:?}"
-            );
-            assert!(args.is_empty(), "{os:?}");
         }
     }
 

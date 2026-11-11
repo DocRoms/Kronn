@@ -76,7 +76,14 @@ const EXEC_STEP_PRIORITY: Priority = Priority::Background;
 /// The command of an Exec step child at [`EXEC_STEP_PRIORITY`], behind the
 /// host's priority launcher unless the owner turned that off.
 fn step_command(program: &str) -> tokio::process::Command {
-    step_command_planned(program, background_priority::plan_here(EXEC_STEP_PRIORITY))
+    // Behind the launcher a missing program would be the launcher's exit 127,
+    // not the spawn error the step reports.
+    let plan = if which::which(program).is_ok() {
+        background_priority::plan_here(EXEC_STEP_PRIORITY)
+    } else {
+        background_priority::Plan::default()
+    };
+    step_command_planned(program, plan)
 }
 
 fn step_command_planned(program: &str, plan: background_priority::Plan) -> tokio::process::Command {
