@@ -58,6 +58,10 @@ pub const REFERENCING_COLUMNS: &[(&str, &str)] = &[
 pub const OWNED_COLUMNS: &[(&str, &str)] = &[
     // The definitions the run froze when it started.
     ("workflow_run_pins", "run_id"),
+    // What the shadows of its steps answered (KT-1459).
+    ("step_shadow_runs", "run_id"),
+    // The merged result and the provenance of a merged step (KT-1544).
+    ("step_shadow_merges", "run_id"),
 ];
 
 /// What a blanked step output reads afterwards.
@@ -137,6 +141,24 @@ pub fn cutoff_hours(now: DateTime<Utc>, hours: u32) -> String {
 /// `cutoff`, keeping every other field of each step. Returns the rows changed;
 /// fewer than `limit` means nothing is left to do.
 pub fn compact_run_payloads_chunk(conn: &Connection, cutoff: &str, limit: usize) -> Result<usize> {
+    // What the shadows of those runs' steps answered goes with the outputs it
+    // was compared to (KT-1459); read before the runs are marked trimmed.
+    conn.execute(
+        &format!(
+            "UPDATE step_shadow_runs SET output = ?3
+              WHERE output <> '' AND output <> ?3 AND run_id IN ({})",
+            payload_candidates_sql()
+        ),
+        params![cutoff, limit as i64, REMOVED_OUTPUT],
+    )?;
+    conn.execute(
+        &format!(
+            "UPDATE step_shadow_merges SET merged_output = ?3
+              WHERE merged_output <> '' AND merged_output <> ?3 AND run_id IN ({})",
+            payload_candidates_sql()
+        ),
+        params![cutoff, limit as i64, REMOVED_OUTPUT],
+    )?;
     let sql = format!(
         "UPDATE workflow_runs
             SET step_results_json = CASE WHEN json_valid(step_results_json)
@@ -562,6 +584,43 @@ mod tests {
             compact_all(&conn),
             0,
             "a trimmed run is not rewritten again"
+        );
+    }
+
+    #[test]
+    fn a_trimmed_run_loses_what_the_shadows_of_its_steps_answered() {
+        let conn = db();
+        run(&conn, "shadowed", "Success", "linear", Some(OLD));
+        run(
+            &conn,
+            "recent",
+            "Success",
+            "linear",
+            Some("2999-01-01T00:00:00+00:00"),
+        );
+        for run_id in ["shadowed", "recent"] {
+            conn.execute(
+                "INSERT INTO step_shadow_runs
+                    (id, run_id, result_index, step_name, shadow_id, status, identity_json, output, started_at)
+                 VALUES (?1, ?2, 0, 'review', 's', 'success', '{}', 'a long review', '2026-01-01T00:00:00+00:00')",
+                params![format!("row-{run_id}"), run_id],
+            )
+            .unwrap();
+        }
+        compact_all(&conn);
+        let output = |run_id: &str| -> String {
+            conn.query_row(
+                "SELECT output FROM step_shadow_runs WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(output("shadowed"), REMOVED_OUTPUT);
+        assert_eq!(
+            output("recent"),
+            "a long review",
+            "a run inside its window keeps it"
         );
     }
 

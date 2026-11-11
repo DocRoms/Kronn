@@ -43,7 +43,7 @@ their actual type to the authored string type.
 Ollama still receives the same envelope through its native `format` field,
 with a non-streaming request. No change to its decoding schema is required.
 [src: file: backend/src/agents/runner.rs:8315-8369#build_ollama_chat_body]
-[src: file: backend/src/workflows/steps.rs:1352-1354#ollama_envelope_format]
+[src: file: backend/src/workflows/steps.rs:1353-1355#ollama_envelope_format]
 
 ## Guarantees and regression coverage
 
@@ -55,7 +55,7 @@ for full provider-enforced validation. For example, it does not enforce
 `additionalProperties` or resolve `$ref`.
 [src: file: backend/src/workflows/steps.rs:556-579#validate_envelope_against_schema]
 [src: file: backend/src/workflows/steps.rs:773-791#on_invalid]
-[src: file: backend/src/workflows/template.rs:1366-1386#validate_envelope_against_schema]
+[src: file: backend/src/workflows/template.rs:1367-1387#validate_envelope_against_schema]
 
 Body regressions cover explicit `strict: false`, preservation of nested optional
 properties, array items and dictionary schemas, both streaming settings, and

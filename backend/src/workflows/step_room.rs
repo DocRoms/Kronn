@@ -1110,7 +1110,6 @@ mod tests {
         Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: "workflow-1".into(),

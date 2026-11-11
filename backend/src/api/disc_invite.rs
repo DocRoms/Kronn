@@ -880,7 +880,22 @@ async fn try_remote_join(
         let Ok(url) = reqwest::Url::parse(&format!("{base}/api/disc/claim-by-token")) else {
             continue;
         };
-        let body = serde_json::json!({ "token": token, "from_invite_code": our_code });
+        // The secret this contact was paired with; none means it must re-pair.
+        let contact_id = contact.id.clone();
+        let Some(secret) = state
+            .db
+            .with_conn(move |conn| db::contacts::outbound_secret(conn, &contact_id))
+            .await
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        let body = serde_json::json!({
+            "token": token,
+            "from_invite_code": our_code,
+            "secret": secret,
+        });
         let claim = async {
             let resp = client.post(url).json(&body).send().await.ok()?;
             resp.json::<serde_json::Value>().await.ok()
@@ -2336,14 +2351,20 @@ fn invite_handoff(token: &str) -> String {
 
 /// Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
 /// host the room behind this invite code?". Authenticated by `from_invite_code`
-/// matching one of our contacts — the same self-auth credential as the WS
-/// Presence handshake (so this endpoint is exempt from the bearer middleware).
+/// naming one of our contacts AND `secret`, the per-contact secret it was paired
+/// with — the same credential as the WS Presence handshake (so this endpoint is
+/// exempt from the bearer middleware).
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct ClaimByTokenRequest {
     pub token: String,
-    /// The CALLING peer's own invite code — must match a known contact here.
+    /// The CALLING peer's own invite code — names a known contact here. It is
+    /// public: it proves nothing without `secret`.
     pub from_invite_code: String,
+    /// The pairing secret of that contact (KT-1650). Empty/absent is refused.
+    #[serde(default)]
+    #[ts(skip)]
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -2363,9 +2384,10 @@ pub struct ClaimByTokenResponse {
 /// contact-share) into a single paste-a-code action that works wherever the
 /// room actually lives.
 ///
-/// Auth: the caller proves it's a known contact via `from_invite_code` (same
-/// credential as the WS Presence frame). Registered as auth-exempt in `lib.rs`
-/// (a remote peer has no bearer token), gated here instead.
+/// Auth: the caller proves it's a known contact via `from_invite_code` and its
+/// pairing `secret` (same credential as the WS Presence frame). Registered as
+/// auth-exempt in `lib.rs` (a remote peer has no bearer token), gated here
+/// instead.
 pub async fn claim_by_token(
     State(state): State<AppState>,
     Json(req): Json<ClaimByTokenRequest>,
@@ -2374,38 +2396,36 @@ pub async fn claim_by_token(
     if from_code.is_empty() {
         return Json(ApiResponse::err("from_invite_code required"));
     }
-    // Peers are identified only by their code: off unless P2P is enabled,
-    // answered exactly like an unknown code.
+    // Peers are identified only by their code and secret: off unless P2P is
+    // enabled, answered exactly like an unauthenticated peer.
     if !state.p2p.enabled() {
-        return Json(ApiResponse::err(
-            "unknown peer (invite code not in contacts)",
-        ));
+        return Json(ApiResponse::err(crate::db::contacts::PEER_REFUSED));
     }
 
-    // 1. Authenticate the caller: the invite code must match a known contact
-    //    (same trust model as the WS Presence handshake — no anonymous claims).
+    // 1. Authenticate the caller: a known contact presenting its pairing secret
+    //    (same trust model as the WS Presence handshake — no anonymous claims,
+    //    and the public invite code alone is not a credential).
     let code_lookup = from_code.clone();
+    let presented = req.secret.clone();
     let caller = match state
         .db
-        .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &code_lookup))
+        .with_conn(move |conn| {
+            crate::db::contacts::authenticate_peer(conn, &code_lookup, &presented)
+        })
         .await
     {
         Ok(crate::db::contacts::InviteAuth::Accepted(c)) => c,
-        // Pending/refused answers EXACTLY like unknown — no status oracle.
+        // Unpaired/refused/wrong secret answers EXACTLY like unknown — no oracle.
         Ok(crate::db::contacts::InviteAuth::NotAccepted { pseudo, status }) => {
             tracing::warn!(
                 target: "kronn::invariant",
                 caller = %pseudo, status = %status, route = "claim-by-token",
-                "invite-code auth refused — contact is not accepted"
+                "peer auth refused — contact is not accepted or not paired"
             );
-            return Json(ApiResponse::err(
-                "unknown peer (invite code not in contacts)",
-            ));
+            return Json(ApiResponse::err(crate::db::contacts::PEER_REFUSED));
         }
         Ok(crate::db::contacts::InviteAuth::Unknown) => {
-            return Json(ApiResponse::err(
-                "unknown peer (invite code not in contacts)",
-            ))
+            return Json(ApiResponse::err(crate::db::contacts::PEER_REFUSED))
         }
         Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
     };
@@ -2441,7 +2461,7 @@ pub async fn claim_by_token(
             // revoked, between this check and the sharing update.
             let on = gate.read();
             if !*on || !crate::db::contacts::contact_id_is_accepted(conn, &cid)? {
-                anyhow::bail!("unknown peer (invite code not in contacts)");
+                anyhow::bail!(crate::db::contacts::PEER_REFUSED);
             }
             let disc = crate::db::discussions::get_discussion(conn, &did)?
                 .ok_or_else(|| anyhow::anyhow!("discussion vanished"))?;
@@ -2495,13 +2515,17 @@ pub async fn claim_by_token(
 
 /// Body of `POST /api/disc/fetch-file` (F8). A peer that received a
 /// `FileAttached` announcement calls this to pull the binary of a context file
-/// it doesn't have. Authenticated by `from_invite_code` matching a contact
-/// (same trust model as `claim-by-token`).
+/// it doesn't have. Authenticated by `from_invite_code` naming a contact and its
+/// pairing `secret` (same trust model as `claim-by-token`).
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct FetchFileRequest {
     pub file_id: String,
     pub from_invite_code: String,
+    /// The pairing secret of that contact (KT-1650). Empty/absent is refused.
+    #[serde(default)]
+    #[ts(skip)]
+    pub secret: String,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -2518,7 +2542,8 @@ pub struct FetchFileResponse {
 /// `POST /api/disc/fetch-file` — the binary-transfer leg of F8 (P2P file/doc
 /// recovery). Returns the bytes of a context file we host so a peer can mirror
 /// it locally. Auth-exempt in `lib.rs` (a remote peer has no bearer token),
-/// gated here on a known `from_invite_code` — same as `claim-by-token`.
+/// gated here on a known `from_invite_code` and its pairing `secret` — same as
+/// `claim-by-token`.
 pub async fn fetch_file(
     State(state): State<AppState>,
     Json(req): Json<FetchFileRequest>,
@@ -2527,36 +2552,32 @@ pub async fn fetch_file(
     if from_code.is_empty() {
         return Json(ApiResponse::err("from_invite_code required"));
     }
-    // Peers are identified only by their code: off unless P2P is enabled,
-    // answered exactly like an unknown code.
+    // Peers are identified only by their code and secret: off unless P2P is
+    // enabled, answered exactly like an unauthenticated peer.
     if !state.p2p.enabled() {
-        return Json(ApiResponse::err(
-            "unknown peer (invite code not in contacts)",
-        ));
+        return Json(ApiResponse::err(crate::db::contacts::PEER_REFUSED));
     }
-    // Authenticate the caller (must be a known contact) — and KEEP its id:
-    // being a contact is not enough to read arbitrary files (see below).
+    // Authenticate the caller (a known contact presenting its pairing secret)
+    // — and KEEP its id: being a contact is not enough to read arbitrary files
+    // (see below).
+    let presented = req.secret.clone();
     let caller = match state
         .db
-        .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &from_code))
+        .with_conn(move |conn| crate::db::contacts::authenticate_peer(conn, &from_code, &presented))
         .await
     {
         Ok(crate::db::contacts::InviteAuth::Accepted(c)) => c,
-        // Pending/refused answers EXACTLY like unknown — no status oracle.
+        // Unpaired/refused/wrong secret answers EXACTLY like unknown — no oracle.
         Ok(crate::db::contacts::InviteAuth::NotAccepted { pseudo, status }) => {
             tracing::warn!(
                 target: "kronn::invariant",
                 caller = %pseudo, status = %status, route = "fetch-file",
-                "invite-code auth refused — contact is not accepted"
+                "peer auth refused — contact is not accepted or not paired"
             );
-            return Json(ApiResponse::err(
-                "unknown peer (invite code not in contacts)",
-            ));
+            return Json(ApiResponse::err(crate::db::contacts::PEER_REFUSED));
         }
         Ok(crate::db::contacts::InviteAuth::Unknown) => {
-            return Json(ApiResponse::err(
-                "unknown peer (invite code not in contacts)",
-            ))
+            return Json(ApiResponse::err(crate::db::contacts::PEER_REFUSED))
         }
         Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
     };
@@ -2624,12 +2645,12 @@ pub async fn fetch_file(
             data_base64: None,
         }))
     };
-    let caller_code = req.from_invite_code.trim().to_string();
+    let caller_id = caller.id.clone();
     // Revoking the caller, removing it from the discussion or turning P2P
     // off cancels the read.
     let read = tokio::select! {
         read = tokio::fs::read(&disk_path) => read,
-        _ = until_fetch_unentitled(&state, &caller_code, &cf.discussion_id) => return not_found(),
+        _ = until_fetch_unentitled(&state, &caller_id, &cf.discussion_id) => return not_found(),
     };
     let bytes = match read {
         Ok(b) => b,
@@ -2642,23 +2663,23 @@ pub async fn fetch_file(
         mime_type: Some(cf.mime_type),
         data_base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
     };
-    match fetch_release(&state, &caller_code, &cf.discussion_id, response).await {
+    match fetch_release(&state, &caller_id, &cf.discussion_id, response).await {
         Some(response) => Json(ApiResponse::ok(response)),
         None => not_found(),
     }
 }
 
-/// Still an accepted contact listed in the discussion's `shared_with`.
+/// Still an accepted contact listed in the discussion's `shared_with`. The
+/// caller was authenticated by its pairing secret when the request came in; from
+/// then on it is its contact id that is re-checked.
 fn caller_entitled(
     conn: &rusqlite::Connection,
-    caller_code: &str,
+    caller_id: &str,
     disc_id: &str,
 ) -> anyhow::Result<bool> {
-    let crate::db::contacts::InviteAuth::Accepted(caller) =
-        crate::db::contacts::authenticate_invite_code(conn, caller_code)?
-    else {
+    if !crate::db::contacts::contact_id_is_accepted(conn, caller_id)? {
         return Ok(false);
-    };
+    }
     let members: Option<String> = conn
         .query_row(
             "SELECT shared_with_json FROM discussions WHERE id = ?1",
@@ -2669,27 +2690,23 @@ fn caller_entitled(
     let members: Vec<String> = members
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default();
-    Ok(members.contains(&caller.id))
+    Ok(members.iter().any(|member| member == caller_id))
 }
 
 /// The caller may still receive files of `disc_id`: P2P on, still an
 /// accepted contact, and still listed in the discussion's `shared_with`.
-async fn fetch_entitled(state: &AppState, caller_code: &str, disc_id: &str) -> bool {
+async fn fetch_entitled(state: &AppState, caller_id: &str, disc_id: &str) -> bool {
     if !state.p2p.enabled() {
         return false;
     }
-    let (code, did, gate) = (
-        caller_code.to_owned(),
-        disc_id.to_owned(),
-        state.p2p.clone(),
-    );
+    let (caller, did, gate) = (caller_id.to_owned(), disc_id.to_owned(), state.p2p.clone());
     let entitled = state
         .db
         .with_conn(move |conn| {
             if !*gate.read() {
                 return Ok(false);
             }
-            caller_entitled(conn, &code, &did)
+            caller_entitled(conn, &caller, &did)
         })
         .await
         .unwrap_or(false);
@@ -2702,20 +2719,16 @@ async fn fetch_entitled(state: &AppState, caller_code: &str, disc_id: &str) -> b
 /// land between this check and the release.
 async fn fetch_release(
     state: &AppState,
-    caller_code: &str,
+    caller_id: &str,
     disc_id: &str,
     response: FetchFileResponse,
 ) -> Option<FetchFileResponse> {
-    let (code, did, gate) = (
-        caller_code.to_owned(),
-        disc_id.to_owned(),
-        state.p2p.clone(),
-    );
+    let (caller, did, gate) = (caller_id.to_owned(), disc_id.to_owned(), state.p2p.clone());
     state
         .db
         .with_conn(move |conn| {
             let on = gate.read();
-            Ok((*on && caller_entitled(conn, &code, &did)?).then_some(response))
+            Ok((*on && caller_entitled(conn, &caller, &did)?).then_some(response))
         })
         .await
         .ok()
@@ -2723,8 +2736,8 @@ async fn fetch_release(
 }
 
 /// Resolves once the caller loses its entitlement (checked every 250 ms).
-async fn until_fetch_unentitled(state: &AppState, caller_code: &str, disc_id: &str) {
-    while fetch_entitled(state, caller_code, disc_id).await {
+async fn until_fetch_unentitled(state: &AppState, caller_id: &str, disc_id: &str) {
+    while fetch_entitled(state, caller_id, disc_id).await {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
@@ -2732,6 +2745,9 @@ async fn until_fetch_unentitled(state: &AppState, caller_code: &str, disc_id: &s
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    /// The pairing secret the contacts made by these tests were paired with.
+    const PEER_SECRET: &str = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12";
     use crate::core::config::default_config;
     use crate::db::Database;
     use crate::DEFAULT_MAX_CONCURRENT_AGENTS;
@@ -2835,7 +2851,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+        assert!(fetch_entitled(&state, "c-ent", "d-ent-1").await);
 
         // A read in flight is cancelled once membership is removed.
         let cancelled = {
@@ -2843,7 +2859,7 @@ mod tests {
             tokio::spawn(async move {
                 tokio::select! {
                     _ = std::future::pending::<()>() => false,
-                    _ = until_fetch_unentitled(&state, "kr-inv-ent", "d-ent-1") => true,
+                    _ = until_fetch_unentitled(&state, "c-ent", "d-ent-1") => true,
                 }
             })
         };
@@ -2863,7 +2879,7 @@ mod tests {
             .await
             .expect("the transfer is cancelled")
             .unwrap());
-        assert!(!fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+        assert!(!fetch_entitled(&state, "c-ent", "d-ent-1").await);
 
         // P2P off and a deleted contact deny as well.
         state
@@ -2879,14 +2895,14 @@ mod tests {
             .await
             .unwrap();
         state.p2p.set(false);
-        assert!(!fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+        assert!(!fetch_entitled(&state, "c-ent", "d-ent-1").await);
         state.p2p.set(true);
         state
             .db
             .with_conn(|conn| crate::db::contacts::delete_contact(conn, "c-ent"))
             .await
             .unwrap();
-        assert!(!fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+        assert!(!fetch_entitled(&state, "c-ent", "d-ent-1").await);
     }
 
     #[tokio::test]
@@ -2931,7 +2947,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let check = {
             let state = state.clone();
-            tokio::spawn(async move { fetch_entitled(&state, "kr-inv-busy", "d-busy-1").await })
+            tokio::spawn(async move { fetch_entitled(&state, "c-busy", "d-busy-1").await })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
         state.p2p.set(false);
@@ -2975,7 +2991,7 @@ mod tests {
             mime_type: Some("application/pdf".into()),
             data_base64: Some("Qk9EWQ".into()),
         };
-        assert!(fetch_release(&state, "kr-inv-rel", "d-rel-1", response())
+        assert!(fetch_release(&state, "c-rel", "d-rel-1", response())
             .await
             .is_some());
 
@@ -2992,9 +3008,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let release = {
             let state = state.clone();
-            tokio::spawn(
-                async move { fetch_release(&state, "kr-inv-rel", "d-rel-1", response()).await },
-            )
+            tokio::spawn(async move { fetch_release(&state, "c-rel", "d-rel-1", response()).await })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
         state.p2p.set(false);
@@ -3015,7 +3029,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(fetch_release(&state, "kr-inv-rel", "d-rel-1", response())
+        assert!(fetch_release(&state, "c-rel", "d-rel-1", response())
             .await
             .is_none());
     }
@@ -3028,12 +3042,13 @@ mod tests {
             Json(FetchFileRequest {
                 file_id: "f-1".into(),
                 from_invite_code: "kr-inv-abc".into(),
+                secret: PEER_SECRET.into(),
             }),
         )
         .await;
         assert_eq!(
             resp.0.error.as_deref(),
-            Some("unknown peer (invite code not in contacts)")
+            Some(crate::db::contacts::PEER_REFUSED)
         );
     }
 
@@ -3063,6 +3078,12 @@ mod tests {
                         updated_at: chrono::Utc::now(),
                     },
                 )?;
+                crate::db::contacts::set_pairing_secrets(
+                    conn,
+                    "c-1",
+                    &crate::db::contacts::hash_secret(PEER_SECRET),
+                    PEER_SECRET,
+                )?;
                 conn.execute(
                     "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, extracted_text, extracted_size, disk_path, message_id)
                      VALUES ('f-1', 'd-fetch-1', 'doc.pdf', 'application/pdf', 5, '', 0, ?1, 'm-1')",
@@ -3079,6 +3100,7 @@ mod tests {
             Json(FetchFileRequest {
                 file_id: "f-1".into(),
                 from_invite_code: "kr-inv-abc".into(),
+                secret: PEER_SECRET.into(),
             }),
         )
         .await;
@@ -3105,6 +3127,7 @@ mod tests {
             Json(FetchFileRequest {
                 file_id: "f-1".into(),
                 from_invite_code: "kr-inv-abc".into(),
+                secret: PEER_SECRET.into(),
             }),
         )
         .await;
@@ -3118,17 +3141,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_accepted_contacts_are_refused_like_unknown_codes() {
+    async fn non_accepted_or_unauthenticated_peers_are_refused_like_unknown_codes() {
         // Passe D (Codex constat n°1) — a pending/refused contact keeps its
         // invite code but must NOT pass the auth-exempt P2P routes, and the
         // refusal must be indistinguishable from an unknown code (no oracle).
+        // KT-1650 — neither does an accepted contact that presents no secret, a
+        // wrong one, or the public invite code in its place; and one that
+        // predates pairing secrets (no secret stored) passes with nothing.
         let state = make_state_with_disc("d-auth-1").await;
+        state.p2p.set(true);
         state
             .db
             .with_conn(|conn| {
-                for (id, code, status) in [
-                    ("c-pend", "kr-inv-pend", "pending"),
-                    ("c-ref", "kr-inv-ref", "refused"),
+                for (id, code, status, paired) in [
+                    ("c-pend", "kr-inv-pend", "pending", true),
+                    ("c-ref", "kr-inv-ref", "refused", true),
+                    ("c-acc", "kr-inv-acc", "accepted", true),
+                    ("c-old", "kr-inv-old", "accepted", false),
                 ] {
                     crate::db::contacts::insert_contact(
                         conn,
@@ -3143,26 +3172,46 @@ mod tests {
                             updated_at: chrono::Utc::now(),
                         },
                     )?;
+                    if paired {
+                        crate::db::contacts::set_pairing_secrets(
+                            conn,
+                            id,
+                            &crate::db::contacts::hash_secret(PEER_SECRET),
+                            PEER_SECRET,
+                        )?;
+                        crate::db::contacts::update_contact_status(conn, id, status)?;
+                    }
                 }
                 Ok(())
             })
             .await
             .unwrap();
 
-        for code in ["kr-inv-pend", "kr-inv-ref", "kr-inv-ghost"] {
-            // fetch-file: same error string for pending, refused and unknown.
+        let wrong = "cd34".repeat(16);
+        for (code, secret) in [
+            ("kr-inv-pend", PEER_SECRET),
+            ("kr-inv-ref", PEER_SECRET),
+            ("kr-inv-ghost", PEER_SECRET),
+            ("kr-inv-acc", ""),
+            ("kr-inv-acc", "kr-inv-acc"),
+            ("kr-inv-acc", wrong.as_str()),
+            ("kr-inv-old", ""),
+            ("kr-inv-old", PEER_SECRET),
+        ] {
+            // fetch-file: same error string for every refusal.
             let resp = fetch_file(
                 State(state.clone()),
                 Json(FetchFileRequest {
                     file_id: "f-any".into(),
                     from_invite_code: code.into(),
+                    secret: secret.into(),
                 }),
             )
             .await;
             assert_eq!(
                 resp.0.error.as_deref(),
-                Some("unknown peer (invite code not in contacts)"),
-                "{code} must be refused with the unknown-code message"
+                Some(crate::db::contacts::PEER_REFUSED),
+                "{code} / {secret:?} must be refused with the one refusal message"
             );
 
             // claim-by-token: same contract.
@@ -3171,15 +3220,29 @@ mod tests {
                 Json(ClaimByTokenRequest {
                     token: "kr-join-whatever".into(),
                     from_invite_code: code.into(),
+                    secret: secret.into(),
                 }),
             )
             .await;
             assert_eq!(
                 resp.0.error.as_deref(),
-                Some("unknown peer (invite code not in contacts)"),
-                "{code} must be refused with the unknown-code message"
+                Some(crate::db::contacts::PEER_REFUSED),
+                "{code} / {secret:?} must be refused with the one refusal message"
             );
         }
+        assert!(crate::db::contacts::PEER_REFUSED.contains("Pairing required"));
+
+        // The same accepted contact with its secret is let through.
+        let resp = claim_by_token(
+            State(state.clone()),
+            Json(ClaimByTokenRequest {
+                token: "kr-join-whatever".into(),
+                from_invite_code: "kr-inv-acc".into(),
+                secret: PEER_SECRET.into(),
+            }),
+        )
+        .await;
+        assert!(resp.0.success, "{:?}", resp.0.error);
     }
 
     #[tokio::test]

@@ -631,6 +631,9 @@ pub enum ExecutionTimeoutKind {
     TotalDuration,
     ReviewWait,
     HumanWait,
+    /// KT-1689 — a `Working` execution still queued for its worker's turn. An
+    /// alert for the principal, never an interruption.
+    QueueWait,
 }
 
 /// Decide the resume action for a TaskExecution found mid-integration at boot

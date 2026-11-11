@@ -3,6 +3,7 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{AddContactRequest, AddContactResult, ApiResponse, Contact, NetworkInfo};
 use crate::AppState;
@@ -15,96 +16,281 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Contact
     }
 }
 
-/// POST /api/contacts — add a contact from invite code
+/// What a bare invite code (an address) gets: it pairs nobody.
+const BARE_CODE_HINT: &str = "A bare invite code is only an address and cannot pair a contact. \
+     Ask the other side to open Settings > Identity, generate a pairing code \
+     (kronn:pseudo@host:port#secret) and paste that here.";
+
+/// What the accepting side answers to any pairing it cannot complete: the same
+/// words whatever the reason, so they tell nothing about which contacts exist.
+const PAIR_REFUSED: &str = "Pairing refused: the pairing code is unknown, expired or already \
+     used, or it does not fit this contact. A code pairs a new contact only; a contact that \
+     already exists on this instance needs a code issued for it (Re-pair on its entry), or \
+     must be deleted on both sides first. Generate a new pairing code on this instance \
+     (Settings > Identity) and paste it on the other side.";
+
+/// Body of `POST /api/contacts/pairing-offer`.
+#[derive(Debug, Default, Deserialize)]
+pub struct PairingOfferRequest {
+    /// Issue the code for this existing, unpaired contact (a re-pair from its
+    /// entry): the code then pairs that contact and nobody else.
+    #[serde(default)]
+    pub contact_id: Option<String>,
+}
+
+/// POST /api/contacts/pairing-offer — hand out a pairing code: this instance's
+/// public invite code, `#`, and a fresh random secret (KT-1650). The secret is
+/// shown once; only its hash is kept, until a peer spends it (7 days at most).
+/// Without a `contact_id` the code pairs a NEW contact only.
+pub async fn pairing_offer(
+    State(state): State<AppState>,
+    body: Option<Json<PairingOfferRequest>>,
+) -> Json<ApiResponse<String>> {
+    let contact_id = body.and_then(|Json(b)| b.contact_id);
+    let code = {
+        let config = state.config.read().await;
+        match try_build_invite_code(&config.server).await {
+            Ok(code) => code,
+            Err(reason) => return Json(ApiResponse::err(reason)),
+        }
+    };
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::contacts::create_pairing_offer(conn, contact_id.as_deref())
+        })
+        .await
+    {
+        Ok(Some(secret)) => Json(ApiResponse::ok(format!("{code}#{secret}"))),
+        Ok(None) => Json(ApiResponse::err(
+            "This contact cannot be re-paired: it is unknown, already paired or refused",
+        )),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// POST /api/contacts — pair with a contact from the pairing code it gave.
+///
+/// The code carries the peer's address and the secret we will present to it. We
+/// make our own secret for the other direction and hand it over in the pairing
+/// request, which the peer accepts only against a live pairing code of its own.
+/// Both secrets are random and exchanged here once; from then on every P2P route
+/// asks for them, never just for the public invite code.
 pub async fn add(
     State(state): State<AppState>,
     Json(req): Json<AddContactRequest>,
 ) -> Json<ApiResponse<AddContactResult>> {
-    let (pseudo, kronn_url) = match crate::db::contacts::parse_invite_code(&req.invite_code) {
-        Some(parsed) => parsed,
-        None => {
+    let Some((invite_code, offer_secret)) =
+        crate::db::contacts::split_pairing_code(&req.invite_code)
+    else {
+        return Json(ApiResponse::err(
+            if crate::db::contacts::parse_invite_code(&req.invite_code).is_some() {
+                BARE_CODE_HINT
+            } else {
+                "Invalid pairing code. Format: kronn:pseudo@host:port#secret"
+            },
+        ));
+    };
+    let Some((pseudo, kronn_url)) = crate::db::contacts::parse_invite_code(&invite_code) else {
+        return Json(ApiResponse::err(
+            "Invalid pairing code. Format: kronn:pseudo@host:port#secret",
+        ));
+    };
+
+    // A contact that came in as a request, or predates pairing secrets, is paired
+    // in place (its row and shared discussions stay); a paired one is not touched.
+    let lookup = invite_code.clone();
+    let existing = state
+        .db
+        .with_conn(move |conn| {
+            let found = crate::db::contacts::find_contact_by_invite_code(conn, &lookup)?;
+            Ok(match found {
+                Some(c) => {
+                    let paired = crate::db::contacts::is_paired(conn, &c.id)?;
+                    Some((c, paired))
+                }
+                None => None,
+            })
+        })
+        .await;
+    let existing_id = match existing {
+        Ok(Some((c, false))) if c.status != "refused" => Some(c.id),
+        Ok(Some(_)) => {
             return Json(ApiResponse::err(
-                "Invalid invite code. Format: kronn:pseudo@host:port",
+                "Contact already exists: delete it on both sides before pairing again",
             ))
         }
+        Ok(None) => None,
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    // Check if already exists
-    let code = req.invite_code.clone();
-    let exists = state
-        .db
-        .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &code))
-        .await;
-    // Adding a code that came in as a request accepts that request.
-    let request = match exists {
-        Ok(Some(existing)) if existing.status == crate::db::contacts::STATUS_REQUESTED => {
-            Some(existing)
-        }
-        Ok(Some(_)) => return Json(ApiResponse::err("Contact already exists")),
-        _ => None,
-    };
-
-    // Ping the peer to check reachability (non-blocking, 3s timeout)
-    // P2P off: no request leaves for the peer; the contact waits as pending.
-    let (reachable, warning) = if !state.p2p.enabled() {
-        (false, Some("P2P_OFF".to_string()))
-    } else {
-        let health_url = format!("{}/api/health", kronn_url);
-        let ping = guarded_client().get(&health_url).send();
-        match crate::api::federation::unless_p2p_off(&state, ping)
-            .await
-            .and_then(Result::ok)
-        {
-            Some(r) if r.status().is_success() => (true, None),
-            _ => {
-                // Diagnose WHY the peer is unreachable
-                let hint = diagnose_unreachable(&kronn_url).await;
-                (false, Some(hint))
-            }
+    if !state.p2p.enabled() {
+        return Json(ApiResponse::err(
+            "P2P connections are off: turn them on to pair a contact",
+        ));
+    }
+    let our_code = {
+        let config = state.config.read().await;
+        match try_build_invite_code(&config.server).await {
+            Ok(code) => code,
+            Err(reason) => return Json(ApiResponse::err(reason)),
         }
     };
+    let Some(base) = crate::db::contacts::contact_base_url(&kronn_url) else {
+        return Json(ApiResponse::err("Contact address is invalid"));
+    };
+    let Ok(url) = reqwest::Url::parse(&format!("{base}/api/contacts/pair")) else {
+        return Json(ApiResponse::err("Contact address is invalid"));
+    };
+    let client = match crate::core::safe_http::peer_client(std::time::Duration::from_secs(5)) {
+        Ok(client) => client,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
 
-    let status = if reachable { "accepted" } else { "pending" };
-
-    if let Some(mut existing) = request {
-        let id = existing.id.clone();
-        return match state
-            .db
-            .with_conn(move |conn| crate::db::contacts::update_contact_status(conn, &id, status))
-            .await
-        {
-            Ok(_) => {
-                existing.status = status.into();
-                existing.updated_at = Utc::now();
-                Json(ApiResponse::ok(AddContactResult {
-                    contact: existing,
-                    warning,
-                }))
-            }
-            Err(e) => Json(ApiResponse::err(format!("Failed to add contact: {}", e))),
-        };
+    let reverse_secret = crate::db::contacts::generate_secret();
+    let body = serde_json::json!({
+        "from_invite_code": our_code,
+        "offer_secret": offer_secret,
+        "reverse_secret": reverse_secret,
+    });
+    let pair = async {
+        let resp = client.post(url).json(&body).send().await.ok()?;
+        resp.json::<serde_json::Value>().await.ok()
+    };
+    match crate::api::federation::unless_p2p_off(&state, pair).await {
+        None => return Json(ApiResponse::err("P2P connections were turned off")),
+        Some(None) => {
+            let hint = diagnose_unreachable(&kronn_url).await;
+            return Json(ApiResponse::err(format!(
+                "Pairing not completed: the peer is unreachable ({hint}). The pairing code \
+                 stays valid for {} days: retry once the network works.",
+                crate::db::contacts::PAIRING_OFFER_TTL_DAYS
+            )));
+        }
+        Some(Some(answer)) if answer.get("success").and_then(|v| v.as_bool()) == Some(true) => {}
+        Some(Some(answer)) => {
+            let reason = answer
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("no reason given");
+            return Json(ApiResponse::err(format!(
+                "The peer refused the pairing: {reason}"
+            )));
+        }
     }
 
+    // The peer accepted: keep both secrets (ours hashed, theirs as given), in
+    // one transaction that re-checks the contact. It may have been paired,
+    // refused or deleted while the peer was being asked: then nothing is
+    // written (the peer still holds our secret and must delete its side too).
     let now = Utc::now();
-    let contact = Contact {
+    let inbound_hash = crate::db::contacts::hash_secret(&reverse_secret);
+    let new_contact = Contact {
         id: uuid::Uuid::new_v4().to_string(),
         pseudo,
         avatar_email: None,
         kronn_url,
-        invite_code: req.invite_code,
-        status: status.into(),
+        invite_code,
+        status: "pending".into(),
         created_at: now,
         updated_at: now,
     };
-
-    let c = contact.clone();
-    match state
+    let stored = state
         .db
-        .with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c))
-        .await
-    {
-        Ok(()) => Json(ApiResponse::ok(AddContactResult { contact, warning })),
+        .with_conn(move |conn| {
+            crate::db::contacts::complete_outbound_pairing(
+                conn,
+                existing_id.as_deref(),
+                &new_contact,
+                &inbound_hash,
+                &offer_secret,
+            )
+        })
+        .await;
+    match stored {
+        Ok(Some(contact)) => Json(ApiResponse::ok(AddContactResult {
+            contact,
+            warning: None,
+        })),
+        Ok(None) => Json(ApiResponse::err(
+            "Pairing not stored: the contact changed while the peer was being asked (paired, \
+             refused or deleted). Delete it on both sides and pair again.",
+        )),
         Err(e) => Json(ApiResponse::err(format!("Failed to add contact: {}", e))),
+    }
+}
+
+/// Body of `POST /api/contacts/pair`: a peer completes a pairing with a pairing
+/// code this instance handed out.
+#[derive(Debug, Deserialize)]
+pub struct PairRequest {
+    /// The caller's public invite code: who it is, not a credential.
+    pub from_invite_code: String,
+    /// The secret of the pairing code we handed out. It becomes what the caller
+    /// presents to us from now on.
+    pub offer_secret: String,
+    /// The secret we will present to the caller from now on.
+    pub reverse_secret: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PairResponse {
+    pub pseudo: String,
+}
+
+/// POST /api/contacts/pair — auth-exempt (a remote peer has no bearer token),
+/// gated on a live pairing code. The code is spent by the first successful
+/// pairing; an already paired contact is never overwritten, so a leaked code
+/// cannot take over an existing contact.
+pub async fn pair(
+    State(state): State<AppState>,
+    Json(req): Json<PairRequest>,
+) -> Json<ApiResponse<PairResponse>> {
+    let refused = || Json(ApiResponse::err(PAIR_REFUSED));
+    if !state.p2p.enabled() {
+        return refused();
+    }
+    let invite_code = req.from_invite_code.trim().to_string();
+    if invite_code.len() > crate::db::contacts::MAX_INVITE_CODE_LEN
+        || !crate::db::contacts::is_well_formed_secret(&req.offer_secret)
+        || !crate::db::contacts::is_well_formed_secret(&req.reverse_secret)
+    {
+        return refused();
+    }
+    let Some((pseudo, kronn_url)) = crate::db::contacts::parse_invite_code(&invite_code) else {
+        return refused();
+    };
+    let our_pseudo = {
+        let config = state.config.read().await;
+        invite_pseudo(&config.server)
+    };
+
+    let attempt = crate::db::contacts::PairingAttempt {
+        offer_secret: req.offer_secret,
+        invite_code,
+        pseudo,
+        kronn_url,
+        reverse_secret: req.reverse_secret,
+    };
+    let gate = state.p2p.clone();
+    let paired = state
+        .db
+        .with_conn(move |conn| {
+            // Held through the write: P2P cannot turn off in between.
+            let on = gate.read();
+            if !*on {
+                return Ok(false);
+            }
+            crate::db::contacts::accept_pairing(conn, &attempt)
+        })
+        .await;
+    match paired {
+        Ok(true) => Json(ApiResponse::ok(PairResponse { pseudo: our_pseudo })),
+        Ok(false) => refused(),
+        Err(e) => {
+            tracing::warn!("pairing failed: {e}");
+            refused()
+        }
     }
 }
 

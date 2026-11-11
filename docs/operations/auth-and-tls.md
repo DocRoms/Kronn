@@ -36,8 +36,12 @@ Behaviour:
   `Authorization: Bearer <auth_token>`.
 - **Health endpoint** `/api/health`: never requires auth (Docker
   healthcheck path).
-- **WebSocket** `/api/ws`: handled by the WS handshake's invite-code
-  check, not the middleware.
+- **WebSocket** `/api/ws`: handled by the WS handshake's contact check (invite
+  code and per-contact pairing secret), not the middleware.
+- **P2P routes answered before the gate** (`/api/disc/claim-by-token`,
+  `/api/disc/fetch-file`, `/api/contacts/pair`): no bearer token; the first two
+  need a contact's pairing secret, the third a live pairing code. See
+  [P2P contact pairing](../architecture/p2p-contact-pairing.md).
 
 The token can be rotated at any time from `Settings → Auth`. The
 endpoint is `POST /api/config/auth-token/regenerate` — localhost

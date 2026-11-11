@@ -1,19 +1,22 @@
 /**
- * KT-1450 — the Quick Prompts and skills behind a Page: per workflow, the
- * version its normal runs load and the one its shadow runs test, their
- * history, and the promotion of a tested version to the normal runs.
+ * KT-1450, KT-1459 — the Quick Prompts and skills behind a Page: per step of a
+ * workflow, the version its normal execution loads and the one each of its
+ * shadows tests, their history, the promotion of a tested version to the step,
+ * and the shadows themselves: test a version in a new shadow, change what a
+ * shadow tests, remove a shadow.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Layers, FlaskConical, ArrowUpCircle, ArrowRight, CheckCircle2, RefreshCw } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
-import { pages as pagesApi, workflows as workflowsApi } from '../lib/api';
+import { pages as pagesApi, workflows as workflowsApi, skills as skillsApi, quickPrompts as quickPromptsApi } from '../lib/api';
 import { automationPath, workflowPath, workflowShadowSettingsPath } from '../lib/routes';
 import { skillBaseId, skillPinnedVersion } from '../lib/automationSkills';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { AppLink } from './AppLink';
 import SkillHistoryDrawer from './SkillHistoryDrawer';
 import QPHistoryDrawer from './QPHistoryDrawer';
-import type { LivePageResource, LivePageResourceUse } from '../types/generated';
+import { useVersions, MAX_SHADOWS } from './workflows/StepShadowsEditor';
+import type { LivePageResource, LivePageResourceUse, StepShadow, WorkflowStep } from '../types/generated';
 import './LivePageResources.css';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
@@ -23,29 +26,28 @@ interface Props {
   onNavigateWorkflow?: (workflowId: string) => void;
 }
 
-/** One workflow's use of a resource: its steps, and what each lane loads. */
-interface WorkflowUse {
+/** One step's use of a resource: what its normal execution loads, and what each shadow loads. */
+interface StepUse {
   workflowId: string;
   workflowName: string;
-  steps: string[];
-  /** Per step, what its normal run loads. */
-  normal: { step: string; ref: string | null }[];
-  shadow: string | null;
+  step: string;
+  /** What the normal execution loads. */
+  normal: string | null;
+  /** What each enabled shadow of the step loads in place of it, in order. */
+  shadows: { id: string; label: string; ref: string }[];
 }
 
-function byWorkflow(uses: readonly LivePageResourceUse[]): WorkflowUse[] {
-  const groups = new Map<string, WorkflowUse>();
-  for (const use of uses) {
-    const group = groups.get(use.workflow_id) ?? { workflowId: use.workflow_id, workflowName: use.workflow_name, steps: [], normal: [], shadow: null };
-    group.steps.push(use.step_name);
-    group.normal.push({ step: use.step_name, ref: use.normal });
-    group.shadow = group.shadow ?? use.shadow;
-    groups.set(use.workflow_id, group);
-  }
-  return [...groups.values()];
+function stepUses(uses: readonly LivePageResourceUse[]): StepUse[] {
+  return uses.map(use => ({
+    workflowId: use.workflow_id,
+    workflowName: use.workflow_name,
+    step: use.step_name,
+    normal: use.normal,
+    shadows: (use.shadows ?? []).map(shadow => ({ id: shadow.shadow_id, label: shadow.label, ref: shadow.version })),
+  }));
 }
 
-/** The version number a lane loads, when it names one of this resource. */
+/** The version number a shadow loads, when it names one of this resource. */
 function versionOf(resource: LivePageResource, ref: string | null): number | null {
   if (ref == null) return resource.latest_version;
   if (resource.kind === 'quick_prompt') return Number(ref.replace(/^v/, '')) || null;
@@ -53,21 +55,15 @@ function versionOf(resource: LivePageResource, ref: string | null): number | nul
   return skillPinnedVersion(ref) ?? resource.latest_version;
 }
 
-function laneLabel(resource: LivePageResource, ref: string | null, t: Translate, lane: 'normal' | 'shadow' = 'normal'): string {
+function refLabel(resource: LivePageResource, ref: string | null, t: Translate, side: 'normal' | 'shadow' = 'normal'): string {
+  if (side === 'shadow' && ref === '') return t('pages.resources.dropped');
   if (resource.kind === 'quick_prompt') {
     return ref == null ? t('pages.resources.currentVersion', resource.latest_version ?? '?') : ref;
   }
   if (ref == null || skillBaseId(ref) !== resource.id) return ref ?? '';
   const pinned = skillPinnedVersion(ref);
-  if (pinned != null) return lane === 'shadow' ? `v${pinned}` : t('pages.resources.pinnedVersion', pinned);
+  if (pinned != null) return side === 'shadow' ? `v${pinned}` : t('pages.resources.pinnedVersion', pinned);
   return resource.latest_version != null ? t('pages.resources.latestVersion', resource.latest_version) : t('pages.resources.unversioned');
-}
-
-/** One label when every step loads the same thing, else one per step. */
-function normalLabel(resource: LivePageResource, normal: WorkflowUse['normal'], t: Translate): string {
-  const labels = normal.map(({ ref }) => laneLabel(resource, ref, t));
-  if (new Set(labels).size <= 1) return labels[0] ?? '';
-  return normal.map(({ step }, i) => t('pages.resources.stepLabel', step, labels[i])).join(' · ');
 }
 
 export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
@@ -89,17 +85,33 @@ export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
 
   const refresh = useCallback(() => setReload(n => n + 1), []);
 
-  const promote = useAsyncGuard(async (resource: LivePageResource, use: WorkflowUse, label: string) => {
-    const isSkill = resource.kind === 'skill';
-    const confirmText = isSkill
-      ? t('pages.resources.promoteSkillConfirm', resource.name, label, use.workflowName, use.steps.join(', '))
-      : t('pages.resources.promoteQpConfirm', resource.name, label, use.workflowName);
-    if (!window.confirm(confirmText)) return;
-    setPromoting(`${use.workflowId}:${resource.kind}:${resource.id}`);
+  /** Saves the step's shadows as `change` leaves them: a person's edit, never an agent's. */
+  const editShadows = useAsyncGuard(async (use: StepUse, change: (shadows: StepShadow[]) => StepShadow[], saved: string) => {
     setError(null);
     setDone(null);
     try {
-      await workflowsApi.promoteShadow(use.workflowId, { kind: resource.kind, id: resource.id });
+      const workflow = await workflowsApi.get(use.workflowId);
+      if (!workflow) throw new Error(t('pages.resources.stepGone', use.step));
+      const steps: WorkflowStep[] = workflow.steps.map(step => (step.name === use.step ? { ...step, shadows: change(step.shadows ?? []) } : step));
+      await workflowsApi.update(use.workflowId, { steps });
+      setDone(saved);
+      refresh();
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    }
+  });
+
+  const promote = useAsyncGuard(async (resource: LivePageResource, use: StepUse, label: string, shadowId: string) => {
+    const isSkill = resource.kind === 'skill';
+    const confirmText = isSkill
+      ? t('pages.resources.promoteSkillConfirm', resource.name, label, use.workflowName, use.step)
+      : t('pages.resources.promoteQpConfirm', resource.name, label, use.workflowName, use.step);
+    if (!window.confirm(confirmText)) return;
+    setPromoting(`${use.workflowId}:${use.step}:${resource.kind}:${resource.id}`);
+    setError(null);
+    setDone(null);
+    try {
+      await workflowsApi.promoteShadow(use.workflowId, { kind: resource.kind, id: resource.id, step: use.step, shadow: shadowId });
       setDone(isSkill
         ? t('pages.resources.promotedSkill', resource.name, use.workflowName, label)
         : t('pages.resources.promotedQp', resource.name, label));
@@ -124,7 +136,7 @@ export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
     );
   }
   if (!resources || resources.length === 0) return null;
-  const shadowed = resources.filter(r => r.uses.some(use => use.shadow)).length;
+  const shadowed = resources.filter(r => r.uses.some(use => (use.shadows ?? []).length > 0)).length;
   const firstWorkflow = resources.flatMap(r => r.uses)[0];
 
   return (
@@ -158,13 +170,14 @@ export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
                   {!isSkill && <QPHistoryDrawer qpId={resource.id} qpName={resource.name} refreshTrigger={reload} />}
                 </span>
               </div>
-              {byWorkflow(resource.uses).map(use => (
+              {stepUses(resource.uses).map(use => (
                 <UseRow
-                  key={use.workflowId}
+                  key={`${use.workflowId}:${use.step}`}
                   resource={resource}
                   use={use}
-                  busy={promoting === `${use.workflowId}:${resource.kind}:${resource.id}`}
-                  onPromote={label => { void promote(resource, use, label); }}
+                  busy={promoting === `${use.workflowId}:${use.step}:${resource.kind}:${resource.id}`}
+                  onPromote={(label, shadowId) => { void promote(resource, use, label, shadowId); }}
+                  onEditShadows={(change, saved) => { void editShadows(use, change, saved); }}
                   onNavigateWorkflow={onNavigateWorkflow}
                   t={t}
                 />
@@ -185,17 +198,116 @@ export function LivePageResources({ pageId, onNavigateWorkflow }: Props) {
   );
 }
 
-function UseRow({ resource, use, busy, onPromote, onNavigateWorkflow, t }: {
+/** The shadow `shadowId` testing `version` of the resource (`null`: no longer testing it). */
+function withVersion(shadows: StepShadow[], resource: LivePageResource, shadowId: string, version: number | 'drop' | null): StepShadow[] {
+  return shadows.map(shadow => {
+    if (shadow.id !== shadowId) return shadow;
+    if (resource.kind === 'quick_prompt') {
+      const quick_prompt_versions = { ...(shadow.quick_prompt_versions ?? {}) };
+      if (typeof version === 'number') quick_prompt_versions[resource.id] = version; else delete quick_prompt_versions[resource.id];
+      return { ...shadow, quick_prompt_versions };
+    }
+    const skills = { ...(shadow.skills ?? {}) };
+    if (version === 'drop') skills[resource.id] = '';
+    else if (version == null) delete skills[resource.id];
+    else skills[resource.id] = `${resource.id}@${version}`;
+    return { ...shadow, skills };
+  });
+}
+
+function freshShadow(shadows: readonly StepShadow[]): string {
+  for (let n = shadows.length + 1; ; n += 1) {
+    if (!shadows.some(shadow => shadow.id === `shadow-${n}`)) return `shadow-${n}`;
+  }
+}
+
+function ShadowControls({ resource, use, onEditShadows, t }: {
   resource: LivePageResource;
-  use: WorkflowUse;
+  use: StepUse;
+  onEditShadows: (change: (shadows: StepShadow[]) => StepShadow[], saved: string) => void;
+  t: Translate;
+}) {
+  const isSkill = resource.kind === 'skill';
+  const versions = useVersions(
+    () => (isSkill ? skillsApi.history(resource.id) : quickPromptsApi.history(resource.id)),
+    `${resource.kind}:${resource.id}`,
+  );
+  const [newVersion, setNewVersion] = useState('');
+  const options = versions.list.map(n => <option key={n} value={n}>{n === versions.list[0] ? t('wf.shadow.optionLatest', n) : `v${n}`}</option>);
+  const key = `${resource.id}-${use.workflowId}-${use.step}`;
+  return (
+    <details className="live-pages-resource-lane-edit" data-testid={`live-page-resource-shadows-${key}`}>
+      <summary>{t('pages.resources.shadowsEdit')}</summary>
+      {use.shadows.map(shadow => {
+        const current = versionOf(resource, shadow.ref);
+        return (
+          <div key={shadow.id} className="live-pages-resource-lane-row" data-testid={`live-page-resource-shadow-${resource.id}-${shadow.id}`}>
+            <span className="live-pages-resource-lane-name">{shadow.label}</span>
+            <select
+              className="wf-shadow-select"
+              aria-label={t('pages.resources.shadowVersion', shadow.label)}
+              value={shadow.ref === '' ? 'drop' : current ?? ''}
+              onChange={e => {
+                // Read now: the controlled select is reset by the time the save runs.
+                const picked = e.target.value;
+                const version = picked === 'drop' ? 'drop' : picked ? Number(picked) : null;
+                onEditShadows(shadows => withVersion(shadows, resource, shadow.id, version), t('pages.resources.shadowSaved', shadow.label));
+              }}
+            >
+              {isSkill && <option value="drop">{t('pages.resources.dropped')}</option>}
+              {current != null && !versions.list.includes(current) && <option value={current}>v{current}</option>}
+              {options}
+            </select>
+            <button
+              type="button"
+              className="wf-small-btn"
+              data-testid={`live-page-resource-shadow-remove-${resource.id}-${shadow.id}`}
+              onClick={() => {
+                if (!window.confirm(t('pages.resources.shadowRemoveConfirm', shadow.label, use.step))) return;
+                onEditShadows(shadows => shadows.filter(other => other.id !== shadow.id), t('pages.resources.shadowRemoved', shadow.label));
+              }}
+            >
+              {t('wf.shadow.removeShort')}
+            </button>
+          </div>
+        );
+      })}
+      <div className="live-pages-resource-lane-row">
+        <span className="live-pages-resource-lane-name">{t('pages.resources.shadowAdd')}</span>
+        <select className="wf-shadow-select" aria-label={t('pages.resources.shadowAddVersion')} value={newVersion} onChange={e => setNewVersion(e.target.value)}>
+          <option value="">{versions.state === 'loading' ? t('common.loading') : t('pages.resources.shadowAddVersion')}</option>
+          {options}
+        </select>
+        <button
+          type="button"
+          className="wf-small-btn"
+          data-testid={`live-page-resource-shadow-add-${key}`}
+          disabled={!newVersion || use.shadows.length >= MAX_SHADOWS}
+          onClick={() => {
+            const n = Number(newVersion);
+            onEditShadows(shadows => {
+              const shadow: StepShadow = { id: freshShadow(shadows), label: `${resource.name} v${n}`, enabled: true };
+              return withVersion([...shadows, shadow], resource, shadow.id, n);
+            }, t('pages.resources.shadowCreated', `${resource.name} v${n}`));
+            setNewVersion('');
+          }}
+        >
+          {t('pages.resources.shadowAddButton')}
+        </button>
+      </div>
+    </details>
+  );
+}
+
+function UseRow({ resource, use, busy, onPromote, onEditShadows, onNavigateWorkflow, t }: {
+  resource: LivePageResource;
+  use: StepUse;
   busy: boolean;
-  onPromote: (label: string) => void;
+  onPromote: (label: string, shadowId: string) => void;
+  onEditShadows: (change: (shadows: StepShadow[]) => StepShadow[], saved: string) => void;
   onNavigateWorkflow?: (workflowId: string) => void;
   t: Translate;
 }) {
-  const tested = use.shadow ? versionOf(resource, use.shadow) : null;
-  const same = tested != null && use.normal.every(({ ref }) => versionOf(resource, ref) === tested);
-  const label = tested != null ? `v${tested}` : laneLabel(resource, use.shadow, t, 'shadow');
   return (
     <div className="live-pages-resource-use" data-testid={`live-page-resource-use-${resource.id}-${use.workflowId}`}>
       <span className="live-pages-resource-where">
@@ -206,38 +318,44 @@ function UseRow({ resource, use, busy, onPromote, onNavigateWorkflow, t }: {
         >
           {use.workflowName}
         </AppLink>
-        <span className="live-pages-resource-muted">{t('pages.resources.steps', use.steps.join(', '))}</span>
+        <span className="live-pages-resource-muted">{t('pages.resources.step', use.step)}</span>
       </span>
       <span className="live-pages-resource-lanes">
         <span className="live-pages-resource-lane">
           <span className="live-pages-resource-muted">{t('pages.resources.normal')}</span>
-          {normalLabel(resource, use.normal, t)}
+          {refLabel(resource, use.normal, t)}
         </span>
-        {use.shadow && (
-          <>
-            <ArrowRight size={11} aria-hidden className="live-pages-resource-muted" />
-            <span className="live-pages-resource-lane" data-lane="shadow">
-              <span className="live-pages-resource-muted"><FlaskConical size={10} aria-hidden /> {t('pages.resources.shadow')}</span>
-              {laneLabel(resource, use.shadow, t, 'shadow')}
+        {use.shadows.map(shadow => {
+          const tested = shadow.ref ? versionOf(resource, shadow.ref) : null;
+          const same = tested != null && versionOf(resource, use.normal) === tested;
+          const label = tested != null ? `v${tested}` : refLabel(resource, shadow.ref, t, 'shadow');
+          return (
+            <span key={shadow.id} className="live-pages-resource-lane-group" data-testid={`live-page-resource-shadow-group-${resource.id}-${shadow.id}`}>
+              <ArrowRight size={11} aria-hidden className="live-pages-resource-muted" />
+              <span className="live-pages-resource-lane" data-lane="shadow">
+                <span className="live-pages-resource-muted"><FlaskConical size={10} aria-hidden /> {shadow.label}</span>
+                {refLabel(resource, shadow.ref, t, 'shadow')}
+              </span>
+              <span className="live-pages-resource-action">
+                {!same && (
+                  <button
+                    type="button"
+                    className="live-pages-resource-promote"
+                    data-testid={`live-page-resource-promote-${resource.id}-${shadow.id}`}
+                    disabled={busy}
+                    title={t('pages.resources.promoteTitle', use.workflowName, use.step)}
+                    onClick={() => onPromote(label, shadow.id)}
+                  >
+                    <ArrowUpCircle size={12} aria-hidden /> {t('pages.resources.promote', label)}
+                  </button>
+                )}
+                {same && <span className="live-pages-resource-muted">{t('pages.resources.sameAsNormal')}</span>}
+              </span>
             </span>
-          </>
-        )}
+          );
+        })}
       </span>
-      <span className="live-pages-resource-action">
-        {use.shadow && !same && (
-          <button
-            type="button"
-            className="live-pages-resource-promote"
-            data-testid={`live-page-resource-promote-${resource.id}`}
-            disabled={busy}
-            title={t('pages.resources.promoteTitle', use.workflowName)}
-            onClick={() => onPromote(label)}
-          >
-            <ArrowUpCircle size={12} aria-hidden /> {t('pages.resources.promote', label)}
-          </button>
-        )}
-        {use.shadow && same && <span className="live-pages-resource-muted">{t('pages.resources.sameAsNormal')}</span>}
-      </span>
+      <ShadowControls resource={resource} use={use} onEditShadows={onEditShadows} t={t} />
     </div>
   );
 }

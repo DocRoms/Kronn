@@ -194,6 +194,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       saveWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256 }),
       getAgentAccess: resolve({ agents: {} }),
       getAgentAccessEffective: resolve([]),
+      getAgentFallback: resolve({ chains: [], cooldowns: [] }),
+      setAgentFallback: resolve({ chains: [], cooldowns: [] }),
       getModelTiers: resolve({ tiers: {} }),
       getGlobalContext: resolve(''),
       saveGlobalContext: resolve(undefined),
@@ -483,6 +485,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       nativeAgentMode: resolve({ disabled: false }),
       agentHandoffMode: resolve({ global_enabled: false, disabled: false, unlimited_override: false, effective_enabled: false, paid_limit: 1 }),
       executionVariableRetention: resolve({ global_days: 30, override_days: null, effective_days: 30 }),
+      fallback: resolve({}),
+      setFallback: resolve({}),
       workspaces: resolve([]),
       archive: resolve(undefined),
       unarchive: resolve(undefined),
@@ -551,6 +555,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
 
     workflows: {
       promoteShadow: resolve({}),
+      stepShadows: resolve([]),
       list: resolve([]),
       get: resolve(null),
       unsafeSteps: resolve([]),

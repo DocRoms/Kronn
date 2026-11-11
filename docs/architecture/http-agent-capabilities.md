@@ -486,8 +486,8 @@ each, with their metrics nested, the full native catalogue (51,990 B) and a
 shape is 1,071 B; the model reads the shape, sends one call with
 `$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
 unshortened; the conversation then stands at 21,421 estimated tokens of 36,043
-[src: file: backend/src/agents/runner_test.rs:2994#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
-[src: file: backend/src/agents/runner_test.rs:3001#a_200_kb_response_yields_the_web_vitals].
+[src: file: backend/src/agents/runner_test.rs:3031#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
+[src: file: backend/src/agents/runner_test.rs:3038#a_200_kb_response_yields_the_web_vitals].
 
 **The window follows the catalogue (KT-1527).** The three shortening tests
 (`a_shortened_api_response_announces_its_shape_and_how_to_ask_for_a_part`, the one
@@ -502,14 +502,14 @@ They now size their window from the catalogue they carry
 messages get the same room whatever the catalogue weighs. With today's catalogue
 that is a ~36K window, not exactly 32K. A test inflates the catalogue by 1.5 KB and
 then 20 KB and replays all three scenarios
-[src: file: backend/src/agents/runner_test.rs:3279#a_catalogue_change_does_not_flip_the_shortening_fixtures].
+[src: file: backend/src/agents/runner_test.rs:3316#a_catalogue_change_does_not_flip_the_shortening_fixtures].
 
 That decoupling drops the signal the old tests gave, badly, when the catalogue
 outgrew the real 32K budget. A guard test keeps it, on its own: a 32K window must
 leave at least 5,000 B for the messages beside the declared catalogue (9,450 B
 today). When it fails, the catalogue outgrew the 32K budget and has to be trimmed,
 or the default Ollama window raised
-[src: file: backend/src/agents/runner_test.rs:3303#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
+[src: file: backend/src/agents/runner_test.rs:3340#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
 
 **When the plain cut does happen, the result stays a valid envelope.** A JSON
 result that nothing smarter could shorten used to be cut as text, handing the model
@@ -520,7 +520,7 @@ excerpt that keeps the envelope inside the budget once embedded in `messages`. A
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
 [src: file: backend/src/agents/runner.rs:8019#truncated_json_envelope]
-[src: file: backend/src/agents/runner_test.rs:3327#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
+[src: file: backend/src/agents/runner_test.rs:3364#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or
 writes a good one unprompted. The "model" in that test reads the shape and follows
@@ -538,16 +538,16 @@ writes are scoped to general workflows plus the current discussion's project.
 Create inherits that project unless an explicit null requests a general draft.
 Update preserves the existing project and all omitted fields; supplied arrays
 replace their stored array. Workers and workflow Agent steps cannot use this
-authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:142-249#execute_workflow_tool]
+authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:125-243#execute_workflow_tool]
 
 Authoring always leaves the workflow disabled. Updating an enabled workflow
 returns an explicit alternative: disable it in the Workflows UI or create a new
 disabled draft. Neither enabling, triggering nor deletion is exposed here.
 Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
-[src: file: backend/src/api/agent_workflow_tools.rs:80-137#draft_patch]
-[src: file: backend/src/api/agent_workflow_tools.rs:228-230#enabled]
-[src: file: backend/src/api/workflows.rs:2817-2877#validate_step_references]
+[src: file: backend/src/api/agent_workflow_tools.rs:63-120#draft_patch]
+[src: file: backend/src/api/agent_workflow_tools.rs:211-213#enabled]
+[src: file: backend/src/api/workflows.rs:2981-3041#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same
@@ -555,7 +555,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-457#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9693-9695#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9696-9698#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON
