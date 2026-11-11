@@ -289,8 +289,8 @@ setup output, a `CollectApiData` source and a Quick Exec run keep the
 historical `[... output tronqué — limite N KB ...]` suffix and write no file,
 so a collected value never carries a local path. The file goes with the run's
 directory.
-[src: file: backend/src/workflows/exec_step.rs:1130-1175#captured_text]
-[src: file: backend/src/workflows/exec_step.rs:1249-1266#truncation_marker]
+[src: file: backend/src/workflows/exec_step.rs:1137-1182#captured_text]
+[src: file: backend/src/workflows/exec_step.rs:1256-1273#truncation_marker]
 
 ### Approved repository scripts (KT-918)
 
@@ -323,10 +323,10 @@ runs with the copy as its working directory, so `node <declared path>` and a
 helper loaded through `process.cwd()` or the script's own directory come from
 the copy. The run's checkout is in `KRONN_WORKTREE`, the copy in
 `KRONN_APPROVED_SCRIPTS_DIR`. The setup command still runs in the checkout.
-[src: file: backend/src/workflows/exec_step.rs:133-153#approved_script_child]
-[src: file: backend/src/workflows/exec_step.rs:157-181#prepare_approved_scripts]
-[src: file: backend/src/workflows/exec_step.rs:518-529#approved_copy]
-[src: file: backend/src/workflows/exec_step.rs:769-775#approved_script_child]
+[src: file: backend/src/workflows/exec_step.rs:143-163#approved_script_child]
+[src: file: backend/src/workflows/exec_step.rs:167-191#prepare_approved_scripts]
+[src: file: backend/src/workflows/exec_step.rs:525-536#approved_copy]
+[src: file: backend/src/workflows/exec_step.rs:776-782#approved_script_child]
 
 Limits: only the declared files are verified. Absolute imports, paths built
 from `KRONN_WORKTREE` and interpreter search paths outside the copy are not

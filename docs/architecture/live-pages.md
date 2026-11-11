@@ -449,7 +449,7 @@ stored as the JSON value; if it does not parse, the step fails the same way.
 Other text is published as a string. The Exec output is scrubbed of the
 project's GitHub token before it reaches the run record or a Page.
 `[src: file: backend/src/workflows/exec_step.rs:60-62#MAX_PUBLISH_OUTPUT_BYTES]`
-`[src: file: backend/src/workflows/exec_step.rs:453-458#secrets]`
+`[src: file: backend/src/workflows/exec_step.rs:460-465#secrets]`
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
