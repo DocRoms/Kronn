@@ -4,8 +4,13 @@
  * carries two one-click toggles: Active (the shadow runs) and Merge (its answer
  * goes into the step result, the one the next step receives). Used by the
  * workflow overview, where a change saves at once, and by the editor.
+ *
+ * KT-1707 — a step with shadows reads as one table. Every row has the same
+ * layout, `role · agent · model [badge]`: the highlighted « Principal » row
+ * first (the step's own picker, always active, the base of the merge), then the
+ * « Shadow » rows indented under it. The shadow's free label is a tooltip.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { CircleHelp, Plus, X } from 'lucide-react';
 import { DEFAULT_MERGE_MINUTES, MAX_MERGE_MINUTES } from '../../lib/shadowRuns';
 import {
@@ -14,9 +19,10 @@ import {
 } from '../../lib/shadowMerge';
 import { MAX_SHADOWS, stepCanCarryShadows } from './StepShadowsEditor';
 import { ShadowAgentPicker, TransportBadge, type MainAgent } from './ShadowAgentPicker';
+import { agentModelLabel, stepMainAgent } from './shadowRowModel';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
 import './StepShadowRows.css';
-import type { StepShadow, WorkflowStep } from '../../types/generated';
+import type { ModelTiersConfig, StepShadow, WorkflowStep } from '../../types/generated';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
 
@@ -25,15 +31,17 @@ interface Props {
   /** The step the result goes to, when there is one. */
   nextStepName?: string;
   choices?: readonly AgentSwitchTarget[];
+  /** The agent families' configured models: they name the default model of an agent. */
+  modelTiers?: ModelTiersConfig | null;
   /** Applies an edit; without it the rows only show. */
   onEdit?: (edit: ShadowEdit) => void;
   /** Offer « + Shadow » on a step that has none yet. */
   addWhenEmpty?: boolean;
+  /** The step's own agent/model picker: it moves into the Principal row once the step has shadows. */
+  mainPicker?: ReactNode;
   t: Translate;
   testId?: string;
 }
-
-const nameOf = (shadow: StepShadow) => shadow.label || shadow.id;
 
 /** The `?` of the merged result: hover, or tap, opens what the merge does. */
 function MergeHelp({ merged, next, timeoutSecs, t, testId }: { merged: string; next: string | undefined; timeoutSecs: number | undefined; t: Translate; testId: string }) {
@@ -106,37 +114,57 @@ function Toggle({ kind, on, label, title, disabled, onClick, testId }: {
   );
 }
 
-export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmpty = false, t, testId = 'wf-shadow-rows' }: Props) {
+export function StepShadowRows({ step, nextStepName, choices, modelTiers, onEdit, addWhenEmpty = false, mainPicker, t, testId = 'wf-shadow-rows' }: Props) {
   const shadows = step.shadows ?? [];
   const merge = step.shadow_merge;
   if (!stepCanCarryShadows(step) || (shadows.length === 0 && !(addWhenEmpty && onEdit))) return null;
 
-  const main: MainAgent = { agent: step.agent, connectionId: step.agent_settings?.connection_id, model: step.agent_settings?.model };
+  const main: MainAgent = stepMainAgent(step);
   const merged = activeMergedIds(merge, shadows);
-  const mergedNames = shadows.filter(shadow => merged.includes(shadow.id)).map(nameOf);
+  const targets = choices ?? [];
+  const mainLabel = agentModelLabel(undefined, main, targets, t, modelTiers);
+  const agentName = (shadow: StepShadow) => agentModelLabel(shadow.agent, main, targets, t, modelTiers);
+  const mergedNames = shadows.filter(shadow => merged.includes(shadow.id)).map(shadow => t('wf.shadow.rows.shadowNamed', agentName(shadow)));
   const editable = !!onEdit;
 
   return (
-    <div className="wf-shadow-rows" data-testid={testId} onClick={event => event.stopPropagation()}>
+    <div className="wf-shadow-rows" data-testid={testId} data-block={shadows.length > 0} onClick={event => event.stopPropagation()}>
+      {shadows.length > 0 && (
+        <div className="wf-shadow-subrow wf-shadow-principal" data-role="principal" data-testid={`${testId}-principal`}>
+          <span className="wf-shadow-subrow-name">{t('wf.shadow.rows.principal')}</span>
+          <span className="wf-shadow-subrow-agent" data-testid={`${testId}-principal-agent`}>
+            {mainPicker ?? <span className="wf-shadow-static" title={mainLabel}>{mainLabel}</span>}
+          </span>
+          <TransportBadge agent={step.agent} connectionId={step.agent_settings?.connection_id} t={t} />
+          <span className="wf-shadow-subrow-toggles">
+            <span className="wf-shadow-chip" data-testid={`${testId}-principal-active`}>{t('wf.shadow.rows.alwaysActive')}</span>
+            {merged.length > 0 && <span className="wf-shadow-base" data-testid={`${testId}-principal-base`}>{t('wf.shadow.rows.mergeBase')}</span>}
+          </span>
+        </div>
+      )}
       {shadows.map(shadow => {
         const rowId = `${testId}-${shadow.id}`;
         const isMerged = merged.includes(shadow.id);
         const active = shadow.enabled !== false;
-        const name = nameOf(shadow);
+        const name = agentName(shadow);
+        const tooltip = shadow.label || shadow.id;
         const mergeTip = nextStepName ? t('wf.shadow.rows.mergeTip', name, nextStepName) : t('wf.shadow.rows.mergeTipLast', name);
         return (
-          <div key={shadow.id} className="wf-shadow-subrow" data-testid={rowId} data-paused={!active} data-merged={isMerged}>
-            <span className="wf-shadow-subrow-name" title={name}>⑂ {name}</span>
-            <ShadowAgentPicker
-              value={shadow.agent}
-              choices={choices}
-              main={main}
-              disabled={!editable}
-              ariaLabel={t('wf.shadow.rows.pickerLabel', name)}
-              testId={`${rowId}-agent`}
-              t={t}
-              onChange={agent => onEdit?.(withShadowChanged(shadows, merge, shadow.id, { ...shadow, agent }))}
-            />
+          <div key={shadow.id} className="wf-shadow-subrow" data-role="shadow" data-testid={rowId} data-paused={!active} data-merged={isMerged} title={tooltip}>
+            <span className="wf-shadow-subrow-name">{t('wf.shadow.rows.roleShadow')}</span>
+            <span className="wf-shadow-subrow-agent">
+              <ShadowAgentPicker
+                value={shadow.agent}
+                choices={choices}
+                main={main}
+                modelTiers={modelTiers}
+                disabled={!editable}
+                ariaLabel={t('wf.shadow.rows.pickerLabel', tooltip)}
+                testId={`${rowId}-agent`}
+                t={t}
+                onChange={agent => onEdit?.(withShadowChanged(shadows, merge, shadow.id, { ...shadow, agent }))}
+              />
+            </span>
             <TransportBadge agent={shadow.agent?.agent ?? step.agent} connectionId={shadow.agent ? shadow.agent.connection_id : step.agent_settings?.connection_id} t={t} />
             <span className="wf-shadow-subrow-toggles">
               <Toggle
@@ -162,8 +190,8 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
                   type="button"
                   className="wf-shadow-subrow-remove"
                   data-testid={`${rowId}-remove`}
-                  aria-label={t('wf.shadow.remove', name)}
-                  title={t('wf.shadow.remove', name)}
+                  aria-label={t('wf.shadow.remove', tooltip)}
+                  title={t('wf.shadow.remove', tooltip)}
                   onClick={() => onEdit?.(withShadowRemoved(shadows, merge, shadow.id))}
                 >
                   <X size={11} aria-hidden />
@@ -178,6 +206,7 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
           value={undefined}
           choices={choices}
           main={main}
+          modelTiers={modelTiers}
           ariaLabel={t('wf.shadow.rows.addLabel')}
           testId={`${testId}-add`}
           className="wf-shadow-add"
@@ -195,7 +224,7 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
               : t('wf.shadow.rows.summaryLast', mergedNames.join(' + '))}
           </span>
           <MergeHelp
-            merged={['main', ...mergedNames].join(' + ')}
+            merged={mergedNames.join(' + ')}
             next={nextStepName}
             timeoutSecs={merge.timeout_secs}
             t={t}
@@ -207,6 +236,7 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
               value={merge.agent}
               choices={choices}
               main={main}
+              modelTiers={modelTiers}
               disabled={!editable}
               ariaLabel={t('wf.shadow.rows.condenseLabel')}
               testId={`${testId}-condense`}

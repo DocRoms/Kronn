@@ -98,6 +98,7 @@ describe('deep links', () => {
     [{ target: 'project', id: 'p1' }, '/projects/p1'],
     [{ target: 'planning_task', id: 't1' }, '/planning/t1'],
     [{ target: 'workflow', id: 'wf-1' }, '/workflows/wf-1'],
+    [{ target: 'plugin', id: 'cfg 1' }, '/plugins/cfg%201'],
   ] as const)('resolves %j to its address from the route table', (link, path) => {
     expect(activityLinkPath(link)).toBe(path);
   });
@@ -108,15 +109,17 @@ describe('deep links', () => {
 
   it('opens each target through the typed navigation', () => {
     const nav = {
-      toDiscussion: vi.fn(), toWorkflow: vi.fn(), toProject: vi.fn(), toPlanningTask: vi.fn(),
+      toDiscussion: vi.fn(), toWorkflow: vi.fn(), toProject: vi.fn(), toPlanningTask: vi.fn(), toPlugin: vi.fn(),
     } as unknown as Parameters<typeof openActivityLink>[0];
     openActivityLink(nav, { target: 'discussion', id: 'd1' });
     openActivityLink(nav, { target: 'workflow', id: 'wf', run_id: 'r1' });
     openActivityLink(nav, { target: 'project', id: 'p1' });
     openActivityLink(nav, { target: 'planning_task', id: 't1' });
+    openActivityLink(nav, { target: 'plugin', id: 'cfg1' });
     expect(nav.toDiscussion).toHaveBeenCalledWith('d1');
     expect(nav.toWorkflow).toHaveBeenCalledWith('wf', 'r1');
     expect(nav.toProject).toHaveBeenCalledWith('p1');
     expect(nav.toPlanningTask).toHaveBeenCalledWith('t1');
+    expect(nav.toPlugin).toHaveBeenCalledWith('cfg1');
   });
 });

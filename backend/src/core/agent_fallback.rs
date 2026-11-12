@@ -1,26 +1,28 @@
-//! KT-1518 — the agent fallback chain.
+//! KT-1518 / KT-1693 — the agent fallback.
 //!
-//! Each agent has an ordered chain of agents that take over, one after the
-//! other, when the PROVIDER cannot serve it (`AgentConfig::fallback_chain`, e.g.
-//! Claude Code → Codex → Ollama): a rate limit, a quota or credits spent, an
-//! outage that survived its retries, a CLI that is not authenticated. Never a
-//! task failure, a refusal, a test failure or the timeout of the work itself:
-//! [`classify_trigger`] answers `None` for those, and every surface asks it
-//! before it switches anything.
+//! Each agent has, per mode (eco, standard, advanced, decision, image, video),
+//! at most one agent/model that takes over when the PROVIDER cannot serve it
+//! (`AgentConfig::mode_fallbacks`, e.g. Claude Code standard → Codex): a rate
+//! limit, a quota or credits spent, an outage that survived its retries, a CLI
+//! that is not authenticated. Never a task failure, a refusal, a test failure or
+//! the timeout of the work itself: [`classify_trigger`] answers `None` for
+//! those, and every surface asks it before it switches anything.
 //!
 //! This module is the policy and nothing else — no spawning, no rooms. The three
 //! surfaces (a discussion turn, a workflow Agent step, a task worker) each ask
 //! [`select`] for the next link and apply it their own way, so a link is chosen
 //! by the same rules everywhere:
 //!
-//! * the chain is the list of the agent the turn STARTED on (its default one, or
-//!   the override of a discussion / a workflow step; an empty override is "no
-//!   fallback"), at most [`MAX_CHAIN_DEPTH`] links, an agent never twice and
-//!   never itself (validated when it is saved, re-checked here); after a hop the
-//!   walk goes on in the same list, past the link that just failed;
-//! * a link on cooldown, not installed, billed by API key without the owner's
-//!   opt-in, or lacking something the turn needs (MCP tools, workspace writes,
-//!   image input, a long context) is skipped, and the walk goes on;
+//! * a fallback goes to the same KIND of mode: text (eco, standard or advanced)
+//!   to text, decision to decision, image to image, video to video
+//!   ([`check_shape`]); when it is itself unavailable, the fallback set on ITS
+//!   own row applies ([`effective_chain`]), at most [`MAX_CHAIN_DEPTH`] links,
+//!   an agent never twice and never itself (refused when saved, re-checked
+//!   here); the discussion's / step's override replaces the first link, an
+//!   empty override is "no fallback";
+//! * a link on cooldown, not installed, or lacking something the turn needs (MCP
+//!   tools, workspace writes, image input, a long context) is skipped, and the
+//!   walk goes on; there is no "paid" rule: enabling a fallback is the consent;
 //! * nothing usable ends in a clear message, not a silent stop.
 //!
 //! The same TIER is kept (economy stays economy): a fallback carries the tier of
@@ -33,7 +35,10 @@ use std::collections::HashSet;
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{AgentFallback, AgentType, AgentsConfig, ModelTier};
+use crate::models::{
+    AgentFallback, AgentType, AgentsConfig, FallbackKind, FallbackMode, FallbackTransport,
+    ModeFallback, ModelTier,
+};
 
 /// Links followed from one agent. Bounded so a long chain cannot turn one
 /// refused turn into a tour of every provider the owner has.
@@ -228,13 +233,15 @@ pub fn capability_gap(agent: &AgentType, needs: &TurnNeeds) -> Option<&'static s
     None
 }
 
-/// Billed per call by API key, so never a surprise: the owner opts in per link.
-/// Subscription CLIs and a local Ollama are not.
-pub fn is_paid(agent: &AgentType) -> bool {
-    matches!(
-        agent,
-        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom
-    )
+/// How an agent is reached: a CLI process (OpenCode's ACP included), a remote
+/// HTTP API (LiteLLM, NVIDIA, a named connection) or a local model server
+/// (Ollama). Shown as a badge on every fallback.
+pub fn transport(agent: &AgentType) -> FallbackTransport {
+    match agent {
+        AgentType::Ollama => FallbackTransport::Local,
+        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => FallbackTransport::Http,
+        _ => FallbackTransport::Cli,
+    }
 }
 
 /// The label a person reads.
@@ -256,7 +263,7 @@ pub fn display_name(agent: &AgentType) -> &'static str {
 
 // ─── The chain ───────────────────────────────────────────────────────────
 
-/// Why a chain, or a link being added to it, is refused.
+/// Why a fallback, or a chain, is refused.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChainError {
     SelfFallback(AgentType),
@@ -273,6 +280,21 @@ pub enum ChainError {
         to: AgentType,
     },
     BadModel(&'static str),
+    /// The fallback's mode is not of the kind of the mode it replaces: text goes
+    /// to text, decision to decision, image to image, video to video.
+    WrongKind {
+        mode: FallbackMode,
+        target: FallbackMode,
+    },
+}
+
+fn kind_label(kind: FallbackKind) -> &'static str {
+    match kind {
+        FallbackKind::Text => "text (eco, standard or advanced)",
+        FallbackKind::Decision => "decision",
+        FallbackKind::Image => "image",
+        FallbackKind::Video => "video",
+    }
 }
 
 impl std::fmt::Display for ChainError {
@@ -305,38 +327,143 @@ impl std::fmt::Display for ChainError {
                 display_name(from),
             ),
             ChainError::BadModel(why) => write!(f, "The fallback model {why}."),
+            ChainError::WrongKind { mode, target } => write!(
+                f,
+                "A {} fallback must be a {} model; {} is not one.",
+                mode.label(),
+                kind_label(mode.kind()),
+                target.label()
+            ),
         }
     }
 }
 
 impl std::error::Error for ChainError {}
 
-/// The default chain of `from`, as stored.
-pub fn default_chain<'a>(agents: &'a AgentsConfig, from: &AgentType) -> &'a [AgentFallback] {
+/// The fallback `agent` has set on its `mode` row.
+pub fn row<'a>(
+    agents: &'a AgentsConfig,
+    agent: &AgentType,
+    mode: FallbackMode,
+) -> Option<&'a AgentFallback> {
     agents
-        .agent_config(from)
-        .map(|config| config.fallback_chain.as_slice())
-        .unwrap_or(&[])
+        .agent_config(agent)?
+        .mode_fallbacks
+        .iter()
+        .find(|entry| entry.row == mode)
+        .map(|entry| &entry.fallback)
 }
 
-/// The chain a turn that starts on `origin` follows: the override when there is
-/// one (an empty override is "no fallback"), else the agent's default chain.
+/// Sets (`Some`) or removes (`None`) the `mode` row of `agent`. `false` when the
+/// agent has no card (a named connection).
+pub fn set_row(
+    agents: &mut AgentsConfig,
+    agent: &AgentType,
+    mode: FallbackMode,
+    fallback: Option<AgentFallback>,
+) -> bool {
+    let Some(config) = agents.agent_config_mut(agent) else {
+        return false;
+    };
+    config.mode_fallbacks.retain(|entry| entry.row != mode);
+    if let Some(fallback) = fallback {
+        config.mode_fallbacks.push(ModeFallback {
+            row: mode,
+            fallback,
+        });
+        config.mode_fallbacks.sort_by_key(|entry| entry.row);
+    }
+    true
+}
+
+/// The mode a link runs in: its own, else the one it replaces.
+pub fn link_mode(link: &AgentFallback, replaced: FallbackMode) -> FallbackMode {
+    link.mode.unwrap_or(replaced)
+}
+
+/// Goes on from the last link of `chain` through the rows its agent has set —
+/// the fallback of a fallback — until a row is missing, would come back to an
+/// agent already on the walk (a loop) or the chain is [`MAX_CHAIN_DEPTH`] long.
+/// `origin` and `mode` are where the walk started. Returns where the first
+/// added link comes from, per added link: the agent whose row it is.
+fn extend_through_rows(
+    agents: &AgentsConfig,
+    origin: Option<&AgentType>,
+    mode: FallbackMode,
+    chain: &mut Vec<AgentFallback>,
+) -> Vec<AgentType> {
+    let mut seen: Vec<AgentType> = origin.cloned().into_iter().collect();
+    let mut tail_mode = mode;
+    for link in chain.iter() {
+        seen.push(link.agent.clone());
+        tail_mode = link_mode(link, tail_mode);
+    }
+    let mut tail_agent = chain
+        .last()
+        .map(|link| link.agent.clone())
+        .or_else(|| origin.cloned());
+    let mut sources = Vec::new();
+    while chain.len() < MAX_CHAIN_DEPTH {
+        let Some(owner) = tail_agent.clone() else {
+            break;
+        };
+        let Some(next) = row(agents, &owner, tail_mode) else {
+            break;
+        };
+        let next_mode = link_mode(next, tail_mode);
+        if next.agent == AgentType::Custom
+            || seen.contains(&next.agent)
+            || next_mode.kind() != tail_mode.kind()
+        {
+            break;
+        }
+        seen.push(next.agent.clone());
+        sources.push(owner);
+        tail_agent = Some(next.agent.clone());
+        tail_mode = next_mode;
+        chain.push(next.clone());
+    }
+    sources
+}
+
+/// The chain a turn that starts on `origin` in `mode` follows: the override's
+/// links when there is one (an empty override is "no fallback"), else the row of
+/// `origin`; either way continued through the rows of the last link.
 pub fn effective_chain(
     agents: &AgentsConfig,
     origin: &AgentType,
+    mode: FallbackMode,
     chain_override: Option<&[AgentFallback]>,
 ) -> Vec<AgentFallback> {
-    match chain_override {
-        Some(chain) => chain.to_vec(),
-        None => default_chain(agents, origin).to_vec(),
-    }
+    let mut chain = match chain_override {
+        Some([]) => return Vec::new(),
+        Some(links) => links.to_vec(),
+        None => Vec::new(),
+    };
+    extend_through_rows(agents, Some(origin), mode, &mut chain);
+    chain
 }
 
-/// What is wrong with a chain whatever the configuration: too long, the
+/// The default chain of `from` in `mode`: its own row, then the rows of the
+/// fallbacks. Empty when the row is off.
+pub fn default_chain(
+    agents: &AgentsConfig,
+    from: &AgentType,
+    mode: FallbackMode,
+) -> Vec<AgentFallback> {
+    effective_chain(agents, from, mode, None)
+}
+
+/// What is wrong with a list of links whatever the configuration: too long, the
 /// starting agent or one agent twice in it (a loop), an agent with no card (a
-/// named connection), a bad model. `from` is the agent the chain belongs to
-/// (`None` for an override that is not tied to one agent, as a discussion's is).
-pub fn check_shape(from: Option<&AgentType>, chain: &[AgentFallback]) -> Result<(), ChainError> {
+/// named connection), a bad model, a link of another kind than `mode` (`None`:
+/// not tied to one mode). `from` is the agent the chain belongs to (`None` for
+/// an override that is not tied to one agent, as a discussion's is).
+pub fn check_shape(
+    from: Option<&AgentType>,
+    mode: Option<FallbackMode>,
+    chain: &[AgentFallback],
+) -> Result<(), ChainError> {
     if chain.len() > MAX_CHAIN_DEPTH {
         return Err(ChainError::TooDeep {
             from: from.cloned(),
@@ -357,6 +484,11 @@ pub fn check_shape(from: Option<&AgentType>, chain: &[AgentFallback]) -> Result<
             return Err(ChainError::Cycle(path));
         }
         seen.push(link.agent.clone());
+        if let (Some(mode), Some(target)) = (mode, link.mode) {
+            if target.kind() != mode.kind() {
+                return Err(ChainError::WrongKind { mode, target });
+            }
+        }
         if let Some(model) = &link.model {
             if model.trim().is_empty() {
                 return Err(ChainError::BadModel("is empty"));
@@ -371,7 +503,7 @@ pub fn check_shape(from: Option<&AgentType>, chain: &[AgentFallback]) -> Result<
     Ok(())
 }
 
-/// Checks a whole chain before it is stored: [`check_shape`], then no access
+/// Checks a list of links before it is stored: [`check_shape`], then no access
 /// escalation (a link never gets more access than the agent it replaces).
 /// Capability gaps that depend on the TURN are not refused here (a chain may end
 /// on a local Ollama on purpose); [`chain_view`] shows them and [`select`] skips
@@ -379,9 +511,10 @@ pub fn check_shape(from: Option<&AgentType>, chain: &[AgentFallback]) -> Result<
 pub fn validate_chain(
     agents: &AgentsConfig,
     from: Option<&AgentType>,
+    mode: Option<FallbackMode>,
     chain: &[AgentFallback],
 ) -> Result<(), ChainError> {
-    check_shape(from, chain)?;
+    check_shape(from, mode, chain)?;
     if let Some(from) = from {
         for link in chain {
             if agents.full_access_for(&link.agent) && !agents.full_access_for(from) {
@@ -391,6 +524,40 @@ pub fn validate_chain(
                 });
             }
         }
+    }
+    Ok(())
+}
+
+/// Checks a row before it is stored: the link itself ([`validate_chain`]), then
+/// the chain it would make through the rows of the fallbacks — no loop, not
+/// longer than [`MAX_CHAIN_DEPTH`]. Nothing is stored here.
+pub fn validate_row(
+    agents: &AgentsConfig,
+    from: &AgentType,
+    mode: FallbackMode,
+    link: &AgentFallback,
+) -> Result<(), ChainError> {
+    validate_chain(agents, Some(from), Some(mode), std::slice::from_ref(link))?;
+    let mut trial = agents.clone();
+    if !set_row(&mut trial, from, mode, Some(link.clone())) {
+        return Err(ChainError::NoCardFor(from.clone()));
+    }
+    let mut seen = vec![from.clone(), link.agent.clone()];
+    let mut tail = (link.agent.clone(), link_mode(link, mode));
+    while let Some(next) = row(&trial, &tail.0, tail.1) {
+        if seen.contains(&next.agent) {
+            let mut path = seen.clone();
+            path.push(next.agent.clone());
+            return Err(ChainError::Cycle(path));
+        }
+        seen.push(next.agent.clone());
+        if seen.len() - 1 > MAX_CHAIN_DEPTH {
+            return Err(ChainError::TooDeep {
+                from: Some(from.clone()),
+                links: seen.len() - 1,
+            });
+        }
+        tail = (next.agent.clone(), link_mode(next, tail.1));
     }
     Ok(())
 }
@@ -417,88 +584,178 @@ pub fn is_configured(agents: &AgentsConfig) -> bool {
     all_agents().iter().any(|agent| {
         agents
             .agent_config(agent)
-            .is_some_and(|config| !config.fallback_chain.is_empty())
+            .is_some_and(|config| !config.mode_fallbacks.is_empty())
     })
 }
 
-/// One link as the Settings card shows it.
+/// KT-1693 — the agent-level chain of 0.15.3 (`fallback_chain`) is carried onto
+/// the text mode rows of that agent: its first link on each of eco, standard and
+/// advanced, the next links on the rows of the link before them (so the walk
+/// « A → B → C » is still « A → B → C »). An agent's own chain wins where a row
+/// is already taken; a link that would be its own row's agent is dropped. The
+/// legacy field is emptied. `true` when something was carried (config to save).
+pub fn migrate_legacy_chains(agents: &mut AgentsConfig) -> bool {
+    let legacy: Vec<(AgentType, Vec<AgentFallback>)> = all_agents()
+        .into_iter()
+        .filter_map(|agent| {
+            let chain = std::mem::take(&mut agents.agent_config_mut(&agent)?.fallback_chain);
+            (!chain.is_empty()).then_some((agent, chain))
+        })
+        .collect();
+    if legacy.is_empty() {
+        return false;
+    }
+    let carry = |agents: &mut AgentsConfig, owner: &AgentType, link: &AgentFallback| {
+        if link.agent == *owner || link.agent == AgentType::Custom {
+            return;
+        }
+        for mode in FallbackMode::TEXT {
+            if row(agents, owner, mode).is_none() {
+                let carried = AgentFallback {
+                    agent: link.agent.clone(),
+                    model: link.model.clone(),
+                    mode: None,
+                };
+                set_row(agents, owner, mode, Some(carried));
+            }
+        }
+    };
+    for (agent, chain) in &legacy {
+        if let Some(first) = chain.first() {
+            carry(agents, agent, first);
+        }
+    }
+    for (_, chain) in &legacy {
+        for pair in chain.windows(2) {
+            carry(agents, &pair[0].agent, &pair[1]);
+        }
+    }
+    true
+}
+
+/// One fallback as the Settings card shows it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
-pub struct ChainLinkView {
+pub struct LinkView {
     pub agent: AgentType,
     #[ts(optional)]
     pub model: Option<String>,
-    pub paid: bool,
-    pub allow_paid: bool,
+    /// The mode of the model it runs on.
+    pub mode: FallbackMode,
+    pub transport: FallbackTransport,
     /// What a turn could need that this link cannot give, as warnings.
     pub gaps: Vec<String>,
 }
 
-/// The chain of one agent, for display: its links with their gaps, or the
-/// reason it is refused.
+/// A fallback reached through another agent's row: it is not set here but on
+/// `source`'s card (« set on <agent>'s card »).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct InheritedView {
+    pub source: AgentType,
+    pub link: LinkView,
+}
+
+/// The fallback of one mode row, for display: its own link, the links inherited
+/// through the rows of the fallbacks, or the reason it is refused.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
 pub struct ChainView {
     pub agent: AgentType,
-    pub links: Vec<ChainLinkView>,
+    pub mode: FallbackMode,
+    pub links: Vec<LinkView>,
+    pub inherited: Vec<InheritedView>,
     #[ts(optional)]
     pub error: Option<String>,
 }
 
-pub fn chain_view(agents: &AgentsConfig, from: &AgentType) -> ChainView {
-    chain_view_of(agents, Some(from), default_chain(agents, from))
+pub fn chain_view(agents: &AgentsConfig, from: &AgentType, mode: FallbackMode) -> ChainView {
+    let own: Vec<AgentFallback> = row(agents, from, mode).cloned().into_iter().collect();
+    chain_view_of(agents, Some(from), mode, &own)
 }
 
-/// A chain, as Settings, a step editor or a room's settings show it. Gaps are
-/// what the owner agent has and the link lacks (`from` unknown: what an agent
-/// type can give at all).
+fn link_view(
+    link: &AgentFallback,
+    replaced: FallbackMode,
+    owner: Option<&Capabilities>,
+) -> LinkView {
+    let has = capabilities(&link.agent);
+    // A link lacks something only if the agent it replaces had it.
+    let lacks =
+        |have: bool, owner_has: fn(&Capabilities) -> bool| !have && owner.is_none_or(owner_has);
+    let mut gaps = Vec::new();
+    if lacks(has.mcp_tools, |c| c.mcp_tools) {
+        gaps.push("no MCP tools".to_string());
+    }
+    if lacks(has.write_access, |c| c.write_access) {
+        gaps.push("cannot write in the worktree".to_string());
+    }
+    if lacks(has.image_input, |c| c.image_input) {
+        gaps.push("images are not guaranteed".to_string());
+    }
+    if lacks(has.long_context, |c| c.long_context) {
+        gaps.push("capped context window".to_string());
+    }
+    LinkView {
+        agent: link.agent.clone(),
+        model: link.model.clone(),
+        mode: link_mode(link, replaced),
+        transport: transport(&link.agent),
+        gaps,
+    }
+}
+
+/// A fallback, as Settings, a step editor or a room's settings show it. `chain`
+/// is what is set here (a row, or an override); the links the rows of the
+/// fallbacks add after it come back as `inherited`. Gaps are what the owner
+/// agent has and the link lacks (`from` unknown: what an agent type can give).
 pub fn chain_view_of(
     agents: &AgentsConfig,
     from: Option<&AgentType>,
+    mode: FallbackMode,
     chain: &[AgentFallback],
 ) -> ChainView {
-    let error = validate_chain(agents, from, chain)
+    let error = validate_chain(agents, from, Some(mode), chain)
         .err()
         .map(|error| error.to_string());
     let owner = from.map(capabilities);
-    let views = chain
+    let mut at = mode;
+    let links: Vec<LinkView> = chain
         .iter()
         .map(|link| {
-            let has = capabilities(&link.agent);
-            // A link lacks something only if the agent it replaces had it.
-            let lacks = |have: bool, owner_has: fn(&Capabilities) -> bool| {
-                !have && owner.as_ref().is_none_or(owner_has)
-            };
-            let mut gaps = Vec::new();
-            if lacks(has.mcp_tools, |c| c.mcp_tools) {
-                gaps.push("no MCP tools".to_string());
-            }
-            if lacks(has.write_access, |c| c.write_access) {
-                gaps.push("cannot write in the worktree".to_string());
-            }
-            if lacks(has.image_input, |c| c.image_input) {
-                gaps.push("images are not guaranteed".to_string());
-            }
-            if lacks(has.long_context, |c| c.long_context) {
-                gaps.push("capped context window".to_string());
-            }
-            ChainLinkView {
-                paid: is_paid(&link.agent),
-                allow_paid: link.allow_paid,
-                model: link.model.clone(),
-                agent: link.agent.clone(),
-                gaps,
-            }
+            let view = link_view(link, at, owner.as_ref());
+            at = view.mode;
+            view
+        })
+        .collect();
+    let mut extended = chain.to_vec();
+    let sources = if chain.is_empty() {
+        Vec::new()
+    } else {
+        extend_through_rows(agents, from, mode, &mut extended)
+    };
+    let mut at = links.last().map_or(mode, |link| link.mode);
+    let inherited = extended
+        .iter()
+        .skip(chain.len())
+        .zip(sources)
+        .map(|(link, source)| {
+            let link = link_view(link, at, owner.as_ref());
+            at = link.mode;
+            InheritedView { source, link }
         })
         .collect();
     ChainView {
         agent: from.cloned().unwrap_or(AgentType::ClaudeCode),
-        links: views,
+        mode,
+        links,
+        inherited,
         error,
     }
 }
 
-/// What Settings > Agents shows: every chain, and who is on cooldown.
+/// What Settings > Agents shows: every mode row that has a fallback, and who is
+/// on cooldown.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, ts_rs::TS)]
 #[ts(export)]
 pub struct FallbackOverview {
@@ -506,18 +763,19 @@ pub struct FallbackOverview {
     pub cooldowns: Vec<Cooldown>,
 }
 
-/// One chain per agent that has a fallback (the agents without one have no
-/// chain to show), plus the cooldowns still running.
+/// One view per mode row that has a fallback (the rows without one have none to
+/// show), plus the cooldowns still running.
 pub fn overview(agents: &AgentsConfig, cooldowns: Vec<Cooldown>) -> FallbackOverview {
     FallbackOverview {
         chains: all_agents()
             .iter()
-            .filter(|agent| {
-                agents
-                    .agent_config(agent)
-                    .is_some_and(|config| !config.fallback_chain.is_empty())
+            .flat_map(|agent| {
+                FallbackMode::ALL
+                    .into_iter()
+                    .filter(|mode| row(agents, agent, *mode).is_some())
+                    .map(|mode| chain_view(agents, agent, mode))
+                    .collect::<Vec<_>>()
             })
-            .map(|agent| chain_view(agents, agent))
             .collect(),
         cooldowns,
     }
@@ -548,7 +806,7 @@ pub fn select(
     needs: &TurnNeeds,
     cooling: &dyn Fn(&AgentType) -> Option<DateTime<Utc>>,
 ) -> Selection {
-    if let Err(error) = validate_chain(agents, None, chain) {
+    if let Err(error) = validate_chain(agents, None, None, chain) {
         return Selection::Stop {
             why: error.to_string(),
         };
@@ -578,12 +836,6 @@ pub fn select(
         }
         if !crate::workflows::step_agents::agent_can_launch(&link.agent, usable, agents) {
             skipped.push(format!("{name} is not installed or not enabled"));
-            continue;
-        }
-        if is_paid(&link.agent) && !link.allow_paid {
-            skipped.push(format!(
-                "{name} bills by API key and its use as a fallback was not allowed"
-            ));
             continue;
         }
         if agents.full_access_for(&link.agent) && !agents.full_access_for(origin) {
@@ -617,8 +869,9 @@ pub fn stamp(at: DateTime<Utc>) -> String {
     at.format("%H:%M UTC").to_string()
 }
 
-/// « Codex: quota exhausted until 14:00 UTC -> continued with Claude Code
-/// (sonnet) ». The model is the link's own, else the tier it keeps.
+/// « Codex · gpt-5.6-sol: quota exhausted until 14:00 UTC → continued with
+/// Claude Code · sonnet [CLI] ». The model is the link's own, else the mode it
+/// keeps (`eco mode`); the badge is how the fallback is reached.
 pub fn notice(
     failing: &AgentType,
     from_model: Option<&str>,
@@ -627,27 +880,30 @@ pub fn notice(
     link: &AgentFallback,
     tier: ModelTier,
 ) -> String {
+    let mode = FallbackMode::from_tier(tier);
     let until = until
         .map(|at| format!(" until {}", stamp(at)))
         .unwrap_or_default();
     let model = link
         .model
         .clone()
-        .unwrap_or_else(|| format!("{} tier", tier.as_str()));
+        .unwrap_or_else(|| format!("{} mode", link_mode(link, mode).label()));
     let from = from_model
-        .map(|model| format!("{} ({model})", display_name(failing)))
-        .unwrap_or_else(|| format!("{} ({} tier)", display_name(failing), tier.as_str()));
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} mode", mode.label()));
     format!(
-        "{from}: {}{until} -> continued with {} ({model})",
+        "{} · {from}: {}{until} → continued with {} · {model} [{}]",
+        display_name(failing),
         trigger.reason(),
         display_name(&link.agent),
+        transport(&link.agent).label(),
     )
 }
 
 /// The room line when no link can take over.
 pub fn stop_notice(failing: &AgentType, trigger: Trigger, why: &str) -> String {
     format!(
-        "{}: {} -> no fallback ({why})",
+        "{}: {} → no fallback ({why})",
         display_name(failing),
         trigger.reason()
     )
@@ -813,12 +1069,50 @@ pub fn cooling_lookup(
 
 // ─── Overrides and origins ───────────────────────────────────────────────
 
-/// The chain a discussion overrides the default with: `None` = no override, an
-/// empty list = no fallback in this discussion.
+/// A discussion's own fallback for one mode.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ModeOverride {
+    pub mode: FallbackMode,
+    /// The links that replace the default of the mode; empty is "no fallback".
+    pub chain: Vec<AgentFallback>,
+}
+
+/// The override of `mode` among a discussion's: `None` = the default applies.
+pub fn override_for(
+    overrides: Option<&[ModeOverride]>,
+    mode: FallbackMode,
+) -> Option<&[AgentFallback]> {
+    overrides?
+        .iter()
+        .find(|entry| entry.mode == mode)
+        .map(|entry| entry.chain.as_slice())
+}
+
+/// Reads what a row stores: per-mode overrides, or the single list 0.15.3
+/// stored (a chain for the whole discussion), which becomes the same override
+/// on each text mode — an empty one cuts them.
+fn parse_overrides(json: &str) -> anyhow::Result<Vec<ModeOverride>> {
+    if let Ok(per_mode) = serde_json::from_str::<Vec<ModeOverride>>(json) {
+        if !per_mode.is_empty() {
+            return Ok(per_mode);
+        }
+    }
+    let legacy = serde_json::from_str::<Vec<AgentFallback>>(json)?;
+    Ok(FallbackMode::TEXT
+        .into_iter()
+        .map(|mode| ModeOverride {
+            mode,
+            chain: legacy.clone(),
+        })
+        .collect())
+}
+
+/// What a discussion overrides, per mode: `None` = nothing is overridden.
 pub fn get_discussion_override(
     conn: &Connection,
     discussion_id: &str,
-) -> anyhow::Result<Option<Vec<AgentFallback>>> {
+) -> anyhow::Result<Option<Vec<ModeOverride>>> {
     let json: Option<String> = conn
         .query_row(
             "SELECT chain_json FROM discussion_fallback_overrides WHERE discussion_id = ?1",
@@ -826,38 +1120,44 @@ pub fn get_discussion_override(
             |row| row.get(0),
         )
         .optional()?;
-    Ok(json
-        .map(|json| serde_json::from_str::<Vec<AgentFallback>>(&json))
-        .transpose()?)
+    json.map(|json| parse_overrides(&json)).transpose()
 }
 
-/// Stores (`Some`) or removes (`None`) a discussion's override.
+/// Stores (`Some`) or removes (`None`) a discussion's override of one mode; the
+/// other modes' overrides stay.
 pub fn set_discussion_override(
     conn: &Connection,
     discussion_id: &str,
+    mode: FallbackMode,
     chain: Option<&[AgentFallback]>,
 ) -> anyhow::Result<()> {
-    match chain {
-        Some(chain) => {
-            conn.execute(
-                "INSERT INTO discussion_fallback_overrides (discussion_id, chain_json, updated_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(discussion_id) DO UPDATE SET chain_json = excluded.chain_json,
-                     updated_at = excluded.updated_at",
-                params![
-                    discussion_id,
-                    serde_json::to_string(chain)?,
-                    Utc::now().to_rfc3339()
-                ],
-            )?;
-        }
-        None => {
-            conn.execute(
-                "DELETE FROM discussion_fallback_overrides WHERE discussion_id = ?1",
-                [discussion_id],
-            )?;
-        }
+    let mut overrides = get_discussion_override(conn, discussion_id)?.unwrap_or_default();
+    overrides.retain(|entry| entry.mode != mode);
+    if let Some(chain) = chain {
+        overrides.push(ModeOverride {
+            mode,
+            chain: chain.to_vec(),
+        });
     }
+    overrides.sort_by_key(|entry| entry.mode);
+    if overrides.is_empty() {
+        conn.execute(
+            "DELETE FROM discussion_fallback_overrides WHERE discussion_id = ?1",
+            [discussion_id],
+        )?;
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO discussion_fallback_overrides (discussion_id, chain_json, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(discussion_id) DO UPDATE SET chain_json = excluded.chain_json,
+             updated_at = excluded.updated_at",
+        params![
+            discussion_id,
+            serde_json::to_string(&overrides)?,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 

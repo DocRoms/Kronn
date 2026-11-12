@@ -28,6 +28,7 @@ import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
 import { StepShadowRows } from './StepShadowRows';
+import { hasShadowBlock, resolveAgentModel, stepMainAgent } from './shadowRowModel';
 import { runShadowSummary, type ShadowEdit } from '../../lib/shadowMerge';
 import { RunStatusTrail } from './RunDetail';
 import { LoadedRunDetail } from './LoadedRunDetail';
@@ -1374,6 +1375,7 @@ function StepAgentSwitcher({
   agentAccess,
   t,
   compact = false,
+  showModel = false,
 }: {
   step: WorkflowStep;
   stepIndex: number;
@@ -1383,6 +1385,8 @@ function StepAgentSwitcher({
   agentAccess?: AgentsConfig | null;
   t: (key: string, ...args: (string | number)[]) => string;
   compact?: boolean;
+  /** Name the model even when the picker is read-only: the Principal row reads `agent · model`. */
+  showModel?: boolean;
 }) {
   return (
     <AgentSwitchPicker
@@ -1405,6 +1409,7 @@ function StepAgentSwitcher({
       ariaLabel={t('wf.stepAgentSwitchLabel', step.name, AGENT_LABELS[step.agent] ?? step.agent)}
       needsFullAccess={agent => requiresFullAccessToRun(agentAccess, agent)}
       staticClassName={compact ? 'wf-pipe-chip-agent' : 'wf-step-agent-static'}
+      suffix={showModel && !onChange ? resolveAgentModel(stepMainAgent(step), agentChoices ?? [], agentAccess?.model_tiers) || undefined : undefined}
     />
   );
 }
@@ -1521,6 +1526,7 @@ function SubWorkflowOverview({
           steps={workflow.steps}
           selectedStepIndex={selectedIndex}
           onSelectStep={setSelectedIndex}
+          modelTiers={agentAccess?.model_tiers}
           t={t}
         />
         <div className="wf-steps-pipeline" data-layout="index" role="list">
@@ -1760,6 +1766,23 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
   const selectedStepIndex = Math.min(
     selectedStepIndexRaw,
     Math.max(workflow.steps.length - 1, 0),
+  );
+  // The step's own agent/model picker: on its single line, or in the Principal row once it has shadows (KT-1707).
+  const agentPicker = (step: WorkflowStep, index: number) => (
+    <>
+      <StepAgentSwitcher
+        step={step}
+        stepIndex={index}
+        availableAgentTypes={availableAgentTypes}
+        agentChoices={agentChoices}
+        onChange={onChangeStepAgent}
+        agentAccess={agentAccess}
+        t={t}
+        compact
+        showModel={hasShadowBlock(step)}
+      />
+      {!onChangeStepAgent && <TierBadge step={step} t={t} chip />}
+    </>
   );
   const selectStep = (index: number, openDetails = true) => {
     setSelectedStepIndex(index);
@@ -2068,6 +2091,8 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                 steps={workflow.steps}
                 selectedStepIndex={selectedStepIndex}
                 onSelectStep={index => selectStep(index)}
+                choices={agentChoices}
+                modelTiers={agentAccess?.model_tiers}
                 t={t}
               />
               {/* Compact pipeline — the map explains control flow, while these
@@ -2110,21 +2135,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                               className="wf-step-id-pill"
                             />
                           )}
-                          {isAgentStep && (
-                            <>
-                            <StepAgentSwitcher
-                              step={step}
-                              stepIndex={i}
-                              availableAgentTypes={availableAgentTypes}
-                              agentChoices={agentChoices}
-                              onChange={onChangeStepAgent}
-                              agentAccess={agentAccess}
-                              t={t}
-                              compact
-                            />
-                            {!onChangeStepAgent && <TierBadge step={step} t={t} chip />}
-                            </>
-                          )}
+                          {isAgentStep && !hasShadowBlock(step) && agentPicker(step, i)}
                           {step.step_type?.type === 'Decide' && (
                             <StepDecisionPicker
                               step={step}
@@ -2141,6 +2152,8 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                             step={step}
                             nextStepName={workflow.steps[i + 1]?.name}
                             choices={agentChoices}
+                            modelTiers={agentAccess?.model_tiers}
+                            mainPicker={hasShadowBlock(step) ? agentPicker(step, i) : undefined}
                             onEdit={onChangeStepShadows ? edit => void onChangeStepShadows(i, edit) : undefined}
                             t={t}
                             testId={`wf-shadow-rows-${i}`}

@@ -3721,9 +3721,10 @@ mod tests {
             .is_none());
     }
 
-    /// KT-1600 — the per-agent tools switch persists for an HTTP agent, clears
-    /// back to the default, and is refused for a CLI agent (which brings its own
-    /// tools) and for `Custom` (whose setting lives on its connection).
+    /// KT-1600 — the per-agent tools switch persists for Ollama, clears back to
+    /// the default, and is refused for a CLI agent (which brings its own tools)
+    /// and for `Custom`, LiteLLM and NVIDIA (KT-1687: their setting lives on the
+    /// connection, the agent slot follows the default connection).
     #[tokio::test]
     #[serial]
     async fn config_agent_tools_switch_persists_clears_and_refuses_non_http_agents() {
@@ -3765,7 +3766,7 @@ mod tests {
         assert_eq!(body["success"], true, "{body}");
         assert_eq!(state.config.read().await.agents.ollama.tools_enabled, None);
 
-        for agent in ["ClaudeCode", "Custom"] {
+        for agent in ["ClaudeCode", "Custom", "LiteLlm", "Nvidia"] {
             let (_, body) = send(
                 state.clone(),
                 false,
@@ -3774,6 +3775,10 @@ mod tests {
             .await;
             assert_eq!(body["success"], false, "{agent}: {body}");
         }
+        assert_eq!(
+            state.config.read().await.agents.lite_llm.tools_enabled,
+            None
+        );
     }
 
     #[tokio::test]

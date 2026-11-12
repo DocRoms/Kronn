@@ -100,7 +100,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2971-3019#decline]`
+`[src: file: backend/src/lib.rs:2980-3028#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:655-770#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
@@ -660,7 +660,7 @@ alias or display name; a name two connections share is refused rather than
 guessed, and every refusal lists the connections that can generate the
 modality asked for, with their ids.
 [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
-[src: file: backend/src/db/external_api_connections.rs:132-160#ConnectionReference]
+[src: file: backend/src/db/external_api_connections.rs:159-187#ConnectionReference]
 
 The catalogue reports `configured` and `reachable`
 independently; its only strict implication is

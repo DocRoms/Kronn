@@ -11,7 +11,7 @@ use rusqlite::params;
 use super::agent_fallback::system_notice;
 use crate::core::agent_fallback::{self as fallback, Pin, Trigger, TurnNeeds};
 use crate::db::agent_dispatch::AgentDispatchJob;
-use crate::models::AgentType;
+use crate::models::{AgentType, FallbackMode};
 use crate::AppState;
 
 /// The job to run: `job` itself, or — its agent overridden and pinned — the
@@ -78,12 +78,18 @@ pub(crate) async fn start_on_fallback_among(
         return job;
     };
     let agent = job.agent_override.clone().unwrap_or(room_agent);
-    let chain = fallback::effective_chain(&agents, &agent, chain_override.as_deref());
+    let tier = super::runtime::dispatch_target_tier(&targets, job.agent_override.as_ref(), None)
+        .unwrap_or(room_tier);
+    let mode = FallbackMode::from_tier(tier);
+    let chain = fallback::effective_chain(
+        &agents,
+        &agent,
+        mode,
+        fallback::override_for(chain_override.as_deref(), mode),
+    );
     if agent == AgentType::Custom || chain.is_empty() {
         return job;
     }
-    let tier = super::runtime::dispatch_target_tier(&targets, job.agent_override.as_ref(), None)
-        .unwrap_or(room_tier);
     let needs = TurnNeeds {
         long_context: chars > fallback::LONG_CONTEXT_CHARS,
         ..Default::default()

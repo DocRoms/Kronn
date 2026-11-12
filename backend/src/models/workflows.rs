@@ -1919,8 +1919,10 @@ pub struct AgentSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tools: Option<StepTools>,
-    /// KT-1518 — this step's own fallback chain. `None`: the agent's default
-    /// chain applies; `Some(empty)`: no fallback for this step.
+    /// KT-1693 — this step's own fallback, for the mode the step runs in (its
+    /// tier: eco, standard or advanced). `None`: the row of the agent applies;
+    /// `Some(empty)`: no fallback for this step; links: they replace the row,
+    /// then the rows of the fallbacks go on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub fallback: Option<Vec<AgentFallback>>,

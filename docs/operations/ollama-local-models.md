@@ -662,7 +662,7 @@ default itself is never written, so someone who never touched it keeps the
 automatic behaviour. Folded, its summary line counts the suggestions and the
 downloads in progress. A download or an update in flight is drawn above the
 block, outside the fold, with its progress and its Cancel, so folding the block
-back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:155-157#usePersistentFold]
+back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:161-163#usePersistentFold]
 [src: file: frontend/src/hooks/usePersistentFold.ts:13-31#usePersistentFold]
 
 ### The suggestions, and what "verified" means here
@@ -717,7 +717,7 @@ Next to each model's Update button a badge says whether the tag has moved on:
 **Update available**, **Up to date**, or **Not checked**. When the block is
 folded, its summary counts the updates waiting. Updating a model withholds its
 badge until the library has been asked again, so a verdict that described the
-replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:446-452#freshnessOf]
+replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:453-459#freshnessOf]
 
 ### Reading the official library
 
@@ -893,15 +893,17 @@ without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
     (a stored `https://openrouter.ai/api` or `.../api/v1` gives the same address)
     with `Authorization: Bearer <the connection's stored credential>`, read from the
     token store like the media calls, never from the step, never logged (the route's
-    `Debug` hides it, an error text is scrubbed of it) and never followed through a
+    `Debug` hides it; a provider's error body is scrubbed of it in full *before* it is
+    cut to length, so a token straddling the cut cannot leak as a fragment, and the
+    success output is scrubbed too) and never followed through a
     redirect. HTTP 401 and 403 are a refused token: the step fails with the plain
     sentence of the other connection calls and `[SIGNAL: auth_refused]`, and runs
     nothing else. A connection that is gone, of another provider, with another
     `decision_model` or without a stored credential fails the step with that
     reason before any call.
     [src: file: backend/src/workflows/decide_step.rs:268#route_for]
-    [src: file: backend/src/workflows/decide_step.rs:644#call]
-    [src: file: backend/src/workflows/decide_step.rs:619#refused_output]
+    [src: file: backend/src/workflows/decide_step.rs:649#call]
+    [src: file: backend/src/workflows/decide_step.rs:624#refused_output]
   - **What the picker lists.** The Ollama decision models of the catalogue
     (Local), then each connection's `decision_model` when its provider is OpenRouter
     and a credential is stored (HTTP, with the connection's name). LiteLLM, NVIDIA and
@@ -915,8 +917,8 @@ without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
     `/v1/systemone` with the connection's bearer and the model, and branches the
     run; a 401 and a 403 are reported and never swapped, with the token absent from
     the output; a gone, foreign or credential-less connection makes no call.
-    [src: file: backend/src/workflows/decide_step.rs:1179#an_openrouter_connection_is_called_on_v1_systemone_with_its_bearer]
-    [src: file: backend/src/workflows/decide_step.rs:1240#a_refused_openrouter_token_is_reported_and_never_swapped]
+    [src: file: backend/src/workflows/decide_step.rs:1184#an_openrouter_connection_is_called_on_v1_systemone_with_its_bearer]
+    [src: file: backend/src/workflows/decide_step.rs:1245#a_refused_openrouter_token_is_reported_and_never_swapped]
 
 ## Bench snapshot (M5 Max 64 GB, Q4_K_M, informational)
 

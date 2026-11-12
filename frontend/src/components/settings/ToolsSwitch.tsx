@@ -13,8 +13,9 @@ interface Props {
   variant?: 'pill' | 'field';
 }
 
-/** Kronn tools on an HTTP agent or connection: on by default, an off switch for
- *  a model that cannot take tool calls (KT-1600). */
+/** "Can act in Kronn" on an HTTP agent or connection: on by default, an off
+ *  switch for a model that cannot take tool calls (KT-1600). Lives in a card,
+ *  never loose on the page (KT-1687). */
 export function ToolsSwitch({ subject, checked, onChange, testId, disabled = false, variant = 'pill' }: Props) {
   const { t } = useT();
   return (

@@ -3831,6 +3831,35 @@
   cursor: pointer;
 }
 
+/* ── Project scope control (Infos step) ────────────────── */
+.wf-scope {
+  border: 0;
+  margin-inline: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.wf-scope > legend {
+  padding: 0;
+}
+
+.wf-scope-options,
+.wf-scope-projects {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.wf-scope-projects {
+  margin-top: var(--kr-sp-3);
+  padding-left: var(--kr-sp-8);
+}
+
+.wf-scope-hint {
+  margin-top: var(--kr-sp-3);
+  overflow-wrap: anywhere;
+}
+
 /* ── Cron preview box ──────────────────────────────────── */
 .wf-cron-preview {
   display: flex;
@@ -8436,4 +8465,12 @@
 .wf-shadow-cmp-pick label { display: inline-flex; align-items: center; gap: 6px; }
 @media (max-width: 560px) {
   .wf-shadow-cmp-diff { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* KT-1693 — the step's fallback override sits under its agent/mode choice. */
+.wf-step-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-4);
 }
