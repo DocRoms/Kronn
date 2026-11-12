@@ -420,7 +420,7 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:296-396#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:8142-8213#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:8166-8237#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
 dead worker `[src: file: backend/src/api/orchestration.rs:866-1037#start_resilience_watchdog]`.
 
@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:14083-14236#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9274-9320#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14612-14801#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:8932-9239#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:14083-14236#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9425-9471#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14612-14801#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:9083-9390#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -519,7 +519,7 @@ attributable handoff — "typed assignments and handoffs, never dependent on Mar
   with guidance (→ `Working`) `[src: file: backend/src/models/orchestration.rs:309-309#Escalated]`, or abandons
   (→ `Cancelled`, reachable from any non-terminal state) `[src: file: backend/src/models/orchestration.rs:274-283#can_transition_to]`.
   An optional `escalation_notify_url` is stored on the run
-  `[src: file: backend/src/models/orchestration.rs:734-734#escalation_notify_url]`; nothing fires it yet.
+  `[src: file: backend/src/models/orchestration.rs:737#escalation_notify_url]`; nothing fires it yet.
   The gate webhook it was meant to reuse is `fire_gate_webhook`
   `[src: file: backend/src/workflows/runner.rs:863-884#fire_gate_webhook]`.
 
