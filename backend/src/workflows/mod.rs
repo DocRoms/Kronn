@@ -43,6 +43,7 @@ pub mod runner;
 pub mod safety;
 pub mod shadow;
 pub mod shadow_merge;
+pub mod shadow_summary;
 pub mod step_agents;
 pub mod step_output_format;
 pub mod step_room;

@@ -28,9 +28,17 @@
 //! retries. A clear copy found at start (written by 0.15.x) is converted once by
 //! [`protect_copies`]; a copy that cannot be written is cut down to its key
 //! line (the one value that exists nowhere else) and sealed at the next start.
-//! A copy holding an `encryption_secret` that cannot be read as a key is never
-//! dropped, a symbolic link or a file with several hard links is never touched
-//! (it is reported); both are left as they are and listed in `failures`.
+//! Three kinds are left exactly as they are and listed in `failures` instead:
+//! a copy holding an `encryption_secret` that cannot be read as a key (never
+//! dropped), a `corrupt` copy whose seal failed (a config.toml that could never
+//! be read may hold credentials that reached no encrypted store), and a link
+//! (symbolic link, Windows reparse point), a non-regular file (a FIFO would block
+//! the pass) or a file with several hard links.
+//!
+//! The key is the top-level `encryption_secret` ([`key_of`]): a text that parses
+//! is decided by that value alone, and a text that does not is scanned for it
+//! line by line down to its first table, so an `encryption_secret` under
+//! `[tokens]` or inside a string is never taken for the key.
 //!
 //! The pass reads a copy, then writes and renames: a single pass at start, in
 //! the one process that owns the data directory, so a copy swapped between the
@@ -272,20 +280,20 @@ pub fn stamp() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ").to_string()
 }
 
-/// A top-level `encryption_secret` of `text`, whole or salvaged line by line,
-/// when it is a real key.
+/// The top-level `encryption_secret` of `text`, when it is a real key. A text
+/// that parses is decided by its top-level value alone (a value that is no key
+/// gives `None`: an `encryption_secret` under a table is a credential of
+/// something else); only a text that does not parse is scanned line by line, and
+/// then only its top level ([`config::salvage_key_line`]).
 pub fn key_of(text: &str) -> Option<String> {
-    text.parse::<toml::Table>()
-        .ok()
-        .and_then(|t| {
-            t.get("encryption_secret")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .and_then(|k| crypto::canonical_secret(&k).ok())
-        // The parsed value is no key (or the text does not parse): a real key
-        // line further down must not be lost with it.
-        .or_else(|| config::salvage_key_line(text).and_then(|k| crypto::canonical_secret(&k).ok()))
+    let found = match text.parse::<toml::Table>() {
+        Ok(table) => table
+            .get("encryption_secret")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        Err(_) => config::salvage_key_line(text),
+    };
+    found.and_then(|k| crypto::canonical_secret(&k).ok())
 }
 
 /// The only content kept of a copy that cannot be sealed.
@@ -354,7 +362,7 @@ pub fn protect_clear_copies(dir: &Path, key_hex: Option<&str>) -> Protected {
     for copy in copies(dir).into_iter().filter(|c| !c.sealed) {
         match protect_one(dir, &copy, key_hex) {
             Ok(Done::Sealed) => report.sealed += 1,
-            Ok(Done::Reduced) => report.reduced += 1,
+            Ok(Done::Reduced | Done::Dropped) => report.reduced += 1,
             Ok(Done::Untouched) => {}
             Ok(Done::Deferred) => {
                 tracing::warn!(
@@ -378,7 +386,10 @@ pub fn protect_clear_copies(dir: &Path, key_hex: Option<&str>) -> Protected {
 
 enum Done {
     Sealed,
+    /// Cut down to its key line.
     Reduced,
+    /// Removed: it held nothing a later start needs.
+    Dropped,
     Untouched,
     Deferred,
 }
@@ -401,25 +412,44 @@ fn protect_one(dir: &Path, copy: &ConfigCopy, key_hex: Option<&str>) -> Result<D
             // is not kept whole. Only its key line is irreplaceable (every
             // credential lives in the encrypted store), so it is cut down exactly
             // as when no key exists; the next start seals what is left. Anything
-            // but a real cut-down (a copy that cannot be cut down, or has nothing
-            // left to cut) is a failure carrying the seal's cause.
-            Err(e) => match reduce(dir, copy, &text) {
-                Ok(Done::Reduced) => {
-                    tracing::warn!(
-                        "{} could not be encrypted ({e:#}); it was cut down to its key line, \
-                         the next start retries",
-                        copy.name
-                    );
-                    Ok(Done::Reduced)
+            // but a real cut-down or drop (a copy that cannot be cut down, or has
+            // nothing left to cut) is a failure carrying the seal's cause.
+            Err(e) => {
+                // A copy of a config.toml that could never be read: its
+                // credentials may never have reached the encrypted store, so a
+                // transient failure must not cost it anything.
+                if copy.kind == Kind::Corrupt {
+                    return Err(e.context(
+                        "it is a config.toml that could not be read, whose content may exist \
+                         nowhere else: left as it is",
+                    ));
                 }
-                Ok(Done::Untouched) => {
-                    Err(e.context("it already holds nothing but its key line, left as it is"))
+                match reduce(dir, copy, &text) {
+                    Ok(Done::Reduced) => {
+                        tracing::warn!(
+                            "{} could not be encrypted ({e:#}); it was cut down to its key \
+                             line, the next start retries",
+                            copy.name
+                        );
+                        Ok(Done::Reduced)
+                    }
+                    Ok(Done::Dropped) => {
+                        tracing::warn!(
+                            "{} could not be encrypted ({e:#}); it held no key line and \
+                             nothing a later start needs, so it was removed",
+                            copy.name
+                        );
+                        Ok(Done::Dropped)
+                    }
+                    Ok(Done::Untouched) => {
+                        Err(e.context("it already holds nothing but its key line, left as it is"))
+                    }
+                    Ok(_) => {
+                        Err(e.context("it holds a value that is not a key and cannot be cut down"))
+                    }
+                    Err(cut) => Err(e.context(format!("and it could not be cut down: {cut:#}"))),
                 }
-                Ok(_) => {
-                    Err(e.context("it holds a value that is not a key and cannot be cut down"))
-                }
-                Err(cut) => Err(e.context(format!("and it could not be cut down: {cut:#}"))),
-            },
+            }
         };
     }
     reduce(dir, copy, &text)
@@ -434,17 +464,48 @@ fn check_plain_file(path: &Path) -> Result<()> {
         Err(e) => return Err(e).context("stat"),
     };
     refuse_symlink(path).context("read")?;
+    // Before any read: a FIFO or a device would block the start pass.
     anyhow::ensure!(meta.is_file(), "it is not a regular file; left as it is");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        anyhow::ensure!(
-            meta.nlink() <= 1,
-            "it has {} hard links, another name would keep its content; left as it is",
-            meta.nlink()
-        );
-    }
+    let links = hard_links(path, &meta)?;
+    anyhow::ensure!(
+        links <= 1,
+        "it has {links} hard links, another name would keep its content; left as it is"
+    );
     Ok(())
+}
+
+/// How many names the regular file at `path` has.
+#[cfg(unix)]
+fn hard_links(_path: &Path, meta: &std::fs::Metadata) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(meta.nlink())
+}
+
+/// How many names the regular file at `path` has (the count is not in std's
+/// stable `Metadata` on Windows: asked of an open handle).
+#[cfg(windows)]
+fn hard_links(path: &Path, _meta: &std::fs::Metadata) -> Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = std::fs::File::open(path).context("open")?;
+    // SAFETY: an all-zero struct is a valid out-parameter; the handle stays open
+    // for the whole call.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let asked = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    if asked == 0 {
+        return Err(anyhow::Error::new(std::io::Error::last_os_error()))
+            .context("count its hard links");
+    }
+    Ok(u64::from(info.nNumberOfLinks))
+}
+
+/// Neither unix nor windows: the count is unknown, so the copy is left alone.
+#[cfg(not(any(unix, windows)))]
+fn hard_links(_path: &Path, _meta: &std::fs::Metadata) -> Result<u64> {
+    anyhow::bail!("its hard links cannot be counted on this platform; left as it is")
 }
 
 /// Encrypt the raw `bytes` of `copy` under `key` and remove the clear file once
@@ -490,7 +551,7 @@ fn reduce(dir: &Path, copy: &ConfigCopy, text: &str) -> Result<Done> {
         // Nothing in it a later start needs: dropped rather than kept in clear.
         None => {
             remove(&copy.path)?;
-            Ok(Done::Reduced)
+            Ok(Done::Dropped)
         }
     }
 }
@@ -529,14 +590,34 @@ fn remove_old_temps(dir: &Path, report: &mut Protected) {
     }
 }
 
-/// An error when `path` is a symbolic link (dangling or not): a copy is never
-/// read through, renamed or written over a link. A missing path is fine.
+/// Whether `meta` is a link: a symbolic link, or on Windows any reparse point
+/// (junction, AppExecLink, cloud placeholder, ...), which `is_symlink` does not
+/// all cover, as the Windows move below does not trust it either.
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_symlink() || is_reparse_point(meta)
+}
+
+#[cfg(windows)]
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// An error when `path` is a symbolic link (dangling or not; on Windows, any
+/// reparse point): a copy is never read through, renamed or written over a link.
+/// A missing path is fine.
 pub fn refuse_symlink(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
+        Ok(meta) if is_link(&meta) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "{} is a symbolic link; it is left where it is",
+                "{} is a symbolic link or a reparse point; it is left where it is",
                 path.display()
             ),
         )),

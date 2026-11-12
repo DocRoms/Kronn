@@ -4,6 +4,7 @@ import { NewDiscussionForm } from '../NewDiscussionForm';
 import type { Project, AgentDetection, AgentReadiness, AgentType, AgentsConfig } from '../../types/generated';
 import { loadDraft, NEW_DISCUSSION_DRAFT_ID } from '../../lib/chat-drafts';
 import type { ExternalApiConnectionView } from '../../lib/api';
+import { expectPopoverAboveOverlay } from '../../test/zIndexLayers';
 
 vi.mock('../../lib/api', () => ({
   skills: { list: vi.fn().mockResolvedValue([]) },
@@ -1926,5 +1927,33 @@ describe('NewDiscussionForm — Configuration links open in a new tab', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(onNavigate).not.toHaveBeenCalled();
     open.mockRestore();
+  });
+});
+
+// KT-1701 — the picker popover is portaled to <body>; it must outrank the form's overlay.
+describe('NewDiscussionForm — agent picker layer', () => {
+  it('opens the agent picker above the new-discussion overlay', async () => {
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />
+    );
+    const trigger = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-testid="new-disc-agent-picker"] .kr-agent-switch-btn');
+      if (!el) throw new Error('agent picker not rendered yet');
+      return el;
+    });
+    await act(async () => { fireEvent.click(trigger); });
+
+    const popover = document.querySelector('.kr-agent-switch-popover')!;
+    expect(popover).not.toBeNull();
+    expectPopoverAboveOverlay(trigger, popover, 'disc-new-overlay');
   });
 });

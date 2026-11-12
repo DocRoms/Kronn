@@ -1202,25 +1202,105 @@ fn set_aside_unreadable_config(
 /// A top-level `encryption_secret = "..."` line that parses on its own: the
 /// first whose value is a real key, else the first non-empty one (a value that
 /// is not a key never hides a valid key line further down).
+///
+/// Only the top level of the text is read: the scan stops at the first line that
+/// opens a table (`[` or `[[`), and a line inside a multi-line string is not a
+/// line of the document. An `encryption_secret` under `[tokens]`, an MCP env
+/// table or in a string is a value of something else, never the key. (A
+/// multi-line array whose element line starts with `[` also ends the scan: the
+/// safe side, the key is then looked for in the other stores.)
 pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
     let mut first = None;
+    // The delimiter of the multi-line string the scan is inside, if any.
+    let mut open_string: Option<&str> = None;
     for line in content.lines() {
-        let Ok(table) = line.trim().parse::<toml::Table>() else {
-            continue;
-        };
-        let Some(value) = table
-            .get("encryption_secret")
-            .and_then(|v| v.as_str())
-            .filter(|k| !k.is_empty())
-        else {
-            continue;
-        };
-        if super::crypto::canonical_secret(value).is_ok() {
-            return Some(value.to_string());
+        let mut rest = line;
+        if let Some(delimiter) = open_string {
+            match string_end(rest, delimiter) {
+                Some(after) => rest = after,
+                None => continue,
+            }
+        } else if line.trim_start().starts_with('[') {
+            break;
+        } else if let Some(value) = key_value_of(line) {
+            if super::crypto::canonical_secret(&value).is_ok() {
+                return Some(value);
+            }
+            first.get_or_insert(value);
         }
-        first.get_or_insert_with(|| value.to_string());
+        // A multi-line string opened on this line swallows the following ones.
+        open_string = opened_string(rest);
     }
     first
+}
+
+/// The value of `encryption_secret = "..."` when `line` is that assignment on
+/// its own and the value is not empty.
+fn key_value_of(line: &str) -> Option<String> {
+    let table = line.trim().parse::<toml::Table>().ok()?;
+    table
+        .get("encryption_secret")
+        .and_then(|v| v.as_str())
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+}
+
+/// What follows the end of a multi-line string (`delimiter` is `"""` or `'''`)
+/// in `line`, when it ends there; basic strings honour `\` escapes.
+fn string_end<'a>(line: &'a str, delimiter: &str) -> Option<&'a str> {
+    let mut at = 0;
+    while at < line.len() {
+        let tail = &line[at..];
+        if delimiter == "\"\"\"" && tail.starts_with('\\') {
+            // An escape takes the next character with it.
+            at += tail.chars().take(2).map(char::len_utf8).sum::<usize>();
+        } else if let Some(after) = tail.strip_prefix(delimiter) {
+            return Some(after);
+        } else {
+            at += tail.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    None
+}
+
+/// The delimiter of the multi-line string that `line` opens and leaves open:
+/// single-line strings and comments are skipped over.
+fn opened_string(line: &str) -> Option<&'static str> {
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        if c == '#' {
+            return None;
+        }
+        let delimiter = if rest.starts_with("\"\"\"") {
+            Some("\"\"\"")
+        } else if rest.starts_with("'''") {
+            Some("'''")
+        } else {
+            None
+        };
+        if let Some(delimiter) = delimiter {
+            match string_end(&rest[3..], delimiter) {
+                Some(after) => rest = after,
+                None => return Some(delimiter),
+            }
+        } else if c == '"' || c == '\'' {
+            // A single-line string: up to its closing quote (or the end of the line).
+            let mut chars = rest.char_indices().skip(1);
+            let mut end = rest.len();
+            while let Some((i, d)) = chars.next() {
+                if c == '"' && d == '\\' {
+                    chars.next();
+                } else if d == c {
+                    end = i + 1;
+                    break;
+                }
+            }
+            rest = &rest[end..];
+        } else {
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    None
 }
 
 /// `default_config()` without a key: a missing config.toml must not offer a

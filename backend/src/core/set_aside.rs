@@ -565,15 +565,9 @@ pub fn clear_credentials_in(text: &str) -> Vec<ClearCredential> {
 
 /// The canonical `encryption_secret` a config text carries, if it is a key.
 fn key_in(text: &str) -> Option<String> {
-    text.parse::<toml::Table>()
-        .ok()
-        .and_then(|t| {
-            t.get("encryption_secret")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .or_else(|| config::salvage_key_line(text))
-        .and_then(|k| crypto::canonical_secret(&k).ok())
+    // The same rule as for a copy: a text that parses is decided by its
+    // top-level value, an `encryption_secret` under a table is no key.
+    crate::core::config_copies::key_of(text)
 }
 
 /// The `(kind, value)` pairs `stored_credentials` holds and `key` decrypts.

@@ -261,11 +261,20 @@ Safe to interrupt at any point; a rerun converges:
    cut down to its `encryption_secret` line (every credential lives in the
    encrypted store, so only that key line is irreplaceable) and the encryption
    is retried at the next start; if the cut-down write fails too, the file is
-   left as it is and logged once. A copy holding an `encryption_secret` that is
-   not a readable key is never dropped (it may be the only trace of a key): it
-   is left as it is and reported, as is a symbolic link or a file with several
-   hard links, which the pass never reads through, renames over or removes. A
-   valid key line is still found past a value that is not a key. The pass reads
+   left as it is and logged once. A `config.toml.corrupt.<timestamp>` whose
+   encryption fails is not cut down: a config.toml that could never be read may
+   hold credentials that reached no encrypted store, so it is left whole and
+   reported until the encryption succeeds. A copy holding an
+   `encryption_secret` that is not a readable key is never dropped (it may be
+   the only trace of a key): it is left as it is and reported, as is a symbolic
+   link or Windows reparse point, a file that is not a regular file (a FIFO
+   would block the pass) or a file with several hard links, which the pass
+   never reads through, renames over or removes. The key is the top-level
+   `encryption_secret`: a text that parses is decided by that value alone, a
+   text that does not (a duplicate key, say) is scanned line by line down to its
+   first table, so a valid key line is still found past a value that is not a
+   key, and an `encryption_secret` under `[tokens]`, in an MCP env table or
+   inside a multi-line string is never taken for the key. The pass reads
    a copy then renames over it, once at start in the single process that owns
    the data directory; a copy swapped in between is out of scope. One failure
    does not stop the others. The key lookup tells three cases apart. A key is found:
