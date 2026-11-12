@@ -34,6 +34,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   previewImport: vi.fn(),
   autoDisabled: vi.fn(),
   reenable: vi.fn(),
+  stepShadows: vi.fn(),
 }));
 
 // The one place the default resolved values live: applied once when the mock is
@@ -48,6 +49,7 @@ const applyWorkflowsApiDefaults = vi.hoisted(() => () => {
   mockWorkflowsApi.previewImport.mockResolvedValue({ skills: [], missing_skills: [] });
   mockWorkflowsApi.autoDisabled.mockResolvedValue([]);
   mockWorkflowsApi.reenable.mockResolvedValue([]);
+  mockWorkflowsApi.stepShadows.mockResolvedValue([]);
 });
 applyWorkflowsApiDefaults();
 
@@ -62,6 +64,8 @@ vi.mock('../../hooks/useWebSocket', () => ({
 // Mock API — WorkflowsPage calls workflowsApi.list() and skillsApi.list() on mount
 vi.mock('../../lib/api', () => ({
   workflows: mockWorkflowsApi,
+  // KT-1518 — the fallback control of an expanded step lists the installed agents.
+  agents: { detect: vi.fn().mockResolvedValue([]) },
   skills: {
     list: vi.fn().mockResolvedValue([]),
     create: vi.fn(),
@@ -145,6 +149,10 @@ vi.mock('../../lib/api', () => ({
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),
     // 0.8.6 phase 4 — WorkflowWizard reads default tier on mount.
     getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
+    // KT-1367 — the wizard reads the decision model to offer the Decide step.
+    getModelTiers: vi.fn().mockResolvedValue({}),
+    // KT-1518 — an expanded step editor reads the agent fallback chains.
+    getAgentFallback: vi.fn().mockResolvedValue({ chains: [], cooldowns: [] }),
   },
   // WorkflowWizard loads the MCP overview at mount (ApiCall plugin picker).
   mcps: {
@@ -2010,8 +2018,8 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
           selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null, editor: 'edit' }} />,
       );
-      // Expanded on arrival: its toggle is in view without a click.
-      expect(await screen.findByTestId('wf-shadow-enabled')).toBeInTheDocument();
+      // Expanded on arrival, on the first step that can carry shadows: no click needed.
+      expect(await screen.findByTestId('wf-step-shadows-0-add')).toBeInTheDocument();
     } finally {
       window.history.replaceState(null, '', window.location.pathname);
     }
@@ -2027,7 +2035,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null }} />,
     );
     fireEvent.click(await screen.findByTestId('wf-shadow-entry'));
-    expect(await screen.findByTestId('wf-shadow-enabled')).toBeInTheDocument();
+    expect(await screen.findByTestId('wf-step-shadows-0-add')).toBeInTheDocument();
   });
 
   it('applies the address again under a new token, even when its fields did not change', async () => {

@@ -73,6 +73,31 @@ mod tests {
             .is_some_and(|doctrine| doctrine.starts_with("## Authoring doctrine")));
     }
 
+    /// KT-1681 — the default read is lean; the route narrows it to one step
+    /// type or one shared section and refuses what it does not know.
+    #[tokio::test]
+    async fn workflow_step_schema_route_narrows_to_a_type_or_a_section() {
+        let read = |query: &'static str| async move {
+            send(
+                test_state(),
+                false,
+                Request::builder()
+                    .uri(format!("/api/workflows/step-schema{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .1
+        };
+        let full = crate::api::workflows::full_step_schema();
+        let exec = read("?step_type=Exec").await;
+        assert_eq!(exec["data"]["contract"], full["fields_by_type"]["Exec"]);
+        let vars = read("?section=template_vars").await;
+        assert_eq!(vars["data"]["contract"], full["template_vars"]);
+        assert_eq!(read("?step_type=Nope").await["success"], false);
+        assert_eq!(read("?section=Nope").await["success"], false);
+    }
+
     /// KT-1657 — the route lists a run paused on a provider quota with its
     /// wake time (it holds a concurrency slot), and routes `workflows/active-runs`
     /// before `workflows/{id}`.

@@ -4,7 +4,7 @@ Kronn blocks new delegations for a provider after a real quota-exhaustion recove
 
 A human confirmation in Config > Agents can acknowledge that one provider's quota is available again. The action records an idempotent provider-scoped audit event and watermark; it does not restart, cancel, or change any historical execution or recovery row. A later quota marker for that provider is newer than the watermark and blocks launches again. [src: file: backend/src/db/orchestration.rs:3513-3554#rearm_provider_quota]
 
-The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3319-3322#rearm_provider_quota] [src: file: backend/src/api/orchestration.rs:16119-16151#rearm_provider_quota]
+The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3340-3343#rearm_provider_quota] [src: file: backend/src/api/orchestration.rs:16119-16151#rearm_provider_quota]
 
 ## Reassigning to the same provider is a re-arm (KT-838)
 
@@ -12,7 +12,7 @@ One exhausted quota often stops several executions at once, each escalation taki
 
 ## Announced reset time
 
-When the provider's refusal names a reset time in a zone (Claude Code: `resets 4:20pm (Europe/Paris)`, or with a day: `resets Oct 3, 4pm (Europe/Paris)`), it is resolved to a UTC instant and stored on the provider's quota generation row (`provider_quota_generations.reset_at`). Settings > Agents shows it beside the re-arm button as "Rearmable at 16:20" in the browser's local time. Since KT-1564 it is also the refusal's expiry (next section). A refusal without a zone gets no instant, since the backend's own zone may not be the user's. A later refusal that names no time keeps a still-future announcement of the same outage and drops a passed one. [src: file: backend/src/api/discussions/orchestration.rs:1617-1681#announced_quota_reset] [src: file: backend/src/db/orchestration.rs:2771-2792#reset_at] [src: file: frontend/src/components/settings/AgentsSection.tsx:954-966#quotaResetTime]
+When the provider's refusal names a reset time in a zone (Claude Code: `resets 4:20pm (Europe/Paris)`, or with a day: `resets Oct 3, 4pm (Europe/Paris)`), it is resolved to a UTC instant and stored on the provider's quota generation row (`provider_quota_generations.reset_at`). Settings > Agents shows it beside the re-arm button as "Rearmable at 16:20" in the browser's local time. Since KT-1564 it is also the refusal's expiry (next section). A refusal without a zone gets no instant, since the backend's own zone may not be the user's. A later refusal that names no time keeps a still-future announcement of the same outage and drops a passed one. [src: file: backend/src/api/discussions/orchestration.rs:1617-1681#announced_quota_reset] [src: file: backend/src/db/orchestration.rs:2771-2792#reset_at] [src: file: frontend/src/components/settings/AgentsSection.tsx:984-996#quotaResetTime]
 
 ## The announced reset closes the escalation (KT-1564)
 
@@ -22,7 +22,7 @@ The sweep skips the executions of a run whose `control_state` is not `running` (
 
 ## Provider fallback is its own opt-in (KT-1564)
 
-`allowed_agents` only lists the providers a worker may be given. A switch to another provider when a dispatch is refused for quota needs the campaign's separate `quota_fallback` flag (`orchestration_runs.quota_fallback`, off by default, field `quota_fallback` of `POST /api/orchestration/campaigns`). Without it the execution escalates and waits for its own provider's reset, whatever `allowed_agents` or `default_worker` say. [src: file: backend/src/api/discussions/runtime.rs:766#try_quota_provider_fallback_among]
+`allowed_agents` only lists the providers a worker may be given. A switch to another provider when a dispatch is refused for quota needs the campaign's separate `quota_fallback` flag (`orchestration_runs.quota_fallback`, off by default, field `quota_fallback` of `POST /api/orchestration/campaigns`). Without it the execution escalates and waits for its own provider's reset, whatever `allowed_agents` or `default_worker` say. [src: file: backend/src/api/discussions/runtime.rs:773#try_quota_provider_fallback_among]
 
 With the opt-in, the fallback keeps the execution's tier and profile (a model name is provider-specific and is dropped), records the worker it leaves and the reset the refusal announced in `task_execution_quota_origin`, and the same sweep hands the execution back to that exact worker once the reset has passed (only while it is `Working`, or parked on its own quota refusal). A fallback whose refusal announced no reset is never undone by Kronn. The origin is only deleted by a human reassignment, or once the execution is back on its original provider: when the fallback provider hits its own quota and resets first, the sweep retries it and keeps the origin, so the execution still returns to the original worker (tier and model included) after that provider's reset. The return re-checks in its own transaction that the execution is still `Working` or parked on its own quota refusal: a delivery made by the fallback worker in the meantime (`AwaitingReview`) is left alone, never turned into a rejected delivery.
 

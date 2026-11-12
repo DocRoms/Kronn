@@ -144,7 +144,6 @@ pub fn build_feasibility_workflow(params: FeasibilityWorkflowParams) -> CreateWo
     CreateWorkflowRequest {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         name: workflow_name,
         project_id: params.project_id,
@@ -196,7 +195,6 @@ pub fn build_feasibility_child(
     CreateWorkflowRequest {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         name: if decomposed {
             format!("{parent_name} — implement & verify (per-task)")
@@ -282,6 +280,7 @@ fn agent_retry() -> Option<crate::models::workflows::RetryConfig> {
 
 fn blank_agent_settings() -> AgentSettings {
     AgentSettings {
+        fallback: None,
         tools: None,
         model: None,
         tier: None,
@@ -314,6 +313,8 @@ pub(crate) fn blank_step(name: &str, kind: StepType, agent: AgentType) -> Workfl
         delay_after_secs: None,
         skill_ids: vec![],
         external_effect: false,
+        shadows: Vec::new(),
+        shadow_merge: None,
         profile_ids: vec![],
         directive_ids: vec![],
         batch_quick_prompt_id: None,
@@ -358,6 +359,7 @@ pub(crate) fn blank_step(name: &str, kind: StepType, agent: AgentType) -> Workfl
         transform_data: None,
         page_publish: None,
         task_board: None,
+        decide: None,
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
@@ -435,6 +437,7 @@ fn build_triage_step(agent: AgentType, ticket_ref: &str, reviewer: AgentType) ->
     // « Deux cerveaux » (2026-06-12) — the PLAN must come from the strongest
     // reasoning tier; execution is then routed to cheap tiers per item.
     s.agent_settings = Some(AgentSettings {
+        fallback: None,
         tools: None,
         model: None,
         tier: Some(ModelTier::Reasoning),

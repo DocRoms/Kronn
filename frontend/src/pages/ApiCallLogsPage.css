@@ -240,7 +240,7 @@
   background: rgba(0, 0, 0, 0.55);
   display: flex;
   justify-content: flex-end;
-  z-index: 200;
+  z-index: var(--kr-z-drawer);
 }
 
 .api-call-logs-drawer {

@@ -350,6 +350,8 @@ fn uncertain_side_effect_type(step_type: &StepType) -> Option<&'static str> {
         StepType::Agent
         | StepType::BatchQuickPrompt
         | StepType::Gate
+        // Asks a question; changes nothing.
+        | StepType::Decide
         | StepType::JsonData
         | StepType::TransformData
         | StepType::SubWorkflow
@@ -946,8 +948,6 @@ async fn execute_run_with_notify_policy(
         }
     };
     let workflow = &pinned;
-    // KT-1449 — once pinned, a normal run starts its shadow alongside.
-    super::shadow::spawn_if_wanted(&state, workflow, run).await;
     let is_inherited_workspace = inherited_workspace.is_some();
     // Boxed: the run body's state machine is too large for a caller's stack.
     let result = Box::pin(execute_run_body(
@@ -1151,13 +1151,6 @@ async fn execute_run_body(
         let mut chosen = workflow_in_project.into_owned();
         super::step_agents::apply_from_run(&mut chosen, run);
         workflow_in_project = std::borrow::Cow::Owned(chosen);
-    }
-    // KT-1449 — a shadow run loads the versions its variant names.
-    if super::shadow::is_shadow(run) {
-        let mut variant = workflow_in_project.into_owned();
-        super::shadow::apply_versions(&state, &mut variant).await?;
-        super::shadow::isolate(&mut variant);
-        workflow_in_project = std::borrow::Cow::Owned(variant);
     }
     // KT-851 — a multi-project workflow keeps Quick Prompt/API references
     // symbolic; they resolve in this run's project.
@@ -1907,6 +1900,7 @@ async fn execute_run_body(
     // and `{{artifacts.Y}}` exactly as if the run had never paused.
     // Fresh runs have no prior step_results, so this is a no-op for them.
     replay_prior_results(&mut ctx, &run.step_results);
+    super::shadow_summary::restore(&state, &mut ctx, workflow, run).await;
     // 0.7.0 Phase 6 — seed durable state from the run row. On a fresh
     // run this is empty (no-op); on resume / restart-recovery it carries
     // counters and verdicts the agent wrote in prior iterations so the
@@ -2519,6 +2513,10 @@ async fn execute_run_body(
         // A Gate waits for a person: a trial run must never wait for one.
         let skip_in_shadow = (step.external_effect || matches!(step.step_type, StepType::Gate))
             && super::shadow::is_shadow(run);
+        // KT-1459 — a run of the retired workflow-level shadow starts no
+        // shadows. The snapshot is taken here: the step's future holds `run`.
+        let shadow_snapshot =
+            (!step.shadows.is_empty() && !super::shadow::is_shadow(run)).then(|| run.clone());
         let step_future = async {
             if skip_in_shadow {
                 return super::shadow::skipped(step);
@@ -2648,6 +2646,34 @@ async fn execute_run_body(
                             condition_action: None,
                         }
                     } else {
+                        // KT-1459 — the step's shadows start beside it on the very
+                        // input it receives: the same context, the run's state
+                        // before a Gate's feedback is consumed. None is awaited:
+                        // the main step never waits for, or fails with, one.
+                        let shadow_input =
+                            shadow_snapshot
+                                .as_ref()
+                                .map(|_| super::shadow::ShadowInput {
+                                    project_path: project_path.clone(),
+                                    project_id: workflow.project_id.clone(),
+                                    work_dir: work_dir.clone(),
+                                    tokens: tokens_config.clone(),
+                                    agents: agents_config.clone(),
+                                    ollama_context_overrides: ollama_context_overrides.clone(),
+                                    ctx: ctx.clone(),
+                                    run_state: run.state.clone(),
+                                });
+                        if let (Some(shadow_run), Some(input)) = (&shadow_snapshot, &shadow_input) {
+                            super::shadow::start_for_step(
+                                &state,
+                                workflow,
+                                shadow_run,
+                                step,
+                                in_flight_result_index,
+                                input,
+                            )
+                            .await;
+                        }
                         // Gate feedback, runtime injection (global, approach B):
                         // a human Gate "request changes" persisted its comment to
                         // run.state["last_human_feedback"] before the truncate
@@ -2661,14 +2687,22 @@ async fn execute_run_body(
                         );
                         let step = &hydrated;
                         let step_room = step_room.ok().flatten();
-                        let full_access = agents_config.full_access_for(&step.agent);
-                        let native_tools = Some(KronnToolExecutor::workflow_room_arc(
-                            state.clone(),
-                            workflow.project_id.clone(),
-                            run.id.clone(),
-                            step.name.clone(),
-                            step_room.as_ref().and_then(|room| room.member().cloned()),
-                        ));
+                        // KT-1518 — an agent whose provider just refused a turn is
+                        // on cooldown: the step starts on its fallback instead of
+                        // spending a launch on a provider known to refuse.
+                        let mut fallback_notices: Vec<String> = Vec::new();
+                        let mut current_step = step.clone();
+                        if let Some((moved, notice)) =
+                            super::agent_fallback_step::start_on_fallback(
+                                &state,
+                                agents_config,
+                                step,
+                            )
+                            .await
+                        {
+                            fallback_notices.push(notice);
+                            current_step = moved;
+                        }
                         // Live-progress wiring — without this the user gets a
                         // "step is running" pulse with no visible content until
                         // the step finishes (typical Agent step = 30-120s of
@@ -2720,27 +2754,73 @@ async fn execute_run_body(
                         // retries, and any scheduling gap between steps —
                         // and the WorkflowDetail live-mini-dashboard then
                         // disagrees with RunDetail's `LiveStepStatus`.
-                        let mut outcome = execute_step(
-                            step,
-                            &project_path,
-                            workflow.project_id.as_deref(),
-                            &work_dir,
-                            tokens_config,
-                            full_access,
-                            &ctx,
-                            Some(progress_tx),
-                            Some(&activity_tx),
-                            Some(&agents_config.model_tiers),
-                            Some(&crate::models::setup::HttpEndpoints::from_agents(
+                        let mut fallback_hops = 0;
+                        let mut outcome = loop {
+                            let full_access = agents_config.full_access_for(&current_step.agent);
+                            let native_tools = Some(KronnToolExecutor::workflow_room_arc(
+                                state.clone(),
+                                workflow.project_id.clone(),
+                                run.id.clone(),
+                                current_step.name.clone(),
+                                step_room.as_ref().and_then(|room| room.member().cloned()),
+                            ));
+                            let launched = execute_step(
+                                &current_step,
+                                &project_path,
+                                workflow.project_id.as_deref(),
+                                &work_dir,
+                                tokens_config,
+                                full_access,
+                                &ctx,
+                                Some(progress_tx.clone()),
+                                Some(&activity_tx),
+                                Some(&agents_config.model_tiers),
+                                Some(&crate::models::setup::HttpEndpoints::from_agents(
+                                    agents_config,
+                                )),
+                                Some(&ollama_context_overrides),
+                                native_tools,
+                                Some(&state.db),
+                                step_room.as_ref().map(|room| room.context()),
+                                Some(&run.id),
+                            )
+                            .await;
+                            // KT-1518 — the provider's refusal (never the work's
+                            // failure) continues on the next link of the chain.
+                            match super::agent_fallback_step::continue_after(
+                                &state,
                                 agents_config,
-                            )),
-                            Some(&ollama_context_overrides),
-                            native_tools,
-                            Some(&state.db),
-                            step_room.as_ref().map(|room| room.context()),
-                            Some(&run.id),
-                        )
-                        .await;
+                                &step.agent,
+                                &current_step,
+                                &launched,
+                            )
+                            .await
+                            {
+                                super::agent_fallback_step::Next::Rerun {
+                                    step: moved,
+                                    notice,
+                                } if fallback_hops
+                                    < crate::core::agent_fallback::MAX_CHAIN_DEPTH =>
+                                {
+                                    fallback_hops += 1;
+                                    fallback_notices.push(notice);
+                                    current_step = *moved;
+                                }
+                                super::agent_fallback_step::Next::Stopped { notice } => {
+                                    fallback_notices.push(notice);
+                                    break launched;
+                                }
+                                _ => break launched,
+                            }
+                        };
+                        // The forwarder ends when the last sender is gone.
+                        drop(progress_tx);
+                        if !fallback_notices.is_empty() {
+                            outcome.result.output = super::agent_fallback_step::with_notices(
+                                std::mem::take(&mut outcome.result.output),
+                                &fallback_notices,
+                            );
+                        }
                         if let Some(room) = step_room {
                             let stop = match outcome.result.status {
                                 RunStatus::Success => AgentRunStop::Finished,
@@ -2786,6 +2866,23 @@ async fn execute_run_body(
                                 Err(error) => fail_document_audit(&mut outcome, &error),
                                 Ok(_) => {}
                             }
+                        }
+                        // KT-1544 — a step that merges its shadows hands the
+                        // rest of the workflow the merged result: the selected
+                        // shadows are waited for (up to the merge's timeout),
+                        // then condensed with the main output. Anything that goes
+                        // wrong leaves the main output as it is.
+                        if let (Some(shadow_run), Some(input)) = (&shadow_snapshot, &shadow_input) {
+                            super::shadow_merge::merge_step(
+                                &state,
+                                workflow,
+                                shadow_run,
+                                step,
+                                in_flight_result_index,
+                                input,
+                                &mut outcome,
+                            )
+                            .await;
                         }
                         outcome
                     }
@@ -2900,6 +2997,18 @@ async fn execute_run_body(
                         run.project_id.as_deref().or(workflow.project_id.as_deref()),
                         &state,
                         &ctx,
+                    )
+                    .await
+                }
+                StepType::Decide => {
+                    let base = crate::api::ollama::resolve_base_url_pub(
+                        state.ollama_base_url_override.as_deref(),
+                    );
+                    super::decide_step::execute_decide_step(
+                        step,
+                        &ctx,
+                        &base,
+                        agents_config.model_tiers.ollama.decision.as_deref(),
                     )
                     .await
                 }
@@ -3088,6 +3197,19 @@ async fn execute_run_body(
             &mut ctx,
             Some(&agents_config.model_tiers),
         );
+        // KT-1694 — a later step reads what the step's shadows and merge did:
+        // the merge ran inside the step's future, so the summary is final.
+        if shadow_snapshot.is_some() {
+            let summary = super::shadow_summary::for_completed_step(
+                &state,
+                &run.id,
+                in_flight_result_index,
+                step,
+                &outcome.result,
+            )
+            .await;
+            ctx.set_step_shadows(&step.name, &summary.to_string());
+        }
 
         // 0.7.0 Phase 3 — persist declared artifacts to disk so they
         // survive past the run (committable when in a worktree,
@@ -3193,6 +3315,8 @@ async fn execute_run_body(
             | StepType::TransformData
             | StepType::PublishPageData
             | StepType::TaskBoard
+            // A decision model, not an agent: no agent call to count.
+            | StepType::Decide
             // A triggered run has its own budget.
             | StepType::TriggerWorkflow
             // Counts each review call itself, as it happens.
@@ -4009,6 +4133,18 @@ async fn execute_run_body(
                         &workflow.id,
                         &state,
                         &ctx,
+                    )
+                    .await
+                }
+                StepType::Decide => {
+                    let base = crate::api::ollama::resolve_base_url_pub(
+                        state.ollama_base_url_override.as_deref(),
+                    );
+                    super::decide_step::execute_decide_step(
+                        rb_step,
+                        &ctx,
+                        &base,
+                        agents_config.model_tiers.ollama.decision.as_deref(),
                     )
                     .await
                 }
@@ -4921,6 +5057,10 @@ pub(crate) fn replay_prior_results(ctx: &mut TemplateContext, results: &[StepRes
             prior.step_model.as_deref(),
         );
         ctx.set_step_provenance(&prior.step_name, prior.agent_provenance.as_deref());
+        ctx.set_step_shadows(
+            &prior.step_name,
+            &super::shadow_summary::none(&prior.step_name).to_string(),
+        );
     }
 }
 
@@ -4958,6 +5098,11 @@ pub(crate) fn record_step_completion(
         result.step_model.as_deref(),
     );
     ctx.set_step_provenance(&step.name, result.agent_provenance.as_deref());
+    // A step with shadows replaces this once its executions are read back.
+    ctx.set_step_shadows(
+        &step.name,
+        &super::shadow_summary::none(&step.name).to_string(),
+    );
 }
 
 pub(crate) fn apply_step_snapshot(
@@ -4981,6 +5126,7 @@ pub(crate) fn apply_step_snapshot(
         StepType::TriggerWorkflow => "TriggerWorkflow",
         StepType::DelegateSubtasks => "DelegateSubtasks",
         StepType::TaskBoard => "TaskBoard",
+        StepType::Decide => "Decide",
     };
     result.step_kind = Some(kind.into());
     // KT-1525 — what the step left in the run: the run view grades it.
@@ -5336,6 +5482,8 @@ mod tests {
             mcp_config_ids: vec![],
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -5380,6 +5528,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -5693,6 +5842,8 @@ mod tests {
             delay_after_secs: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -5736,6 +5887,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -5818,6 +5970,7 @@ mod tests {
         let mut step = mk_step_for_snapshot(StepType::Agent);
         step.agent = AgentType::ClaudeCode;
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: Some(ModelTier::Reasoning),
@@ -5837,6 +5990,7 @@ mod tests {
         );
         // explicit model override wins, default tier → bare model
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("o3".into()),
             tier: None,
@@ -6206,7 +6360,6 @@ mod tests {
         Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: "test".into(),
@@ -8484,6 +8637,7 @@ mod tests {
         let mut step = fake_step("reason");
         step.agent = AgentType::Codex;
         step.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("gpt-5.6-sol".into()),
             tier: None,
@@ -11127,7 +11281,7 @@ mod tests {
     mod quota_wait_subworkflow_runs;
     mod run_effect_runs;
     mod run_pin_runs;
-    mod shadow_runs;
+    mod step_shadow_runs;
     mod task_board_runs;
     mod workflow_safety_runs;
 }

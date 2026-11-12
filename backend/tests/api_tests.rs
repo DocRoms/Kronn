@@ -1740,7 +1740,6 @@ async fn live_page_workflows_returns_configured_publishers() {
             let workflow = kronn::models::Workflow {
                 refs: Default::default(),
                 retention: None,
-                shadow: None,
                 project_scope: None,
                 id: "wf-linked".into(),
                 name: "Page producer".into(),
@@ -1786,9 +1785,10 @@ async fn live_page_workflows_returns_configured_publishers() {
 }
 
 /// KT-1450 — a Page lists the Quick Prompts and skills of the workflows behind
-/// it (publishers, action targets, their sub-workflows), each lane's version.
+/// it (publishers, action targets, their sub-workflows), the version each
+/// shadow of a step loads.
 #[tokio::test]
-async fn live_page_resources_list_what_its_workflows_load_per_lane() {
+async fn live_page_resources_list_what_its_workflows_load_per_shadow() {
     let state = test_state();
     let app = build_router_with_auth(state.clone(), false);
     let (_, qp) = post_json(
@@ -1798,39 +1798,34 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
     )
     .await;
     let qp_id = qp["data"]["id"].as_str().unwrap().to_string();
-    let workflow = |id: &str,
-                    steps: Vec<kronn::models::WorkflowStep>,
-                    shadow: Option<kronn::models::WorkflowShadow>| {
-        kronn::models::Workflow {
-            retention: None,
-            shadow,
-            refs: Default::default(),
-            project_scope: None,
-            id: id.into(),
-            name: id.into(),
-            project_id: None,
-            trigger: kronn::models::WorkflowTrigger::Manual,
-            steps,
-            actions: vec![],
-            safety: kronn::models::WorkflowSafety {
-                sandbox: false,
-                max_files: None,
-                max_lines: None,
-                require_approval: false,
-            },
-            workspace_config: None,
-            concurrency_limit: None,
-            concurrency_key: None,
-            guards: None,
-            artifacts: std::collections::HashMap::new(),
-            on_failure: vec![],
-            exec_allowlist: vec![],
-            variables: vec![],
-            enabled: true,
-            pinned: false,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        }
+    let workflow = |id: &str, steps: Vec<kronn::models::WorkflowStep>| kronn::models::Workflow {
+        retention: None,
+        refs: Default::default(),
+        project_scope: None,
+        id: id.into(),
+        name: id.into(),
+        project_id: None,
+        trigger: kronn::models::WorkflowTrigger::Manual,
+        steps,
+        actions: vec![],
+        safety: kronn::models::WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        concurrency_key: None,
+        guards: None,
+        artifacts: std::collections::HashMap::new(),
+        on_failure: vec![],
+        exec_allowlist: vec![],
+        variables: vec![],
+        enabled: true,
+        pinned: false,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     };
     let publisher = workflow(
         "wf-res-publisher",
@@ -1839,6 +1834,21 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
                 name: "review".into(),
                 step_type: kronn::models::StepType::Agent,
                 skill_ids: vec!["rust".into()],
+                shadows: vec![
+                    kronn::models::StepShadow {
+                        id: "candidate".into(),
+                        label: "Candidate".into(),
+                        skills: [("rust".to_string(), "custom-candidate@2".to_string())].into(),
+                        ..Default::default()
+                    },
+                    // Off: it runs nothing, so the panel does not offer it.
+                    kronn::models::StepShadow {
+                        id: "parked".into(),
+                        enabled: false,
+                        skills: [("rust".to_string(), "custom-parked@1".to_string())].into(),
+                        ..Default::default()
+                    },
+                ],
                 ..Default::default()
             },
             kronn::models::WorkflowStep {
@@ -1857,11 +1867,6 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
                 ..Default::default()
             },
         ],
-        Some(kronn::models::WorkflowShadow {
-            enabled: true,
-            skills: [("rust".to_string(), "custom-candidate@2".to_string())].into(),
-            ..Default::default()
-        }),
     );
     let child = workflow(
         "wf-res-child",
@@ -1871,7 +1876,6 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
             quick_prompt_id: Some(qp_id.clone()),
             ..Default::default()
         }],
-        None,
     );
     let action_target = workflow(
         "wf-res-action",
@@ -1881,7 +1885,6 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
             skill_ids: vec!["security".into()],
             ..Default::default()
         }],
-        None,
     );
     state
         .db
@@ -1915,7 +1918,13 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
     };
     let rust = find("skill", "rust");
     assert_eq!(rust["uses"][0]["normal"], "rust");
-    assert_eq!(rust["uses"][0]["shadow"], "custom-candidate@2");
+    assert_eq!(rust["uses"][0]["step_name"], "review");
+    assert_eq!(rust["uses"][0]["shadows"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        rust["uses"][0]["shadows"][0]["version"],
+        "custom-candidate@2"
+    );
+    assert_eq!(rust["uses"][0]["shadows"][0]["shadow_id"], "candidate");
     let prompt = find("quick_prompt", &qp_id);
     assert_eq!(prompt["name"], "Review prompt");
     assert_eq!(prompt["latest_version"], 1);
@@ -1928,10 +1937,10 @@ async fn live_page_resources_list_what_its_workflows_load_per_lane() {
     assert_eq!(missing["error_code"], "not_found");
 }
 
-/// KT-1450 — promoting the shadow hands the tested version to the normal lane:
-/// a skill in every step that loads it, a Quick Prompt pinned on its steps.
+/// KT-1450 — promoting a step's shadow hands the tested version to the step: a
+/// skill in the step that carries the shadow, a Quick Prompt pinned on it.
 #[tokio::test]
-async fn promoting_the_shadow_hands_the_tested_version_to_the_normal_lane() {
+async fn promoting_a_step_shadow_hands_the_tested_version_to_that_step() {
     let state = test_state();
     let app = build_router_with_auth(state.clone(), false);
     let (_, qp) = post_json(
@@ -1954,36 +1963,50 @@ async fn promoting_the_shadow_hands_the_tested_version_to_the_normal_lane() {
         serde_json::json!({
             "name": "Promoted", "trigger": {"type": "Manual"},
             "steps": [
-                {"name": "a", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "A.", "skill_ids": ["rust"]},
+                {"name": "a", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "A.", "skill_ids": ["rust"],
+                 "shadows": [{"id": "sec", "skills": {"rust": "security"}}, {"id": "other", "skills": {"rust": "typescript"}}]},
                 {"name": "b", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "B.", "skill_ids": ["rust", "typescript"]},
-                {"name": "c", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "quick_prompt_id": qp_id}
-            ],
-            "shadow": {"enabled": true, "skills": {"rust": "security"}, "quick_prompt_versions": {(qp_id.clone()): 1}}
+                {"name": "c", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "quick_prompt_id": qp_id,
+                 "shadows": [{"id": "v1", "quick_prompt_versions": {(qp_id.clone()): 1}}]}
+            ]
         }),
     )
     .await;
     assert_eq!(created["success"], true, "{created}");
     let id = created["data"]["id"].as_str().unwrap().to_string();
-    let promote = |kind: &str, resource: &str| {
+    let promote = |kind: &str, resource: &str, step: &str, shadow: Option<&str>| {
         let app = app.clone();
         let path = format!("/api/workflows/{id}/shadow/promote");
-        let body = serde_json::json!({"kind": kind, "id": resource});
+        let body =
+            serde_json::json!({"kind": kind, "id": resource, "step": step, "shadow": shadow});
         async move { post_json(app, &path, body).await.1 }
     };
-    let promoted = promote("skill", "rust").await;
+    // Two shadows of the step: it names the one that tested the skill.
+    let ambiguous = promote("skill", "rust", "a", None).await;
+    assert_eq!(ambiguous["success"], false, "{ambiguous}");
+    let promoted = promote("skill", "rust", "a", Some("sec")).await;
     assert_eq!(promoted["success"], true, "{promoted}");
     assert_eq!(
         promoted["data"]["steps"][0]["skill_ids"],
         serde_json::json!(["security"])
     );
+    // Another step loading the same skill is not touched.
     assert_eq!(
         promoted["data"]["steps"][1]["skill_ids"],
-        serde_json::json!(["security", "typescript"])
+        serde_json::json!(["rust", "typescript"])
     );
-    assert!(promoted["data"]["shadow"]["skills"].is_null(), "{promoted}");
-    assert_eq!(promote("skill", "rust").await["success"], false);
+    // The shadow no longer replaces it; its sibling is left as it was.
+    let shadows = promoted["data"]["steps"][0]["shadows"].as_array().unwrap();
+    assert_eq!(shadows.len(), 2, "{promoted}");
+    assert!(shadows[0]["skills"].is_null(), "{promoted}");
+    assert_eq!(shadows[1]["skills"]["rust"], "typescript");
+    assert_eq!(
+        promote("skill", "rust", "a", Some("sec")).await["success"],
+        false
+    );
 
-    let promoted = promote("quick_prompt", &qp_id).await;
+    // One shadow on the step: no need to name it.
+    let promoted = promote("quick_prompt", &qp_id, "c", None).await;
     assert_eq!(promoted["success"], true, "{promoted}");
     assert_eq!(promoted["data"]["steps"][2]["quick_prompt_version"], 1);
     // Other workflows may load the Quick Prompt: it keeps its latest version.
@@ -1993,6 +2016,135 @@ async fn promoting_the_shadow_hands_the_tested_version_to_the_normal_lane() {
         "{history}"
     );
     assert_eq!(history["data"][0]["version_index"], 2, "{history}");
+    // A step that does not exist is refused with the reason.
+    let unknown = promote("skill", "rust", "ghost", None).await;
+    assert_eq!(unknown["success"], false, "{unknown}");
+}
+
+/// KT-1459 — a person saves several shadows on a step with their overrides; a
+/// bad one is refused with the reason, and the shadows read back from the step.
+#[tokio::test]
+async fn a_step_saves_several_shadows_and_refuses_a_bad_one() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let workflow = |shadows: Value| {
+        serde_json::json!({
+            "name": "Shadowed", "trigger": {"type": "Manual"},
+            "steps": [
+                {"name": "review", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "Review.",
+                 "shadows": shadows},
+                {"name": "post", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "Post.", "external_effect": true}
+            ]
+        })
+    };
+    let shadows = serde_json::json!([
+        {"id": "identical"},
+        {"id": "qwen-local", "label": "Qwen (Ollama)",
+         "agent": {"agent": "Ollama", "model": "qwen3:30b"},
+         "prompt": {"type": "inline", "template": "Review tersely."},
+         "budget": {"max_tokens": 200000, "max_duration_secs": 7200}},
+        {"id": "v3.10.1", "sample_every": 3, "skills": {"custom-x": ""}}
+    ]);
+    let (_, created) = post_json(app.clone(), "/api/workflows", workflow(shadows)).await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    let (_, read) = get_json(app.clone(), &format!("/api/workflows/{id}")).await;
+    let saved = read["data"]["steps"][0]["shadows"].as_array().unwrap();
+    assert_eq!(saved.len(), 3, "{read}");
+    assert_eq!(saved[0]["id"], "identical");
+    assert_eq!(saved[0]["enabled"], true);
+    assert_eq!(saved[1]["agent"]["model"], "qwen3:30b");
+    assert_eq!(saved[1]["budget"]["max_tokens"], 200000);
+    assert_eq!(saved[2]["sample_every"], 3);
+    assert_eq!(saved[2]["skills"]["custom-x"], "");
+    // They sit on the step they were saved on, nowhere else.
+    assert!(read["data"]["steps"][1]["shadows"].is_null(), "{read}");
+
+    for (bad, why) in [
+        (serde_json::json!([{"id": "a"}, {"id": "a"}]), "twice"),
+        (serde_json::json!([{"id": "Bad Id"}]), "must be 1 to 40"),
+        (
+            serde_json::json!([{"id": "x", "sample_every": 0}]),
+            "samples one run",
+        ),
+        (
+            serde_json::json!([{"id": "x", "prompt": {"type": "inline", "template": "  "}}]),
+            "inline prompt is empty",
+        ),
+        (
+            serde_json::json!([{"id": "x", "budget": {"max_tokens": 0}}]),
+            "above zero",
+        ),
+        (
+            serde_json::json!([{"id": "x", "agent": {"agent": "Custom"}}]),
+            "needs the connection",
+        ),
+    ] {
+        let (_, refused) = post_json(app.clone(), "/api/workflows", workflow(bad)).await;
+        assert_eq!(refused["success"], false, "{why}: {refused}");
+        assert!(
+            refused["error"].as_str().unwrap_or_default().contains(why),
+            "{why}: {refused}"
+        );
+    }
+
+    // A step that acts outside Kronn, or is no Agent step, cannot carry one.
+    let (_, outside) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Outside", "trigger": {"type": "Manual"},
+            "steps": [{"name": "post", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "Post.",
+                       "external_effect": true, "shadows": [{"id": "s"}]}]
+        }),
+    )
+    .await;
+    assert_eq!(outside["success"], false, "{outside}");
+    assert!(
+        outside["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside Kronn"),
+        "{outside}"
+    );
+    let (_, not_agent) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Gate", "trigger": {"type": "Manual"},
+            "steps": [{"name": "ok", "step_type": {"type": "Gate"}, "shadows": [{"id": "s"}]}]
+        }),
+    )
+    .await;
+    assert_eq!(not_agent["success"], false, "{not_agent}");
+    assert!(
+        not_agent["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Agent step"),
+        "{not_agent}"
+    );
+
+    // Saved again without shadows, the step has none: a person removes them.
+    let (_, updated) = put_json_root(
+        app.clone(),
+        &format!("/api/workflows/{id}"),
+        serde_json::json!({"steps": [
+            {"name": "review", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "Review."}
+        ]}),
+    )
+    .await;
+    assert_eq!(updated["success"], true, "{updated}");
+    let (_, read) = get_json(app.clone(), &format!("/api/workflows/{id}")).await;
+    assert!(read["data"]["steps"][0]["shadows"].is_null(), "{read}");
+
+    // The step-shadows endpoint of an unknown run answers with the reason.
+    let (_, none) = get_json(
+        app,
+        &format!("/api/workflows/{id}/runs/no-run/step-shadows"),
+    )
+    .await;
+    assert_eq!(none["success"], false, "{none}");
 }
 
 /// KT-1098 — a slug is renamed under the creation rules, and the old one keeps
@@ -2205,7 +2357,6 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
             let workflow = kronn::models::Workflow {
                 refs: Default::default(),
                 retention: None,
-                shadow: None,
                 project_scope: None,
                 id: "workflow-portable".into(),
                 name: "Portable workflow".into(),
@@ -6072,7 +6223,6 @@ async fn optional_variable_http_run(
     let workflow = kronn::models::Workflow {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         id: "optional-input-workflow".into(),
         name: "Optional input".into(),
@@ -6264,7 +6414,6 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     let workflow = kronn::models::Workflow {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         id: "goto-fallback-workflow".into(),
         name: "Goto fallback".into(),
@@ -6402,7 +6551,6 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     let workflow = kronn::models::Workflow {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         id: "labelled-workflow".into(),
         name: "Labelled".into(),
@@ -7020,7 +7168,6 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
     let workflow = kronn::models::Workflow {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         id: "required-input-workflow".into(),
         name: "Required input".into(),
@@ -7183,7 +7330,6 @@ async fn launch_agent_choice_state(workflow_id: &str) -> AppState {
     let workflow = kronn::models::Workflow {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         id: workflow_id.into(),
         name: "Launch agent choice".into(),
@@ -16862,6 +17008,9 @@ async fn enable_p2p(state: &AppState) {
 
 /// Invite code of the accepted contact `ws_send_presence` authenticates as.
 const TEST_PEER_CODE: &str = "kronn:TestPeer@10.0.0.77:3456";
+/// The pairing secret every contact made by `insert_test_contact` was paired
+/// with (KT-1650): the invite code alone authenticates nobody.
+const TEST_PEER_SECRET: &str = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12";
 
 async fn insert_test_contact(state: &AppState, code: &str, status: &str) {
     let contact = kronn::models::Contact {
@@ -16870,15 +17019,32 @@ async fn insert_test_contact(state: &AppState, code: &str, status: &str) {
         avatar_email: None,
         kronn_url: "http://10.0.0.77:3456".into(),
         invite_code: code.into(),
-        status: status.into(),
+        // Paired first (a refused contact takes no secrets), then given its status.
+        status: "pending".into(),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
+    let (id, status) = (contact.id.clone(), status.to_string());
     state
         .db
-        .with_conn(move |conn| kronn::db::contacts::insert_contact(conn, &contact))
+        .with_conn(move |conn| {
+            kronn::db::contacts::insert_contact(conn, &contact)?;
+            pair_test_contact(conn, &id, &status)
+        })
         .await
         .unwrap();
+}
+
+/// Give a contact the test secrets (both directions), keeping its status.
+fn pair_test_contact(conn: &rusqlite::Connection, id: &str, status: &str) -> anyhow::Result<()> {
+    kronn::db::contacts::set_pairing_secrets(
+        conn,
+        id,
+        &kronn::db::contacts::hash_secret(TEST_PEER_SECRET),
+        TEST_PEER_SECRET,
+    )?;
+    kronn::db::contacts::update_contact_status(conn, id, status)?;
+    Ok(())
 }
 
 /// Open the WS as a browser page with this `Origin` (and an optional query).
@@ -16912,6 +17078,7 @@ fn frontend_presence() -> WsMessage {
     WsMessage::Presence {
         from_pseudo: "local".into(),
         from_invite_code: "".into(),
+        from_secret: String::new(),
         online: true,
     }
 }
@@ -16964,6 +17131,7 @@ fn presence_of(pseudo: &str) -> WsMessage {
     WsMessage::Presence {
         from_pseudo: pseudo.into(),
         from_invite_code: "".into(),
+        from_secret: String::new(),
         online: true,
     }
 }
@@ -16980,6 +17148,7 @@ async fn ws_send_presence(state: &AppState, sender: &mut WsSink) {
     let presence = WsMessage::Presence {
         from_pseudo: "TestPeer".into(),
         from_invite_code: TEST_PEER_CODE.into(),
+        from_secret: TEST_PEER_SECRET.into(),
         online: true,
     };
     sender
@@ -17163,6 +17332,7 @@ async fn ws_refuses_peers_while_p2p_is_off() {
         &WsMessage::Presence {
             from_pseudo: "TestPeer".into(),
             from_invite_code: TEST_PEER_CODE.into(),
+            from_secret: TEST_PEER_SECRET.into(),
             online: true,
         },
     )
@@ -17325,6 +17495,7 @@ async fn ws_unknown_valid_invite_code_is_a_request_not_a_verified_peer() {
     let presence = WsMessage::Presence {
         from_pseudo: "PeerGamma".into(),
         from_invite_code: code.into(),
+        from_secret: String::new(),
         online: true,
     };
     send_ws(&mut sender, &presence).await;
@@ -17372,6 +17543,7 @@ async fn ws_chat_from_a_non_accepted_contact_is_dropped() {
         &WsMessage::Presence {
             from_pseudo: "Pending".into(),
             from_invite_code: pending.into(),
+            from_secret: TEST_PEER_SECRET.into(),
             online: true,
         },
     )
@@ -17560,6 +17732,7 @@ async fn ws_a_share_reaches_only_its_members() {
             &WsMessage::Presence {
                 from_pseudo: pseudo.into(),
                 from_invite_code: code.into(),
+                from_secret: TEST_PEER_SECRET.into(),
                 online: true,
             },
         )
@@ -17745,6 +17918,7 @@ async fn ws_rejects_invalid_invite_code_format() {
     let msg = WsMessage::Presence {
         from_pseudo: "BadPeer".into(),
         from_invite_code: "not-a-valid-code".into(),
+        from_secret: String::new(),
         online: true,
     };
     sender
@@ -17815,6 +17989,74 @@ async fn ws_rejects_non_presence_first_message() {
     );
 }
 
+/// KT-1650 — a contact's public invite code alone does not admit a peer: no
+/// secret and a wrong secret are refused, nothing reaches the bus, and the
+/// refused peer is told how to re-pair in the close frame.
+#[tokio::test]
+async fn ws_public_invite_code_alone_is_refused_and_the_peer_is_told_to_repair() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
+    insert_test_contact(&state, TEST_PEER_CODE, "accepted").await;
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+
+    for secret in [String::new(), "cd34".repeat(16)] {
+        let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+            .await
+            .expect("the upgrade succeeds: admission is decided at Presence");
+        let (mut sender, mut receiver) = StreamExt::split(ws_stream);
+        send_ws(
+            &mut sender,
+            &WsMessage::Presence {
+                from_pseudo: "TestPeer".into(),
+                from_invite_code: TEST_PEER_CODE.into(),
+                from_secret: secret.clone(),
+                online: true,
+            },
+        )
+        .await;
+        let reason = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+            while let Some(Ok(frame)) = StreamExt::next(&mut receiver).await {
+                if let tokio_tungstenite::tungstenite::Message::Close(Some(frame)) = frame {
+                    return Some(frame.reason.to_string());
+                }
+            }
+            None
+        })
+        .await
+        .expect("the refusal arrives");
+        let reason = reason.expect("a close frame with a reason");
+        assert!(reason.contains("re-pair"), "secret {secret:?}: {reason}");
+    }
+    assert!(
+        broadcast_rx.try_recv().is_err(),
+        "a refused peer's Presence never reaches the bus"
+    );
+}
+
+/// KT-1650 — the secret a peer presented is never shown to the local frontend:
+/// the Presence put on the bus has it cleared.
+#[tokio::test]
+async fn ws_peer_secret_never_reaches_the_bus() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+        .await
+        .expect("WS connect failed");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+    ws_send_presence(&state, &mut sender).await;
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+        .await
+        .expect("timeout")
+        .expect("recv error");
+    match received {
+        WsMessage::Presence { from_secret, .. } => assert!(from_secret.is_empty()),
+        other => panic!("expected Presence, got {other:?}"),
+    }
+}
+
 /// WS accepts known invite code from a contact in the DB.
 #[tokio::test]
 async fn ws_accepts_known_invite_code() {
@@ -17834,7 +18076,10 @@ async fn ws_accepts_known_invite_code() {
     let c = contact.clone();
     state
         .db
-        .with_conn(move |conn| kronn::db::contacts::insert_contact(conn, &c))
+        .with_conn(move |conn| {
+            kronn::db::contacts::insert_contact(conn, &c)?;
+            pair_test_contact(conn, &c.id, "accepted")
+        })
         .await
         .unwrap();
 
@@ -17852,6 +18097,7 @@ async fn ws_accepts_known_invite_code() {
     let msg = WsMessage::Presence {
         from_pseudo: "PeerDelta".into(),
         from_invite_code: "kronn:PeerDelta@10.0.0.50:3456".into(),
+        from_secret: TEST_PEER_SECRET.into(),
         online: true,
     };
     sender
@@ -18264,7 +18510,10 @@ async fn fetch_file_scoped_to_shared_disc_serves_bytes_and_rejects_unknown() {
     let c = contact.clone();
     state
         .db
-        .with_conn(move |conn| kronn::db::contacts::insert_contact(conn, &c))
+        .with_conn(move |conn| {
+            kronn::db::contacts::insert_contact(conn, &c)?;
+            pair_test_contact(conn, &c.id, "accepted")
+        })
         .await
         .unwrap();
 
@@ -18308,7 +18557,7 @@ async fn fetch_file_scoped_to_shared_disc_serves_bytes_and_rejects_unknown() {
     let (st, json) = post_json(
         build_router_with_auth(state.clone(), false),
         "/api/disc/fetch-file",
-        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140" }),
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140", "secret": TEST_PEER_SECRET }),
     ).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(
@@ -18334,12 +18583,40 @@ async fn fetch_file_scoped_to_shared_disc_serves_bytes_and_rejects_unknown() {
     let (st, json) = post_json(
         build_router_with_auth(state.clone(), false),
         "/api/disc/fetch-file",
-        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140" }),
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140", "secret": TEST_PEER_SECRET }),
     ).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(json["data"]["found"], true);
     assert_eq!(json["data"]["filename"], "doc.pdf");
     assert_eq!(json["data"]["data_base64"], "aGVsbG8tZG9jLWJ5dGVz");
+
+    // KT-1650 — the public invite code alone is refused, even for a contact the
+    // discussion IS shared with: no secret, an empty one, a wrong one, and the
+    // secret of the pairing in the other direction's hash (never a credential).
+    for body in [
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140" }),
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140", "secret": "" }),
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140", "secret": "kronn:PeerAlpha@10.0.0.9:3140" }),
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140", "secret": "cd34".repeat(16) }),
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140", "secret": kronn::db::contacts::hash_secret(TEST_PEER_SECRET) }),
+    ] {
+        let (st, refused) = post_json(
+            build_router_with_auth(state.clone(), false),
+            "/api/disc/fetch-file",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(refused["success"], false, "{body}");
+        assert!(refused["data"].is_null(), "no bytes for {body}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .unwrap()
+                .contains("Pairing required"),
+            "the refusal says how to re-pair: {refused}"
+        );
+    }
 
     // Unknown caller → rejected (auth is the same trust model as claim-by-token).
     let (st2, json2) = post_json(
@@ -24005,10 +24282,36 @@ mod cold_api_handlers_tests {
         assert!(json.get("success").is_some());
     }
 
-    // ── contacts::add — business contract ────────────────────────────
+    // ── contacts::add — business contract (KT-1650: pairing codes) ────
+
+    /// One instance as a peer reachable on the loopback test server.
+    async fn paired_instance(pseudo: &str) -> (AppState, std::net::SocketAddr) {
+        let state = test_state();
+        super::enable_p2p(&state).await;
+        let addr = super::start_test_server(state.clone()).await;
+        {
+            let mut cfg = state.config.write().await;
+            cfg.server.domain = Some("127.0.0.1".into());
+            cfg.server.runtime_port = Some(addr.port());
+            cfg.server.pseudo = Some(pseudo.into());
+        }
+        (state, addr)
+    }
+
+    async fn pairing_code_of(state: &AppState) -> String {
+        let (st, json) = post_json(
+            build_router_with_auth(state.clone(), false),
+            "/api/contacts/pairing-offer",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], true, "{json}");
+        json["data"].as_str().unwrap().to_string()
+    }
 
     #[tokio::test]
-    async fn contacts_add_rejects_invalid_invite_code_format() {
+    async fn contacts_add_rejects_invalid_pairing_code_format() {
         let (st, json) = post_json(
             test_app(),
             "/api/contacts",
@@ -24018,89 +24321,426 @@ mod cold_api_handlers_tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(json["success"], serde_json::Value::Bool(false));
         let err = json["error"].as_str().unwrap_or("");
-        assert!(err.contains("Invalid invite code"));
+        assert!(err.contains("Invalid pairing code"), "{err}");
     }
 
+    /// KT-1650 — a bare invite code is an address, not a pairing credential: it
+    /// is refused with the way to get a pairing code, and nothing is stored.
     #[tokio::test]
-    async fn contacts_add_unreachable_peer_persists_as_pending() {
-        // Use a deliberately unreachable port so the peer ping fails.
-        // The contact is still persisted with status=pending and a
-        // diagnosis hint in the response.
+    async fn contacts_add_refuses_a_bare_invite_code() {
+        let state = test_state();
         let (st, json) = post_json(
-            test_app(),
+            build_router_with_auth(state.clone(), false),
             "/api/contacts",
             serde_json::json!({ "invite_code": "kronn:Test@127.0.0.1:1" }),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        // May succeed (added pending) or fail — but no 500.
-        assert!(json.get("success").is_some());
-        if json["success"] == serde_json::Value::Bool(true) {
-            assert_eq!(
-                json["data"]["contact"]["status"], "pending",
-                "unreachable peer must be persisted as pending"
-            );
-            assert!(json["data"]["warning"].is_string() || json["data"]["warning"].is_null());
-        }
+        assert_eq!(json["success"], false);
+        let err = json["error"].as_str().unwrap();
+        assert!(err.contains("pairing code"), "{err}");
+        let contacts = state
+            .db
+            .with_conn(kronn::db::contacts::list_contacts)
+            .await
+            .unwrap();
+        assert!(contacts.is_empty());
     }
 
-    /// KT-1033 — adding the code of an incoming request accepts that request
-    /// (it becomes dialable) instead of failing as a duplicate.
+    /// A pairing needs the network: an unreachable peer, or P2P off, stores
+    /// nothing (there is no half-paired contact to retry).
     #[tokio::test]
-    async fn contacts_add_accepts_an_incoming_request() {
+    async fn contacts_add_unreachable_peer_or_p2p_off_persists_nothing() {
+        let code = format!(
+            "kronn:Test@127.0.0.1:1#{}",
+            kronn::db::contacts::generate_secret()
+        );
         let state = test_state();
-        let code = "kronn:Asker@127.0.0.1:1";
-        super::insert_test_contact(&state, code, "requested").await;
+        let app = build_router_with_auth(state.clone(), false);
+        let (_, off) = post_json(
+            app.clone(),
+            "/api/contacts",
+            serde_json::json!({ "invite_code": code }),
+        )
+        .await;
+        assert_eq!(off["success"], false);
+        assert!(off["error"].as_str().unwrap().contains("P2P"), "{off}");
+
+        super::enable_p2p(&state).await;
+        let (st, down) = post_json(
+            app,
+            "/api/contacts",
+            serde_json::json!({ "invite_code": code }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(down["success"], false);
+        assert!(
+            down["error"].as_str().unwrap().contains("unreachable"),
+            "{down}"
+        );
+        let contacts = state
+            .db
+            .with_conn(kronn::db::contacts::list_contacts)
+            .await
+            .unwrap();
+        assert!(contacts.is_empty(), "no half-paired contact");
+    }
+
+    /// KT-1650 — adding a code whose contact is already paired is refused: it
+    /// has to be deleted on both sides first.
+    #[tokio::test]
+    async fn contacts_add_rejects_an_already_paired_contact() {
+        let state = test_state();
+        super::enable_p2p(&state).await;
+        let code = "kronn:Dup@127.0.0.1:1";
+        super::insert_test_contact(&state, code, "accepted").await;
         let (st, json) = post_json(
             build_router_with_auth(state.clone(), false),
+            "/api/contacts",
+            serde_json::json!({ "invite_code": format!("{code}#{}", kronn::db::contacts::generate_secret()) }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], false);
+        assert!(
+            json["error"].as_str().unwrap().contains("already exists"),
+            "{json}"
+        );
+    }
+
+    /// KT-1650 — the whole pairing between two real instances, and what it
+    /// buys: random per-contact secrets, kept hashed on the verifying side, and
+    /// every peer route refusing the public invite code on its own.
+    #[tokio::test]
+    async fn contacts_pairing_exchanges_random_secrets_and_the_public_code_alone_is_refused() {
+        let (bob, bob_addr) = paired_instance("Bob").await;
+        let (alice, _alice_addr) = paired_instance("Alice").await;
+        let bob_router = || build_router_with_auth(bob.clone(), false);
+
+        let code = pairing_code_of(&bob).await;
+        let (public, secret) = code.rsplit_once('#').unwrap();
+        assert_eq!(public, format!("kronn:Bob@127.0.0.1:{}", bob_addr.port()));
+        assert_eq!(secret.len(), 64);
+        // Random, never a function of the public address: another code differs.
+        let other = pairing_code_of(&bob).await;
+        assert_ne!(other.rsplit_once('#').unwrap().1, secret);
+        assert_eq!(other.rsplit_once('#').unwrap().0, public);
+
+        // Alice pastes Bob's pairing code: the pairing completes on both sides.
+        let (st, json) = post_json(
+            build_router_with_auth(alice.clone(), false),
             "/api/contacts",
             serde_json::json!({ "invite_code": code }),
         )
         .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(json["success"], true, "{json}");
-        assert_eq!(json["data"]["contact"]["status"], "pending");
-        let contacts = state
+        assert_eq!(json["data"]["contact"]["status"], "accepted");
+        assert!(
+            !json.to_string().contains(secret),
+            "no secret comes back to the frontend"
+        );
+
+        let alice_code = format!(
+            "kronn:Alice@127.0.0.1:{}",
+            alice.config.read().await.server.listening_port()
+        );
+        let (bob_side, alice_side) = (secret.to_string(), alice_code.clone());
+        let (b_contact, b_hash, b_out) = bob
+            .db
+            .with_conn(move |conn| {
+                let c = kronn::db::contacts::find_contact_by_invite_code(conn, &alice_side)?
+                    .expect("Bob stored Alice");
+                let hash = kronn::db::contacts::inbound_secret_hash(conn, &c.id)?;
+                let out = kronn::db::contacts::outbound_secret(conn, &c.id)?;
+                Ok((c, hash, out))
+            })
+            .await
+            .unwrap();
+        assert_eq!(b_contact.status, "accepted");
+        assert_eq!(
+            b_hash.as_deref(),
+            Some(kronn::db::contacts::hash_secret(&bob_side).as_str()),
+            "Bob keeps only the hash of what Alice presents"
+        );
+        assert_ne!(b_hash.as_deref(), Some(secret), "never the clear secret");
+        let b_out = b_out.expect("Bob got a secret to present to Alice");
+        assert_eq!(b_out.len(), 64);
+        assert_ne!(b_out, secret, "one secret per direction");
+
+        let a_secrets = alice
+            .db
+            .with_conn(|conn| {
+                let c = kronn::db::contacts::list_contacts(conn)?.remove(0);
+                Ok((
+                    kronn::db::contacts::outbound_secret(conn, &c.id)?,
+                    kronn::db::contacts::inbound_secret_hash(conn, &c.id)?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(a_secrets.0.as_deref(), Some(secret));
+        assert_eq!(
+            a_secrets.1.as_deref(),
+            Some(kronn::db::contacts::hash_secret(&b_out).as_str())
+        );
+
+        // The pairing code is spent: nobody else can pair with it.
+        let (carol, _) = paired_instance("Carol").await;
+        let (_, reused) = post_json(
+            build_router_with_auth(carol.clone(), false),
+            "/api/contacts",
+            serde_json::json!({ "invite_code": code }),
+        )
+        .await;
+        assert_eq!(reused["success"], false, "{reused}");
+        assert!(
+            reused["error"].as_str().unwrap().contains("refused"),
+            "{reused}"
+        );
+
+        // Bob authenticates Alice only with the secret, on every route.
+        let auth = |presented: String| {
+            let code = alice_code.clone();
+            let bob = bob.clone();
+            async move {
+                bob.db
+                    .with_conn(move |conn| {
+                        Ok(matches!(
+                            kronn::db::contacts::authenticate_peer(conn, &code, &presented)?,
+                            kronn::db::contacts::InviteAuth::Accepted(_)
+                        ))
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(auth(secret.to_string()).await);
+        assert!(!auth(String::new()).await, "no secret");
+        assert!(
+            !auth(alice_code.clone()).await,
+            "the public code is no secret"
+        );
+        assert!(!auth("00".repeat(32)).await, "a wrong secret");
+
+        for body in [
+            serde_json::json!({ "token": "t", "from_invite_code": alice_code }),
+            serde_json::json!({ "token": "t", "from_invite_code": alice_code, "secret": alice_code }),
+            serde_json::json!({ "token": "t", "from_invite_code": alice_code, "secret": "00".repeat(32) }),
+        ] {
+            let (_, refused) =
+                post_json(bob_router(), "/api/disc/claim-by-token", body.clone()).await;
+            assert_eq!(refused["success"], false, "{body}");
+            assert!(
+                refused["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Pairing required"),
+                "{refused}"
+            );
+        }
+        let (_, ok) = post_json(
+            bob_router(),
+            "/api/disc/claim-by-token",
+            serde_json::json!({ "token": "t", "from_invite_code": alice_code, "secret": secret }),
+        )
+        .await;
+        assert_eq!(ok["success"], true, "the paired secret is accepted: {ok}");
+        assert_eq!(ok["data"]["found"], false);
+
+        // A leaked pairing code cannot take over a contact that is already paired.
+        let fresh = pairing_code_of(&bob).await;
+        let (_, hijack) = post_json(
+            bob_router(),
+            "/api/contacts/pair",
+            serde_json::json!({
+                "from_invite_code": alice_code,
+                "offer_secret": fresh.rsplit_once('#').unwrap().1,
+                "reverse_secret": kronn::db::contacts::generate_secret(),
+            }),
+        )
+        .await;
+        assert_eq!(hijack["success"], false, "{hijack}");
+        assert!(
+            auth(secret.to_string()).await,
+            "the original pairing still stands"
+        );
+        // ... nor does the public invite code stand in for a pairing code.
+        let (_, bare) = post_json(
+            bob_router(),
+            "/api/contacts/pair",
+            serde_json::json!({
+                "from_invite_code": "kronn:Mallory@127.0.0.1:9",
+                "offer_secret": public,
+                "reverse_secret": kronn::db::contacts::generate_secret(),
+            }),
+        )
+        .await;
+        assert_eq!(bare["success"], false, "{bare}");
+    }
+
+    /// KT-1650 review — a pairing code pairs a NEW contact only. An existing
+    /// unpaired contact (a `needs_repair` row, an import) is paired only by a
+    /// code issued for it, and only by the peer that row stands for.
+    #[tokio::test]
+    async fn contacts_pairing_never_rebinds_an_existing_contact_unless_the_offer_is_for_it() {
+        let (bob, _bob_addr) = paired_instance("Bob").await;
+        let (alice, _alice_addr) = paired_instance("Alice").await;
+        let bob_router = || build_router_with_auth(bob.clone(), false);
+        let alice_code = format!(
+            "kronn:Alice@127.0.0.1:{}",
+            alice.config.read().await.server.listening_port()
+        );
+        let charlie_code = "kronn:Charlie@10.0.0.3:3140";
+
+        // Bob holds two contacts from before pairing secrets.
+        for (id, code) in [
+            ("alice-row", alice_code.as_str()),
+            ("charlie-row", charlie_code),
+        ] {
+            let (pseudo, kronn_url) = kronn::db::contacts::parse_invite_code(code).unwrap();
+            let contact = kronn::models::Contact {
+                id: id.into(),
+                pseudo,
+                avatar_email: None,
+                kronn_url,
+                invite_code: code.into(),
+                status: "needs_repair".into(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            bob.db
+                .with_conn(move |conn| kronn::db::contacts::insert_contact(conn, &contact))
+                .await
+                .unwrap();
+        }
+        let untouched = |id: &'static str| {
+            let bob = bob.clone();
+            async move {
+                bob.db
+                    .with_conn(move |conn| {
+                        let c = kronn::db::contacts::get_contact(conn, id)?.unwrap();
+                        Ok((
+                            c.status,
+                            kronn::db::contacts::is_paired(conn, id)?,
+                            kronn::db::contacts::outbound_secret(conn, id)?,
+                        ))
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        let pair_body = |from: &str, code: &str| {
+            serde_json::json!({
+                "from_invite_code": from,
+                "offer_secret": code.rsplit_once('#').unwrap().1,
+                "reverse_secret": kronn::db::contacts::generate_secret(),
+            })
+        };
+
+        // An offer for nobody in particular cannot be spent by (or for) a contact
+        // that already exists: Charlie's row is not rebound to whoever holds it.
+        let open = pairing_code_of(&bob).await;
+        for from in [charlie_code, alice_code.as_str()] {
+            let (_, refused) =
+                post_json(bob_router(), "/api/contacts/pair", pair_body(from, &open)).await;
+            assert_eq!(refused["success"], false, "{refused}");
+            assert!(
+                refused["error"].as_str().unwrap().contains("Re-pair"),
+                "the refusal says how to go on: {refused}"
+            );
+        }
+        assert_eq!(
+            untouched("charlie-row").await,
+            ("needs_repair".into(), false, None)
+        );
+        assert_eq!(
+            untouched("alice-row").await,
+            ("needs_repair".into(), false, None)
+        );
+        // The same through Alice's own instance: the peer refused, nothing stored.
+        let (_, via_alice) = post_json(
+            build_router_with_auth(alice.clone(), false),
+            "/api/contacts",
+            serde_json::json!({ "invite_code": open }),
+        )
+        .await;
+        assert_eq!(via_alice["success"], false, "{via_alice}");
+        assert!(alice
             .db
             .with_conn(kronn::db::contacts::list_contacts)
             .await
-            .unwrap();
-        assert_eq!(contacts.len(), 1);
-        assert_eq!(contacts[0].status, "pending");
-    }
+            .unwrap()
+            .is_empty());
 
-    #[tokio::test]
-    async fn contacts_add_rejects_duplicate_invite_code() {
-        let state = test_state();
-        let app1 = build_router_with_auth(state.clone(), false);
-        let app2 = build_router_with_auth(state, false);
-
-        // First add (will be pending since 127.0.0.1:1 is unreachable).
-        let (st1, json1) = post_json(
-            app1,
-            "/api/contacts",
-            serde_json::json!({ "invite_code": "kronn:Dup@127.0.0.1:1" }),
+        // A code can only be issued for a contact that can be re-paired.
+        let (_, ghost) = post_json(
+            bob_router(),
+            "/api/contacts/pairing-offer",
+            serde_json::json!({ "contact_id": "no-such-contact" }),
         )
         .await;
-        assert_eq!(st1, StatusCode::OK);
-        if json1["success"] != serde_json::Value::Bool(true) {
-            // Insertion failed for another reason (e.g. peer ping took
-            // too long) — skip the duplicate-check assertion since the
-            // first contact wasn't persisted.
-            return;
+        assert_eq!(ghost["success"], false, "{ghost}");
+
+        // A code issued for Alice's row: nobody else can use it, not even for
+        // Charlie's row or a brand-new contact ...
+        let (_, issued) = post_json(
+            bob_router(),
+            "/api/contacts/pairing-offer",
+            serde_json::json!({ "contact_id": "alice-row" }),
+        )
+        .await;
+        assert_eq!(issued["success"], true, "{issued}");
+        let for_alice = issued["data"].as_str().unwrap().to_string();
+        for from in [charlie_code, "kronn:Mallory@10.0.0.9:3140"] {
+            let (_, refused) = post_json(
+                bob_router(),
+                "/api/contacts/pair",
+                pair_body(from, &for_alice),
+            )
+            .await;
+            assert_eq!(refused["success"], false, "{refused}");
         }
+        assert_eq!(
+            untouched("charlie-row").await,
+            ("needs_repair".into(), false, None)
+        );
+        assert_eq!(
+            untouched("alice-row").await,
+            ("needs_repair".into(), false, None)
+        );
 
-        // Same code again must be rejected.
-        let (st2, json2) = post_json(
-            app2,
+        // ... while Alice re-pairs her own row in place.
+        let (_, repaired) = post_json(
+            build_router_with_auth(alice.clone(), false),
             "/api/contacts",
-            serde_json::json!({ "invite_code": "kronn:Dup@127.0.0.1:1" }),
+            serde_json::json!({ "invite_code": for_alice }),
         )
         .await;
-        assert_eq!(st2, StatusCode::OK);
-        assert_eq!(json2["success"], serde_json::Value::Bool(false));
-        let err = json2["error"].as_str().unwrap_or("");
-        assert!(err.contains("already exists"));
+        assert_eq!(repaired["success"], true, "{repaired}");
+        let (status, paired, out) = untouched("alice-row").await;
+        assert_eq!((status.as_str(), paired), ("accepted", true));
+        assert!(out.is_some());
+        assert_eq!(
+            untouched("charlie-row").await,
+            ("needs_repair".into(), false, None)
+        );
+        let count = bob
+            .db
+            .with_conn(|conn| Ok(kronn::db::contacts::list_contacts(conn)?.len()))
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "Alice's row was reused, no duplicate");
+
+        // A paired contact cannot get a code any more.
+        let (_, paired_offer) = post_json(
+            bob_router(),
+            "/api/contacts/pairing-offer",
+            serde_json::json!({ "contact_id": "alice-row" }),
+        )
+        .await;
+        assert_eq!(paired_offer["success"], false, "{paired_offer}");
     }
 
     // ── disc_introspection happy-path with seeded disc ───────────────
@@ -26614,7 +27254,6 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let wf = kronn::models::Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -26677,7 +27316,6 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let wf = kronn::models::Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -27218,7 +27856,6 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let wf = kronn::models::Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -30581,7 +31218,6 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
             let workflow = kronn::models::Workflow {
                 refs: Default::default(),
                 retention: None,
-                shadow: None,
                 project_scope: None,
                 id: "workflow-unsafe".into(),
                 name: "Unsafe".into(),
@@ -30805,7 +31441,6 @@ async fn inline_quick_exec_sources_are_flagged_and_fixable() {
             let workflow = kronn::models::Workflow {
                 refs: Default::default(),
                 retention: None,
-                shadow: None,
                 project_scope: None,
                 id: "workflow-collect-unsafe".into(),
                 name: "Collect".into(),
@@ -31437,7 +32072,6 @@ async fn the_unchanged_line_exception_keys_on_the_exact_stored_line() {
             let workflow = kronn::models::Workflow {
                 refs: Default::default(),
                 retention: None,
-                shadow: None,
                 project_scope: None,
                 id: "workflow-identity".into(),
                 name: "Identity".into(),
@@ -32178,5 +32812,99 @@ async fn workflow_refs_are_validated_rendered_exported_and_remapped() {
     assert!(
         error.contains("`board`") && error.contains("page-refs"),
         "{error}"
+    );
+}
+
+/// KT-1544 — a person saves the optional merge of a step with its shadows (one,
+/// several or all of them); a merge that names nothing real is refused with the
+/// reason, and what was saved reads back with the step.
+#[tokio::test]
+async fn a_step_saves_the_merge_of_its_shadows_and_refuses_a_bad_one() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let workflow = |merge: Value| {
+        serde_json::json!({
+            "name": "Merged", "trigger": {"type": "Manual"},
+            "steps": [
+                {"name": "review", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "Review.",
+                 "shadows": [{"id": "qwen-local"}, {"id": "other-model"}],
+                 "shadow_merge": merge}
+            ]
+        })
+    };
+    // Off by default: a step with shadows and no merge only compares them.
+    let (_, plain) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Plain", "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "Review.",
+                       "shadows": [{"id": "a"}]}]
+        }),
+    )
+    .await;
+    assert_eq!(plain["success"], true, "{plain}");
+    assert!(
+        plain["data"]["steps"][0]["shadow_merge"].is_null(),
+        "{plain}"
+    );
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        workflow(serde_json::json!({
+            "shadows": ["qwen-local"], "timeout_secs": 900,
+            "agent": {"agent": "ClaudeCode", "model": "opus"}
+        })),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    let (_, read) = get_json(app.clone(), &format!("/api/workflows/{id}")).await;
+    let merge = &read["data"]["steps"][0]["shadow_merge"];
+    assert_eq!(merge["enabled"], true, "{read}");
+    assert_eq!(merge["shadows"], serde_json::json!(["qwen-local"]));
+    assert_eq!(merge["timeout_secs"], 900);
+    assert_eq!(merge["agent"]["model"], "opus");
+
+    for (bad, why) in [
+        (serde_json::json!({"shadows": ["ghost"]}), "does not carry"),
+        (
+            serde_json::json!({"shadows": ["qwen-local", "qwen-local"]}),
+            "twice",
+        ),
+        (serde_json::json!({"timeout_secs": 0}), "seconds"),
+        (serde_json::json!({"timeout_secs": 100000}), "seconds"),
+        (
+            serde_json::json!({"agent": {"agent": "Custom"}}),
+            "needs the connection",
+        ),
+    ] {
+        let (_, refused) = post_json(app.clone(), "/api/workflows", workflow(bad)).await;
+        assert_eq!(refused["success"], false, "{why}: {refused}");
+        assert!(
+            refused["error"].as_str().unwrap_or_default().contains(why),
+            "{why}: {refused}"
+        );
+    }
+
+    // A merge needs shadows to merge with.
+    let (_, alone) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Alone", "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Agent"}, "agent": "ClaudeCode", "prompt_template": "Review.",
+                       "shadow_merge": {}}]
+        }),
+    )
+    .await;
+    assert_eq!(alone["success"], false, "{alone}");
+    assert!(
+        alone["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at least one shadow"),
+        "{alone}"
     );
 }

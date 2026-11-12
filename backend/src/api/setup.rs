@@ -289,6 +289,11 @@ pub async fn save_api_key(
             *live = config;
             // A new or changed key may lift a provider quota (KT-1657).
             crate::workflows::quota_wait::request_recheck();
+            // KT-1518 — and no agent stays on cooldown for the old account.
+            let _ = state
+                .db
+                .with_conn(crate::core::agent_fallback::clear_all_cooldowns)
+                .await;
             Json(ApiResponse::ok(ApiKeyDisplay {
                 id: key.id,
                 name: key.name,
@@ -367,6 +372,10 @@ pub async fn activate_api_key(
                 *live = config;
                 // Another account may not be out of quota (KT-1657).
                 crate::workflows::quota_wait::request_recheck();
+                let _ = state
+                    .db
+                    .with_conn(crate::core::agent_fallback::clear_all_cooldowns)
+                    .await;
                 Json(ApiResponse::ok(()))
             }
             Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
@@ -2888,7 +2897,13 @@ async fn do_import_db(
                 }
             }
             for c in &contacts {
-                if let Err(e) = crate::db::contacts::insert_contact(&tx, c) {
+                // An export never carries pairing secrets (KT-1650): an imported
+                // contact has none, so it pairs again before it is dialled.
+                let mut c = c.clone();
+                if matches!(c.status.as_str(), "accepted" | "pending") {
+                    c.status = crate::db::contacts::STATUS_NEEDS_REPAIR.into();
+                }
+                if let Err(e) = crate::db::contacts::insert_contact(&tx, &c) {
                     tracing::warn!("Import contact error: {e}");
                 }
             }
@@ -6835,3 +6850,67 @@ mod workers_config_tests;
 #[cfg(test)]
 #[path = "setup_context_files_tests.rs"]
 mod context_files_tests;
+
+/// GET /api/config/agent-fallback
+/// Every agent's fallback chain (KT-1518) with the cooldowns still running.
+pub async fn get_agent_fallback(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
+    let agents = state.config.read().await.agents.clone();
+    let cooldowns = state
+        .db
+        .with_read_conn(|conn| crate::core::agent_fallback::list_cooldowns(conn, Utc::now()))
+        .await
+        .unwrap_or_default();
+    Json(ApiResponse::ok(crate::core::agent_fallback::overview(
+        &agents, cooldowns,
+    )))
+}
+
+/// POST /api/config/agent-fallback
+/// Sets the whole chain of agents that take over, in order, when this one is
+/// unavailable on the provider side (an empty chain cuts it). A loop, a chain
+/// past the depth limit, a fallback with more access than the agent it replaces,
+/// or an agent that cannot take part is refused with the reason; nothing is
+/// stored then. Applies to the next turn, no restart.
+pub async fn set_agent_fallback(
+    State(state): State<AppState>,
+    Json(req): Json<SetAgentFallbackRequest>,
+) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
+    let mut config = state.config.write().await;
+    let chain: Vec<crate::models::AgentFallback> = req
+        .fallback_chain
+        .into_iter()
+        .map(|mut link| {
+            link.model = link
+                .model
+                .map(|model| model.trim().to_string())
+                .filter(|model| !model.is_empty());
+            link
+        })
+        .collect();
+    if let Err(error) =
+        crate::core::agent_fallback::validate_chain(&config.agents, Some(&req.agent), &chain)
+    {
+        return Json(ApiResponse::err(error.to_string()));
+    }
+    let Some(agent) = config.agents.agent_config_mut(&req.agent) else {
+        return Json(ApiResponse::err(
+            "This agent cannot have a fallback: a named connection is chosen in the workflow",
+        ));
+    };
+    agent.fallback_chain = chain;
+    if let Err(error) = config::save(&config).await {
+        return Json(ApiResponse::err(format!("Failed to save: {error}")));
+    }
+    let agents = config.agents.clone();
+    drop(config);
+    let cooldowns = state
+        .db
+        .with_read_conn(|conn| crate::core::agent_fallback::list_cooldowns(conn, Utc::now()))
+        .await
+        .unwrap_or_default();
+    Json(ApiResponse::ok(crate::core::agent_fallback::overview(
+        &agents, cooldowns,
+    )))
+}

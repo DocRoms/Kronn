@@ -711,6 +711,15 @@ pub(crate) fn validate_imported_sub_workflow_graph(
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
 pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+    // KT-1518 — a step's own fallback chain: no loop, not too long.
+    if let Some(chain) = s
+        .agent_settings
+        .as_ref()
+        .and_then(|settings| settings.fallback.as_deref())
+    {
+        crate::core::agent_fallback::check_shape(Some(&s.agent), chain)
+            .map_err(|e| format!("Step « {} »: {e}", s.name))?;
+    }
     crate::core::skill_versions::validate_pins(&s.skill_ids)
         .map_err(|e| format!("Step « {} »: {e}", s.name))?;
     match (s.quick_prompt_version, s.quick_prompt_id.as_deref()) {
@@ -1009,6 +1018,17 @@ pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), Stri
                         ));
                     }
                 }
+            }
+        }
+        StepType::Decide => {
+            let Some(config) = s.decide.as_ref() else {
+                return Err(format!(
+                    "Step Decide « {} » : `decide` est obligatoire.",
+                    s.name
+                ));
+            };
+            if let Some(problem) = crate::workflows::decide_step::config_problem(config) {
+                return Err(format!("Step Decide « {} » : {problem}.", s.name));
             }
         }
         StepType::TaskBoard => {
@@ -1834,13 +1854,23 @@ async fn validate_saved_quick_exec_refs(
     Ok(())
 }
 
-/// Shared by the MCP bridge and native HTTP agents; kept out of every-turn
-/// declarations so the canonical authoring contract is paid only on demand.
+/// The shared contracts a caller may fetch whole through `workflow_step_schema`
+/// (`section`); the default contract only summarises them.
+pub(crate) const STEP_SCHEMA_SECTIONS: [&str; 3] = [
+    "template_vars",
+    "data_pipeline_contract",
+    "authoring_doctrine",
+];
+
+/// The complete authoring contract: every per-type note, runtime contract and
+/// example, plus the shared sections. Too big to hand out by default (KT-1681:
+/// it sat 18 tokens under the 32768 MLX window), so it is the source both the
+/// lean default and the on-demand reads (`step_schema_view`) are cut from.
 ///
 /// The closed set of step types and the authoring doctrine come from the code,
 /// not from the JSON file: the list cannot lag the enum, and the doctrine is
 /// the very text the `workflow-architect` guide carries (KT-1216).
-pub(crate) fn canonical_step_schema() -> serde_json::Value {
+pub(crate) fn full_step_schema() -> serde_json::Value {
     let mut schema: serde_json::Value =
         serde_json::from_str(include_str!("workflow_step_schema.json"))
             .expect("versioned workflow step schema is valid JSON");
@@ -1850,9 +1880,121 @@ pub(crate) fn canonical_step_schema() -> serde_json::Value {
     schema
 }
 
+/// A field entry's name: `"api_method (default GET)"` is `api_method`.
+fn field_name(entry: &serde_json::Value) -> serde_json::Value {
+    let text = entry.as_str().unwrap_or_default();
+    serde_json::json!(text.split(" (").next().unwrap_or(text))
+}
+
+/// What `workflow_step_schema` serves with no argument, derived from the full
+/// contract so the two cannot drift: per step type the required fields, the
+/// names of the optional ones and `more`, the keys only a `step_type` read
+/// carries (notes, runtime contracts, example); the closed set, the shape rules,
+/// the triggers, the pipeline order and the doctrine whole (KT-1216); the
+/// template variables as their syntax and the namespace names.
+///
+/// This is what the 32768 clamp test measures: the contract an agent always
+/// pays for. The detail is paid only for the types it composes.
+pub(crate) fn canonical_step_schema() -> serde_json::Value {
+    let full = full_step_schema();
+    let mut fields = serde_json::Map::new();
+    for (name, contract) in full["fields_by_type"].as_object().into_iter().flatten() {
+        let optional: Vec<serde_json::Value> = contract["optional"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(field_name)
+            .collect();
+        let more: Vec<&str> = contract
+            .as_object()
+            .into_iter()
+            .flat_map(|object| object.keys())
+            .map(String::as_str)
+            .filter(|key| !["required", "optional"].contains(key))
+            .collect();
+        fields.insert(
+            name.clone(),
+            serde_json::json!({
+                "required": contract["required"],
+                "optional": optional,
+                "more": more,
+            }),
+        );
+    }
+    let namespaces: Vec<&str> = full["template_vars"]["namespaces"]
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.keys())
+        .map(String::as_str)
+        .collect();
+    serde_json::json!({
+        "shape": full["shape"],
+        "read_first": full["read_first"],
+        "how_to_read": "Per type: `required` fields and the NAMES of the `optional` ones. Before composing a step of a type, call workflow_step_schema({step_type}): it returns that type's whole contract (the `more` keys: notes, runtime contracts, the working `example`, what each optional field takes). Shared contracts: workflow_step_schema({section}) with template_vars (every template namespace and the time grammar), data_pipeline_contract or authoring_doctrine.",
+        "step_types_closed_set": full["step_types_closed_set"],
+        "fields_by_type": fields,
+        "discovery_rule": full["discovery_rule"],
+        "triggers": full["triggers"],
+        "template_vars": {
+            "syntax": full["template_vars"]["syntax"],
+            "namespaces": namespaces,
+            "full": "workflow_step_schema({section: \"template_vars\"})",
+        },
+        "data_pipeline_contract": full["data_pipeline_contract"],
+        "authoring_doctrine": full["authoring_doctrine"],
+    })
+}
+
+/// One read of the authoring contract: the lean default, one step type's whole
+/// contract (`step_type`) or one shared section whole (`section`). The HTTP
+/// route, the native tool and the MCP bridge all serve it.
+pub(crate) fn step_schema_view(
+    step_type: Option<&str>,
+    section: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    if let Some(kind) = step_type {
+        let full = full_step_schema();
+        let contract = full["fields_by_type"].get(kind).ok_or_else(|| {
+            format!(
+                "Unknown step_type {kind}; call workflow_step_schema with no arguments for the closed set"
+            )
+        })?;
+        return Ok(serde_json::json!({
+            "shape": full["shape"],
+            "step_type": kind,
+            "contract": contract,
+        }));
+    }
+    if let Some(section) = section {
+        if !STEP_SCHEMA_SECTIONS.contains(&section) {
+            return Err(
+                "section must be template_vars, data_pipeline_contract or authoring_doctrine"
+                    .into(),
+            );
+        }
+        return Ok(serde_json::json!({
+            "section": section,
+            "contract": full_step_schema()[section],
+        }));
+    }
+    Ok(canonical_step_schema())
+}
+
+/// Optional narrowing of GET /api/workflows/step-schema.
+#[derive(Debug, Default, Deserialize)]
+pub struct StepSchemaQuery {
+    pub step_type: Option<String>,
+    pub section: Option<String>,
+}
+
 /// GET /api/workflows/step-schema
-pub async fn step_schema() -> Json<ApiResponse<serde_json::Value>> {
-    Json(ApiResponse::ok(canonical_step_schema()))
+pub async fn step_schema(
+    Query(query): Query<StepSchemaQuery>,
+) -> Json<ApiResponse<serde_json::Value>> {
+    match step_schema_view(query.step_type.as_deref(), query.section.as_deref()) {
+        Ok(view) => Json(ApiResponse::ok(view)),
+        Err(error) => Json(ApiResponse::err(error)),
+    }
 }
 
 /// GET /api/workflows
@@ -2726,8 +2868,8 @@ fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
 
 /// Why an agent cannot change a workflow's retention (KT-1100): the purge
 /// applies it at once, enabled or not, so only a human may set what it deletes.
-/// POST /api/workflows/:id/shadow/promote — the normal lane takes over the
-/// version the shadow tested (KT-1450). Human-only: no bridge route.
+/// POST /api/workflows/:id/shadow/promote — the step takes over the version its
+/// shadow tested (KT-1450). Human-only: no bridge route.
 pub async fn promote_shadow(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2749,22 +2891,44 @@ pub async fn promote_shadow(
     }
 }
 
-pub(crate) const AGENT_SHADOW_REFUSAL: &str = "A shadow variant starts extra runs: an \
-     agent cannot set or change it. Ask the user to set it in Kronn (workflow editor, \
-     \"Shadow runs\").";
+pub(crate) const AGENT_SHADOW_REFUSAL: &str = "A step shadow runs the step once more beside \
+     the main execution, and its merge condenses them into the step's output: an agent \
+     cannot set or change either. Ask the user to set it in Kronn \
+     (workflow editor, the step's \"Shadows\").";
 
-/// A shadow variant names skills that exist in that version and QP versions
-/// from 1 (KT-1449).
-fn validate_shadow(shadow: &WorkflowShadow) -> Result<(), String> {
-    let replacements: Vec<String> = shadow.skills.values().cloned().collect();
-    crate::core::skill_versions::validate_pins(&replacements)
-        .map_err(|e| format!("Shadow: {e}"))?;
-    if let Some((id, _)) = shadow.quick_prompt_versions.iter().find(|(_, n)| **n == 0) {
-        return Err(format!(
-            "Shadow: Quick Prompt {id} has no version 0, versions start at 1"
-        ));
+/// The shadows of steps a person saves name skills that exist in that version,
+/// QP versions from 1, and only sit on Agent steps that stay inside Kronn
+/// (KT-1449, KT-1459).
+fn validate_shadows(steps: &[WorkflowStep]) -> Result<(), String> {
+    crate::workflows::shadow::validate(steps)
+}
+
+/// Whether any of the steps carries a shadow.
+fn carries_shadows(steps: &[WorkflowStep]) -> bool {
+    steps
+        .iter()
+        .any(|step| !step.shadows.is_empty() || step.shadow_merge.is_some())
+}
+
+/// GET /api/workflows/:id/runs/:run_id/step-shadows — per step that ran shadows,
+/// the main execution beside what each shadow was and produced (KT-1459).
+pub async fn run_step_shadows(
+    State(state): State<AppState>,
+    Path((id, run_id)): Path<(String, String)>,
+) -> Json<ApiResponse<Vec<crate::workflows::shadow::StepShadowComparison>>> {
+    let result = state
+        .db
+        .with_read_conn(move |conn| {
+            let run = crate::db::workflows::get_run(conn, &run_id)?
+                .filter(|run| run.workflow_id == id)
+                .ok_or_else(|| anyhow::anyhow!("Run not found"))?;
+            crate::workflows::shadow::comparisons(conn, &run)
+        })
+        .await;
+    match result {
+        Ok(steps) => Json(ApiResponse::ok(steps)),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
     }
-    Ok(())
 }
 
 pub(crate) const AGENT_RETENTION_REFUSAL: &str = "Run retention is a human decision: an \
@@ -2891,11 +3055,13 @@ async fn create_written(
             return Json(ApiResponse::err(e));
         }
     }
-    if let Some(ref shadow) = req.shadow {
+    if carries_shadows(&req.steps) || carries_shadows(&req.on_failure) {
         if writer == WorkflowWriter::Agent {
             return Json(ApiResponse::err(AGENT_SHADOW_REFUSAL));
         }
-        if let Err(e) = validate_shadow(shadow) {
+        if let Err(e) =
+            validate_shadows(&req.steps).and_then(|()| validate_shadows(&req.on_failure))
+        {
             return Json(ApiResponse::err(e));
         }
     }
@@ -3002,7 +3168,6 @@ async fn create_written(
     }
     let wf = Workflow {
         retention: req.retention,
-        shadow: req.shadow,
         pinned: false,
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -3459,13 +3624,23 @@ async fn update_written(
     {
         return Json(ApiResponse::err(AGENT_RETENTION_REFUSAL));
     }
-    if writer == WorkflowWriter::Agent
-        && req
-            .shadow
-            .as_ref()
-            .is_some_and(|shadow| *shadow != existing.shadow)
-    {
-        return Json(ApiResponse::err(AGENT_SHADOW_REFUSAL));
+    // Shadows are human-only: an agent that sends the steps back with the
+    // shadows it read keeps them, one that sets or changes them is refused.
+    if writer == WorkflowWriter::Agent {
+        let changed = |steps: &Option<Vec<WorkflowStep>>, stored: &[WorkflowStep]| {
+            steps.as_ref().is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    (!step.shadows.is_empty() || step.shadow_merge.is_some()) && {
+                        let mut kept = vec![step.clone()];
+                        crate::workflows::shadow::keep_stored_shadows(&mut kept, stored);
+                        kept[0].shadows != step.shadows || kept[0].shadow_merge != step.shadow_merge
+                    }
+                })
+            })
+        };
+        if changed(&req.steps, &existing.steps) || changed(&req.on_failure, &existing.on_failure) {
+            return Json(ApiResponse::err(AGENT_SHADOW_REFUSAL));
+        }
     }
     // An agent's change to what an enabled workflow executes would run under
     // the human's earlier activation: compared below, it disables the workflow.
@@ -3480,9 +3655,11 @@ async fn update_written(
     if writer == WorkflowWriter::Agent {
         if let Some(steps) = req.steps.as_mut() {
             keep_human_approvals(steps, &existing.steps);
+            crate::workflows::shadow::keep_stored_shadows(steps, &existing.steps);
         }
         if let Some(on_failure) = req.on_failure.as_mut() {
             keep_human_approvals(on_failure, &existing.on_failure);
+            crate::workflows::shadow::keep_stored_shadows(on_failure, &existing.on_failure);
         }
     }
     if let Some(steps) = req.steps.as_mut() {
@@ -3577,8 +3754,13 @@ async fn update_written(
             return Json(ApiResponse::err(e));
         }
     }
-    if let Some(Some(ref shadow)) = req.shadow {
-        if let Err(e) = validate_shadow(shadow) {
+    if let Some(steps) = req.steps.as_deref() {
+        if let Err(e) = validate_shadows(steps) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+    if let Some(on_failure) = req.on_failure.as_deref() {
+        if let Err(e) = validate_shadows(on_failure) {
             return Json(ApiResponse::err(e));
         }
     }
@@ -3674,7 +3856,6 @@ async fn update_written(
     let mut updated = Workflow {
         refs: req.refs.unwrap_or(existing.refs),
         retention: req.retention.unwrap_or(existing.retention),
-        shadow: req.shadow.unwrap_or(existing.shadow),
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
         project_id: req.project_id.unwrap_or(existing.project_id),
@@ -3839,7 +4020,14 @@ async fn update_written(
                 {
                     updated.enabled = stored.enabled;
                     updated.retention = stored.retention;
-                    updated.shadow = stored.shadow;
+                    crate::workflows::shadow::keep_stored_shadows(
+                        &mut updated.steps,
+                        &stored.steps,
+                    );
+                    crate::workflows::shadow::keep_stored_shadows(
+                        &mut updated.on_failure,
+                        &stored.on_failure,
+                    );
                 }
             }
             if let (true, Some((by, summary))) = (was_enabled, auto_disable_summary) {
@@ -4010,12 +4198,17 @@ pub(crate) fn workflow_dependency_ids<'a>(
                 dependencies.quick_apis.insert(id.to_string());
             }
         }
-        if let Some(shadow) = &workflow.shadow {
-            dependencies.skills.extend(shadow.skills.keys().cloned());
-            dependencies.skills.extend(shadow.skills.values().cloned());
-        }
         for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
             dependencies.skills.extend(step.skill_ids.iter().cloned());
+            for shadow in &step.shadows {
+                dependencies.skills.extend(shadow.skills.keys().cloned());
+                dependencies
+                    .skills
+                    .extend(shadow.skills.values().filter(|id| !id.is_empty()).cloned());
+                if let Some(crate::models::ShadowPrompt::QuickPrompt { id, .. }) = &shadow.prompt {
+                    dependencies.quick_prompts.insert(id.clone());
+                }
+            }
             if let Some(id) = step
                 .quick_prompt_id
                 .as_deref()
@@ -5129,6 +5322,12 @@ pub(crate) async fn create_manual_run_admitted(
         .ok_or_else(|| "Workflow not found".to_string())?;
     if !wf.enabled {
         return Err("Workflow is disabled — enable it before triggering".into());
+    }
+    if let Some(refusal) = crate::workflows::decide_step::launch_refusal(
+        &wf,
+        &state.config.read().await.agents.model_tiers,
+    ) {
+        return Err(refusal);
     }
     let as_read = wf.clone();
     crate::workflows::template::refuse_reserved_names(
@@ -7538,6 +7737,8 @@ pub async fn suggestions(
                     mcp_config_ids: vec![],
                     skill_ids: vec![],
                     external_effect: false,
+                    shadows: Vec::new(),
+                    shadow_merge: None,
                     profile_ids: vec![],
                     directive_ids: vec![],
                     batch_quick_prompt_id: None,
@@ -7582,6 +7783,7 @@ pub async fn suggestions(
                     transform_data: None,
                     page_publish: None,
                     task_board: None,
+                    decide: None,
                     sub_workflow_id: None,
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
@@ -8517,6 +8719,8 @@ mod tests {
             mcp_config_ids: vec![],
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -8561,6 +8765,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -9882,7 +10087,6 @@ mod tests {
         Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: "src-id-original".into(),
@@ -12030,6 +12234,7 @@ mod tests {
         step.prompt_template = "Write the verdict".into();
         step.agent = AgentType::ClaudeCode;
         let tools = |cli: &[&str], kronn: &[&str]| crate::models::AgentSettings {
+            fallback: None,
             model: None,
             tier: None,
             connection_id: None,

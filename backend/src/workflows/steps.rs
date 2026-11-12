@@ -1141,6 +1141,7 @@ fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
     let mut escalated = step.clone();
     escalated.agent = crate::models::AgentType::ClaudeCode;
     escalated.agent_settings = Some(crate::models::AgentSettings {
+        fallback: None,
         tools: step.agent_settings.as_ref().and_then(|s| s.tools.clone()),
         model: None,
         tier: Some(crate::models::ModelTier::Reasoning),
@@ -1904,6 +1905,7 @@ async fn run_multi_agent_debate(
         s.on_result = vec![];
         s.output_format = crate::models::StepOutputFormat::FreeText;
         s.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: cfg.reviewer_tier,
@@ -2372,6 +2374,7 @@ mod tests {
         let mut local = make_step("summarize {{x}}");
         local.agent = crate::models::AgentType::Ollama;
         local.agent_settings = Some(crate::models::AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("qwen3:8b".into()),
             tier: Some(crate::models::ModelTier::Default),
@@ -2431,6 +2434,7 @@ mod tests {
         let step = WorkflowStep {
             agent: AgentType::ClaudeCode,
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 model: Some("manual-model".into()),
                 tier: Some(ModelTier::Default),
                 reasoning_effort: Some("High".into()),
@@ -2512,6 +2516,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: Some(ModelTier::Default),
@@ -2575,6 +2580,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: Some(ModelTier::Default),
@@ -2600,6 +2606,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: None,
             tier: Some(ModelTier::Default),
@@ -2616,6 +2623,7 @@ mod tests {
     fn explicit_workflow_model_remains_the_dispatch_and_preflight_model() {
         let mut step = make_step("anything");
         step.agent_settings = Some(AgentSettings {
+            fallback: None,
             tools: None,
             model: Some("expert-model".into()),
             tier: Some(ModelTier::Default),
@@ -2749,6 +2757,8 @@ mod tests {
             delay_after_secs: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             profile_ids: vec![],
             directive_ids: vec![],
             batch_quick_prompt_id: None,
@@ -2793,6 +2803,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
@@ -3453,6 +3464,7 @@ mod http_native_tool_step_tests {
             agent: AgentType::Custom,
             prompt_template: "Answer from the selected connection".into(),
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 tools: None,
                 model: model.map(str::to_string),
                 tier: Some(ModelTier::Default),
@@ -3762,6 +3774,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::ClaudeCode,
             prompt_template: "Use the selected model".into(),
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 tools: None,
                 model: Some("retired-alias".into()),
                 tier: Some(ModelTier::Reasoning),
@@ -3936,6 +3949,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::LiteLlm,
             prompt_template: "Which task is active?".into(),
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 tools: None,
                 model: Some("test-model".into()),
                 tier: None,
@@ -4032,6 +4046,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::Ollama,
             prompt_template: "Which task is active?".into(),
             agent_settings: Some(AgentSettings {
+                fallback: None,
                 tools: None,
                 model: Some("test-model".into()),
                 tier: None,

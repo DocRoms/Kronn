@@ -735,3 +735,51 @@ fn nothing_is_published_before_the_campaign_delivered() {
     );
     assert!(!log.contains("pr create"), "{log}");
 }
+
+#[test]
+#[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
+fn a_pull_request_changing_the_ui_is_opened_with_the_required_screenshots_section() {
+    if !python_available() {
+        eprintln!("python3 missing: dry run skipped");
+        return;
+    }
+    let dry = dry_run_setup();
+    std::fs::create_dir_all(dry.checkout.join("frontend/src")).unwrap();
+    std::fs::write(dry.checkout.join("frontend/src/App.css"), "a{}\n").unwrap();
+    git(&dry.checkout, &["add", "frontend"]);
+    git(&dry.checkout, &["commit", "-m", "style the header"]);
+    let (out, log) = publish(&dry, true, false);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for needle in [
+        "## Screenshots (UI changes)",
+        "Required: this pull request changes `frontend/`",
+        "`pr-screenshots`",
+        "docs/conventions/pull-requests.md",
+    ] {
+        assert!(log.contains(needle), "missing `{needle}`: {log}");
+    }
+    assert!(!log.contains("no UI change"), "{log}");
+}
+
+#[test]
+#[cfg(unix)] // stubs gh with a #!/bin/sh script made executable by mode bits
+fn a_pull_request_without_ui_change_says_so_in_its_screenshots_section() {
+    if !python_available() {
+        eprintln!("python3 missing: dry run skipped");
+        return;
+    }
+    let dry = dry_run_setup();
+    let (out, log) = publish(&dry, true, false);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(log.contains("## Screenshots (UI changes)"), "{log}");
+    assert!(log.contains("N/A \u{2014} no UI change"), "{log}");
+    assert!(!log.contains("Required: this pull request"), "{log}");
+}

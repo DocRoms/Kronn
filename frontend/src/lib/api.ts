@@ -113,6 +113,10 @@ import type {
   DbUsage,
   DbCompaction,
   SetAgentAccessRequest,
+  SetAgentFallbackRequest,
+  DiscussionFallback,
+  AgentFallback,
+  FallbackOverview,
   SetAgentMentionColorRequest,
   AgentsConfig,
   AgentEffectiveAccess,
@@ -269,7 +273,7 @@ import type {
   LivePagePublication,
   LivePageRevision,
   LivePageRevisionSummary,
-  LivePageWorkflowLink, LivePageResource, PromoteShadowRequest,
+  LivePageWorkflowLink, LivePageResource, PromoteShadowRequest, StepShadowComparison,
   LivePagesCapability,
   PublishLivePageRequest,
   PublishLivePageResult,
@@ -985,6 +989,11 @@ export const config = {
   getAgentAccessEffective: () => api<AgentEffectiveAccess[]>('GET', '/config/agent-access/effective'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
   setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
+  /** KT-1518 — every agent's fallback chain and the cooldowns still running. */
+  getAgentFallback: () => api<FallbackOverview>('GET', '/config/agent-fallback'),
+  /** Sets the whole chain of agents that take over, in order, when this one is unavailable (empty cuts it); a loop, an over-long chain or a broader access is refused with the reason. */
+  setAgentFallback: (req: SetAgentFallbackRequest) =>
+    api<FallbackOverview>('POST', '/config/agent-fallback', req),
   /** Kronn tool executor switch of an HTTP agent (KT-1600): `false` = off, `null` = the default (on). */
   setAgentTools: (req: { agent: AgentType; enabled: boolean | null }) => api<void>('POST', '/config/agent-tools', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>
@@ -1081,6 +1090,12 @@ export const contacts = {
   add: (invite_code: string) => api<AddContactResult>('POST', '/contacts', { invite_code }),
   delete: (id: string) => api<void>('DELETE', `/contacts/${id}`),
   inviteCode: () => api<string>('GET', '/contacts/invite-code'),
+  // A pairing code (invite code + fresh secret, KT-1650): the only thing that
+  // lets another instance add this one as a contact. It pairs a NEW contact;
+  // with a `contactId` it is issued for that existing contact (a re-pair) and
+  // pairs only it.
+  pairingCode: (contactId?: string) =>
+    api<string>('POST', '/contacts/pairing-offer', contactId ? { contact_id: contactId } : {}),
   ping: (id: string) => api<boolean>('GET', `/contacts/${id}/ping`),
   networkInfo: () => api<NetworkInfo>('GET', '/contacts/network-info'),
 };
@@ -2134,6 +2149,11 @@ export const discussions = {
     api<DiscussionAgentHandoffMode>('GET', `/discussions/${id}/agent-handoffs`),
   executionVariableRetention: (id: string) =>
     api<DiscussionExecutionVariableRetention>('GET', `/discussions/${id}/execution-variable-retention`),
+  /** KT-1518 — this discussion's own fallback chain (`chain_override` absent: the agent's default chain applies). */
+  fallback: (id: string) => api<DiscussionFallback>('GET', `/discussions/${id}/fallback`),
+  /** `null` removes the override; `[]` cancels the fallback in this discussion; a refused chain rejects with its reason. */
+  setFallback: (id: string, chainOverride: AgentFallback[] | null) =>
+    api<DiscussionFallback>('PUT', `/discussions/${id}/fallback`, { chain_override: chainOverride }),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Unified "join by code": paste any `kr-join-…` token and the backend
    *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend
@@ -2889,6 +2909,8 @@ export const workflows = {
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
   promoteShadow: (id: string, req: PromoteShadowRequest) => api<Workflow>('POST', `/workflows/${id}/shadow/promote`, req),
+  /** KT-1459 — per step that ran shadows, the main execution beside what each shadow was and produced. */
+  stepShadows: (id: string, runId: string) => api<StepShadowComparison[]>('GET', `/workflows/${id}/runs/${runId}/step-shadows`),
 
   /** Trigger with SSE streaming for real-time progress.
    *  0.6.0 UX pass — accepts optional `variables` payload for workflows

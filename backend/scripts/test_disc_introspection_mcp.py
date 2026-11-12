@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from unittest import mock
@@ -7398,7 +7399,20 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
             _SCRIPT.parent.parent / "src" / "workflows" / "authoring_doctrine.md"
         ).read_text()
         def read_schema(method, path, *args, **kwargs):
-            self.assertEqual((method, path), ("GET", "/api/workflows/step-schema"))
+            # The backend serves the lean default, one type or one section
+            # (`step_schema_view`); the stub narrows the full file the same way.
+            url = urllib.parse.urlparse(path)
+            self.assertEqual((method, url.path), ("GET", "/api/workflows/step-schema"))
+            query = urllib.parse.parse_qs(url.query)
+            if "step_type" in query:
+                kind = query["step_type"][0]
+                return self._env({
+                    "shape": self.schema["shape"], "step_type": kind,
+                    "contract": self.schema["fields_by_type"][kind],
+                })
+            if "section" in query:
+                name = query["section"][0]
+                return self._env({"section": name, "contract": self.schema[name]})
             return self._env(self.schema)
         patcher = mock.patch.object(self.mod, "_http", side_effect=read_schema)
         self.schema_http = patcher.start()
@@ -7408,19 +7422,41 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         self.assertEqual(self.mod.call_workflow_step_schema({}), self.schema)
         self.schema_http.assert_called_once_with("GET", "/api/workflows/step-schema")
 
+    def _contract(self, step_type):
+        return self.mod.call_workflow_step_schema({"step_type": step_type})["contract"]
+
+    def _section(self, section):
+        return self.mod.call_workflow_step_schema({"section": section})["contract"]
+
+    def test_step_schema_narrows_by_type_and_section_through_the_backend(self):
+        """KT-1681 — the default is lean: the detail a type or a section
+        carries is read on demand, through the same route native agents use."""
+        self.mod.call_workflow_step_schema({"step_type": "Exec"})
+        self.schema_http.assert_called_with(
+            "GET", "/api/workflows/step-schema?step_type=Exec"
+        )
+        self.mod.call_workflow_step_schema({"section": "template_vars"})
+        self.schema_http.assert_called_with(
+            "GET", "/api/workflows/step-schema?section=template_vars"
+        )
+        declared = next(
+            tool for tool in self.mod.TOOLS if tool["name"] == "workflow_step_schema"
+        )["inputSchema"]["properties"]
+        self.assertEqual(set(declared), {"step_type", "section"})
+
     @staticmethod
     def _env(data):
         return {"success": True, "data": data}
 
     # ── workflow_step_schema ─────────────────────────────────────────
-    def test_step_schema_lists_the_closed_fifteen_set(self):
+    def test_step_schema_lists_the_closed_sixteen_set(self):
         out = self.mod.call_workflow_step_schema({})
         self.assertEqual(
             set(out["step_types_closed_set"]),
             {"Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec",
              "Gate", "Notify", "JsonData", "CollectApiData", "TransformData",
              "PublishPageData", "SubWorkflow", "TriggerWorkflow", "DelegateSubtasks",
-             "TaskBoard"},
+             "TaskBoard", "Decide"},
         )
         # every type has a field spec
         for st in out["step_types_closed_set"]:
@@ -7455,8 +7491,7 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
             self.assertIn("authoring_doctrine", tools[name], name)
 
     def test_step_schema_documents_foreach_runtime_contract(self):
-        out = self.mod.call_workflow_step_schema({})
-        contract = out["fields_by_type"]["SubWorkflow"]["FOREACH_RUNTIME_CONTRACT"]
+        contract = self._contract("SubWorkflow")["FOREACH_RUNTIME_CONTRACT"]
         # the run-breaking fact: fixed target name, not derived from source
         self.assertIn(".kronn/current_task.json", contract)
         self.assertIn("FIXED", contract)
@@ -7467,35 +7502,30 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         self.assertIn("workflow_step_schema", names)
 
     def test_step_schema_exec_documents_stdin(self):
-        out = self.mod.call_workflow_step_schema({})
-        opt = " ".join(out["fields_by_type"]["Exec"]["optional"])
+        opt = " ".join(self._contract("Exec")["optional"])
         self.assertIn("exec_stdin", opt)
 
     def test_step_schema_documents_batchqp_output_piping(self):
-        out = self.mod.call_workflow_step_schema({})
-        bqp = out["fields_by_type"]["BatchQuickPrompt"]["OUTPUT_PIPING"]
+        bqp = self._contract("BatchQuickPrompt")["OUTPUT_PIPING"]
         self.assertIn("data.results", bqp)
         self.assertIn("not truncated", bqp)
         self.assertIn("tokens_status", bqp)
 
     def test_step_schema_distinguishes_workflow_and_foreach_concurrency(self):
-        out = self.mod.call_workflow_step_schema({})
-        contract = out["fields_by_type"]["SubWorkflow"]["FOREACH_CONCURRENCY"]
+        contract = self._contract("SubWorkflow")["FOREACH_CONCURRENCY"]
         self.assertIn("SEQUENTIAL", contract)
         self.assertIn("concurrency_limit", contract)
         self.assertIn("rejected", contract)
         self.assertIn("BatchQuickPrompt", contract)
 
     def test_step_schema_agent_documents_typedschema_piping(self):
-        out = self.mod.call_workflow_step_schema({})
-        piping = out["fields_by_type"]["Agent"]["OUTPUT_PIPING"]
+        piping = self._contract("Agent")["OUTPUT_PIPING"]
         # the accessor that DOES pipe an LLM result into a deterministic step
         self.assertIn("{{steps.<name>.data}}", piping)
         self.assertIn("TypedSchema", piping)
 
     def test_step_schema_documents_template_var_namespaces(self):
-        out = self.mod.call_workflow_step_schema({})
-        tv = out["template_vars"]
+        tv = self._section("template_vars")
         ns = tv["namespaces"]
         # the namespaces an automating agent must know to wire a WF end-to-end
         for key in ["steps.<name>.data", "steps.<name>.data_json",
@@ -7508,18 +7538,17 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         self.assertIn("alias", ns["steps.<name>.data_json"])
 
     def test_step_schema_documents_run_anchored_vendor_neutral_time(self):
-        out = self.mod.call_workflow_step_schema({})
-        time_spec = out["template_vars"]["time_expressions"]
+        template_vars = self._section("template_vars")
+        time_spec = template_vars["time_expressions"]
         self.assertIn("time.now", time_spec["canonical"])
         self.assertIn("Europe/Paris", time_spec["canonical"])
         self.assertIn("local_iso_ms", time_spec["filters"]["fmt"])
         self.assertIn("Do not use plugin/vendor names", time_spec["vendor_neutrality"])
-        self.assertIn("time.now / now", out["template_vars"]["namespaces"])
-        self.assertIn("same anchor", out["fields_by_type"]["CollectApiData"]["note"])
+        self.assertIn("time.now / now", template_vars["namespaces"])
+        self.assertIn("same anchor", self._contract("CollectApiData")["note"])
 
     def test_step_schema_documents_complete_page_pipeline(self):
-        out = self.mod.call_workflow_step_schema({})
-        contract = out["data_pipeline_contract"]
+        contract = self._section("data_pipeline_contract")
         self.assertEqual(
             contract["normal_path"],
             "CollectApiData -> TransformData -> PublishPageData",
@@ -7528,11 +7557,10 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         self.assertIn("qe_list", " ".join(contract["discovery_order"]))
         self.assertIn("page_list", " ".join(contract["discovery_order"]))
         for step_type in ["CollectApiData", "TransformData", "PublishPageData"]:
-            self.assertIn("example", out["fields_by_type"][step_type])
+            self.assertIn("example", self._contract(step_type))
 
     def test_step_schema_documents_collect_quick_exec_sources(self):
-        out = self.mod.call_workflow_step_schema({})
-        collect = out["fields_by_type"]["CollectApiData"]
+        collect = self._contract("CollectApiData")
         self.assertIn("quick_exec", collect["note"])
         self.assertIn("exec_allowlist", collect["note"])
         self.assertIn("csv", collect["note"])
@@ -7596,8 +7624,7 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
             self.assertIn(needle, instr)
 
     def test_step_schema_foreach_contract_documents_current_task_template_vars(self):
-        out = self.mod.call_workflow_step_schema({})
-        contract = out["fields_by_type"]["SubWorkflow"]["FOREACH_RUNTIME_CONTRACT"]
+        contract = self._contract("SubWorkflow")["FOREACH_RUNTIME_CONTRACT"]
         # the templating accessor an agent kept guessing — now pinned
         self.assertIn("{{current_task.<field>}}", contract)
         self.assertIn("current_task.number", contract)
@@ -8160,7 +8187,7 @@ class AgentLibraryCrudTests(unittest.TestCase):
             manual = self.mod.call_tool_manual({"tool": tool})["manual"]
             self.assertIn("Versions and shadow runs", manual)
         draft = self.mod.call_tool_manual({"tool": "workflow_create_draft"})["manual"]
-        for fact in ("external_effect: true", "{{run.variant}}", "KRONN_REF_<NAME>", "human-only"):
+        for fact in ("external_effect: true", "a step shadow never runs it", "Step shadows are human-only", "KRONN_REF_<NAME>"):
             self.assertIn(fact, draft)
 
     def test_profile_and_directive_get_return_omitted_bodies(self):

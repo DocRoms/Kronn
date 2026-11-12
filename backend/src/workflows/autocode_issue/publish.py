@@ -82,6 +82,25 @@ if ahead == '0':
     sys.stderr.write('%s holds no commit beyond %s/%s yet: wait for the campaign to deliver, then run this again.\n' % (branch, base, target))
     sys.exit(1)
 
+# KT-1682: a pull request that changes what renders carries before / after
+# captures (docs/conventions/pull-requests.md); the body says so up front.
+ui_changed = any(
+    name.startswith('frontend/')
+    for name in git('diff', '--name-only', '%s/%s...%s' % (base, target, branch)).stdout.split('\n')
+)
+
+
+def pr_body(number):
+    if ui_changed:
+        screenshots = ('**Required: this pull request changes `frontend/`.** Before (`%s`) / after (this head) '
+                       'captures of each changed screen, light and dark, published on the `pr-screenshots` '
+                       'branch and embedded here, then retaken after every push that changes a captured '
+                       'screen. See `docs/conventions/pull-requests.md`.' % target)
+    else:
+        screenshots = 'N/A \u2014 no UI change'
+    return 'Closes #%s\n\n## Screenshots (UI changes)\n%s\n\nOpened by Kronn autoCode.' % (number, screenshots)
+
+
 title = run(['gh', 'api', 'repos/%s/issues/%s' % (repo, num), '--jq', '.title']).stdout.strip()
 published = None
 for step in plan['steps']:
@@ -107,7 +126,7 @@ for step in plan['steps']:
     elif action == 'open_pull_request':
         created = run(['gh', 'pr', 'create', '--repo', step['repo'], '--base', step['base'], '--head', step['head'],
                        '--title', 'Issue #%s - %s' % (num, title),
-                       '--body', 'Closes #%s\n\nOpened by Kronn autoCode.' % num], check=False)
+                       '--body', pr_body(num)], check=False)
         text = (created.stdout + created.stderr).strip()
         if created.returncode != 0 and 'already exists' not in text:
             sys.stderr.write('gh pr create: %s\n' % text[-400:])

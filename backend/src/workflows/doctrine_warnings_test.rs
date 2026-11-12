@@ -29,7 +29,6 @@ fn workflow(steps: Vec<WorkflowStep>) -> Workflow {
         variables: vec![],
         enabled: false,
         retention: None,
-        shadow: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

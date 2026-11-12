@@ -5,6 +5,7 @@ import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { useIsMobile } from '../../hooks/useMediaQuery';
 import { OllamaCard } from './OllamaCard';
+import { AgentFallbackControl } from './AgentFallbackControl';
 import { ComfyUiCard } from './ComfyUiCard';
 import { ExternalApiSection } from './ExternalApiSection';
 import { ToolsSwitch } from './ToolsSwitch';
@@ -312,6 +313,8 @@ export function AgentsSection({
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
   const { data: effectiveAccess } = useApi(() => configApi.getAgentAccessEffective(), [agentAccess]);
+  // KT-1518 — every agent's fallback chain and the cooldowns still running.
+  const { data: fallbackOverview, refetch: refetchFallback } = useApi(() => configApi.getAgentFallback(), [agentAccess]);
   const { data: providerQuotaStates, refetch: refetchProviderQuotaStates } = useApi(() => agentsApi.quotaStates(), []);
   const [rearmingProvider, setRearmingProvider] = useState<AgentType | null>(null);
 
@@ -619,6 +622,33 @@ export function AgentsSection({
           }}
         />
       </label>
+    );
+  };
+
+  /** KT-1518 — « Fallback to »: the agent that continues a turn this one cannot
+   *  serve (rate limit, quota, outage, not signed in), with the chain it makes. */
+  const renderFallbackControl = (agentType: AgentType) => {
+    const slot = AGENT_CONCURRENCY[agentType];
+    if (!slot) return null;
+    const current = agentAccess?.[slot.key]?.fallback_chain ?? [];
+    const candidates = agents
+      .filter((other) => (other.installed || current.some((link) => link.agent === other.agent_type))
+        && other.agent_type !== agentType
+        && AGENT_CONCURRENCY[other.agent_type])
+      .map((other) => other.agent_type);
+    return (
+      <AgentFallbackControl
+        agentType={agentType}
+        current={current}
+        candidates={candidates}
+        chain={fallbackOverview?.chains.find((chain) => chain.agent === agentType)}
+        cooldown={fallbackOverview?.cooldowns.find((cooldown) => cooldown.agent === agentType)}
+        onChange={async (next) => {
+          await configApi.setAgentFallback({ agent: agentType, fallback_chain: next });
+          refetchAgentAccess();
+          refetchFallback();
+        }}
+      />
     );
   };
 
@@ -1011,6 +1041,7 @@ export function AgentsSection({
                   is "Activé". */}
               <div className="set-agent-actions">
                 {renderConcurrencyControl(agent.agent_type)}
+                {renderFallbackControl(agent.agent_type)}
                 {agent.installed ? (
                   <>
                   <button

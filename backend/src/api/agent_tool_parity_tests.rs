@@ -294,7 +294,7 @@ fn version_and_shadow_knowledge_is_the_same_on_both_sides() {
     ] {
         assert!(content.contains(fact), "the guide section lacks {fact}");
     }
-    let schema = crate::api::workflows::canonical_step_schema();
+    let schema = crate::api::workflows::full_step_schema();
     assert!(schema["shape"]
         .as_str()
         .unwrap()

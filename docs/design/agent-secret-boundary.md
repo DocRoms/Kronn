@@ -789,10 +789,11 @@ gateway access log. Federation frames travel only between the members of a
 shared discussion, checked in the same DB call as each write; a peer's
 attachment is staged and published only after that check, and a file served
 to a peer is re-checked right before its bytes leave. Federation (`p2p_enabled`) is off by
-default: a peer proves only that it knows an invite code, which is not a
-secret, so turning it on lets anyone who knows an accepted contact's code
-and reaches the port act as that contact in shared discussions. Pairing
-secrets or a signed challenge replace this in 0.15.
+default. A peer proves who it is with a per-contact random secret exchanged at
+pairing (KT-1650), kept hashed on the verifying side and compared in constant
+time; the invite code is only the contact's public address and no longer
+authenticates anyone. Contacts made before that must re-pair. See
+[P2P contact pairing](../architecture/p2p-contact-pairing.md).
 
 **Real probe for the human.**
 1. Start a Claude discussion on a project, with Kronn running natively.

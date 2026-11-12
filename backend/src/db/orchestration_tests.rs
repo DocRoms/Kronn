@@ -1771,6 +1771,229 @@ fn a_tool_still_running_is_activity_until_its_cap() {
     );
 }
 
+/// A `Working` execution whose worker dispatch is still `Pending` — the shape of
+/// an execution held back by the task-worker cap (KT-1689) — with the activity
+/// deadline long expired, as it is after a 30-minute wait.
+fn queued_working_execution(
+    conn: &Connection,
+    task: &str,
+    number: i64,
+    queued_minutes_ago: i64,
+) -> TaskExecution {
+    let execution = working_execution(conn, task, number);
+    let child = format!("d-{task}-child");
+    let job = format!("dispatch-{task}");
+    let created = (Utc::now() - chrono::Duration::minutes(queued_minutes_ago)).to_rfc3339();
+    conn.execute(
+        "INSERT INTO discussions (id, title, agent, created_at, updated_at) \
+         VALUES (?1, 'Worker', 'Codex', ?2, ?2)",
+        params![child, created],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order) \
+         VALUES (?1, ?2, 'User', 'work', ?3, 1)",
+        params![format!("msg-{task}"), child, created],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_dispatch_jobs (id, discussion_id, trigger_message_id, \
+             trigger_sort_order, dedupe_key, chain_prompt_ids_json, status, available_at, \
+             created_at, updated_at, progress_phase, progress_detail) \
+         VALUES (?1, ?2, ?3, 1, ?4, '[]', 'Pending', ?5, ?5, ?5, 'queued', 'task_worker_limit:2/2')",
+        params![job, child, format!("msg-{task}"), format!("dedupe-{task}"), created],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE task_executions SET sub_discussion_id = ?2, dispatch_job_id = ?3 WHERE id = ?1",
+        params![execution.id, child, job],
+    )
+    .unwrap();
+    let past = (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = ?2 WHERE task_execution_id = ?1",
+        params![execution.id, past],
+    )
+    .unwrap();
+    get_task_execution(conn, &execution.id).unwrap().unwrap()
+}
+
+fn expired_kinds(conn: &Connection, exec_id: &str) -> Vec<ExecutionTimeoutKind> {
+    expired_execution_timeouts(conn, Utc::now())
+        .unwrap()
+        .into_iter()
+        .filter(|(id, _)| id == exec_id)
+        .map(|(_, kind)| kind)
+        .collect()
+}
+
+#[test]
+fn an_execution_queued_for_a_worker_slot_is_never_interrupted_by_the_activity_clock() {
+    let conn = setup();
+    // Queued for 50 min: past the 20-min activity timeout, well inside the queue deadline.
+    let execution = queued_working_execution(&conn, "t-queued-clock", 1690, 50);
+
+    assert!(
+        expired_kinds(&conn, &execution.id).is_empty(),
+        "a queued worker is not silent"
+    );
+    // Even when the scan raced the claim, applying the clock refuses a queued job.
+    assert!(
+        !apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap()
+    );
+    let after = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(after.status, TaskExecutionStatus::Working);
+    let job = crate::db::agent_dispatch::get(&conn, "dispatch-t-queued-clock")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        job.status,
+        crate::db::agent_dispatch::DispatchStatus::Pending
+    );
+    assert!(
+        parent_room_alerts(&conn).is_empty(),
+        "no alert before the queue deadline"
+    );
+}
+
+#[test]
+fn the_activity_clock_starts_when_the_queued_worker_is_claimed() {
+    let conn = setup();
+    let execution = queued_working_execution(&conn, "t-claim-clock", 1691, 50);
+
+    let claimed = crate::db::agent_dispatch::claim(&conn, "dispatch-t-claim-clock").unwrap();
+    assert!(claimed.is_some(), "the free slot admits the queued job");
+    let deadline = get_execution_recovery(&conn, &execution.id)
+        .unwrap()
+        .unwrap()
+        .activity_deadline_at
+        .expect("the clock is armed");
+    let armed = (deadline - Utc::now()).num_seconds();
+    assert!(
+        armed > i64::from(DEFAULT_ACTIVITY_TIMEOUT_SECS) - 60,
+        "a full activity window starts at the claim, got {armed}s"
+    );
+    assert!(expired_kinds(&conn, &execution.id).is_empty());
+
+    // The worker then stays silent for a whole window: the clock fires as before.
+    let past = (Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = ?2 WHERE task_execution_id = ?1",
+        params![execution.id, past],
+    )
+    .unwrap();
+    assert_eq!(
+        expired_kinds(&conn, &execution.id),
+        vec![ExecutionTimeoutKind::Activity]
+    );
+}
+
+#[test]
+fn an_execution_provisioning_its_lane_is_never_interrupted_by_the_activity_clock() {
+    let conn = setup();
+    seed_task(&conn, "t-warm-clock", 1692);
+    let execution = launch_single_task(
+        &conn,
+        &LaunchSingleTaskInput::new("t-warm-clock", DISC),
+        &backend_actor(),
+    )
+    .unwrap()
+    .execution;
+    // An explicit policy arms the clock in every status; the first build and the
+    // build-slot wait (`Provisioning`) still outlast it.
+    set_resilience_policy(
+        &conn,
+        &execution.orchestration_run_id,
+        &OrchestrationResiliencePolicy {
+            activity_timeout_secs: Some(60),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    transition_execution(
+        &conn,
+        &execution.id,
+        TaskExecutionStatus::Provisioning,
+        &backend_actor(),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let past = (Utc::now() - chrono::Duration::minutes(40)).to_rfc3339();
+    conn.execute(
+        "UPDATE task_execution_recovery SET activity_deadline_at = ?2 WHERE task_execution_id = ?1",
+        params![execution.id, past],
+    )
+    .unwrap();
+    assert!(expired_kinds(&conn, &execution.id).is_empty());
+    assert!(
+        !apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::Activity).unwrap()
+    );
+    assert_eq!(
+        get_task_execution(&conn, &execution.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskExecutionStatus::Provisioning
+    );
+}
+
+#[test]
+#[serial_test::serial(task_timeout_env)]
+fn a_queue_past_its_own_deadline_alerts_the_principal_once_without_interrupting() {
+    let conn = setup();
+    let hours = i64::from(DEFAULT_QUEUE_TIMEOUT_SECS) / 3600;
+    let execution = queued_working_execution(&conn, "t-queue-deadline", 1693, (hours + 1) * 60);
+
+    assert_eq!(
+        expired_kinds(&conn, &execution.id),
+        vec![ExecutionTimeoutKind::QueueWait],
+        "a queue past the deadline is reported, not an activity timeout"
+    );
+    assert!(
+        apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::QueueWait).unwrap()
+    );
+
+    let after = get_task_execution(&conn, &execution.id).unwrap().unwrap();
+    assert_eq!(
+        after.status,
+        TaskExecutionStatus::Working,
+        "not interrupted"
+    );
+    assert_eq!(
+        crate::db::agent_dispatch::get(&conn, "dispatch-t-queue-deadline")
+            .unwrap()
+            .unwrap()
+            .status,
+        crate::db::agent_dispatch::DispatchStatus::Pending,
+        "the dispatch stays queued"
+    );
+    let alerts = parent_room_alerts(&conn);
+    assert_eq!(alerts.len(), 1);
+    assert!(alerts[0].contains("task_worker_limit:2/2"), "{}", alerts[0]);
+    assert!(alerts[0].contains("#1"), "queue position: {}", alerts[0]);
+
+    // One event per dispatch: neither the scan nor a second apply repeats it.
+    assert!(expired_kinds(&conn, &execution.id).is_empty());
+    assert!(
+        !apply_execution_timeout(&conn, &execution.id, ExecutionTimeoutKind::QueueWait).unwrap()
+    );
+    assert_eq!(parent_room_alerts(&conn).len(), 1);
+}
+
+#[test]
+#[serial_test::serial(task_timeout_env)]
+fn the_queue_deadline_is_configurable_through_the_environment() {
+    let conn = setup();
+    let execution = queued_working_execution(&conn, "t-queue-env", 1694, 90);
+    assert!(expired_kinds(&conn, &execution.id).is_empty());
+    let _env = TimeoutEnv::set("KRONN_TASK_QUEUE_TIMEOUT_SECS", "3600");
+    assert_eq!(default_queue_timeout_secs(), 3600);
+    assert_eq!(
+        expired_kinds(&conn, &execution.id),
+        vec![ExecutionTimeoutKind::QueueWait]
+    );
+}
+
 #[test]
 fn a_campaign_policy_overrides_the_default_activity_deadline() {
     let conn = setup();

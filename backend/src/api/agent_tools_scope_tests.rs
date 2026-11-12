@@ -872,7 +872,6 @@ fn workflow_loading(id: &str, skill: &str) -> crate::models::Workflow {
     Workflow {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         pinned: false,
         id: id.into(),

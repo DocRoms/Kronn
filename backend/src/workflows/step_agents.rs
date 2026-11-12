@@ -180,7 +180,7 @@ pub fn check_available(
 
 /// Replaces the step's agent, model and effort. Tier, budget and tools stay;
 /// a named connection stays only while the agent does.
-fn apply_to_step(step: &mut WorkflowStep, choice: &StepAgentOverride) {
+pub(crate) fn apply_to_step(step: &mut WorkflowStep, choice: &StepAgentOverride) {
     let agent_changes = step.agent != choice.agent;
     let settings = step
         .agent_settings
@@ -286,7 +286,6 @@ mod tests {
         Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: "wf".into(),

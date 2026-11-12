@@ -752,8 +752,11 @@ async fn auth_middleware(
     // a remote peer has no bearer token. It self-authenticates via its invite
     // code in the body, validated against our contacts in the handler (same
     // trust model as the WS Presence handshake).
+    // `/api/contacts/pair` is the same: a peer completing a pairing has no token
+    // yet, and the handler only accepts a live pairing code.
     if request.uri().path() == "/api/disc/claim-by-token"
         || request.uri().path() == "/api/disc/fetch-file"
+        || request.uri().path() == "/api/contacts/pair"
     {
         // These answer remote peers; a Kronn-launched agent's token never.
         if carries_bridge_token(&headers) {
@@ -1546,6 +1549,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::workflows::promote_shadow),
         )
         .route(
+            "/api/workflows/{id}/runs/{run_id}/step-shadows",
+            get(api::workflows::run_step_shadows),
+        )
+        .route(
             "/api/pages/{id}/publications",
             get(api::live_pages::publications),
         )
@@ -1752,6 +1759,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/config/agent-concurrency",
             post(api::setup::set_agent_concurrency),
+        )
+        .route(
+            "/api/discussions/{id}/fallback",
+            get(api::discussions::agent_fallback_override::get_discussion_fallback)
+                .put(api::discussions::agent_fallback_override::set_discussion_fallback),
+        )
+        .route(
+            "/api/config/agent-fallback",
+            get(api::setup::get_agent_fallback).post(api::setup::set_agent_fallback),
         )
         .route(
             "/api/config/agent-access",
@@ -3531,6 +3547,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::contacts::list).post(api::contacts::add),
         )
         .route("/api/contacts/invite-code", get(api::contacts::invite_code))
+        .route(
+            "/api/contacts/pairing-offer",
+            post(api::contacts::pairing_offer),
+        )
+        // Auth-exempt (see auth_middleware): gated on a live pairing code.
+        .route("/api/contacts/pair", post(api::contacts::pair))
         .route(
             "/api/contacts/network-info",
             get(api::contacts::network_info),
