@@ -219,7 +219,7 @@ fn sheet_files(f: &Fixture) -> Vec<(String, Vec<u8>)> {
 fn every_sheet_of_every_sub_audit_is_listed_exactly_once() {
     let f = fixture();
     let before = sheet_files(&f);
-    let outcome = resync(&f.docs, NO_ADR).unwrap();
+    let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
     let after = index(&f);
     assert!(outcome.changed);
     assert_eq!(outcome.listed, ACTIVE.len());
@@ -257,9 +257,9 @@ fn every_sheet_of_every_sub_audit_is_listed_exactly_once() {
 #[test]
 fn a_rerun_is_byte_identical() {
     let f = fixture();
-    resync(&f.docs, NO_ADR).unwrap();
+    resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
     let once = index(&f);
-    let outcome = resync(&f.docs, NO_ADR).unwrap();
+    let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
     assert!(!outcome.changed);
     assert_eq!(index(&f), once);
 }
@@ -267,7 +267,7 @@ fn a_rerun_is_byte_identical() {
 #[test]
 fn false_no_finding_outcomes_are_recomputed_with_their_evidence() {
     let f = fixture();
-    let outcome = resync(&f.docs, NO_ADR).unwrap();
+    let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
     let after = index(&f);
     assert_eq!(
         outcome.reconciled_dimensions,
@@ -287,7 +287,7 @@ fn false_no_finding_outcomes_are_recomputed_with_their_evidence() {
 #[test]
 fn sheets_added_after_a_first_resync_join_the_index() {
     let f = fixture();
-    resync(&f.docs, NO_ADR).unwrap();
+    resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
     let td = f.docs.join("tech-debt");
     fs::write(
         td.join("TD-20261006-perf-a.md"),
@@ -302,7 +302,7 @@ fn sheets_added_after_a_first_resync_join_the_index() {
     )
     .unwrap();
     fs::remove_file(td.join("TD-20261001-full-b.md")).unwrap();
-    let outcome = resync(&f.docs, NO_ADR).unwrap();
+    let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
     let after = index(&f);
     assert_eq!(row_count(&after, "TD-20261006-perf-a"), 1);
     // A generated row follows its sheet away; a hand-written one stays.
@@ -311,7 +311,11 @@ fn sheets_added_after_a_first_resync_join_the_index() {
     assert!(after.contains("- `TD-20261001-phantom` — Row without a sheet"));
     assert_eq!(outcome.reconciled_dimensions, vec!["Performance"]);
     assert_eq!(after.matches(BLOCK_END).count(), 1);
-    assert!(!resync(&f.docs, NO_ADR).unwrap().changed);
+    assert!(
+        !resync(f.docs.parent().unwrap(), &f.docs, NO_ADR)
+            .unwrap()
+            .changed
+    );
 }
 
 #[test]
@@ -322,12 +326,16 @@ fn an_index_without_a_current_list_gets_one_before_the_coverage_matrix() {
         "# Tech debt\n\n## Dimension coverage\n\n| Dimension | Outcome | Evidence |\n|---|---|---|\n",
     )
     .unwrap();
-    resync(&f.docs, NO_ADR).unwrap();
+    resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
     let after = index(&f);
     let list = after.find("## Current list").unwrap();
     assert!(list < after.find("## Dimension coverage").unwrap());
     assert_eq!(row_count(&after, "TD-20261002-sec-a"), 1);
-    assert!(!resync(&f.docs, NO_ADR).unwrap().changed);
+    assert!(
+        !resync(f.docs.parent().unwrap(), &f.docs, NO_ADR)
+            .unwrap()
+            .changed
+    );
 }
 
 #[test]
@@ -352,7 +360,7 @@ fn a_human_owned_index_is_resynced_and_marked_and_a_missing_one_left_alone() {
     let f = fixture();
     let human = format!("<!-- kronn:section name=\"debt\" owner=\"human\" -->\n{CENTRAL}<!-- kronn:section:end -->\n");
     fs::write(f.docs.join(CENTRAL_INDEX), &human).unwrap();
-    let outcome = resync(&f.docs, NO_ADR).unwrap();
+    let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
     assert!(
         outcome.skipped.is_none() && outcome.changed,
         "never skipped"
@@ -368,7 +376,10 @@ fn a_human_owned_index_is_resynced_and_marked_and_a_missing_one_left_alone() {
 
     fs::remove_file(f.docs.join(CENTRAL_INDEX)).unwrap();
     assert_eq!(
-        resync(&f.docs, NO_ADR).unwrap().skipped.as_deref(),
+        resync(f.docs.parent().unwrap(), &f.docs, NO_ADR)
+            .unwrap()
+            .skipped
+            .as_deref(),
         Some("no central index")
     );
     assert!(
@@ -425,6 +436,7 @@ fn a_finding_an_accepted_adr_covers_leaves_the_index_and_references_it() {
 
     let baseline = fs::read_to_string(docs.join("decisions.md")).unwrap();
     let outcome = resync(
+        docs.parent().unwrap(),
         &docs,
         crate::core::adr::Trust::RunBaseline {
             decisions: &baseline,
@@ -478,6 +490,7 @@ fn an_adr_accepted_during_the_run_leaves_its_finding_in_the_index_for_validation
     .unwrap();
 
     let outcome = resync(
+        docs.parent().unwrap(),
         &docs,
         crate::core::adr::Trust::RunBaseline {
             decisions: baseline,
@@ -539,12 +552,16 @@ fn a_resync_keeps_the_severity_of_a_detail_file_the_index_row_gave() {
         "| CQ-001 | Oversized controller | Backend | High |\n| TD-20261001-phantom |",
     );
     fs::write(&index, content).unwrap();
-    resync(&fx.docs, NO_ADR).unwrap();
+    resync(fx.docs.parent().unwrap(), &fx.docs, NO_ADR).unwrap();
     let after = fs::read_to_string(&index).unwrap();
     let rows = index_rows(&after);
     assert_eq!(rows["CQ-001"].severity.as_deref(), Some("High"), "{after}");
     // A second pass changes nothing.
-    assert!(!resync(&fx.docs, NO_ADR).unwrap().changed);
+    assert!(
+        !resync(fx.docs.parent().unwrap(), &fx.docs, NO_ADR)
+            .unwrap()
+            .changed
+    );
 }
 
 #[test]
@@ -557,4 +574,51 @@ fn a_bullet_kept_for_a_row_without_sheet_still_names_the_debt() {
         Some("Legacy one-liner")
     );
     assert!(index_rows("```\n- `TD-20261016-fenced` — x\n```\n").is_empty());
+}
+
+/// KT-1595: the index is rewritten right after an agent ran; a docs folder
+/// swapped for a link between the walk and the write never takes the rewrite
+/// out of the project, and a linked `tech-debt/` folder is not listed.
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+mod swapped_folder {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    #[test]
+    fn the_index_is_never_rewritten_through_a_swapped_docs_folder() {
+        let f = fixture();
+        let external = tempfile::tempdir().unwrap();
+        // The index is read first (one guarded call), the swap lands on its write.
+        swap_probe::arm_after(&f.docs, external.path(), 1);
+        let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.changed, "{outcome:?}");
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+        let moved = f.docs.parent().unwrap().join("docs.moved");
+        let held = fs::read_to_string(moved.join(CENTRAL_INDEX)).unwrap();
+        assert!(held.contains("TD-20261001-full-b"), "{held}");
+    }
+
+    #[test]
+    fn a_linked_tech_debt_folder_is_not_listed() {
+        let f = fixture();
+        let external = tempfile::tempdir().unwrap();
+        fs::write(
+            external.path().join("TD-20269999-foreign.md"),
+            "# T\n- **Status**: Inferred\n",
+        )
+        .unwrap();
+        fs::remove_dir_all(f.docs.join("tech-debt")).unwrap();
+        std::os::unix::fs::symlink(external.path(), f.docs.join("tech-debt")).unwrap();
+        resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
+        let index = fs::read_to_string(f.docs.join(CENTRAL_INDEX)).unwrap();
+        assert!(!index.contains("TD-20269999-foreign"), "{index}");
+    }
+
+    #[test]
+    fn a_docs_folder_outside_the_root_is_refused() {
+        let f = fixture();
+        let other = tempfile::tempdir().unwrap();
+        assert!(resync(other.path(), &f.docs, NO_ADR).is_err());
+    }
 }

@@ -89,14 +89,25 @@ pub fn is_td_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// Whether `dir` is a real folder, not a link to one (an lstat, so a link is
+/// never followed): a `tech-debt/` folder replaced by a link would list, and
+/// then rewrite, the sheets of whatever it points at (KT-1595).
+pub fn is_real_dir(dir: &Path) -> bool {
+    std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
+}
+
 /// Every `TD-*.md` file directly under `<docs>/tech-debt/`, sorted by id.
-/// Symlinks are skipped: a sheet must live in the repository.
+/// Symlinks are skipped: a sheet must live in the repository, and so must the
+/// `tech-debt/` folder itself.
 pub fn read_sheets(docs_dir: &Path) -> Vec<TdSheet> {
     read_sheets_in(&docs_dir.join("tech-debt"))
 }
 
 /// [`read_sheets`] of a `tech-debt/` directory itself.
 pub fn read_sheets_in(td_dir: &Path) -> Vec<TdSheet> {
+    if !is_real_dir(td_dir) {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(td_dir) else {
         return Vec::new();
     };
@@ -122,6 +133,9 @@ pub fn read_sheets_in(td_dir: &Path) -> Vec<TdSheet> {
 /// comes from its index row, so the generated table keeps the severity the
 /// dimension audit gave once it replaces that row (KT-1309).
 fn read_detail_sheets(docs_dir: &Path) -> Vec<TdSheet> {
+    if !is_real_dir(&docs_dir.join("tech-debt")) {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
         return Vec::new();
     };
@@ -872,9 +886,17 @@ pub fn resync_content(
 
 /// Settles the sheets a trusted ADR covers, then resyncs the central index
 /// from `<docs>/tech-debt/`: a finding a decision explains is never listed.
-pub fn resync(docs_dir: &Path, trust: crate::core::adr::Trust) -> Result<ResyncOutcome, String> {
-    let adr = crate::core::adr::settle_covered_sheets(docs_dir, trust);
-    let mut outcome = resync_index(docs_dir)?;
+/// `root` is the project the folder belongs to: every write goes through the
+/// rooted primitive under it, so a parent swapped for a link after an agent ran
+/// never takes a write outside (KT-1595).
+pub fn resync(
+    root: &Path,
+    docs_dir: &Path,
+    trust: crate::core::adr::Trust,
+) -> Result<ResyncOutcome, String> {
+    crate::core::fs_guard::assert_contained_no_symlink(root, docs_dir)?;
+    let adr = crate::core::adr::settle_covered_sheets(root, docs_dir, trust);
+    let mut outcome = resync_index(root, docs_dir)?;
     match adr {
         Ok(adr) => {
             outcome.adr_settled = adr.settled;
@@ -891,7 +913,7 @@ pub fn resync(docs_dir: &Path, trust: crate::core::adr::Trust) -> Result<ResyncO
 /// Leaves the file alone when it is absent or a symlink; the `unindexed_td`
 /// diagnostic then reports the gap. A human-validated index is rewritten and
 /// marked to reconfirm (KT-1079).
-fn resync_index(docs_dir: &Path) -> Result<ResyncOutcome, String> {
+fn resync_index(root: &Path, docs_dir: &Path) -> Result<ResyncOutcome, String> {
     let index = docs_dir.join(CENTRAL_INDEX);
     let skip = |why: &str| {
         Ok(ResyncOutcome {
@@ -906,8 +928,13 @@ fn resync_index(docs_dir: &Path) -> Result<ResyncOutcome, String> {
         }
         Ok(_) => {}
     }
-    let content =
-        std::fs::read_to_string(&index).map_err(|e| format!("read {}: {e}", index.display()))?;
+    let content = match crate::core::fs_guard::guarded_read(root, &index) {
+        Ok(Some(bytes)) => {
+            String::from_utf8(bytes).map_err(|e| format!("read {}: {e}", index.display()))?
+        }
+        Ok(None) => return skip("no central index"),
+        Err(e) => return Err(format!("read {}: {e}", index.display())),
+    };
     let mut sheets = read_sheets(docs_dir);
     sheets.extend(read_detail_sheets(docs_dir));
     sheets.sort_by(|a, b| a.id.cmp(&b.id));
@@ -920,21 +947,19 @@ fn resync_index(docs_dir: &Path) -> Result<ResyncOutcome, String> {
     let indexes = dimension_indexes(docs_dir);
     let (text, outcome) = resync_content(&content, &sheets, &indexes);
     if outcome.changed {
-        crate::core::mcp_scanner::atomic_write(&index, &text)?;
-        if let Some(project) = docs_dir.parent() {
-            let rel = index
-                .strip_prefix(project)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            if let Err(e) = crate::core::doc_provenance::note_write(
-                project,
-                &rel,
-                &content,
-                &text,
-                crate::core::doc_provenance::DocWriter::TdIndex,
-            ) {
-                tracing::warn!("Human-validation provenance of {rel} not recorded: {e}");
-            }
+        crate::core::fs_guard::guarded_replace(root, &index, text.as_bytes())?;
+        let rel = index
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if let Err(e) = crate::core::doc_provenance::note_write(
+            root,
+            &rel,
+            &content,
+            &text,
+            crate::core::doc_provenance::DocWriter::TdIndex,
+        ) {
+            tracing::warn!("Human-validation provenance of {rel} not recorded: {e}");
         }
     }
     Ok(outcome)

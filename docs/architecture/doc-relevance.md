@@ -62,7 +62,7 @@ back depends on that step (`AnalysisStep.sources`):
   of the doc queues it again.
 
 [src: file: backend/src/core/citation_drift.rs:86#DocReview]
-[src: file: backend/src/core/citation_drift.rs:926#current_review]
+[src: file: backend/src/core/citation_drift.rs:929#current_review]
 [src: file: backend/src/api/audit/revalidate.rs:60#stamp_rereads]
 
 ### When a prose path counts as gone
@@ -161,7 +161,7 @@ accepts them all.
   proposals the human launches through « Revalider l'audit », then reviews
   and validates; « Vérifié, inchangé » acknowledges a doc, recorded or not,
   that was judged stale but is fine.
-  [src: file: backend/src/core/checksums.rs:856#acknowledge_stale]
+  [src: file: backend/src/core/checksums.rs:862#acknowledge_stale]
 
 A citation the git diff maps to a new line past the fingerprint window is
 treated as moved, exactly as the plan re-anchors it.

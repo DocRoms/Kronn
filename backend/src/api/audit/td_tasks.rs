@@ -80,9 +80,11 @@ pub(crate) async fn guard_decisions(
         return None;
     }
     let docs = crate::core::docs_location::DocsRoot::of(project_path).dir(project_path);
-    let outcome =
-        tokio::task::spawn_blocking(move || crate::core::td_decisions::restore(&docs, &before))
-            .await;
+    let root = project_path.to_path_buf();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::core::td_decisions::restore(&root, &docs, &before)
+    })
+    .await;
     match outcome {
         Ok(Ok(outcome)) if !outcome.is_empty() => {
             tracing::info!(

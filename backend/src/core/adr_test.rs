@@ -244,7 +244,7 @@ fn settle_covered_sheets_writes_once_and_skips_rejected() {
     )
     .unwrap();
 
-    let first = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
+    let first = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR)).unwrap();
     assert_eq!(
         first.settled,
         vec![
@@ -259,7 +259,7 @@ fn settle_covered_sheets_writes_once_and_skips_rejected() {
     assert_eq!(fs::read_to_string(&rejected_path).unwrap(), rejected);
 
     let after_first = fs::read_to_string(&covered).unwrap();
-    let second = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
+    let second = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR)).unwrap();
     assert!(second.settled.is_empty(), "{second:?}");
     assert_eq!(fs::read_to_string(&covered).unwrap(), after_first);
 }
@@ -309,7 +309,7 @@ fn run_fixture(decisions: &str, sheet_extra: &str) -> (tempfile::TempDir, std::p
 fn an_adr_accepted_during_the_run_settles_nothing_and_goes_back_to_proposed() {
     let baseline = "# Architecture decisions\n";
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "- **Decision record**: ADR-0001\n");
-    let outcome = settle_covered_sheets(&docs, run(baseline)).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(baseline)).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.downgraded,
@@ -329,7 +329,7 @@ fn an_adr_accepted_during_the_run_settles_nothing_and_goes_back_to_proposed() {
     assert!(decisions.contains("only a human accepts an ADR"));
     assert!(in_force(&parse(&decisions)).is_empty());
     // The next run starts from the downgraded file: still nothing settles.
-    let again = settle_covered_sheets(&docs, run(&decisions)).unwrap();
+    let again = settle_covered_sheets(docs.parent().unwrap(), &docs, run(&decisions)).unwrap();
     assert!(again.settled.is_empty() && again.downgraded.is_empty());
 }
 
@@ -338,7 +338,7 @@ fn a_covers_entry_added_during_the_run_does_not_count() {
     // ADR-0001 was accepted before the run, without the TD's slug.
     let baseline = CI_LABEL_ADR.replace("- **Covers**: quality-gate-not-enforced\n", "");
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
-    let outcome = settle_covered_sheets(&docs, run(&baseline)).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(&baseline)).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert!(
         outcome.downgraded.is_empty(),
@@ -349,7 +349,7 @@ fn a_covers_entry_added_during_the_run_does_not_count() {
 #[test]
 fn an_adr_accepted_before_the_run_still_settles() {
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
-    let outcome = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR)).unwrap();
     assert_eq!(outcome.settled.len(), 1, "{outcome:?}");
     assert!(outcome.downgraded.is_empty());
     // Superseding it during the run only removes coverage (the safe side).
@@ -357,7 +357,8 @@ fn an_adr_accepted_before_the_run_still_settles() {
         &CI_LABEL_ADR.replace("**Status**: accepted", "**Status**: superseded by ADR-0002"),
         "",
     );
-    let outcome = settle_covered_sheets(&docs2, run(CI_LABEL_ADR)).unwrap();
+    let outcome =
+        settle_covered_sheets(docs2.parent().unwrap(), &docs2, run(CI_LABEL_ADR)).unwrap();
     assert!(outcome.settled.is_empty());
 }
 
@@ -373,7 +374,8 @@ fn a_card_settles_only_with_the_adrs_it_appended() {
     )
     .unwrap();
     let ids = vec!["ADR-0002".to_string()];
-    let outcome = settle_covered_sheets(&docs, Trust::CardAccepted(&ids)).unwrap();
+    let outcome =
+        settle_covered_sheets(docs.parent().unwrap(), &docs, Trust::CardAccepted(&ids)).unwrap();
     assert_eq!(
         outcome.settled,
         vec!["TD-20261011-other → ADR-0002 — Accept `TD-20261011-other`".to_string()]
@@ -425,7 +427,7 @@ fn a_record_line_the_run_writes_on_a_new_sheet_settles_nothing() {
         "TD-20261011-sql-injection",
         "- **Decision record**: ADR-0001\n",
     );
-    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, start.trust()).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.not_in_force,
@@ -462,7 +464,7 @@ fn a_record_line_the_run_adds_or_changes_on_an_existing_sheet_settles_nothing() 
         "TD-20261001-human",
         "- **Decision record**: ADR-0001\n",
     );
-    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, start.trust()).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert_eq!(outcome.not_in_force.len(), 2, "{outcome:?}");
     assert_eq!(status_of(&docs, "TD-20261001-no-record"), None);
@@ -477,7 +479,7 @@ fn a_record_line_present_before_the_run_still_settles() {
     fs::write(docs.join(DECISIONS_FILE), TWO_ADRS).unwrap();
     write_sheet(&docs, "TD-20261001-human", "- **Decision record**: ADR-2\n");
     let start = StartOfRun::capture(&docs);
-    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, start.trust()).unwrap();
     assert_eq!(
         outcome.settled,
         vec!["TD-20261001-human → ADR-0002 — No ORM".to_string()]
@@ -547,7 +549,8 @@ fn a_card_ignores_a_record_line_naming_the_adr_it_creates() {
     let card = "## ADR-0005: Accept `TD-20261011-accepted` as an intentional trade-off\n\n- **Status**: accepted\n- **Date**: 2026-10-11\n- **Covers**: TD-20261011-accepted\n";
     fs::write(docs.join(DECISIONS_FILE), card).unwrap();
     let ids = vec!["ADR-0005".to_string()];
-    let outcome = settle_covered_sheets(&docs, Trust::CardAccepted(&ids)).unwrap();
+    let outcome =
+        settle_covered_sheets(docs.parent().unwrap(), &docs, Trust::CardAccepted(&ids)).unwrap();
     assert_eq!(
         outcome.settled,
         vec![
@@ -567,4 +570,68 @@ fn a_card_ignores_a_record_line_naming_the_adr_it_creates() {
         status_of(&docs, "TD-20261011-accepted"),
         Some(TdDecision::AcceptedDecision)
     );
+}
+
+/// KT-1595: the settlement runs after an agent, so a folder swapped for a link
+/// between the walk and the write never takes a sheet or `decisions.md` out of
+/// the project.
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+mod swapped_folder {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    const SHEET: &str = "TD-20261011-quality-gate-not-enforced.md";
+
+    #[test]
+    fn a_settled_sheet_is_never_written_through_a_swapped_folder() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        // The sheet is read first (one guarded call), the swap lands on its write.
+        swap_probe::arm_after(&docs.join("tech-debt"), external.path(), 1);
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(outcome.unwrap().settled.len(), 1);
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+        let held = fs::read_to_string(docs.join("tech-debt.moved").join(SHEET)).unwrap();
+        assert_eq!(td_decision(&held), Some(TdDecision::AcceptedDecision));
+    }
+
+    #[test]
+    fn decisions_md_is_never_downgraded_through_a_swapped_docs_folder() {
+        let baseline = "# Architecture decisions\n";
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        // `decisions.md` is read first, the swap lands on the downgrade write.
+        swap_probe::arm_after(&docs, external.path(), 1);
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(baseline));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(outcome.unwrap().downgraded.len(), 1);
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+        let moved = docs.parent().unwrap().join("docs.moved");
+        let held = fs::read_to_string(moved.join(DECISIONS_FILE)).unwrap();
+        assert!(held.contains("only a human accepts an ADR"), "{held}");
+    }
+
+    #[test]
+    fn a_linked_tech_debt_folder_is_not_settled() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        let foreign = sheet("TD-20261011-quality-gate-not-enforced", "foreign", "");
+        fs::write(external.path().join(SHEET), &foreign).unwrap();
+        fs::remove_dir_all(docs.join("tech-debt")).unwrap();
+        std::os::unix::fs::symlink(external.path(), docs.join("tech-debt")).unwrap();
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(outcome.unwrap().settled.is_empty());
+        assert_eq!(
+            fs::read_to_string(external.path().join(SHEET)).unwrap(),
+            foreign
+        );
+    }
+
+    #[test]
+    fn a_docs_folder_outside_the_root_is_refused() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let other = tempfile::tempdir().unwrap();
+        assert!(settle_covered_sheets(other.path(), &docs, run(CI_LABEL_ADR)).is_err());
+    }
 }

@@ -3295,10 +3295,9 @@ pub async fn full_audit(
             .await;
 
             if let Ok((report_path, report, candidates, updated)) = recon_outcome {
-                if let Some(parent) = report_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::fs::write(&report_path, &report) {
+                // Through the rooted primitive (KT-1595): the report lands in a
+                // folder an agent's leftover process may have swapped for a link.
+                match crate::core::fs_guard::guarded_replace(&project_path, &report_path, report.as_bytes()) {
                     Ok(()) => {
                         tracing::info!(
                             "Reconciliation report: {} candidates, {} updated. Written to {}",
@@ -3323,8 +3322,8 @@ pub async fn full_audit(
         // Lists every TD sheet, sub-audits included, in the central index.
         if outcome != RunOutcome::Nothing && should_optimize_documents(kind) {
             let docs = docs_root.dir(&project_path);
-            let baseline = adr_baseline.clone();
-            match tokio::task::spawn_blocking(move || crate::core::td_index::resync(&docs, baseline.trust())).await {
+            let (root, baseline) = (project_path.clone(), adr_baseline.clone());
+            match tokio::task::spawn_blocking(move || crate::core::td_index::resync(&root, &docs, baseline.trust())).await {
                 Ok(Ok(td)) => {
                     yield Event::default().event("td_index").data(serde_json::json!({
                         "changed": td.changed, "listed": td.listed, "settled": td.settled,
@@ -3339,8 +3338,8 @@ pub async fn full_audit(
             }
         } else if outcome != RunOutcome::Nothing {
             // A standalone sub-audit rebuilds no index, but an accepted ADR still settles its sheets.
-            let (docs, baseline) = (docs_root.dir(&project_path), adr_baseline.clone());
-            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::core::adr::settle_covered_sheets(&docs, baseline.trust())).await {
+            let (root, docs, baseline) = (project_path.clone(), docs_root.dir(&project_path), adr_baseline.clone());
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || crate::core::adr::settle_covered_sheets(&root, &docs, baseline.trust())).await {
                 tracing::warn!("ADR check after the sub-audit failed: {e} — audit continues");
             }
         }

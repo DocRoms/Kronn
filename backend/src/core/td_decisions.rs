@@ -9,6 +9,7 @@ use std::path::Path;
 use crate::core::audit_validation::{
     append_history_entry, replace_current_status, td_decision, TdDecision,
 };
+use crate::core::rooted_fd::Dir;
 use crate::core::td_index::{is_td_id, parse_sheet, TdSheet};
 
 const GUARD_REVIEWER: &str = "Kronn decision guard";
@@ -52,7 +53,12 @@ impl RestoreOutcome {
     }
 }
 
-fn sheet_files(td_dir: &Path) -> Vec<(String, String)> {
+/// The `TD-*.md` sheets directly under `td_dir`, read with `read`; none when
+/// `td_dir` is a link (a sheet must live in the repository).
+fn sheet_files(td_dir: &Path, read: impl Fn(&Path) -> Option<String>) -> Vec<(String, String)> {
+    if !crate::core::td_index::is_real_dir(td_dir) {
+        return Vec::new();
+    }
     let Ok(entries) = std::fs::read_dir(td_dir) else {
         return Vec::new();
     };
@@ -62,7 +68,7 @@ fn sheet_files(td_dir: &Path) -> Vec<(String, String)> {
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
             let id = name.strip_suffix(".md").filter(|id| is_td_id(id))?;
-            let content = std::fs::read_to_string(e.path()).ok()?;
+            let content = read(&e.path())?;
             Some((id.to_string(), content))
         })
         .collect();
@@ -74,7 +80,8 @@ fn sheet_files(td_dir: &Path) -> Vec<(String, String)> {
 /// decision: the human postponed it).
 pub fn snapshot(docs_dir: &Path) -> DecisionSnapshot {
     let mut snap = DecisionSnapshot::default();
-    for (id, content) in sheet_files(&docs_dir.join("tech-debt")) {
+    let read = |path: &Path| std::fs::read_to_string(path).ok();
+    for (id, content) in sheet_files(&docs_dir.join("tech-debt"), read) {
         snap.known_ids.insert(id.clone());
         if let Some(decision) = td_decision(&content).filter(|d| d.is_settled()) {
             snap.decided.push(Decided {
@@ -168,38 +175,54 @@ fn flag_duplicate(content: &str, settled: &TdSheet) -> Option<String> {
 /// a decided sheet whose decision changed gets it back (a confirmed sheet the
 /// run deleted stays deleted: reconciliation reports it as possibly fixed);
 /// a new active sheet repeating a settled one is flagged.
-pub fn restore(docs_dir: &Path, snap: &DecisionSnapshot) -> Result<RestoreOutcome, String> {
+///
+/// This runs seconds after the agent's last write, with a process it left
+/// behind possibly still alive: `root` is the project, and every read and
+/// write of a sheet goes through the rooted primitive under it, so a
+/// `tech-debt/` folder (or a parent) swapped for a link never takes a sheet
+/// outside the project (KT-1595). A `docs_dir` outside `root` is refused.
+pub fn restore(
+    root: &Path,
+    docs_dir: &Path,
+    snap: &DecisionSnapshot,
+) -> Result<RestoreOutcome, String> {
+    crate::core::fs_guard::assert_contained_no_symlink(root, docs_dir)?;
     let td_dir = docs_dir.join("tech-debt");
     let mut outcome = RestoreOutcome::default();
     for entry in &snap.decided {
         let path = td_dir.join(format!("{}.md", entry.id));
-        match std::fs::read_to_string(&path) {
-            Ok(current) => {
+        match crate::core::fs_guard::guarded_read(root, &path) {
+            Ok(Some(bytes)) => {
+                let current = String::from_utf8(bytes)
+                    .map_err(|e| format!("read {}: {e}", path.display()))?;
                 if td_decision(&current) == Some(entry.decision) {
                     continue;
                 }
                 let fixed = put_back_decision(&current, entry.decision)
                     .unwrap_or_else(|| entry.content.clone());
-                crate::core::mcp_scanner::atomic_write(&path, &fixed)?;
+                crate::core::fs_guard::guarded_replace(root, &path, fixed.as_bytes())?;
                 outcome.reverted.push(entry.id.clone());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None) => {
                 if !entry.decision.leaves_index() {
                     continue;
                 }
-                if std::fs::symlink_metadata(&path).is_ok() {
-                    continue;
-                }
-                std::fs::create_dir_all(&td_dir)
-                    .map_err(|e| format!("create {}: {e}", td_dir.display()))?;
-                crate::core::mcp_scanner::atomic_write(&path, &entry.content)?;
+                crate::core::fs_guard::guarded_replace(root, &path, entry.content.as_bytes())?;
                 outcome.restored.push(entry.id.clone());
             }
+            // A link at the sheet's own name is left alone, never followed.
+            Err(e) if Dir::is_link_refusal(&e) => continue,
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         }
     }
 
-    let files = sheet_files(&td_dir);
+    let read = |path: &Path| {
+        crate::core::fs_guard::guarded_read(root, path)
+            .ok()
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    };
+    let files = sheet_files(&td_dir, read);
     let sheets: Vec<TdSheet> = files.iter().map(|(id, c)| parse_sheet(id, c)).collect();
     for ((id, content), sheet) in files.iter().zip(&sheets) {
         if snap.known_ids.contains(id) || !sheet.is_active() {
@@ -209,7 +232,8 @@ pub fn restore(docs_dir: &Path, snap: &DecisionSnapshot) -> Result<RestoreOutcom
             continue;
         };
         if let Some(flagged) = flag_duplicate(content, settled) {
-            crate::core::mcp_scanner::atomic_write(&td_dir.join(format!("{id}.md")), &flagged)?;
+            let path = td_dir.join(format!("{id}.md"));
+            crate::core::fs_guard::guarded_replace(root, &path, flagged.as_bytes())?;
         }
         outcome
             .settled_duplicates

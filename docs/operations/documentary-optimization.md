@@ -33,8 +33,8 @@ a parenthesised `(src: file: …)` is refused (only the bracketed marker is
 verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1459-1474#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:1709-1781#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1466-1481#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1716-1788#stack_currency_problems]
 [src: file: backend/src/core/document_optimization.rs:1787-1807#diag]
 
 A citation into a path git ignores (a vendored dependency, a build output) that

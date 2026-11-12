@@ -119,6 +119,9 @@ impl Snapshot {
     }
 
     /// Put every file back; the ones that could not be, with the reason.
+    /// A restored file keeps the permissions it has NOW (the rooted replace
+    /// keeps those of an existing file), not the ones it had when saved: only
+    /// the bytes are put back. Fine for docs, which a run never `chmod`s.
     fn restore(&self) -> Vec<String> {
         let mut failed = Vec::new();
         for (path, saved) in &self.files {

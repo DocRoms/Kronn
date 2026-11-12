@@ -1062,7 +1062,7 @@ pub(crate) fn apply_td_resolutions_at(
     // The decision is on the sheets; the index status column follows them.
     // Only the ADRs this decision appended settle here: the human accepted them.
     let trust = crate::core::adr::Trust::CardAccepted(&card_adrs);
-    if let Err(error) = crate::core::td_index::resync(&docs_dir, trust) {
+    if let Err(error) = crate::core::td_index::resync(&root, &docs_dir, trust) {
         tracing::warn!("Tech-debt index resync after a TD decision failed: {error}");
     }
     Ok(())

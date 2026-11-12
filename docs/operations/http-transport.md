@@ -86,7 +86,7 @@ agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
 [src: file: backend/src/api/audit/document_repair.rs:785-859#split_verified_citations]
-[src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
+[src: file: backend/src/core/audit_state.rs:11#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2559-2589#check_attempt]
 [src: file: backend/src/api/audit/full.rs:1893-1897#max_attempts]
 [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]

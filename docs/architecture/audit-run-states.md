@@ -148,7 +148,7 @@ this degrades and continues.
   bring it, so the blocker stays pre-existing. Only a step *handed* the blocker
   to fix is charged with it afterwards (`release`), and is then retried and
   redone like any other.
-  [src: file: backend/src/api/audit/document_repair.rs:178#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:247#release] [src: file: backend/src/api/audit/full.rs:3373#split_preexisting]
+  [src: file: backend/src/api/audit/document_repair.rs:178#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:247#release] [src: file: backend/src/api/audit/full.rs:3372#split_preexisting]
 - **The exemption is the run's, not the ledger's** (KT-1353). The ledger stores
   the content hash of each pre-existing blocker's document as the run last left
   it (`seal`, after every step and after the final gate's own write). The

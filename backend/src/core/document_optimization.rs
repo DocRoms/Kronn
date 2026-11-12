@@ -241,12 +241,15 @@ pub fn analyze_with(
 pub fn analyze_and_write(project: &Path) -> Result<DocumentaryOptimizationReport, String> {
     let report = analyze(project)?;
     let body = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
-    let target = crate::core::audit_state::state_dir(project)?.join("document-optimization.json");
-    if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(format!("{REPORT_FILE} is a symlink; refusing report write"));
-    }
-    crate::core::mcp_scanner::atomic_write(&target, &format!("{body}\n"))
-        .map_err(|e| format!("write {REPORT_FILE}: {e}"))?;
+    // Through the rooted primitive under the project (KT-1595): the state
+    // folder is created and written without a by-path step an agent's leftover
+    // process could redirect with a link.
+    crate::core::audit_state::write_state_file(
+        project,
+        "document-optimization.json",
+        &format!("{body}\n"),
+    )
+    .map_err(|e| format!("write {REPORT_FILE}: {e}"))?;
     Ok(report)
 }
 
@@ -2956,6 +2959,7 @@ mod tests {
             vec!["docs/tech-debt/TD-20261003-missing.md"]
         );
         crate::core::td_index::resync(
+            root,
             &root.join("docs"),
             crate::core::adr::Trust::RunBaseline {
                 decisions: "",

@@ -78,7 +78,15 @@ mode), `validation` (`settle_unaddressed_signals`, `repair_coverage_rows`),
 `revalidate::apply_reanchors`, the rollback snapshot of `validate_version`,
 the `citation_drift` record, the `checksums` baseline (publish, rollback and
 `acknowledge_sections`) and the TD decisions of
-`audit_validation::apply_td_resolutions_at` with their rollback, and, in `worktree`,
+`audit_validation::apply_td_resolutions_at` with their rollback, the writers that
+run on a project's docs folder after the post-run sweep, each now taking the
+project root next to the docs folder (`td_decisions::restore(root, docs_dir, …)`,
+`adr::settle_covered_sheets(root, docs_dir, …)`, `td_index::resync(root,
+docs_dir, …)`, which refuse a `docs_dir` outside `root`) and the reconciliation
+report of the Full audit, the audit state folder `.kronn/audit` (`audit_state`:
+folder creation, create-new stores, removals, the legacy migration and
+`write_state_file`, used by the documentary-optimization report and the blame
+record of `document_repair`), and, in `worktree`,
 the lane target, the managed worktree folders and the `.git` / `gitdir` files
 `fix_worktree_paths` rewrites (rooted at the worktree and at the repo's `.git`). A `template_reinstall` `Create` is create-only (a file
 that appeared since the plan is never overwritten nor deleted by a rollback) and
@@ -107,20 +115,14 @@ outside the root.
 - Files a spawned `git` or an agent writes by path (the `git mv` of
   `docs_migration` is one: its paths are checked first and its fallback is rooted).
 - Other by-path writers that never call `fs_guard`: `root_agent_files::inject_or_update`,
-  `td_decisions`, `adr`, `skills`, `profiles`, and in `worktree` the copy of the
-  untracked files into a new checkout, the `info/exclude` append and the
-  submodule parent folders.
-- By-path writers into a project's docs folder that can run after an agent and are
-  still open to the swap, left as a follow-up (a decision, not an oversight):
-  `td_index::resync_index` and the `adr` / `td_decisions` settlement it is called
-  with. They take the docs folder, not the project root, and that folder may be a
-  nested path chosen by the project (`docs_location`), so its parent is not a
-  root: rooting them means threading the project root through their callers.
-  `td_index` and `adr` checks are lstat refusals only.
-- By-path writers into the audit state folder `.kronn/audit` (`audit_state`, the
-  documentary-optimization report, the blame record of `document_repair`). It is
-  made by `audit_state::state_dir`, which checks each level with `lstat` and creates
-  it by path; its files are written with `atomic_write`. Not rooted.
+  `skills`, `profiles`, and in `worktree` the copy of the
+  untracked files into a new checkout, the `info/exclude` append (which
+  `audit_state::state_dir` calls, so the local exclude of `.kronn/` is still
+  written by path) and the submodule parent folders.
+- A `tech-debt/` folder that is itself a link is never listed nor rewritten by the
+  sheet listings (`adr`, `td_index`, `td_decisions`): they refuse it with an lstat,
+  like the sweep does. That is a refusal for readability; the containment of the
+  writes never depends on it.
 - `template_reinstall` applies the template's file renames before it writes
   (`apply_renames_in`); a later failure rolls back the files it wrote, not those
   renames.
