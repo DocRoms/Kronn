@@ -106,6 +106,27 @@ describe('ExternalApiSection — Kronn tools switch (KT-1600)', () => {
     await waitFor(() => expect(updateMock).toHaveBeenCalledWith('off', expect.objectContaining({ tools_enabled: true })));
   });
 
+  it('says it in plain words in every language (KT-1687)', async () => {
+    const [en, fr, es, zh] = (await Promise.all([
+      import('../../../lib/i18n/locales/en'),
+      import('../../../lib/i18n/locales/fr'),
+      import('../../../lib/i18n/locales/es'),
+      import('../../../lib/i18n/locales/zh'),
+    ])).map(module => module.default as Record<string, string>);
+    expect(en['agents.tools']).toBe('Can act in Kronn');
+    expect(fr['agents.tools']).toBe('Peut agir dans Kronn');
+    expect(en['agents.toolsHint']).toBe(
+      'Lets this model read your discussions, start automations or call your APIs from a conversation. Turn it off if the model answers oddly: some models cannot use these tools.',
+    );
+    expect(fr['agents.toolsHint']).toBe(
+      'Autorise ce modèle à lire vos discussions, lancer des automatisations ou appeler vos API depuis une conversation. Désactivez-le si ce modèle répond de façon étrange : certains ne savent pas utiliser ces outils.',
+    );
+    for (const locale of [en, fr, es, zh]) {
+      expect(locale['agents.tools']).not.toMatch(/outils kronn|kronn tools|herramientas de kronn/i);
+      expect(locale['agents.toolsHint'].length).toBeGreaterThan(40);
+    }
+  });
+
   it('opens an unset saved connection with the switch on', async () => {
     listMock.mockResolvedValue([conn({ id: 'plain', endpoint: 'https://a.example.test' })]);
     renderSection();

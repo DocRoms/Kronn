@@ -1371,6 +1371,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Required sentinel proving the current tool contract was transported. scoped requires worker_scope; generic forbids it."},
                 "worker_scope": worker_scope_schema.clone(),
                 "validations": validations_schema("Optional: the gates you will launch with. A command that could never run (shell syntax, a binary off the allowlist) makes launchable false, with the form that runs."),
+                "base_rev": {"type": "string", "description": "Optional: the integration branch you will launch with. A branch checked out in the owner's working checkout or in a worktree Kronn does not own makes launchable false. Absent: the room's declared integration branch is checked."},
                 "max_review_rounds": max_review_rounds_schema()
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
@@ -1383,7 +1384,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker": {"type": "object"},
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Must exactly match the preflighted scope intent."},
                 "worker_scope": worker_scope_schema,
-                "base_rev": {"type": "string"},
+                "base_rev": {"type": "string", "description": "The integration branch: the task branch is cut from it and integrates back into it. Absent: the room's declared integration branch (its campaign target); with none declared the launch is refused, it never defaults to `main`. A branch checked out in the owner's working checkout is refused."},
                 "idempotency_key": {"type": "string"},
                 "validations": validations_schema("Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest. Refused at launch when a command could never run."),
                 "max_review_rounds": max_review_rounds_schema(),
@@ -2798,6 +2799,7 @@ impl KronnToolExecutor {
                     Err(error) => return fail(call, error),
                 };
                 let parent = discussion_id;
+                let base_rev = required_string(call, "base_rev");
                 crate::api::orchestration::reclaim_finished_worktrees_for_launch(
                     &self.state.db,
                     &task_reference,
@@ -2813,6 +2815,11 @@ impl KronnToolExecutor {
                             &task_reference,
                             &parent,
                             &worker,
+                        )?;
+                        crate::api::orchestration::integration_target_preparation(
+                            conn,
+                            &mut preparation,
+                            base_rev.as_deref(),
                         )?;
                         preparation.warnings.extend(full_suite_warnings);
                         preparation.default_max_review_rounds =
@@ -4606,6 +4613,14 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              agent_list, `worker_scope_intent` (`generic`, or `scoped` with a `worker_scope`), and \
              optionally the `validations` you will launch with. Only `launchable: true` permits a \
              matching task_exec_launch.\n\n\
+             **Integration target** — pass the `base_rev` you will launch with, or leave it out \
+             to check the room's declared integration branch (its campaign target). A branch \
+             checked out in the owner's working checkout, or in a worktree Kronn does not own, \
+             makes the answer `launchable: false` with reason \
+             `integration_target_owner_checkout` or `integration_target_foreign_worktree`: \
+             integration writes into the checkout that holds the branch. With no `base_rev` \
+             and no declared branch the answer carries an `integration_target_undeclared` \
+             warning, and task_exec_launch refuses: it never defaults to `main`.\n\n\
              **Review rounds** — `max_review_rounds` (prepare and launch) is the number of \
              `request_changes` rounds before the execution escalates: an integer from 1 to 1000 \
              or `\"unlimited\"` (no cap; a looping review burns tokens until a stall or a \

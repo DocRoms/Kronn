@@ -1081,7 +1081,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; lane_seeds_copy_enabled?: boolean; lane_seeds_adopt_suggested?: boolean; lane_seeds_strong_confirm?: boolean; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; disk_launch_min_free_gib?: number; disk_sweep_idle_hours?: number; disk_stalled_build_days?: number; lane_seeds_copy_enabled?: boolean; lane_seeds_adopt_suggested?: boolean; lane_seeds_strong_confirm?: boolean; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -4280,7 +4280,7 @@ export const runsApi = {
 
 // ─── Disk (KT-1318) ───────────────────────────────────────────────────────────
 export type DiskKind = 'worktree' | 'lane_build_dir' | 'cache';
-export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign';
+export type DiskState = 'orphan' | 'reclaimable' | 'active' | 'kept' | 'foreign' | 'stalled';
 
 export interface DiskOwner {
   task_ref: string | null;
@@ -4293,8 +4293,10 @@ export interface DiskEntry {
   kind: DiskKind;
   path: string;
   name: string;
-  /** A floor when `bytes_are_partial`. */
+  /** Apparent bytes: blocks a cloned build dir shares with the seed are counted in full. A floor when `bytes_are_partial`. */
   bytes: number;
+  /** Real bytes (no other file shares them): what deleting really frees. Null when the file system cannot say. */
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   idle_seconds: number | null;
   owner: DiskOwner | null;
@@ -4308,13 +4310,18 @@ export interface DiskKindTotal {
   kind: DiskKind;
   entries: number;
   bytes: number;
+  /** Null as soon as one entry of the kind could not say. */
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   orphan_bytes: number;
+  orphan_unique_bytes: number;
 }
 
 export interface DiskPolicy {
   launch_min_free_gib: number;
   sweep_idle_hours: number;
+  /** Days a Blocked/Interrupted execution's build dir must be idle before it is purgeable. */
+  stalled_build_days: number;
   warning_gib: number;
   critical_gib: number;
 }
@@ -4325,7 +4332,10 @@ export interface DiskReport {
   policy: DiskPolicy;
   volumes: { project_id: string; project_name: string; path: string; available_bytes: number | null; total_bytes: number | null }[];
   totals: DiskKindTotal[];
+  apparent_bytes: number;
+  unique_bytes: number | null;
   orphan_bytes: number;
+  orphan_unique_bytes: number;
   orphan_count: number;
   entries: DiskEntry[];
 }
@@ -4334,6 +4344,7 @@ export interface DiskPurgeItem {
   path: string;
   purged: boolean;
   bytes: number;
+  unique_bytes: number | null;
   bytes_are_partial: boolean;
   reason: string | null;
 }
@@ -4342,7 +4353,10 @@ export interface DiskPurgeResult {
   mode: 'orphans' | 'entries';
   items: DiskPurgeItem[];
   freed_bytes: number;
+  /** What the volume really gained (unique bytes where known, else apparent). */
+  freed_unique_bytes: number;
   kept: number;
+  available_bytes_before: number | null;
   available_bytes_after: number | null;
 }
 

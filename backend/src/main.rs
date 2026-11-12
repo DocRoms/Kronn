@@ -408,6 +408,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             config.server.disk_launch_min_free_gib,
             config.server.disk_sweep_idle_hours,
         );
+        kronn::core::disk_usage::set_stalled_build_days(config.server.disk_stalled_build_days);
         // KT-1438 — the lane-seed switches, before the first worktree of this boot.
         kronn::core::task_worker_lane_seeds::set_seed_policy(
             config.server.lane_seeds_copy_enabled,

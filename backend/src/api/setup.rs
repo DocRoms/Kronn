@@ -896,7 +896,9 @@ fn normalize_mention_color(color: Option<&str>) -> Result<Option<String>, &'stat
 /// POST /api/config/agent-tools
 /// Set (or clear) the operator switch for the Kronn tool executor on one HTTP
 /// agent (KT-1600). CLI agents bring their own tools and have no such switch;
-/// a named `Custom` connection carries its own setting on the connection.
+/// a named `Custom` connection carries its own setting on the connection, and
+/// so do LiteLLM and NVIDIA since KT-1687: their agent slot follows the switch
+/// of the provider's default connection (`sync_runtime_config`).
 pub async fn set_agent_tools(
     State(state): State<AppState>,
     Json(req): Json<SetAgentToolsRequest>,
@@ -904,9 +906,7 @@ pub async fn set_agent_tools(
     let mut config = state.config.write().await;
     let agent = match req.agent {
         AgentType::Ollama => &mut config.agents.ollama,
-        AgentType::LiteLlm => &mut config.agents.lite_llm,
-        AgentType::Nvidia => &mut config.agents.nvidia,
-        AgentType::Custom => {
+        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
             return Json(ApiResponse::err(
                 "Set the tools option on the external API connection itself",
             ))
@@ -1008,6 +1008,7 @@ pub async fn get_server_config(
         run_payload_retention_days: config.server.run_payload_retention_days,
         disk_launch_min_free_gib: config.server.disk_launch_min_free_gib,
         disk_sweep_idle_hours: config.server.disk_sweep_idle_hours,
+        disk_stalled_build_days: config.server.disk_stalled_build_days,
         p2p_enabled: config.server.p2p_enabled,
         frontend_origins: config.server.frontend_origins.clone(),
         lane_seeds_copy_enabled: config.server.lane_seeds_copy_enabled,
@@ -1092,6 +1093,10 @@ pub async fn set_server_config(
     if let Some(hours) = req.disk_sweep_idle_hours {
         config.server.disk_sweep_idle_hours =
             hours.clamp(crate::core::disk_usage::MIN_SWEEP_IDLE_HOURS, 24 * 365);
+    }
+    if let Some(days) = req.disk_stalled_build_days {
+        config.server.disk_stalled_build_days =
+            days.clamp(crate::core::disk_usage::MIN_STALLED_BUILD_DAYS, 365);
     }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {

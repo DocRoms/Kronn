@@ -125,7 +125,7 @@ encrypted with the instance key in the `stored_credentials` table since 0.14.3
 `config.toml` without them. `#[ts(skip)]` only keeps the value out of the
 generated TypeScript model. See [key-management.md](key-management.md).
 [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
-[src: file: backend/src/models/setup.rs:644-649#ApiKey]
+[src: file: backend/src/models/setup.rs:655-660#ApiKey]
 
 Deletion is not transactional across SQLite and the local configuration. Kronn
 deletes the connection row first, then removes the matching token entry from a
@@ -140,7 +140,7 @@ from the API keys.
 Mention the saved alias, such as `@nvidia` or `@company-proxy`, in the message.
 Kronn resolves named connection mentions before canonicalizing the requested
 agent targets, and carries the exact connection identifier in that target.
-[src: file: backend/src/db/external_api_connections.rs:201-235#target_for_connection]
+[src: file: backend/src/db/external_api_connections.rs:228-262#target_for_connection]
 [src: file: backend/src/api/discussions/messaging.rs:571-603#resolve_connection_mentions]
 
 The new-discussion form merges configured OpenRouter/Other aliases with native
@@ -161,7 +161,7 @@ the same per-turn aggregation as LiteLLM and NVIDIA.
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
-wrong endpoint. [src: file: backend/src/db/external_api_connections.rs:178-199#ensure_mention_alias_available]
+wrong endpoint. [src: file: backend/src/db/external_api_connections.rs:203-224#ensure_mention_alias_available]
 
 ### A connection is an agent everywhere, not only in the router (0.13.0)
 
@@ -197,7 +197,7 @@ stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
 configuration did not contain one. [src: file: backend/src/lib.rs:187-210#bootstrap_external_api_connections]
-[src: file: backend/src/db/external_api_connections.rs:334-365#backfill_legacy_config]
+[src: file: backend/src/db/external_api_connections.rs:359-390#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
 their endpoint and Economy, Default and Reasoning models. Saving either card
@@ -206,7 +206,7 @@ previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2125-2129#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1872-1877#onModelTiersChanged]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1862-1867#onModelTiersChanged]
 
 The former standalone LiteLLM settings card (`LiteLlmCard`) and its frontend
 client were removed (KT-668): nothing mounted them, and the named connection
@@ -249,7 +249,7 @@ those tokens ahead of the call.
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
   [src: file: backend/src/core/token_checks.rs:326-344#spawn_scheduler]
-  [src: file: backend/src/lib.rs:2541-2543#check_token]
+  [src: file: backend/src/lib.rs:2546-2548#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
   OAuth / token-exchange refresh included), with the 15 s timeout of the
@@ -315,9 +315,9 @@ those tokens ahead of the call.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:16161-16167#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:16320-16326#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6183-6198#call_agent_list]
-  [src: file: backend/src/db/external_api_connections.rs:144-162#resolve]
+  [src: file: backend/src/db/external_api_connections.rs:167-185#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]
   [src: file: backend/src/api/media.rs:449-478#usable_connections]
 - **Wrong model after an endpoint edit:** test again before selecting tiers;

@@ -263,7 +263,7 @@ describe('WorkflowDetail — header actions', () => {
     });
     const entry = screen.getByTestId('wf-shadow-entry');
     expect(entry).toHaveAttribute('data-active', 'true');
-    expect(entry.textContent).toMatch(/wf\.shadow\.entryOn/);
+    expect(entry.textContent).toMatch(/wf\.shadow\.entryShadowsMany.*wf\.shadow\.entryStepsOne/);
     expect(entry).toHaveAccessibleName(expect.stringContaining('wf.shadow.entryTitleOn'));
   });
 

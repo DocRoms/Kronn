@@ -5411,6 +5411,11 @@ redirects_to: Array<string>, };
 export type IntegrationStrategy = "two_phase_ff_only";
 
 /**
+ * Who holds the integration target branch (KT-1688).
+ */
+export type IntegrationTargetState = "kronn_worktree" | "not_checked_out" | "owner_checkout" | "foreign_worktree" | "unresolved";
+
+/**
  * A `kronn-question` fence that no card could be recorded from.
  */
 export type InvalidCard = {
@@ -9868,6 +9873,12 @@ disk_launch_min_free_gib: number,
  */
 disk_sweep_idle_hours: number,
 /**
+ * KT-1691 — days a Blocked or Interrupted execution's lane build dir must
+ * have been unwritten before it becomes purgeable (by a confirmed
+ * per-entry delete, never by a sweep). Its worktree and branch stay.
+ */
+disk_stalled_build_days: number,
+/**
  * Maximum concurrent agent processes (default: 5)
  */
 max_concurrent_agents: number,
@@ -10070,7 +10081,12 @@ disk_launch_min_free_gib: number,
 /**
  * KT-1318 - hours a lane build dir must be idle before a sweep may take it.
  */
-disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+disk_sweep_idle_hours: number,
+/**
+ * KT-1691 - days a Blocked/Interrupted execution's build dir must be idle
+ * before it becomes purgeable.
+ */
+disk_stalled_build_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
  * KT-1438 - copy lane seeds into task worktrees (default on).
  */
@@ -11251,7 +11267,12 @@ export type TaskExecutionAuditEvent = { id: string, action: string, from_status:
  * sourced from the orchestration aggregate; task DoD, manifests, validations
  * and telemetry are joined here so clients never reconstruct lineage from chat.
  */
-export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>,
+export type TaskExecutionDetail = { lineage: TaskExecutionLineage, target_branch: string | null,
+/**
+ * KT-1688 — the integration target's worktree and who owns it, so a wrong
+ * target shows before the integration, not at it.
+ */
+integration_target?: TaskExecutionIntegrationTarget, definition_of_done: Array<PlanningDodItem>, attempts: Array<TaskExecutionAttemptDetail>,
 /**
  * Every CLI session the worker ran, attempts and relaunches included, oldest
  * first (KT-911). Empty for a worker with no CLI session (HTTP providers).
@@ -11321,6 +11342,15 @@ cached_prompt_tokens: number, cache_reported_turns: number,
  * Sum over the `cache_write_reported_turns` that reported a cache write only.
  */
 cache_write_prompt_tokens: number, cache_write_reported_turns: number, eval_tokens: number, traffic_tokens: number, peak_context_tokens: number, duration_ms: number, phases: Array<TaskExecutionHttpPhaseUsage>, recent_turns: Array<TaskExecutionHttpTurnUsage>, };
+
+/**
+ * Where an execution's integration will land, visible before it happens.
+ */
+export type TaskExecutionIntegrationTarget = { branch: string,
+/**
+ * The worktree that holds `branch`; absent when none does.
+ */
+worktree?: string, state: IntegrationTargetState, };
 
 /**
  * A resolved TaskExecution + its lineage, answerable in one query (DoD-4):

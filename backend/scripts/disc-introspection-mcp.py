@@ -7853,6 +7853,11 @@ def call_disk_usage(args):
         "totals": report.get("totals"),
         "orphan_count": report.get("orphan_count"),
         "orphan_bytes": report.get("orphan_bytes"),
+        # KT-1691: `bytes` counts the blocks a cloned lane shares with the seed
+        # in full; `unique_bytes` is the real figure (null when unknown).
+        "apparent_bytes": report.get("apparent_bytes"),
+        "unique_bytes": report.get("unique_bytes"),
+        "orphan_unique_bytes": report.get("orphan_unique_bytes"),
         "entries_total": len(entries),
         "entries": entries[:limit],
     })
@@ -10867,8 +10872,10 @@ TOOL_MANUALS["disk_usage"] = (
     "`lane_build_dir`, `cache`), `orphan_*` and `available_bytes` cover the whole instance. "
     "`entries` (largest first, 25 max; `entries_total` is the count) are your own project's "
     "only, with `task_ref`, `execution_id`, `status`, `idle_seconds` and a `state`: `orphan` "
-    "(finished, no live worktree, idle), `reclaimable`, `active`, `kept`, `foreign`; sizes are "
-    "floors when `bytes_are_partial`. `scoped: true` = this view.\n\n"
+    "(finished, no live worktree, idle), `reclaimable`, `active`, `kept`, `foreign`, `stalled` "
+    "(Blocked/Interrupted, build dir idle for days); `bytes` are apparent (a lane cloned from the "
+    "seed counts shared blocks in full), `unique_bytes` is what deleting really frees (null = "
+    "unknown); sizes are floors when `bytes_are_partial`. `scoped: true` = this view.\n\n"
     "Read-only: purging is a human action in Settings > Disk. Tell the user when "
     "`under_pressure` or `orphan_bytes` is large; do not try to purge. Another project's id is refused."
 )

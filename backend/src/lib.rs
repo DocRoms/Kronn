@@ -201,6 +201,10 @@ pub async fn bootstrap_external_api_connections(
                 conn,
                 &legacy_connection_config,
             )?;
+            crate::db::external_api_connections::carry_agent_tools_off(
+                conn,
+                &legacy_connection_config,
+            )?;
             crate::db::external_api_connections::runtime_connections(conn)
         })
         .await?;
