@@ -13,6 +13,7 @@ import { slugify } from './mcpPageHelpers';
 import { accessHealth, diagnosticLabel } from './pluginHealth';
 import { PluginHealthBadge } from './PluginHealthBadge';
 import { TokenRefusedNotice } from './TokenRefusedNotice';
+import { TokenCheckStatus } from './TokenCheckStatus';
 import type { McpPageState } from './useMcpPageState';
 
 /**
@@ -27,6 +28,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     t, projects, mcpOverview, mcpRegistry,
     probeByConfig, probingConfigId, handleProbeConfig,
     probeTestedAtByConfig, driftBySlug,
+    checkingTokenId, handleCheckToken,
     handleSetPreferredInterface,
     editingLabelId, editingLabelText, setEditingLabelId, setEditingLabelText, handleSaveLabel,
     editingCustomServerId,
@@ -212,6 +214,14 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
               setActiveTab('credentials');
               if (editingEnvId !== cfg.id) void handleStartEditSecrets(cfg.id);
             }}
+          />
+        )}
+        {cfg.server_id && cfgServer?.api_spec && (
+          <TokenCheckStatus
+            cfg={cfg}
+            t={t}
+            checking={checkingTokenId === cfg.id}
+            onCheck={() => void handleCheckToken(cfg.id)}
           />
         )}
         {cfg.registry_drift && (

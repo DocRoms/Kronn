@@ -20,6 +20,7 @@ import { agentSettingsForSelection } from '../../lib/agentSelection';
 import { SearchableSelect } from '../SearchableSelect';
 import { ModelCatalogPicker } from '../ModelCatalogPicker';
 import { FallbackOverride } from '../settings/FallbackOverride';
+import { modeOfTier } from '../../lib/fallbackChain';
 import { MarkdownEditor } from '../MarkdownComposerTools';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
@@ -312,6 +313,24 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     ? installedAgentTypes
     : ALL_AGENT_TYPES
   ).map(at => ({ type: at, label: AGENT_LABELS[at] ?? at }));
+  // KT-1693 — the step's own fallback for the mode it runs in, right under the
+  // agent/mode choice it depends on (not folded in the advanced settings): the
+  // agent's row applies unless the step overrides or cuts it.
+  const renderStepFallback = (step: WorkflowStep, index: number) => (
+    <div className="wf-step-fallback" data-testid={`wiz-step-${index}-fallback-block`}>
+      <label className="wf-label">{t('fallback.stepTitle')}</label>
+      <small className="text-2xs">{t('fallback.stepHint')}</small>
+      <FallbackOverride
+        testId={`wiz-step-${index}-fallback`}
+        origin={step.agent}
+        mode={modeOfTier(step.agent_settings?.tier)}
+        value={step.agent_settings?.fallback ?? null}
+        onChange={async next => updateStep(index, {
+          agent_settings: { ...step.agent_settings, fallback: next ?? undefined }
+        })}
+      />
+    </div>
+  );
   const renderAgentTierPicker = (step: WorkflowStep, onUpdate: (patch: Partial<WorkflowStep>) => void, compact = false) => (
     <AgentSwitchPicker
       currentAgent={step.agent}
@@ -1661,6 +1680,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               />
             )}
           </div>
+          {steps[0] && (!steps[0].step_type || steps[0].step_type.type === 'Agent') && (
+            <div className="mb-6">{renderStepFallback(steps[0], 0)}</div>
+          )}
 
           <label className="wf-label">
             {t('wiz.promptLabel')} <HelpTip hint={t('wiz.helpPromptSimple')} />
@@ -2379,6 +2401,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   <div className="wf-step-agent-routing">
                     <label className="wf-label">{t('wiz.agentAndTierLabel')}</label>
                     {renderAgentTierPicker(step, patch => updateStep(i, patch))}
+                    {renderStepFallback(step, i)}
                     {/* KT-1696 — the shadows sit right under the agent, not in « Advanced ». */}
                     <StepShadowRows
                       step={step}
@@ -4551,18 +4574,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             />
                           </div>
                         </div>
-                        {/* KT-1518 — this step's own fallback chain: the agent's default
-                            applies unless the step overrides or cancels it. */}
-                        <label className="wf-label">{t('fallback.stepTitle')}</label>
-                        <small className="text-2xs">{t('fallback.stepHint')}</small>
-                        <FallbackOverride
-                          testId={`wiz-step-${i}-fallback`}
-                          origin={step.agent}
-                          value={step.agent_settings?.fallback ?? null}
-                          onChange={async next => updateStep(i, {
-                            agent_settings: { ...step.agent_settings, fallback: next ?? undefined }
-                          })}
-                        />
                       </div>
                     )}
 

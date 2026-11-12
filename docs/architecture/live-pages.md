@@ -699,7 +699,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:5147-5155#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:5159-5167#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -747,7 +747,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:5271-5281#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5280-5290#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 

@@ -109,7 +109,7 @@ export function QuotaAgentSwitch({
     return () => { cancelled = true; };
   }, []);
 
-  // KT-1518 — the agent's own fallback chain is the alternative to waiting: its
+  // KT-1518 — the agent's own fallback is the alternative to waiting: its
   // first link is offered first, and preselected until the person picks another.
   const [fallbackAgent, setFallbackAgent] = useState<AgentType | null>(null);
   useEffect(() => {
@@ -118,7 +118,9 @@ export function QuotaAgentSwitch({
     void Promise.resolve().then(() => configApi.getAgentFallback()).then(
       (overview) => {
         if (cancelled) return;
-        const chain = overview?.chains.find(candidate => candidate.agent === current);
+        // One row per mode now: the standard one speaks for the step, else the first that has a fallback.
+        const rows = overview?.chains.filter(candidate => candidate.agent === current) ?? [];
+        const chain = rows.find(candidate => candidate.mode === 'standard') ?? rows[0];
         setFallbackAgent(chain?.links[0]?.agent ?? null);
       },
       () => { /* no chain to show: the plain list stands */ },

@@ -56,6 +56,8 @@ import type {
   McpProbeResponse,
   McpRescanReport,
   McpTestAllResponse,
+  McpTokenCheckAllResponse,
+  McpTokenCheckResult,
   InviteResponse,
   MessageSearchHit,
   DiscLinkRequest,
@@ -116,6 +118,7 @@ import type {
   SetAgentFallbackRequest,
   DiscussionFallback,
   AgentFallback,
+  FallbackMode,
   FallbackOverview,
   SetAgentMentionColorRequest,
   AgentsConfig,
@@ -989,7 +992,7 @@ export const config = {
   getAgentAccessEffective: () => api<AgentEffectiveAccess[]>('GET', '/config/agent-access/effective'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
   setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
-  /** KT-1518 — every agent's fallback chain and the cooldowns still running. */
+  /** KT-1693 — every mode row that has a fallback, and the cooldowns still running. */
   getAgentFallback: () => api<FallbackOverview>('GET', '/config/agent-fallback'),
   /** Sets the whole chain of agents that take over, in order, when this one is unavailable (empty cuts it); a loop, an over-long chain or a broader access is refused with the reason. */
   setAgentFallback: (req: SetAgentFallbackRequest) =>
@@ -1974,6 +1977,11 @@ export const mcps = {
   refresh: (dryRun = false) =>
     api<McpRescanReport>('POST', `/mcps/refresh${dryRun ? '?dry_run=true' : ''}`),
   testAll: () => api<McpTestAllResponse>('POST', '/mcps/test-all'),
+  /** KT-1692 — probe one connection's token now (rate-limited server side). */
+  checkToken: (configId: string) =>
+    api<McpTokenCheckResult>('POST', `/mcps/configs/${encodeURIComponent(configId)}/check-token`),
+  /** KT-1692 — "Check all": probe every connection that has a test endpoint. */
+  checkTokens: () => api<McpTokenCheckAllResponse>('POST', '/mcps/check-tokens'),
   previewBundle: (request: PluginBundleSelectionRequest) =>
     api<PluginBundlePreview>('POST', '/mcps/bundles/preview', request),
   exportBundle: async (
@@ -2149,11 +2157,11 @@ export const discussions = {
     api<DiscussionAgentHandoffMode>('GET', `/discussions/${id}/agent-handoffs`),
   executionVariableRetention: (id: string) =>
     api<DiscussionExecutionVariableRetention>('GET', `/discussions/${id}/execution-variable-retention`),
-  /** KT-1518 — this discussion's own fallback chain (`chain_override` absent: the agent's default chain applies). */
+  /** KT-1693 — what this discussion overrides, per mode (a mode with no override follows the agent's default). */
   fallback: (id: string) => api<DiscussionFallback>('GET', `/discussions/${id}/fallback`),
-  /** `null` removes the override; `[]` cancels the fallback in this discussion; a refused chain rejects with its reason. */
-  setFallback: (id: string, chainOverride: AgentFallback[] | null) =>
-    api<DiscussionFallback>('PUT', `/discussions/${id}/fallback`, { chain_override: chainOverride }),
+  /** Overrides one mode: `null` removes the override (back to the default); `[]` cuts the fallback on that mode; a refused chain rejects with its reason. */
+  setFallback: (id: string, mode: FallbackMode, chainOverride: AgentFallback[] | null) =>
+    api<DiscussionFallback>('PUT', `/discussions/${id}/fallback`, { mode, chain_override: chainOverride }),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Unified "join by code": paste any `kr-join-…` token and the backend
    *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend

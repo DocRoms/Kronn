@@ -2513,6 +2513,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/mcps/registry", get(api::mcps::list_registry))
         .route("/api/mcps/refresh", post(api::mcps::refresh))
         .route("/api/mcps/test-all", post(api::mcps::test_all_configs))
+        .route("/api/mcps/check-tokens", post(api::mcps::check_all_tokens))
         .route(
             "/api/mcps/bundles/preview",
             post(api::plugin_portability::preview_plugin_bundle),
@@ -2539,6 +2540,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/mcps/configs/{id}/probe",
             post(api::mcps::probe_config),
+        )
+        .route(
+            "/api/mcps/configs/{id}/check-token",
+            post(api::mcps::check_token),
         )
         .route(
             "/api/mcps/servers/{server_id}/access-policy",
