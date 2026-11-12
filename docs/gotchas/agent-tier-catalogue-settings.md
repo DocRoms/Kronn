@@ -52,7 +52,7 @@ is appended separately.
 [src: file: frontend/src/components/settings/OllamaCard.tsx:174-202#refresh]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:236-259#pickTierModel]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:261-317#saveContextOverride]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:637-638#tiersLoadError]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:641-642#tiersLoadError]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:648-652#configuredDefault]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:105-141#merges]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:182-194#initial]
@@ -252,7 +252,7 @@ Unavailable known entries remain disabled. Clearing an override is explicit
 and leaves tier resolution to the caller/backend.
 [src: file: frontend/src/components/ModelCatalogPicker.tsx:21-71#ModelCatalogPicker]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:309-315#ModelCatalogPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4513-4528#ModelCatalogPicker]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4519-4534#ModelCatalogPicker]
 
 Reasoning choices come from the effective model's `reasoning_modes`, not a
 fixed low/medium/high list. An existing value absent from that list is retained
@@ -306,8 +306,8 @@ configuration. The callback updates only the compensation step, not the main
 pipeline. Search, exact connection namespaces, provenance and unavailable tiers
 therefore share the existing picker behavior.
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:313-342#renderAgentTierPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:5012-5015#updateRb]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:311-315#renderAgentTierPicker]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:5018-5021#updateRb]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:312-316#renderAgentTierPicker]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.coverage.test.tsx:984-1048#recover]
 
 Five picker controls failed against the previous compensation form; the

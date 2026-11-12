@@ -26,7 +26,7 @@ import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
 import { StepShadowRows } from './StepShadowRows';
-import { hasShadowBlock } from './shadowRowModel';
+import { hasShadowBlock, resolveAgentModel, stepMainAgent } from './shadowRowModel';
 import { runShadowSummary, type ShadowEdit } from '../../lib/shadowMerge';
 import { RunStatusTrail } from './RunDetail';
 import { LoadedRunDetail } from './LoadedRunDetail';
@@ -1395,7 +1395,7 @@ function StepAgentSwitcher({
       ariaLabel={t('wf.stepAgentSwitchLabel', step.name, AGENT_LABELS[step.agent] ?? step.agent)}
       needsFullAccess={agent => requiresFullAccessToRun(agentAccess, agent)}
       staticClassName={compact ? 'wf-pipe-chip-agent' : 'wf-step-agent-static'}
-      suffix={showModel && !onChange ? step.agent_settings?.model ?? undefined : undefined}
+      suffix={showModel && !onChange ? resolveAgentModel(stepMainAgent(step), agentChoices ?? [], agentAccess?.model_tiers) || undefined : undefined}
     />
   );
 }
@@ -1485,6 +1485,7 @@ function SubWorkflowOverview({
           steps={workflow.steps}
           selectedStepIndex={selectedIndex}
           onSelectStep={setSelectedIndex}
+          modelTiers={agentAccess?.model_tiers}
           t={t}
         />
         <div className="wf-steps-pipeline" data-layout="index" role="list">
@@ -2049,6 +2050,8 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                 steps={workflow.steps}
                 selectedStepIndex={selectedStepIndex}
                 onSelectStep={index => selectStep(index)}
+                choices={agentChoices}
+                modelTiers={agentAccess?.model_tiers}
                 t={t}
               />
               {/* Compact pipeline — the map explains control flow, while these
@@ -2098,6 +2101,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                             step={step}
                             nextStepName={workflow.steps[i + 1]?.name}
                             choices={agentChoices}
+                            modelTiers={agentAccess?.model_tiers}
                             mainPicker={hasShadowBlock(step) ? agentPicker(step, i) : undefined}
                             onEdit={onChangeStepShadows ? edit => void onChangeStepShadows(i, edit) : undefined}
                             t={t}

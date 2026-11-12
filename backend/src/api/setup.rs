@@ -896,7 +896,9 @@ fn normalize_mention_color(color: Option<&str>) -> Result<Option<String>, &'stat
 /// POST /api/config/agent-tools
 /// Set (or clear) the operator switch for the Kronn tool executor on one HTTP
 /// agent (KT-1600). CLI agents bring their own tools and have no such switch;
-/// a named `Custom` connection carries its own setting on the connection.
+/// a named `Custom` connection carries its own setting on the connection, and
+/// so do LiteLLM and NVIDIA since KT-1687: their agent slot follows the switch
+/// of the provider's default connection (`sync_runtime_config`).
 pub async fn set_agent_tools(
     State(state): State<AppState>,
     Json(req): Json<SetAgentToolsRequest>,
@@ -904,9 +906,7 @@ pub async fn set_agent_tools(
     let mut config = state.config.write().await;
     let agent = match req.agent {
         AgentType::Ollama => &mut config.agents.ollama,
-        AgentType::LiteLlm => &mut config.agents.lite_llm,
-        AgentType::Nvidia => &mut config.agents.nvidia,
-        AgentType::Custom => {
+        AgentType::LiteLlm | AgentType::Nvidia | AgentType::Custom => {
             return Json(ApiResponse::err(
                 "Set the tools option on the external API connection itself",
             ))

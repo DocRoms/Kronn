@@ -19,10 +19,10 @@ import {
 } from '../../lib/shadowMerge';
 import { MAX_SHADOWS, stepCanCarryShadows } from './StepShadowsEditor';
 import { ShadowAgentPicker, TransportBadge, type MainAgent } from './ShadowAgentPicker';
-import { agentModelLabel } from './shadowRowModel';
+import { agentModelLabel, stepMainAgent } from './shadowRowModel';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
 import './StepShadowRows.css';
-import type { StepShadow, WorkflowStep } from '../../types/generated';
+import type { ModelTiersConfig, StepShadow, WorkflowStep } from '../../types/generated';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
 
@@ -31,6 +31,8 @@ interface Props {
   /** The step the result goes to, when there is one. */
   nextStepName?: string;
   choices?: readonly AgentSwitchTarget[];
+  /** The agent families' configured models: they name the default model of an agent. */
+  modelTiers?: ModelTiersConfig | null;
   /** Applies an edit; without it the rows only show. */
   onEdit?: (edit: ShadowEdit) => void;
   /** Offer « + Shadow » on a step that has none yet. */
@@ -112,15 +114,16 @@ function Toggle({ kind, on, label, title, disabled, onClick, testId }: {
   );
 }
 
-export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmpty = false, mainPicker, t, testId = 'wf-shadow-rows' }: Props) {
+export function StepShadowRows({ step, nextStepName, choices, modelTiers, onEdit, addWhenEmpty = false, mainPicker, t, testId = 'wf-shadow-rows' }: Props) {
   const shadows = step.shadows ?? [];
   const merge = step.shadow_merge;
   if (!stepCanCarryShadows(step) || (shadows.length === 0 && !(addWhenEmpty && onEdit))) return null;
 
-  const main: MainAgent = { agent: step.agent, connectionId: step.agent_settings?.connection_id, model: step.agent_settings?.model };
+  const main: MainAgent = stepMainAgent(step);
   const merged = activeMergedIds(merge, shadows);
   const targets = choices ?? [];
-  const agentName = (shadow: StepShadow) => agentModelLabel(shadow.agent, main, targets, t);
+  const mainLabel = agentModelLabel(undefined, main, targets, t, modelTiers);
+  const agentName = (shadow: StepShadow) => agentModelLabel(shadow.agent, main, targets, t, modelTiers);
   const mergedNames = shadows.filter(shadow => merged.includes(shadow.id)).map(shadow => t('wf.shadow.rows.shadowNamed', agentName(shadow)));
   const editable = !!onEdit;
 
@@ -130,7 +133,7 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
         <div className="wf-shadow-subrow wf-shadow-principal" data-role="principal" data-testid={`${testId}-principal`}>
           <span className="wf-shadow-subrow-name">{t('wf.shadow.rows.principal')}</span>
           <span className="wf-shadow-subrow-agent" data-testid={`${testId}-principal-agent`}>
-            {mainPicker ?? <span className="wf-shadow-static">{agentModelLabel(undefined, main, targets, t)}</span>}
+            {mainPicker ?? <span className="wf-shadow-static" title={mainLabel}>{mainLabel}</span>}
           </span>
           <TransportBadge agent={step.agent} connectionId={step.agent_settings?.connection_id} t={t} />
           <span className="wf-shadow-subrow-toggles">
@@ -154,6 +157,7 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
                 value={shadow.agent}
                 choices={choices}
                 main={main}
+                modelTiers={modelTiers}
                 disabled={!editable}
                 ariaLabel={t('wf.shadow.rows.pickerLabel', tooltip)}
                 testId={`${rowId}-agent`}
@@ -202,6 +206,7 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
           value={undefined}
           choices={choices}
           main={main}
+          modelTiers={modelTiers}
           ariaLabel={t('wf.shadow.rows.addLabel')}
           testId={`${testId}-add`}
           className="wf-shadow-add"
@@ -231,6 +236,7 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
               value={merge.agent}
               choices={choices}
               main={main}
+              modelTiers={modelTiers}
               disabled={!editable}
               ariaLabel={t('wf.shadow.rows.condenseLabel')}
               testId={`${testId}-condense`}

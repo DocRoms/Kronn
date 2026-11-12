@@ -6,6 +6,8 @@
   flex-direction: column;
   gap: 4px;
   align-self: stretch;
+  /* Takes the width the card leaves (in the editor's flex row too), so the agent · model column is never narrower than it must be. */
+  flex: 1 1 auto;
   min-width: 0;
   margin: 2px 11px 6px 19px;
   cursor: default;
@@ -49,7 +51,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.wf-shadow-subrow-agent { display: inline-flex; align-items: center; min-width: 0; }
+.wf-shadow-subrow-agent { display: flex; align-items: center; min-width: 0; }
 .wf-shadow-static { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--kr-text-primary); }
 
 .wf-shadow-subrow-toggles {

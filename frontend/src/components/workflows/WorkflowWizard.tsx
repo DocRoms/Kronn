@@ -1655,6 +1655,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               <StepShadowRows
                 step={steps[0]}
                 choices={agentChoices}
+                modelTiers={agentAccess?.model_tiers}
                 mainPicker={hasShadowBlock(steps[0]) ? renderAgentTierPicker(steps[0], patch => updateStep(0, patch)) : undefined}
                 onEdit={edit => applyShadowEdit(0, edit)}
                 addWhenEmpty
@@ -2387,6 +2388,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       step={step}
                       nextStepName={steps[i + 1]?.name}
                       choices={agentChoices}
+                      modelTiers={agentAccess?.model_tiers}
                       mainPicker={hasShadowBlock(step) ? renderAgentTierPicker(step, patch => updateStep(i, patch)) : undefined}
                       onEdit={edit => applyShadowEdit(i, edit)}
                       addWhenEmpty

@@ -14,7 +14,7 @@ import { modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
 import { agentTransport, type AgentTransport } from '../../lib/shadowMerge';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
 import { agentModelLabel } from './shadowRowModel';
-import type { AgentType, ShadowAgent } from '../../types/generated';
+import type { AgentType, ModelTier, ModelTiersConfig, ShadowAgent } from '../../types/generated';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
 
@@ -29,6 +29,8 @@ export interface MainAgent {
   agent: AgentType;
   connectionId?: string | null;
   model?: string | null;
+  /** The step's tier: it picks the model configured when none is explicit. */
+  tier?: ModelTier | null;
 }
 
 interface Props {
@@ -37,6 +39,8 @@ interface Props {
   onChange: (next: ShadowAgent | undefined) => void;
   choices?: readonly AgentSwitchTarget[];
   main: MainAgent;
+  /** The agent families' configured models, to name a default model. */
+  modelTiers?: ModelTiersConfig | null;
   ariaLabel: string;
   testId: string;
   t: Translate;
@@ -51,7 +55,7 @@ const FALLBACK_TARGETS: readonly AgentSwitchTarget[] = [...ALL_AGENT_TYPES, 'Cus
 
 const targetLabel = (target: AgentSwitchTarget) => target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
 
-export function ShadowAgentPicker({ value, onChange, choices, main, ariaLabel, testId, t, disabled = false, children, className }: Props) {
+export function ShadowAgentPicker({ value, onChange, choices, main, modelTiers, ariaLabel, testId, t, disabled = false, children, className }: Props) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const rootRef = useRef<HTMLSpanElement>(null);
@@ -92,6 +96,7 @@ export function ShadowAgentPicker({ value, onChange, choices, main, ariaLabel, t
     };
   }, [open, place]);
 
+  const fullLabel = agentModelLabel(value, main, targets, t, modelTiers);
   const pick = (next: ShadowAgent | undefined) => {
     setOpen(false);
     onChange(next);
@@ -110,10 +115,11 @@ export function ShadowAgentPicker({ value, onChange, choices, main, ariaLabel, t
         aria-label={ariaLabel}
         aria-haspopup="menu"
         aria-expanded={open}
+        title={children ? undefined : fullLabel}
         disabled={disabled}
         onClick={() => setOpen(current => !current)}
       >
-        {children ?? <span>{agentModelLabel(value, main, targets, t)}</span>}
+        {children ?? <span>{fullLabel}</span>}
         {!children && !value && <em className="wf-shadow-picker-hint">{t('wf.shadow.rows.sameAgent')}</em>}
         <ChevronDown size={9} aria-hidden />
       </button>

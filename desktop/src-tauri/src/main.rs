@@ -863,6 +863,10 @@ async fn start_backend(
     ));
     tokio::spawn(async move { learning_sweep.start().await });
 
+    // KT-1692 — probe every API connection's token at start and once a day, so
+    // an expired or revoked one is flagged before a workflow needs it.
+    kronn::core::token_checks::spawn_scheduler(state.clone());
+
     // KT-984 — periodic, chunked run retention. Mirror of the spawn in
     // backend/src/main.rs (feature in the lib, spawn per-binary).
     kronn::core::run_retention::spawn(state.db.clone(), state.config.clone());

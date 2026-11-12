@@ -161,7 +161,7 @@ export type ActivityLink = { target: ActivityLinkTarget, id: string, run_id?: st
  * The kinds of place a row's deep link can open. Resolved to an address by the
  * UI's route table, so a path is never spelled in the backend.
  */
-export type ActivityLinkTarget = "discussion" | "workflow" | "project" | "planning_task";
+export type ActivityLinkTarget = "discussion" | "workflow" | "project" | "planning_task" | "plugin";
 
 /**
  * `GET /api/activity`.
@@ -6135,7 +6135,18 @@ last_probes: Array<McpLastProbe>,
  * (401/403 auth error, failed token refresh); cleared by the next
  * successful call.
  */
-auth_failure?: McpAuthFailure, };
+auth_failure?: McpAuthFailure,
+/**
+ * KT-1692 — true when Kronn can probe this connection's token (a declared
+ * or selected test endpoint). Without one the card shows the last good
+ * call instead of a check.
+ */
+token_probe: boolean,
+/**
+ * KT-1692 — the last proactive check and the last time the token worked.
+ * `None` when the connection was never probed and never called.
+ */
+token_check?: McpTokenCheck, };
 
 /**
  * KT-829 — one config's probe outcome inside a `POST /api/mcps/test-all` run.
@@ -6348,6 +6359,48 @@ export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
  * with a bounded concurrency, one result each.
  */
 export type McpTestAllResponse = { results: Array<McpConfigProbeResult>, };
+
+/**
+ * The proactive check of one connection (KT-1692).
+ */
+export type McpTokenCheck = {
+/**
+ * RFC3339 time of the last probe; `None` when never probed.
+ */
+checked_at?: string, outcome?: McpTokenCheckOutcome,
+/**
+ * What the probe said, redacted and truncated.
+ */
+detail: string,
+/**
+ * RFC3339 time of the last good probe or real call.
+ */
+last_good_at?: string, };
+
+/**
+ * `POST /api/mcps/check-tokens`.
+ */
+export type McpTokenCheckAllResponse = { results: Array<McpTokenCheckResult>, };
+
+/**
+ * What a proactive token probe found (KT-1692).
+ */
+export type McpTokenCheckOutcome = "ok" | "refused" | "inconclusive";
+
+/**
+ * `POST /api/mcps/configs/{id}/check-token` and `POST /api/mcps/check-tokens`
+ * (KT-1692): one connection's answer.
+ */
+export type McpTokenCheckResult = { config_id: string,
+/**
+ * The stored check after this request.
+ */
+check: McpTokenCheck,
+/**
+ * True when the probe was skipped because the connection was probed a
+ * moment ago: `check` is then the previous answer.
+ */
+rate_limited: boolean, };
 
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 

@@ -37,12 +37,37 @@ pub fn sync_runtime_config(connection: &ExternalApiConnection, config: &mut AppC
     let changed = agent.base_url != connection.endpoint
         || tiers.economy != connection.economy_model
         || tiers.default != connection.default_model
-        || tiers.reasoning != connection.reasoning_model;
+        || tiers.reasoning != connection.reasoning_model
+        || agent.tools_enabled != connection.tools_enabled;
     agent.base_url.clone_from(&connection.endpoint);
+    // The agent slot has no switch of its own (KT-1687): a run naming no
+    // connection follows the Kronn-tools switch of the provider's default one.
+    agent.tools_enabled = connection.tools_enabled;
     tiers.economy.clone_from(&connection.economy_model);
     tiers.default.clone_from(&connection.default_model);
     tiers.reasoning.clone_from(&connection.reasoning_model);
     changed
+}
+
+/// Carry an agent-level Kronn-tools `off` (the KT-1600 slot switch, gone in
+/// KT-1687) onto the provider's default connection, so no owner choice is lost
+/// when the switch moves into the connection card. Only an unset connection
+/// takes it: a switch the owner already set on the connection wins. Idempotent
+/// — once carried, the connection says `off` and nothing is left to move.
+pub fn carry_agent_tools_off(conn: &Connection, config: &AppConfig) -> Result<()> {
+    for (id, agent) in [
+        (LEGACY_LITELLM_ID, &config.agents.lite_llm),
+        (LEGACY_NVIDIA_ID, &config.agents.nvidia),
+    ] {
+        if agent.tools_enabled == Some(false) {
+            conn.execute(
+                "UPDATE external_api_connections SET tools_enabled = 0
+                 WHERE id = ?1 AND tools_enabled IS NULL",
+                params![id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The connection a legacy agent really runs on when no connection was chosen:
@@ -467,6 +492,70 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[test]
+    fn an_agent_level_tools_off_is_carried_onto_the_default_connection() {
+        // KT-1687 — the slot switch is gone: its `off` moves onto the default
+        // connection, the slot then follows the connection, and a restart
+        // changes nothing more.
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let mut config = default_config();
+        config.agents.lite_llm.tools_enabled = Some(false);
+        backfill_legacy_config(&conn, &config).unwrap();
+
+        for _ in 0..2 {
+            carry_agent_tools_off(&conn, &config).unwrap();
+            for connection in runtime_connections(&conn).unwrap() {
+                sync_runtime_config(&connection, &mut config);
+            }
+        }
+        let tools = |agent: &AgentType| {
+            legacy_connection_for_agent(&conn, agent)
+                .unwrap()
+                .unwrap()
+                .tools_enabled
+        };
+        assert_eq!(tools(&AgentType::LiteLlm), Some(false));
+        assert_eq!(
+            tools(&AgentType::Nvidia),
+            None,
+            "only the provider that was off"
+        );
+        assert_eq!(config.agents.lite_llm.tools_enabled, Some(false));
+        assert_eq!(config.agents.nvidia.tools_enabled, None);
+
+        // Switching the connection back on reaches the agent slot, and the
+        // old agent value never resurrects.
+        let mut connection = legacy_connection_for_agent(&conn, &AgentType::LiteLlm)
+            .unwrap()
+            .unwrap();
+        connection.tools_enabled = Some(true);
+        update(&conn, &connection).unwrap();
+        carry_agent_tools_off(&conn, &config).unwrap();
+        assert!(sync_runtime_config(&connection, &mut config));
+        assert_eq!(config.agents.lite_llm.tools_enabled, Some(true));
+        assert_eq!(tools(&AgentType::LiteLlm), Some(true));
+    }
+
+    #[test]
+    fn a_connection_switch_already_set_wins_over_the_agent_level_off() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let mut config = default_config();
+        backfill_legacy_config(&conn, &config).unwrap();
+        let mut connection = legacy_connection_for_agent(&conn, &AgentType::Nvidia)
+            .unwrap()
+            .unwrap();
+        connection.tools_enabled = Some(true);
+        update(&conn, &connection).unwrap();
+        config.agents.nvidia.tools_enabled = Some(false);
+
+        carry_agent_tools_off(&conn, &config).unwrap();
+        sync_runtime_config(&connection, &mut config);
+
+        assert_eq!(config.agents.nvidia.tools_enabled, Some(true));
     }
 
     #[test]

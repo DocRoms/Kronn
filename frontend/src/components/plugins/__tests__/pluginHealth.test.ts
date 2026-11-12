@@ -23,6 +23,7 @@ const config = (overrides: Partial<McpConfigDisplay> = {}): McpConfigDisplay => 
   effective_preferred_interface: 'mcp',
   credential_source: 'stored',
   last_probes: [],
+  token_probe: false,
   ...overrides,
 });
 

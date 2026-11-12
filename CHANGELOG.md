@@ -264,6 +264,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- Settings > Agents: one « Can act in Kronn » switch per model, inside its card
+  (KT-1687, follow-up of KT-1600). The loose LiteLLM / NVIDIA « Outils Kronn »
+  block between the sections is gone; the switch lives on the Ollama card and on
+  each external API connection card, with a plain help text (en / fr / es / zh).
+  Rule: LiteLLM and NVIDIA have no agent-level switch any more — a run that names
+  no connection follows the switch of that provider's default connection
+  (`sync_runtime_config`), and `POST /api/config/agent-tools` now refuses them
+  like `Custom`. An agent-level « off » set under KT-1600 is carried onto the
+  default connection at startup when that connection has no setting of its own
+  (`carry_agent_tools_off`), so no choice is lost; a switch already set on the
+  connection wins. No schema change.
 - Workflow authoring: `workflow_step_schema` serves a lean contract by default
   (KT-1681). The full one sat 18 estimated tokens under the 32 768-token MLX
   window, so the next step type would have overflowed it; the lean one leaves

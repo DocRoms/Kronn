@@ -56,6 +56,8 @@ import type {
   McpProbeResponse,
   McpRescanReport,
   McpTestAllResponse,
+  McpTokenCheckAllResponse,
+  McpTokenCheckResult,
   InviteResponse,
   MessageSearchHit,
   DiscLinkRequest,
@@ -1974,6 +1976,11 @@ export const mcps = {
   refresh: (dryRun = false) =>
     api<McpRescanReport>('POST', `/mcps/refresh${dryRun ? '?dry_run=true' : ''}`),
   testAll: () => api<McpTestAllResponse>('POST', '/mcps/test-all'),
+  /** KT-1692 — probe one connection's token now (rate-limited server side). */
+  checkToken: (configId: string) =>
+    api<McpTokenCheckResult>('POST', `/mcps/configs/${encodeURIComponent(configId)}/check-token`),
+  /** KT-1692 — "Check all": probe every connection that has a test endpoint. */
+  checkTokens: () => api<McpTokenCheckAllResponse>('POST', '/mcps/check-tokens'),
   previewBundle: (request: PluginBundleSelectionRequest) =>
     api<PluginBundlePreview>('POST', '/mcps/bundles/preview', request),
   exportBundle: async (
