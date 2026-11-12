@@ -835,6 +835,7 @@ The optional `control` is `{ "type": "text" }`, `{ "type": "textarea" }`, or
 - `{{steps.STEP_NAME.data}}` — structured/extracted data from any named step (compact JSON if object/array, raw string if `data` was a plain string)
 - `{{steps.STEP_NAME.data_json}}` — same data, always-serialized JSON (use when piping into an HTTP body or another JSON parser)
 - `{{steps.STEP_NAME.data.<path>}}` / `{{previous_step.data.<path>}}` — **nested-path traversal** through the structured `data`. Dot-separated; numeric segments index arrays. Examples: `{{steps.run-tests.data.exit_code}}`, `{{steps.analyze.data.subtasks.0.title}}`, `{{steps.fetch.data.items.2.id}}`. Returns the leaf as a string (scalars stringified, objects/arrays pretty-printed JSON). Missing fields stay visible in previews and fail closed before execution, so broken refs never render silently empty or reach an external API
+- `{{steps.STEP_NAME.shadows}}` / `{{previous_step.shadows}}` — a read-only JSON **summary of the step's shadows and merge**, for a step after it (typically a `PublishPageData` with `value_from: "steps.advise.shadows"` so a Page shows them). Always present once the step has run: `executions` is empty for a step without shadows. Paths work as for `.data` (`{{steps.advise.shadows.merge.status}}`, `{{steps.advise.shadows.executions.1.agent}}`). Never an output, a prompt or a setting: shape and rules in Versions and shadow runs › Showing the shadows in a Page
 - `{{state.<key>}}` — durable run state. Agents emit `---STATE:key=value---` in their output; the runner persists on the run row and exposes here on next iterations. Use for loops with feedback (review writes verdict, next implement reads it)
 - `{{iter.<step_name>}}` — per-step revisit counter (1, 2, 3…). Useful in Goto loops (e.g. "iteration {{iter.implement}} of 5")
 - `{{artifacts.<name>}}` — content of an artifact declared in `Workflow.artifacts` and emitted via `---ARTIFACT:<name>---...---END_ARTIFACT---`. Pre-seeded as empty string before round 1 so referencing it on the first iteration renders cleanly
@@ -1272,7 +1273,7 @@ An Agent step with `quick_prompt_id` may set `quick_prompt_version: N`: it loads
 
 ### Step shadows
 
-A step carries `shadows: [...]`, 0 to 8 per step. Every time the step runs in a covered project, each enabled shadow re-runs **only that step**, beside the main execution, on exactly the input the main step receives: the same rendered prompt context, the same previous outputs and variables. **Only the main output continues the workflow**; a shadow's output never feeds a later step. A shadow has:
+A step carries `shadows: [...]`, 0 to 8 per step. Every time the step runs in a covered project, each enabled shadow re-runs **only that step**, beside the main execution, on exactly the input the main step receives: the same rendered prompt context, the same previous outputs and variables. **Only the main output continues the workflow**; a shadow's output never feeds a later step (a later step reads only a summary of what ran, `{{steps.<name>.shadows}}`, never an output). A shadow has:
 
 | Field | Meaning |
 |---|---|
@@ -1310,6 +1311,30 @@ How a merge runs, once the main execution has succeeded:
 - the merged result replaces the step's `output` (and the step's signals are read from it), so `{{steps.<step>.output}}`, `.data` and `.summary` hold the merged result. The condense pass's tokens are added to the step's `tokens_used` and reported in the merge.
 
 The run view shows the merge under the step: its status, the missing shadows, a table of each execution's contribution (kept, only this one, duplicate, dropped as unverified), the provenance of every point, what the condense pass spent, and the merged result diffed against each execution. `GET /api/workflows/{id}/runs/{run_id}/step-shadows` returns it as `merge` on each step.
+
+### Showing the shadows in a Page
+
+A Page only reads datasets a workflow published. A step after the shadowed one reads `{{steps.<name>.shadows}}` (also `{{previous_step.shadows}}`), a JSON summary, and a `PublishPageData` write with `value_from: "steps.<name>.shadows"` puts it in a dataset:
+
+```json
+{ "step": "advise",
+  "executions": [ { "key": "main" | "<shadow id>", "label": "...", "identical": false, "agent": "ClaudeCode", "model": "...",
+                    "transport": "cli" | "http" | "local",
+                    "status": "success" | "failed" | "skipped" | "over_budget" | "timed_out" | "interrupted" | "running",
+                    "tokens": 1200, "cost_usd": 0.02, "duration_ms": 31000 } ],
+  "merge": null | { "status": "merged" | "rejected" | "failed" | "skipped" | "waiting",
+                    "included": ["argon"], "missing": [ { "key": "qwen", "reason": "..." } ],
+                    "points": { "kept": 5, "unique": 2, "duplicate": 3, "dropped": 1 },
+                    "per_execution": { "main": { "kept": 3, "duplicate": 0, "dropped": 0 } } },
+  "determinism": null | { "identical_runs": 2, "distinct_outputs": 1 } }
+```
+
+- `executions` lists the main execution first, then each shadow that started, in start order. `key` is `main` or the shadow id; `identical` is true for a shadow that changes nothing of its step (the main execution is never `identical`); `transport` is `cli` (an agent CLI), `http` (a remote endpoint such as LiteLLM) or `local` (Ollama); `tokens`, `cost_usd`, `duration_ms` and `model` are `null` until known. An unmeasured cost is `null`, never `0`.
+- `merge` is `null` when the step merges nothing (no `shadow_merge`, or the main execution failed). `included` are the shadows whose output went into the condense pass, `missing` those that did not, with the reason. `points` counts the merge's points: `kept` (published), `unique` (kept points only one execution found), `duplicate`, `dropped` (not verified, never published); `per_execution` credits each execution with its own `kept`, `duplicate` and `dropped`.
+- `determinism` is `null` without an identical shadow; otherwise how many executions (the main one and the identical shadows that produced an output) gave how many distinct outputs, timings left out.
+- **The merge is over when the next step renders**: it runs inside the shadowed step's own execution, so the step after it waits for it (up to the merge's `timeout_secs`). A shadow with no merge, or one the merge does not wait for, may still be going: it is reported `running`, and a summary read later is not rewritten. A resumed run rebuilds it from what was stored.
+- **No output, prompt or secret is in it**: only the identity (agent, model, transport), the status, the measures and the merge's counts. The shadows' outputs and the merge's points stay in the run view; only the main (or merged) output continues the workflow.
+- A step without shadows has `{"step": "<name>", "executions": [], "merge": null, "determinism": null}`, so a template needs not know whether the step carries some. The save-time check of `{{steps.X.…}}` references does not cover `.shadows`: a misspelt step name fails when the run renders it.
 
 Only a person sets `shadow_merge`, like `shadows`: an agent cannot set or change it (a save that sends the steps back keeps the stored one). It costs one more agent call per run (the condense pass) on top of the shadows; shadows on local models cost no hosted tokens, and the condense pass reads the outputs, not the whole input again, unless a point needs verification. Point the user to the step editor's **Shadows** section, **Merge with the main execution**.
 

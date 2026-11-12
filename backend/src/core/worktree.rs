@@ -2654,6 +2654,156 @@ pub fn integration_target_tip(repo_path: &Path, target: &str) -> Result<String, 
     resolve_commit(repo_path, &format!("refs/heads/{branch}"))
 }
 
+/// Why a launch's integration target is refused before anything is created
+/// (KT-1688). Integration advances the target branch: when a checkout holds it,
+/// that checkout is written to, so it must be one Kronn owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntegrationTargetRefusal {
+    /// No `base_rev` was given and the room declares no integration branch.
+    /// Defaulting to `main` would aim the integration at the owner's checkout.
+    NoneDeclared,
+    /// The branch is checked out in the project's own working checkout.
+    OwnerCheckout { branch: String, path: PathBuf },
+    /// The branch is checked out in a worktree outside `<repo>/.kronn/worktrees`.
+    ForeignWorktree { branch: String, path: PathBuf },
+}
+
+impl IntegrationTargetRefusal {
+    /// Stable machine code, the prefix of the refusal text.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoneDeclared => "integration_target_undeclared",
+            Self::OwnerCheckout { .. } => "integration_target_owner_checkout",
+            Self::ForeignWorktree { .. } => "integration_target_foreign_worktree",
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::NoneDeclared => "no `base_rev` was given and the room declares no integration \
+                branch; name the integration branch explicitly (a campaign room declares it), \
+                Kronn never defaults to `main`"
+                .to_string(),
+            Self::OwnerCheckout { branch, path } => format!(
+                "`{branch}` is checked out in the owner's working checkout ({}); integrating \
+                 there would write into files the owner is working on and move `{branch}` past \
+                 its review gate. Target an integration branch no checkout holds, or one held by \
+                 a Kronn-owned worktree",
+                path.display()
+            ),
+            Self::ForeignWorktree { branch, path } => format!(
+                "`{branch}` is checked out in {}, a worktree Kronn does not own (Kronn-owned \
+                 worktrees live under <repo>/.kronn/worktrees); integration never writes into it",
+                path.display()
+            ),
+        }
+    }
+
+    /// The refusal as shown to the caller: `<code>: <detail>`.
+    pub fn message(&self) -> String {
+        format!("{}: {}", self.code(), self.detail())
+    }
+}
+
+/// Refuse an integration target whose checkout is not Kronn's. A branch checked
+/// out nowhere is advanced by a ref compare-and-swap that touches no checkout;
+/// one checked out in a Kronn-owned worktree is advanced inside it.
+pub fn integration_target_ownership(
+    repo_path: &Path,
+    branch: &str,
+) -> Result<Result<(), IntegrationTargetRefusal>, String> {
+    #[cfg(test)]
+    if !ownership_seam::enforced(repo_path) {
+        return Ok(Ok(()));
+    }
+    let (branch, checkouts) = target_branch_checkouts(repo_path, branch)?;
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let owner = canonical(repo_path);
+    let managed_root = canonical(&worktree_base_dir(repo_path));
+    for path in checkouts {
+        let resolved = canonical(&path);
+        if resolved == owner {
+            return Ok(Err(IntegrationTargetRefusal::OwnerCheckout {
+                branch,
+                path,
+            }));
+        }
+        if !resolved.starts_with(&managed_root) {
+            return Ok(Err(IntegrationTargetRefusal::ForeignWorktree {
+                branch,
+                path,
+            }));
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// Test seam. The lib's launch tests drive whole sagas against throwaway repos
+/// whose own working checkout holds `main`, which is exactly what production
+/// refuses as an integration target. Those repos are exempt; a test that
+/// exercises the refusal opts its repo in with [`ownership_seam::enforce_for`].
+/// Keyed by repository path, so concurrent tests never see each other's choice.
+#[cfg(test)]
+pub(crate) mod ownership_seam {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static ENFORCED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    fn key(repo: &Path) -> PathBuf {
+        repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf())
+    }
+
+    pub(crate) fn enforce_for(repo: &Path) {
+        ENFORCED.lock().unwrap().push(key(repo));
+    }
+
+    pub(super) fn enforced(repo: &Path) -> bool {
+        ENFORCED.lock().unwrap().contains(&key(repo))
+    }
+}
+
+/// Who holds `branch` and where, for the status a principal reads before any
+/// integration. Never fails: what cannot be read is `Unresolved`.
+pub fn describe_integration_target(
+    repo_path: &Path,
+    branch: &str,
+) -> crate::models::TaskExecutionIntegrationTarget {
+    use crate::models::IntegrationTargetState as State;
+    let unresolved = || crate::models::TaskExecutionIntegrationTarget {
+        branch: branch.to_string(),
+        worktree: None,
+        state: State::Unresolved,
+    };
+    let Ok((resolved, checkouts)) = target_branch_checkouts(repo_path, branch) else {
+        return unresolved();
+    };
+    let Some(first) = checkouts.first() else {
+        return crate::models::TaskExecutionIntegrationTarget {
+            branch: resolved,
+            worktree: None,
+            state: State::NotCheckedOut,
+        };
+    };
+    // A refused checkout is the one to show: it is the path a wrong target
+    // would have written into.
+    let (state, path) = match integration_target_ownership(repo_path, branch) {
+        Ok(Ok(())) => (State::KronnWorktree, first.clone()),
+        Ok(Err(IntegrationTargetRefusal::OwnerCheckout { path, .. })) => {
+            (State::OwnerCheckout, path)
+        }
+        Ok(Err(IntegrationTargetRefusal::ForeignWorktree { path, .. })) => {
+            (State::ForeignWorktree, path)
+        }
+        Ok(Err(IntegrationTargetRefusal::NoneDeclared)) | Err(_) => return unresolved(),
+    };
+    crate::models::TaskExecutionIntegrationTarget {
+        branch: resolved,
+        worktree: Some(path.display().to_string()),
+        state,
+    }
+}
+
 /// Uncommitted files that would be endangered by advancing the target. A target
 /// no worktree has checked out has none.
 pub fn integration_target_dirty_files(
@@ -5553,6 +5703,103 @@ mod tests {
         assert!(integration_target_dirty_files(&unchecked)
             .unwrap()
             .is_empty());
+    }
+
+    fn add_worktree(repo: &Path, path: &Path, branch: &str) {
+        assert!(crate::core::cmd::git_cmd()
+            .args(["worktree", "add"])
+            .arg(path)
+            .arg(branch)
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+
+    #[test]
+    fn integration_target_refuses_the_owners_checkout_and_foreign_worktrees() {
+        let repo = make_test_repo("target-ownership");
+        ownership_seam::enforce_for(repo.path());
+        make_branch(repo.path(), "elsewhere");
+
+        // `main` is checked out in the project's own working checkout.
+        let refusal = integration_target_ownership(repo.path(), "main")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            refusal,
+            IntegrationTargetRefusal::OwnerCheckout { ref branch, .. } if branch == "main"
+        ));
+        assert_eq!(refusal.code(), "integration_target_owner_checkout");
+        assert!(refusal
+            .message()
+            .starts_with("integration_target_owner_checkout: "));
+
+        // A branch no checkout holds is advanced by a ref swap: nothing to refuse.
+        assert_eq!(
+            integration_target_ownership(repo.path(), "elsewhere").unwrap(),
+            Ok(())
+        );
+
+        // A worktree outside `.kronn/worktrees` is not Kronn's.
+        let outside = tempfile::tempdir().unwrap();
+        make_branch(repo.path(), "foreign");
+        add_worktree(repo.path(), &outside.path().join("wt"), "foreign");
+        let refusal = integration_target_ownership(repo.path(), "foreign")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            refusal,
+            IntegrationTargetRefusal::ForeignWorktree { .. }
+        ));
+        assert_eq!(refusal.code(), "integration_target_foreign_worktree");
+
+        // A worktree under `<repo>/.kronn/worktrees` is.
+        make_branch(repo.path(), "integ");
+        let owned = worktree_base_dir(repo.path());
+        fs::create_dir_all(&owned).unwrap();
+        add_worktree(repo.path(), &owned.join("integ"), "integ");
+        assert_eq!(
+            integration_target_ownership(repo.path(), "integ").unwrap(),
+            Ok(())
+        );
+        assert!(integration_target_ownership(repo.path(), "missing").is_err());
+    }
+
+    #[test]
+    fn integration_target_is_described_with_its_worktree_and_owner() {
+        use crate::models::IntegrationTargetState as State;
+        let repo = make_test_repo("target-describe");
+        ownership_seam::enforce_for(repo.path());
+        make_branch(repo.path(), "elsewhere");
+        make_branch(repo.path(), "integ");
+        let owned = worktree_base_dir(repo.path());
+        fs::create_dir_all(&owned).unwrap();
+        add_worktree(repo.path(), &owned.join("integ"), "integ");
+
+        let owner = describe_integration_target(repo.path(), "main");
+        assert_eq!(owner.state, State::OwnerCheckout);
+        assert_eq!(owner.branch, "main");
+        assert_eq!(
+            Path::new(owner.worktree.as_deref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            repo.path().canonicalize().unwrap()
+        );
+
+        let free = describe_integration_target(repo.path(), "elsewhere");
+        assert_eq!(free.state, State::NotCheckedOut);
+        assert_eq!(free.worktree, None);
+
+        let kronn = describe_integration_target(repo.path(), "integ");
+        assert_eq!(kronn.state, State::KronnWorktree);
+        assert!(kronn.worktree.unwrap().ends_with("integ"));
+
+        assert_eq!(
+            describe_integration_target(repo.path(), "nope").state,
+            State::Unresolved
+        );
     }
 
     #[test]

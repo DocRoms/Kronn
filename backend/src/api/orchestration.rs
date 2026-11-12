@@ -1914,6 +1914,9 @@ struct Prepared {
     task_title: String,
     task_description: String,
     dod: Vec<PlanningDodItem>,
+    /// KT-1688 — the validated integration branch the base commit is pinned
+    /// from; never the `main` fallback this used to be.
+    target_branch: String,
     /// The idempotent replay found an execution already past `Provisioning`
     /// (running/terminal) — the saga returns it untouched.
     already_launched: bool,
@@ -2203,7 +2206,7 @@ async fn provision_task_execution_inner(
 
     // ── Phase B — pin the base commit (git). Nothing external created yet, so a
     // failure only marks the execution resumable. ──
-    let base_rev = input.base_rev.clone().unwrap_or_else(|| "main".to_string());
+    let base_rev = prepared.target_branch.clone();
     let base_sha = match worktree::resolve_commit(&repo_path, &base_rev) {
         Ok(sha) => sha,
         Err(e) => {
@@ -9772,6 +9775,80 @@ fn build_review_findings_message(
     )
 }
 
+/// KT-1688 — the integration branch a launch will target, or the refusal text.
+///
+/// An explicit `base_rev` wins; without one the room's active campaign declares
+/// it; with neither there is no target, never `main` by default. The branch must
+/// be a local one, and a checkout holding it must be Kronn-owned: integration
+/// writes into that checkout, so the owner's working checkout (or any foreign
+/// worktree) is refused here, before anything is created.
+pub(crate) fn resolve_launch_target(
+    conn: &rusqlite::Connection,
+    parent_discussion_id: &str,
+    repo_path: &std::path::Path,
+    base_rev: Option<&str>,
+) -> Result<Result<String, String>> {
+    let requested = base_rev.map(str::trim).filter(|rev| !rev.is_empty());
+    let declared = match requested {
+        Some(rev) => Some(rev.to_string()),
+        None => crate::db::orchestration::get_active_campaign_for_discussion(
+            conn,
+            parent_discussion_id,
+        )?
+        .and_then(|run| run.target_branch)
+        .filter(|branch| !branch.trim().is_empty()),
+    };
+    let Some(declared) = declared else {
+        return Ok(Err(
+            worktree::IntegrationTargetRefusal::NoneDeclared.message()
+        ));
+    };
+    let branch = match worktree::resolve_local_branch(repo_path, &declared) {
+        Ok(branch) => branch,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    match worktree::integration_target_ownership(repo_path, &branch) {
+        Ok(Ok(())) => Ok(Ok(branch)),
+        Ok(Err(refusal)) => Ok(Err(refusal.message())),
+        Err(reason) => Ok(Err(reason)),
+    }
+}
+
+/// KT-1688 — the integration-target check of the preflight. A named or declared
+/// target that would be refused makes the task not launchable; with neither, the
+/// preflight only warns, since `base_rev` is still given at launch.
+pub(crate) fn integration_target_preparation(
+    conn: &rusqlite::Connection,
+    preparation: &mut crate::models::TaskExecutionPreparation,
+    base_rev: Option<&str>,
+) -> Result<()> {
+    let Some(project_id) = preparation.project_id.clone() else {
+        return Ok(());
+    };
+    let Some(project) = crate::db::projects::get_project(conn, &project_id)? else {
+        return Ok(());
+    };
+    let repo = scanner::resolve_host_path(&project.path);
+    let Err(message) =
+        resolve_launch_target(conn, &preparation.parent_discussion_id, &repo, base_rev)?
+    else {
+        return Ok(());
+    };
+    let (code, detail) = message
+        .split_once(": ")
+        .filter(|(code, _)| code.starts_with("integration_target_"))
+        .unwrap_or(("integration_target_invalid", message.as_str()));
+    let undeclared = code == worktree::IntegrationTargetRefusal::NoneDeclared.code();
+    let reason = preparation_reason(code, detail.to_string());
+    if undeclared {
+        preparation.warnings.push(reason);
+    } else {
+        preparation.launchable = false;
+        preparation.reasons.push(reason);
+    }
+    Ok(())
+}
+
 /// Phase A body (one SQLite commit): validate the task (DoD-1), resolve its single
 /// project + repo path, launch the idempotent execution and move it to
 /// `Provisioning`. Returns the business refusal in the inner `Err` (DB errors in
@@ -9914,12 +9991,30 @@ fn begin_provisioning(
     // stay a named local branch. A raw SHA/tag is immutable and would make the
     // apply drift check observe that object forever instead of the real parent.
     let target_branch = if is_replay {
-        target_branch.unwrap_or("main").to_string()
+        // The replayed execution keeps the target its run already pinned.
+        let pinned = match existing.as_ref() {
+            Some(execution) => crate::db::orchestration::get_orchestration_run(
+                conn,
+                &execution.orchestration_run_id,
+            )?
+            .and_then(|run| run.target_branch),
+            None => None,
+        };
+        match pinned.or_else(|| target_branch.map(str::to_string)) {
+            Some(branch) => branch,
+            None => {
+                return Ok(Err(ProvisionError::NotLaunchable(
+                    worktree::IntegrationTargetRefusal::NoneDeclared.message(),
+                )))
+            }
+        }
     } else {
-        match worktree::resolve_local_branch(
+        match resolve_launch_target(
+            conn,
+            parent_discussion_id,
             std::path::Path::new(&repo_path),
-            target_branch.unwrap_or("main"),
-        ) {
+            target_branch,
+        )? {
             Ok(branch) => branch,
             Err(reason) => return Ok(Err(ProvisionError::NotLaunchable(reason))),
         }
@@ -9951,6 +10046,7 @@ fn begin_provisioning(
     // A single-task launch uses the pinned base revision as its integration
     // target (default `main`). Campaigns reuse their already-persisted run, so
     // this field is ignored by `launch_task_in_run` there.
+    let launch_target_branch = target_branch.clone();
     launch.target_branch = Some(target_branch);
     launch.validations = validations.to_vec();
     if let Some(rounds) = max_review_rounds {
@@ -10005,6 +10101,7 @@ fn begin_provisioning(
         task_title: task.summary.title.clone(),
         task_description: task.description.clone(),
         dod: task.definition_of_done.clone(),
+        target_branch: launch_target_branch.clone(),
         already_launched,
     };
 
@@ -12820,9 +12917,20 @@ pub(crate) fn execution_detail(
     )?);
     let progress = execution_progress(conn, &lineage.execution)?;
     let last_delivery_refusal = crate::db::orchestration::latest_delivery_refusal(conn, exec_id)?;
+    let integration_target = run.target_branch.as_deref().and_then(|branch| {
+        let [project_id] = task.summary.project_ids.as_slice() else {
+            return None;
+        };
+        let project = crate::db::projects::get_project(conn, project_id)
+            .ok()
+            .flatten()?;
+        let repo = scanner::resolve_host_path(&project.path);
+        Some(worktree::describe_integration_target(&repo, branch))
+    });
     Ok(crate::models::TaskExecutionDetail {
         lineage,
         target_branch: run.target_branch,
+        integration_target,
         definition_of_done: task.definition_of_done,
         attempts: attempts.into_values().collect(),
         worker_sessions: crate::db::orchestration::list_worker_cli_sessions(conn, exec_id)?,
@@ -14909,6 +15017,11 @@ pub struct TaskExecPrepareRequest {
     /// makes the preflight refuse instead of the integration.
     #[serde(default)]
     pub validations: Vec<crate::models::ValidationSpec>,
+    /// KT-1688 — the integration branch the launch will name. Checked like at
+    /// launch, so an owner's checkout refuses the preflight instead of the
+    /// integration. Absent: the room's declared integration branch is checked.
+    #[serde(default)]
+    pub base_rev: Option<String>,
     /// KT-1345 — checked like at launch, so a bad value refuses the preflight.
     #[serde(default, deserialize_with = "explicit_review_rounds")]
     pub max_review_rounds: Option<serde_json::Value>,
@@ -16265,6 +16378,7 @@ pub async fn task_exec_prepare(
     let parent = request.parent_discussion_id.trim().to_string();
     let task = request.task_reference.trim().to_string();
     let worker = request.worker;
+    let base_rev = request.base_rev.clone();
     let scope_refusal = worker_scope_refusal(&worker, request.worker_scope.as_ref());
     let validations_refusal = validations_refusal(&request.validations);
     let full_suite_warnings = full_suite_validation_warnings(&request.validations);
@@ -16287,6 +16401,7 @@ pub async fn task_exec_prepare(
                 bail!("principal discussion not found or caller is not an active member");
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
+            integration_target_preparation(conn, &mut preparation, base_rev.as_deref())?;
             preparation.warnings.extend(catalog_warning);
             preparation.warnings.extend(full_suite_warnings);
             preparation.default_max_review_rounds =
@@ -16522,6 +16637,14 @@ pub struct TaskExecutionCompactStatus {
     pub status: TaskExecutionStatus,
     pub attempt: u32,
     pub review_rounds: String,
+    /// KT-1688 — the branch the integration will advance, and the worktree that
+    /// holds it, so a wrong target is visible before integration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integration_worktree: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integration_target_state: Option<crate::models::IntegrationTargetState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head_sha: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -16724,6 +16847,15 @@ pub(crate) fn compact_execution_status(
             execution.review_rounds,
             crate::models::review_limit_label(execution.max_review_rounds)
         ),
+        target_branch: detail.target_branch.clone(),
+        integration_worktree: detail
+            .integration_target
+            .as_ref()
+            .and_then(|target| target.worktree.clone()),
+        integration_target_state: detail
+            .integration_target
+            .as_ref()
+            .map(|target| target.state),
         head_sha: detail
             .attempts
             .iter()
@@ -31060,6 +31192,334 @@ pub(crate) mod tests {
         assert_eq!(git_rev(repo.path(), "main"), moved);
     }
 
+    fn launch_input(task_ref: &str, parent_id: &str, base_rev: Option<&str>) -> ProvisionInput {
+        ProvisionInput {
+            task_reference: task_ref.to_string(),
+            parent_discussion_id: parent_id.to_string(),
+            worker: native_worker(),
+            base_rev: base_rev.map(str::to_string),
+            idempotency_key: None,
+        }
+    }
+
+    /// The room declares `branch` as its campaign's integration branch.
+    async fn declare_integration_branch(db: &Database, parent_id: &str, branch: &str) {
+        let parent_id = parent_id.to_string();
+        let branch = branch.to_string();
+        db.with_conn(move |conn| {
+            let mut input = crate::models::OrchestrationRunInput::single_task(parent_id);
+            input.kind = crate::models::OrchestrationRunKind::Campaign;
+            input.target_branch = Some(branch);
+            crate::db::orchestration::create_orchestration_run(conn, &input)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_launch_with_no_base_rev_and_no_declared_branch_is_refused_not_sent_to_main() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        let tip = git_rev(repo.path(), "main");
+
+        let error = provision_single_task_execution(&db, launch_input(&task_ref, &parent_id, None))
+            .await
+            .expect_err("an unspecified target must not silently be main");
+
+        assert!(matches!(
+            error,
+            ProvisionError::NotLaunchable(ref reason)
+                if reason.starts_with("integration_target_undeclared: ")
+        ));
+        let (code, message) = provision_error_parts(&error);
+        assert_eq!(code, ApiErrorCode::Validation);
+        assert!(message.contains("never defaults to `main`"), "{message}");
+        // A blank base_rev is no declaration either.
+        assert!(provision_single_task_execution(
+            &db,
+            launch_input(&task_ref, &parent_id, Some("  "))
+        )
+        .await
+        .is_err());
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 0);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM orchestration_runs").await,
+            0
+        );
+        assert!(!repo.path().join(".kronn/worktrees").exists());
+        assert_eq!(git_rev(repo.path(), "main"), tip);
+    }
+
+    #[tokio::test]
+    async fn a_launch_with_no_base_rev_uses_the_rooms_declared_integration_branch() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        git(repo.path(), &["branch", "integ/0.15.x"]);
+        // `main` moves on, so a launch that fell back to it is told apart.
+        std::fs::write(repo.path().join("later.txt"), "later").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "second"]);
+        let integ_tip = git_rev(repo.path(), "integ/0.15.x");
+        assert_ne!(integ_tip, git_rev(repo.path(), "main"));
+        declare_integration_branch(&db, &parent_id, "integ/0.15.x").await;
+
+        let execution =
+            provision_single_task_execution(&db, launch_input(&task_ref, &parent_id, None))
+                .await
+                .expect("the room's integration branch is the target");
+
+        assert_eq!(execution.base_sha.as_deref(), Some(integ_tip.as_str()));
+        let run_id = execution.orchestration_run_id.clone();
+        let target = db
+            .with_conn(move |conn| {
+                Ok(
+                    crate::db::orchestration::get_orchestration_run(conn, &run_id)?
+                        .unwrap()
+                        .target_branch,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(target.as_deref(), Some("integ/0.15.x"));
+    }
+
+    #[tokio::test]
+    async fn a_launch_into_the_owners_checkout_is_refused_with_a_typed_reason() {
+        let repo = init_repo();
+        crate::core::worktree::ownership_seam::enforce_for(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        git(repo.path(), &["branch", "integ"]);
+
+        let error =
+            provision_single_task_execution(&db, launch_input(&task_ref, &parent_id, Some("main")))
+                .await
+                .expect_err("main is checked out in the owner's working checkout");
+        assert!(matches!(
+            error,
+            ProvisionError::NotLaunchable(ref reason)
+                if reason.starts_with("integration_target_owner_checkout: ")
+                    && reason.contains("owner's working checkout")
+        ));
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 0);
+        assert!(!repo.path().join(".kronn/worktrees").exists());
+
+        // The room's declared branch is held to the same rule.
+        declare_integration_branch(&db, &parent_id, "main").await;
+        let error = provision_single_task_execution(&db, launch_input(&task_ref, &parent_id, None))
+            .await
+            .expect_err("a declared owner's checkout is refused too");
+        assert!(matches!(
+            error,
+            ProvisionError::NotLaunchable(ref reason)
+                if reason.starts_with("integration_target_owner_checkout: ")
+        ));
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_launch_into_a_branch_no_checkout_holds_is_accepted_under_enforcement() {
+        let repo = init_repo();
+        crate::core::worktree::ownership_seam::enforce_for(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        git(repo.path(), &["branch", "integ"]);
+
+        provision_single_task_execution(&db, launch_input(&task_ref, &parent_id, Some("integ")))
+            .await
+            .expect("a branch checked out nowhere is advanced by a ref swap");
+    }
+
+    #[tokio::test]
+    async fn a_launch_into_a_foreign_worktree_is_refused_and_a_kronn_worktree_accepted() {
+        let repo = init_repo();
+        crate::core::worktree::ownership_seam::enforce_for(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        let outside = tempfile::tempdir().unwrap();
+        git(repo.path(), &["branch", "foreign"]);
+        git(repo.path(), &["branch", "integ"]);
+        let foreign = outside.path().join("wt");
+        git(
+            repo.path(),
+            &["worktree", "add", &foreign.to_string_lossy(), "foreign"],
+        );
+        let owned = repo.path().join(".kronn/worktrees/integration");
+        std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
+        git(
+            repo.path(),
+            &["worktree", "add", &owned.to_string_lossy(), "integ"],
+        );
+
+        let error = provision_single_task_execution(
+            &db,
+            launch_input(&task_ref, &parent_id, Some("foreign")),
+        )
+        .await
+        .expect_err("a worktree Kronn does not own is never written to");
+        assert!(matches!(
+            error,
+            ProvisionError::NotLaunchable(ref reason)
+                if reason.starts_with("integration_target_foreign_worktree: ")
+        ));
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM task_executions").await, 0);
+
+        let execution = provision_single_task_execution(
+            &db,
+            launch_input(&task_ref, &parent_id, Some("integ")),
+        )
+        .await
+        .expect("a Kronn-owned worktree may hold the integration branch");
+
+        // The status names the target and the worktree before any integration.
+        let exec_id = execution.id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &exec_id))
+            .await
+            .unwrap();
+        assert_eq!(detail.target_branch.as_deref(), Some("integ"));
+        let target = detail.integration_target.clone().unwrap();
+        assert_eq!(
+            target.state,
+            crate::models::IntegrationTargetState::KronnWorktree
+        );
+        assert!(target.worktree.as_deref().unwrap().ends_with("integration"));
+        let compact = serde_json::to_value(compact_execution_status(&detail, None)).unwrap();
+        assert_eq!(compact["target_branch"], "integ");
+        assert_eq!(compact["integration_target_state"], "kronn_worktree");
+        assert_eq!(compact["integration_worktree"], target.worktree.unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_status_shows_a_target_no_worktree_holds_and_the_owners_checkout() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        git(repo.path(), &["branch", "integ"]);
+        let execution = provision_single_task_execution(
+            &db,
+            launch_input(&task_ref, &parent_id, Some("integ")),
+        )
+        .await
+        .unwrap();
+
+        let exec_id = execution.id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &exec_id))
+            .await
+            .unwrap();
+        let target = detail.integration_target.clone().unwrap();
+        assert_eq!(target.branch, "integ");
+        assert_eq!(target.worktree, None);
+        assert_eq!(
+            target.state,
+            crate::models::IntegrationTargetState::NotCheckedOut
+        );
+        let compact = serde_json::to_value(compact_execution_status(&detail, None)).unwrap();
+        assert_eq!(compact["target_branch"], "integ");
+        assert_eq!(compact["integration_target_state"], "not_checked_out");
+        assert!(compact.get("integration_worktree").is_none());
+
+        // A run that was pinned to the owner's checkout reads as such, before
+        // the integration finds out.
+        crate::core::worktree::ownership_seam::enforce_for(repo.path());
+        let run_id = execution.orchestration_run_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET target_branch = 'main' WHERE id = ?1",
+                [&run_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let exec_id = execution.id.clone();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &exec_id))
+            .await
+            .unwrap();
+        let target = detail.integration_target.unwrap();
+        assert_eq!(
+            target.state,
+            crate::models::IntegrationTargetState::OwnerCheckout
+        );
+        assert_eq!(
+            std::path::Path::new(target.worktree.as_deref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            repo.path().canonicalize().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_preflight_refuses_an_owners_checkout_and_warns_when_no_branch_is_declared() {
+        let repo = init_repo();
+        crate::core::worktree::ownership_seam::enforce_for(repo.path());
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        git(repo.path(), &["branch", "integ"]);
+        let prepare = |base_rev: Option<&'static str>| {
+            let task_ref = task_ref.clone();
+            let parent_id = parent_id.clone();
+            let db = &db;
+            async move {
+                db.with_conn(move |conn| {
+                    let mut preparation =
+                        prepare_task_execution(conn, &task_ref, &parent_id, &native_worker())?;
+                    integration_target_preparation(conn, &mut preparation, base_rev)?;
+                    Ok(preparation)
+                })
+                .await
+                .unwrap()
+            }
+        };
+
+        let refused = prepare(Some("main")).await;
+        assert!(!refused.launchable);
+        assert!(refused
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "integration_target_owner_checkout"));
+
+        // The seeded task is not linked to the room's plan, so `launchable` says
+        // nothing here: what counts is whether the target is among the reasons.
+        let target_reasons = |preparation: &crate::models::TaskExecutionPreparation| {
+            preparation
+                .reasons
+                .iter()
+                .filter(|reason| reason.code.starts_with("integration_target_"))
+                .count()
+        };
+
+        let undeclared = prepare(None).await;
+        assert_eq!(
+            target_reasons(&undeclared),
+            0,
+            "base_rev is still given at launch: a warning, not a refusal"
+        );
+        assert!(undeclared
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "integration_target_undeclared"));
+
+        let accepted = prepare(Some("integ")).await;
+        assert_eq!(target_reasons(&accepted), 0, "{:?}", accepted.reasons);
+        assert!(accepted.warnings.is_empty());
+
+        // The room's declared branch is what an absent base_rev checks.
+        declare_integration_branch(&db, &parent_id, "main").await;
+        let declared = prepare(None).await;
+        assert!(!declared.launchable);
+        assert!(declared.warnings.is_empty());
+        assert!(declared
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "integration_target_owner_checkout"));
+    }
+
     #[tokio::test]
     async fn distinct_tasks_get_distinct_sub_discussions() {
         let repo = init_repo();
@@ -32765,6 +33225,7 @@ pub(crate) mod tests {
             task_title: task.summary.title.clone(),
             task_description: "x".into(),
             dod: task.definition_of_done.clone(),
+            target_branch: "main".into(),
             already_launched: false,
         };
         let brief = build_brief(
@@ -48737,6 +49198,7 @@ pub(crate) mod tests {
                 "task_reference": task_ref,
                 "worker": serde_json::to_value(native_worker()).unwrap(),
                 "worker_scope_intent": "generic",
+                "base_rev": "main",
             });
             for (key, value) in extra.as_object().unwrap() {
                 arguments[key] = value.clone();

@@ -509,3 +509,166 @@ async fn the_merge_is_stored_with_the_shadows_and_kept_through_an_agents_write()
         .unwrap();
     assert!(after.steps[0].shadow_merge.is_some(), "human-only");
 }
+
+// ─── KT-1694 — what the shadows and the merge leave to a later step ─────────
+
+const SHADOWS_MARK: &str = "---SHADOWS---";
+
+/// The step after the review reads the summary beside the review itself.
+fn publishing(wf: &mut Workflow, reader: &str) {
+    wf.steps[2].prompt_template =
+        format!("Summary of: {{{{steps.review.output}}}}\n{SHADOWS_MARK}\n{{{{{reader}}}}}");
+}
+
+/// The JSON a later step received after the marker.
+fn rendered_summary(fx: &Fixture) -> serde_json::Value {
+    let prompt = summary_prompt(fx);
+    let json = prompt
+        .split_once(SHADOWS_MARK)
+        .unwrap_or_else(|| panic!("the step did not receive the summary: {prompt}"))
+        .1
+        .trim_start();
+    serde_json::Deserializer::from_str(json)
+        .into_iter::<serde_json::Value>()
+        .next()
+        .unwrap_or_else(|| panic!("no JSON after the marker: {json}"))
+        .unwrap_or_else(|error| panic!("not JSON ({error}): {json}"))
+}
+
+#[tokio::test]
+async fn a_later_step_reads_the_executions_and_the_merge_of_a_merged_step() {
+    let fx = merged_fixture("proj-shadows-summary", faithful_condense()).await;
+    let mut wf = merged_workflow(&fx, Some(merge()));
+    // An identical shadow beside the merged ones: it measures determinism, and
+    // the merge (no shadow named) waits for it too.
+    wf.steps[1].shadows.push(shadow_of("twin"));
+    publishing(&mut wf, "steps.review.shadows");
+    let run = fx.run(&wf, "run-shadows-summary").await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+
+    let summary = rendered_summary(&fx);
+    assert_eq!(summary["step"], "review");
+    let executions = summary["executions"].as_array().unwrap();
+    let keys: Vec<&str> = executions
+        .iter()
+        .map(|execution| execution["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["main", "local", "other", "twin"], "{summary}");
+    let by = |key: &str| executions.iter().find(|e| e["key"] == key).unwrap();
+    assert_eq!(by("main")["agent"], "ClaudeCode");
+    assert_eq!(by("main")["transport"], "cli");
+    assert_eq!(by("main")["status"], "success");
+    assert_eq!(by("main")["identical"], false);
+    assert_eq!(by("local")["agent"], "Codex");
+    assert_eq!(by("local")["identical"], false);
+    assert_eq!(by("twin")["identical"], true);
+    for execution in executions {
+        assert_eq!(execution["status"], "success", "{execution}");
+    }
+
+    // The merge ran inside the step: its result is final when the next step renders.
+    let merge = &summary["merge"];
+    assert_eq!(merge["status"], "merged", "{summary}");
+    assert_eq!(
+        merge["included"],
+        serde_json::json!(["local", "other", "twin"])
+    );
+    assert_eq!(merge["missing"], serde_json::json!([]));
+    assert_eq!(
+        merge["points"],
+        serde_json::json!({"kept": 2, "unique": 1, "duplicate": 0, "dropped": 1})
+    );
+    assert_eq!(
+        merge["per_execution"]["local"],
+        serde_json::json!({"kept": 0, "duplicate": 1, "dropped": 1})
+    );
+    assert_eq!(
+        merge["per_execution"]["other"],
+        serde_json::json!({"kept": 1, "duplicate": 0, "dropped": 0})
+    );
+
+    // The twin answered the main review as the main execution did.
+    assert_eq!(
+        summary["determinism"],
+        serde_json::json!({"identical_runs": 2, "distinct_outputs": 1})
+    );
+
+    // Outputs, prompts and the evidence of a point stay out of it.
+    let text = summary.to_string();
+    for secret in [
+        MAIN_REVIEW,
+        LOCAL_REVIEW,
+        OTHER_REVIEW,
+        MERGED_REVIEW,
+        "login.rs",
+        "tenants",
+        "Review PR-42",
+        "Second look",
+    ] {
+        assert!(!text.contains(secret), "`{secret}` leaked into {text}");
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_merge_is_reported_as_such_to_a_later_step() {
+    let fx = merged_fixture("proj-shadows-rejected", leaking_condense()).await;
+    let mut wf = merged_workflow(&fx, Some(merge()));
+    publishing(&mut wf, "steps.review.shadows.merge.status");
+    let run = fx.run(&wf, "run-shadows-rejected").await;
+    assert_eq!(result_of(&run, "review").output, MAIN_REVIEW);
+    let prompt = summary_prompt(&fx);
+    assert!(
+        prompt
+            .trim_end()
+            .ends_with(&format!("{SHADOWS_MARK}\nrejected")),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn a_step_without_a_merge_has_no_merge_block() {
+    let fx = merged_fixture("proj-shadows-nomerge", faithful_condense()).await;
+    let mut wf = merged_workflow(&fx, None);
+    publishing(&mut wf, "steps.review.shadows");
+    fx.run(&wf, "run-shadows-nomerge").await;
+    let summary = rendered_summary(&fx);
+    assert!(summary["merge"].is_null(), "{summary}");
+    assert_eq!(summary["executions"][0]["key"], "main");
+}
+
+#[tokio::test]
+async fn a_step_without_shadows_renders_an_empty_summary() {
+    let fx = fixture("proj-shadows-none", scripted(MAIN_REVIEW)).await;
+    let mut wf = fx.workflow(vec![]);
+    publishing(&mut wf, "steps.review.shadows");
+    let run = fx.run(&wf, "run-shadows-none").await;
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+    assert_eq!(
+        rendered_summary(&fx),
+        serde_json::json!({"step": "review", "executions": [], "merge": null, "determinism": null})
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_run_gives_a_later_step_the_same_summary() {
+    let fx = merged_fixture("proj-shadows-resume", faithful_condense()).await;
+    let mut wf = merged_workflow(&fx, Some(merge()));
+    publishing(&mut wf, "steps.review.shadows");
+    let run = fx.run(&wf, "run-shadows-resume").await;
+    let seen = rendered_summary(&fx);
+
+    // What a Gate resume replays: the stored results, then the stored shadows.
+    let mut ctx = TemplateContext::new();
+    replay_prior_results(&mut ctx, &run.step_results);
+    assert_eq!(
+        ctx.resolve_value("steps.review.shadows.executions"),
+        Some(serde_json::json!([])),
+        "a replay alone knows no shadow"
+    );
+    crate::workflows::shadow_summary::restore(&fx.state, &mut ctx, &wf, &run).await;
+    assert_eq!(ctx.resolve_value("steps.review.shadows").unwrap(), seen);
+    assert_eq!(
+        ctx.resolve_value("steps.who.shadows.executions").unwrap(),
+        serde_json::json!([])
+    );
+}

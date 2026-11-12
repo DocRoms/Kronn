@@ -315,7 +315,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
   created from this exact SHA, not from a moving branch tip — and never from a dirty working tree,
   which is precisely why parent cleanliness is an apply-time concern, not a provisioning one. HEAD of
   the fresh child is verified to equal `base_sha` after creation
-  (`verify_worktree_head`, `[src: file: backend/src/core/worktree.rs:2763-2776#verify_worktree_head]`).
+  (`verify_worktree_head`, `[src: file: backend/src/core/worktree.rs:2913-2926#verify_worktree_head]`).
 - **Child branch + worktree** — a managed worktree under `.kronn/worktrees/`, created with
   `git worktree add -b kronn/task/<KT-ref>-<exec-short> <path> <base_sha>` (the SHA-arg variant the
   managed creator must gain, §0-Adapt). The branch carries a short **execution** id, not a review
@@ -347,9 +347,9 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      `refs/kronn-backup/<task-id>-<exec-short>` at `candidate_target_sha` before the candidate is built
      `[src: file: backend/src/core/worktree.rs:2301-2329#write_backup_ref]`. `fast_forward_target_to`
      verifies that the parent tip is **still exactly `candidate_target_sha`** (a compare-and-swap) and
-     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:2722-2742#fast_forward_target_to]`
+     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:2872-2892#fast_forward_target_to]`
      (a target no worktree has checked out has no tree to keep clean: it advances by a `git update-ref`
-     compare-and-swap `[src: file: backend/src/core/worktree.rs:2667-2719#update_ref_target_to]`).
+     compare-and-swap `[src: file: backend/src/core/worktree.rs:2817-2869#update_ref_target_to]`).
   4. Advance the parent to `candidate_merge_sha` **fast-forward only** — a deterministic, short,
      verifiable mutation (the candidate already contains `candidate_target_sha` as an ancestor).
   5. **Never** `stash`, and **never** silently `update-ref` a checked-out branch. If the parent has
@@ -357,7 +357,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      rebuilt on the new tip (→ `Integrating`), never forced through.
 - **Cleanup** — on `Done`, the child worktree is torn down
   (`remove_integrated_task_worktree`, which ends in `remove_discussion_worktree`,
-  `[src: file: backend/src/core/worktree.rs:3688-3756#remove_integrated_task_worktree]`) and the sub-discussion
+  `[src: file: backend/src/core/worktree.rs:3838-3906#remove_integrated_task_worktree]`) and the sub-discussion
   archived. On `Cancelled`/`Failed`, the child branch is preserved for inspection and the worktree
   removed only if clean.
 
@@ -428,7 +428,7 @@ Cancellation and reassignment preserve the same lineage. Cancellation first canc
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:14083-14236#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9425-9471#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14612-14801#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:9083-9390#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:14237-14390#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9425-9471#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:14766-14955#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:9083-9390#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -561,8 +561,8 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:293-393#reconcile_at_boot]`
   `[src: file: backend/src/api/orchestration.rs:866-1037#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:14083-14236#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:14612-14801#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:14237-14390#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:14766-14955#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.

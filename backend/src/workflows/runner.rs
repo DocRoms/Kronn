@@ -1900,6 +1900,7 @@ async fn execute_run_body(
     // and `{{artifacts.Y}}` exactly as if the run had never paused.
     // Fresh runs have no prior step_results, so this is a no-op for them.
     replay_prior_results(&mut ctx, &run.step_results);
+    super::shadow_summary::restore(&state, &mut ctx, workflow, run).await;
     // 0.7.0 Phase 6 — seed durable state from the run row. On a fresh
     // run this is empty (no-op); on resume / restart-recovery it carries
     // counters and verdicts the agent wrote in prior iterations so the
@@ -3196,6 +3197,19 @@ async fn execute_run_body(
             &mut ctx,
             Some(&agents_config.model_tiers),
         );
+        // KT-1694 — a later step reads what the step's shadows and merge did:
+        // the merge ran inside the step's future, so the summary is final.
+        if shadow_snapshot.is_some() {
+            let summary = super::shadow_summary::for_completed_step(
+                &state,
+                &run.id,
+                in_flight_result_index,
+                step,
+                &outcome.result,
+            )
+            .await;
+            ctx.set_step_shadows(&step.name, &summary.to_string());
+        }
 
         // 0.7.0 Phase 3 — persist declared artifacts to disk so they
         // survive past the run (committable when in a worktree,
@@ -5043,6 +5057,10 @@ pub(crate) fn replay_prior_results(ctx: &mut TemplateContext, results: &[StepRes
             prior.step_model.as_deref(),
         );
         ctx.set_step_provenance(&prior.step_name, prior.agent_provenance.as_deref());
+        ctx.set_step_shadows(
+            &prior.step_name,
+            &super::shadow_summary::none(&prior.step_name).to_string(),
+        );
     }
 }
 
@@ -5080,6 +5098,11 @@ pub(crate) fn record_step_completion(
         result.step_model.as_deref(),
     );
     ctx.set_step_provenance(&step.name, result.agent_provenance.as_deref());
+    // A step with shadows replaces this once its executions are read back.
+    ctx.set_step_shadows(
+        &step.name,
+        &super::shadow_summary::none(&step.name).to_string(),
+    );
 }
 
 pub(crate) fn apply_step_snapshot(
