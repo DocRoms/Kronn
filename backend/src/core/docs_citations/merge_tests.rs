@@ -1219,3 +1219,98 @@ fn a_prose_conflict_next_to_anchors_carries_no_citation_detail() {
     );
     assert_eq!((build.settled, build.detail), (None, None));
 }
+
+const BUDGET_FN: &str = "pub fn retry_budget() {}";
+
+/// 220 lines defining `retry_budget` at 10 (and at each of `also`). The child
+/// shifts the file by 3 and cites the definition at 13; the target moves that
+/// definition to line 100 and, with `target_cites`, re-anchors the doc to 100:
+/// both sides then rewrote the one citation line. The merged file holds the
+/// symbol at 103 (and, for each of `also`, 3 lines below it).
+fn moved_definition_repo(also: &[usize], target_cites: bool) -> (tempfile::TempDir, String) {
+    let repo = scratch_repo();
+    let dir = repo.path();
+    let special: Vec<(usize, &str)> = std::iter::once(10)
+        .chain(also.iter().copied())
+        .map(|at| (at, BUDGET_FN))
+        .collect();
+    let base = source_of(220, &special);
+    write_lines(dir, "src/lib.rs", &base);
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(
+        dir.join("docs/budget.md"),
+        "Retries: [src: file: src/lib.rs:10-11#retry_budget]\n",
+    )
+    .unwrap();
+    commit_all(dir, "base");
+    git(dir, &["checkout", "-q", "-b", "child"]);
+    let mut lines = base.clone();
+    insert_after(&mut lines, 1, 3, "child");
+    write_lines(dir, "src/lib.rs", &lines);
+    fs::write(
+        dir.join("docs/budget.md"),
+        "Retries: [src: file: src/lib.rs:13-14#retry_budget]\n",
+    )
+    .unwrap();
+    commit_all(dir, "child shifts the file");
+    assert_eq!(broken(dir), Vec::<String>::new());
+    git(dir, &["checkout", "-q", "main"]);
+    let mut lines = base;
+    lines[9] = "let v10 = 0;".to_string();
+    lines[99] = BUDGET_FN.to_string();
+    write_lines(dir, "src/lib.rs", &lines);
+    if target_cites {
+        fs::write(
+            dir.join("docs/budget.md"),
+            "Retries: [src: file: src/lib.rs:100-101#retry_budget]\n",
+        )
+        .unwrap();
+    }
+    let target = commit_all(dir, "target moves the definition");
+    assert_eq!(broken(dir).len(), usize::from(!target_cites));
+    git(dir, &["checkout", "-q", "child"]);
+    (repo, target)
+}
+
+#[test]
+fn a_definition_the_merged_file_holds_once_is_re_anchored_whatever_the_distance() {
+    let (repo, target) = moved_definition_repo(&[], true);
+    let dir = repo.path();
+
+    // Both sides rewrote the one citation line (13 and 100), the merged file
+    // defines the symbol at 103, 90 lines from where the child cited it.
+    let CandidateOutcome::Built { .. } = build_candidate(dir, &target).unwrap() else {
+        panic!("a unique definition is the source of truth, not a bounce");
+    };
+
+    assert_eq!(parents(dir), 2);
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/budget.md")).unwrap(),
+        "Retries: [src: file: src/lib.rs:103-104#retry_budget]\n"
+    );
+    assert_eq!(broken(dir), Vec::<String>::new());
+    assert_eq!(git(dir, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_symbol_defined_twice_still_bounces_and_lists_both_candidate_lines() {
+    // The merged file defines it at 103 and at 153; the child cited 13, which
+    // the target's rewrite took away, so nothing proves which one is meant.
+    let (repo, target) = moved_definition_repo(&[150], false);
+    let dir = repo.path();
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert!(
+        matches!(build.outcome, CandidateOutcome::Conflict { .. }),
+        "{:?}",
+        build.outcome
+    );
+    let detail = build.detail.expect("the worker is told which citations");
+    assert!(
+        detail.contains("docs/budget.md:1 [src: file: src/lib.rs:13-14#retry_budget]"),
+        "{detail}"
+    );
+    assert!(detail.contains("candidate lines 103, 153"), "{detail}");
+    assert!(!merge::merge_in_progress(dir));
+}

@@ -9,7 +9,7 @@ stream with a plain `error` event. [src: file: backend/src/models/ollama.rs:119-
 
 The Settings card holds one `AbortController` per active model. Cancelling a
 download aborts the browser request and removes that model's transient progress
-state, so the same download can be started again. [src: file: frontend/src/components/settings/OllamaCard.tsx:319-385#startPull]
+state, so the same download can be started again. [src: file: frontend/src/components/settings/OllamaCard.tsx:326-392#startPull]
 
 Updating an installed model uses the same endpoint and the same card state: the
 Update button pulls the model's exact tag again (KT-930), so its progress,

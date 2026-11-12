@@ -15,7 +15,7 @@ import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { AppLink } from './AppLink';
 import SkillHistoryDrawer from './SkillHistoryDrawer';
 import QPHistoryDrawer from './QPHistoryDrawer';
-import { useVersions, MAX_SHADOWS } from './workflows/StepShadowsEditor';
+import { useVersions, MAX_SHADOWS } from './workflows/shadowEditorModel';
 import type { LivePageResource, LivePageResourceUse, StepShadow, WorkflowStep } from '../types/generated';
 import './LivePageResources.css';
 

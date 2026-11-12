@@ -16,7 +16,7 @@ fails when that provider is rate-limited, unavailable, or unhealthy. A quota or
 session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
-[src: file: backend/src/models/workflows.rs:2005-2011#RetryConfig]
+[src: file: backend/src/models/workflows.rs:2019-2025#RetryConfig]
 [src: file: backend/src/workflows/steps.rs:492-508#RETRY_BACKOFF_UNIT]
 [src: file: backend/src/workflows/steps.rs:993-1000#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
@@ -70,7 +70,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:1193-1268#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:1408-1483#AgentDetection]
 
 ## Policy and precedence
 
@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:339-361#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:4858-4867#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:4860-4869#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -281,7 +281,7 @@ property of each surface, not of an agent being installed. [src: file: backend/s
 `DiscussionMessage` already persists the actual `agent_type`, `model_tier`, and
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
 Run Detail renders them. [src: file: backend/src/models/discussions.rs:324-372#DiscussionMessage]
-[src: file: backend/src/models/workflows.rs:2516-2529#step_agent]
+[src: file: backend/src/models/workflows.rs:2531-2544#step_agent]
 [src: file: frontend/src/components/workflows/RunDetail.tsx:1145-1152#StepModelBadge]
 
 Workflow Agent steps also keep a per-attempt trail (`StepResult.agent_provenance`:
@@ -290,7 +290,7 @@ resolved model, success, duration and `cost_usd`), and `step_agent`/`step_model`
 are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
-[src: file: backend/src/models/workflows.rs:2323-2402#WorkflowAgentProvenance]
+[src: file: backend/src/models/workflows.rs:2338-2417#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1435-1459#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/runner.rs:5137-5159#selected_attempt]
 
@@ -328,7 +328,7 @@ Required UI:
 Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
 attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
 cross-provider cost display therefore needs additive persistence of that total,
-not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2122-2131#tokens_used] [src: file: backend/src/models/workflows.rs:2394-2402#cost_usd]
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2136-2145#tokens_used] [src: file: backend/src/models/workflows.rs:2408-2416#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.

@@ -37,7 +37,6 @@ struct Plan {
     from_model: Option<String>,
     trigger: Trigger,
     until: DateTime<Utc>,
-    announced: Option<DateTime<Utc>>,
     selection: Selection,
     surface: Surface,
     tier: ModelTier,
@@ -173,6 +172,7 @@ async fn plan(
     let needs = match surface {
         Surface::Worker { .. } => TurnNeeds {
             write_access: true,
+            task_worker: true,
             ..Default::default()
         },
         Surface::Room => TurnNeeds {
@@ -223,7 +223,6 @@ async fn plan(
         from_model,
         trigger,
         until,
-        announced,
         selection,
         surface,
         tier,
@@ -654,6 +653,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
         link,
         plan.tier,
     );
+    let notice = format!("Task worker execution {execution_id}: {notice}");
     crate::api::orchestration::reassign_native_execution_as(
         state,
         execution_id,
@@ -664,7 +664,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
         },
         &format!("automatic agent fallback: {notice}"),
         crate::api::orchestration::ReassignCause::QuotaFallback {
-            reset_at: plan.announced,
+            reset_at: Some(plan.until),
         },
     )
     .await?;
@@ -737,11 +737,14 @@ async fn post_stop(state: &AppState, job: &AgentDispatchJob, plan: &Plan, why: &
             job.discussion_id.clone(),
             system_notice(content, &plan.failing, plan.tier, &job.trigger_message_id),
         ),
-        Surface::Worker { parent_room, .. } => (
+        Surface::Worker {
+            parent_room,
+            execution_id,
+        } => (
             parent_room.clone(),
             crate::api::orchestration::orchestrator_message(
                 format!("agent-fallback-stop:{}", job.id),
-                content,
+                format!("Task worker execution {execution_id}: {content}"),
             ),
         ),
     };

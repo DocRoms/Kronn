@@ -50,4 +50,30 @@ describe('WorkflowProjectScopeControl (KT-851)', () => {
     expect(screen.getByLabelText('wiz.projectScope.all')).toBeChecked();
     expect(screen.getByText('wiz.projectScope.hintGlobal')).toBeInTheDocument();
   });
+
+  it('renders one option per line with the wizard classes only (KT-1709)', () => {
+    render(
+      <WorkflowProjectScopeControl
+        value={{ type: 'Projects', project_ids: [] }}
+        onChange={() => {}}
+        projects={projects}
+        homeProjectId="home"
+      />,
+    );
+    const root = screen.getByTestId('workflow-project-scope');
+    expect(root).toHaveClass('wf-scope');
+    const options = root.querySelector('.wf-scope-options') as HTMLElement;
+    const radios = Array.from(options.querySelectorAll('label'));
+    expect(radios).toHaveLength(3);
+    radios.forEach(label => expect(label).toHaveClass('wf-checkbox-label'));
+    const checkboxes = Array.from(root.querySelectorAll('.wf-scope-projects label'));
+    expect(checkboxes).toHaveLength(2);
+    checkboxes.forEach(label => expect(label).toHaveClass('wf-checkbox-label'));
+    expect(screen.getByText('wiz.projectScope.hint')).toHaveClass('wf-field-hint');
+    // No utility class the wizard stylesheet does not define.
+    const unstyled = ['flex', 'items-center', 'ml-6', 'text-sm', 'text-2xs'];
+    root.querySelectorAll('*').forEach(node => {
+      unstyled.forEach(cls => expect(node).not.toHaveClass(cls));
+    });
+  });
 });

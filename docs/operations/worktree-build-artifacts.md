@@ -174,9 +174,9 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:6592-6649#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:6810-6906#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:6596-6613#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:6833-6890#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:6892-6988#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:6723-6740#run_one_validation_with]
 [src: file: backend/src/api/orchestration.rs:7035-7101#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
@@ -320,6 +320,82 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
 [src: file: backend/src/core/config.rs:610-611]
+
+## Long builds in a task worker (KT-1718)
+
+A cold test-profile build of the backend (`cargo test --lib <filter>` compiles
+the whole dependency graph and a 1.7 GB `libkronn.rlib`) took 41 min 43 s cold
+on a loaded lane, against a 10-minute shell cap (table below). On 2026-11-12 a worker's filtered run hit the shell
+tool's cap three times (each timeout killed `rustc`), started the build in the
+background, handed the turn back, and the headless Claude process exited and
+took the build with it: dispatch `worker_reported_failure`, execution
+`Interrupted` (KT-1595, then KT-1692 and KT-1693). Three limits were stacked,
+and the worker is told about all three:
+
+| Limit | Value | Who owns it |
+|---|---|---|
+| Per shell command | Claude Code's own cap is 10 minutes (`BASH_MAX_TIMEOUT_MS`); Kronn now sets **60 min** | Settings > Workers, `workers.bash_max_timeout_min` (1 to 240) |
+| Per shell command when it names no limit | Claude Code's own default is 2 minutes; Kronn now sets **15 min** | Settings > Workers, `workers.bash_default_timeout_min` (1 to the maximum) |
+| Generation (the whole turn) | `server.agent_global_timeout_min`, 30 min by default, clamped to 1 to 240 | Settings > Server |
+
+**Kronn sets the shell limits itself.** Every Claude task worker is launched
+with `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` taken from the two
+settings, so a worker no longer depends on the shell Kronn was started from (the
+variables used to be passed through only when present in Kronn's own
+environment, which a normal install never has). The settings win over an
+inherited value; they are published to the process by `config::save` and at boot,
+so a saved change reaches the next spawn without a restart. A hand-edited value
+is clamped at spawn and the default never exceeds the maximum. A command allowed
+as long as the generation would be cut with it, so Settings > Workers shows the
+per-command limits next to the generation limit and warns when the maximum
+reaches it.
+
+**The worker brief says how to run a long build.** Run it in the foreground and
+pass the Bash tool an explicit `timeout` up to the cap; never cut it short and
+never restart it in a loop; never end the turn while a command runs in the
+background, because the process exits with the turn and takes the build with it
+(a command that must be backgrounded is waited for in the same turn). The
+persisted long validations stay Kronn's, run at integration.
+
+**Lane warm-up.** Before the worker starts, the lane runs
+`cargo test --no-run --locked --offline` (the test profile, not only the dev
+build) and writes `.kronn-warm.json` only when it succeeds; a lane whose marker
+matches the current `Cargo.lock` is not built again. A failed or timed-out
+warm-up leaves no marker and the worker starts anyway, so a lane without
+`.kronn-warm.json` is cold for the test profile whatever its seeded `debug/`
+holds.
+
+**Measured on the KT-1718 lane (2026-11-12, `CARGO_BUILD_JOBS=3`, background
+priority, machine busy with other workers).** The lane had been seeded with a
+`cargo build` target but carried no `.kronn-warm.json`, so its test profile was
+cold. From the worker's first build command to the first targeted test result:
+
+| Step | Wall time |
+|---|---|
+| Cold `cargo check --lib --tests` (the shell tool moved it to the background at its 600 s cap) | 10 min 08 s |
+| Cold `cargo test --lib <filter>`: test-profile build, then the filtered run | 41 min 43 s build, 0.00 s run |
+| Same lane, source untouched: `cargo test --lib <filter>` | 1.68 s build, 29.6 s for 50 tests |
+| Same lane, after a source edit: `cargo test --no-run --locked --offline` (the warm-up command) | 1 min 07 s |
+| Same lane, after merging the integration branch (about 80 files changed, backend and docs): rebuild of the test profile | 19 min 45 s |
+| Same lane, immediately after: the citation gate test alone, binary already built | 25.6 s |
+
+Before this change that first result was out of reach: the foreground cap (10
+minutes) is a quarter of the cold build, so each attempt was killed, which is the
+KT-1595 sequence. With a 60-minute cap the cold build completes inside one
+foreground command (the measured run used a background command only because this
+worker's own environment predates the setting), and on a warmed lane a filtered
+`cargo test --lib` is well inside any cap. These are single observations under
+load, not a performance guarantee.
+
+[src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
+[src: file: backend/src/models/setup.rs:204-211#effective_bash_timeouts_ms]
+[src: file: backend/src/core/task_worker_env.rs:814-824#apply_bash_timeouts]
+[src: file: backend/src/agents/runner.rs:15176-15178#apply_bash_timeouts]
+[src: file: backend/src/core/config.rs:678-679#set_bash_timeouts]
+[src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
+[src: file: backend/src/api/orchestration.rs:11346-11356]
+[src: file: backend/src/core/task_worker_lane_warm.rs:872]
+[src: file: frontend/src/components/settings/WorkersSection.tsx:39#WorkersSection]
 
 ## Maintenance command
 

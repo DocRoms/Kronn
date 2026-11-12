@@ -161,6 +161,7 @@ fn warnings_never_block_and_the_summary_names_them() {
         &HashMap::new(),
         &HashMap::new(),
         &[github()],
+        None,
         &mut |_| Ok(None),
     );
     assert!(verdict.ready, "{verdict:?}");

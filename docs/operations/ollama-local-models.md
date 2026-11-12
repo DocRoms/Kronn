@@ -169,7 +169,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_tools.rs:1693-1710#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1401-1415#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1417-1434#worker_repair_iteration_limit]`
-`[src: file: backend/src/api/orchestration.rs:9669-9897#worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:9751-9979#worker_scope]`
 
 For a pure insertion, do not make the worker reproduce a paragraph inside a
 replacement range. Use one verified anchor line:
@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:3004-3072#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:3123-3180#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:3086-3154#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:3205-3262#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -662,7 +662,7 @@ default itself is never written, so someone who never touched it keeps the
 automatic behaviour. Folded, its summary line counts the suggestions and the
 downloads in progress. A download or an update in flight is drawn above the
 block, outside the fold, with its progress and its Cancel, so folding the block
-back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:161-163#usePersistentFold]
+back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:164-166#usePersistentFold]
 [src: file: frontend/src/hooks/usePersistentFold.ts:13-31#usePersistentFold]
 
 ### The suggestions, and what "verified" means here
@@ -854,6 +854,71 @@ without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
 - Ollama 0.34.2 refuses to pull `clef-flash` with `412 … requires a newer
   version of Ollama`; the card now says to update Ollama. Measured on
   0.40.6: first call 8.5 s (load), then 0.2–0.6 s.
+- **A Decide step picks its own model (KT-1697).** `decide.model` and
+  `decide.connection_id` live in the step JSON, so no migration. Unset, the step
+  runs the configured Decision model, as before; set, the runner calls that model
+  and records it as the step's model. Without a `connection_id` the call goes to
+  Ollama's `/v1/systemone`; with one, to the connection (next bullet).
+  [src: file: backend/src/workflows/decide_step.rs:163#resolve_model]
+  The model is picked from the workflow overview (step card and pipeline chip,
+  `Décision · <model> ▾` with a Local/HTTP badge, saved at once, rolled back if the
+  save fails) and from the editor, with the same `DecisionModelPicker`. A single
+  decision model stays visible, read-only.
+  [src: file: frontend/src/lib/decisionModels.ts:38#decisionModelOptions]
+  Readiness flags a step whose model Ollama no longer lists
+  (`decision_model_not_installed`) or whose connection can no longer serve it
+  (`decision_connection_unavailable`: gone, not OpenRouter, or its
+  `decision_model` changed); the run refuses it the same way. The model is never
+  swapped for the configured one.
+  [src: file: backend/src/workflows/readiness.rs:367#decision_connection_unavailable]
+- **A connection's `decision_model` is wired for OpenRouter only (KT-1697).** The
+  owner decided (2026-11-11) to wire connection decision models, not remove them,
+  over a contract read from the provider, never assumed. OpenRouter serves its
+  decision models on the System One API, the same contract as Ollama's
+  `/v1/systemone`: `POST https://openrouter.ai/api/v1/systemone` (a Decisions alias
+  exists at `/api/alpha/decisions`). Request `{"model": "<slug>", "state":
+  <string|array>, "questions": {"<key>": {"type": "noul|choice|score",
+  "instructions": "...", "criteria": ...}}}`; response `answers.<key>` with `noul`
+  (a probability), `choice` or `score`, plus `probabilities` and `confidence`, and
+  `usage` for the token counts. The Perplexity Decider V1.2 and Decider Flash V1.2
+  models (`perplexity/pplx-decider-flash-v1.2`) share it. Read by the principal from
+  [src: url: https://openrouter.ai/skills/openrouter-decisions]
+  [src: url: https://openrouter.ai/docs/guides/community/jev]
+  [src: url: https://openrouter.ai/api/v1/models?output_modalities=decisions]
+  because the worker's sandbox had no network: no call was measured, and the
+  mocked answer in the tests (`openrouter_answer`) follows that documented shape.
+  Only `answers` is read.
+  - **Transport.** The runner builds the same `request_body` and reads the answer
+    with the same `interpret` as for Ollama; it posts to `<connection endpoint>/v1/systemone`
+    (a stored `https://openrouter.ai/api` or `.../api/v1` gives the same address)
+    with `Authorization: Bearer <the connection's stored credential>`, read from the
+    token store like the media calls, never from the step, never logged (the route's
+    `Debug` hides it; a provider's error body is scrubbed of it in full *before* it is
+    cut to length, so a token straddling the cut cannot leak as a fragment, and the
+    success output is scrubbed too) and never followed through a
+    redirect. HTTP 401 and 403 are a refused token: the step fails with the plain
+    sentence of the other connection calls and `[SIGNAL: auth_refused]`, and runs
+    nothing else. A connection that is gone, of another provider, with another
+    `decision_model` or without a stored credential fails the step with that
+    reason before any call.
+    [src: file: backend/src/workflows/decide_step.rs:268#route_for]
+    [src: file: backend/src/workflows/decide_step.rs:649#call]
+    [src: file: backend/src/workflows/decide_step.rs:624#refused_output]
+  - **What the picker lists.** The Ollama decision models of the catalogue
+    (Local), then each connection's `decision_model` when its provider is OpenRouter
+    and a credential is stored (HTTP, with the connection's name). LiteLLM, NVIDIA and
+    the other kinds are **not listed**, and a step on one is refused: none has a
+    documented decision contract today. Their `decision_model` field is kept. To
+    support one, record its contract here (endpoint, request, answer), then widen
+    `callable_decision_model` and `DECISION_PRESETS` together.
+    [src: file: backend/src/workflows/decide_step.rs:208#callable_decision_model]
+    [src: file: frontend/src/lib/decisionModels.ts:33#DECISION_PRESETS]
+  - **Tests.** wiremock against a mocked OpenRouter: the request reaches
+    `/v1/systemone` with the connection's bearer and the model, and branches the
+    run; a 401 and a 403 are reported and never swapped, with the token absent from
+    the output; a gone, foreign or credential-less connection makes no call.
+    [src: file: backend/src/workflows/decide_step.rs:1184#an_openrouter_connection_is_called_on_v1_systemone_with_its_bearer]
+    [src: file: backend/src/workflows/decide_step.rs:1245#a_refused_openrouter_token_is_reported_and_never_swapped]
 
 ## Bench snapshot (M5 Max 64 GB, Q4_K_M, informational)
 

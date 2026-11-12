@@ -23,6 +23,13 @@ import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { MAX_REVIEW_ROUNDS, MIN_REVIEW_ROUNDS } from '../../lib/reviewRounds';
 import { DEFAULT_HEAVY_OUTPUT_KB, MAX_HEAVY_OUTPUT_KB, MIN_HEAVY_OUTPUT_KB } from '../../lib/heavyOutput';
 import { DEFAULT_TASK_WORKERS, MAX_TASK_WORKERS, MIN_TASK_WORKERS } from '../../lib/taskWorkers';
+import {
+  commandOutlivesGeneration,
+  DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
+  DEFAULT_BASH_MAX_TIMEOUT_MIN,
+  MAX_BASH_TIMEOUT_MIN,
+  MIN_BASH_TIMEOUT_MIN,
+} from '../../lib/workerShellTimeouts';
 import '../../pages/SettingsPage.css';
 
 interface Props {
@@ -36,7 +43,21 @@ export function WorkersSection({ t }: Props) {
   const [background, setBackground] = useState(true);
   const [taskWorkers, setTaskWorkers] = useState(String(DEFAULT_TASK_WORKERS));
   const [heavyKb, setHeavyKb] = useState(String(DEFAULT_HEAVY_OUTPUT_KB));
+  const [bashDefault, setBashDefault] = useState(String(DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
+  const [bashMax, setBashMax] = useState(String(DEFAULT_BASH_MAX_TIMEOUT_MIN));
+  // The generation limit (Settings > Server) cuts the whole turn whatever a command is
+  // allowed, so it is shown next to the per-command cap. Read-only here.
+  const [generationMin, setGenerationMin] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    Promise.resolve()
+      .then(() => configApi.getServerConfig())
+      .then(cfg => { if (live) setGenerationMin(cfg?.agent_global_timeout_min ?? null); })
+      .catch(() => { /* the limit is a hint: the form works without it */ });
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -51,6 +72,8 @@ export function WorkersSection({ t }: Props) {
         setBackground(value.background_priority !== false);
         setTaskWorkers(String(value.max_concurrent_task_workers));
         setHeavyKb(String(value.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
+        setBashDefault(String(value.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
+        setBashMax(String(value.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -65,14 +88,23 @@ export function WorkersSection({ t }: Props) {
   // unparseable field only blocks the save while it would actually be used.
   const heavy = Number(heavyKb);
   const validHeavy = Number.isInteger(heavy) && heavy >= MIN_HEAVY_OUTPUT_KB && heavy <= MAX_HEAVY_OUTPUT_KB;
-  const valid = (unlimited || validCount) && validWorkerCap && validHeavy;
+  const bashDefaultMin = Number(bashDefault);
+  const bashMaxMin = Number(bashMax);
+  const validBashMax = Number.isInteger(bashMaxMin)
+    && bashMaxMin >= MIN_BASH_TIMEOUT_MIN && bashMaxMin <= MAX_BASH_TIMEOUT_MIN;
+  const validBashDefault = Number.isInteger(bashDefaultMin)
+    && bashDefaultMin >= MIN_BASH_TIMEOUT_MIN && validBashMax && bashDefaultMin <= bashMaxMin;
+  const validBash = validBashMax && validBashDefault;
+  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
     && (unlimited || count === saved.default_max_review_rounds);
   const unchanged = roundsUnchanged
     && saved !== null && workerCap === saved.max_concurrent_task_workers
-    && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB);
+    && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)
+    && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
+    && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN);
 
   const save = useAsyncGuard(async () => {
     if (!saved || !valid) return;
@@ -84,6 +116,8 @@ export function WorkersSection({ t }: Props) {
         background_priority: background,
         max_concurrent_task_workers: workerCap,
         heavy_output_kb: heavy,
+        bash_default_timeout_min: bashDefaultMin,
+        bash_max_timeout_min: bashMaxMin,
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
@@ -91,6 +125,8 @@ export function WorkersSection({ t }: Props) {
       setBackground(next.background_priority !== false);
       setTaskWorkers(String(next.max_concurrent_task_workers));
       setHeavyKb(String(next.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
+      setBashDefault(String(next.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
+      setBashMax(String(next.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
     } catch (cause) {
       setError(userError(cause));
     }
@@ -231,6 +267,69 @@ export function WorkersSection({ t }: Props) {
           <p role="alert" className="default-docs-dir-error" data-testid="workers-heavy-invalid">
             {t('config.workers.heavyOutputInvalid', MIN_HEAVY_OUTPUT_KB, MAX_HEAVY_OUTPUT_KB)}
           </p>
+        )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.shellTimeouts')}</span>
+          <span className="text-base font-semibold text-accent" style={{ marginLeft: 'auto' }} data-testid="workers-shell-current">
+            {saved === null
+              ? '…'
+              : t(
+                'config.workers.shellTimeoutsSummary',
+                saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
+                saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN,
+                generationMin ?? '…',
+              )}
+          </span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-shell-hint">{t('config.workers.shellTimeoutsHint')}</p>
+        <div className="flex-row gap-3">
+          <label className="flex-row gap-3">
+            <span className="text-sm">{t('config.workers.bashDefault')}</span>
+            <input
+              type="number"
+              className="set-input set-input-sm"
+              min={MIN_BASH_TIMEOUT_MIN}
+              max={MAX_BASH_TIMEOUT_MIN}
+              aria-label={t('config.workers.bashDefault')}
+              value={bashDefault}
+              disabled={saved === null}
+              onChange={event => setBashDefault(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+              data-testid="workers-bash-default-input"
+            />
+          </label>
+          <label className="flex-row gap-3">
+            <span className="text-sm">{t('config.workers.bashMax')}</span>
+            <input
+              type="number"
+              className="set-input set-input-sm"
+              min={MIN_BASH_TIMEOUT_MIN}
+              max={MAX_BASH_TIMEOUT_MIN}
+              aria-label={t('config.workers.bashMax')}
+              value={bashMax}
+              disabled={saved === null}
+              onChange={event => setBashMax(event.target.value)}
+              onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+              data-testid="workers-bash-max-input"
+            />
+          </label>
+          <span className="flex-row gap-3" data-testid="workers-generation-limit">
+            <span className="text-sm">{t('config.workers.generationLimit')}</span>
+            <span className="text-base font-semibold">{generationMin ?? '…'}</span>
+          </span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-generation-hint">{t('config.workers.generationLimitHint')}</p>
+        {!validBash && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-shell-invalid">
+            {t('config.workers.shellTimeoutsInvalid', MIN_BASH_TIMEOUT_MIN, MAX_BASH_TIMEOUT_MIN)}
+          </p>
+        )}
+        {validBash && commandOutlivesGeneration(bashMaxMin, generationMin) && (
+          <div className="set-expose-warn" role="alert" data-testid="workers-shell-outlive-warning">
+            <AlertTriangle size={13} />
+            <span>{t('config.workers.shellTimeoutsOutlive')}</span>
+          </div>
         )}
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}
       </div>
