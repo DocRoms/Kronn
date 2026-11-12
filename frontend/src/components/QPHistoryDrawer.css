@@ -39,7 +39,7 @@
   position: fixed;
   inset: 0;
   background: var(--kr-bg-overlay, rgba(0, 0, 0, 0.5));
-  z-index: 998;
+  z-index: var(--kr-z-drawer);
   animation: qph-fade-in 0.15s ease-out;
 }
 .qph-drawer {
@@ -52,7 +52,7 @@
   background: var(--kr-bg-surface);
   border-left: 1px solid var(--kr-border-medium);
   box-shadow: -4px 0 24px var(--kr-bg-scrim, rgba(0, 0, 0, 0.3));
-  z-index: 999;
+  z-index: calc(var(--kr-z-drawer) + 1);
   display: flex;
   flex-direction: column;
   color: var(--kr-text-primary);

@@ -118,7 +118,7 @@ the same job.
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2951-3011#load_completed_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2626-2757#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8927-9248#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8941-9262#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -227,6 +227,6 @@ only on an actual target/tier change, distinguishes an absent connection from
 explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
-[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1372-1380#currentConnectionId]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1202-1219#agentSettingsForSelection]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1392-1400#currentConnectionId]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1203-1220#agentSettingsForSelection]
 [src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]

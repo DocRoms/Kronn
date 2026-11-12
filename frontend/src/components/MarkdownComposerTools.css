@@ -115,7 +115,7 @@
 
 .md-composer-panel-fixed {
   position: fixed;
-  z-index: calc(var(--kr-z-modal) + 30);
+  z-index: var(--kr-z-popover);
 }
 
 .md-composer-panel-head {

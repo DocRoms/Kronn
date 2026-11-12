@@ -6,6 +6,7 @@ import {
   withDecisionModel,
 } from '../decisionModels';
 import type { DecideConfig, ModelCatalogSnapshot, Workflow } from '../../types/generated';
+import type { ExternalApiConnectionView } from '../api';
 
 const entry = (model_id: string, capabilities: string[], extra: Record<string, unknown> = {}) => ({
   model_id, display_name: model_id, display_alias: null, capabilities,
@@ -30,12 +31,39 @@ describe('decisionModelOptions (KT-1697)', () => {
     expect(options[1].unavailable).toBe(true);
   });
 
-  it('does not list a connection\'s decision model: no HTTP decision contract is verified', () => {
+  it('does not read a model from another runtime target of the catalogue', () => {
     const http = snapshot([entry('perplexity/pplx-decider-flash-v1.2', ['decision'], {
       runtime_target_id: 'http:conn-1',
     })], 'http:conn-1');
     expect(decisionModelOptions(http)).toEqual([]);
     expect(decisionModelOptions(null)).toEqual([]);
+  });
+
+  const connection = (extra: Record<string, unknown> = {}) => ({
+    id: '731fe83a', display_name: 'OpenRouter', origin_preset: 'open_router',
+    decision_model: 'perplexity/pplx-decider-flash-v1.2', has_credential: true, ...extra,
+  }) as unknown as ExternalApiConnectionView;
+
+  it('lists an OpenRouter connection\'s decision model after the local ones, over HTTP', () => {
+    const options = decisionModelOptions(snapshot([entry('clef-flash:9b', ['decision'])]), [connection()]);
+    expect(options.map(option => [option.model, option.connectionId, option.transport])).toEqual([
+      ['clef-flash:9b', null, 'local'],
+      ['perplexity/pplx-decider-flash-v1.2', '731fe83a', 'http'],
+    ]);
+    expect(options[1].connectionName).toBe('OpenRouter');
+    expect(options[1].unavailable).toBe(false);
+  });
+
+  it('lists no connection whose provider has no documented decision contract, or no credential, or no model', () => {
+    const options = decisionModelOptions(snapshot([]), [
+      connection({ id: 'lite', origin_preset: 'lite_llm' }),
+      connection({ id: 'nv', origin_preset: 'nvidia' }),
+      connection({ id: 'other', origin_preset: 'other' }),
+      connection({ id: 'nokey', has_credential: false }),
+      connection({ id: 'none', decision_model: null }),
+      connection({ id: 'blank', decision_model: '  ' }),
+    ]);
+    expect(options).toEqual([]);
   });
 });
 

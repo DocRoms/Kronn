@@ -39,6 +39,8 @@ import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import { RunRetentionCard } from './RunRetentionCard';
 import QuickPromptVersionPin from '../QuickPromptVersionPin';
 import { StepShadowsEditor } from './StepShadowsEditor';
+import { StepShadowRows } from './StepShadowRows';
+import type { ShadowEdit } from '../../lib/shadowMerge';
 import { WorkflowRefsCard } from './WorkflowRefsCard';
 import type { RefOptions } from '../../lib/workflowRefs';
 import type { AgentsConfig } from '../../types/generated';
@@ -973,6 +975,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     setSteps(steps.map((s, i) => i === idx ? { ...s, ...patch } : s));
   };
 
+  /** KT-1696 — a change from the shadow sub-rows: the step's shadows, and its merge when the change moves it. */
+  const applyShadowEdit = (idx: number, edit: ShadowEdit) =>
+    updateStep(idx, edit.merge === undefined ? { shadows: edit.shadows } : { shadows: edit.shadows, shadow_merge: edit.merge ?? undefined });
+
   const createStarterPage = async (idx: number) => {
     const title = (pageDraftTitles[idx] ?? '').trim();
     if (!title || pageCreatingIndex !== null) return;
@@ -1644,6 +1650,16 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           </label>
           <div className="wf-wizard-agent-tier mb-6">
             {steps[0] && renderAgentTierPicker(steps[0], patch => updateStep(0, patch))}
+            {steps[0] && (
+              <StepShadowRows
+                step={steps[0]}
+                choices={agentChoices}
+                onEdit={edit => applyShadowEdit(0, edit)}
+                addWhenEmpty
+                t={t}
+                testId="wf-wiz-shadow-rows-simple"
+              />
+            )}
           </div>
 
           <label className="wf-label">
@@ -2363,6 +2379,16 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   <div className="wf-step-agent-routing">
                     <label className="wf-label">{t('wiz.agentAndTierLabel')}</label>
                     {renderAgentTierPicker(step, patch => updateStep(i, patch))}
+                    {/* KT-1696 — the shadows sit right under the agent, not in « Advanced ». */}
+                    <StepShadowRows
+                      step={step}
+                      nextStepName={steps[i + 1]?.name}
+                      choices={agentChoices}
+                      onEdit={edit => applyShadowEdit(i, edit)}
+                      addWhenEmpty
+                      t={t}
+                      testId={`wf-wiz-shadow-rows-${i}`}
+                    />
                   </div>
                 )}
                 {step.step_type?.type !== 'BatchQuickPrompt' && (checkAgentRestricted(agentAccess, step.agent) || requiresFullAccessToRun(agentAccess, step.agent)) && (

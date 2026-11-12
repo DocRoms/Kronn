@@ -385,6 +385,11 @@ pub struct ServerConfig {
     /// live worktree, before a sweep (boot, periodic, pressure) may remove it.
     #[serde(default = "default_disk_sweep_idle_hours")]
     pub disk_sweep_idle_hours: u64,
+    /// KT-1691 — days a Blocked or Interrupted execution's lane build dir must
+    /// have been unwritten before it becomes purgeable (by a confirmed
+    /// per-entry delete, never by a sweep). Its worktree and branch stay.
+    #[serde(default = "default_disk_stalled_build_days")]
+    pub disk_stalled_build_days: u64,
     /// Maximum concurrent agent processes (default: 5)
     #[serde(default = "default_max_agents")]
     pub max_concurrent_agents: usize,
@@ -569,11 +574,17 @@ pub(crate) const DEFAULT_DISK_WARNING_GIB: u64 = 20;
 /// been measured at 5-30 GiB; 30 GiB is the room a launch needs to finish.
 pub(crate) const DEFAULT_DISK_LAUNCH_MIN_FREE_GIB: u64 = 30;
 pub(crate) const DEFAULT_DISK_SWEEP_IDLE_HOURS: u64 = 6;
+/// KT-1691 — a Blocked or Interrupted execution that left its build dir alone
+/// this long is not coming back soon; the next resume rebuilds.
+pub(crate) const DEFAULT_DISK_STALLED_BUILD_DAYS: u64 = 3;
 fn default_disk_launch_min_free_gib() -> u64 {
     DEFAULT_DISK_LAUNCH_MIN_FREE_GIB
 }
 fn default_disk_sweep_idle_hours() -> u64 {
     DEFAULT_DISK_SWEEP_IDLE_HOURS
+}
+fn default_disk_stalled_build_days() -> u64 {
+    DEFAULT_DISK_STALLED_BUILD_DAYS
 }
 fn default_disk_critical_gib() -> u64 {
     DEFAULT_DISK_CRITICAL_GIB
@@ -1467,6 +1478,9 @@ pub struct ServerConfigPublic {
     pub disk_launch_min_free_gib: u64,
     /// KT-1318 - hours a lane build dir must be idle before a sweep may take it.
     pub disk_sweep_idle_hours: u64,
+    /// KT-1691 - days a Blocked/Interrupted execution's build dir must be idle
+    /// before it becomes purgeable.
+    pub disk_stalled_build_days: u64,
     pub p2p_enabled: bool,
     pub frontend_origins: Vec<String>,
     /// KT-1438 - copy lane seeds into task worktrees (default on).
@@ -1529,6 +1543,9 @@ pub struct UpdateServerConfigRequest {
     /// KT-1318 - `server.disk_sweep_idle_hours`.
     #[serde(default)]
     pub disk_sweep_idle_hours: Option<u64>,
+    /// KT-1691 - `server.disk_stalled_build_days`.
+    #[serde(default)]
+    pub disk_stalled_build_days: Option<u64>,
     /// KT-1438 - `server.lane_seeds_copy_enabled`.
     #[serde(default)]
     pub lane_seeds_copy_enabled: Option<bool>,

@@ -584,7 +584,14 @@ fn a_decide_step_on_a_missing_model_or_a_connection_is_flagged_never_swapped() {
     };
     // A saved default exists: it must not rescue the step.
     let _saved = crate::core::config::test_saved_decision::set(true);
-    let installed: HashSet<String> = ["clef-flash:9b".to_string()].into();
+    let installed = DecisionModels {
+        installed: ["clef-flash:9b".to_string()].into(),
+        connections: [(
+            "or-1".to_string(),
+            "perplexity/pplx-decider-flash-v1.2".to_string(),
+        )]
+        .into(),
+    };
 
     let missing = workflow("wf", vec![decide_on(Some("ghost:7b"), None)], vec![]);
     let readiness = assess_with_decision_models(&missing, &HashMap::new(), &installed);
@@ -598,9 +605,26 @@ fn a_decide_step_on_a_missing_model_or_a_connection_is_flagged_never_swapped() {
     let present = workflow("wf", vec![decide_on(Some("clef-flash:9b"), None)], vec![]);
     assert!(assess_with_decision_models(&present, &HashMap::new(), &installed).ready);
 
-    let connection = workflow("wf", vec![decide_on(Some("m"), Some("conn-1"))], vec![]);
-    let readiness = assess_with_decision_models(&connection, &HashMap::new(), &installed);
-    assert_eq!(reasons(&readiness), ["decision_connection_unavailable"]);
+    // A connection that serves the step's model is callable; one that is gone,
+    // or whose decision model changed, is flagged and never swapped.
+    let served = workflow(
+        "wf",
+        vec![decide_on(
+            Some("perplexity/pplx-decider-flash-v1.2"),
+            Some("or-1"),
+        )],
+        vec![],
+    );
+    assert!(assess_with_decision_models(&served, &HashMap::new(), &installed).ready);
+    for (model, connection) in [
+        ("perplexity/pplx-decider-flash-v1.2", "conn-gone"),
+        ("perplexity/another-decider", "or-1"),
+    ] {
+        let flagged = workflow("wf", vec![decide_on(Some(model), Some(connection))], vec![]);
+        let readiness = assess_with_decision_models(&flagged, &HashMap::new(), &installed);
+        assert_eq!(reasons(&readiness), ["decision_connection_unavailable"]);
+        assert!(!readiness.blockers[0].human_only);
+    }
 
     // An unreadable catalogue skips the model check rather than guessing.
     assert!(assess(&missing, &HashMap::new()).ready);

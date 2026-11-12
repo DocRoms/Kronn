@@ -30,6 +30,12 @@
   color: var(--kr-info);
 }
 
+.kr-decision-source {
+  flex-shrink: 0;
+  color: var(--kr-text-tertiary);
+  font-size: 10px;
+}
+
 .kr-decision-missing {
   display: inline-flex;
   align-items: center;

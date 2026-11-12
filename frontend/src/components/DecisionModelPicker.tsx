@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, Check, ChevronDown, Compass, Loader2 } from 'lucide-react';
+import { useApi } from '../hooks/useApi';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
+import { externalApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import {
   decisionModelOptions,
@@ -46,8 +48,14 @@ export function DecisionModelPicker({
   const popoverRef = useRef<HTMLSpanElement>(null);
   // Ollama's catalogue is local: loading it on mount costs one list call.
   const { catalog, catalogError } = useModelCatalogSnapshot(!suppliedOptions, ['agent:ollama']);
-  const options = suppliedOptions ?? decisionModelOptions(catalog);
-  const loaded = suppliedOptions !== undefined || catalog !== null;
+  // The connections serving a decision model (OpenRouter) come with their own
+  // list; one that cannot be read leaves the local models, never a guess.
+  const { data: connections, loading: connectionsLoading } = useApi(
+    () => suppliedOptions ? Promise.resolve([]) : externalApi.list(),
+    [suppliedOptions !== undefined],
+  );
+  const options = suppliedOptions ?? decisionModelOptions(catalog, connections ?? []);
+  const loaded = suppliedOptions !== undefined || (catalog !== null && !connectionsLoading);
 
   const configured = defaultModel?.trim() || null;
   const shownModel = choice.model ?? configured;
@@ -179,10 +187,11 @@ export function DecisionModelPicker({
                   data-testid={`decision-option-${option.model}`}
                   data-current={current}
                   disabled={saving || current || option.unavailable}
-                  title={option.unavailable ? t('modelCatalog.unavailable') : option.model}
+                  title={option.unavailable ? t('modelCatalog.unavailable') : option.connectionName ? `${option.model} · ${option.connectionName}` : option.model}
                   onClick={() => void select(next)}
                 >
                   <span>{option.label}</span>
+                  {option.connectionName && <span className="kr-decision-source">{option.connectionName}</span>}
                   <span className="kr-decision-transport" data-transport={option.transport}>
                     {t(`decisionPicker.transport.${option.transport}`)}
                   </span>

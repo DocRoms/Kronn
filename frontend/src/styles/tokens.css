@@ -159,11 +159,25 @@
   --kr-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.6);
 
   /* ── Z-index scale ────────────────────────────────────────────────────── */
+  /* ONE scale for every stacking layer, lowest to highest. A raw number
+     above 50 in a stylesheet or inline style is a bug (guarded by
+     src/styles/__tests__/zIndexScale.test.ts): pick a layer here, or `calc(layer + n)`
+     for a sibling that must sit just above it.
+       sticky       in-page sticky bars and small local floaters (<= sticky + 40)
+       drawer       slide-in panels and their backdrops
+       modal        dialogs, backdrop and surface in one element
+       modal-nested a dialog or full-screen viewer opened from inside a modal
+       popover      dropdowns / pickers / tooltips, portaled or not. ABOVE every
+                    modal, because a popover is opened from the topmost layer
+       toast        banners and toasts
+       tour         guided tour, above everything                          */
   --kr-z-sticky: 50;
-  --kr-z-modal: 100;
-  --kr-z-toast: 200;
+  --kr-z-drawer: 100;
+  --kr-z-modal: 200;
+  --kr-z-modal-nested: 300;
+  --kr-z-popover: 400;
+  --kr-z-toast: 500;
   --kr-z-tour: 5000;
-  --kr-z-tour-tooltip: 5001;
   --kr-z-tour-tooltip: 5001;
 
   /* ── Neon glow tokens ─────────────────────────────────────────────────

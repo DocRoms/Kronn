@@ -16,7 +16,7 @@ fails when that provider is rate-limited, unavailable, or unhealthy. A quota or
 session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
-[src: file: backend/src/models/workflows.rs:2005-2011#RetryConfig]
+[src: file: backend/src/models/workflows.rs:2019-2025#RetryConfig]
 [src: file: backend/src/workflows/steps.rs:492-508#RETRY_BACKOFF_UNIT]
 [src: file: backend/src/workflows/steps.rs:993-1000#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
@@ -54,7 +54,7 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:1027-1073#ModelTier]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:1038-1084#ModelTier]
 [src: file: backend/src/agents/runner.rs:3707-3741#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
@@ -70,7 +70,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:1059-1134#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:1070-1145#AgentDetection]
 
 ## Policy and precedence
 
@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:339-361#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:4844-4853#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:4860-4869#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -255,7 +255,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1840-2081#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3923-4003#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1840-2081#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3937-4017#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
@@ -281,7 +281,7 @@ property of each surface, not of an agent being installed. [src: file: backend/s
 `DiscussionMessage` already persists the actual `agent_type`, `model_tier`, and
 concrete `model`. `StepResult` already has `step_agent` and `step_model`, and
 Run Detail renders them. [src: file: backend/src/models/discussions.rs:324-372#DiscussionMessage]
-[src: file: backend/src/models/workflows.rs:2516-2529#step_agent]
+[src: file: backend/src/models/workflows.rs:2531-2544#step_agent]
 [src: file: frontend/src/components/workflows/RunDetail.tsx:1145-1152#StepModelBadge]
 
 Workflow Agent steps also keep a per-attempt trail (`StepResult.agent_provenance`:
@@ -290,9 +290,9 @@ resolved model, success, duration and `cost_usd`), and `step_agent`/`step_model`
 are stamped from the selected attempt, else the last one. That trail has no
 fallback purpose, failure kind or effect state, so it is a foundation rather
 than enough for fallback, and discussions have no equivalent.
-[src: file: backend/src/models/workflows.rs:2323-2402#WorkflowAgentProvenance]
+[src: file: backend/src/models/workflows.rs:2338-2417#WorkflowAgentProvenance]
 [src: file: backend/src/workflows/steps.rs:1435-1459#WorkflowAgentAttempt]
-[src: file: backend/src/workflows/runner.rs:5114-5136#selected_attempt]
+[src: file: backend/src/workflows/runner.rs:5137-5159#selected_attempt]
 
 Persist an `AgentAttempt` record (table or versioned run JSON) with:
 
@@ -328,11 +328,11 @@ Required UI:
 Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
 attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
 cross-provider cost display therefore needs additive persistence of that total,
-not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2122-2131#tokens_used] [src: file: backend/src/models/workflows.rs:2392-2400#cost_usd]
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2136-2145#tokens_used] [src: file: backend/src/models/workflows.rs:2406-2414#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.
-Fallback must fix this accounting at the physical-attempt boundary. [src: file: backend/src/workflows/runner.rs:3267-3282#add_llm_calls]
+Fallback must fix this accounting at the physical-attempt boundary. [src: file: backend/src/workflows/runner.rs:3281-3296#add_llm_calls]
 
 Do not reuse the existing `native_fallback` name: that field describes the
 separate discussion-routing case where an untargeted user turn goes to the

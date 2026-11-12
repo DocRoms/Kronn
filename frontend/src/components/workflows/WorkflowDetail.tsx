@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
-import { StepShadowCompare } from './StepShadowCompare';
+import { StepShadowCompare, useStepShadows } from './StepShadowCompare';
 import { isShadowRun } from '../../lib/shadowRuns';
 import { newTabClickProps } from '../../lib/newTabNavigation';
 import { livePagePath, workflowPath } from '../../lib/routes';
@@ -27,6 +27,8 @@ import { filterRuns, foldNoOpRuns, groupRunsByParent, isNoOpRun, RUN_PAGE_SIZE, 
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
+import { StepShadowRows } from './StepShadowRows';
+import { runShadowSummary, type ShadowEdit } from '../../lib/shadowMerge';
 import { RunStatusTrail } from './RunDetail';
 import { LoadedRunDetail } from './LoadedRunDetail';
 import { RunStatusCard } from '../RunStatusCard';
@@ -217,6 +219,8 @@ export interface WorkflowDetailProps {
   onChangeStepAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => Promise<void>;
   /** KT-1697 — save the decision model of a Decide step (`model: null` = the configured one). */
   onChangeStepDecisionModel?: (stepIndex: number, choice: DecisionModelChoice) => Promise<void>;
+  /** KT-1696 — saves a change of a step's shadows or of its merge; puts it back and says why when it fails. */
+  onChangeStepShadows?: (stepIndex: number, edit: ShadowEdit) => Promise<void>;
   /** KT-1017 — apply the suggested rewrite of an unsafe Exec command line. */
   onApplyUnsafeFix?: (issue: UnsafeExecStep) => Promise<void>;
   /** KT-1017 — a human approves a step that waits for it. */
@@ -1432,6 +1436,22 @@ function StepDecisionPicker({
   );
 }
 
+/** KT-1696 — what a run's row says of its step shadows: how many ran and how their merge went. */
+function RunShadowTag({ workflowId, run, t }: {
+  workflowId: string;
+  run: WorkflowRun;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const summary = runShadowSummary(useStepShadows(workflowId, run.id, run.status));
+  if (!summary) return null;
+  return (
+    <span className="wf-run-compact-shadows" data-testid="wf-run-shadows" data-merge={summary.merge ?? 'none'}>
+      ⑂ {summary.shadows}
+      {summary.merge && <> · ⊕ {t(summary.merge === 'ok' ? 'wf.shadow.rows.runMergeOk' : 'wf.shadow.rows.runMergePartial')}</>}
+    </span>
+  );
+}
+
 function compactStepMeta(step: WorkflowStep): {
   kind: string;
   Icon: typeof Plug;
@@ -1651,7 +1671,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onChangeStepDecisionModel, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, noOpRunsHidden = 0, showNoOpRuns = false, onToggleNoOpRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onChangeStepDecisionModel, onChangeStepShadows, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, noOpRunsHidden = 0, showNoOpRuns = false, onToggleNoOpRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -2116,6 +2136,16 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                             />
                           )}
                         </span>
+                        {isAgentStep && (
+                          <StepShadowRows
+                            step={step}
+                            nextStepName={workflow.steps[i + 1]?.name}
+                            choices={agentChoices}
+                            onEdit={onChangeStepShadows ? edit => void onChangeStepShadows(i, edit) : undefined}
+                            t={t}
+                            testId={`wf-shadow-rows-${i}`}
+                          />
+                        )}
                       </div>
                     </Fragment>
                   );
@@ -2658,6 +2688,9 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
               <RunStatusTrail run={run} timeline={statusTimeline} />
               {run.parent_workflow_name && (
                 <span className="wf-run-compact-parent" title={run.parent_workflow_name}>↳ {run.parent_workflow_name}</span>
+              )}
+              {(workflow.steps ?? []).some(step => (step.shadows ?? []).length > 0) && (
+                <RunShadowTag workflowId={workflow.id} run={run} t={t} />
               )}
               {isShadowRun(run) && (
                 <span className="wf-run-compact-shadow" title={t('wf.shadow.badgeTitle')} data-testid="wf-run-shadow-badge">

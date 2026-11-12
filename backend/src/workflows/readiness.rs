@@ -56,12 +56,23 @@ pub fn assess_with_approvals(
     assess_full(root, workflows, &HashMap::new(), None, approval)
 }
 
-/// [`assess`] that also knows which decision models Ollama has installed
-/// (KT-1697), so a Decide step on a missing model is flagged.
+/// The decision models a Decide step may name as its own (KT-1697).
+#[derive(Debug, Clone, Default)]
+pub struct DecisionModels {
+    /// The decision models Ollama's catalogue lists as available.
+    pub installed: HashSet<String>,
+    /// Connection id -> its `decision_model`, for the connections whose
+    /// provider serves decisions through a documented contract.
+    pub connections: HashMap<String, String>,
+}
+
+/// [`assess`] that also knows which decision models Ollama has installed and
+/// which connections serve one (KT-1697), so a Decide step on a model that is
+/// gone is flagged.
 pub fn assess_with_decision_models(
     root: &Workflow,
     workflows: &HashMap<String, Workflow>,
-    decision_models: &HashSet<String>,
+    decision_models: &DecisionModels,
 ) -> WorkflowReadiness {
     assess_full(
         root,
@@ -72,22 +83,32 @@ pub fn assess_with_decision_models(
     )
 }
 
-/// The decision models Ollama's catalogue lists as available, or `None` when
-/// the catalogue cannot be read (the model check is then skipped, never
-/// guessed).
-pub fn installed_decision_models(conn: &rusqlite::Connection) -> Option<HashSet<String>> {
+/// The decision models Ollama's catalogue lists as available and the callable
+/// ones of the connections, or `None` when either cannot be read (the model
+/// check is then skipped, never guessed).
+pub fn installed_decision_models(conn: &rusqlite::Connection) -> Option<DecisionModels> {
     let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::Ollama);
     let entries = crate::db::model_catalog::list_for_target(conn, &target).ok()?;
-    Some(
-        entries
-            .into_iter()
-            .filter(|entry| {
-                entry.availability == crate::models::ModelAvailability::Available
-                    && entry.capabilities.iter().any(|c| c == "decision")
-            })
-            .map(|entry| entry.model_id)
-            .collect(),
-    )
+    let installed = entries
+        .into_iter()
+        .filter(|entry| {
+            entry.availability == crate::models::ModelAvailability::Available
+                && entry.capabilities.iter().any(|c| c == "decision")
+        })
+        .map(|entry| entry.model_id)
+        .collect();
+    let connections = crate::db::external_api_connections::list(conn)
+        .ok()?
+        .iter()
+        .filter_map(|connection| {
+            super::decide_step::callable_decision_model(connection)
+                .map(|model| (connection.id.clone(), model.to_string()))
+        })
+        .collect();
+    Some(DecisionModels {
+        installed,
+        connections,
+    })
 }
 
 /// [`assess`] plus the repository-import approval gate the run checks before
@@ -158,7 +179,7 @@ pub fn assess_full(
     root: &Workflow,
     workflows: &HashMap<String, Workflow>,
     quick_execs: &HashMap<String, QuickExec>,
-    decision_models: Option<&HashSet<String>>,
+    decision_models: Option<&DecisionModels>,
     approval: &mut ApprovalCheck<'_>,
 ) -> WorkflowReadiness {
     assess_walk(root, workflows, quick_execs, &[], decision_models, approval)
@@ -171,7 +192,7 @@ pub fn assess_walk(
     workflows: &HashMap<String, Workflow>,
     quick_execs: &HashMap<String, QuickExec>,
     apis: &[ConfiguredApi],
-    decision_models: Option<&HashSet<String>>,
+    decision_models: Option<&DecisionModels>,
     approval: &mut ApprovalCheck<'_>,
 ) -> WorkflowReadiness {
     let mut walk = Walk {
@@ -231,8 +252,8 @@ struct Walk<'a, 'b> {
     full_access_refusals: HashMap<String, bool>,
     /// Whether a decision model is saved, read once per check.
     decision_model_saved: Option<bool>,
-    /// The decision models Ollama has installed; `None` = not read, no check.
-    decision_models: Option<&'a HashSet<String>>,
+    /// The decision models a step may name; `None` = not read, no check.
+    decision_models: Option<&'a DecisionModels>,
     /// The repository-import gate every run of a checked workflow passes.
     approval: &'a mut ApprovalCheck<'b>,
 }
@@ -338,23 +359,30 @@ impl Walk<'_, '_> {
                 quick_exec: None,
             };
             if let Some(connection) = config.connection_id.as_deref() {
-                self.blockers.push(blocked(
-                    "decision_connection_unavailable",
-                    format!(
-                        "This Decide step uses the decision model of connection {connection}, \
-                         which cannot be called: no HTTP provider has a verified decision \
-                         contract, or the connection is gone."
-                    ),
-                    "Pick a local decision model for this step (workflow_update: decide.model, \
-                     no decide.connection_id), or clear the model to use the configured one."
-                        .into(),
-                ));
+                let model = super::decide_step::own_model(config).unwrap_or_default();
+                if self.decision_models.is_some_and(|known| {
+                    known.connections.get(connection).map(String::as_str) != Some(model)
+                }) {
+                    self.blockers.push(blocked(
+                        "decision_connection_unavailable",
+                        format!(
+                            "This Decide step uses the decision model `{model}` of connection \
+                             {connection}, which cannot be called: the connection is gone, its \
+                             provider has no documented decision contract (only OpenRouter has \
+                             one), or its decision model is no longer `{model}`. Kronn does not \
+                             run another model in its place."
+                        ),
+                        "Pick another decision model for this step (workflow_update: decide.model \
+                         and decide.connection_id), or clear them to use the configured one."
+                            .into(),
+                    ));
+                }
                 return;
             }
             if let Some(model) = super::decide_step::own_model(config) {
                 if self
                     .decision_models
-                    .is_some_and(|installed| !installed.contains(model))
+                    .is_some_and(|known| !known.installed.contains(model))
                 {
                     self.blockers.push(blocked(
                         "decision_model_not_installed",

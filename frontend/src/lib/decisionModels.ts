@@ -1,4 +1,5 @@
 import type { DecideConfig, ModelCatalogSnapshot, Workflow, WorkflowStep } from '../types/generated';
+import type { ExternalApiConnectionView } from './api';
 import { isDecisionCapable, modelRuntimeTargetId } from './modelCatalogSelection';
 
 /** KT-1697 — how a decision model is reached: Ollama's `/v1/systemone`
@@ -11,6 +12,8 @@ export interface DecisionModelOption {
   /** The external connection the model comes from; `null` = local Ollama. */
   connectionId: string | null;
   label: string;
+  /** The connection's name, for a model reached over HTTP. */
+  connectionName?: string;
   transport: DecisionTransport;
   /** Listed but not served (the catalogue says so): shown, never selectable. */
   unavailable: boolean;
@@ -22,14 +25,22 @@ export interface DecisionModelChoice {
   connectionId: string | null;
 }
 
-/** The Ollama decision models of the catalogue. A connection's `decision_model`
- *  is not listed: no HTTP provider has a verified decision contract yet, so a
+/** The connection kinds with a documented decision contract: OpenRouter serves
+ *  its decision models on `POST /api/v1/systemone`. LiteLLM, NVIDIA and the
+ *  others have none documented, so their `decision_model` is not listed: a
  *  step could not call it (docs/operations/ollama-local-models.md, « Decision
- *  models »). `connectionId` and `transport: 'http'` are ready for the day one
- *  has. */
-export function decisionModelOptions(snapshot: ModelCatalogSnapshot | null | undefined): DecisionModelOption[] {
+ *  models »). Keep in step with `callable_decision_model` in the backend. */
+const DECISION_PRESETS: ReadonlySet<string> = new Set(['open_router']);
+
+/** The models a Decide step can call: the Ollama decision models of the
+ *  catalogue (local), then each connection's `decision_model` the runner can
+ *  call (HTTP). A connection without its credential cannot be called. */
+export function decisionModelOptions(
+  snapshot: ModelCatalogSnapshot | null | undefined,
+  connections: readonly ExternalApiConnectionView[] = [],
+): DecisionModelOption[] {
   const target = snapshot?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId('Ollama'));
-  return (target?.models ?? [])
+  const local = (target?.models ?? [])
     .filter(model => model.runtime_target_id === target?.runtime_target_id && isDecisionCapable(model.capabilities))
     .map(model => ({
       model: model.model_id,
@@ -38,6 +49,20 @@ export function decisionModelOptions(snapshot: ModelCatalogSnapshot | null | und
       transport: 'local' as const,
       unavailable: model.availability === 'unavailable',
     }));
+  const http = connections
+    .filter(connection => DECISION_PRESETS.has(connection.origin_preset) && connection.has_credential)
+    .flatMap(connection => {
+      const model = connection.decision_model?.trim();
+      return model ? [{
+        model,
+        connectionId: connection.id,
+        label: model,
+        connectionName: connection.display_name,
+        transport: 'http' as const,
+        unavailable: false,
+      }] : [];
+    });
+  return [...local, ...http];
 }
 
 /** The step's own choice, `null` model when it uses the configured one. */

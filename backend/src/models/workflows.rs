@@ -1672,9 +1672,11 @@ pub struct DecideConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model: Option<String>,
-    /// KT-1697 — the external API connection `model` comes from. No HTTP
-    /// provider has a verified decision contract yet, so a step carrying one
-    /// is flagged by readiness and refused at run time, never swapped.
+    /// KT-1697 — the external API connection `model` comes from. Only an
+    /// OpenRouter connection has a documented decision contract
+    /// (`POST /api/v1/systemone`); a step on a connection that is gone or can no
+    /// longer serve `model` is flagged by readiness and refused at run time,
+    /// never swapped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub connection_id: Option<String>,
