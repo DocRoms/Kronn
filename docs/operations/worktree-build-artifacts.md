@@ -324,8 +324,8 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 ## Long builds in a task worker (KT-1718)
 
 A cold test-profile build of the backend (`cargo test --lib <filter>` compiles
-the whole dependency graph and a 1.7 GB `libkronn.rlib`) takes far longer than
-10 minutes under load. On 2026-11-12 a worker's filtered run hit the shell
+the whole dependency graph and a 1.7 GB `libkronn.rlib`) took 41 min 43 s cold
+on a loaded lane, against a 10-minute shell cap (table below). On 2026-11-12 a worker's filtered run hit the shell
 tool's cap three times (each timeout killed `rustc`), started the build in the
 background, handed the turn back, and the headless Claude process exited and
 took the build with it: dispatch `worker_reported_failure`, execution
@@ -376,6 +376,8 @@ cold. From the worker's first build command to the first targeted test result:
 | Cold `cargo test --lib <filter>`: test-profile build, then the filtered run | 41 min 43 s build, 0.00 s run |
 | Same lane, source untouched: `cargo test --lib <filter>` | 1.68 s build, 29.6 s for 50 tests |
 | Same lane, after a source edit: `cargo test --no-run --locked --offline` (the warm-up command) | 1 min 07 s |
+| Same lane, after merging the integration branch (about 80 files changed, backend and docs): rebuild of the test profile | 19 min 45 s |
+| Same lane, immediately after: the citation gate test alone, binary already built | 25.6 s |
 
 Before this change that first result was out of reach: the foreground cap (10
 minutes) is a quarter of the cold build, so each attempt was killed, which is the
