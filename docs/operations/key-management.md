@@ -261,7 +261,14 @@ Safe to interrupt at any point; a rerun converges:
    cut down to its `encryption_secret` line (every credential lives in the
    encrypted store, so only that key line is irreplaceable) and the encryption
    is retried at the next start; if the cut-down write fails too, the file is
-   left as it is and logged once. One failure does not stop the others. The key lookup tells three cases apart. A key is found:
+   left as it is and logged once. A copy holding an `encryption_secret` that is
+   not a readable key is never dropped (it may be the only trace of a key): it
+   is left as it is and reported, as is a symbolic link or a file with several
+   hard links, which the pass never reads through, renames over or removes. A
+   valid key line is still found past a value that is not a key. The pass reads
+   a copy then renames over it, once at start in the single process that owns
+   the data directory; a copy swapped in between is out of scope. One failure
+   does not stop the others. The key lookup tells three cases apart. A key is found:
    everything is encrypted under it. The lookup stops at the first store that
    cannot be read: a lower store (a key file left behind) may hold an older key
    than the locked one above it, so it never stands in for it; a value that is
@@ -342,7 +349,7 @@ all back, so local MCP secrets are never lost to a half import. GitHub
 connections are not exported; those of projects that come back by id are
 kept (the `projects` cascade no longer drops their tokens), and the report
 counts the ones whose project is gone.
-[src: file: backend/src/api/setup.rs:2549-2597#import_clear_statements]
+[src: file: backend/src/api/setup.rs:2558-2606#import_clear_statements]
 [src: file: backend/src/db/github_connections.rs:84-107#restore_rows]
 
 ## Reset

@@ -23,7 +23,7 @@ Both checks are needed. [src: file: backend/src/agents/runner.rs:14507-14516#NUL
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
-detection. [src: file: backend/src/agents/runner_test.rs:11792-11826#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
+detection. [src: file: backend/src/agents/runner_test.rs:11829-11863#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
 
 ## Report the carrier, never the value
 
@@ -31,7 +31,7 @@ These fields hold API keys and tokens. The refusal names the environment
 variable by key, or the argument by the flag it follows — positions shift
 between agents — and never the content, matching the invocation receipt's own
 rule that no argument content is logged.
-[src: file: backend/src/agents/runner_test.rs:11724-11790#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
+[src: file: backend/src/agents/runner_test.rs:11761-11827#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
 
 ## It is settled before anything runs
 
@@ -75,7 +75,7 @@ existing hard preflight refusal rather than being silently repaired.
 [src: file: backend/src/api/disc_prompts.rs:387-398#build_agent_prompt]
 [src: file: backend/src/api/disc_prompts.rs:400-420#build_agent_delta_prompt]
 [src: file: backend/src/api/discussions/streaming.rs:2733#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:4127#build_agent_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:4138#build_agent_prompt]
 
 The new HTTP regressions use the real Router and SQLite with temporary config
 and files: upload preserves exact disk bytes, and export/import/re-export keeps
@@ -87,8 +87,8 @@ provider or claim a browser/full-runtime end-to-end demonstration. Truly absent
 runtimes still use the existing deferral policy; this patch does not cap it.
 [src: file: backend/tests/context_file_safety.rs:82-137#upload_utf16_and_binary_keeps_original_bytes_and_safe_durable_previews]
 [src: file: backend/tests/context_file_safety.rs:139-247#imported_legacy_preview_and_history_are_safe_without_rewriting_the_archive]
-[src: file: backend/src/api/discussions/streaming.rs:7531-7561#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
-[src: file: backend/src/api/discussions/streaming.rs:7563-7655#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
+[src: file: backend/src/api/discussions/streaming.rs:7546-7576#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
+[src: file: backend/src/api/discussions/streaming.rs:7578-7670#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
 
 Initial production-path regression replay: **9 failed / 0 passed** before the
 preview/prompt corrections. Expanded focused replay: **12 passed**; two HTTP

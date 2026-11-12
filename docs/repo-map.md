@@ -34,7 +34,7 @@ Kronn/
 │       │   ├── disc_prompts.rs # Pure prompt builders (~625L, 9 tests): build_agent_prompt, build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext struct
 │       │   ├── disc_git.rs     # Discussion Git actions, optionally scoped to one declared CLI workspace
 │       │   ├── disc_workspace.rs # Joined-session worktree declaration plus advisory history-rewrite lease
-│       │   ├── contacts.rs     # Contacts CRUD + invite codes + network info + ping
+│       │   ├── contacts.rs     # Contacts CRUD + invite codes + pairing codes (`/pairing-offer`, `/pair`) + network info + ping
 │       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence (Origin-checked; accepted contacts only, unknown codes recorded as requests) + PartialResponseRecovered / BatchRunProgress / BatchRunFinished broadcasts
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
 │       │   ├── plugin_portability.rs # Versioned multi-plugin bundle preview/export/import; encrypted values, trust/scope checks, idempotence and audit

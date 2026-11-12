@@ -71,6 +71,64 @@ pub fn saved_full_access(agent: &crate::models::AgentType) -> bool {
     }
 }
 
+/// KT-1367 — whether config.toml names a decision model for Decide steps
+/// (`agents.model_tiers.ollama.decision`), read without any other effect.
+pub fn saved_decision_model() -> bool {
+    #[cfg(test)]
+    {
+        test_saved_decision::get()
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(path) = config_path() else {
+            return false;
+        };
+        saved_decision_model_in(&std::fs::read_to_string(path).unwrap_or_default())
+    }
+}
+
+pub(crate) fn saved_decision_model_in(raw: &str) -> bool {
+    raw.parse::<toml::Table>()
+        .ok()
+        .and_then(|table| {
+            table
+                .get("agents")?
+                .get("model_tiers")?
+                .get("ollama")?
+                .get("decision")?
+                .as_str()
+                .map(|model| !model.trim().is_empty())
+        })
+        .unwrap_or(false)
+}
+
+/// The saved decision model a test states, per thread.
+#[cfg(test)]
+pub(crate) mod test_saved_decision {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SAVED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Restores the previous value when dropped.
+    pub(crate) struct SavedDecision(bool);
+
+    impl Drop for SavedDecision {
+        fn drop(&mut self) {
+            SAVED.with(|saved| saved.set(self.0));
+        }
+    }
+
+    pub(crate) fn set(value: bool) -> SavedDecision {
+        SavedDecision(SAVED.with(|saved| saved.replace(value)))
+    }
+
+    pub(crate) fn get() -> bool {
+        SAVED.with(Cell::get)
+    }
+}
+
 /// The saved full-access setting a test states, per thread (each tokio test
 /// runs on its own thread).
 #[cfg(test)]
@@ -982,6 +1040,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                fallback_chain: Vec::new(),
                 tools_enabled: None,
             },
             codex: AgentConfig {
@@ -992,6 +1051,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                fallback_chain: Vec::new(),
                 tools_enabled: None,
             },
             open_code: AgentConfig::default(),
@@ -1139,16 +1199,28 @@ fn set_aside_unreadable_config(
     Ok(aside)
 }
 
-/// A top-level `encryption_secret = "..."` line that parses on its own.
+/// A top-level `encryption_secret = "..."` line that parses on its own: the
+/// first whose value is a real key, else the first non-empty one (a value that
+/// is not a key never hides a valid key line further down).
 pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        let table: toml::Table = line.trim().parse().ok()?;
-        table
+    let mut first = None;
+    for line in content.lines() {
+        let Ok(table) = line.trim().parse::<toml::Table>() else {
+            continue;
+        };
+        let Some(value) = table
             .get("encryption_secret")
             .and_then(|v| v.as_str())
             .filter(|k| !k.is_empty())
-            .map(str::to_string)
-    })
+        else {
+            continue;
+        };
+        if super::crypto::canonical_secret(value).is_ok() {
+            return Some(value.to_string());
+        }
+        first.get_or_insert_with(|| value.to_string());
+    }
+    first
 }
 
 /// `default_config()` without a key: a missing config.toml must not offer a

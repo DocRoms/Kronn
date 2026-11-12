@@ -17,6 +17,7 @@ For each step, take the first line that fits.
 9. The step must read, judge or write in natural language → `Agent`, after the cheaper types have collected and shaped its input. The same Agent task on N items → `BatchQuickPrompt`.
 10. A chunk reused by several workflows → `SubWorkflow` (the parent waits for the result) or `TriggerWorkflow` (fire and continue).
 11. Already-planned subtasks to implement and review → `DelegateSubtasks`; a board of tagged tasks behind a Page → `TaskBoard`.
+12. A closed judgement on a prior output (continue or not, which branch) → `Decide`.
 
 ### At equal token cost, choose for maintainability
 

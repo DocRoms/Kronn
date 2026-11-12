@@ -28,6 +28,14 @@
 //! retries. A clear copy found at start (written by 0.15.x) is converted once by
 //! [`protect_copies`]; a copy that cannot be written is cut down to its key
 //! line (the one value that exists nowhere else) and sealed at the next start.
+//! A copy holding an `encryption_secret` that cannot be read as a key is never
+//! dropped, a symbolic link or a file with several hard links is never touched
+//! (it is reported); both are left as they are and listed in `failures`.
+//!
+//! The pass reads a copy, then writes and renames: a single pass at start, in
+//! the one process that owns the data directory, so a copy swapped between the
+//! read and the rename is out of scope (credentials live in `stored_credentials`
+//! since 0.14.3, KT-1007).
 
 use std::path::{Path, PathBuf};
 
@@ -274,8 +282,10 @@ pub fn key_of(text: &str) -> Option<String> {
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         })
-        .or_else(|| config::salvage_key_line(text))
         .and_then(|k| crypto::canonical_secret(&k).ok())
+        // The parsed value is no key (or the text does not parse): a real key
+        // line further down must not be lost with it.
+        .or_else(|| config::salvage_key_line(text).and_then(|k| crypto::canonical_secret(&k).ok()))
 }
 
 /// The only content kept of a copy that cannot be sealed.
@@ -374,6 +384,9 @@ enum Done {
 }
 
 fn protect_one(dir: &Path, copy: &ConfigCopy, key_hex: Option<&str>) -> Result<Done> {
+    // A link is never read through, renamed over or removed: the target (or the
+    // other name of a hard link) would keep the whole content in clear.
+    check_plain_file(&copy.path)?;
     let bytes = match std::fs::read(&copy.path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Done::Untouched),
@@ -387,23 +400,51 @@ fn protect_one(dir: &Path, copy: &ConfigCopy, key_hex: Option<&str>) -> Result<D
             // The seal failed (full disk, ...) while a key exists: the clear copy
             // is not kept whole. Only its key line is irreplaceable (every
             // credential lives in the encrypted store), so it is cut down exactly
-            // as when no key exists; the next start seals what is left. When the
-            // cut-down fails too, the copy stays as it is and the failure is
-            // reported once.
+            // as when no key exists; the next start seals what is left. Anything
+            // but a real cut-down (a copy that cannot be cut down, or has nothing
+            // left to cut) is a failure carrying the seal's cause.
             Err(e) => match reduce(dir, copy, &text) {
-                Ok(done) => {
+                Ok(Done::Reduced) => {
                     tracing::warn!(
                         "{} could not be encrypted ({e:#}); it was cut down to its key line, \
                          the next start retries",
                         copy.name
                     );
-                    Ok(done)
+                    Ok(Done::Reduced)
+                }
+                Ok(Done::Untouched) => {
+                    Err(e.context("it already holds nothing but its key line, left as it is"))
+                }
+                Ok(_) => {
+                    Err(e.context("it holds a value that is not a key and cannot be cut down"))
                 }
                 Err(cut) => Err(e.context(format!("and it could not be cut down: {cut:#}"))),
             },
         };
     }
     reduce(dir, copy, &text)
+}
+
+/// An error unless `path` is a regular file with a single name: a symbolic
+/// link, another kind of file, or a file with several hard links is left alone.
+fn check_plain_file(path: &Path) -> Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).context("stat"),
+    };
+    refuse_symlink(path).context("read")?;
+    anyhow::ensure!(meta.is_file(), "it is not a regular file; left as it is");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        anyhow::ensure!(
+            meta.nlink() <= 1,
+            "it has {} hard links, another name would keep its content; left as it is",
+            meta.nlink()
+        );
+    }
+    Ok(())
 }
 
 /// Encrypt the raw `bytes` of `copy` under `key` and remove the clear file once
@@ -441,6 +482,11 @@ fn reduce(dir: &Path, copy: &ConfigCopy, text: &str) -> Result<Done> {
         // not: it is sealed whole once a key exists, never dropped (only a file
         // proven empty goes).
         None if copy.kind == Kind::RetiredKey && !text.trim().is_empty() => Ok(Done::Deferred),
+        // An `encryption_secret` that is no readable key may still be the only
+        // trace of one: never dropped, reported instead.
+        None if text.contains("encryption_secret") => {
+            anyhow::bail!("it holds an encryption_secret that is not a readable key; left as it is")
+        }
         // Nothing in it a later start needs: dropped rather than kept in clear.
         None => {
             remove(&copy.path)?;

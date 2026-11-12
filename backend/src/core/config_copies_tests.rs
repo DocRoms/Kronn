@@ -245,6 +245,124 @@ fn a_copy_that_can_be_neither_sealed_nor_cut_down_is_left_and_reported() {
     );
 }
 
+/// A copy whose seal fails and that cannot be cut down to a key line stays as it
+/// is, reported in `failures` with a true message, never counted as cut down or
+/// deferred.
+#[test]
+fn a_failed_seal_that_cannot_be_cut_down_is_a_failure_not_a_cut_down() {
+    let (dir, key) = dir_with_key();
+    let d = dir.path();
+    let junk = format!("encryption_secret = \"not-a-key\"\n{LEAKY}");
+    std::fs::write(d.join("config.toml.backup"), &junk).unwrap();
+    // A retired-key copy holding a value that is no key.
+    let retired = "config.toml.retired-key.20261001T000000Z";
+    std::fs::write(d.join(retired), "an-old-value\n").unwrap();
+    // A copy that already holds nothing but its key line.
+    let only = format!("encryption_secret = \"{}\"\n", crypto::generate_secret());
+    let rotated = "config.toml.backup.20261001T000000Z";
+    std::fs::write(d.join(rotated), &only).unwrap();
+    for name in ["config.toml.backup", retired, rotated] {
+        std::fs::create_dir(d.join(format!(".{name}.enc.tmp"))).unwrap();
+    }
+
+    let report = protect_clear_copies(d, Some(&key));
+    assert_eq!(report.failures.len(), 3, "{report:?}");
+    assert_eq!(
+        (report.reduced, report.deferred, report.sealed),
+        (0, 0, 0),
+        "{report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
+        junk
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join(retired)).unwrap(),
+        "an-old-value\n"
+    );
+    assert_eq!(std::fs::read_to_string(d.join(rotated)).unwrap(), only);
+}
+
+/// A key line the parser rejects as a whole (duplicate key) is found past a
+/// value that is not a key; a copy whose `encryption_secret` is no key at all is
+/// never dropped.
+#[test]
+fn a_valid_key_line_behind_a_junk_one_is_kept_and_a_junk_key_is_never_dropped() {
+    let k = crypto::generate_secret();
+    // Duplicate key: the whole text does not parse, the lines are scanned.
+    let both = format!("encryption_secret = \"junk\"\n{LEAKY}encryption_secret = \"{k}\"\n");
+    let dup = format!("encryption_secret = \"junk\"\nencryption_secret = \"{k}\"\n{LEAKY}");
+    for text in [&both, &dup] {
+        assert_eq!(key_of(text), Some(k.clone()), "{text}");
+        assert_eq!(config::salvage_key_line(text), Some(k.clone()), "{text}");
+    }
+    // Without a real key, the first value is still what is salvaged.
+    assert_eq!(
+        config::salvage_key_line("encryption_secret = \"junk\"\n"),
+        Some("junk".to_string())
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(d.join("config.toml.backup"), &both).unwrap();
+    let junk = format!("encryption_secret = \"junk\"\n{LEAKY}");
+    std::fs::write(d.join("config.toml.corrupt.20261001T000000Z"), &junk).unwrap();
+
+    let report = protect_clear_copies(d, None);
+    assert_eq!(
+        (report.reduced, report.failures.len()),
+        (1, 1),
+        "{report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
+        format!("encryption_secret = \"{k}\"\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("config.toml.corrupt.20261001T000000Z")).unwrap(),
+        junk
+    );
+}
+
+/// A symbolic link is never read through, renamed over or removed (its target
+/// would keep the content in clear), and a file with another hard link is left
+/// alone: both are failures, with or without a key.
+#[cfg(unix)]
+#[test]
+fn a_linked_copy_is_refused_and_reported() {
+    let (dir, key) = dir_with_key();
+    let d = dir.path();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("target");
+    std::fs::write(&target, LEAKY).unwrap();
+    std::os::unix::fs::symlink(&target, d.join("config.toml.backup")).unwrap();
+    std::fs::write(d.join("config.toml.corrupt.20261001T000000Z"), LEAKY).unwrap();
+    std::fs::hard_link(
+        d.join("config.toml.corrupt.20261001T000000Z"),
+        outside.path().join("other-name"),
+    )
+    .unwrap();
+
+    for key_hex in [Some(key.as_str()), None] {
+        let report = protect_clear_copies(d, key_hex);
+        assert_eq!(report.failures.len(), 2, "{report:?}");
+        assert_eq!((report.sealed, report.reduced), (0, 0), "{report:?}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), LEAKY);
+        assert!(d
+            .join("config.toml.backup")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(d.join("config.toml.corrupt.20261001T000000Z")).unwrap(),
+            LEAKY
+        );
+        assert!(!d.join("config.toml.backup.enc").exists());
+        assert!(!d.join("config.toml.corrupt.20261001T000000Z.enc").exists());
+    }
+}
+
 /// With no key to seal under, a clear copy is cut down to its key line, or
 /// dropped when it has none; never kept whole. A second pass changes nothing.
 #[test]

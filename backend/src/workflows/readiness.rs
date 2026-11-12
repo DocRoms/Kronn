@@ -142,6 +142,7 @@ pub fn assess_walk(
         blockers: Vec::new(),
         warnings: Vec::new(),
         full_access_refusals: HashMap::new(),
+        decision_model_saved: None,
         approval,
     };
     walk.visit(root);
@@ -185,6 +186,8 @@ struct Walk<'a, 'b> {
     warnings: Vec<WorkflowWarning>,
     /// Each agent's setting is read once per check, as the runner reads it.
     full_access_refusals: HashMap<String, bool>,
+    /// Whether a decision model is saved, read once per check.
+    decision_model_saved: Option<bool>,
     /// The repository-import gate every run of a checked workflow passes.
     approval: &'a mut ApprovalCheck<'b>,
 }
@@ -268,6 +271,34 @@ impl Walk<'_, '_> {
         }
     }
 
+    /// A Decide step with no decision model saved: the launch refuses it.
+    fn decision_blockers(&mut self, wf: &Workflow, step: &WorkflowStep, on_failure: bool) {
+        if step.step_type != StepType::Decide {
+            return;
+        }
+        let saved = *self
+            .decision_model_saved
+            .get_or_insert_with(crate::core::config::saved_decision_model);
+        if saved {
+            return;
+        }
+        self.blockers.push(WorkflowBlocker {
+            workflow_id: wf.id.clone(),
+            workflow_name: wf.name.clone(),
+            step: Some(step.name.clone()),
+            on_failure,
+            kind: WorkflowBlockerKind::MisconfiguredStep,
+            phase: None,
+            reason: Some("decision_model_missing".into()),
+            message: "This Decide step needs a decision model, and none is configured.".into(),
+            action: "Ask the user to choose a decision model in Config › Agents › Ollama \
+                     (row « Décision »)."
+                .into(),
+            human_only: true,
+            quick_exec: None,
+        });
+    }
+
     /// Saved Quick Execs a CollectApiData step runs by id, whose line waits for
     /// a human's approval: the run refuses them, so the page lists them first.
     fn quick_exec_blockers(&mut self, wf: &Workflow, step: &WorkflowStep, on_failure: bool) {
@@ -337,6 +368,7 @@ impl Walk<'_, '_> {
                 self.blockers.extend(step_blockers(wf, step, on_failure));
                 self.quick_exec_blockers(wf, step, on_failure);
                 self.full_access_blockers(wf, step, on_failure);
+                self.decision_blockers(wf, step, on_failure);
             }
         }
         self.path.push(wf.id.clone());
