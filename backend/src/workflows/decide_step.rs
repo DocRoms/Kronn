@@ -1,8 +1,14 @@
 //! Executor for `StepType::Decide` (KT-1367).
 //!
-//! Asks the configured decision model typed questions about a templated
-//! state, in one call to Ollama's `POST /v1/systemone`, and turns each answer
+//! Asks the step's decision model (its own, else the configured one) typed
+//! questions about a templated state, in one call to the System One API
+//! (`POST /v1/systemone`), and turns each answer
 //! into a signal the step's `on_result` rules branch on. Zero agent tokens.
+//!
+//! Two transports speak that one contract: Ollama (local, no credential) and an
+//! OpenRouter connection (`POST <base>/v1/systemone`, bearer from the
+//! connection's stored credential). No other provider has a documented decision
+//! contract, so a connection of another kind is refused, never guessed.
 //!
 //! Signals, besides `OK`:
 //! - `noul`: `<id>_yes` or `<id>_no`;
@@ -25,8 +31,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use crate::models::{
-    ConditionAction, DecideConfig, DecideKind, DecideQuestion, RunStatus, StepConditionRule,
-    StepResult, WorkflowStep,
+    ConditionAction, DecideConfig, DecideKind, DecideQuestion, ExternalApiConnection,
+    ExternalApiConnectionPreset, McpAuthFailureKind, RunStatus, StepConditionRule, StepResult,
+    WorkflowStep,
 };
 
 use super::steps::StepOutcome;
@@ -72,6 +79,12 @@ pub fn config_problem(config: &DecideConfig) -> Option<String> {
         if !min.is_finite() || !(0.0..=1.0).contains(&min) {
             return Some("`decide.min_confidence` must be between 0 and 1".into());
         }
+    }
+    if config.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+        return Some("`decide.model` is empty: pick a model or leave it unset".into());
+    }
+    if config.connection_id.is_some() && own_model(config).is_none() {
+        return Some("`decide.connection_id` needs the connection's `decide.model`".into());
     }
     let mut ids = BTreeSet::new();
     for question in &config.questions {
@@ -135,8 +148,33 @@ pub fn config_problem(config: &DecideConfig) -> Option<String> {
     None
 }
 
-/// Why a workflow with Decide steps cannot run here: no decision model is
-/// set. Refused at launch and shown as a blocker, never a silent skip.
+/// The model a step chose for itself, if it did.
+pub fn own_model(config: &DecideConfig) -> Option<&str> {
+    config
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
+/// The model a Decide step calls: its own, else the configured Decision model.
+/// A step on a connection always names its model (see [`config_problem`]), so
+/// the configured one never stands in for it.
+pub fn resolve_model<'a>(
+    config: &'a DecideConfig,
+    configured: Option<&'a str>,
+) -> Result<&'a str, String> {
+    own_model(config)
+        .or(configured.map(str::trim).filter(|model| !model.is_empty()))
+        .ok_or_else(|| {
+            "No decision model is configured: choose one in Config › Agents › Ollama (row « Décision »)."
+                .to_string()
+        })
+}
+
+/// Why a workflow with Decide steps cannot run here: a step relies on the
+/// configured decision model and none is set. Refused at launch and shown as
+/// a blocker, never a silent skip.
 pub fn launch_refusal(
     workflow: &crate::models::Workflow,
     model_tiers: &crate::models::ModelTiersConfig,
@@ -145,7 +183,12 @@ pub fn launch_refusal(
         .steps
         .iter()
         .chain(workflow.on_failure.iter())
-        .any(|step| step.step_type == crate::models::StepType::Decide);
+        .filter(|step| step.step_type == crate::models::StepType::Decide)
+        .any(|step| {
+            step.decide
+                .as_ref()
+                .is_none_or(|config| own_model(config).is_none())
+        });
     let configured = model_tiers
         .ollama
         .decision
@@ -158,7 +201,127 @@ pub fn launch_refusal(
     })
 }
 
-/// The `/v1/systemone` body (contract measured on Ollama 0.40.6).
+/// The decision model of a connection that Kronn can call: only OpenRouter has
+/// a documented decision contract (`POST /api/v1/systemone`, see
+/// docs/operations/ollama-local-models.md, « Decision models »). LiteLLM,
+/// NVIDIA and the other kinds are not listed until theirs is documented.
+pub fn callable_decision_model(connection: &ExternalApiConnection) -> Option<&str> {
+    (connection.origin_preset == ExternalApiConnectionPreset::OpenRouter)
+        .then_some(connection.decision_model.as_deref())
+        .flatten()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
+/// Where a Decide call goes: Ollama, or a connection with its credential.
+#[derive(Clone)]
+pub struct Route {
+    base_url: String,
+    /// The connection's bearer. Never logged: `Debug` hides it.
+    bearer: Option<String>,
+    /// The connection's name, for the sentence of a refused token.
+    connection: Option<String>,
+}
+
+impl std::fmt::Debug for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Route")
+            .field("base_url", &self.base_url)
+            .field("bearer", &self.bearer.as_ref().map(|_| "<hidden>"))
+            .field("connection", &self.connection)
+            .finish()
+    }
+}
+
+impl Route {
+    /// Ollama: no credential.
+    pub fn local(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            bearer: None,
+            connection: None,
+        }
+    }
+
+    fn connection(base_url: String, bearer: String, name: String) -> Self {
+        Self {
+            base_url,
+            bearer: Some(bearer),
+            connection: Some(name),
+        }
+    }
+
+    /// `<base>/v1/systemone`. Operators store `https://openrouter.ai/api` or
+    /// `.../api/v1`; either gives the same address.
+    fn url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base);
+        format!("{base}/v1/systemone")
+    }
+}
+
+/// The route a step's call takes. A step without a connection goes to Ollama;
+/// one with a connection needs that connection to exist, to serve decisions
+/// and to still have the step's model, and its credential to be stored. When
+/// any of that is gone the step fails with the reason: the model is never
+/// swapped.
+pub async fn route_for(
+    state: &crate::AppState,
+    config: &DecideConfig,
+    ollama_base: &str,
+) -> Result<Route, String> {
+    let Some(connection_id) = config.connection_id.clone() else {
+        return Ok(Route::local(ollama_base));
+    };
+    let wanted = own_model(config).unwrap_or_default().to_string();
+    let id = connection_id.clone();
+    let connection = state
+        .db
+        .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &id))
+        .await
+        .map_err(|e| format!("Connection {connection_id} could not be read: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "Connection {connection_id} no longer exists, so the decision model `{wanted}` \
+                 cannot be called. Pick another decision model for this step."
+            )
+        })?;
+    if callable_decision_model(&connection) != Some(wanted.as_str()) {
+        return Err(format!(
+            "Connection \"{}\" no longer serves the decision model `{wanted}` (only OpenRouter \
+             has a documented decision contract, and its decision model must be `{wanted}`). \
+             Pick another decision model for this step.",
+            connection.display_name
+        ));
+    }
+    let base = connection
+        .endpoint
+        .clone()
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Connection \"{}\" has no endpoint configured.",
+                connection.display_name
+            )
+        })?;
+    let bearer = state
+        .config
+        .read()
+        .await
+        .tokens
+        .active_key_for(&connection.credential_slug)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "Connection \"{}\" has no stored credential: add its API key in Settings → APIs.",
+                connection.display_name
+            )
+        })?;
+    Ok(Route::connection(base, bearer, connection.display_name))
+}
+
+/// The `/v1/systemone` body. The same request on Ollama (measured on 0.40.6)
+/// and on OpenRouter (https://openrouter.ai/skills/openrouter-decisions).
 pub fn request_body(model: &str, state: &str, questions: &[DecideQuestion]) -> Value {
     let mut asked = Map::new();
     for question in questions {
@@ -309,23 +472,40 @@ pub fn action_for(rules: &[StepConditionRule], signals: &[String]) -> Option<Con
         .map(|rule| rule.action.clone())
 }
 
+/// Runs a Decide step on the route its model needs: Ollama at `ollama_base`,
+/// or its connection. `model` is the configured Decision model.
 pub async fn execute_decide_step(
     step: &WorkflowStep,
     ctx: &TemplateContext,
-    base_url: &str,
+    state: &crate::AppState,
+    ollama_base: &str,
+    model: Option<&str>,
+) -> StepOutcome {
+    let route = match step.decide.as_ref() {
+        Some(config) => route_for(state, config, ollama_base).await,
+        None => Ok(Route::local(ollama_base)),
+    };
+    match route {
+        Ok(route) => run_decide_step(step, ctx, &route, model).await,
+        Err(reason) => fail(step, Instant::now(), None, reason),
+    }
+}
+
+/// The step on an already resolved route.
+pub async fn run_decide_step(
+    step: &WorkflowStep,
+    ctx: &TemplateContext,
+    route: &Route,
     model: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
     let Some(config) = step.decide.as_ref() else {
         return fail(step, start, None, "Decide step has no `decide` config.");
     };
-    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
-        return fail(
-            step,
-            start,
-            None,
-            "No decision model is configured: choose one in Config › Agents › Ollama (row « Décision »).",
-        );
+    // `model` is the configured Decision model; the step's own wins over it.
+    let model = match resolve_model(config, model) {
+        Ok(model) => model,
+        Err(reason) => return fail(step, start, None, reason),
     };
     if let Some(problem) = config_problem(config) {
         return fail(step, start, Some(model), format!("Decide step: {problem}."));
@@ -335,15 +515,27 @@ pub async fn execute_decide_step(
         Err(e) => return fail(step, start, Some(model), format!("Decide state: {e}")),
     };
     let body = request_body(model, &state, &config.questions);
-    let response = match call(base_url, &body).await {
+    let response = match call(route, &body).await {
         Ok(response) => response,
-        Err(e) => {
+        Err(CallError::Refused { status, detail }) => {
             return fail(
                 step,
                 start,
                 Some(model),
-                format!("Decision model {model} at {base_url}: {e}"),
+                refused_output(route, model, status, &detail),
             )
+        }
+        Err(CallError::Failed(e)) => {
+            let at = route.connection.as_deref().map_or_else(
+                || route.base_url.clone(),
+                |name| format!("connection \"{name}\""),
+            );
+            return fail(
+                step,
+                start,
+                Some(model),
+                scrubbed(route, format!("Decision model {model} at {at}: {e}")),
+            );
         }
     };
     let decision = match interpret(&config.questions, &response, config.min_confidence) {
@@ -370,6 +562,8 @@ pub async fn execute_decide_step(
         None,
         &signals,
     );
+    // Provider-supplied values (probabilities) reach the output: no token in it.
+    let output = scrubbed(route, output);
     let condition_action = action_for(&step.on_result, &decision.signals);
     let condition_result = condition_action.as_ref().map(|action| match action {
         ConditionAction::Stop => "Stop".to_string(),
@@ -389,31 +583,111 @@ pub async fn execute_decide_step(
     }
 }
 
-async fn call(base_url: &str, body: &Value) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
+/// Why a call gave no answer.
+enum CallError {
+    Failed(String),
+    /// The provider refused the connection's token (HTTP 401 or 403).
+    Refused {
+        status: u16,
+        detail: String,
+    },
+}
+
+/// The provider's own words for an error: Ollama answers `{"error": "..."}`,
+/// OpenRouter `{"error": {"code": .., "message": ".."}}`. The whole message is
+/// scrubbed of the connection's token before it is capped: a token straddling
+/// the cut would otherwise no longer match any form `SecretSet` knows.
+fn provider_reason(route: &Route, value: &Value, text: &str) -> String {
+    let error = &value["error"];
+    let full = error
+        .as_str()
+        .or_else(|| error["message"].as_str())
+        .unwrap_or(text);
+    scrubbed(route, full.to_string())
+        .chars()
+        .take(300)
+        .collect()
+}
+
+/// `text` without the connection's token, in case a provider echoes it.
+fn scrubbed(route: &Route, text: String) -> String {
+    let Some(bearer) = route.bearer.as_deref() else {
+        return text;
+    };
+    let mut secrets = crate::core::secret_scrub::SecretSet::new();
+    secrets.add(bearer);
+    secrets.scrub(&text)
+}
+
+/// The output of a step whose connection token was refused: the plain sentence
+/// of every refused connection call, then the signal the run page keys on.
+fn refused_output(route: &Route, model: &str, status: u16, detail: &str) -> String {
+    use super::api_auth_failure::{annotate, plain_words, sanitize, AuthRefusal};
+    let mut secrets = crate::core::secret_scrub::SecretSet::new();
+    if let Some(bearer) = route.bearer.as_deref() {
+        secrets.add(bearer);
+    }
+    let refusal = sanitize(
+        AuthRefusal {
+            kind: if status == 401 {
+                McpAuthFailureKind::Refused
+            } else {
+                McpAuthFailureKind::Forbidden
+            },
+            http_status: Some(status),
+            provider_message: detail.split_whitespace().collect::<Vec<_>>().join(" "),
+        },
+        &secrets,
+    );
+    let name = route.connection.as_deref().unwrap_or("connection");
+    annotate(
+        &format!("Decision model {model}: HTTP {status}."),
+        &plain_words(name, "OpenRouter", &refusal),
+    )
+}
+
+async fn call(route: &Route, body: &Value) -> Result<Value, CallError> {
+    let builder = reqwest::Client::builder()
         .timeout(CALL_TIMEOUT)
-        .connect_timeout(Duration::from_secs(5))
-        .no_proxy()
+        .connect_timeout(Duration::from_secs(5));
+    // Ollama is local: never through a proxy. A connection is a remote host and
+    // follows the machine's network policy like Kronn's other provider calls,
+    // but never a redirect, which could carry the token elsewhere.
+    let builder = if route.bearer.is_some() {
+        builder.redirect(reqwest::redirect::Policy::none())
+    } else {
+        builder.no_proxy()
+    };
+    let client = builder
         .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .post(format!("{}/v1/systemone", base_url.trim_end_matches('/')))
-        .json(body)
+        .map_err(|e| CallError::Failed(e.to_string()))?;
+    let mut request = client.post(route.url()).json(body);
+    if let Some(bearer) = route.bearer.as_deref() {
+        request = request.bearer_auth(bearer);
+    }
+    let response = request
         .send()
         .await
-        .map_err(|e| format!("not reachable ({e})"))?;
+        .map_err(|e| CallError::Failed(format!("not reachable ({e})")))?;
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if route.bearer.is_some() && matches!(status.as_u16(), 401 | 403) {
+        return Err(CallError::Refused {
+            status: status.as_u16(),
+            detail: provider_reason(route, &value, &text),
+        });
+    }
     if !status.is_success() {
-        let reason = value["error"].as_str().unwrap_or(text.as_str());
-        return Err(format!(
+        return Err(CallError::Failed(format!(
             "answered HTTP {status}: {}",
-            reason.chars().take(300).collect::<String>()
-        ));
+            provider_reason(route, &value, &text)
+        )));
     }
     if value.is_null() {
-        return Err("answered something that is not JSON".into());
+        return Err(CallError::Failed(
+            "answered something that is not JSON".into(),
+        ));
     }
     Ok(value)
 }
@@ -509,7 +783,7 @@ mod tests {
         DecideConfig {
             state: "{{steps.tests.output}}".into(),
             questions,
-            min_confidence: None,
+            ..Default::default()
         }
     }
 
@@ -722,7 +996,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        let outcome = execute_decide_step(&step, &ctx, &server.uri(), Some("clef-flash:9b")).await;
+        let outcome = run_decide_step(
+            &step,
+            &ctx,
+            &Route::local(&server.uri()),
+            Some("clef-flash:9b"),
+        )
+        .await;
         assert_eq!(
             outcome.result.status,
             RunStatus::Success,
@@ -744,6 +1024,520 @@ mod tests {
         );
     }
 
+    fn step_with(decide: DecideConfig) -> WorkflowStep {
+        WorkflowStep {
+            name: "decide".into(),
+            step_type: StepType::Decide,
+            decide: Some(decide),
+            ..Default::default()
+        }
+    }
+
+    /// KT-1697 — the step's own model is the one called; unset keeps the
+    /// configured Decision model.
+    #[tokio::test]
+    async fn the_runner_calls_the_steps_own_model_and_falls_back_to_the_configured_one() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for model in ["step-own:7b", "clef-flash:9b"] {
+            Mock::given(method("POST"))
+                .and(path("/v1/systemone"))
+                .and(body_partial_json(json!({ "model": model })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(captured()))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("tests", "ok");
+        let questions = vec![question("ship", DecideKind::Noul)];
+
+        let own = step_with(DecideConfig {
+            model: Some("step-own:7b".into()),
+            ..config(questions.clone())
+        });
+        let outcome = run_decide_step(
+            &own,
+            &ctx,
+            &Route::local(&server.uri()),
+            Some("clef-flash:9b"),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert_eq!(outcome.result.step_model.as_deref(), Some("step-own:7b"));
+
+        let unset = step_with(config(questions));
+        let outcome = run_decide_step(
+            &unset,
+            &ctx,
+            &Route::local(&server.uri()),
+            Some("clef-flash:9b"),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert_eq!(outcome.result.step_model.as_deref(), Some("clef-flash:9b"));
+    }
+
+    // ---- KT-1697: a decision model served by an OpenRouter connection ----
+
+    const OPENROUTER_MODEL: &str = "perplexity/pplx-decider-flash-v1.2";
+    /// A made-up token: the real one never enters a test.
+    const FAKE_TOKEN: &str = "sk-or-test-not-a-real-token";
+
+    /// An OpenRouter answer in the System One shape the provider documents
+    /// (https://openrouter.ai/skills/openrouter-decisions): `answers.<key>`
+    /// with `noul` (probability), `probabilities` and `confidence`, and `usage`
+    /// for the token counts. Only `answers` is read.
+    fn openrouter_answer() -> Value {
+        json!({
+            "model": OPENROUTER_MODEL,
+            "answers": {
+                "ship": {
+                    "type": "noul",
+                    "noul": 0.93,
+                    "probabilities": {"false": 0.07, "true": 0.93},
+                    "confidence": 0.86
+                }
+            },
+            "usage": {"prompt_tokens": 61, "completion_tokens": 4, "total_tokens": 65}
+        })
+    }
+
+    fn connection_of(
+        id: &str,
+        preset: ExternalApiConnectionPreset,
+        endpoint: &str,
+        decision_model: Option<&str>,
+    ) -> ExternalApiConnection {
+        ExternalApiConnection {
+            id: id.into(),
+            display_name: format!("Provider {id}"),
+            mention_alias: id.into(),
+            endpoint: Some(endpoint.into()),
+            credential_slug: format!("credential-{id}"),
+            origin_preset: preset,
+            economy_model: None,
+            default_model: None,
+            reasoning_model: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            image_model: None,
+            video_model: None,
+            decision_model: decision_model.map(str::to_string),
+            tools_enabled: None,
+            media_endpoint: None,
+        }
+    }
+
+    /// Kronn state holding `connections`, and the stored token of each slug in
+    /// `tokens`.
+    async fn state_with(
+        connections: Vec<ExternalApiConnection>,
+        tokens: &[(&str, &str)],
+    ) -> crate::AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory db"));
+        db.with_conn(move |conn| {
+            for connection in &connections {
+                crate::db::external_api_connections::insert(conn, connection)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mut config = crate::core::config::default_config();
+        for (slug, value) in tokens {
+            config.tokens.keys.push(crate::models::ApiKey {
+                id: format!("key-{slug}"),
+                name: (*slug).into(),
+                provider: (*slug).into(),
+                value: (*value).into(),
+                active: true,
+            });
+        }
+        crate::AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(config)),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    fn openrouter_step() -> WorkflowStep {
+        step_with(DecideConfig {
+            model: Some(OPENROUTER_MODEL.into()),
+            connection_id: Some("or-1".into()),
+            ..config(vec![question("ship", DecideKind::Noul)])
+        })
+    }
+
+    fn rendered() -> TemplateContext {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("tests", "1104 passed; 0 failed");
+        ctx
+    }
+
+    /// The request reaches `/v1/systemone` with the connection's bearer, in the
+    /// shape Ollama takes, and the answer branches the run like Ollama's. The
+    /// stored endpoint may end at `/api` or at `/api/v1`.
+    #[tokio::test]
+    async fn an_openrouter_connection_is_called_on_v1_systemone_with_its_bearer() {
+        use wiremock::matchers::{body_partial_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/systemone"))
+            .and(header(
+                "authorization",
+                format!("Bearer {FAKE_TOKEN}").as_str(),
+            ))
+            .and(body_partial_json(json!({
+                "model": OPENROUTER_MODEL,
+                "state": "1104 passed; 0 failed",
+                "questions": {"ship": {"type": "noul", "instructions": "Is it ready?"}},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openrouter_answer()))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        for endpoint in [server.uri(), format!("{}/v1", server.uri())] {
+            let state = state_with(
+                vec![connection_of(
+                    "or-1",
+                    ExternalApiConnectionPreset::OpenRouter,
+                    &endpoint,
+                    Some(OPENROUTER_MODEL),
+                )],
+                &[("credential-or-1", FAKE_TOKEN)],
+            )
+            .await;
+            // Ollama is closed: the call must not go there, nor use the
+            // configured model.
+            let outcome = execute_decide_step(
+                &openrouter_step(),
+                &rendered(),
+                &state,
+                "http://127.0.0.1:9",
+                Some("clef-flash:9b"),
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status,
+                RunStatus::Success,
+                "{}",
+                outcome.result.output
+            );
+            assert_eq!(outcome.result.step_model.as_deref(), Some(OPENROUTER_MODEL));
+            assert!(
+                outcome.result.output.contains("[SIGNAL: ship_yes]"),
+                "{}",
+                outcome.result.output
+            );
+            assert!(!outcome.result.output.contains(FAKE_TOKEN));
+        }
+    }
+
+    /// A refused token is reported with the signal of every refused connection
+    /// call, never echoed, and never answered by another model.
+    #[tokio::test]
+    async fn a_refused_openrouter_token_is_reported_and_never_swapped() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for status in [401u16, 403] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/systemone"))
+                // Some providers echo the credential they refuse.
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                    "error": {"code": status, "message": format!("Invalid API key {FAKE_TOKEN}")}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let state = state_with(
+                vec![connection_of(
+                    "or-1",
+                    ExternalApiConnectionPreset::OpenRouter,
+                    &server.uri(),
+                    Some(OPENROUTER_MODEL),
+                )],
+                &[("credential-or-1", FAKE_TOKEN)],
+            )
+            .await;
+            let outcome = execute_decide_step(
+                &openrouter_step(),
+                &rendered(),
+                &state,
+                "http://127.0.0.1:9",
+                Some("clef-flash:9b"),
+            )
+            .await;
+            let output = &outcome.result.output;
+            assert_eq!(outcome.result.status, RunStatus::Failed, "{output}");
+            assert!(
+                output.contains(&format!("refused the token (HTTP {status})")),
+                "{output}"
+            );
+            assert!(output.contains("Provider or-1"), "{output}");
+            assert!(output.contains("[SIGNAL: auth_refused]"), "{output}");
+            assert!(!output.contains(FAKE_TOKEN), "{output}");
+            // No fallback to Ollama or to the configured model.
+            assert!(!output.contains("not reachable"), "{output}");
+            assert_eq!(outcome.result.step_model.as_deref(), Some(OPENROUTER_MODEL));
+            assert!(outcome.condition_action.is_none());
+        }
+    }
+
+    /// A provider that echoes the token in an error, with the token straddling
+    /// the 300-character cut of the reason, leaks no fragment of it: the
+    /// message is scrubbed whole before it is capped. A refusal (401), a
+    /// failure (500) and a body that is not JSON are all covered.
+    #[tokio::test]
+    async fn a_token_straddling_the_error_cut_leaks_no_fragment() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // The token starts 10 characters before the cut: unscrubbed, the first
+        // ten characters of it would survive the cut.
+        let message = format!("{}{FAKE_TOKEN}{}", "x".repeat(290), "y".repeat(50));
+        assert!(message
+            .chars()
+            .take(300)
+            .collect::<String>()
+            .contains("sk-or-test"));
+        let fragment = &FAKE_TOKEN[..8];
+
+        for (status, as_json) in [(401u16, true), (403, true), (500, true), (500, false)] {
+            let server = MockServer::start().await;
+            let response = if as_json {
+                ResponseTemplate::new(status)
+                    .set_body_json(json!({"error": {"code": status, "message": message}}))
+            } else {
+                ResponseTemplate::new(status).set_body_string(message.clone())
+            };
+            Mock::given(method("POST"))
+                .and(path("/v1/systemone"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let state = state_with(
+                vec![connection_of(
+                    "or-1",
+                    ExternalApiConnectionPreset::OpenRouter,
+                    &server.uri(),
+                    Some(OPENROUTER_MODEL),
+                )],
+                &[("credential-or-1", FAKE_TOKEN)],
+            )
+            .await;
+            let outcome = execute_decide_step(
+                &openrouter_step(),
+                &rendered(),
+                &state,
+                "http://127.0.0.1:9",
+                None,
+            )
+            .await;
+            let output = &outcome.result.output;
+            assert_eq!(outcome.result.status, RunStatus::Failed, "{output}");
+            assert!(
+                !output.contains(fragment),
+                "status {status} json {as_json}: {output}"
+            );
+            // The answer is still the provider's own words, capped.
+            assert!(output.contains("xxxx"), "status {status}: {output}");
+        }
+    }
+
+    /// A provider-supplied value copied into a successful output (the level
+    /// probabilities here) cannot carry the connection's token out.
+    #[tokio::test]
+    async fn a_success_output_never_carries_the_token() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/systemone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "answers": {"route": {
+                    "type": "choice",
+                    "choice": "local",
+                    "confidence": 0.9,
+                    "probabilities": {"local": 0.9, FAKE_TOKEN: 0.1}
+                }}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = state_with(
+            vec![connection_of(
+                "or-1",
+                ExternalApiConnectionPreset::OpenRouter,
+                &server.uri(),
+                Some(OPENROUTER_MODEL),
+            )],
+            &[("credential-or-1", FAKE_TOKEN)],
+        )
+        .await;
+        let step = step_with(DecideConfig {
+            model: Some(OPENROUTER_MODEL.into()),
+            connection_id: Some("or-1".into()),
+            ..config(vec![question("route", DecideKind::Choice)])
+        });
+        let outcome =
+            execute_decide_step(&step, &rendered(), &state, "http://127.0.0.1:9", None).await;
+        let output = &outcome.result.output;
+        assert_eq!(outcome.result.status, RunStatus::Success, "{output}");
+        assert!(output.contains("[SIGNAL: route_local]"), "{output}");
+        assert!(!output.contains(FAKE_TOKEN), "{output}");
+        assert!(!output.contains(&FAKE_TOKEN[..8]), "{output}");
+    }
+
+    /// A connection that is gone, of another provider, with another decision
+    /// model or without a stored token fails with the reason before any call.
+    #[tokio::test]
+    async fn a_connection_that_cannot_serve_the_model_fails_without_a_call() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/systemone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(openrouter_answer()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let token = [("credential-or-1", FAKE_TOKEN)];
+        type Tokens<'a> = &'a [(&'a str, &'a str)];
+        let cases: Vec<(Vec<ExternalApiConnection>, Tokens, &str)> = vec![
+            (vec![], &token[..], "no longer exists"),
+            (
+                vec![connection_of(
+                    "or-1",
+                    ExternalApiConnectionPreset::LiteLlm,
+                    &server.uri(),
+                    Some(OPENROUTER_MODEL),
+                )],
+                &token[..],
+                "no longer serves",
+            ),
+            (
+                vec![connection_of(
+                    "or-1",
+                    ExternalApiConnectionPreset::OpenRouter,
+                    &server.uri(),
+                    Some("perplexity/another-decider"),
+                )],
+                &token[..],
+                "no longer serves",
+            ),
+            (
+                vec![connection_of(
+                    "or-1",
+                    ExternalApiConnectionPreset::OpenRouter,
+                    &server.uri(),
+                    Some(OPENROUTER_MODEL),
+                )],
+                &[],
+                "no stored credential",
+            ),
+        ];
+        for (connections, tokens, reason) in cases {
+            let state = state_with(connections, tokens).await;
+            let outcome = execute_decide_step(
+                &openrouter_step(),
+                &rendered(),
+                &state,
+                "http://127.0.0.1:9",
+                Some("clef-flash:9b"),
+            )
+            .await;
+            assert_eq!(outcome.result.status, RunStatus::Failed);
+            assert!(
+                outcome.result.output.contains(reason),
+                "{reason}: {}",
+                outcome.result.output
+            );
+            assert_eq!(outcome.result.step_model, None);
+        }
+    }
+
+    /// Only OpenRouter has a documented decision contract: the picker and the
+    /// readiness list no other provider's decision model.
+    #[test]
+    fn only_an_openrouter_decision_model_is_callable() {
+        let of = |preset, model| connection_of("c", preset, "https://x.test", model);
+        assert_eq!(
+            callable_decision_model(&of(
+                ExternalApiConnectionPreset::OpenRouter,
+                Some(OPENROUTER_MODEL)
+            )),
+            Some(OPENROUTER_MODEL)
+        );
+        for preset in [
+            ExternalApiConnectionPreset::LiteLlm,
+            ExternalApiConnectionPreset::Nvidia,
+            ExternalApiConnectionPreset::Other,
+        ] {
+            assert_eq!(
+                callable_decision_model(&of(preset, Some(OPENROUTER_MODEL))),
+                None
+            );
+        }
+        for blank in [None, Some("  ")] {
+            assert_eq!(
+                callable_decision_model(&of(ExternalApiConnectionPreset::OpenRouter, blank)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_route_never_prints_its_token() {
+        let route = Route::connection(
+            "https://openrouter.ai/api".into(),
+            FAKE_TOKEN.into(),
+            "OpenRouter".into(),
+        );
+        assert!(!format!("{route:?}").contains(FAKE_TOKEN));
+        assert_eq!(route.url(), "https://openrouter.ai/api/v1/systemone");
+        let with_v1 = Route::connection(
+            "https://openrouter.ai/api/v1/".into(),
+            FAKE_TOKEN.into(),
+            "OpenRouter".into(),
+        );
+        assert_eq!(with_v1.url(), "https://openrouter.ai/api/v1/systemone");
+        assert_eq!(
+            Route::local("http://127.0.0.1:11434/").url(),
+            "http://127.0.0.1:11434/v1/systemone"
+        );
+    }
+
+    #[test]
+    fn a_step_model_is_validated() {
+        let questions = vec![question("ship", DecideKind::Noul)];
+        let blank = DecideConfig {
+            model: Some("  ".into()),
+            ..config(questions.clone())
+        };
+        assert!(config_problem(&blank).unwrap().contains("decide.model"));
+        let orphan = DecideConfig {
+            connection_id: Some("conn-1".into()),
+            ..config(questions.clone())
+        };
+        assert!(config_problem(&orphan).unwrap().contains("connection_id"));
+        let own = DecideConfig {
+            model: Some("step-own:7b".into()),
+            ..config(questions)
+        };
+        assert_eq!(config_problem(&own), None);
+    }
+
     #[tokio::test]
     async fn without_a_model_or_a_reachable_ollama_the_step_fails_with_a_sentence() {
         let ctx = {
@@ -757,15 +1551,21 @@ mod tests {
             decide: Some(config(vec![question("ship", DecideKind::Noul)])),
             ..Default::default()
         };
-        let no_model = execute_decide_step(&step, &ctx, "http://127.0.0.1:9", None).await;
+        let no_model =
+            run_decide_step(&step, &ctx, &Route::local("http://127.0.0.1:9"), None).await;
         assert_eq!(no_model.result.status, RunStatus::Failed);
         assert!(
             no_model.result.output.contains("No decision model"),
             "{}",
             no_model.result.output
         );
-        let down =
-            execute_decide_step(&step, &ctx, "http://127.0.0.1:9", Some("clef-flash:9b")).await;
+        let down = run_decide_step(
+            &step,
+            &ctx,
+            &Route::local("http://127.0.0.1:9"),
+            Some("clef-flash:9b"),
+        )
+        .await;
         assert_eq!(down.result.status, RunStatus::Failed);
         assert!(
             down.result.output.contains("not reachable"),

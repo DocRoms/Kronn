@@ -3414,6 +3414,48 @@ pub fn due_quota_origin(
     Ok(quota_origin(conn, exec_id)?.filter(|origin| origin.is_due(now)))
 }
 
+/// KT-1713 — the worker a quota fallback left, when the window that justified
+/// the fallback has ended and the execution still runs on the alternative.
+/// `None`: no fallback in progress, the window is still open, a CLI session
+/// owns the worker, or the execution is already back on its declared worker.
+pub fn lapsed_fallback_origin(
+    conn: &Connection,
+    exec_id: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<QuotaOrigin>> {
+    let Some(origin) = due_quota_origin(conn, exec_id, now)? else {
+        return Ok(None);
+    };
+    let Some(execution) = get_task_execution(conn, exec_id)? else {
+        return Ok(None);
+    };
+    Ok(
+        (execution.worker_target_kind != Some(MessageTargetKind::Cli)
+            && !origin.is_worker_of(&execution))
+        .then_some(origin),
+    )
+}
+
+/// Re-checked inside the reassignment transaction of a resume that hands an
+/// `Interrupted` execution back to its declared worker (KT-1713): the fallback
+/// window must still be over and the execution still parked on the alternative.
+pub fn ensure_fallback_lapsed_on_resume(
+    conn: &Connection,
+    exec_id: &str,
+    target_provider: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let execution = get_task_execution(conn, exec_id)?
+        .ok_or_else(|| anyhow::anyhow!("execution vanished before its fallback return"))?;
+    if execution.status != TaskExecutionStatus::Interrupted {
+        bail!("fallback return skipped: the execution is no longer interrupted");
+    }
+    match lapsed_fallback_origin(conn, exec_id, now)? {
+        Some(origin) if origin.provider == target_provider => Ok(()),
+        _ => bail!("fallback return skipped: the fallback window is still open or already left"),
+    }
+}
+
 /// Re-checked inside the reassignment transaction, right before the sweep (a
 /// backend actor) moves an execution. Between the sweep's read and that
 /// transaction a human may have moved, paused or finished the execution: the

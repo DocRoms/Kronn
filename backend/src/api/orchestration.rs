@@ -1697,6 +1697,88 @@ fn handoff_notice_en(
     }
 }
 
+/// KT-1713 — the room line saying a task worker went back to its declared
+/// worker once the quota window behind its fallback ended. It names the
+/// execution and that it is a task worker, like the fallback notice does.
+pub(crate) fn fallback_return_notice(
+    execution_id: &str,
+    from_provider: &str,
+    declared_provider: &str,
+) -> String {
+    format!(
+        "Task worker execution {execution_id}: the quota window that moved it to {from_provider} \
+         has ended → back on its declared worker {declared_provider}"
+    )
+}
+
+/// KT-1713 — resume of an `Interrupted` execution that a quota fallback moved
+/// off its declared worker: when the window behind that fallback is over, hand
+/// the work back to the declared worker (same child room and worktree) and say
+/// so in both rooms, instead of waking the alternative again. `None`: nothing
+/// to return (no fallback, window still open, already home) or the return was
+/// refused, in which case the ordinary wake proceeds on the current worker.
+async fn return_lapsed_fallback_on_resume(state: &AppState, exec_id: &str) -> Option<String> {
+    let id = exec_id.to_string();
+    let found = state
+        .db
+        .with_conn(move |conn| {
+            let origin =
+                crate::db::orchestration::lapsed_fallback_origin(conn, &id, chrono::Utc::now())?;
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?;
+            Ok(origin.zip(execution))
+        })
+        .await
+        .ok()
+        .flatten()?;
+    let (origin, execution) = found;
+    let from = execution.worker_agent_type.clone().unwrap_or_default();
+    let notice = fallback_return_notice(exec_id, &from, &origin.provider);
+    let view = match reassign_native_execution_as(
+        state,
+        exec_id,
+        origin.selection,
+        &notice,
+        ReassignCause::FallbackLapsed,
+    )
+    .await
+    {
+        Ok(view) => view,
+        Err(error) => {
+            tracing::warn!(
+                execution_id = exec_id,
+                "fallback return to the declared worker refused on resume: {error}"
+            );
+            return None;
+        }
+    };
+    let message = orchestrator_message(
+        format!(
+            "agent-fallback-return:{exec_id}:{}",
+            view.execution
+                .dispatch_job_id
+                .as_deref()
+                .unwrap_or_default()
+        ),
+        notice.clone(),
+    );
+    let room = execution.parent_discussion_id.clone();
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_message(conn, &room, &message)?;
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!(
+            execution_id = exec_id,
+            "fallback return notice could not be persisted: {error}"
+        );
+    }
+    state.agent_dispatch_notify.notify_one();
+    Some(format!("returned to the declared worker: {notice}"))
+}
+
 async fn wake_recovered_worker(db: &Database, exec_id: &str) -> Result<String> {
     let id = exec_id.to_string();
     let execution = db
@@ -14005,12 +14087,21 @@ async fn resume_claimed_execution(
                 Err(error) => Err(ProvisionError::Internal(error.to_string())),
             }
         }
-        ExecutionRecoveryAction::ResumeWorker => wake_recovered_worker(&state.db, &exec_id)
-            .await
-            .map_err(|error| match error.downcast::<StaleWorkerScope>() {
-                Ok(stale) => ProvisionError::CheckpointRefused(stale.0),
-                Err(error) => ProvisionError::Internal(error.to_string()),
-            }),
+        ExecutionRecoveryAction::ResumeWorker => {
+            // KT-1713 — a fallback taken for a quota window is temporary: once
+            // the window is over, the resume goes back to the declared worker.
+            match return_lapsed_fallback_on_resume(&state, &exec_id).await {
+                Some(outcome) => Ok(outcome),
+                None => {
+                    wake_recovered_worker(&state.db, &exec_id)
+                        .await
+                        .map_err(|error| match error.downcast::<StaleWorkerScope>() {
+                            Ok(stale) => ProvisionError::CheckpointRefused(stale.0),
+                            Err(error) => ProvisionError::Internal(error.to_string()),
+                        })
+                }
+            }
+        }
         ExecutionRecoveryAction::AwaitReview => {
             let id = exec_id.clone();
             match state
@@ -14462,6 +14553,10 @@ pub(crate) enum ReassignCause {
     /// an escalation that announced no reset. Same worker, same worktree;
     /// re-validated inside the reassignment transaction.
     QuotaProbed,
+    /// KT-1713 — a resume of an `Interrupted` execution whose quota fallback
+    /// window has ended: it goes back to the worker it declared instead of
+    /// being woken on the alternative. Re-validated inside the transaction.
+    FallbackLapsed,
 }
 
 impl ReassignCause {
@@ -14471,15 +14566,19 @@ impl ReassignCause {
     fn rearm_actor(self) -> PlanningActorKind {
         match self {
             Self::Human => PlanningActorKind::Human,
-            Self::QuotaFallback { .. } | Self::QuotaReturn | Self::QuotaProbed => {
-                PlanningActorKind::Backend
-            }
+            Self::QuotaFallback { .. }
+            | Self::QuotaReturn
+            | Self::QuotaProbed
+            | Self::FallbackLapsed => PlanningActorKind::Backend,
         }
     }
 
     /// Kronn handing an execution back to the worker it was parked on.
     fn is_quota_return(self) -> bool {
-        matches!(self, Self::QuotaReturn | Self::QuotaProbed)
+        matches!(
+            self,
+            Self::QuotaReturn | Self::QuotaProbed | Self::FallbackLapsed
+        )
     }
 
     /// The still-valid check a quota return runs before and inside its
@@ -14493,6 +14592,9 @@ impl ReassignCause {
         let now = chrono::Utc::now();
         match self {
             Self::QuotaProbed => crate::db::orchestration::ensure_probed_quota_return_still_parked(
+                conn, exec_id, provider, now,
+            ),
+            Self::FallbackLapsed => crate::db::orchestration::ensure_fallback_lapsed_on_resume(
                 conn, exec_id, provider, now,
             ),
             _ => crate::db::orchestration::ensure_quota_return_still_due(
@@ -50087,6 +50189,7 @@ pub(crate) mod tests {
     }
 
     // KT-1518 — the agent fallback chain on a task worker.
+    mod agent_fallback_return;
     mod agent_fallback_runs;
 }
 

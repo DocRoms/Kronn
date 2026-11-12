@@ -3007,6 +3007,7 @@ async fn execute_run_body(
                     super::decide_step::execute_decide_step(
                         step,
                         &ctx,
+                        &state,
                         &base,
                         agents_config.model_tiers.ollama.decision.as_deref(),
                     )
@@ -4143,6 +4144,7 @@ async fn execute_run_body(
                     super::decide_step::execute_decide_step(
                         rb_step,
                         &ctx,
+                        &state,
                         &base,
                         agents_config.model_tiers.ollama.decision.as_deref(),
                     )
