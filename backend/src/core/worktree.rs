@@ -230,32 +230,22 @@ pub fn scan_build_artifacts(repo_path: &Path) -> Vec<BuildArtifactTarget> {
 /// Returns `(bytes, partial)`. Symlinks are counted as entries but never
 /// followed, so a link into a huge tree cannot make this walk unbounded.
 pub(crate) fn measure_within_budget(root: &Path) -> (u64, bool) {
-    let mut bytes = 0u64;
-    let mut visited = 0usize;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            visited += 1;
-            if visited > SCAN_ENTRY_BUDGET {
-                return (bytes, true);
-            }
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else {
-                bytes += meta.len();
-            }
-        }
-    }
-    (bytes, false)
+    let measured = measure_real_within_budget(root);
+    (measured.bytes, measured.partial)
+}
+
+/// [`measure_within_budget`] with the unique (non-shared) bytes too: a lane
+/// cloned from the seed counts the blocks it shares in full in `bytes`, and
+/// only `unique_bytes` is what deleting it frees (KT-1691).
+pub(crate) fn measure_real_within_budget(root: &Path) -> crate::core::disk_usage::Measured {
+    crate::core::disk_usage::measure_bounded(
+        root,
+        &[],
+        crate::core::disk_usage::MeasureBudget::within(
+            SCAN_ENTRY_BUDGET,
+            std::time::Duration::from_secs(120),
+        ),
+    )
 }
 
 /// What the durable execution state says about a worktree, as the caller read
@@ -288,6 +278,10 @@ pub struct CleanupReport {
     pub bytes_reclaimed: u64,
     /// True when `bytes_reclaimed` is a floor rather than the whole figure.
     pub bytes_are_partial: bool,
+    /// KT-1691 — of those, the bytes no other file shared (what the delete
+    /// really freed); `None` when the file system cannot say. `bytes_reclaimed`
+    /// counts the blocks a copy-on-write clone shares in full.
+    pub unique_bytes: Option<u64>,
 }
 
 /// Delete the regenerable build artefacts of one managed worktree.
@@ -341,6 +335,7 @@ pub fn clean_worktree_build_artifacts(
                 target_path,
                 bytes_reclaimed: 0,
                 bytes_are_partial: false,
+                unique_bytes: Some(0),
             })
         }
         Err(error) => {
@@ -365,7 +360,8 @@ pub fn clean_worktree_build_artifacts(
     }
     assert_no_build_in_progress(&target_path)?;
 
-    let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(&target_path);
+    let measured = measure_real_within_budget(&target_path);
+    let (bytes_reclaimed, bytes_are_partial) = (measured.bytes, measured.partial);
     std::fs::remove_dir_all(&target_path).map_err(|error| {
         format!(
             "failed to clean {}: {error}. Nothing further was attempted; the target is \
@@ -384,6 +380,7 @@ pub fn clean_worktree_build_artifacts(
         target_path,
         bytes_reclaimed,
         bytes_are_partial,
+        unique_bytes: measured.unique_bytes,
     })
 }
 
@@ -456,6 +453,7 @@ pub fn remove_lane_target(repo_path: &Path, lane_target: &Path) -> Result<Cleanu
                 target_path: lane_target.to_path_buf(),
                 bytes_reclaimed: 0,
                 bytes_are_partial: false,
+                unique_bytes: Some(0),
             })
         }
         Err(error) => {
@@ -473,7 +471,8 @@ pub fn remove_lane_target(repo_path: &Path, lane_target: &Path) -> Result<Cleanu
     }
     assert_no_build_in_progress(lane_target)?;
 
-    let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(lane_target);
+    let measured = measure_real_within_budget(lane_target);
+    let (bytes_reclaimed, bytes_are_partial) = (measured.bytes, measured.partial);
     crate::core::fs_guard::guarded_remove_tree(repo_path, lane_target).map_err(|error| {
         format!(
             "failed to clean {}: {error}. The lane target is left as it stands.",
@@ -490,6 +489,128 @@ pub fn remove_lane_target(repo_path: &Path, lane_target: &Path) -> Result<Cleanu
         target_path: lane_target.to_path_buf(),
         bytes_reclaimed,
         bytes_are_partial,
+        unique_bytes: measured.unique_bytes,
+    })
+}
+
+// ── KT-1691 — a checkout no workspace row names ──────────────────────────────
+//
+// A directory under `<repo>/.kronn/worktrees` that durable state does not know
+// (the database was reset or restored, a row was deleted) is judged by nothing:
+// no execution finishes it, so no release ever takes it. It is only offered to
+// the owner, who confirms each one; these two functions are what a confirmed
+// delete runs. The caller has proven no row names the path.
+
+/// Delete the whole checkout of an ownerless worktree, as `git worktree remove`
+/// does without `--force`: Git refuses a checkout with uncommitted or untracked
+/// work, and the branch stays. Refuses a running build.
+pub fn remove_ownerless_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+) -> Result<CleanupReport, String> {
+    assert_managed_task_worktree_path(repo_path, worktree_path)?;
+    let meta = std::fs::symlink_metadata(worktree_path).map_err(|error| {
+        format!(
+            "refusing to remove {}: cannot read it ({error})",
+            worktree_path.display()
+        )
+    })?;
+    if !meta.is_dir() {
+        return Err(format!(
+            "refusing to remove {}: expected a directory",
+            worktree_path.display()
+        ));
+    }
+    if !worktree_path.join(".git").exists() {
+        return Err(format!(
+            "{} is not a git worktree: remove it by hand once you know it is yours",
+            worktree_path.display()
+        ));
+    }
+    let dirty = worktree_dirty_files(worktree_path)?;
+    if !dirty.is_empty() {
+        return Err(format!(
+            "{} has {} uncommitted or untracked file(s): commit or discard them first",
+            worktree_path.display(),
+            dirty.len()
+        ));
+    }
+    let target = worktree_path.join("target");
+    if target.is_dir() {
+        assert_no_build_in_progress(&target)?;
+    }
+    let measured = measure_real_within_budget(worktree_path);
+    let output = crate::core::cmd::git_cmd()
+        .args(["worktree", "remove"])
+        .arg(worktree_path)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("git worktree remove failed to run: {error}"))?;
+    if !output.status.success() || worktree_path.exists() {
+        return Err(format!(
+            "git refused to remove {}: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    tracing::info!(
+        "Removed ownerless worktree {} ({} bytes{})",
+        worktree_path.display(),
+        measured.bytes,
+        if measured.partial { "+, floored" } else { "" }
+    );
+    Ok(CleanupReport {
+        target_path: worktree_path.to_path_buf(),
+        bytes_reclaimed: measured.bytes,
+        bytes_are_partial: measured.partial,
+        unique_bytes: measured.unique_bytes,
+    })
+}
+
+/// Delete the `target/` inside an ownerless worktree (regenerable). Refuses a
+/// running build and a `target` that is not a plain directory.
+pub fn remove_ownerless_worktree_cache(
+    repo_path: &Path,
+    worktree_path: &Path,
+) -> Result<CleanupReport, String> {
+    assert_managed_task_worktree_path(repo_path, worktree_path)?;
+    let target_path = worktree_path.join("target");
+    let meta = match std::fs::symlink_metadata(&target_path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CleanupReport {
+                target_path,
+                bytes_reclaimed: 0,
+                bytes_are_partial: false,
+                unique_bytes: Some(0),
+            })
+        }
+        Err(error) => {
+            return Err(format!(
+                "refusing to clean {}: cannot read it ({error})",
+                target_path.display()
+            ))
+        }
+    };
+    if !meta.is_dir() {
+        return Err(format!(
+            "refusing to clean {}: it is not a plain directory",
+            target_path.display()
+        ));
+    }
+    assert_no_build_in_progress(&target_path)?;
+    let measured = measure_real_within_budget(&target_path);
+    crate::core::fs_guard::guarded_remove_tree(repo_path, &target_path).map_err(|error| {
+        format!(
+            "failed to clean {}: {error}. The target is left as it stands.",
+            target_path.display()
+        )
+    })?;
+    Ok(CleanupReport {
+        target_path,
+        bytes_reclaimed: measured.bytes,
+        bytes_are_partial: measured.partial,
+        unique_bytes: measured.unique_bytes,
     })
 }
 
@@ -966,13 +1087,14 @@ pub fn process_lane_target_attributed(
                 }
             }
             if !allowed {
-                let (bytes_reclaimed, bytes_are_partial) = measure_within_budget(lane_target);
+                let measured = measure_real_within_budget(lane_target);
                 return LaneTargetOutcome::WouldRemove(
                     owner,
                     CleanupReport {
                         target_path: lane_target.to_path_buf(),
-                        bytes_reclaimed,
-                        bytes_are_partial,
+                        bytes_reclaimed: measured.bytes,
+                        bytes_are_partial: measured.partial,
+                        unique_bytes: measured.unique_bytes,
                     },
                 );
             }

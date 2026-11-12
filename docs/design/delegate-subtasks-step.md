@@ -27,11 +27,11 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   within the concurrency, budget and escalation limits, and, with
   `auto_continue`, launches the next launchable task after each integration
   under the idempotency key `campaign-auto:<run>:<task>`.
-  `[src: file: backend/src/db/orchestration.rs:1637-1777#campaign_task_candidates]`
+  `[src: file: backend/src/db/orchestration.rs:1741-1881#campaign_task_candidates]`
   `[src: file: backend/src/api/orchestration.rs:4461-4561#advance_campaign_after_integration]`
 - **Worker resolution.** Explicit override, then the campaign default worker,
   then the principal discussion's identity.
-  `[src: file: backend/src/db/orchestration.rs:1447-1475#resolve_campaign_worker]`
+  `[src: file: backend/src/db/orchestration.rs:1551-1579#resolve_campaign_worker]`
 - **Review contract.** `ReviewDecisionV1` with a verdict `approve |
   request_changes`, the reviewed HEAD, findings and DoD verifications.
   `decide_review` bumps the round on `request_changes`, sends the findings to
@@ -39,8 +39,8 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   is spent. `[src: file: backend/src/models/orchestration.rs:2038-2044#ReviewVerdict]`
   `[src: file: backend/src/models/orchestration.rs:2081-2104#ReviewDecisionV1]`
   `[src: file: backend/src/api/orchestration.rs:8707-8714#decide_review]`
-  `[src: file: backend/src/db/orchestration.rs:4696-4705#ReviewCheckpoint]`
-  `[src: file: backend/src/db/orchestration.rs:4727-4739#ReviewCheckpointOutcome]`
+  `[src: file: backend/src/db/orchestration.rs:4800-4809#ReviewCheckpoint]`
+  `[src: file: backend/src/db/orchestration.rs:4831-4843#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
   decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:14766-14778#reassign_execution]`
   `[src: file: backend/src/api/orchestration.rs:18481-18490#human_review]`
@@ -49,7 +49,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   checked out (or by moving the ref when no worktree has it), refusing a dirty
   checkout, and sends a conflict back to the worker.
   `[src: file: backend/src/api/orchestration.rs:3305-3563#run_integration]`
-  `[src: file: backend/src/core/worktree.rs:2624-2646#IntegrationTarget]`
+  `[src: file: backend/src/core/worktree.rs:2746-2768#IntegrationTarget]`
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
@@ -81,7 +81,7 @@ branch. Checked against the code:
   `[src: file: backend/src/api/orchestration.rs:15256-15269#principal_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:15231-15273#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:7641-7648#deliver_worker_manifest]`
-  `[src: file: backend/src/db/orchestration.rs:4643-4650#EscalationDelivery]`
+  `[src: file: backend/src/db/orchestration.rs:4747-4754#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
   `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
 

@@ -233,7 +233,7 @@ The activity clock default is 20 minutes
 (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
 wins). A tool call in flight (a cold build run by the worker itself) is activity
 up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
-[src: file: backend/src/db/orchestration.rs:8002#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8106#DEFAULT_ACTIVITY_TIMEOUT_SECS]
 
 **Queue deadline.** An execution queued longer than the queue deadline is
 reported, never interrupted: the principal room receives one orchestration
@@ -244,8 +244,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8031#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8059#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8135#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8163#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -278,9 +278,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:2301-2329#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:2873-2893#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:2818-2871#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2423-2451#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:2995-3015#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:2940-2993#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -294,7 +294,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2640-2647#integration_target]
+[src: file: backend/src/core/worktree.rs:2762-2769#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -344,7 +344,7 @@ test without a release-time sweep. A citation the lane breaks for good (symbol
 removed or renamed) is the lane's to fix; the worker brief says so. The merge a
 worker finishes with `task_exec_commit` runs the same settlement.
 [src: file: backend/src/core/worktree.rs:2378-2482#build_candidate_detailed]
-[src: file: backend/src/core/worktree.rs:2517-2580#settle_branch_docs]
+[src: file: backend/src/core/worktree.rs:2639-2702#settle_branch_docs]
 [src: file: backend/src/core/docs_citations/merge.rs:306-322#resolve_anchor_only_conflicts]
 [src: file: backend/src/core/docs_citations/merge.rs:685-745#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]

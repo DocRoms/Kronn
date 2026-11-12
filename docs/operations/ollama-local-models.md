@@ -43,7 +43,7 @@ The discussion SSE path resolves this scope from the durable
 executor. If that lookup fails, the run is refused before provider inference;
 Kronn must never silently broaden a worker to the principal catalogue.
 `[src: file: backend/src/api/discussions/streaming.rs:92-146#native_http_tools_for_discussion]`
-`[src: file: backend/src/db/orchestration.rs:1092-1109#get_execution_for_sub_discussion]`
+`[src: file: backend/src/db/orchestration.rs:1196-1213#get_execution_for_sub_discussion]`
 
 ## Recommended subtask loop
 

@@ -511,6 +511,115 @@ fn a_source_cannot_start_a_build_while_it_is_being_cloned() {
     assert_eq!(*build_could_start.lock().unwrap(), Some(false));
 }
 
+/// A unit of the seed as Cargo lays it out, last written `age_days` ago.
+fn seed_unit(debug: &Path, hash: &str, age_days: u64) {
+    let age = std::time::SystemTime::now() - Duration::from_secs(age_days * 24 * 3600);
+    let fingerprint = debug.join(".fingerprint").join(format!("kronn-{hash}"));
+    std::fs::create_dir_all(&fingerprint).unwrap();
+    std::fs::write(fingerprint.join("test-lib-kronn"), "x").unwrap();
+    // The fingerprint Cargo compares: two builds of the same configuration.
+    std::fs::write(
+        fingerprint.join("test-lib-kronn.json"),
+        "{\"rustc\":13462371384788945141,\"features\":\"[\\\"default\\\"]\",\
+         \"declared_features\":\"[]\",\"target\":7848994504142944354,\
+         \"profile\":11056920130593593451,\"path\":7897662090217625916,\"deps\":[],\
+         \"local\":[],\"rustflags\":[],\"config\":9396254390672932401,\"compile_kind\":0}",
+    )
+    .unwrap();
+    for file in ["test-lib-kronn", "test-lib-kronn.json"] {
+        std::fs::File::open(fingerprint.join(file))
+            .unwrap()
+            .set_modified(age)
+            .unwrap();
+    }
+    std::fs::File::open(&fingerprint)
+        .unwrap()
+        .set_modified(age)
+        .unwrap();
+    std::fs::write(debug.join("deps").join(format!("kronn-{hash}")), "bin").unwrap();
+}
+
+/// KT-1691 — Cargo never removes an old artifact, so the seed grew to 174 GB of
+/// which 91 GB were months-old test binaries, and every lane cloned (and then
+/// rewrote part of) all of it. The seed is pruned to its latest build first.
+#[test]
+fn a_lane_never_clones_stale_seed_artifacts() {
+    const STALE: &str = "aaaaaaaaaaaaaaaa";
+    const LATEST: &str = "bbbbbbbbbbbbbbbb";
+    let fx = fixture();
+    let source = fx.main_target();
+    let debug = source.join(DEBUG_DIR);
+    seed_unit(&debug, STALE, 90);
+    seed_unit(&debug, LATEST, 0);
+    let lane = fx.lane("kt-1691-slim", LOCK_A);
+    let seen_by_the_clone = Arc::new(Mutex::new(Vec::new()));
+    let seen = seen_by_the_clone.clone();
+
+    let home = HomeKey::of(&lane, &provisioned());
+    let outcome = seed_lane(&lane, &home, &|from, to| {
+        // What the clone is about to take, listed at the moment it takes it.
+        let mut names: Vec<String> = std::fs::read_dir(from.join("deps"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        *seen.lock().unwrap() = names;
+        copy_dir(from, to)
+    });
+
+    let SeedOutcome::Cloned { pruned, .. } = outcome else {
+        panic!("expected a clone, got {outcome:?}");
+    };
+    assert_eq!(pruned.map(|report| report.removed_units), Some(1));
+    let seen = seen_by_the_clone.lock().unwrap().clone();
+    assert!(
+        !seen.iter().any(|name| name.contains(STALE)),
+        "the clone saw a stale artifact: {seen:?}"
+    );
+    assert!(seen.contains(&format!("kronn-{LATEST}")), "{seen:?}");
+    let lane_debug = lane.cargo_target_dir.join(DEBUG_DIR);
+    assert!(!lane_debug
+        .join("deps")
+        .join(format!("kronn-{STALE}"))
+        .exists());
+    assert!(!lane_debug
+        .join(".fingerprint")
+        .join(format!("kronn-{STALE}"))
+        .exists());
+    assert!(lane_debug
+        .join("deps")
+        .join(format!("kronn-{LATEST}"))
+        .exists());
+    // The seed itself is slimmed, so the next lane starts from the same.
+    assert!(!debug.join("deps").join(format!("kronn-{STALE}")).exists());
+    // What was already there (the warm artifact) is untouched.
+    assert!(debug.join("deps").join("libdep.rlib").exists());
+}
+
+/// ...and never while a build uses it: a busy seed is neither pruned nor cloned.
+#[test]
+fn a_seed_a_build_is_writing_is_not_pruned() {
+    let fx = fixture();
+    let source = fx.main_target();
+    let debug = source.join(DEBUG_DIR);
+    seed_unit(&debug, "aaaaaaaaaaaaaaaa", 90);
+    seed_unit(&debug, "bbbbbbbbbbbbbbbb", 0);
+    let lane = fx.lane("kt-1691-busy", LOCK_A);
+    let building = std::fs::File::open(debug.join(CARGO_BUILD_LOCK)).unwrap();
+    FileExt::lock_exclusive(&building).unwrap();
+    let clone = RecordingClone::new();
+
+    let record = warm(&lane, &ScriptedBuild::ok(), &clone, &BuildGate::new());
+
+    assert!(matches!(record.seed, SeedOutcome::NoSource { .. }));
+    assert!(clone.calls().is_empty());
+    assert!(
+        debug.join("deps").join("kronn-aaaaaaaaaaaaaaaa").exists(),
+        "a seed in use is left exactly as it is"
+    );
+}
+
 #[test]
 fn an_unsupported_clone_leaves_the_target_empty_and_still_builds() {
     let fx = fixture();
@@ -751,6 +860,7 @@ fn the_warm_start_record_roundtrips_as_json() {
             source: PathBuf::from("/repo/target"),
             kind: SeedSourceKind::MainCheckout,
             clone_ms: 12,
+            pruned: None,
         },
         build_jobs: 4,
         first_build: FirstBuild::Succeeded {
@@ -800,6 +910,7 @@ fn timed(first_build: FirstBuild, queued_ms: u64) -> WarmStartRecord {
             source: PathBuf::from("/repo/target"),
             kind: SeedSourceKind::MainCheckout,
             clone_ms: 30,
+            pruned: None,
         },
         build_jobs: 4,
         first_build,

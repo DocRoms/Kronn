@@ -42,7 +42,7 @@ The recurrence also exposed that non-terminal old executions and unregistered
 manual worktrees do not become reclaimable merely because a planning task is
 done. KT-638 keeps prevention open: it does not lower disk thresholds, ignore
 tests, scan recursively on a failing request, or authorise deletion of active
-or unowned targets. [src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness] [src: file: backend/src/core/worktree.rs:1141-1205#ensure_build_disk_headroom]
+or unowned targets. [src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness] [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
 
 The retained maintenance record distinguishes each authorised batch. These are
 dated physical free-space observations, not quotas or reusable deletion grants:
@@ -173,7 +173,7 @@ created only at Cargo's exact target path when its immediate parent is already a
 real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
-stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1141-1205#ensure_build_disk_headroom]
+stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
 [src: file: backend/src/api/orchestration.rs:6592-6649#validation_build_path]
 [src: file: backend/src/api/orchestration.rs:6810-6906#validation_metadata_command]
 [src: file: backend/src/api/orchestration.rs:6596-6613#run_one_validation_with]
@@ -191,7 +191,7 @@ target and configured critical threshold, while the maintenance inventory lists
 managed candidates and their refusal reason. An operator may request a manual,
 path-specific reclaim only after the inventory's ownership and terminal-state
 checks; this document does not authorise a broad purge or deletion of unknown,
-active, or leased targets. [src: file: backend/src/core/worktree.rs:1100-1135#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
+active, or leased targets. [src: file: backend/src/core/worktree.rs:1222-1257#ensure_disk_headroom_for] [src: file: scripts/dev-backend-build-guard.sh:41-44#critical_gib]
 [src: file: backend/src/api/maintenance.rs:125-190#list_build_artifacts]
 [src: file: backend/src/db/orchestration.rs:429-542#worktree_cleanup_liveness]
 

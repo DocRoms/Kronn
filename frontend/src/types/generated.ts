@@ -9820,6 +9820,12 @@ disk_launch_min_free_gib: number,
  */
 disk_sweep_idle_hours: number,
 /**
+ * KT-1691 — days a Blocked or Interrupted execution's lane build dir must
+ * have been unwritten before it becomes purgeable (by a confirmed
+ * per-entry delete, never by a sweep). Its worktree and branch stay.
+ */
+disk_stalled_build_days: number,
+/**
  * Maximum concurrent agent processes (default: 5)
  */
 max_concurrent_agents: number,
@@ -10022,7 +10028,12 @@ disk_launch_min_free_gib: number,
 /**
  * KT-1318 - hours a lane build dir must be idle before a sweep may take it.
  */
-disk_sweep_idle_hours: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+disk_sweep_idle_hours: number,
+/**
+ * KT-1691 - days a Blocked/Interrupted execution's build dir must be idle
+ * before it becomes purgeable.
+ */
+disk_stalled_build_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
 /**
  * KT-1438 - copy lane seeds into task worktrees (default on).
  */
