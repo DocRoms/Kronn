@@ -99,6 +99,16 @@ const VITEST_CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
 const VITEST_CONFIG_PROBE_FILTER: &str = "kronn-lane-config-probe-no-such-test";
 /// What a failed probe's reason keeps of the command's output.
 const PROBE_DETAIL_BYTES: usize = 300;
+/// KT-1736 — how many error lines a failed probe keeps from the START of its
+/// output. The last [`PROBE_DETAIL_BYTES`] of a `cargo` build are its epilogue
+/// (`warning: build failed, waiting for other jobs`); the compiler's own message
+/// is far above them.
+const PROBE_FIRST_ERROR_LINES: usize = 8;
+/// A kept error line is clipped to this many characters (a `cc` command line is
+/// several kilobytes; its end names the file that failed).
+const PROBE_ERROR_LINE_CHARS: usize = 400;
+/// The longest line the scanner buffers; the rest of a longer one is dropped.
+const PROBE_SCANNED_LINE_BYTES: usize = 16 * 1024;
 
 /// The parallelism of every build and test tool the project uses, bounded by
 /// one `jobs` budget (KT-1634): Cargo's compilation, each Rust test binary
@@ -907,8 +917,8 @@ impl ProbeRunner for ProcessProbeRunner {
             Ok(child) => child,
             Err(error) => return failure(format!("cannot start `{}`: {error}", probe.program)),
         };
-        let stdout = child.stdout.take().map(drain_tail);
-        let stderr = child.stderr.take().map(drain_tail);
+        let stdout = child.stdout.take().map(|pipe| drain_output(pipe, false));
+        let stderr = child.stderr.take().map(|pipe| drain_output(pipe, true));
         let deadline = Instant::now() + probe.timeout;
         let mut cancelled = false;
         let status = loop {
@@ -927,13 +937,15 @@ impl ProbeRunner for ProcessProbeRunner {
                 Err(error) => return failure(format!("cannot wait for the probe: {error}")),
             }
         };
-        let collect = |handle: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        let collect = |handle: Option<std::thread::JoinHandle<Captured>>| {
             handle
                 .and_then(|handle| handle.join().ok())
-                .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
                 .unwrap_or_default()
         };
         let (stdout, stderr) = (collect(stdout), collect(stderr));
+        let first_errors = stderr.first_errors;
+        let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).trim().to_string();
+        let (stdout, stderr) = (text(stdout.tail), text(stderr.tail));
         let detail = if stderr.is_empty() { stdout } else { stderr };
         let detail = detail.split_whitespace().collect::<Vec<_>>().join(" ");
         match status {
@@ -941,7 +953,10 @@ impl ProbeRunner for ProcessProbeRunner {
                 success: true,
                 detail,
             },
-            Some(status) => failure(format!("exited with {status}: {detail}")),
+            Some(status) => failure(format!(
+                "exited with {status}: {}",
+                failure_detail(&first_errors, &detail)
+            )),
             None if cancelled => failure("cancelled".to_string()),
             None => failure(format!("timed out after {}s", probe.timeout.as_secs())),
         }
@@ -987,21 +1002,104 @@ fn kill_process_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Read a pipe to its end, keeping only the last [`PROBE_DETAIL_BYTES`].
-fn drain_tail<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<Vec<u8>> {
+/// What a probe's pipe held: its last [`PROBE_DETAIL_BYTES`] and, when scanned,
+/// the first error lines it printed (KT-1736).
+#[derive(Default)]
+struct Captured {
+    tail: Vec<u8>,
+    first_errors: Vec<String>,
+}
+
+/// Whether `line` reports an error: a compiler's (`clang: error:`, `error[E…]`,
+/// `fatal error:`), cargo's (`error: failed to run custom build command`), a
+/// build script's (`error occurred in cc-rs`) or a panic. A mere mention of the
+/// word (`std::error::Error` in a warning) is not one.
+fn is_error_line(line: &str) -> bool {
+    let line = line.trim().to_ascii_lowercase();
+    line.starts_with("error")
+        || line.contains(": error")
+        || line.contains("fatal error")
+        || line.contains("error occurred")
+        || line.contains("panicked at")
+}
+
+/// `line` on one line, clipped to [`PROBE_ERROR_LINE_CHARS`] around an ellipsis
+/// that keeps both its start and its end.
+fn clip_error_line(line: &str) -> String {
+    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= PROBE_ERROR_LINE_CHARS {
+        return line;
+    }
+    let head = PROBE_ERROR_LINE_CHARS * 5 / 8;
+    let end = PROBE_ERROR_LINE_CHARS - head;
+    format!(
+        "{} … {}",
+        chars[..head].iter().collect::<String>(),
+        chars[chars.len() - end..].iter().collect::<String>()
+    )
+}
+
+/// The reason of a failed probe: its first error lines (those its last output
+/// does not already show), then its last output.
+fn failure_detail(first_errors: &[String], tail: &str) -> String {
+    let missing: Vec<&str> = first_errors
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !tail.contains(line))
+        .collect();
+    if missing.is_empty() {
+        return tail.to_string();
+    }
+    format!(
+        "first errors: {} | last output: {tail}",
+        missing.join(" | ")
+    )
+}
+
+/// Read a pipe to its end, keeping the last [`PROBE_DETAIL_BYTES`] and, when
+/// `scan_errors`, the first [`PROBE_FIRST_ERROR_LINES`] error lines.
+fn drain_output<R: Read + Send + 'static>(
+    mut pipe: R,
+    scan_errors: bool,
+) -> std::thread::JoinHandle<Captured> {
     std::thread::spawn(move || {
-        let mut tail: Vec<u8> = Vec::new();
+        let mut captured = Captured::default();
+        let mut pending: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
+        let flush = |pending: &mut Vec<u8>, captured: &mut Captured| {
+            if captured.first_errors.len() < PROBE_FIRST_ERROR_LINES {
+                let text = String::from_utf8_lossy(pending);
+                if is_error_line(&text) {
+                    captured.first_errors.push(clip_error_line(&text));
+                }
+            }
+            pending.clear();
+        };
         while let Ok(read) = pipe.read(&mut chunk) {
             if read == 0 {
                 break;
             }
-            tail.extend_from_slice(&chunk[..read]);
-            if tail.len() > PROBE_DETAIL_BYTES {
-                tail.drain(..tail.len() - PROBE_DETAIL_BYTES);
+            captured.tail.extend_from_slice(&chunk[..read]);
+            if captured.tail.len() > PROBE_DETAIL_BYTES {
+                let excess = captured.tail.len() - PROBE_DETAIL_BYTES;
+                captured.tail.drain(..excess);
+            }
+            if !scan_errors {
+                continue;
+            }
+            for &byte in &chunk[..read] {
+                if byte == b'\n' {
+                    flush(&mut pending, &mut captured);
+                } else if pending.len() < PROBE_SCANNED_LINE_BYTES {
+                    pending.push(byte);
+                }
             }
         }
-        tail
+        if scan_errors && !pending.is_empty() {
+            flush(&mut pending, &mut captured);
+        }
+        captured
     })
 }
 

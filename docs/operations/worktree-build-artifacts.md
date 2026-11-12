@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:6833-6890#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:6892-6988#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:6723-6740#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:7035-7101#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:6849-6906#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:6908-7004#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:6739-6756#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:7051-7117#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -313,13 +313,75 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/background_priority.rs:293-295#check_launcher_at_boot]
 [src: file: backend/src/core/cmd.rs:359-370#async_cmd_with]
 [src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
-[src: file: backend/src/core/task_worker_env.rs:839]
+[src: file: backend/src/core/task_worker_env.rs:849]
 [src: file: backend/src/core/task_worker_lane_warm.rs:843]
 [src: file: backend/src/agents/runner.rs:14718-14727#agent_launch_priority]
 [src: file: backend/src/core/quick_exec.rs:516-540#build_command]
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
 [src: file: backend/src/core/config.rs:610-611]
+
+## A failed lane warm-up is never silent (KT-1736)
+
+On 2026-11-12 every lane's warm-up ended `first_build.outcome = "failed"` after
+about 90 s (`task_execution_events`, `action = 'lane_warm_start'`), so each worker
+met a cold lane (KT-1718 measured 41 min 43 s for its first
+`cargo test --lib <filter>`). The stored reason was only the last 300 bytes of
+`cargo test --no-run` — the end of the `cc` command line of the file that failed
+(`…/aws-lc-sys-0.44.0/…/arm/aes/aes-xts-enc.S`) and cargo's
+`warning: build failed` epilogue — never the compiler's own message, printed far
+above. The warm-up ran to completion for the other jobs (hence the 90 s) and left
+no `.kronn-warm.json`.
+
+What was established, and what was not:
+
+- The failure is specific to the warm-up's environment: the same crate builds
+  from a clean lane in a worker's own shell (`cargo build -p aws-lc-sys`,
+  1 min 04 s) and, replaying the warm-up's sealed environment without the OS
+  sandbox, cargo does not even consider the crate stale on a lane seeded from the
+  main checkout.
+- The failing file is an assembly source. Apple clang compiles a `.S` as two jobs
+  (`clang -cc1 -E … -o $TMPDIR/aes-xts-enc-XXXXXX.s`, then `clang -cc1as`), so —
+  unlike a `.c` file — it needs a writable `TMPDIR` and a second process of the
+  driver under the Seatbelt profile (`deny default`, four Mach services, writes
+  limited to the lane). That is the only thing distinguishing the failing source
+  from the ones that compile; it is a **hypothesis, not a measurement**: a
+  worker cannot nest `sandbox-exec`, so the exact profile could not be replayed
+  from inside a worker's sandbox.
+
+So the failure now explains itself the next time it happens:
+
+- **The event keeps the first errors.** `ProcessProbeRunner` scans a probe's
+  stderr while it streams and keeps its first 8 error lines (`error…`,
+  `… : error`, `fatal error`, `error occurred`, `panicked at`; each clipped to 400
+  characters around an ellipsis, so the file name at the end of a `cc` command
+  survives) beside the last 300 bytes. A failed probe's reason reads
+  `exited with exit status: 101: first errors: … | last output: …`. Every probe
+  that goes through the process runner gets it, not only the warm-up.
+- **The room says so.** When the first build fails or times out, the worker's
+  room gets a system line before the worker is dispatched —
+  `⚠️ préchauffage échoué : <cause>` (`⚠️ warm-up failed: <cause>` in an English
+  room) followed by the fact that the worker starts on a cold lane. The cause is
+  the recorded reason, clipped to 900 characters. A warm, cancelled or skipped
+  first build posts nothing.
+
+**Reproducing a warm-up by hand.** Replay the same command in the lane, under the
+OS sandbox the warm-up uses
+(`sandbox-exec -p <profile> cargo test --no-run --locked --offline` from the
+manifest directory, `TMPDIR=<lane target>/.kronn-tmp`, the lane's `CARGO_*`
+variables), then read the first error lines of the execution's
+`lane_warm_start` event.
+
+**Measuring.** The number that matters is *lane start → first targeted test
+result*: the `lane_warm_start` event's `seed_ms`, `queued_ms` and
+`first_build.duration_ms` give the warm-up's share (`timed_steps`), and the
+worker's first `cargo test --lib <filter>` the rest. A warm lane is one whose
+target holds `.kronn-warm.json`.
+
+[src: file: backend/src/core/task_worker_env.rs:1062-1103#drain_output]
+[src: file: backend/src/core/task_worker_lane_warm.rs:729-914#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
+[src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
 
 ## Maintenance command
 

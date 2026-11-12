@@ -2878,6 +2878,22 @@ async fn finish_native_provisioning(
             warm_cancel,
         )
         .await;
+        // KT-1736 — a first build that failed or timed out hands the worker a cold
+        // lane (tens of minutes before its first test): say so in its room, with
+        // the cause, instead of leaving it to find out.
+        if let Some(record) = &warm {
+            let lang = room_lang(db, &prepared.execution.parent_discussion_id).await;
+            if let Some(content) = warm_failure_notice(lang, &record.first_build) {
+                post_warm_failure_notice(
+                    db,
+                    &prepared.execution.id,
+                    prepared.execution.attempt_no,
+                    &sub_disc_id,
+                    content,
+                )
+                .await;
+            }
+        }
         // Cancelled while it warmed: nothing more to run for this execution (the
         // cancel owns its state; the first build is already stopped).
         if warm.as_ref().is_some_and(|record| {
@@ -10810,6 +10826,80 @@ async fn record_lane_warm_start(
         tracing::warn!("lane warm-start record not persisted: {error}");
     }
     Some(record)
+}
+
+/// How much of a failed first build's reason the room line carries.
+const WARM_FAILURE_CAUSE_CHARS: usize = 900;
+
+/// KT-1736 — the room line for a lane whose first build failed or timed out, or
+/// `None` when the lane is warm (or was never going to be built). The worker is
+/// still dispatched, on a cold lane; this says why, with the build's own reason.
+fn warm_failure_notice(
+    lang: RoomLang,
+    first_build: &crate::core::task_worker_lane_warm::FirstBuild,
+) -> Option<String> {
+    use crate::core::task_worker_lane_warm::FirstBuild;
+    let (cause_fr, cause_en) = match first_build {
+        FirstBuild::Failed { detail, .. } => {
+            let cause = clip_warm_failure_cause(detail);
+            (cause.clone(), cause)
+        }
+        FirstBuild::TimedOut { duration_ms } => {
+            let minutes = duration_ms / 60_000;
+            (
+                format!("délai dépassé après {minutes} min"),
+                format!("timed out after {minutes} min"),
+            )
+        }
+        FirstBuild::Succeeded { .. }
+        | FirstBuild::Cancelled { .. }
+        | FirstBuild::Skipped { .. } => return None,
+    };
+    Some(match lang {
+        RoomLang::Fr => format!(
+            "⚠️ préchauffage échoué : {cause_fr}\n\nLe worker démarre sur une lane froide : sa \
+             première compilation (plusieurs dizaines de minutes) aura lieu pendant son tour."
+        ),
+        RoomLang::En => format!(
+            "⚠️ warm-up failed: {cause_en}\n\nThe worker starts on a cold lane: its first build \
+             (tens of minutes) runs during its turn."
+        ),
+    })
+}
+
+/// `detail` clipped to [`WARM_FAILURE_CAUSE_CHARS`] characters.
+fn clip_warm_failure_cause(detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.chars().count() <= WARM_FAILURE_CAUSE_CHARS {
+        return detail.to_string();
+    }
+    let kept: String = detail.chars().take(WARM_FAILURE_CAUSE_CHARS).collect();
+    format!("{kept}…")
+}
+
+/// Post the cold-lane notice in the worker's room. Never raised: a notice that is
+/// not posted only leaves the cause in the journal.
+async fn post_warm_failure_notice(
+    db: &Database,
+    exec_id: &str,
+    attempt_no: u32,
+    room_id: &str,
+    content: String,
+) {
+    let mut notice = orchestrator_message(
+        format!("orch-warmup-failed:{exec_id}:{attempt_no}"),
+        content,
+    );
+    notice.role = MessageRole::System;
+    let room = room_id.to_string();
+    if let Err(error) = db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_message(conn, &room, &notice).map(|_| ())
+        })
+        .await
+    {
+        tracing::warn!(execution_id = %exec_id, "warm-up failure notice not posted: {error}");
+    }
 }
 
 /// Provision a Claude task worker's lane and check, with the worker's own
@@ -33003,6 +33093,75 @@ pub(crate) mod tests {
             ),
             "{record:?}"
         );
+        // KT-1736 — the cold lane is announced in the worker's room with the cause.
+        let notices = warm_failure_notices(&db, &sub).await;
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains("warm-up failed: error: could not compile `fixture`"),
+            "{notices:?}"
+        );
+    }
+
+    async fn warm_failure_notices(db: &Database, room: &str) -> Vec<String> {
+        let room = room.to_string();
+        db.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT content FROM messages \
+                 WHERE discussion_id = ?1 AND id LIKE 'orch-warmup-failed:%'",
+            )?;
+            let rows = statement.query_map([room], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[test]
+    fn a_failed_or_timed_out_first_build_is_announced_a_warm_one_is_not() {
+        use crate::core::task_worker_lane_warm::FirstBuild;
+        let failed = FirstBuild::Failed {
+            duration_ms: 90_000,
+            detail: "exited with exit status: 101: first errors: clang: error: boom".into(),
+        };
+        let fr = warm_failure_notice(RoomLang::Fr, &failed).expect("announced");
+        assert!(
+            fr.contains("préchauffage échoué : exited with exit status: 101"),
+            "{fr}"
+        );
+        assert!(fr.contains("clang: error: boom"), "{fr}");
+        let en = warm_failure_notice(RoomLang::En, &failed).expect("announced");
+        assert!(
+            en.contains("warm-up failed: exited with exit status: 101"),
+            "{en}"
+        );
+
+        let timed_out = FirstBuild::TimedOut {
+            duration_ms: 1_800_000,
+        };
+        let fr = warm_failure_notice(RoomLang::Fr, &timed_out).expect("announced");
+        assert!(
+            fr.contains("préchauffage échoué : délai dépassé après 30 min"),
+            "{fr}"
+        );
+
+        for quiet in [
+            FirstBuild::Succeeded { duration_ms: 1 },
+            FirstBuild::Cancelled { duration_ms: 1 },
+            FirstBuild::Skipped {
+                reason: "no Cargo.lock".into(),
+            },
+        ] {
+            assert_eq!(warm_failure_notice(RoomLang::En, &quiet), None, "{quiet:?}");
+        }
+    }
+
+    #[test]
+    fn a_very_long_failure_reason_is_clipped_in_the_room() {
+        let long = "x".repeat(WARM_FAILURE_CAUSE_CHARS * 3);
+        let clipped = clip_warm_failure_cause(&long);
+        assert_eq!(clipped.chars().count(), WARM_FAILURE_CAUSE_CHARS + 1);
+        assert!(clipped.ends_with('…'));
+        assert_eq!(clip_warm_failure_cause("  short  "), "short");
     }
 
     #[tokio::test]
