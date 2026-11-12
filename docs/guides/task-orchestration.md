@@ -177,6 +177,38 @@ joined CLI never silently substitutes a native responder.
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
 [src: file: backend/src/db/discussions.rs:2020-2063#already_scheduled]
 
+### Warming, queueing and which clock applies
+
+A launch goes through several waits before the worker's first tool call. Only
+the last one is the worker's own; the others are Kronn's, so the silent-worker
+clock (KT-1247) does not run during them (KT-1689).
+
+| Phase | Execution status | What shows in the status | Clock |
+| --- | --- | --- | --- |
+| Worktree creation, lane provisioning, seed clone, lane seeds | `Provisioning` | `phase: warming`, the `warming_steps` | None: the activity clock only expires a `Working` execution. |
+| Build-slot wait (`gate_wait`, up to 30 min) and lane first build (`first_build`, up to the first-build timeout) | `Provisioning` | `warming_steps` with their durations | None, same reason. A 30-min wait or a 24-min build never counts as inactivity. |
+| Toolchain smoke check, brief, dispatch | `Provisioning` → `Working` | `smoke_check` step | None until the dispatch exists. |
+| Queued for a worker slot (task-worker cap, agent or host caps) | `Working`, dispatch `Pending` | `phase: queued`, reason `task_worker_limit:<running>/<cap>`, queue position | **Queue deadline** only (below). The activity clock is suspended while the dispatch is `Pending`. |
+| Worker's turn: claimed, agent started, tool calls, messages, commits | `Working`, dispatch `Running` | `launching`, `tool_activity`, `upstream_wait` | **Activity clock**: 20 min without a tool call, message, commit or delivery interrupts the execution (`activity_timeout`, resumable). It starts at the claim of the dispatch, not at its creation, and a single tool call in flight counts as activity up to its cap. |
+
+The activity clock default is 20 minutes
+(`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
+wins). A tool call in flight (a cold build run by the worker itself) is activity
+up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
+[src: file: backend/src/db/orchestration.rs:8106#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+
+**Queue deadline.** An execution queued longer than the queue deadline is
+reported, never interrupted: the principal room receives one orchestration
+event per dispatch naming the reason (`task_worker_limit:2/2`) and the queue
+position, with the options (keep waiting, free a slot, take over). The execution
+stays `Working` and its dispatch stays queued; it starts when a slot frees. The
+deadline is 6 hours by default and is set host-wide with
+`KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
+falls back to the default). It counts from the creation of the queued dispatch.
+A resumed execution queues a new dispatch and gets its own deadline.
+[src: file: backend/src/db/orchestration.rs:8135#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8163#queue_wait_reported]
+
 ### Highlight a message without changing the task
 
 Choose **Important message** above the ordinary composer, enter text and select

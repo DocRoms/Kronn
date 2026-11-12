@@ -335,7 +335,7 @@
 
 .project-docker-logs-overlay {
   position: fixed;
-  z-index: 1200;
+  z-index: var(--kr-z-modal-nested);
   inset: 0;
   display: grid;
   place-items: center;

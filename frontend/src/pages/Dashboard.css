@@ -1285,7 +1285,7 @@ button.dash-badge-tech-debt {
   position: fixed;
   inset: 0;
   background: var(--kr-bg-overlay);
-  z-index: 1000;
+  z-index: var(--kr-z-modal);
   display: flex;
   align-items: center;
   justify-content: center;

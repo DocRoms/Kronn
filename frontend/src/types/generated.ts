@@ -4743,7 +4743,7 @@ skills: Array<string>, };
  */
 export type ExecutionRecoveryAction = "resume_provisioning" | "resume_worker" | "await_review" | "await_human" | "rebuild_candidate" | "run_validations" | "apply_fast_forward" | "idempotent_close" | "block_dirty_target" | "block_missing_workspace" | "block_missing_discussion" | "block_agent_unavailable";
 
-export type ExecutionTimeoutKind = "activity" | "total_duration" | "review_wait" | "human_wait";
+export type ExecutionTimeoutKind = "activity" | "total_duration" | "review_wait" | "human_wait" | "queue_wait";
 
 /**
  * One value a configuration-only export withheld.
