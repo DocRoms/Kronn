@@ -1,0 +1,274 @@
+/* KT-1696 — step shadows as sub-rows under an Agent step, the merged result they
+   feed, and their lines on the branch map. Violet = a shadow, orange = its merge. */
+
+.wf-shadow-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-self: stretch;
+  min-width: 0;
+  margin: 2px 11px 6px 19px;
+  cursor: default;
+  font-weight: 400;
+  color: var(--kr-text-secondary);
+}
+
+.wf-shadow-subrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-left: 2px dashed rgba(var(--kr-purple-rgb), 0.55);
+  border-radius: 0 var(--kr-r-sm) var(--kr-r-sm) 0;
+  background: rgba(var(--kr-purple-rgb), 0.06);
+  font-size: var(--kr-fs-xs);
+}
+.wf-shadow-subrow[data-paused='true'] { opacity: 0.7; }
+.wf-shadow-subrow[data-paused='true'] .wf-shadow-subrow-name { text-decoration: line-through; }
+
+.wf-shadow-subrow-name {
+  color: var(--kr-purple);
+  font-weight: 700;
+  /* Natural width: the name only clips when it alone is wider than the card. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-shadow-subrow-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* Agent/model picker: same trigger look as the step's own agent picker. */
+.wf-shadow-picker { display: inline-flex; min-width: 0; }
+.wf-shadow-picker-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+.wf-shadow-picker-btn > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-shadow-picker-btn:hover:not(:disabled) { border-color: var(--kr-purple); }
+.wf-shadow-picker-btn:disabled { cursor: default; opacity: 0.75; }
+.wf-shadow-add .wf-shadow-picker-btn {
+  align-self: flex-start;
+  border-style: dashed;
+  border-color: rgba(var(--kr-purple-rgb), 0.55);
+  background: transparent;
+  color: var(--kr-purple);
+}
+
+.wf-shadow-transport {
+  padding: 0 5px;
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-pill);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Two labelled one-click switches. */
+.wf-shadow-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px 1px 4px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-pill);
+  background: transparent;
+  color: var(--kr-text-muted);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.wf-shadow-switch:disabled { cursor: default; }
+.wf-shadow-switch-knob {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--kr-text-ghost);
+}
+.wf-shadow-switch[data-kind='active'][data-on='true'] {
+  border-color: var(--kr-purple);
+  background: rgba(var(--kr-purple-rgb), 0.14);
+  color: var(--kr-purple);
+}
+.wf-shadow-switch[data-kind='active'][data-on='true'] .wf-shadow-switch-knob { background: var(--kr-purple); }
+.wf-shadow-switch[data-kind='merge'][data-on='true'] {
+  border-color: var(--kr-warning-amber);
+  background: rgba(var(--kr-warning-amber-rgb), 0.14);
+  color: var(--kr-warning-amber);
+}
+.wf-shadow-switch[data-kind='merge'][data-on='true'] .wf-shadow-switch-knob { background: var(--kr-warning-amber); }
+.wf-shadow-switch:focus-visible,
+.wf-shadow-picker-btn:focus-visible,
+.wf-shadow-subrow-remove:focus-visible,
+.wf-shadow-help-btn:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 1px; }
+
+.wf-shadow-subrow-remove {
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+}
+.wf-shadow-subrow-remove:hover { color: var(--kr-error); }
+
+/* The summary of the merged result: not a setting, but the condense agent is. */
+.wf-shadow-merged {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  padding: 3px 8px;
+  border-left: 2px solid var(--kr-warning-amber);
+  border-radius: 0 var(--kr-r-sm) var(--kr-r-sm) 0;
+  background: rgba(var(--kr-warning-amber-rgb), 0.08);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+}
+.wf-shadow-merged-text { font-weight: 600; overflow-wrap: anywhere; }
+/* "merged by <picker>" never splits: the group wraps as one unit, only when space is missing. */
+.wf-shadow-merged-agent {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.wf-shadow-merged-by { color: var(--kr-text-muted); flex: none; }
+
+.wf-shadow-help { position: relative; display: inline-flex; }
+.wf-shadow-help-btn {
+  display: inline-flex;
+  padding: 1px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--kr-warning-amber);
+  cursor: help;
+}
+.wf-shadow-help-pop {
+  position: absolute;
+  z-index: calc(var(--kr-z-modal) + 10);
+  top: calc(100% + 4px);
+  left: -8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 280px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 10px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+}
+.wf-shadow-help-pop code {
+  padding: 2px 6px;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-code);
+  font-family: var(--kr-font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* The agent/model menu (portaled to the body). */
+.wf-shadow-menu {
+  position: fixed;
+  z-index: calc(var(--kr-z-modal) + 20);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 300px;
+  max-width: calc(100vw - 16px);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+  font-size: var(--kr-fs-sm);
+}
+.wf-shadow-menu-group { display: flex; flex-direction: column; margin-top: 4px; border-top: 1px solid var(--kr-border-subtle); padding-top: 4px; }
+.wf-shadow-menu-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+}
+.wf-shadow-menu-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.wf-shadow-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px 4px 22px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.wf-shadow-menu-item > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.wf-shadow-menu-item:hover:not(:disabled),
+.wf-shadow-menu-item:focus-visible { background: rgba(var(--kr-purple-rgb), 0.12); }
+.wf-shadow-menu-item:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: -2px; }
+.wf-shadow-menu-item[data-current='true'] { color: var(--kr-purple); font-weight: 700; }
+.wf-shadow-menu-item:disabled { color: var(--kr-text-faint); cursor: not-allowed; }
+.wf-shadow-menu > .wf-shadow-menu-item { padding-left: 8px; }
+.wf-shadow-menu-hint { color: var(--kr-text-muted); font-size: var(--kr-fs-2xs); }
+
+/* Branch map: the shadow lines under a doubled step, and its tags. */
+.wf-bm-tag { fill: var(--kr-purple); font-size: 9px; font-weight: 700; }
+.wf-bm-tag-merge { fill: var(--kr-warning-amber); }
+.wf-bm-shadow { fill: var(--kr-purple); font-size: 10px; font-family: var(--kr-font-mono, monospace); }
+.wf-bm-shadow[data-paused='true'] { text-decoration: line-through; opacity: 0.65; }
+.wf-bm-merged { fill: var(--kr-warning-amber); }
+
+/* Runs list: « ⑂ 2 · ⊕ ok ». */
+.wf-run-compact-shadows {
+  padding: 0 6px;
+  border: 1px solid rgba(var(--kr-purple-rgb), 0.45);
+  border-radius: var(--kr-r-pill);
+  color: var(--kr-purple);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.wf-run-compact-shadows[data-merge='partial'] { border-color: var(--kr-warning-amber); color: var(--kr-warning-amber); }

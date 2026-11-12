@@ -87,8 +87,8 @@ provider or claim a browser/full-runtime end-to-end demonstration. Truly absent
 runtimes still use the existing deferral policy; this patch does not cap it.
 [src: file: backend/tests/context_file_safety.rs:82-137#upload_utf16_and_binary_keeps_original_bytes_and_safe_durable_previews]
 [src: file: backend/tests/context_file_safety.rs:139-247#imported_legacy_preview_and_history_are_safe_without_rewriting_the_archive]
-[src: file: backend/src/api/discussions/streaming.rs:7546-7576#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
-[src: file: backend/src/api/discussions/streaming.rs:7578-7670#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
+[src: file: backend/src/api/discussions/streaming.rs:7560-7590#a_nul_byte_in_the_command_line_is_a_hard_stop_not_a_deferral]
+[src: file: backend/src/api/discussions/streaming.rs:7592-7684#kt633_nul_failure_persists_a_visible_error_and_settles_the_dispatch]
 
 Initial production-path regression replay: **9 failed / 0 passed** before the
 preview/prompt corrections. Expanded focused replay: **12 passed**; two HTTP

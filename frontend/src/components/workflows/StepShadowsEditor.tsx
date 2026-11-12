@@ -10,6 +10,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, FlaskConical, Info, Plus, Tra
 import { skills as skillsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import { skillBaseId, skillPinnedVersion } from '../../lib/automationSkills';
 import { AGENT_LABELS, ALL_AGENT_TYPES } from '../../lib/constants';
+import { freshShadowId, shadowTally } from '../../lib/shadowMerge';
 import { isIdenticalShadow, pruneMerge, shadowTestedCount } from '../../lib/shadowRuns';
 import { StepMergeEditor } from './StepShadowMergeEditor';
 import type {
@@ -42,13 +43,6 @@ type Versions = { state: 'loading' | 'error' | 'ready'; list: number[] };
 
 export const MAX_SHADOWS = 8;
 const SHADOW_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
-
-/** A shadow id nobody uses yet in the step: `shadow-1`, `shadow-2`… */
-function freshShadowId(shadows: readonly StepShadow[]): string {
-  for (let n = shadows.length + 1; ; n += 1) {
-    if (!shadows.some(shadow => shadow.id === `shadow-${n}`)) return `shadow-${n}`;
-  }
-}
 
 /** The empty text of an input is no value. */
 const orUndefined = (text: string): string | undefined => (text.trim() ? text : undefined);
@@ -551,7 +545,15 @@ export function ShadowStatusButton({ steps, projects, onOpen, t }: {
     ? []
     : [...new Set(all.flatMap(shadow => shadow.project_ids ?? []))];
   const projectNames = projectIds.map(id => projects.find(p => p.id === id)?.name ?? id).join(', ');
-  const label = active ? t('wf.shadow.entryOn', count, shadowed.length) : t('wf.shadow.entryOff');
+  // KT-1696 — « ⑂ 2 shadows · 1 step · ⊕ merge »: what is doubled, and whether it is merged.
+  const tally = shadowTally(steps);
+  const label = active
+    ? [
+      t(tally.shadows === 1 ? 'wf.shadow.entryShadowsOne' : 'wf.shadow.entryShadowsMany', tally.shadows),
+      t(tally.steps === 1 ? 'wf.shadow.entryStepsOne' : 'wf.shadow.entryStepsMany', tally.steps),
+      ...(tally.merged ? [t('wf.shadow.entryMerge')] : []),
+    ].join(' · ')
+    : t('wf.shadow.entryOff');
   const title = active
     ? t('wf.shadow.entryTitleOn', projectIds.length === 0 ? t('wf.shadow.entryAllProjects') : projectNames)
     : t('wf.shadow.entryTitleOff');
@@ -565,7 +567,7 @@ export function ShadowStatusButton({ steps, projects, onOpen, t }: {
       aria-label={`${label}. ${title}`}
       onClick={onOpen}
     >
-      <FlaskConical size={10} aria-hidden /> {label}
+      {!active && <FlaskConical size={10} aria-hidden />} {label}
     </button>
   );
 }

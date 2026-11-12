@@ -132,6 +132,7 @@ pub mod safe_http;
 pub mod scanner;
 pub mod secret_facts;
 pub mod secret_scrub;
+pub mod seed_prune;
 pub mod session_budget;
 pub mod set_aside;
 pub mod skill_bundle;

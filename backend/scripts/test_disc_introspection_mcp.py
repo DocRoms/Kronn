@@ -5815,6 +5815,9 @@ class DiskUsageToolTests(unittest.TestCase):
             "totals": [{"kind": "lane_build_dir", "entries": 40, "bytes": 9}],
             "orphan_count": 2,
             "orphan_bytes": 5,
+            "apparent_bytes": 900,
+            "unique_bytes": 40,
+            "orphan_unique_bytes": 1,
             "entries": [{"path": f"/r/target/wt-{n}"} for n in range(40)],
             "scoped": True,
         },
@@ -5847,6 +5850,14 @@ class DiskUsageToolTests(unittest.TestCase):
         self.assertEqual(out["orphan_count"], 2)
         self.assertTrue(out["scoped"])
         self.assertNotIn("purged", out)
+
+    def test_real_and_apparent_bytes_are_both_reported(self):
+        # KT-1691: cloned lanes count shared blocks in full in `bytes`.
+        out = self.mod.call_disk_usage({})
+        self.assertEqual(out["apparent_bytes"], 900)
+        self.assertEqual(out["unique_bytes"], 40)
+        self.assertEqual(out["orphan_unique_bytes"], 1)
+        self.assertIn("unique_bytes", self.mod.TOOL_MANUALS["disk_usage"])
 
     def test_the_project_filter_is_url_encoded(self):
         self.mod.call_disk_usage({"project_id": "a b&c"})

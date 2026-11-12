@@ -30,7 +30,7 @@
      encrypted at the next start. Its credentials join the boot, and the notice tells the operator to
      delete the file once checked; Kronn does not delete it.
      [src: file: backend/src/core/config.rs:470-525#set_aside_unreadable_config]
-     [src: file: backend/src/core/config.rs:1176-1188#set_aside_unreadable_config]
+     [src: file: backend/src/core/config.rs:1182-1194#set_aside_unreadable_config]
 - **Why we can't fix now (constraint)**: All three are deliberate KT-1007
   trade-offs against losing the key or a credential: dropping the file copy
   of the key without two durable copies, rewriting `config.toml` under a
