@@ -408,6 +408,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             config.server.disk_launch_min_free_gib,
             config.server.disk_sweep_idle_hours,
         );
+        kronn::core::disk_usage::set_stalled_build_days(config.server.disk_stalled_build_days);
         // KT-1438 — the lane-seed switches, before the first worktree of this boot.
         kronn::core::task_worker_lane_seeds::set_seed_policy(
             config.server.lane_seeds_copy_enabled,
@@ -914,6 +915,10 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         state.db.clone(),
     ));
     tokio::spawn(async move { learning_sweep.start().await });
+
+    // KT-1692 — probe every API connection's token at start and once a day, so
+    // an expired or revoked one is flagged before a workflow needs it.
+    kronn::core::token_checks::spawn_scheduler(state.clone());
 
     // 0.8.11 (B6) — periodic DB backup (default every 24h, keep 7). Targets
     // KRONN_BACKUP_DIR (a host-mounted dir outside the data volume) when set;

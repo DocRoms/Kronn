@@ -19,7 +19,7 @@ loss = **lost forever** without a copy.
 
 Kronn writes three kinds of copies. The scheduled one is built from the
 environment by `[src: file: backend/src/core/backup.rs:316-330#BackupScheduler]`;
-the manual one is `[src: file: backend/src/api/setup.rs:1974-1985#db_backup]`;
+the manual one is `[src: file: backend/src/api/setup.rs:1979-1990#db_backup]`;
 the pre-migration one is described below.
 
 | Copy | When | Where |
@@ -46,7 +46,7 @@ disk lacks room or the copy fails, boot stops before any migration with a
 message saying so. `KRONN_MIGRATION_BACKUP=0` upgrades without a backup; use
 it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1338-1401#backup_before_migration]`
 The copy is taken only when a migration is pending, after the WAL is folded in
-and pinned. `[src: file: backend/src/db/migrations.rs:1494-1525#has_pending]`
+and pinned. `[src: file: backend/src/db/migrations.rs:1498-1529#has_pending]`
 
 ## Run retention and compaction
 

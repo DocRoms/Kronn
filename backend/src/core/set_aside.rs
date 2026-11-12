@@ -354,6 +354,7 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
             | "disk_warning_gib"
             | "disk_launch_min_free_gib"
             | "disk_sweep_idle_hours"
+            | "disk_stalled_build_days"
             | "max_concurrent_agents"
             | "agent_stall_timeout_min"
             | "agent_global_timeout_min"

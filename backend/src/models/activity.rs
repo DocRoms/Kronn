@@ -51,6 +51,8 @@ pub enum ActivityLinkTarget {
     Workflow,
     Project,
     PlanningTask,
+    /// An API connection (plugin config), by config id: opens it in the plugin list.
+    Plugin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

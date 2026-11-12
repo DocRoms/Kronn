@@ -584,6 +584,7 @@ mod tests {
             disk_warning_gib: crate::models::setup::DEFAULT_DISK_WARNING_GIB,
             disk_launch_min_free_gib: crate::models::setup::DEFAULT_DISK_LAUNCH_MIN_FREE_GIB,
             disk_sweep_idle_hours: crate::models::setup::DEFAULT_DISK_SWEEP_IDLE_HOURS,
+            disk_stalled_build_days: crate::models::setup::DEFAULT_DISK_STALLED_BUILD_DAYS,
             max_concurrent_agents: 5,
             agent_stall_timeout_min: 5,
             agent_global_timeout_min: crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,

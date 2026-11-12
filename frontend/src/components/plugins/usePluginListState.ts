@@ -146,6 +146,40 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     }
   });
 
+  // KT-1692 — the proactive token check: one connection ("Check") or every
+  // connection that has a test endpoint ("Check all").
+  const [checkingTokenId, setCheckingTokenId] = useState<string | null>(null);
+  const [checkingAllTokens, setCheckingAllTokens] = useState(false);
+
+  const handleCheckToken = useAsyncGuard(async (configId: string) => {
+    setCheckingTokenId(configId);
+    try {
+      const result = await mcpsApi.checkToken(configId);
+      refetchMcps();
+      toast(t(result.rate_limited ? 'mcp.tokenCheck.recent' : 'mcp.tokenCheck.done'), 'success');
+    } catch (error) {
+      console.warn('Failed to check the token:', error);
+      toast(t('mcp.tokenCheck.failed', userError(error)), 'error');
+    } finally {
+      setCheckingTokenId(null);
+    }
+  });
+
+  const handleCheckAllTokens = useAsyncGuard(async () => {
+    setCheckingAllTokens(true);
+    try {
+      const { results } = await mcpsApi.checkTokens();
+      refetchMcps();
+      const refused = results.filter(result => result.check.outcome === 'refused').length;
+      toast(t('mcp.tokenCheck.allDone', results.length, refused), refused > 0 ? 'error' : 'success');
+    } catch (error) {
+      console.warn('Failed to check the tokens:', error);
+      toast(t('mcp.tokenCheck.failed', userError(error)), 'error');
+    } finally {
+      setCheckingAllTokens(false);
+    }
+  });
+
   const handleTestProject = useAsyncGuard(async (projectId: string, targets: McpConfigDisplay[]) => {
     setTestingProjectId(projectId);
     try {
@@ -551,6 +585,7 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     portabilityMode, setPortabilityMode,
 
     driftBySlug, probeByConfig, probeTestedAtByConfig, probingConfigId, handleProbeConfig, handleSetPreferredInterface,
+    checkingTokenId, checkingAllTokens, handleCheckToken, handleCheckAllTokens,
 
     handleDeleteMcpConfig, handleDeleteSelectedMcpConfigs,
     handleToggleConfigGlobal, handleToggleConfigGeneral, handleSetHostSync, handleToggleConfigProject,
