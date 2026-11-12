@@ -96,5 +96,6 @@ common ways a Kronn deployment ends up exposed.
   link in that window is not excluded. Creating a symlink on Windows needs
   elevated rights or developer mode, so Kronn accepts this rather than
   refusing to write there. A rooted primitive for Windows is tracked as
-  KT-1609. Any other platform that is neither unix nor Windows refuses these
-  writes. Details: `docs/operations/fs-guard-rooted-writes.md`.
+  KT-1609 (planned for 0.15.4; 0.15.3 ships without it). Any other platform
+  that is neither unix nor Windows refuses these writes. Details:
+  `docs/operations/fs-guard-rooted-writes.md`.

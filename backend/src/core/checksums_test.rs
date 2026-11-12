@@ -1002,3 +1002,21 @@ fn head_and_branch_are_read_from_git_and_unknown_outside() {
     assert_eq!(branch.as_deref(), Some("main"));
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// KT-1595: the baseline is published right after an agent ran; a docs folder
+/// swapped for a link between the walk and the write never receives it.
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+#[test]
+fn a_docs_folder_swapped_after_the_walk_never_receives_the_baseline() {
+    use crate::core::fs_guard::swap_probe;
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("repo");
+    fs::create_dir_all(project.join("docs")).unwrap();
+    let external = tempfile::tempdir().unwrap();
+    swap_probe::arm(&project.join("docs"), external.path());
+    let result = publish_checksums_file(&project, &[]);
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+    assert!(project.join("docs.moved/checksums.json").is_file());
+}

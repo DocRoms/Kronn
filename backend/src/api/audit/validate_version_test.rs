@@ -932,3 +932,20 @@ async fn a_bridge_caller_is_refused_the_validation_of_a_version() {
         response.error
     );
 }
+
+/// KT-1595: the rollback puts files back under the project; a docs folder
+/// swapped for a link between the walk and the write never takes one out.
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+#[test]
+fn a_rollback_never_writes_through_a_docs_folder_swapped_after_the_walk() {
+    use crate::core::fs_guard::swap_probe;
+    let tmp = validated();
+    let dir = tmp.path();
+    let snapshot = Snapshot::take(dir).unwrap();
+    let external = tempfile::tempdir().unwrap();
+    swap_probe::arm(&dir.join("docs"), external.path());
+    let failed = snapshot.restore();
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert!(!failed.is_empty(), "the refusal is reported, not hidden");
+    assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+}

@@ -698,8 +698,10 @@ pub(super) fn demote_last_attempt(
         writes.push((path, original, demotion.content));
     }
     let write = |path: &str, from: &str, to: &str| -> Result<(), String> {
-        crate::core::mcp_scanner::atomic_write(&project.join(path), to)
-            .map_err(|e| e.to_string())?;
+        // Rooted (KT-1595): the canonicalize check above is only a refusal,
+        // true at one instant; a folder swapped for a link after it must not
+        // take the write outside the project.
+        crate::core::fs_guard::guarded_replace(project, &project.join(path), to.as_bytes())?;
         if let Err(e) = crate::core::doc_provenance::note_write(
             project,
             path,
@@ -977,8 +979,11 @@ pub(super) fn check_attempt(
                 return Err(format!("repair target escapes project: {path}"));
             }
             preserve_original(project, content)?;
-            crate::core::mcp_scanner::atomic_write(&project.join(path), &corrected)
-                .map_err(|e| e.to_string())?;
+            crate::core::fs_guard::guarded_replace(
+                project,
+                &project.join(path),
+                corrected.as_bytes(),
+            )?;
             if let Err(e) = crate::core::doc_provenance::note_write(
                 project,
                 path,
@@ -2276,6 +2281,24 @@ mod tests {
         assert!(demoted.is_empty());
         let written = std::fs::read_to_string(dir.path().join("docs/tech-debt.md")).unwrap();
         assert_eq!(written, text);
+    }
+
+    /// KT-1595: the demotion runs right after an agent; a docs folder swapped
+    /// for a link between the walk and the write never takes the document out.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_demotion() {
+        use crate::core::fs_guard::swap_probe;
+        let text = "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] in prod.\n";
+        let (dir, blocking) = docroms(text);
+        let external = tempfile::tempdir().unwrap();
+        swap_probe::arm(&dir.path().join("docs"), external.path());
+        let _ = demote_last_attempt(dir.path(), &blocking, None, &|| true);
+        assert!(swap_probe::fired(), "the swap really happened");
+        // The write goes to the folder it held (moved, still inside the
+        // project), never through the link that took its name.
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+        assert!(dir.path().join("docs.moved/tech-debt.md").is_file());
     }
 
     #[test]

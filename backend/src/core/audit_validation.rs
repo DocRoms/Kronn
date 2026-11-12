@@ -999,7 +999,10 @@ pub(crate) fn apply_td_resolutions_at(
     // empty folder behind. `docs_dir` is canonical, so the folder lands in it.
     let mut created_td_dir = false;
     if td_missing {
-        match std::fs::create_dir(&td_dir) {
+        // Every write below goes through the rooted primitive (KT-1595): a
+        // folder swapped for a link since the checks above is never written
+        // through.
+        match crate::core::fs_guard::guarded_create_dir_all(&root, &td_dir) {
             Ok(()) => created_td_dir = true,
             Err(error) => {
                 outcome = Err(anyhow!(error).context(format!("cannot create {}", td_dir.display())))
@@ -1010,7 +1013,8 @@ pub(crate) fn apply_td_resolutions_at(
         if outcome.is_err() {
             break;
         }
-        if let Err(error) = crate::core::mcp_scanner::atomic_write(path, content) {
+        if let Err(error) = crate::core::fs_guard::guarded_replace(&root, path, content.as_bytes())
+        {
             outcome = Err(anyhow!(error));
             break;
         }
@@ -1023,7 +1027,7 @@ pub(crate) fn apply_td_resolutions_at(
     }
     if outcome.is_ok() {
         if let Some((path, original, content)) = &decision_update {
-            match crate::core::mcp_scanner::atomic_write(path, content) {
+            match crate::core::fs_guard::guarded_replace(&root, path, content.as_bytes()) {
                 Ok(()) => written.push((path.as_path(), original.as_deref())),
                 Err(error) => outcome = Err(anyhow!(error)),
             }
@@ -1032,8 +1036,11 @@ pub(crate) fn apply_td_resolutions_at(
     if let Err(error) = outcome {
         for (path, original) in written {
             let restored = match original {
-                Some(original) => crate::core::mcp_scanner::atomic_write(path, original),
-                None => std::fs::remove_file(path).map_err(|e| e.to_string()),
+                Some(original) => {
+                    crate::core::fs_guard::guarded_replace(&root, path, original.as_bytes())
+                }
+                None => crate::core::fs_guard::guarded_remove_file(&root, path)
+                    .map_err(|e| e.to_string()),
             };
             if let Err(restore) = restored {
                 tracing::error!("Could not restore {}: {restore}", path.display());
@@ -1041,7 +1048,7 @@ pub(crate) fn apply_td_resolutions_at(
         }
         if created_td_dir {
             // Empty again once its sheets are gone; a failure leaves it be.
-            let _ = std::fs::remove_dir(&td_dir);
+            let _ = crate::core::fs_guard::guarded_remove_dir(&root, &td_dir);
         }
         return Err(error);
     }
@@ -1585,6 +1592,37 @@ mod tests {
             .unwrap();
         let sheet = std::fs::read_to_string(docs.join("tech-debt/TD-20261016-rowonly.md")).unwrap();
         assert!(sheet.contains("- **Severity**: High"), "{sheet}");
+    }
+
+    /// KT-1595: a docs folder swapped for a link after the checks never
+    /// receives the first decision's `tech-debt/` folder nor its sheet.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_docs_folder_swapped_after_the_checks_never_receives_the_first_decision() {
+        use crate::core::fs_guard::swap_probe;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "# Index\n\n## Current list\n\n| ID | Problem | Area | Severity | Status |\n|----|---------|------|----------|--------|\n| TD-20261016-rowonly | Row only | API | High | Open |\n",
+        )
+        .unwrap();
+        let resolution = TdResolution {
+            td_id: "TD-20261016-rowonly".into(),
+            action: TdResolutionAction::Confirm,
+        };
+        swap_probe::arm(&docs, outside.path());
+        let result = apply_td_resolutions_at(
+            &root,
+            &[(&resolution, Some("Seen in prod."))],
+            TdDecisionOrigin::Review,
+        );
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[cfg(unix)] // creates symlinks through std::os::unix

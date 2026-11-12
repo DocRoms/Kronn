@@ -848,6 +848,7 @@ pub(crate) fn atomic_write_if_unchanged(
 /// window where a normal 0644 document becomes the temp file's defensive 0600.
 /// The byte comparison is the final operation before rename, minimizing the
 /// remaining portable check-to-commit race window.
+#[cfg(any(windows, test))] // the unix `fs_guard` replaces through a held directory instead
 pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
     target: &Path,
     content: &str,

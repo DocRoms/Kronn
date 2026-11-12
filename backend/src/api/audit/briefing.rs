@@ -161,25 +161,52 @@ pub(crate) fn briefing_prompt_section_for(
     format!("\n\n## Project briefing (from the user)\n{body}\n{docs_block}")
 }
 
+/// The reviewed `docs/briefing.md`, read through a handle opened `O_NOFOLLOW`
+/// under the project root (KT-1595): the agent that just ran may have left a
+/// link at the file or in a folder above it, and a link is refused, never read.
+fn read_reviewed_briefing(
+    root: &std::path::Path,
+    file: &std::path::Path,
+) -> Result<String, String> {
+    let cannot = |why: String| {
+        format!(
+            "No briefing was stored: cannot read {}: {why}",
+            file.display()
+        )
+    };
+    let bytes = crate::core::fs_guard::guarded_read(root, file)
+        .map_err(|e| cannot(e.to_string()))?
+        .ok_or_else(|| cannot("no such file".into()))?;
+    String::from_utf8(bytes).map_err(|_| cannot("the file is not valid UTF-8 text".into()))
+}
+
+/// Put the form's answers back into `docs/briefing.md`, written through the
+/// rooted primitive so a folder swapped for a link after the agent ran never
+/// lets the write leave the project (KT-1595).
+fn restore_reviewed_briefing(
+    root: &std::path::Path,
+    file: &std::path::Path,
+    body: &str,
+) -> Result<(), String> {
+    crate::core::fs_guard::guarded_replace(root, file, body.as_bytes())
+}
+
 /// After `KRONN:BRIEFING_COMPLETE`: store the reviewed `docs/briefing.md`,
-/// with the form's project facts put back as answered.
+/// with the form's project facts put back as answered. `project_root` is the
+/// project folder `briefing_file` lives under; every read and write of the
+/// file goes through `fs_guard` against it.
 pub(crate) async fn complete_reviewed_briefing(
     state: &AppState,
     project_id: String,
+    project_root: std::path::PathBuf,
     briefing_file: std::path::PathBuf,
 ) -> Result<(), String> {
     let lease = crate::api::audit::docs_write::DocsWriteLease::acquire(state, &project_id).await?;
-    let file = briefing_file.clone();
+    let (root, file) = (project_root.clone(), briefing_file.clone());
     let reviewed = lease
-        .blocking(move || std::fs::read_to_string(&file))
+        .blocking(move || read_reviewed_briefing(&root, &file))
         .await
-        .map_err(|e| format!("Briefing save interrupted: {e}"))?
-        .map_err(|e| {
-            format!(
-                "No briefing was stored: cannot read {}: {e}",
-                briefing_file.display()
-            )
-        })?;
+        .map_err(|e| format!("Briefing save interrupted: {e}"))??;
     if reviewed.trim().is_empty() {
         return Err("No briefing was stored: the briefing file is empty.".into());
     }
@@ -193,7 +220,7 @@ pub(crate) async fn complete_reviewed_briefing(
     if content != reviewed {
         let body = content.clone();
         lease
-            .blocking(move || crate::core::mcp_scanner::atomic_write(&briefing_file, &body))
+            .blocking(move || restore_reviewed_briefing(&project_root, &briefing_file, &body))
             .await
             .map_err(|e| format!("Briefing restore interrupted: {e}"))?
             .map_err(|e| format!("Cannot restore the saved briefing answers: {e}"))?;
@@ -995,5 +1022,93 @@ mod swap_tests {
         let _ = after.apply();
         assert!(swap_probe::fired(), "the swap really happened");
         assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn restoring_the_reviewed_briefing_never_writes_through_a_swapped_folder() {
+        let (_tmp, root, external) = project();
+        std::fs::write(root.join("docs/briefing.md"), "reviewed").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let result = restore_reviewed_briefing(&root, &root.join("docs/briefing.md"), "restored");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "nothing may land outside the project"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs.moved/briefing.md")).unwrap(),
+            "restored"
+        );
+    }
+
+    #[test]
+    fn reading_the_reviewed_briefing_never_reads_through_a_swapped_folder() {
+        let (_tmp, root, external) = project();
+        std::fs::write(root.join("docs/briefing.md"), "reviewed").unwrap();
+        std::fs::write(external.join("briefing.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let read = read_reviewed_briefing(&root, &root.join("docs/briefing.md"));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(read.unwrap(), "reviewed");
+    }
+
+    #[test]
+    fn a_briefing_file_left_as_a_link_is_neither_read_nor_overwritten() {
+        let (_tmp, root, external) = project();
+        let target = external.join("secret.md");
+        std::fs::write(&target, "OUTSIDE SECRET").unwrap();
+        let file = root.join("docs/briefing.md");
+        std::os::unix::fs::symlink(&target, &file).unwrap();
+        let read = read_reviewed_briefing(&root, &file);
+        assert!(read.is_err(), "{read:?}");
+        assert!(!read.unwrap_err().contains("OUTSIDE SECRET"));
+        assert!(restore_reviewed_briefing(&root, &file, "restored").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "OUTSIDE SECRET");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn completing_the_briefing_after_a_folder_swap_writes_nothing_outside() {
+        let _data_dir = crate::core::config::TestDataDir::new();
+        let (_tmp, root, external) = project();
+        let file = root.join("docs/briefing.md");
+        std::fs::write(&file, "# Briefing\nClarified answers.\n").unwrap();
+        let previous =
+            "# Briefing\nSaved answers.\n\n## Kronn options\n- Keep this user option: yes\n";
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let (path, notes) = (root.to_string_lossy().into_owned(), previous.to_string());
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, briefing_notes, created_at, updated_at) VALUES ('p', 'P', ?1, ?2, 'now', 'now')",
+                rusqlite::params![path, notes],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = crate::AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        swap_probe::arm(&root.join("docs"), &external);
+        let result = complete_reviewed_briefing(&state, "p".into(), root.clone(), file).await;
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(
+            result.is_err(),
+            "the restore must not succeed through a link"
+        );
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "nothing may land outside the project"
+        );
+        let stored = db
+            .with_conn(|conn| crate::db::projects::get_project_briefing_notes(conn, "p"))
+            .await
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some(previous));
     }
 }

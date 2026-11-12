@@ -68,7 +68,17 @@ bootstrap and the Full audit, with the linked-repos doc it writes), the
 `docs_migration` reference rewrites, its `ai/` to `docs/` merge and its
 `index.md` to `AGENTS.md` rename (rooted at the project, so a link already
 committed in `docs/` is refused with no race needed),
-`legacy_docs` (rooted at the project, not at its docs folder), and, in `worktree`,
+`legacy_docs` (rooted at the project, not at its docs folder), the writers that run
+right after an agent has been in the project (the second pass of KT-1595):
+`briefing` completion (`complete_reviewed_briefing` reads and restores
+`docs/briefing.md` against the project root threaded from the stream), the
+`redact_artifacts` sweep (a rooted read, then a compare-and-replace that keeps the
+mode), `validation` (`settle_unaddressed_signals`, `repair_coverage_rows`),
+`document_repair` (the marker demotion and the exact repairs),
+`revalidate::apply_reanchors`, the rollback snapshot of `validate_version`,
+the `citation_drift` record, the `checksums` baseline (publish, rollback and
+`acknowledge_sections`) and the TD decisions of
+`audit_validation::apply_td_resolutions_at` with their rollback, and, in `worktree`,
 the lane target, the managed worktree folders and the `.git` / `gitdir` files
 `fix_worktree_paths` rewrites (rooted at the worktree and at the repo's `.git`). A `template_reinstall` `Create` is create-only (a file
 that appeared since the plan is never overwritten nor deleted by a rollback) and
@@ -100,23 +110,35 @@ outside the root.
   `td_decisions`, `adr`, `skills`, `profiles`, and in `worktree` the copy of the
   untracked files into a new checkout, the `info/exclude` append and the
   submodule parent folders.
+- By-path writers into a project's docs folder that can run after an agent and are
+  still open to the swap, left as a follow-up (a decision, not an oversight):
+  `td_index::resync_index` and the `adr` / `td_decisions` settlement it is called
+  with. They take the docs folder, not the project root, and that folder may be a
+  nested path chosen by the project (`docs_location`), so its parent is not a
+  root: rooting them means threading the project root through their callers.
+  `td_index` and `adr` checks are lstat refusals only.
+- By-path writers into the audit state folder `.kronn/audit` (`audit_state`, the
+  documentary-optimization report, the blame record of `document_repair`). It is
+  made by `audit_state::state_dir`, which checks each level with `lstat` and creates
+  it by path; its files are written with `atomic_write`. Not rooted.
 - `template_reinstall` applies the template's file renames before it writes
   (`apply_renames_in`); a later failure rolls back the files it wrote, not those
   renames.
 
 ## Windows: residual risk, accepted
 
-There is no directory-descriptor primitive in use on Windows. There, every
-`guarded_*` write keeps the behaviour it had before KT-1595: the lstat walk, then
-the write by path. A parent folder swapped for a link between the walk and the
-write is therefore not excluded. Creating a symlink on Windows needs elevated
+**On Windows the fix does not apply: the hole stays open.** There is no
+directory-descriptor primitive in use on Windows. There, every `guarded_*` write
+keeps the behaviour it had before KT-1595: the lstat walk, then the write by path.
+A parent folder swapped for a link between the walk and the write is therefore
+not excluded, for every caller listed above. Creating a symlink on Windows needs elevated
 rights or developer mode, which is why this is accepted rather than failing
 closed: worktree creation, template installs, native files and seeding must keep
 working on the desktop build. The owner decided this and amended DoD item 3 of
 KT-1595 accordingly (item 3 as written asked every target to fail closed).
 
 Closing it needs handle-rooted file operations on Windows. That is the follow-up
-ticket **KT-1609** (Windows rooted primitive); not done here.
+ticket **KT-1609** (Windows rooted primitive), planned for 0.15.4; not done in 0.15.3.
 
 Any target that is neither unix nor Windows fails closed: every `guarded_*` write
 is refused and nothing is created (the `cfg(not(any(unix, windows)))` module in

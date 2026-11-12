@@ -639,7 +639,10 @@ fn publish_checksums_file(
     mappings: &[ChecksumMapping],
 ) -> Result<(PathBuf, Vec<u8>), String> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
-    std::fs::create_dir_all(&docs_dir)
+    // Every write of the baseline goes through the rooted primitive (KT-1595):
+    // it is published right after an agent ran, which may have left a link
+    // where the docs folder was.
+    crate::core::fs_guard::guarded_create_dir_all(project_path, &docs_dir)
         .map_err(|e| format!("Failed to create {} dir: {e}", docs_dir.display()))?;
 
     let file = ChecksumsFile {
@@ -656,22 +659,26 @@ fn publish_checksums_file(
     // instead of staying stale. On any failure here the previous valid
     // manifest stays byte-intact.
     let path = docs_dir.join("checksums.json");
-    crate::core::mcp_scanner::atomic_write_bytes(&path, &json)?;
+    crate::core::fs_guard::guarded_replace(project_path, &path, &json)?;
 
     Ok((path, json))
 }
 
 fn restore_checksums_bytes(
+    root: &Path,
     path: &Path,
     previous: Option<&[u8]>,
     published: &[u8],
 ) -> Result<(), String> {
-    let current = std::fs::read(path).map_err(|e| {
-        format!(
-            "Failed to verify published checksum baseline {}: {e}",
-            path.display()
-        )
-    })?;
+    let current = crate::core::fs_guard::guarded_read(root, path)
+        .map_err(|e| e.to_string())
+        .and_then(|read| read.ok_or_else(|| "no such file".to_string()))
+        .map_err(|e| {
+            format!(
+                "Failed to verify published checksum baseline {}: {e}",
+                path.display()
+            )
+        })?;
     if current != published {
         return Err(format!(
             "checksum baseline {} changed concurrently after publication; refusing to overwrite or delete it",
@@ -679,13 +686,13 @@ fn restore_checksums_bytes(
         ));
     }
     match previous {
-        Some(bytes) => crate::core::mcp_scanner::atomic_write_bytes(path, bytes).map_err(|e| {
+        Some(bytes) => crate::core::fs_guard::guarded_replace(root, path, bytes).map_err(|e| {
             format!(
                 "Failed to restore previous checksum baseline {}: {e}",
                 path.display()
             )
         }),
-        None => match std::fs::remove_file(path) {
+        None => match crate::core::fs_guard::guarded_remove_file(root, path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!(
@@ -712,9 +719,8 @@ where
     }
 
     let path = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
-    let previous = match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+    let previous = match crate::core::fs_guard::guarded_read(project_path, &path) {
+        Ok(bytes) => bytes,
         Err(e) => {
             return Err(format!(
                 "Could not preserve previous checksum baseline {}: {e}",
@@ -728,7 +734,8 @@ where
     after_publish();
     let after = git_source_tree_fingerprint_observed(project_path, Some("post-publish"));
     if after.as_deref() != expected_source_tree {
-        let rollback = restore_checksums_bytes(&path, previous.as_deref(), &published);
+        let rollback =
+            restore_checksums_bytes(project_path, &path, previous.as_deref(), &published);
         return match rollback {
             Ok(()) => Err("source tree changed during checksum baseline publication; previous baseline restored".to_string()),
             Err(rollback_error) => Err(format!(
@@ -837,7 +844,7 @@ pub fn acknowledge_sections(project_path: &Path, ai_files: &[String]) -> Result<
     let json =
         serde_json::to_vec_pretty(&file).map_err(|e| format!("JSON serialize error: {e}"))?;
     let path = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
-    crate::core::mcp_scanner::atomic_write_bytes(&path, &json)?;
+    crate::core::fs_guard::guarded_replace(project_path, &path, &json)?;
     // The cache keys on the manifest mtime, which a same-second rewrite may keep.
     DRIFT_CACHE
         .lock()
