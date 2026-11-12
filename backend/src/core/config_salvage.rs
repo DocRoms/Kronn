@@ -879,7 +879,14 @@ fn sheltered_entries(entries: &[Preserved]) -> Vec<Sheltered> {
 fn decode_shelter(encrypted: &str, key_hex: &str) -> Result<Vec<Sheltered>> {
     let key = crypto::parse_secret(key_hex).map_err(anyhow::Error::msg)?;
     let text = crypto::decrypt(encrypted.trim(), &key).map_err(anyhow::Error::msg)?;
-    let file: ShelterFile = toml::from_str(&text).context("parse the preserved values")?;
+    // The decrypted text holds credentials: the parse error is reduced to its
+    // kind and position, as its own Display would print the offending line.
+    let file: ShelterFile = toml::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "parse the preserved values: {}",
+            super::redact::toml_error_summary(&text, &e)
+        )
+    })?;
     Ok(file.entries)
 }
 

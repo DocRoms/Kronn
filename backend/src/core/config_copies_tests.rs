@@ -872,6 +872,105 @@ fn a_mention_proven_harmless_is_dropped_even_in_a_text_that_does_not_parse() {
     assert_eq!(key_of(&bom_key), Some(k));
 }
 
+/// The key line written with a quoted or escaped key is the key line: TOML decodes
+/// it to the same name, so a copy is cut down to it (and a config.toml set aside
+/// keeps it), never dropped; one that cannot be read is kept whole and reported.
+#[test]
+fn a_quoted_or_escaped_key_name_is_still_the_key_line() {
+    let k = crypto::generate_secret();
+    let spellings = [
+        "\"encryption_secret\"",
+        "'encryption_secret'",
+        "\"encryption\\u005fsecret\"",
+        "\"\\u0065ncryption_secret\"",
+        "  \"encryption_secret\"  ",
+    ];
+    for (i, name) in spellings.iter().enumerate() {
+        let text = format!("{name} = \"{k}\"\nbroken\n{LEAKY}");
+        assert!(text.parse::<toml::Table>().is_err(), "{text}");
+        assert_eq!(key_of(&text), Some(k.clone()), "{text}");
+        assert_eq!(config::salvage_key_line(&text), Some(k.clone()), "{text}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let copy = format!("config.toml.backup.2026100{i}T000000Z");
+        std::fs::write(dir.path().join(&copy), &text).unwrap();
+        let report = protect_clear_copies(dir.path(), None);
+        assert_eq!(
+            (report.reduced, report.failures.len()),
+            (1, 0),
+            "{report:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&copy)).unwrap(),
+            format!("encryption_secret = \"{k}\"\n"),
+            "{text}"
+        );
+        assert!(files_holding(dir.path(), NEEDLES, &[]).is_empty());
+
+        let bare = tempfile::tempdir().unwrap();
+        let Aside::KeyOnly(kept) = set_aside_content(bare.path(), text.as_bytes(), None).unwrap()
+        else {
+            panic!("the key line is kept: {text}")
+        };
+        assert_eq!(
+            std::fs::read_to_string(bare.path().join(kept)).unwrap(),
+            format!("encryption_secret = \"{k}\"\n")
+        );
+    }
+
+    // A quoted key line that cannot be read, or whose value is no key, is never
+    // dropped: kept whole and reported.
+    let damaged = [
+        format!("\"encryption_secret\" = \"{k}\nbroken\n{LEAKY}"),
+        format!("\"encryption_secret\" = \"{k}\" x\n{LEAKY}"),
+        format!("\"encryption\\u005fsecret\" = \"{k}\" x\n{LEAKY}"),
+        format!("\"encryption\\u005fsecret\" = \"{k}\n{LEAKY}"),
+        format!("\"encryption\\u005fsecret\" = \"junk\"\nbroken\n{LEAKY}"),
+        format!("'encryption_secret' = '''\n{k}'''\nbroken\n{LEAKY}"),
+        // A quoted key that cannot be told from the key when it does not parse.
+        "\"enc\\u0072yption_secret\" = [\nbroken\n".to_string(),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    for (i, text) in damaged.iter().enumerate() {
+        assert!(text.parse::<toml::Table>().is_err(), "{text}");
+        assert!(key_lines(text).unreadable, "{text}");
+        std::fs::write(
+            dir.path()
+                .join(format!("config.toml.backup.2026100{i}T000000Z")),
+            text,
+        )
+        .unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(
+                set_aside_content(bare.path(), text.as_bytes(), None).unwrap(),
+                Aside::KeptAsIs(_)
+            ),
+            "{text}"
+        );
+    }
+    for _ in 0..2 {
+        let report = protect_clear_copies(dir.path(), None);
+        assert_eq!(
+            (report.reduced, report.failures.len()),
+            (0, damaged.len()),
+            "{report:?}"
+        );
+        for (i, text) in damaged.iter().enumerate() {
+            let copy = format!("config.toml.backup.2026100{i}T000000Z");
+            assert_eq!(
+                &std::fs::read_to_string(dir.path().join(copy)).unwrap(),
+                text
+            );
+        }
+    }
+
+    // A plain line that does not parse and is not the key stays harmless.
+    for harmless in ["language = \"fr\nbroken\n[x]\n", "a = [\nb = 1\n"] {
+        assert!(!config::salvage_key_scan(harmless).unreadable, "{harmless}");
+    }
+}
+
 /// An unreadable config.toml set aside with no key: several different keys, or a
 /// key line that cannot be read, keep the whole content (owner-only) and say so,
 /// never one key line or nothing; one readable key is still the only thing kept.

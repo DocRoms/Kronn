@@ -1142,6 +1142,35 @@ fn encode_json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"***REDACTED***\"".to_string())
 }
 
+/// What a TOML parse error says, fit for a log, a notice or an API response:
+/// the kind of problem and its line and column, never the source excerpt that
+/// `toml::de::Error`'s `Display` prints (the whole offending line, which may be
+/// a key or a credential), nor a key name or a value (a serde message such as
+/// `invalid type: string "sk-…"` carries one). `text` is the source the error
+/// was raised on, used only to turn the byte span into a line and column.
+pub fn toml_error_summary(text: &str, error: &toml::de::Error) -> String {
+    let message = error.message();
+    let kind = if message.starts_with("invalid type") || message.starts_with("invalid value") {
+        "a value of the wrong type"
+    } else if message.starts_with("missing field") {
+        "a missing required setting"
+    } else if message.starts_with("unknown field") || message.starts_with("unknown variant") {
+        "an unknown setting or value"
+    } else {
+        "invalid TOML"
+    };
+    match error.span() {
+        Some(span) => {
+            let at = span.start.min(text.len());
+            let before = &text.as_bytes()[..at];
+            let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+            let column = before.iter().rev().take_while(|b| **b != b'\n').count() + 1;
+            format!("{kind} at line {line}, column {column}")
+        }
+        None => kind.to_string(),
+    }
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;

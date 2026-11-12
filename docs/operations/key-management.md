@@ -274,7 +274,11 @@ Safe to interrupt at any point; a rerun converges:
    value is not cut down either. What is proven harmless does not keep a copy: an
    empty value, a number, a commented line, or a mention under a table the scan
    reached with no string or array open (a byte-order mark before the table
-   header does not hide it). Such a copy is cut down or removed like any other. A
+   header does not hide it). The key is read by its decoded name, not its
+   spelling: `"encryption_secret"`, `'encryption_secret'` and
+   `"encryption\u005fsecret"` are the key line, and a line that does not parse
+   with a quote or an escape before its `=` is treated as a possible key line.
+   Such a copy is cut down or removed like any other. A
    symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard
    links, which the pass never reads through, renames over or removes. The key is
@@ -286,7 +290,10 @@ Safe to interrupt at any point; a rerun converges:
    `config.toml` set aside while no key exists follows the same policy: several
    different keys, or a key line that cannot be read, keep the whole content as
    `config.toml.corrupt.<timestamp>` (`0600`, reported at every start, encrypted
-   once a key exists); the key-only copy is for one readable key. The pass reads
+   once a key exists); the key-only copy is for one readable key. A TOML parse
+   error of any config file is logged by kind and position only (`invalid TOML
+   at line 3, column 9`), never with the offending line, which would put a key
+   or a credential in the log (`redact::toml_error_summary`). The pass reads
    a copy then renames over it, once at start in the single process that owns
    the data directory; a copy swapped in between is out of scope. One failure
    does not stop the others. The key lookup tells three cases apart. A key is found:
