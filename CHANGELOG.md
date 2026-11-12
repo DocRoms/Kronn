@@ -13,6 +13,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Orchestration: an integration never targets the owner's working checkout, and
+  an unspecified target is no longer `main` (KT-1688). A launch takes its
+  integration branch from `base_rev`, else from its room's campaign; with
+  neither it is refused (`integration_target_undeclared`). A target checked out
+  in the project's own checkout, or in a worktree outside `.kronn/worktrees`, is
+  refused at preflight and launch (`integration_target_owner_checkout`,
+  `integration_target_foreign_worktree`) instead of at integration; a branch no
+  checkout holds, or one held by a Kronn-owned worktree, stays valid.
+  `task_exec_prepare` accepts `base_rev`, and `task_exec_status` names the
+  target branch and its worktree (`integration_worktree`,
+  `integration_target_state`). The integration branch must now be named: a
+  launch that relied on the `main` default needs a `base_rev`.
 - **KT-1544 — Merge a step's main execution with its shadows.** A step with shadows can now condense the main execution and the shadows it selects (one, several or all) into one result that becomes the step's output. The merge waits for the shadows with a timeout and reports the missing ones; a condense pass dedups their points, verifies each against the code and records which executions found it, and a point it cannot verify is never published. The run view shows each execution's contribution and the merged result against each execution. Off by default.
 
 - **KT-1691 — Disk hygiene, second pass.** Three fixes after the 2026-11-11

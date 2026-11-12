@@ -2038,6 +2038,75 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(await screen.findByTestId('wf-step-shadows-0-add')).toBeInTheDocument();
   });
 
+  describe('step shadows edited from the overview (KT-1696)', () => {
+    const doubled = () => labWorkflow({
+      steps: [
+        {
+          name: 'advise', agent: 'ClaudeCode', prompt_template: 'x', mode: { type: 'Normal' }, step_type: { type: 'Agent' },
+          shadows: [{ id: 'twin', label: 'Twin', enabled: true }, { id: 'other', label: 'Other', enabled: true }],
+          shadow_merge: { enabled: true, shadows: ['twin'], timeout_secs: 600 },
+        } as never,
+        { name: 'publish', agent: 'ClaudeCode', prompt_template: 'y', mode: { type: 'Normal' }, step_type: { type: 'Agent' } } as never,
+      ],
+    });
+
+    const openOverview = async (toast = vi.fn()) => {
+      mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+      mockWorkflowsApi.get.mockResolvedValue(doubled());
+      mockWorkflowsApi.listRuns.mockResolvedValue([]);
+      mockWorkflowsApi.countRuns.mockResolvedValue(0);
+      await wrap(
+        <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} toast={toast}
+          selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null }} />,
+      );
+      return toast;
+    };
+
+    it('shows the change first, then saves the whole step list with an explicit merge list', async () => {
+      let resolveSave: (workflow: Workflow) => void = () => {};
+      mockWorkflowsApi.update.mockImplementationOnce(() => new Promise<Workflow>(resolve => { resolveSave = resolve; }));
+      const toast = await openOverview();
+      const merge = await screen.findByTestId('wf-shadow-rows-0-other-merge');
+      expect(merge).toHaveAttribute('aria-checked', 'false');
+
+      fireEvent.click(merge);
+      // Optimistic: on screen before the server answered.
+      await waitFor(() => expect(screen.getByTestId('wf-shadow-rows-0-other-merge')).toHaveAttribute('aria-checked', 'true'));
+      expect(mockWorkflowsApi.update).toHaveBeenCalledTimes(1);
+      const [id, body] = mockWorkflowsApi.update.mock.calls[0];
+      expect(id).toBe('wf-lab');
+      expect(body.steps[0].shadow_merge).toEqual({ enabled: true, shadows: ['twin', 'other'], timeout_secs: 600 });
+      expect(body.steps[1]).toEqual(doubled().steps[1]);
+
+      const saved = doubled();
+      saved.steps[0].shadow_merge = body.steps[0].shadow_merge;
+      await act(async () => { resolveSave(saved); });
+      expect(screen.getByTestId('wf-shadow-rows-0-other-merge')).toHaveAttribute('aria-checked', 'true');
+      expect(toast).not.toHaveBeenCalled();
+    });
+
+    it('puts the change back and says why when the save fails', async () => {
+      mockWorkflowsApi.update.mockRejectedValueOnce(new Error('Workflow locked'));
+      const toast = await openOverview();
+      fireEvent.click(await screen.findByTestId('wf-shadow-rows-0-other-active'));
+      await waitFor(() => expect(toast).toHaveBeenCalled());
+      expect(toast).toHaveBeenCalledWith(expect.stringContaining('Workflow locked'), 'error');
+      await waitFor(() => expect(screen.getByTestId('wf-shadow-rows-0-other-active')).toHaveAttribute('aria-checked', 'true'));
+      expect(screen.getByTestId('wf-shadow-rows-0-other')).toHaveAttribute('data-paused', 'false');
+    });
+
+    it('removes a shadow and its merge entry in one save', async () => {
+      mockWorkflowsApi.update.mockResolvedValueOnce(doubled());
+      await openOverview();
+      fireEvent.click(await screen.findByTestId('wf-shadow-rows-0-twin-remove'));
+      await waitFor(() => expect(mockWorkflowsApi.update).toHaveBeenCalledTimes(1));
+      const body = mockWorkflowsApi.update.mock.calls[0][1];
+      expect(body.steps[0].shadows.map((shadow: { id: string }) => shadow.id)).toEqual(['other']);
+      // The last merged shadow went: the merge is off, its settings kept.
+      expect(body.steps[0].shadow_merge).toEqual({ enabled: false, shadows: [], timeout_secs: 600 });
+    });
+  });
+
   it('applies the address again under a new token, even when its fields did not change', async () => {
     // Back after a click: the address goes A → B → A. The page may have moved
     // to B on its own (the click) while the B render never committed; the
