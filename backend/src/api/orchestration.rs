@@ -33097,7 +33097,7 @@ pub(crate) mod tests {
         let notices = warm_failure_notices(&db, &sub).await;
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(
-            notices[0].contains("warm-up failed: error: could not compile `fixture`"),
+            notices[0].contains("préchauffage échoué : error: could not compile `fixture`"),
             "{notices:?}"
         );
     }

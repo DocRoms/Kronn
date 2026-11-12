@@ -339,7 +339,20 @@ What was established, and what was not:
   from a clean lane in a worker's own shell (`cargo build -p aws-lc-sys`,
   1 min 04 s) and, replaying the warm-up's sealed environment without the OS
   sandbox, cargo does not even consider the crate stale on a lane seeded from the
-  main checkout.
+  main checkout (no `dirty:` line for `aws-lc-sys` under
+  `CARGO_LOG=cargo::core::compiler::fingerprint=info`; its build script only
+  tracks `MACOSX_DEPLOYMENT_TARGET`, `CC`, `CFLAGS`, `AWS_LC_SYS_*`… and the
+  seed's run recorded none of them). So the `.S` compile only runs, and fails,
+  on a lane whose seed lacks a fresh `aws-lc-sys` build.
+- The later lanes of the day end `timed_out`, not `failed`: the lane of this very
+  task was seeded in 522 ms and its first build then ran 1 800 043 ms — the
+  `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` bound — without an `aws-lc-sys` error.
+  `cargo test --no-run` rebuilds the worktree's own crate (a workspace crate is
+  fingerprinted by its path, so a seed never covers it) for the lib test binary
+  and for every `tests/*.rs` binary, which does not fit in 30 minutes on a loaded
+  host. A targeted `cargo test --lib <filter>` needs the first of them only;
+  whether the warm-up should build `--lib` alone is a product trade-off (what
+  "warm" promises the worker) left to the owner.
 - The failing file is an assembly source. Apple clang compiles a `.S` as two jobs
   (`clang -cc1 -E … -o $TMPDIR/aes-xts-enc-XXXXXX.s`, then `clang -cc1as`), so —
   unlike a `.c` file — it needs a writable `TMPDIR` and a second process of the
@@ -377,6 +390,23 @@ result*: the `lane_warm_start` event's `seed_ms`, `queued_ms` and
 `first_build.duration_ms` give the warm-up's share (`timed_steps`), and the
 worker's first `cargo test --lib <filter>` the rest. A warm lane is one whose
 target holds `.kronn-warm.json`.
+
+Measured on 2026-11-12 on the lane of KT-1736 itself (host load 15–25):
+
+| Step | Duration |
+|---|---|
+| worktree creation / lane provision / seed clone | 2.8 s / 0.1 s / 0.5 s |
+| first build (`cargo test --no-run`) | 1 800.0 s — the bound, `timed_out`, no marker |
+| smoke check | 1.3 s |
+| worker's own `cargo test --lib` build of the `kronn` lib test target, same seeded lane, afterwards | 22 min 19 s, then 8 s for 43 tests |
+
+So on a seeded lane the first targeted result costs about 22 minutes of
+compilation of the worktree's own crate, whichever process pays it; the warm-up
+only helps when it finishes inside its bound. This change makes a failure
+visible and diagnosable; it does not shorten that compile, so no "after" figure
+is claimed here. The before/after of a warm-up that now succeeds is to be
+measured on the owner's Mac once the first error lines of a failing lane are
+known.
 
 [src: file: backend/src/core/task_worker_env.rs:1062-1103#drain_output]
 [src: file: backend/src/core/task_worker_lane_warm.rs:729-914#warm_lane_cancellable]
