@@ -517,10 +517,21 @@ fn seed_unit(debug: &Path, hash: &str, age_days: u64) {
     let fingerprint = debug.join(".fingerprint").join(format!("kronn-{hash}"));
     std::fs::create_dir_all(&fingerprint).unwrap();
     std::fs::write(fingerprint.join("test-lib-kronn"), "x").unwrap();
-    std::fs::File::open(fingerprint.join("test-lib-kronn"))
-        .unwrap()
-        .set_modified(age)
-        .unwrap();
+    // The fingerprint Cargo compares: two builds of the same configuration.
+    std::fs::write(
+        fingerprint.join("test-lib-kronn.json"),
+        "{\"rustc\":13462371384788945141,\"features\":\"[\\\"default\\\"]\",\
+         \"declared_features\":\"[]\",\"target\":7848994504142944354,\
+         \"profile\":11056920130593593451,\"path\":7897662090217625916,\"deps\":[],\
+         \"local\":[],\"rustflags\":[],\"config\":9396254390672932401,\"compile_kind\":0}",
+    )
+    .unwrap();
+    for file in ["test-lib-kronn", "test-lib-kronn.json"] {
+        std::fs::File::open(fingerprint.join(file))
+            .unwrap()
+            .set_modified(age)
+            .unwrap();
+    }
     std::fs::File::open(&fingerprint)
         .unwrap()
         .set_modified(age)
