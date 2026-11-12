@@ -637,8 +637,8 @@ export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_
  */
 model_tiers: ModelTiersConfig,
 /**
- * KT-1706 — what takes over the image or video mode of ComfyUI or of a named
- * HTTP connection when its provider cannot serve a generation. Kept apart
+ * KT-1706 — what takes over a mode of a named HTTP connection (or the image or
+ * video mode of ComfyUI) when its provider cannot serve a request. Kept apart
  * from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
  */
 connection_fallbacks?: Array<ConnectionFallback>, };
@@ -4856,7 +4856,7 @@ export type FallbackMode = "eco" | "standard" | "advanced" | "decision" | "image
  */
 export type FallbackOverview = { chains: Array<ChainView>, cooldowns: Array<Cooldown>,
 /**
- * KT-1706 — the image and video rows of ComfyUI and of the named HTTP connections.
+ * KT-1706 — the rows of the named HTTP connections and the image and video rows of ComfyUI.
  */
 media: Array<ConnectionChainView>, };
 
@@ -6465,15 +6465,15 @@ cost_usd: number,
 is_byok: boolean, };
 
 /**
- * KT-1706 — the fallback of one media mode (`image` or `video`) of an owner
- * (`local:comfyui` or a connection id).
+ * KT-1706 — the fallback of one mode of an owner (a connection id, or
+ * `local:comfyui` for `image` and `video`).
  */
 export type ConnectionFallback = { owner: string, row: FallbackMode, fallback: ConnectionFallbackTarget, };
 
 /**
- * KT-1706 — where a media fallback runs: ComfyUI (`local:comfyui`) or a named
- * HTTP connection (its id), and optionally the model; without one, the model
- * that target has in its own image / video slot.
+ * KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
+ * id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
+ * model; without one, the model that target has in its own slot of the mode.
  */
 export type ConnectionFallbackTarget = { connection: string, model?: string | null, };
 

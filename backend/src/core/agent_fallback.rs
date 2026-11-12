@@ -761,7 +761,7 @@ pub fn chain_view_of(
 pub struct FallbackOverview {
     pub chains: Vec<ChainView>,
     pub cooldowns: Vec<Cooldown>,
-    /// KT-1706 — the image and video rows of ComfyUI and of the named HTTP connections.
+    /// KT-1706 — the rows of the named HTTP connections and the image and video rows of ComfyUI.
     pub media: Vec<crate::core::connection_fallback::ConnectionChainView>,
 }
 

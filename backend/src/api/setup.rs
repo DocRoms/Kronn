@@ -6873,12 +6873,12 @@ pub async fn get_agent_fallback(
 }
 
 /// POST /api/config/connection-fallback
-/// KT-1706 — sets (or, with `fallback: null`, removes) the fallback of the image
-/// or video mode of ComfyUI (`local:comfyui`) or of a named HTTP connection (its
-/// id): what takes a generation over when that source cannot serve it. Another
-/// kind of mode, a source that does not exist, a loop or a chain past the depth
-/// limit is refused with the reason; nothing is stored then. Applies to the next
-/// generation, no restart.
+/// KT-1706 — sets (or, with `fallback: null`, removes) the fallback of one mode of
+/// a named HTTP connection (its id) or, for image and video, of ComfyUI
+/// (`local:comfyui`): what takes a request over when that source cannot serve it.
+/// A text mode on ComfyUI, a source that does not exist, a loop or a chain past
+/// the depth limit is refused with the reason; nothing is stored then. Applies to
+/// the next request, no restart.
 pub async fn set_connection_fallback(
     State(state): State<AppState>,
     Json(req): Json<SetConnectionFallbackRequest>,

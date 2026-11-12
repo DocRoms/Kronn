@@ -777,8 +777,8 @@ pub struct AgentsConfig {
     /// Per-agent model tier overrides (Economy/Reasoning model names).
     #[serde(default)]
     pub model_tiers: ModelTiersConfig,
-    /// KT-1706 — what takes over the image or video mode of ComfyUI or of a named
-    /// HTTP connection when its provider cannot serve a generation. Kept apart
+    /// KT-1706 — what takes over a mode of a named HTTP connection (or the image or
+    /// video mode of ComfyUI) when its provider cannot serve a request. Kept apart
     /// from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(skip)]
@@ -1153,9 +1153,9 @@ pub struct ModeFallback {
     pub fallback: AgentFallback,
 }
 
-/// KT-1706 — where a media fallback runs: ComfyUI (`local:comfyui`) or a named
-/// HTTP connection (its id), and optionally the model; without one, the model
-/// that target has in its own image / video slot.
+/// KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
+/// id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
+/// model; without one, the model that target has in its own slot of the mode.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ConnectionFallbackTarget {
@@ -1164,8 +1164,8 @@ pub struct ConnectionFallbackTarget {
     pub model: Option<String>,
 }
 
-/// KT-1706 — the fallback of one media mode (`image` or `video`) of an owner
-/// (`local:comfyui` or a connection id).
+/// KT-1706 — the fallback of one mode of an owner (a connection id, or
+/// `local:comfyui` for `image` and `video`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ConnectionFallback {
@@ -1179,7 +1179,7 @@ pub struct ConnectionFallback {
 pub struct SetConnectionFallbackRequest {
     pub owner: String,
     pub mode: FallbackMode,
-    /// The fallback of this media row; `None` removes it.
+    /// The fallback of this row; `None` removes it.
     pub fallback: Option<ConnectionFallbackTarget>,
 }
 
