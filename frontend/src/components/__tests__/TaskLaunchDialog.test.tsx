@@ -28,6 +28,7 @@ vi.mock('../../lib/I18nContext', () => ({
 
 import { TaskLaunchDialog } from '../TaskLaunchDialog';
 import { orchestrationResolution } from '../taskLaunchResolution';
+import { expectPopoverAboveOverlay } from '../../test/zIndexLayers';
 import type { CampaignView } from '../../lib/api';
 
 const campaign = {
@@ -321,6 +322,21 @@ describe('TaskLaunchDialog', () => {
     expect(props.onClose).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(agent);
     expect(mocks.launch).not.toHaveBeenCalled();
+  });
+
+  // KT-1701 — the picker popover is portaled to <body>; it must outrank the dialog backdrop.
+  it('opens the agent picker above the launch dialog backdrop', async () => {
+    mocks.detect.mockResolvedValue([
+      { name: 'Codex', agent_type: 'Codex', installed: true, enabled: true, runtime_available: false, auth_ready: true },
+      { name: 'OpenCode', agent_type: 'OpenCode', installed: true, enabled: true, runtime_available: false, auth_ready: true },
+    ]);
+    renderDialog();
+    const trigger = await screen.findByRole('button', { name: 'orch.config.agent' });
+    fireEvent.click(trigger);
+
+    const popover = document.querySelector('.kr-agent-switch-popover')!;
+    expect(popover).not.toBeNull();
+    expectPopoverAboveOverlay(trigger, popover, 'orch-launch-backdrop');
   });
 
   it('does not nest catalogue picker labels', () => {

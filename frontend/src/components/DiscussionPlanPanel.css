@@ -872,7 +872,7 @@
 }
 .orch-approval-confirm input { margin-top: 2px; }
 
-.orch-launch-backdrop { position: fixed; z-index: 500; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .58); }
+.orch-launch-backdrop { position: fixed; z-index: var(--kr-z-modal); inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .58); }
 .orch-launch-dialog { display: grid; gap: 12px; width: min(680px, 100%); max-height: min(760px, calc(100vh - 40px)); overflow: auto; padding: 16px; border: 1px solid var(--kr-border-medium); border-radius: var(--kr-r-lg); background: var(--kr-bg-elevated); box-shadow: var(--kr-shadow-lg); }
 .orch-launch-dialog > header,
 .orch-launch-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

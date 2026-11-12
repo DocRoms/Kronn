@@ -10,6 +10,8 @@ import { AlertTriangle, ShieldCheck } from 'lucide-react';
 import { quickExecs as quickExecsApi, workflows as workflowsApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
 import { commandLine } from '../../lib/commandLine';
+import { groupQuickExecBlockers } from '../../lib/pendingQuickExecs';
+import { ActivateAllQuickExecs, type PendingActivation } from '../QuickExecActivation';
 import '../QuickExecActivation.css';
 import type { QuickExec, UnsafeExecStep, Workflow, WorkflowBlocker, WorkflowReadiness } from '../../types/generated';
 
@@ -113,6 +115,28 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
 
   if (issues.length === 0 && local.length === 0 && elsewhere.size === 0) return null;
 
+  // KT-1695 — a Quick Exec several steps use is listed once, with its steps.
+  const quickExecGroups = groupQuickExecBlockers(local);
+  const stepsOf = new Map(quickExecGroups.map(group => [group.quickExec.id, group.steps]));
+  const firstOfQuickExec = new Set<WorkflowBlocker>();
+  const seenQuickExecs = new Set<string>();
+  for (const blocker of local) {
+    if (!blocker.quick_exec || seenQuickExecs.has(blocker.quick_exec.id)) continue;
+    seenQuickExecs.add(blocker.quick_exec.id);
+    firstOfQuickExec.add(blocker);
+  }
+  const activatable: PendingActivation[] = quickExecGroups.flatMap(group => {
+    const exec = blockedExecs.find(item => item.id === group.quickExec.id);
+    return exec ? [{
+      id: exec.id,
+      name: group.quickExec.name,
+      program: group.quickExec.program,
+      command: exec.command,
+      args: exec.args,
+      steps: group.steps,
+    }] : [];
+  });
+
   const codeIssues = issues.filter(issue => issue.reason !== 'unmodelled_program');
   const approvalIssues = issues.filter(issue => issue.reason === 'unmodelled_program');
   const needsHuman = approvalIssues.length > 0 || local.some(blocker => blocker.human_only);
@@ -183,17 +207,29 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
       aria-label={title}
       data-tone={waitingOnly ? 'neutral' : 'error'}
     >
-      <h4 className="wf-unsafe-title">
-        {waitingOnly ? <ShieldCheck size={14} /> : <AlertTriangle size={14} />}
-        {title}
-      </h4>
+      <ActivateAllQuickExecs
+        items={activatable}
+        disabled={applying !== null}
+        onActivated={() => setReload(value => value + 1)}
+        onRefresh={() => setReload(value => value + 1)}
+        heading={(
+          <h4 className="wf-unsafe-title">
+            {waitingOnly ? <ShieldCheck size={14} /> : <AlertTriangle size={14} />}
+            {title}
+          </h4>
+        )}
+      />
       {codeIssues.length > 0 && <p className="wf-unsafe-intro" data-kind="code">{t('wf.unsafeIntro')}</p>}
       {approvalIssues.length > 0 && (
         <p className="wf-unsafe-intro" data-kind="approval">{t('wf.approvalIntro')}</p>
       )}
       {local.length > 0 && (
         <ul className="wf-unsafe-list" data-testid="readiness-local">
-          {local.map((blocker, index) => (
+          {local.map((blocker, index) => {
+            // The later steps of a Quick Exec already listed add nothing.
+            if (blocker.quick_exec && !firstOfQuickExec.has(blocker)) return null;
+            const steps = blocker.quick_exec ? stepsOf.get(blocker.quick_exec.id) ?? [] : [];
+            return (
             <li
               key={`${blocker.on_failure ? 'rollback' : 'main'}:${blocker.step ?? ''}:${blocker.phase ?? ''}:${blocker.kind}:${index}`}
               className="wf-unsafe-item"
@@ -201,12 +237,13 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
             >
               <div className="wf-unsafe-item-head">
                 <span>
-                  <strong>{blocker.step ?? blocker.workflow_name}</strong>
-                  {blocker.phase ? ` (${blocker.phase})` : ''}
-                  {blocker.on_failure ? ` — ${t('wf.readinessRollback')}` : ''}
+                  <strong>{blocker.quick_exec ? blocker.quick_exec.name : blocker.step ?? blocker.workflow_name}</strong>
+                  {blocker.phase && !blocker.quick_exec ? ` (${blocker.phase})` : ''}
+                  {blocker.on_failure && !blocker.quick_exec ? ` — ${t('wf.readinessRollback')}` : ''}
                   {' — '}
                   <code>{blocker.reason ?? blocker.kind}</code>
                   {blocker.human_only ? ` — ${t('wf.readinessHumanOnly')}` : ''}
+                  {steps.length > 0 ? ` — ${t('qeActivation.usedBy', steps.join(', '))}` : ''}
                 </span>
               </div>
               <p className="wf-unsafe-manual-reason">{blocker.message}</p>
@@ -227,7 +264,8 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
                 <p className="wf-unsafe-manual">{blocker.action}</p>
               )}
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
       {elsewhere.size > 0 && (

@@ -148,11 +148,14 @@ describe('ShadowStatusButton', () => {
       step({ name: 'c', shadows: [shadow('off', { enabled: false })] }),
     ];
     rerender(<ShadowStatusButton steps={steps} projects={projects} onOpen={onOpen} t={fmt} />);
-    expect(entry).toHaveTextContent('wf.shadow.entryOn(3|2)');
+    expect(entry).toHaveTextContent('wf.shadow.entryShadowsMany(3) · wf.shadow.entryStepsMany(2)');
     expect(entry).toHaveAttribute('title', 'wf.shadow.entryTitleOn(wf.shadow.entryAllProjects)');
 
     rerender(<ShadowStatusButton steps={[step({ shadows: [shadow('x', { project_ids: ['p2', 'gone'] })] })]} projects={projects} onOpen={onOpen} t={fmt} />);
     expect(entry).toHaveAttribute('title', 'wf.shadow.entryTitleOn(Beta, gone)');
+    // One shadow on one step, merged: singular forms and the merge tag.
+    rerender(<ShadowStatusButton steps={[step({ shadows: [shadow('x')], shadow_merge: { enabled: true, shadows: ['x'] } })]} projects={projects} onOpen={onOpen} t={fmt} />);
+    expect(entry).toHaveTextContent('wf.shadow.entryShadowsOne(1) · wf.shadow.entryStepsOne(1) · wf.shadow.entryMerge');
   });
 });
 

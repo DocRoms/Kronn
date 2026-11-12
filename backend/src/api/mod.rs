@@ -87,5 +87,6 @@ pub mod ui_preferences;
 pub mod usage;
 pub mod user_context;
 pub mod version;
+pub mod worker_time_limit;
 pub mod workflows;
 pub mod ws;

@@ -24,6 +24,7 @@ function entry(overrides: Record<string, unknown> = {}) {
     path: '/repo/target/wt-kt-1-aaaa',
     name: 'wt-kt-1-aaaa',
     bytes: 12 * GB,
+    unique_bytes: 3 * GB,
     bytes_are_partial: false,
     idle_seconds: 8 * 3600,
     owner: { task_ref: 'KT-1', execution_id: 'exec-1', status: 'done' },
@@ -38,14 +39,17 @@ function report(overrides: Record<string, unknown> = {}) {
   return {
     available_bytes: 20 * GB,
     under_pressure: false,
-    policy: { launch_min_free_gib: 30, sweep_idle_hours: 6, warning_gib: 20, critical_gib: 5 },
+    policy: { launch_min_free_gib: 30, sweep_idle_hours: 6, stalled_build_days: 3, warning_gib: 20, critical_gib: 5 },
     volumes: [],
     totals: [
-      { kind: 'worktree', entries: 1, bytes: GB, bytes_are_partial: false, orphan_bytes: 0 },
-      { kind: 'lane_build_dir', entries: 3, bytes: 40 * GB, bytes_are_partial: true, orphan_bytes: 12 * GB },
-      { kind: 'cache', entries: 0, bytes: 0, bytes_are_partial: false, orphan_bytes: 0 },
+      { kind: 'worktree', entries: 1, bytes: GB, unique_bytes: GB, bytes_are_partial: false, orphan_bytes: 0, orphan_unique_bytes: 0 },
+      { kind: 'lane_build_dir', entries: 3, bytes: 40 * GB, unique_bytes: 9 * GB, bytes_are_partial: true, orphan_bytes: 12 * GB, orphan_unique_bytes: 3 * GB },
+      { kind: 'cache', entries: 0, bytes: 0, unique_bytes: 0, bytes_are_partial: false, orphan_bytes: 0, orphan_unique_bytes: 0 },
     ],
+    apparent_bytes: 41 * GB,
+    unique_bytes: 10 * GB,
     orphan_bytes: 12 * GB,
+    orphan_unique_bytes: 3 * GB,
     orphan_count: 1,
     entries: [
       entry(),
@@ -97,11 +101,14 @@ describe('DiskSection', () => {
     await measured();
     expect(screen.getByTestId('disk-free').textContent).toContain('20 Go');
     const totals = screen.getByTestId('disk-totals');
-    expect(within(totals).getByText('≥ 40 Go')).toBeTruthy();
+    // The real figure leads; the apparent one (clone-shared blocks counted in full) is labelled.
+    expect(within(totals).getByText('settings.disk.real(≥ 9 Go)')).toBeTruthy();
+    expect(totals.textContent).toContain('settings.disk.apparent(40 Go)');
     const rows = screen.getAllByTestId('disk-entry');
     expect(rows).toHaveLength(3);
     expect(rows[0].textContent).toContain('KT-1 · done');
-    expect(rows[0].textContent).toContain('12 Go');
+    expect(within(rows[0]).getByTestId('disk-entry-size').textContent).toBe('settings.disk.real(3 Go)');
+    expect(within(rows[0]).getByTestId('disk-entry-size').getAttribute('title')).toBe('settings.disk.apparent(12 Go)');
     expect(rows[0].textContent).toContain('settings.disk.hours(8)');
     expect(rows[0].getAttribute('data-state')).toBe('orphan');
     expect(rows[1].textContent).toContain('KT-2 · working');
@@ -120,9 +127,11 @@ describe('DiskSection', () => {
     await measured();
     diskApi.purgeOrphans.mockResolvedValue({
       mode: 'orphans',
-      items: [{ path: '/repo/target/wt-kt-1-aaaa', purged: true, bytes: 12 * GB, bytes_are_partial: false, reason: null }],
+      items: [{ path: '/repo/target/wt-kt-1-aaaa', purged: true, bytes: 12 * GB, unique_bytes: 3 * GB, bytes_are_partial: false, reason: null }],
       freed_bytes: 12 * GB,
+      freed_unique_bytes: 3 * GB,
       kept: 2,
+      available_bytes_before: 29 * GB,
       available_bytes_after: 32 * GB,
     });
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
@@ -147,9 +156,11 @@ describe('DiskSection', () => {
     await measured();
     diskApi.purgeEntries.mockResolvedValue({
       mode: 'entries',
-      items: [{ path: '/repo/target/wt-kt-1-aaaa', purged: true, bytes: 12 * GB, bytes_are_partial: false, reason: null }],
+      items: [{ path: '/repo/target/wt-kt-1-aaaa', purged: true, bytes: 12 * GB, unique_bytes: 3 * GB, bytes_are_partial: false, reason: null }],
       freed_bytes: 12 * GB,
+      freed_unique_bytes: 3 * GB,
       kept: 0,
+      available_bytes_before: null,
       available_bytes_after: null,
     });
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
@@ -174,14 +185,17 @@ describe('DiskSection', () => {
   it('saves the two thresholds as whole numbers and refuses anything else', async () => {
     await measured();
     configApi.setServerConfig.mockResolvedValue(undefined);
-    const [launch, idle] = within(screen.getByTestId('disk-policy')).getAllByRole('spinbutton');
+    const [launch, idle, stalled] = within(screen.getByTestId('disk-policy')).getAllByRole('spinbutton');
+    expect((stalled as HTMLInputElement).value).toBe('3');
     fireEvent.change(launch, { target: { value: '50' } });
     fireEvent.change(idle, { target: { value: '2' } });
+    fireEvent.change(stalled, { target: { value: '5' } });
     fireEvent.click(within(screen.getByTestId('disk-policy')).getByText('settings.disk.savePolicy'));
     await waitFor(() =>
       expect(configApi.setServerConfig).toHaveBeenCalledWith({
         disk_launch_min_free_gib: 50,
         disk_sweep_idle_hours: 2,
+        disk_stalled_build_days: 5,
       }),
     );
 
@@ -195,6 +209,54 @@ describe('DiskSection', () => {
     fireEvent.change(idle, { target: { value: '0' } });
     fireEvent.click(within(screen.getByTestId('disk-policy')).getByText('settings.disk.savePolicy'));
     expect(configApi.setServerConfig).not.toHaveBeenCalled();
+
+    // Zero days would offer every blocked execution's build dir at once: refused.
+    fireEvent.change(idle, { target: { value: '2' } });
+    fireEvent.change(stalled, { target: { value: '0' } });
+    fireEvent.click(within(screen.getByTestId('disk-policy')).getByText('settings.disk.savePolicy'));
+    expect(configApi.setServerConfig).not.toHaveBeenCalled();
+  });
+
+  it('labels apparent bytes when the file system cannot tell the real ones', async () => {
+    await measured(report({
+      unique_bytes: null,
+      totals: report().totals.map(total => ({ ...total, unique_bytes: null })),
+      entries: [entry({ unique_bytes: null })],
+    }));
+    expect(screen.getByTestId('disk-entry-size').textContent).toBe('settings.disk.apparent(12 Go)');
+    expect(screen.getByTestId('disk-totals').textContent).not.toContain('settings.disk.real');
+    // The explanation of apparent vs real is always on screen.
+    expect(screen.getByTestId('disk-size-rule').textContent).toContain('settings.disk.sizeRule');
+  });
+
+  it('offers foreign, ownerless and stalled build dirs one by one, each with its own warning', async () => {
+    await measured(report({
+      entries: [
+        entry({ path: '/r/target/wt-human', name: 'wt-human', owner: null, state: 'foreign', purgeable: true, idle_seconds: 90 * 3600 }),
+        entry({ path: '/r/target/wt-kt-9-zzzz', name: 'wt-kt-9-zzzz', owner: { task_ref: 'KT-9', execution_id: 'e9', status: 'Blocked' }, state: 'stalled', purgeable: true, idle_seconds: 5 * 86_400 }),
+        entry({ kind: 'worktree', path: '/r/.kronn/worktrees/stray', name: 'stray', owner: null, state: 'kept', purgeable: true, idle_seconds: 9 * 86_400 }),
+        entry({ path: '/r/target/wt-kt-8-yyyy', name: 'wt-kt-8-yyyy', state: 'active', purgeable: false }),
+      ],
+    }));
+    const rows = screen.getAllByTestId('disk-entry');
+    expect(rows.map(row => row.getAttribute('data-state'))).toEqual(['foreign', 'stalled', 'kept', 'active']);
+    expect(rows[1].textContent).toContain('KT-9 · Blocked');
+    expect(rows[1].textContent).toContain('settings.disk.days(5)');
+    expect(within(rows[3]).queryByTestId('disk-delete-entry')).toBeNull();
+    diskApi.purgeEntries.mockResolvedValue({
+      mode: 'entries', items: [{ path: 'p', purged: true, bytes: 1, unique_bytes: 1, bytes_are_partial: false, reason: null }],
+      freed_bytes: 1, freed_unique_bytes: 1, kept: 0, available_bytes_before: null, available_bytes_after: null,
+    });
+    const confirm = vi.fn().mockReturnValue(false);
+    window.confirm = confirm as never;
+    for (const row of rows.slice(0, 3)) fireEvent.click(within(row).getByTestId('disk-delete-entry'));
+    // Nothing is deleted on a declined confirmation, and each case asked its own question.
+    expect(diskApi.purgeEntries).not.toHaveBeenCalled();
+    expect(confirm.mock.calls.map(call => String(call[0]).split('(')[0])).toEqual([
+      'settings.disk.confirmForeign',
+      'settings.disk.confirmStalled',
+      'settings.disk.confirmOwnerless',
+    ]);
   });
 
   it('surfaces a failing report instead of crashing', async () => {

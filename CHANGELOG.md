@@ -13,7 +13,37 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Orchestration: an integration never targets the owner's working checkout, and
+  an unspecified target is no longer `main` (KT-1688). A launch takes its
+  integration branch from `base_rev`, else from its room's campaign; with
+  neither it is refused (`integration_target_undeclared`). A target checked out
+  in the project's own checkout, or in a worktree outside `.kronn/worktrees`, is
+  refused at preflight and launch (`integration_target_owner_checkout`,
+  `integration_target_foreign_worktree`) instead of at integration; a branch no
+  checkout holds, or one held by a Kronn-owned worktree, stays valid.
+  `task_exec_prepare` accepts `base_rev`, and `task_exec_status` names the
+  target branch and its worktree (`integration_worktree`,
+  `integration_target_state`). The integration branch must now be named: a
+  launch that relied on the `main` default needs a `base_rev`.
 - **KT-1544 — Merge a step's main execution with its shadows.** A step with shadows can now condense the main execution and the shadows it selects (one, several or all) into one result that becomes the step's output. The merge waits for the shadows with a timeout and reports the missing ones; a condense pass dedups their points, verifies each against the code and records which executions found it, and a point it cannot verify is never published. The run view shows each execution's contribution and the merged result against each execution. Off by default.
+
+- **KT-1691 — Disk hygiene, second pass.** Three fixes after the 2026-11-11
+  incident (a 2 TB disk down to 173 GB free while 33 lane build dirs read ~190 GB
+  each). A lane's seed (`target/debug` of the main checkout) is now **pruned to its
+  latest build before it is cloned**: units of one configuration (package, kind, features,
+  profile, target, rustflags) superseded by a newer build of it, units built by an
+  older `rustc`, and units of packages `Cargo.lock` no longer lists, go with every file of
+  their hash; a unit is never pruned by age alone, and never while a build holds
+  Cargo's lock. Sizes are reported **real next to apparent**: `unique_bytes` is what
+  deleting an entry frees (APFS private size), `bytes` counts shared clone blocks in
+  full; the Disk panel, `disk_usage`, purge results and the pressure guard's "swept"
+  figure carry both, and say apparent where the file system cannot tell. Foreign
+  `wt-*` dirs, worktrees (and their `target/`) no workspace row names, and the build
+  dirs of executions Blocked or Interrupted for `server.disk_stalled_build_days`
+  (default 3) are listed with their age and **purgeable one entry at a time behind a
+  confirmation, never by a sweep**; the worktree and branch of a stalled execution
+  stay and the next resume rebuilds. No migration. See
+  [disk-usage.md](docs/operations/disk-usage.md).
 
 ### Security
 
