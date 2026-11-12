@@ -269,7 +269,7 @@ loads and the one each of its shadows tests.
 Either way that shadow stops testing it; the other shadows keep theirs. Promotion
 is a person's decision too: the route has no agent access.
 [src: file: backend/src/workflows/shadow.rs:1092#promote]
-[src: file: backend/src/api/workflows.rs:2881#promote_shadow]
+[src: file: backend/src/api/workflows.rs:2885#promote_shadow]
 
 ## From the workflow-level shadow
 
