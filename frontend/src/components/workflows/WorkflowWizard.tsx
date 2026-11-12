@@ -20,6 +20,7 @@ import { agentSettingsForSelection } from '../../lib/agentSelection';
 import { SearchableSelect } from '../SearchableSelect';
 import { ModelCatalogPicker } from '../ModelCatalogPicker';
 import { FallbackOverride } from '../settings/FallbackOverride';
+import { modeOfTier } from '../../lib/fallbackChain';
 import { MarkdownEditor } from '../MarkdownComposerTools';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
@@ -4525,13 +4526,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             />
                           </div>
                         </div>
-                        {/* KT-1518 — this step's own fallback chain: the agent's default
-                            applies unless the step overrides or cancels it. */}
+                        {/* KT-1693 — this step's own fallback, for the mode the step runs in:
+                            the agent's row applies unless the step overrides or cuts it. */}
                         <label className="wf-label">{t('fallback.stepTitle')}</label>
                         <small className="text-2xs">{t('fallback.stepHint')}</small>
                         <FallbackOverride
                           testId={`wiz-step-${i}-fallback`}
                           origin={step.agent}
+                          mode={modeOfTier(step.agent_settings?.tier)}
                           value={step.agent_settings?.fallback ?? null}
                           onChange={async next => updateStep(i, {
                             agent_settings: { ...step.agent_settings, fallback: next ?? undefined }

@@ -119,7 +119,7 @@ describe('QuotaAgentSwitch', () => {
   it('offers the configured fallback first and preselects it, so one click moves the step', async () => {
     detectMock.mockResolvedValue([detection('ClaudeCode'), detection('Codex'), detection('GeminiCli')]);
     fallbackMock.mockResolvedValue({
-      chains: [{ agent: 'ClaudeCode', links: [{ agent: 'GeminiCli', paid: false, allow_paid: false, gaps: [] }] }],
+      chains: [{ agent: 'ClaudeCode', mode: 'standard', links: [{ agent: 'GeminiCli', model: null, mode: 'standard', transport: 'cli', gaps: [] }], inherited: [] }],
       cooldowns: [],
     });
     await wrap(<QuotaAgentSwitch runId="run-1" current="ClaudeCode" />);

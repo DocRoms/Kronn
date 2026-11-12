@@ -376,12 +376,14 @@ mention_color?: string | null,
  */
 base_url?: string | null,
 /**
- * KT-1518 — the agents that take over, in this order, when THIS one is
- * unavailable on the provider side (rate limit, quota or credits spent,
- * outage, CLI not authenticated). Empty: the turn stops with the provider's
- * own message. A discussion or a workflow step may override it.
+ * KT-1693 — what takes over when THIS agent is unavailable on the provider
+ * side (rate limit, quota or credits spent, outage, CLI not authenticated),
+ * one row per mode (eco / standard / advanced / decision / image / video):
+ * at most one fallback per mode, off by default. When the fallback is itself
+ * unavailable, the fallback set on ITS own row applies. A discussion or a
+ * workflow step may override a mode.
  */
-fallback_chain?: Array<AgentFallback>,
+mode_fallbacks?: Array<ModeFallback>,
 /**
  * Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
  * Tools are on by default: `Some(false)` withholds them from every model
@@ -509,20 +511,21 @@ export type AgentEffectiveAccess = { agent: AgentType, full_access: boolean,
 reason?: string, };
 
 /**
- * KT-1518 — one link of an agent fallback chain.
+ * KT-1693 — one fallback: the agent and, optionally, the model that takes over.
  */
 export type AgentFallback = { agent: AgentType,
 /**
- * A specific model on the fallback. `None`: the SAME tier as the turn that
- * was interrupted, resolved on the fallback agent (a model name is
- * provider-specific, so the failing agent's model is never carried over).
+ * A specific model on the fallback. `None`: the mode below (else the SAME
+ * mode as the interrupted turn), resolved on the fallback agent (a model
+ * name is provider-specific, so the failing agent's model is never carried
+ * over).
  */
 model?: string | null,
 /**
- * The owner's opt-in to a fallback that bills by API key (LiteLLM, NVIDIA,
- * a custom connection). Without it a paid link is skipped, never used.
+ * The mode of the model the fallback runs on. `None`: the mode of the row
+ * (or of the turn) it replaces. Must be of the same kind as that mode.
  */
-allow_paid: boolean, };
+mode?: FallbackMode | null, };
 
 export type AgentFilesPolicy = "repo" | "outside";
 
@@ -665,8 +668,10 @@ connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: nu
  */
 tools?: StepTools,
 /**
- * KT-1518 — this step's own fallback chain. `None`: the agent's default
- * chain applies; `Some(empty)`: no fallback for this step.
+ * KT-1693 — this step's own fallback, for the mode the step runs in (its
+ * tier: eco, standard or advanced). `None`: the row of the agent applies;
+ * `Some(empty)`: no fallback for this step; links: they replace the row,
+ * then the rows of the fallbacks go on.
  */
 fallback?: Array<AgentFallback>, };
 
@@ -2263,19 +2268,10 @@ detail?: string | null,
 notice?: string | null, };
 
 /**
- * One link as the Settings card shows it.
+ * The fallback of one mode row, for display: its own link, the links inherited
+ * through the rows of the fallbacks, or the reason it is refused.
  */
-export type ChainLinkView = { agent: AgentType, model?: string, paid: boolean, allow_paid: boolean,
-/**
- * What a turn could need that this link cannot give, as warnings.
- */
-gaps: Array<string>, };
-
-/**
- * The chain of one agent, for display: its links with their gaps, or the
- * reason it is refused.
- */
-export type ChainView = { agent: AgentType, links: Array<ChainLinkView>, error?: string, };
+export type ChainView = { agent: AgentType, mode: FallbackMode, links: Array<LinkView>, inherited: Array<InheritedView>, error?: string, };
 
 export type CheckBriefingDocRequest = { path: string, };
 
@@ -3897,13 +3893,14 @@ exported_by?: PortableExporterIdentity | null, };
 
 export type DiscussionFallback = {
 /**
- * `None`: the agent's default chain applies; `Some([])`: no fallback.
+ * The modes this discussion overrides. A mode that is absent follows the
+ * default of the agent the turn starts on; an empty chain is "no fallback".
  */
-chain_override?: Array<AgentFallback>,
+overrides: Array<ModeOverride>,
 /**
- * The override as the editor shows it (gaps, refusal), when there is one.
+ * Each override as the editor shows it (gaps, inherited links, refusal).
  */
-view?: ChainView, };
+views: Array<ChainView>, };
 
 /**
  * KT-74 — provenance of an imported discussion, as the sidebar needs it.
@@ -4841,9 +4838,22 @@ fail_on_empty: boolean, };
 export type Faithfulness = "entailment" | "neutral" | "contradiction";
 
 /**
- * What Settings > Agents shows: every chain, and who is on cooldown.
+ * KT-1693 — a mode of an agent: the kind of work one model of it serves. The
+ * three text modes are the quality tiers (`ModelTier`); decision, image and
+ * video are capabilities, never tiers.
+ */
+export type FallbackMode = "eco" | "standard" | "advanced" | "decision" | "image" | "video";
+
+/**
+ * What Settings > Agents shows: every mode row that has a fallback, and who is
+ * on cooldown.
  */
 export type FallbackOverview = { chains: Array<ChainView>, cooldowns: Array<Cooldown>, };
+
+/**
+ * How an agent is reached; shown as a badge on every fallback pill.
+ */
+export type FallbackTransport = "cli" | "http" | "local";
 
 /**
  * Body of `POST /api/disc/fetch-file` (F8). A peer that received a
@@ -5389,6 +5399,12 @@ cache_write_tokens: number | null, output_tokens: number, };
  */
 export type InFlightAgentResponse = { message_id: string, content: string, started_at?: string | null, agent_type?: AgentType | null, model?: string | null, trigger_message_id?: string | null, connection_id?: string | null, dispatch?: ActiveAgentDispatch | null, };
 
+/**
+ * A fallback reached through another agent's row: it is not set here but on
+ * `source`'s card (« set on <agent>'s card »).
+ */
+export type InheritedView = { source: AgentType, link: LinkView, };
+
 export type InstructionFile = { path: string,
 /**
  * `None` when the file could not be read. NOT 0 — an unreadable file is not
@@ -5728,6 +5744,19 @@ export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: 
 export type LinkMcpConfigRequest = { project_ids: Array<string>, };
 
 export type LinkPlanningDiscussionRequest = { discussion_id: string, placement?: PlanningPlacement, is_primary?: boolean, position?: number | null, actor?: PlanningActor, };
+
+/**
+ * One fallback as the Settings card shows it.
+ */
+export type LinkView = { agent: AgentType, model?: string,
+/**
+ * The mode of the model it runs on.
+ */
+mode: FallbackMode, transport: FallbackTransport,
+/**
+ * What a turn could need that this link cannot give, as warnings.
+ */
+gaps: Array<string>, };
 
 /**
  * The lint result attached to an agent message.
@@ -6618,6 +6647,11 @@ export type MigrateDocsStatus = "migrated" | "already_migrated" | "not_applicabl
  */
 export type MissingShadow = { shadow_id: string, label: string, reason: string, };
 
+/**
+ * KT-1693 — the fallback set on one mode row of an agent.
+ */
+export type ModeFallback = { row: FallbackMode, fallback: AgentFallback, };
+
 export type ModelAvailability = "available" | "unavailable";
 
 export type ModelCatalogAlert = { model_id: string, replacement?: string | null, references: Array<ModelCatalogReference>, };
@@ -6727,6 +6761,15 @@ export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierC
  * and audit history so the UI never has to parse a provider-specific string.
  */
 export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported" | "not_found" | "access_denied";
+
+/**
+ * A discussion's own fallback for one mode.
+ */
+export type ModeOverride = { mode: FallbackMode,
+/**
+ * The links that replace the default of the mode; empty is "no fallback".
+ */
+chain: Array<AgentFallback>, };
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -10109,11 +10152,11 @@ export type SetAgentConcurrencyRequest = { agent: AgentType,
  */
 concurrency?: number | null, };
 
-export type SetAgentFallbackRequest = { agent: AgentType,
+export type SetAgentFallbackRequest = { agent: AgentType, mode: FallbackMode,
 /**
- * The whole chain, in order. Empty cuts it.
+ * The fallback of this mode row; `None` removes it.
  */
-fallback_chain: Array<AgentFallback>, };
+fallback?: AgentFallback | null, };
 
 export type SetAgentMentionColorRequest = { agent: AgentType,
 /**
@@ -10176,7 +10219,11 @@ export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?
 
 export type SetDiscussionFallbackRequest = {
 /**
- * `None` removes the override (back to the default chain).
+ * The mode whose override is set.
+ */
+mode: FallbackMode,
+/**
+ * `None` removes the override (back to the default); `Some([])` cuts it.
  */
 chain_override?: Array<AgentFallback> | null, };
 

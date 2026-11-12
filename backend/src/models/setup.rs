@@ -983,11 +983,19 @@ pub struct AgentConfig {
     /// to the frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// KT-1518 — the agents that take over, in this order, when THIS one is
-    /// unavailable on the provider side (rate limit, quota or credits spent,
-    /// outage, CLI not authenticated). Empty: the turn stops with the provider's
-    /// own message. A discussion or a workflow step may override it.
+    /// KT-1693 — what takes over when THIS agent is unavailable on the provider
+    /// side (rate limit, quota or credits spent, outage, CLI not authenticated),
+    /// one row per mode (eco / standard / advanced / decision / image / video):
+    /// at most one fallback per mode, off by default. When the fallback is itself
+    /// unavailable, the fallback set on ITS own row applies. A discussion or a
+    /// workflow step may override a mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_fallbacks: Vec<ModeFallback>,
+    /// KT-1518 — the agent-level chain this version replaced. Read once at
+    /// start-up and carried onto the text mode rows
+    /// (`AgentsConfig::migrate_fallback_chains`), then cleared; never written.
+    #[serde(default, skip_serializing)]
+    #[ts(skip)]
     pub fallback_chain: Vec<AgentFallback>,
     /// Operator switch for the Kronn tool executor on an HTTP agent (KT-1600).
     /// Tools are on by default: `Some(false)` withholds them from every model
@@ -998,28 +1006,143 @@ pub struct AgentConfig {
     pub tools_enabled: Option<bool>,
 }
 
-/// KT-1518 — one link of an agent fallback chain.
+/// KT-1693 — a mode of an agent: the kind of work one model of it serves. The
+/// three text modes are the quality tiers (`ModelTier`); decision, image and
+/// video are capabilities, never tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackMode {
+    Eco,
+    Standard,
+    Advanced,
+    Decision,
+    Image,
+    Video,
+}
+
+/// What a mode produces: a fallback only ever goes to the same kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackKind {
+    Text,
+    Decision,
+    Image,
+    Video,
+}
+
+impl FallbackMode {
+    pub const ALL: [FallbackMode; 6] = [
+        FallbackMode::Eco,
+        FallbackMode::Standard,
+        FallbackMode::Advanced,
+        FallbackMode::Decision,
+        FallbackMode::Image,
+        FallbackMode::Video,
+    ];
+
+    /// The three text modes, which an agent-level chain of 0.15.3 is carried to.
+    pub const TEXT: [FallbackMode; 3] = [
+        FallbackMode::Eco,
+        FallbackMode::Standard,
+        FallbackMode::Advanced,
+    ];
+
+    pub fn kind(self) -> FallbackKind {
+        match self {
+            FallbackMode::Eco | FallbackMode::Standard | FallbackMode::Advanced => {
+                FallbackKind::Text
+            }
+            FallbackMode::Decision => FallbackKind::Decision,
+            FallbackMode::Image => FallbackKind::Image,
+            FallbackMode::Video => FallbackKind::Video,
+        }
+    }
+
+    pub fn from_tier(tier: ModelTier) -> Self {
+        match tier {
+            ModelTier::Economy => FallbackMode::Eco,
+            ModelTier::Default => FallbackMode::Standard,
+            ModelTier::Reasoning => FallbackMode::Advanced,
+        }
+    }
+
+    /// The tier a text mode resolves to; `None` for decision, image and video.
+    pub fn tier(self) -> Option<ModelTier> {
+        match self {
+            FallbackMode::Eco => Some(ModelTier::Economy),
+            FallbackMode::Standard => Some(ModelTier::Default),
+            FallbackMode::Advanced => Some(ModelTier::Reasoning),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FallbackMode::Eco => "eco",
+            FallbackMode::Standard => "standard",
+            FallbackMode::Advanced => "advanced",
+            FallbackMode::Decision => "decision",
+            FallbackMode::Image => "image",
+            FallbackMode::Video => "video",
+        }
+    }
+}
+
+/// How an agent is reached; shown as a badge on every fallback pill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackTransport {
+    /// A CLI process on this machine (OpenCode's ACP included).
+    Cli,
+    /// A remote HTTP API (LiteLLM, NVIDIA, a named connection).
+    Http,
+    /// A local model server (Ollama).
+    Local,
+}
+
+impl FallbackTransport {
+    pub fn label(self) -> &'static str {
+        match self {
+            FallbackTransport::Cli => "CLI",
+            FallbackTransport::Http => "HTTP",
+            FallbackTransport::Local => "Local",
+        }
+    }
+}
+
+/// KT-1693 — one fallback: the agent and, optionally, the model that takes over.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentFallback {
     pub agent: AgentType,
-    /// A specific model on the fallback. `None`: the SAME tier as the turn that
-    /// was interrupted, resolved on the fallback agent (a model name is
-    /// provider-specific, so the failing agent's model is never carried over).
+    /// A specific model on the fallback. `None`: the mode below (else the SAME
+    /// mode as the interrupted turn), resolved on the fallback agent (a model
+    /// name is provider-specific, so the failing agent's model is never carried
+    /// over).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// The owner's opt-in to a fallback that bills by API key (LiteLLM, NVIDIA,
-    /// a custom connection). Without it a paid link is skipped, never used.
-    #[serde(default)]
-    pub allow_paid: bool,
+    /// The mode of the model the fallback runs on. `None`: the mode of the row
+    /// (or of the turn) it replaces. Must be of the same kind as that mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<FallbackMode>,
+}
+
+/// KT-1693 — the fallback set on one mode row of an agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModeFallback {
+    pub row: FallbackMode,
+    pub fallback: AgentFallback,
 }
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct SetAgentFallbackRequest {
     pub agent: AgentType,
-    /// The whole chain, in order. Empty cuts it.
-    pub fallback_chain: Vec<AgentFallback>,
+    pub mode: FallbackMode,
+    /// The fallback of this mode row; `None` removes it.
+    pub fallback: Option<AgentFallback>,
 }
 
 // ─── Model tiers ──────────────────────────────────────────────────────────

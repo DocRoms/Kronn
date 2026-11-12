@@ -23,7 +23,8 @@ use uuid::Uuid;
 use crate::core::agent_fallback::{self as fallback, Pin, Selection, Trigger, TurnNeeds};
 use crate::db::agent_dispatch::AgentDispatchJob;
 use crate::models::{
-    AgentFallback, AgentType, DiscussionMessage, MessageChannel, MessageRole, ModelTier,
+    AgentFallback, AgentType, DiscussionMessage, FallbackMode, MessageChannel, MessageRole,
+    ModelTier,
 };
 use crate::AppState;
 
@@ -151,7 +152,13 @@ async fn plan(
             .map(|pin| pin.from_agent.clone())
             .unwrap_or_else(|| failing.clone()),
     };
-    let chain = fallback::effective_chain(&agents, &origin, chain_override.as_deref());
+    let mode = FallbackMode::from_tier(tier);
+    let chain = fallback::effective_chain(
+        &agents,
+        &origin,
+        mode,
+        fallback::override_for(chain_override.as_deref(), mode),
+    );
     if failing == AgentType::Custom || chain.is_empty() {
         return None;
     }

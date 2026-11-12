@@ -1308,27 +1308,43 @@ describe('AgentsSection — Kronn tools switch (KT-1600)', () => {
   });
 });
 
-// KT-1518 — the fallback chain of an agent card, persisted through the backend,
-// which refuses a loop with its reason.
-describe('AgentsSection — per-agent fallback chain', () => {
+// KT-1693 — the fallback of each mode row of an agent card, persisted through the
+// backend, which refuses a loop (or a wrong kind of mode) with its reason.
+describe('AgentsSection — per-mode fallback rows', () => {
   const installed = (name: string, agent_type: AgentType) => makeAgent({ name, agent_type, installed: true, enabled: true });
-  const timeline = 'agent-fallback-timeline-ClaudeCode';
+  const row = (agent: string, mode: string) => `agent-fallback-${agent}-${mode}`;
 
-  it('offers the other installed agents on a card and persists the whole chain, then refetches', async () => {
+  it('gives an agent one row per mode, offers the other installed agents and persists the row, then refetches', async () => {
     setAgentFallbackMock.mockResolvedValue({ chains: [], cooldowns: [] });
     const { refetchAgentAccess } = renderSection({
       agents: [installed('Claude Code', 'ClaudeCode'), installed('Codex', 'Codex')],
     });
-    const add = screen.getByTestId(`${timeline}-add`) as HTMLSelectElement;
-    expect(Array.from(add.querySelectorAll('option')).map(o => o.value)).toEqual(['', 'Codex']);
-    fireEvent.change(add, { target: { value: 'Codex' } });
+    for (const mode of ['eco', 'standard', 'advanced']) {
+      expect(await screen.findByTestId(row('ClaudeCode', mode))).toBeInTheDocument();
+    }
+    expect(screen.getByTestId(`${row('ClaudeCode', 'standard')}-current`)).toHaveTextContent('sonnet');
+    fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-add`));
+    const menu = screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu`);
+    expect(within(menu).getAllByRole('group').map(group => group.getAttribute('aria-label'))).toEqual(['Codex']);
+    fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu-Codex-standard`));
     await waitFor(() =>
       expect(setAgentFallbackMock).toHaveBeenCalledWith({
         agent: 'ClaudeCode',
-        fallback_chain: [{ agent: 'Codex', model: null, allow_paid: false }],
+        mode: 'standard',
+        fallback: { agent: 'Codex', model: null },
       }),
     );
     await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
+  });
+
+  it('gives OpenCode its own rows, and offers it as a fallback of the other agents', async () => {
+    renderSection({
+      agents: [installed('Claude Code', 'ClaudeCode'), installed('OpenCode', 'OpenCode')],
+    });
+    expect(await screen.findByTestId(row('OpenCode', 'standard'))).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-add`));
+    const menu = screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu`);
+    expect(within(menu).getByRole('group', { name: 'OpenCode' })).toBeInTheDocument();
   });
 
   it('shows the refusal of the backend and does not refetch as if it had been stored', async () => {
@@ -1336,8 +1352,9 @@ describe('AgentsSection — per-agent fallback chain', () => {
     const { refetchAgentAccess } = renderSection({
       agents: [installed('Claude Code', 'ClaudeCode'), installed('Codex', 'Codex')],
     });
-    fireEvent.change(screen.getByTestId(`${timeline}-add`), { target: { value: 'Codex' } });
-    expect(await screen.findByTestId(`${timeline}-refused`)).toHaveTextContent('fallback.refused');
+    fireEvent.click(await screen.findByTestId(`${row('ClaudeCode', 'standard')}-add`));
+    fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu-Codex-standard`));
+    expect(await screen.findByTestId(`${row('ClaudeCode', 'standard')}-refused`)).toHaveTextContent('fallback.refused');
     expect(refetchAgentAccess).not.toHaveBeenCalled();
   });
 });

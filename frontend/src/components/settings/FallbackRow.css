@@ -1,0 +1,273 @@
+/* KT-1693 — one mode row of the fallback (proposal B v2):
+     Standard  [Claude Code · sonnet CLI] → [Codex · gpt-5.6 CLI ✕] → ┄ [Ollama · qwen3 Local] ┄  + Add a fallback
+   Pills carry the transport badge; the inherited one is dashed. Tokens only, so
+   every theme (light, dark…) reads it. */
+.fbr {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.fbr + .fbr {
+  border-top: 1px solid var(--kr-border-light);
+}
+
+.fbr-mode {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+}
+
+.fbr-track {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.fbr-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.fbr-arrow {
+  color: var(--kr-text-muted);
+  flex: none;
+}
+
+.fbr-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.fbr-off {
+  font-style: italic;
+}
+
+.fbr-add {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  height: 22px;
+  padding: 0 var(--kr-sp-3);
+  color: var(--kr-accent-text);
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+  border: 1px dashed var(--kr-border-medium);
+  border-radius: var(--kr-r-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbr-add:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+.fbr-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fbr-error {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  color: var(--kr-error);
+}
+
+/* ── Pills ─────────────────────────────────────────────────────────────── */
+.fbp {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-surface);
+}
+
+.fbp[data-tone="current"] {
+  border-color: var(--kr-border);
+  background: var(--kr-bg-subtle);
+}
+
+.fbp[data-tone="own"] {
+  border-color: var(--kr-accent-border);
+}
+
+/* Set on another agent's card: dashed, and it opens that card. */
+.fbp[data-tone="inherited"] {
+  border-style: dashed;
+  background: transparent;
+  color: var(--kr-text-secondary);
+}
+
+.fbp-main {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  min-width: 0;
+  padding: 0 var(--kr-sp-3);
+  min-height: 20px;
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--kr-r-pill);
+}
+
+button.fbp-main {
+  cursor: pointer;
+}
+
+button.fbp-main:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+.fbp-agent {
+  font-weight: 700;
+}
+
+.fbp-model {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kr-font-mono);
+}
+
+.fbp-mode {
+  padding: 0 var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs);
+  text-transform: uppercase;
+  color: var(--kr-text-muted);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-pill);
+}
+
+.fbp-badge {
+  padding: 0 var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  border-radius: var(--kr-r-pill);
+  border: 1px solid currentColor;
+}
+
+.fbp-badge[data-transport="cli"] {
+  color: var(--kr-info);
+}
+
+.fbp-badge[data-transport="http"] {
+  color: var(--kr-purple);
+}
+
+.fbp-badge[data-transport="local"] {
+  color: var(--kr-success);
+}
+
+.fbp-gap {
+  display: inline-flex;
+  color: var(--kr-warning);
+}
+
+.fbp-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: var(--kr-sp-2);
+  color: var(--kr-text-muted);
+  border: 0;
+  border-radius: var(--kr-r-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbp-x:hover:not(:disabled) {
+  color: var(--kr-error);
+  background: var(--kr-bg-hover);
+}
+
+/* ── The « + Add a fallback » menu ─────────────────────────────────────── */
+.fbm {
+  position: absolute;
+  top: calc(100% + var(--kr-sp-2));
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  min-width: 260px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: var(--kr-sp-3);
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+}
+
+.fbm-empty {
+  padding: var(--kr-sp-3);
+  color: var(--kr-text-muted);
+}
+
+.fbm-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+}
+
+.fbm-agent {
+  padding: var(--kr-sp-1) var(--kr-sp-3);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--kr-text-secondary);
+}
+
+.fbm-item {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  border: 0;
+  border-radius: var(--kr-r-md);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbm-item:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+.fbm-item[aria-current="true"] {
+  background: var(--kr-bg-active);
+}
+
+.fbm-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.fbm-model {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--kr-font-mono);
+}
