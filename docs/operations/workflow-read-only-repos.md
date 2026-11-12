@@ -5,8 +5,8 @@ repository paths. The wizard exposes one path per line in the step's advanced
 settings. An empty or absent list retains the existing launch policy. This is
 an explicit per-step declaration; listing a companion project in documentation
 does not automatically grant access.
-[src: file: backend/src/models/workflows.rs:1050-1054#read_only_repos]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4577-4591#read_only_repos]
+[src: file: backend/src/models/workflows.rs:1243-1247#read_only_repos]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4628-4642#read_only_repos]
 
 ```json
 {
@@ -25,7 +25,7 @@ agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
 [src: file: backend/src/agents/read_only_repos.rs:672-776#resolve_with_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:701-731#canonical_directory]
-[src: file: backend/src/api/workflow_step_schema.json:16#read_only_repos]
+[src: file: backend/src/api/workflow_step_schema.json:18#read_only_repos]
 
 Claude receives `--add-dir` together with `Edit` deny rules and sandbox
 `denyWrite` entries. Its read block remains enabled, the OS sandbox is
@@ -353,7 +353,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test.rs:12402-12463#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test.rs:12439-12500#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

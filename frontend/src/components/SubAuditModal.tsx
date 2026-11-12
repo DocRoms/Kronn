@@ -51,7 +51,7 @@ export default function SubAuditModal({ open, onClose, onPick, targetedOnly }: P
       data-testid="sub-audit-modal"
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, zIndex: 999,
+        position: 'fixed', inset: 0, zIndex: 'var(--kr-z-modal)',
         background: 'rgba(0,0,0,0.55)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         padding: 16,

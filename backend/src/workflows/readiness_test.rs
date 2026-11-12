@@ -28,7 +28,6 @@ fn workflow(id: &str, steps: Vec<WorkflowStep>, on_failure: Vec<WorkflowStep>) -
         variables: vec![],
         enabled: true,
         retention: None,
-        shadow: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
@@ -499,4 +498,55 @@ fn a_saved_quick_exec_source_awaiting_approval_is_a_named_blocker() {
     assert!(assess_with(&wf, &HashMap::new(), &approved).ready);
     // Without the Quick Exec map, the old check sees nothing to block.
     assert!(assess(&wf, &HashMap::new()).ready);
+}
+
+/// KT-1367 — a Decide step with no decision model saved is a blocker the
+/// human clears, and the launch refuses it with the same pointer.
+#[test]
+fn a_decide_step_without_a_decision_model_blocks_the_workflow() {
+    let decide = WorkflowStep {
+        name: "decide".into(),
+        step_type: StepType::Decide,
+        decide: Some(crate::models::DecideConfig {
+            state: "{{steps.tests.output}}".into(),
+            questions: vec![crate::models::DecideQuestion {
+                id: "ship".into(),
+                instructions: "Ready to merge?".into(),
+                ..Default::default()
+            }],
+            min_confidence: None,
+        }),
+        ..Default::default()
+    };
+    let wf = workflow("wf-decide", vec![decide], vec![]);
+
+    let _none = crate::core::config::test_saved_decision::set(false);
+    let readiness = assess(&wf, &HashMap::new());
+    let blocker = readiness
+        .blockers
+        .iter()
+        .find(|blocker| blocker.reason.as_deref() == Some("decision_model_missing"))
+        .expect("blocked");
+    assert!(blocker.human_only);
+    assert!(
+        blocker.action.contains("Config › Agents › Ollama"),
+        "{}",
+        blocker.action
+    );
+
+    let mut tiers = crate::models::ModelTiersConfig::default();
+    let refusal = crate::workflows::decide_step::launch_refusal(&wf, &tiers).expect("refused");
+    assert!(refusal.contains("Config › Agents › Ollama"), "{refusal}");
+
+    let _saved = crate::core::config::test_saved_decision::set(true);
+    let readiness = assess(&wf, &HashMap::new());
+    assert!(readiness
+        .blockers
+        .iter()
+        .all(|blocker| blocker.reason.as_deref() != Some("decision_model_missing")));
+    tiers.ollama.decision = Some("clef-flash:9b".into());
+    assert_eq!(
+        crate::workflows::decide_step::launch_refusal(&wf, &tiers),
+        None
+    );
 }

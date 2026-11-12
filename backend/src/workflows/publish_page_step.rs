@@ -451,6 +451,187 @@ mod tests {
         assert_eq!(request.writes[0].value["model"], "claude-sonnet-4-6");
     }
 
+    /// The rows and merge a step with a merged shadow and an identical one
+    /// left behind (KT-1694), summarized the way the runner hands them on.
+    fn shadows_summary_of_a_merged_and_an_identical_shadow() -> serde_json::Value {
+        use crate::db::step_shadows::StepShadowRow;
+        use crate::models::{AgentType, ShadowAgent, StepShadow};
+        use crate::workflows::shadow::{ExecutionIdentity, ShadowStatus};
+        use crate::workflows::shadow_merge::{
+            ExecutionContribution, MergePoint, MergeStatus, PointVerdict, ShadowMergeReport,
+        };
+
+        let row = |shadow_id: &str, agent: &str, output: &str| StepShadowRow {
+            run_id: "run-9".into(),
+            result_index: 0,
+            step_name: "advise".into(),
+            shadow_id: shadow_id.into(),
+            label: shadow_id.to_uppercase(),
+            status: ShadowStatus::Success,
+            identity: ExecutionIdentity {
+                agent: agent.into(),
+                ..Default::default()
+            },
+            output: output.into(),
+            tokens_used: Some(1_000),
+            duration_ms: Some(2_000),
+            cost_usd: None,
+            model: Some("a-model".into()),
+            stopped: None,
+            started_at: "2026-11-11T10:00:00Z".into(),
+            finished_at: Some("2026-11-11T10:00:02Z".into()),
+        };
+        let rows = vec![
+            row("", "ClaudeCode", "{\"cause\": \"origin\"}"),
+            row("argon", "LiteLlm", "SECRET argon output"),
+            row("qwen", "ClaudeCode", "{\"cause\": \"origin\"}"),
+        ];
+        let argon = StepShadow {
+            id: "argon".into(),
+            agent: Some(ShadowAgent {
+                agent: AgentType::LiteLlm,
+                model: None,
+                connection_id: None,
+                reasoning_effort: None,
+            }),
+            ..Default::default()
+        };
+        let qwen = StepShadow {
+            id: "qwen".into(),
+            ..Default::default()
+        };
+        let advise = WorkflowStep {
+            name: "advise".into(),
+            shadows: vec![argon, qwen],
+            ..WorkflowStep::default()
+        };
+        let point = |verdict, found_by: &[&str]| MergePoint {
+            id: "p".into(),
+            summary: "SECRET point".into(),
+            text: None,
+            found_by: found_by.iter().map(|s| s.to_string()).collect(),
+            verdict,
+            verified: true,
+            evidence: None,
+            reason: None,
+            duplicate_of: None,
+        };
+        let merge = ShadowMergeReport {
+            status: MergeStatus::Merged,
+            selected: vec!["argon".into()],
+            contributors: vec!["argon".into()],
+            points: vec![
+                point(PointVerdict::Kept, &["main", "shadow:argon"]),
+                point(PointVerdict::Kept, &["shadow:argon"]),
+            ],
+            contributions: vec![ExecutionContribution {
+                execution: "shadow:argon".into(),
+                kept: 1,
+                unique: 1,
+                duplicate: 1,
+                dropped_unverified: 0,
+            }],
+            merged_output: "SECRET merged".into(),
+            ..Default::default()
+        };
+        let mut result = StepResult {
+            step_name: "advise".into(),
+            status: RunStatus::Success,
+            output: "SECRET merged".into(),
+            tokens_used: Some(1_500),
+            duration_ms: 3_000,
+            started_at: None,
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+            agent_provenance: None,
+            native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
+            output_bytes: None,
+        };
+        result.step_name = advise.name.clone();
+        super::super::shadow_summary::summarize(&advise, &rows, Some(&merge), &result)
+    }
+
+    #[test]
+    fn the_shadows_of_a_step_can_be_published_into_a_page_dataset() {
+        let summary = shadows_summary_of_a_merged_and_an_identical_shadow();
+        let mut context = TemplateContext::new();
+        context.set_step_shadows("advise", &summary.to_string());
+
+        // Whole, as `value_from: steps.advise.shadows`, and in the braces form.
+        for source in ["steps.advise.shadows", "{{steps.advise.shadows}}"] {
+            let request = build_request(&step(source), "workflow-1", "run-9", &context)
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert_eq!(request.writes[0].value, summary, "{source}");
+        }
+        let value = build_request(
+            &step("steps.advise.shadows"),
+            "workflow-1",
+            "run-9",
+            &context,
+        )
+        .unwrap()
+        .writes[0]
+            .value
+            .clone();
+        assert_eq!(value["step"], "advise");
+        assert_eq!(value["executions"].as_array().unwrap().len(), 3);
+        assert_eq!(value["merge"]["status"], "merged");
+        assert_eq!(value["merge"]["included"], serde_json::json!(["argon"]));
+        assert_eq!(
+            value["determinism"],
+            serde_json::json!({"identical_runs": 2, "distinct_outputs": 1})
+        );
+        assert!(!value.to_string().contains("SECRET"), "{value}");
+
+        // A part of it, typed: the merge block alone, or one execution's status.
+        let merge = build_request(
+            &step("steps.advise.shadows.merge"),
+            "workflow-1",
+            "run-9",
+            &context,
+        )
+        .unwrap();
+        assert_eq!(merge.writes[0].value["points"]["unique"], 1);
+        let status = build_request(
+            &step("steps.advise.shadows.executions.1.status"),
+            "workflow-1",
+            "run-9",
+            &context,
+        )
+        .unwrap();
+        assert_eq!(status.writes[0].value, "success");
+    }
+
+    #[test]
+    fn a_step_without_shadows_publishes_an_empty_summary() {
+        let mut context = TemplateContext::new();
+        context.set_step_shadows(
+            "advise",
+            &super::super::shadow_summary::none("advise").to_string(),
+        );
+        let request = build_request(
+            &step("steps.advise.shadows"),
+            "workflow-1",
+            "run-9",
+            &context,
+        )
+        .unwrap();
+        assert_eq!(request.writes[0].value["executions"], serde_json::json!([]));
+        assert!(request.writes[0].value["merge"].is_null());
+    }
+
     #[test]
     fn mixed_text_source_is_rejected_instead_of_stringifying_json() {
         let context = TemplateContext::new();

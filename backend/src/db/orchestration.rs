@@ -8025,6 +8025,11 @@ fn tool_in_flight(phase: Option<&str>, started: Option<DateTime<Utc>>, now: Date
         })
 }
 const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
+/// KT-1689 — how long a `Working` execution may wait for its worker's turn (the
+/// task-worker cap, the agent caps) before the principal is told. The wait is not
+/// silence, so it never interrupts: it raises one event per dispatch.
+pub const DEFAULT_QUEUE_TIMEOUT_SECS: u32 = 6 * 60 * 60;
+const QUEUE_TIMEOUT_ENV: &str = "KRONN_TASK_QUEUE_TIMEOUT_SECS";
 
 fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
     crate::core::child_env::var(name)
@@ -8042,6 +8047,25 @@ pub fn default_activity_timeout_secs() -> u32 {
 /// Global default review timeout (`KRONN_TASK_REVIEW_TIMEOUT_SECS`).
 pub fn default_review_timeout_secs() -> u32 {
     timeout_secs_from_env(REVIEW_TIMEOUT_ENV, DEFAULT_REVIEW_TIMEOUT_SECS)
+}
+
+/// Global queue deadline (`KRONN_TASK_QUEUE_TIMEOUT_SECS`).
+pub fn default_queue_timeout_secs() -> u32 {
+    timeout_secs_from_env(QUEUE_TIMEOUT_ENV, DEFAULT_QUEUE_TIMEOUT_SECS)
+}
+
+/// Whether the queue deadline already alerted for this dispatch. One event per
+/// dispatch: a resumed execution queues a new dispatch and is told again.
+fn queue_wait_reported(conn: &Connection, exec_id: &str, dispatch_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM orchestration_reconciliation_events \
+         WHERE subject_kind = 'execution' AND subject_id = ?1 \
+           AND action = 'queue_wait_timeout' \
+           AND json_extract(details_json, '$.dispatch_id') = ?2)",
+        params![exec_id, dispatch_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 /// The activity clock a status owes. A worker owes activity only while it is
@@ -8345,13 +8369,14 @@ pub fn expired_execution_timeouts(
     let mut stmt = conn.prepare(
         "SELECT r.task_execution_id, e.status, r.total_deadline_at, \
                 r.activity_deadline_at, r.review_deadline_at, r.human_wait_started_at, \
-                p.human_wait_timeout_secs, d.progress_phase, d.last_progress_at \
+                p.human_wait_timeout_secs, d.status, d.progress_phase, d.last_progress_at, \
+                d.id, d.created_at \
          FROM task_execution_recovery r \
          JOIN task_executions e ON e.id = r.task_execution_id \
          LEFT JOIN orchestration_run_resilience_policy p \
            ON p.orchestration_run_id = e.orchestration_run_id \
          LEFT JOIN agent_dispatch_jobs d \
-           ON d.id = e.dispatch_job_id AND d.status = 'Running' \
+           ON d.id = e.dispatch_job_id AND d.status IN ('Running', 'Pending') \
          WHERE e.status NOT IN ('Done', 'Failed', 'Cancelled')",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -8365,12 +8390,37 @@ pub fn expired_execution_timeouts(
             row.get::<_, Option<i64>>(6)?,
             row.get::<_, Option<String>>(7)?,
             row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<String>>(11)?,
         ))
     })?;
     let mut expired = Vec::new();
     for row in rows {
-        let (id, status, total, activity, review, human_since, human_secs, phase, phase_at) = row?;
+        let (
+            id,
+            status,
+            total,
+            activity,
+            review,
+            human_since,
+            human_secs,
+            dispatch_status,
+            running_phase,
+            running_phase_at,
+            dispatch_id,
+            queued_since,
+        ) = row?;
         let parse = |value: Option<String>| value.map(parse_dt);
+        // KT-1689 — a `Pending` dispatch is the worker's queue (the task-worker
+        // cap, the agent's or the host's caps): the worker has not started, so
+        // it cannot be silent. Only a `Running` job carries a tool in flight.
+        let queued = dispatch_status.as_deref() == Some("Pending");
+        let (phase, phase_at) = if queued {
+            (None, None)
+        } else {
+            (running_phase, running_phase_at)
+        };
         if parse(total).is_some_and(|deadline| deadline <= now) {
             expired.push((id, ExecutionTimeoutKind::TotalDuration));
         } else if status == TaskExecutionStatus::AwaitingReview.as_str()
@@ -8380,6 +8430,16 @@ pub fn expired_execution_timeouts(
         } else if let (Some(since), Some(seconds)) = (parse(human_since), human_secs) {
             if since + chrono::Duration::seconds(seconds) <= now {
                 expired.push((id, ExecutionTimeoutKind::HumanWait));
+            }
+        } else if status == TaskExecutionStatus::Working.as_str() && queued {
+            // The queue has its own, much longer deadline, and it only alerts.
+            if let (Some(dispatch_id), Some(since)) = (dispatch_id.as_deref(), parse(queued_since))
+            {
+                if since + chrono::Duration::seconds(i64::from(default_queue_timeout_secs())) <= now
+                    && !queue_wait_reported(conn, &id, dispatch_id)?
+                {
+                    expired.push((id, ExecutionTimeoutKind::QueueWait));
+                }
             }
         } else if status == TaskExecutionStatus::Working.as_str()
             && parse(activity).is_some_and(|deadline| deadline <= now)
@@ -8391,6 +8451,24 @@ pub fn expired_execution_timeouts(
         }
     }
     Ok(expired)
+}
+
+/// Why the `Pending` dispatch of `exec_id` waits and where it stands: the
+/// durable `task_worker_limit:<running>/<cap>` reason and the queue position.
+fn queue_wait_state(conn: &Connection, exec_id: &str) -> Result<(Option<String>, Option<u32>)> {
+    let Some(dispatch_id) = get_task_execution(conn, exec_id)?.and_then(|e| e.dispatch_job_id)
+    else {
+        return Ok((None, None));
+    };
+    let Some(job) = crate::db::agent_dispatch::get(conn, &dispatch_id)? else {
+        return Ok((None, None));
+    };
+    let reason = job.progress_detail.filter(|detail| {
+        job.progress_phase.as_deref() == Some("queued")
+            && detail.starts_with(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)
+    });
+    let position = crate::db::agent_dispatch::task_worker_queue_position(conn, &dispatch_id)?;
+    Ok((reason, position))
 }
 
 /// Alert the principal room that an execution needs a decision, without
@@ -8497,6 +8575,36 @@ fn notify_principal_of_timeout(
              `task_exec_reassign` / `task_exec_cancel` if the work must be taken over."
                 .to_string(),
         ),
+        (ExecutionTimeoutKind::QueueWait, lang) => {
+            let (reason, position) = queue_wait_state(conn, exec_id)?;
+            let reason = reason.unwrap_or_else(|| "concurrency_limit_or_scheduler".to_string());
+            let position = position
+                .map(|position| format!("#{position}"))
+                .unwrap_or_else(|| "n/a".to_string());
+            (
+                "queue_wait_timeout",
+                match lang {
+                    RoomLang::Fr => format!(
+                        "L'exécution attend son tour de worker{since} (raison : `{reason}`, \
+                         position : {position}). Ce n'est pas un silence : rien n'est interrompu, \
+                         l'exécution reste `Working` et démarrera dès qu'un créneau se libère. \
+                         Décide :\n\n\
+                         1. **Attendre** — rien à faire ;\n\
+                         2. **Libérer un créneau** — termine ou annule une autre exécution ;\n\
+                         3. **Reprendre la main** — `task_exec_reassign` vers ta propre session CLI."
+                    ),
+                    RoomLang::En => format!(
+                        "The execution has been waiting for its worker's turn{since} (reason: \
+                         `{reason}`, position: {position}). This is not silence: nothing is \
+                         interrupted, the execution stays `Working` and starts as soon as a slot \
+                         frees up. Decide:\n\n\
+                         1. **Keep waiting** — nothing to do;\n\
+                         2. **Free a slot** — finish or cancel another execution;\n\
+                         3. **Take over** — `task_exec_reassign` to your own CLI session."
+                    ),
+                },
+            )
+        }
         _ => return Ok(()),
     };
     let message = DiscussionMessage {
@@ -8564,7 +8672,39 @@ pub fn apply_execution_timeout(
             ExecutionTimeoutKind::TotalDuration => "total_duration_timeout",
             ExecutionTimeoutKind::ReviewWait => "review_wait_timeout",
             ExecutionTimeoutKind::HumanWait => "human_wait_timeout",
+            ExecutionTimeoutKind::QueueWait => "queue_wait_timeout",
         };
+        if kind == ExecutionTimeoutKind::QueueWait {
+            // KT-1689 — the principal is told once per dispatch, and nothing
+            // moves: the execution stays `Working`, its dispatch stays queued.
+            let Some(dispatch_id) = execution.dispatch_job_id.clone() else {
+                return Ok(false);
+            };
+            let still_queued =
+                crate::db::agent_dispatch::get(conn, &dispatch_id)?.is_some_and(|job| {
+                    job.status == crate::db::agent_dispatch::DispatchStatus::Pending
+                });
+            if execution.status != TaskExecutionStatus::Working
+                || !still_queued
+                || queue_wait_reported(conn, exec_id, &dispatch_id)?
+            {
+                return Ok(false);
+            }
+            record_reconciliation_event(
+                conn,
+                "execution",
+                exec_id,
+                label,
+                serde_json::json!({ "dispatch_id": dispatch_id }),
+            )?;
+            notify_principal_of_timeout(
+                conn,
+                exec_id,
+                kind,
+                Some(i64::from(default_queue_timeout_secs())),
+            )?;
+            return Ok(true);
+        }
         if kind == ExecutionTimeoutKind::Activity {
             // KT-1247 — a silent worker is handed back, never discarded. The
             // clock only means something while the attempt is `Working`: a
@@ -8578,6 +8718,17 @@ pub fn apply_execution_timeout(
                     params![exec_id, Utc::now().to_rfc3339()],
                 )?;
                 return Ok(false);
+            }
+            // KT-1689 — a dispatch still waiting for its turn is not silence,
+            // whatever the scan saw: the clock starts when the worker does.
+            if let Some(dispatch_id) = execution.dispatch_job_id.as_deref() {
+                let queued =
+                    crate::db::agent_dispatch::get(conn, dispatch_id)?.is_some_and(|job| {
+                        job.status == crate::db::agent_dispatch::DispatchStatus::Pending
+                    });
+                if queued {
+                    return Ok(false);
+                }
             }
             // Activity may have landed between the scan and this apply.
             let pushed: Option<String> = conn

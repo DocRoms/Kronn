@@ -181,7 +181,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3420-3487#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3430-3497#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -227,7 +227,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3723-3771#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3730-3778#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -332,7 +332,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:428-508#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2696-2704#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2697-2705#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -461,7 +461,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:955-983#extract]
-  [src: file: backend/src/api/agent_tools.rs:4886-4910#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4901-4925#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -486,8 +486,8 @@ each, with their metrics nested, the full native catalogue (51,990 B) and a
 shape is 1,071 B; the model reads the shape, sends one call with
 `$.data[*].metrics['lcp','fcp','inp','ttfb']`, and gets the 400 values in 2,127 B,
 unshortened; the conversation then stands at 21,421 estimated tokens of 36,043
-[src: file: backend/src/agents/runner_test.rs:2994#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
-[src: file: backend/src/agents/runner_test.rs:3001#a_200_kb_response_yields_the_web_vitals].
+[src: file: backend/src/agents/runner_test.rs:3031#a_200_kb_response_yields_the_web_vitals_in_one_targeted_call_within_a_32k_window]
+[src: file: backend/src/agents/runner_test.rs:3038#a_200_kb_response_yields_the_web_vitals].
 
 **The window follows the catalogue (KT-1527).** The three shortening tests
 (`a_shortened_api_response_announces_its_shape_and_how_to_ask_for_a_part`, the one
@@ -502,14 +502,14 @@ They now size their window from the catalogue they carry
 messages get the same room whatever the catalogue weighs. With today's catalogue
 that is a ~36K window, not exactly 32K. A test inflates the catalogue by 1.5 KB and
 then 20 KB and replays all three scenarios
-[src: file: backend/src/agents/runner_test.rs:3279#a_catalogue_change_does_not_flip_the_shortening_fixtures].
+[src: file: backend/src/agents/runner_test.rs:3316#a_catalogue_change_does_not_flip_the_shortening_fixtures].
 
 That decoupling drops the signal the old tests gave, badly, when the catalogue
 outgrew the real 32K budget. A guard test keeps it, on its own: a 32K window must
 leave at least 5,000 B for the messages beside the declared catalogue (9,450 B
 today). When it fails, the catalogue outgrew the 32K budget and has to be trimmed,
 or the default Ollama window raised
-[src: file: backend/src/agents/runner_test.rs:3303#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
+[src: file: backend/src/agents/runner_test.rs:3340#the_declared_catalogue_leaves_a_32k_window_enough_message_room].
 
 **When the plain cut does happen, the result stays a valid envelope.** A JSON
 result that nothing smarter could shorten used to be cut as text, handing the model
@@ -520,7 +520,7 @@ excerpt that keeps the envelope inside the budget once embedded in `messages`. A
 envelope shortened again keeps the original size it reports. Content that is not
 JSON keeps the plain cut and its note
 [src: file: backend/src/agents/runner.rs:8019#truncated_json_envelope]
-[src: file: backend/src/agents/runner_test.rs:3327#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
+[src: file: backend/src/agents/runner_test.rs:3364#the_plain_text_cut_of_a_json_result_is_still_a_valid_truncation_envelope].
 
 What this does not show: how often a model writes the extract it is shown, or
 writes a good one unprompted. The "model" in that test reads the shape and follows
@@ -538,16 +538,16 @@ writes are scoped to general workflows plus the current discussion's project.
 Create inherits that project unless an explicit null requests a general draft.
 Update preserves the existing project and all omitted fields; supplied arrays
 replace their stored array. Workers and workflow Agent steps cannot use this
-authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:142-249#execute_workflow_tool]
+authoring surface. [src: file: backend/src/api/agent_workflow_tools.rs:125-243#execute_workflow_tool]
 
 Authoring always leaves the workflow disabled. Updating an enabled workflow
 returns an explicit alternative: disable it in the Workflows UI or create a new
 disabled draft. Neither enabling, triggering nor deletion is exposed here.
 Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
-[src: file: backend/src/api/agent_workflow_tools.rs:80-137#draft_patch]
-[src: file: backend/src/api/agent_workflow_tools.rs:228-230#enabled]
-[src: file: backend/src/api/workflows.rs:2817-2877#validate_step_references]
+[src: file: backend/src/api/agent_workflow_tools.rs:63-120#draft_patch]
+[src: file: backend/src/api/agent_workflow_tools.rs:211-213#enabled]
+[src: file: backend/src/api/workflows.rs:2981-3041#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same
@@ -555,7 +555,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-457#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9693-9695#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9696-9698#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON

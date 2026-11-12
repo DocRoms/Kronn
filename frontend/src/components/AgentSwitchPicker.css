@@ -61,7 +61,7 @@
 
 .kr-agent-switch-popover {
   position: fixed;
-  z-index: calc(var(--kr-z-modal) + 20);
+  z-index: var(--kr-z-popover);
   display: flex;
   flex-direction: column;
   width: max-content;

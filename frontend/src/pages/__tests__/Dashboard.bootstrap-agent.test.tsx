@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
 import { withDashboardRoutes } from '../../test/routerWrapper';
 import type { AgentDetection, AgentType } from '../../types/generated';
+import { expectPopoverAboveOverlay } from '../../test/zIndexLayers';
 
 const { detect, bootstrap } = vi.hoisted(() => ({
   detect: vi.fn(),
@@ -89,6 +90,30 @@ describe('Dashboard — bootstrap agent picker', () => {
       tier: 'economy',
       skill_ids: ['bootstrap-architect'],
     });
+  });
+
+  // KT-1701 — the popover (portaled to <body>) opened under the dialog overlay,
+  // so no other agent or tier could be picked.
+  it('opens the agent picker above the dialog overlay and lets another agent be chosen', async () => {
+    bootstrap.mockResolvedValue({ project_id: 'p1', discussion_id: 'd1' });
+    await openBootstrap([agent('Codex'), agent('ClaudeCode')]);
+
+    const trigger = (await screen.findByTestId('bootstrap-agent-picker'))
+      .querySelector<HTMLButtonElement>('.kr-agent-switch-btn')!;
+    await act(async () => { fireEvent.click(trigger); });
+
+    const popover = document.querySelector<HTMLElement>('.kr-agent-switch-popover')!;
+    expect(popover).not.toBeNull();
+    expectPopoverAboveOverlay(trigger, popover, 'dash-modal-overlay');
+
+    await act(async () => {
+      fireEvent.click(document.querySelector<HTMLButtonElement>(
+        '[role="group"][aria-label="Codex"] [data-tier="reasoning"]',
+      )!);
+    });
+    fillForm();
+    await act(async () => { fireEvent.click(submitButton()); });
+    expect(bootstrap.mock.calls[0][0]).toMatchObject({ agent: 'Codex', tier: 'reasoning' });
   });
 
   it('keeps the Reasoning tier by default for the bootstrap discussion', async () => {

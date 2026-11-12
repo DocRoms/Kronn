@@ -3012,10 +3012,21 @@ pub(super) async fn make_agent_stream_inner(
     let disc_tier = tier_override.unwrap_or(disc.tier);
     // 0.8.10 — explicit per-discussion model (e.g. inherited from a launching
     // Quick Prompt) wins over the tier; None → resolve from tier as before.
-    let disc_model = if tier_override.is_some() {
-        None
-    } else {
-        disc.model.clone()
+    // KT-1518 — a turn continued on a fallback runs on the link's own model, or
+    // on the tier it already had: never on the model of the agent that was refused.
+    let fallback_pin = match dispatch_job_id.clone() {
+        Some(job_id) => state
+            .db
+            .with_read_conn(move |conn| crate::core::agent_fallback::get_pin(conn, &job_id))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let disc_model = match &fallback_pin {
+        Some(pin) => pin.model.clone(),
+        None if tier_override.is_some() => None,
+        None => disc.model.clone(),
     };
     let disc_model = disc_model.or_else(|| {
         external_connection.as_ref().and_then(|connection| {

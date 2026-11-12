@@ -193,7 +193,6 @@ fn request(
     CreateWorkflowRequest {
         refs: Default::default(),
         retention: None,
-        shadow: None,
         project_scope: None,
         name: name.into(),
         project_id: project_id.clone(),

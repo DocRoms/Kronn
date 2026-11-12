@@ -222,6 +222,17 @@ impl TemplateContext {
         self.values.insert("previous_step.provenance".into(), json);
     }
 
+    /// The summary of a step's shadows and merge (KT-1694) as
+    /// `steps.<name>.shadows` and `previous_step.shadows`: read-only JSON for a
+    /// step after it, e.g. a PublishPageData writing it into a Page dataset. A
+    /// step without shadows records the summary with no execution.
+    pub fn set_step_shadows(&mut self, step_name: &str, summary_json: &str) {
+        self.values
+            .insert(format!("steps.{step_name}.shadows"), summary_json.into());
+        self.values
+            .insert("previous_step.shadows".into(), summary_json.into());
+    }
+
     /// Records the type of the step that produced `step_name`'s output; call
     /// after [`Self::set_step_output`], which forgets the previous one.
     pub fn set_step_kind(&mut self, step_name: &str, kind: Option<&str>) {
@@ -264,7 +275,7 @@ impl TemplateContext {
 
         // An output without an envelope must not leave an older step's
         // structured values behind under this step's name or `previous_step`.
-        for field in ["data", "summary", "status", "data_json"] {
+        for field in ["data", "summary", "status", "data_json", "shadows"] {
             self.values.remove(&format!("steps.{step_name}.{field}"));
             self.values.remove(&format!("previous_step.{field}"));
         }
@@ -773,14 +784,14 @@ pub(crate) fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -
 }
 
 /// The JSON behind an anchor: the step envelope for `data`, the recorded
-/// attempt summary for `provenance`.
+/// attempt summary for `provenance`, the shadows summary for `shadows`.
 fn anchored_json<'a>(
     values: &'a HashMap<String, String>,
     prefix: &str,
     anchor: &str,
 ) -> Option<&'a String> {
-    if anchor == "provenance" {
-        return values.get(&format!("{prefix}.provenance"));
+    if matches!(anchor, "provenance" | "shadows") {
+        return values.get(&format!("{prefix}.{anchor}"));
     }
     values
         .get(&format!("{prefix}.data_json"))
@@ -802,7 +813,7 @@ pub(crate) fn resolve_typed_path(
     // payload field (`steps.X.data.provenance`): take the first position whose
     // anchored JSON actually exists, then walk what follows it.
     for (idx, anchor) in parts.iter().enumerate().skip(1) {
-        if !matches!(*anchor, "data" | "data_json" | "provenance") {
+        if !matches!(*anchor, "data" | "data_json" | "provenance" | "shadows") {
             continue;
         }
         let Some(json) = anchored_json(values, &parts[..idx].join("."), anchor) else {
@@ -893,6 +904,7 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
             | StepType::TransformData
             | StepType::PublishPageData
             | StepType::TaskBoard
+            | StepType::Decide
             // SubWorkflow's output is the child run's final envelope
             // (standardised) → `{{steps.<subwf>.data}}` is valid.
             | StepType::SubWorkflow
@@ -1880,6 +1892,40 @@ mod tests {
     }
 
     #[test]
+    fn the_shadows_summary_of_a_step_renders_as_json_and_resolves_by_path() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("advise", "plain text");
+        ctx.set_step_shadows(
+            "advise",
+            r#"{"step":"advise","executions":[{"key":"main","status":"success"}],"merge":null,"determinism":null}"#,
+        );
+        let rendered = ctx.render_strict("{{steps.advise.shadows}}").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["executions"][0]["key"], "main");
+        assert_eq!(
+            ctx.render_strict("{{steps.advise.shadows.executions.0.status}}")
+                .unwrap(),
+            "success"
+        );
+        assert_eq!(
+            ctx.render_strict("{{previous_step.shadows.step}}").unwrap(),
+            "advise"
+        );
+        assert_eq!(
+            ctx.resolve_value("steps.advise.shadows.executions")
+                .unwrap()
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        // A step that recorded none leaves the path unknown: strict fails.
+        assert!(ctx.render_strict("{{steps.other.shadows}}").is_err());
+        // A new output of the step forgets the summary of its earlier run.
+        ctx.set_step_output("advise", "again");
+        assert!(ctx.render_strict("{{steps.advise.shadows}}").is_err());
+    }
+
+    #[test]
     fn a_data_field_named_provenance_still_resolves_under_data() {
         let mut ctx = TemplateContext::new();
         ctx.set_step_output(
@@ -2715,6 +2761,8 @@ mod tests {
             retry: None,
             skill_ids: vec![],
             external_effect: false,
+            shadows: Vec::new(),
+            shadow_merge: None,
             directive_ids: vec![],
             profile_ids: vec![],
             delay_after_secs: None,
@@ -2760,6 +2808,7 @@ mod tests {
             transform_data: None,
             page_publish: None,
             task_board: None,
+            decide: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
