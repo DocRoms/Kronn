@@ -22,6 +22,11 @@ const LINE_H = 14;   // one shadow line, or the merged-result line, under a step
 
 const clipName = (name: string, max: number) => (name.length > max ? `${name.slice(0, max - 1)}…` : name);
 
+// A shadow line starts at SHADOW_X in the 10px monospace face (~6 units a glyph): the
+// map column holds this many characters. Only a line past it is clipped.
+const SHADOW_X = GUTTER + 24;
+const SHADOW_CHARS = Math.floor((WIDTH - SHADOW_X - 4) / 6);
+
 /** KT-1696 — a step's shadows and whether they feed a merged result: the lines drawn under it. */
 function shadowLines(step: WorkflowStep) {
   const shadows = step.shadows ?? [];
@@ -97,28 +102,36 @@ export function StepBranchMap({
               {lines[i].shadows.length > 0 && <tspan className="wf-bm-tag" dx={6} data-testid={`wf-bm-shadow-tag-${i}`}>⑂ {lines[i].shadows.length}</tspan>}
               {lines[i].merged && <tspan className="wf-bm-tag wf-bm-tag-merge" dx={4} data-testid={`wf-bm-merge-tag-${i}`}>⊕</tspan>}
             </text>
-            {lines[i].shadows.map((shadow, k) => (
+            {lines[i].shadows.map((shadow, k) => {
+              const fullName = shadow.label || shadow.id;
+              const agentName = AGENT_LABELS[shadow.agent?.agent ?? s.agent] ?? shadow.agent?.agent ?? s.agent;
+              // "⑂ " + name + " · " + agent: the name gets what the column leaves it.
+              const shownName = clipName(fullName, Math.max(SHADOW_CHARS - 5 - agentName.length, 8));
+              return (
               <text
                 key={shadow.id}
-                x={spineX + 24}
+                x={SHADOW_X}
                 y={cy(i) + 3 + (k + 1) * LINE_H}
                 className="wf-bm-shadow"
                 data-paused={shadow.enabled === false}
                 data-testid={`wf-bm-shadow-${i}-${shadow.id}`}
               >
-                ⑂ {clipName(shadow.label || shadow.id, 14)} · {AGENT_LABELS[shadow.agent?.agent ?? s.agent] ?? shadow.agent?.agent ?? s.agent}
+                ⑂ {shownName} · {agentName}
+                {shownName !== fullName && <title>{fullName}</title>}
               </text>
-            ))}
+              );
+            })}
             {lines[i].merged && (
               <text
-                x={spineX + 24}
+                x={SHADOW_X}
                 y={cy(i) + 3 + (lines[i].shadows.length + 1) * LINE_H}
                 className="wf-bm-shadow wf-bm-merged"
                 data-testid={`wf-bm-merged-${i}`}
               >
                 {steps[i + 1]
-                  ? t('wf.branchMap.mergedTo', clipName(steps[i + 1].name, 22))
+                  ? t('wf.branchMap.mergedTo', clipName(steps[i + 1].name, Math.max(SHADOW_CHARS - 23, 8)))
                   : t('wf.branchMap.mergedLast')}
+                {steps[i + 1] && clipName(steps[i + 1].name, Math.max(SHADOW_CHARS - 23, 8)) !== steps[i + 1].name && <title>{steps[i + 1].name}</title>}
               </text>
             )}
           </g>

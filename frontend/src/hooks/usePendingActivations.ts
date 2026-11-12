@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { quickExecs as quickExecsApi, workflows as workflowsApi } from '../lib/api';
 import type { DiscussionActionKind } from '../types/generated';
 import type { PendingActivation, PendingStepLine } from '../components/QuickExecActivation';
+import { groupQuickExecBlockers } from '../lib/pendingQuickExecs';
 
 /** What a Page action or a discussion card would fail on: the Quick Exec it
  * runs, or the Quick Execs and Exec lines of the workflow it launches, that
@@ -38,10 +39,13 @@ export function usePendingActivations(
       );
       const lines: PendingActivation[] = [];
       const stepLines: PendingStepLine[] = [];
+      // KT-1695 — a Quick Exec several steps use is one item, with its steps.
+      for (const group of groupQuickExecBlockers(blockers)) {
+        const [line] = withLine(group.quickExec.id, group.quickExec.name, group.quickExec.program);
+        if (line) lines.push({ ...line, steps: group.steps });
+      }
       for (const blocker of blockers) {
-        if (blocker.quick_exec) {
-          lines.push(...withLine(blocker.quick_exec.id, blocker.quick_exec.name, blocker.quick_exec.program));
-        } else if (blocker.step) {
+        if (!blocker.quick_exec && blocker.step) {
           stepLines.push({ workflowId: blocker.workflow_id, step: blocker.step });
         }
       }

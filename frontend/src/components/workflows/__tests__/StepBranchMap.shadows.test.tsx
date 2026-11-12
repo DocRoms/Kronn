@@ -34,6 +34,27 @@ describe('StepBranchMap — step shadows', () => {
     expect(screen.getByTestId('wf-bm-shadow-1-twin')).toHaveTextContent('⑂ twin · Ollama');
   });
 
+  it('shows a full shadow label that fits the map column, with no tooltip needed', () => {
+    const named = [steps[0], step('advise', {
+      shadows: [shadow('argon', { label: 'Argon (LiteLLM)', agent: { agent: 'LiteLlm' } }), shadow('qwen', { label: 'Qwen identique' })],
+      shadow_merge: merge({ shadows: ['argon'] }),
+    }), steps[2]];
+    render(<StepBranchMap steps={named} t={t} />);
+    expect(screen.getByTestId('wf-bm-shadow-1-argon')).toHaveTextContent('⑂ Argon (LiteLLM) · LiteLLM');
+    expect(screen.getByTestId('wf-bm-shadow-1-qwen')).toHaveTextContent('⑂ Qwen identique · Ollama');
+    expect(screen.getByTestId('wf-bm-shadow-1-argon').querySelector('title')).toBeNull();
+  });
+
+  it('clips a label only past the map column, and keeps the full label in a tooltip', () => {
+    const label = 'A shadow with an extremely long descriptive name indeed';
+    render(<StepBranchMap steps={[step('advise', { shadows: [shadow('long', { label })] })]} t={t} />);
+    const line = screen.getByTestId('wf-bm-shadow-0-long');
+    const drawn = Array.from(line.childNodes).filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('');
+    expect(drawn).toContain('…');
+    expect(drawn).not.toContain(label);
+    expect(line.querySelector('title')).toHaveTextContent(label);
+  });
+
   it('strikes a paused shadow through, not an active one', () => {
     render(<StepBranchMap steps={steps} t={t} />);
     expect(screen.getByTestId('wf-bm-shadow-1-twin')).toHaveAttribute('data-paused', 'true');

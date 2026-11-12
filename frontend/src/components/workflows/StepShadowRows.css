@@ -31,7 +31,10 @@
 .wf-shadow-subrow-name {
   color: var(--kr-purple);
   font-weight: 700;
-  max-width: 14ch;
+  /* Natural width: the name only clips when it alone is wider than the card. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -148,7 +151,17 @@
   font-size: var(--kr-fs-xs);
 }
 .wf-shadow-merged-text { font-weight: 600; overflow-wrap: anywhere; }
-.wf-shadow-merged-by { color: var(--kr-text-muted); }
+/* "merged by <picker>" never splits: the group wraps as one unit, only when space is missing. */
+.wf-shadow-merged-agent {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.wf-shadow-merged-by { color: var(--kr-text-muted); flex: none; }
 
 .wf-shadow-help { position: relative; display: inline-flex; }
 .wf-shadow-help-btn {
@@ -244,7 +257,7 @@
 /* Branch map: the shadow lines under a doubled step, and its tags. */
 .wf-bm-tag { fill: var(--kr-purple); font-size: 9px; font-weight: 700; }
 .wf-bm-tag-merge { fill: var(--kr-warning-amber); }
-.wf-bm-shadow { fill: var(--kr-purple); font-size: 10px; font-family: var(--kr-font-mono, monospace); pointer-events: none; }
+.wf-bm-shadow { fill: var(--kr-purple); font-size: 10px; font-family: var(--kr-font-mono, monospace); }
 .wf-bm-shadow[data-paused='true'] { text-decoration: line-through; opacity: 0.65; }
 .wf-bm-merged { fill: var(--kr-warning-amber); }
 

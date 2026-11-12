@@ -1,6 +1,8 @@
 // KT-1696 — the shadows of an Agent step as sub-rows: agent/model picker with
 // its transport badge, the Active and Merge toggles, ✕ and + Shadow, the summary
 // of the merged result with its `?` popover.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
@@ -144,6 +146,28 @@ describe('StepShadowRows — the sub-rows', () => {
   });
 });
 
+const rowsCss = readFileSync(resolve(process.cwd(), 'src/components/workflows/StepShadowRows.css'), 'utf8');
+const ruleOf = (selector: string) => rowsCss.match(new RegExp(`^${selector.replace('.', '\\.')}\\s*\\{([^}]*)\\}`, 'm'))?.[1] ?? '';
+
+describe('StepShadowRows — names and wrapping', () => {
+  const longName = 'Argon (LiteLLM) · gemini-4 long'; // 31 characters
+  it('renders a ~30 character shadow name whole: no ellipsis class, no inline clipping, full title', () => {
+    renderRows(withShadows({ shadows: [shadow('argon', { label: longName, agent: argon.agent }), twin] }));
+    const name = screen.getByText(`⑂ ${longName}`);
+    expect(longName).toHaveLength(31);
+    expect(name.className).toBe('wf-shadow-subrow-name');
+    expect(name).not.toHaveAttribute('style');
+    expect(name).toHaveAttribute('title', longName);
+  });
+
+  it('lets the name size naturally in the stylesheet: no fixed character cap, it only shrinks inside the card', () => {
+    const rule = ruleOf('.wf-shadow-subrow-name');
+    expect(rule).not.toMatch(/max-width:\s*\d+(\.\d+)?(ch|px|em|rem)/);
+    expect(rule).toMatch(/max-width:\s*100%/);
+    expect(rule).toMatch(/flex:\s*0 1 auto/);
+  });
+});
+
 describe('StepShadowRows — the agent/model menu', () => {
   const open = async (id: string) => {
     await act(async () => { fireEvent.click(screen.getByTestId(id)); });
@@ -218,6 +242,19 @@ describe('StepShadowRows — the merged result', () => {
     expect(summary).toHaveTextContent('wf.shadow.rows.summary(Argon|publish)');
     expect(summary).toHaveTextContent('wf.shadow.rows.mergedBy');
     expect(within(summary).getByTestId('wf-shadow-rows-condense')).toHaveTextContent('wf.shadow.rows.sameAgent');
+  });
+
+  it('keeps « merged by » and its picker in one group that never splits', () => {
+    renderRows(withShadows());
+    const group = screen.getByTestId('wf-shadow-rows-merged-agent');
+    expect(group.parentElement).toBe(screen.getByTestId('wf-shadow-rows-merged'));
+    expect(within(group).getByText('wf.shadow.rows.mergedBy')).toBeInTheDocument();
+    expect(within(group).getByTestId('wf-shadow-rows-condense')).toBeInTheDocument();
+    const rule = ruleOf('.wf-shadow-merged-agent');
+    expect(rule).toMatch(/flex-wrap:\s*nowrap/);
+    expect(rule).toMatch(/white-space:\s*nowrap/);
+    // The summary row wraps whole groups, so the unit moves as one when space is missing.
+    expect(ruleOf('.wf-shadow-merged')).toMatch(/flex-wrap:\s*wrap/);
   });
 
   it('names every merged shadow, and says « the step result » on the last step', () => {

@@ -317,6 +317,112 @@ describe('UnsafeStepsPanel', () => {
     expect(activateQuickExec).toHaveBeenCalledTimes(1);
   });
 
+  // KT-1695 — the owner's CloudWatch case: six steps, four Quick Execs.
+  describe('Quick Execs awaiting activation, listed once each', () => {
+    const blockerFor = (step: string, id: string, name: string): WorkflowBlocker => ({
+      workflow_id: 'wf-1', workflow_name: 'PR review', step, on_failure: false,
+      kind: 'human_approval', phase: 'source', reason: 'unmodelled_program',
+      message: `Quick Exec « ${name} »`, action: '', human_only: true,
+      quick_exec: { id, name, source_alias: 'q', program: 'aws' },
+    });
+    const saved = (id: string, name: string, args: string[]) => ({
+      id, name, icon: '🔎', description: '', project_id: 'p1', command: 'aws',
+      args, timeout_secs: 30, output_format: 'json', variables: [], pinned: false,
+      created_at: 'now', updated_at: 'now',
+    });
+    const blocked = [
+      blockerFor('top-a', 'qe-top', 'Top 5xx'),
+      blockerFor('top-b', 'qe-top', 'Top 5xx'),
+      blockerFor('top-c', 'qe-top', 'Top 5xx'),
+      blockerFor('start', 'qe-start', 'Start query'),
+      blockerFor('poll', 'qe-poll', 'Poll query'),
+      blockerFor('stop', 'qe-stop', 'Stop query'),
+    ];
+
+    const renderPanel = async () => {
+      unsafeSteps.mockResolvedValue([]);
+      readiness.mockReset();
+      readiness
+        .mockResolvedValueOnce({
+          workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: false,
+          blockers: blocked, human_approval_count: 6, checked_workflow_ids: ['wf-1'], summary: '',
+        } as WorkflowReadiness)
+        .mockResolvedValue({
+          workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: true,
+          blockers: [], human_approval_count: 0, checked_workflow_ids: ['wf-1'], summary: '',
+        } as WorkflowReadiness);
+      listQuickExecs.mockReset();
+      listQuickExecs.mockResolvedValue([
+        saved('qe-top', 'Top 5xx', ['logs', 'get-query-results', '{{query_id}}']),
+        saved('qe-start', 'Start query', ['logs', 'start-query', '{{from}}', '{{to}}']),
+        saved('qe-poll', 'Poll query', ['logs', 'describe-queries']),
+        saved('qe-stop', 'Stop query', ['logs', 'stop-query', '--query-id', '{{query_id}}']),
+      ]);
+      activateQuickExec.mockResolvedValue({});
+      render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+      await screen.findByText('wf.qeApprove|Top 5xx|aws');
+    };
+
+    it('lists four cards for six steps, with the steps that use each', async () => {
+      await renderPanel();
+      expect(screen.getAllByTestId('readiness-quick-exec')).toHaveLength(4);
+      expect(screen.getAllByText(/^wf\.qeApprove\|/)).toHaveLength(4);
+      expect(screen.getByText(/qeActivation\.usedBy\|top-a, top-b, top-c/)).toBeDefined();
+      expect(screen.getByText(/qeActivation\.usedBy\|start$/)).toBeDefined();
+    });
+
+    it('puts "Activate all" on the title row and opens the confirmation under it, above the cards', async () => {
+      await renderPanel();
+      const head = screen.getByTestId('qe-activate-all-head');
+      const button = screen.getByText('qeActivateAll.button|4');
+      expect(head.contains(button)).toBe(true);
+      // Same row as the panel title, which comes first.
+      const title = head.querySelector('h4.wf-unsafe-title') as HTMLElement;
+      expect(title).not.toBeNull();
+      expect(title.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // The header is above every card.
+      const firstCard = screen.getAllByTestId('readiness-quick-exec')[0];
+      expect(head.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      fireEvent.click(button);
+      const confirmation = screen.getByTestId('qe-activate-all-confirm');
+      // Right under the title, above the cards.
+      expect(title.compareDocumentPosition(confirmation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(confirmation.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('opens one confirmation for the four, then activates each through the single activation', async () => {
+      await renderPanel();
+      fireEvent.click(screen.getByText('qeActivateAll.button|4'));
+      const confirmation = screen.getByTestId('qe-activate-all-confirm');
+      expect(confirmation.querySelectorAll('details')).toHaveLength(4);
+      // One program for the four: one checkbox, with the existing wording.
+      expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+      expect(screen.getByText('exec.unmodelledApprove|aws')).toBeDefined();
+      const confirm = screen.getByText('qeActivateAll.confirm|4') as HTMLButtonElement;
+      expect(confirm.disabled).toBe(true);
+      expect(activateQuickExec).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('checkbox'));
+      fireEvent.click(confirm);
+      await waitFor(() => expect(activateQuickExec).toHaveBeenCalledTimes(4));
+      expect(activateQuickExec).toHaveBeenCalledWith('qe-top', {
+        command: 'aws', args: ['logs', 'get-query-results', '{{query_id}}'],
+      });
+      expect(activateQuickExec).toHaveBeenCalledWith('qe-start', {
+        command: 'aws', args: ['logs', 'start-query', '{{from}}', '{{to}}'],
+      });
+      await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
+    });
+
+    it('keeps the per-card activation', async () => {
+      await renderPanel();
+      fireEvent.click(screen.getByText('wf.qeApprove|Stop query|aws'));
+      await waitFor(() => expect(activateQuickExec).toHaveBeenCalledWith('qe-stop', {
+        command: 'aws', args: ['logs', 'stop-query', '--query-id', '{{query_id}}'],
+      }));
+      expect(activateQuickExec).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('styles the neutral tone and the command block without the warning colour or a flush block', () => {
     const css = readFileSync(resolve(process.cwd(), 'src/components/QuickExecActivation.css'), 'utf8');
     const rule = (selector: string) => {

@@ -201,17 +201,19 @@ export function StepShadowRows({ step, nextStepName, choices, onEdit, addWhenEmp
             t={t}
             testId={testId}
           />
-          <span className="wf-shadow-merged-by">{t('wf.shadow.rows.mergedBy')}</span>
-          <ShadowAgentPicker
-            value={merge.agent}
-            choices={choices}
-            main={main}
-            disabled={!editable}
-            ariaLabel={t('wf.shadow.rows.condenseLabel')}
-            testId={`${testId}-condense`}
-            t={t}
-            onChange={agent => onEdit?.(withMergeAgent(shadows, merge, agent))}
-          />
+          <span className="wf-shadow-merged-agent" data-testid={`${testId}-merged-agent`}>
+            <span className="wf-shadow-merged-by">{t('wf.shadow.rows.mergedBy')}</span>
+            <ShadowAgentPicker
+              value={merge.agent}
+              choices={choices}
+              main={main}
+              disabled={!editable}
+              ariaLabel={t('wf.shadow.rows.condenseLabel')}
+              testId={`${testId}-condense`}
+              t={t}
+              onChange={agent => onEdit?.(withMergeAgent(shadows, merge, agent))}
+            />
+          </span>
         </div>
       )}
     </div>
