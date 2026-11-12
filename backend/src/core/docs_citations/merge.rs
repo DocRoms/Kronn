@@ -15,7 +15,7 @@
 
 use super::diff_map::DiffMap;
 use super::{
-    check_doc, file_citation_anchored, is_checked_doc, markers_at, reanchor_doc, suggested_span,
+    check_doc, file_citation_anchored, is_checked_doc, markers_at, placed_span, reanchor_doc,
     DocCitationFailure, ReanchorOutcome,
 };
 use crate::core::anti_halluc::{anchor_miss, anchor_miss_in};
@@ -24,9 +24,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// How far, in lines, the nearest occurrence of a symbol may lie from where a
-/// changed hunk maps the cited range. Beyond it the symbol is another place
-/// that merely shares its name, and a human picks.
+/// How far, in lines, the nearest of several occurrences of a symbol may lie
+/// from where a changed hunk maps the cited range. Beyond it the symbol is
+/// another place that merely shares its name, and a human picks. A symbol the
+/// merged file defines exactly once is placed whatever the distance.
 pub const NEAREST_OCCURRENCE_LIMIT: usize = 20;
 
 /// What settling the docs of a merge did.
@@ -44,8 +45,9 @@ pub enum SettleError {
     /// Settling would rewrite a file that carries changes the merge did not
     /// bring.
     Refused { paths: Vec<String>, message: String },
-    /// The merge broke citations the evidence cannot place: the symbol moved
-    /// too far, or two occurrences are equally near. A human points them.
+    /// The merge broke citations the evidence cannot place: the symbol is
+    /// defined or held on several lines, none provably the cited one. A human
+    /// points them.
     Unplaced { docs: Vec<String>, message: String },
     /// git or the filesystem failed.
     Failed(String),
@@ -350,8 +352,9 @@ struct MergeMapper<'a> {
     dirty: BTreeSet<String>,
     /// Dirty files a citation to be moved points into.
     blocked: BTreeSet<String>,
-    /// `(doc line, citation)` of the current doc the evidence could not place.
-    unplaced: Vec<(usize, String)>,
+    /// `(doc line, citation, candidate lines)` of the current doc the evidence
+    /// could not place.
+    unplaced: Vec<(usize, String, Vec<usize>)>,
 }
 
 impl<'a> MergeMapper<'a> {
@@ -376,7 +379,9 @@ impl<'a> MergeMapper<'a> {
     }
 
     /// Where the moved citation belongs in the merged tree. Only a file the
-    /// merge changed is considered. A unique symbol needs no history. Otherwise
+    /// merge changed is considered. A symbol the merged file defines exactly
+    /// once (or, with no definition, holds on one line only) needs no history,
+    /// whatever the distance: the anchor is the source of truth. Otherwise
     /// the revisions the citation was written against map it line by line, and
     /// the symbol must lie in the mapped range. When a hunk changed the cited
     /// lines themselves, the occurrence of the symbol nearest the mapped
@@ -398,8 +403,8 @@ impl<'a> MergeMapper<'a> {
             self.blocked.insert(path);
             return Ok(None);
         }
-        if moved.occurrences.len() == 1 {
-            return Ok(suggested_span(moved.span, &moved.occurrences, moved.total));
+        if let Some(span) = moved.placement() {
+            return Ok(Some(span));
         }
         let (Some(old), Some(anchor)) = (lines, anchor) else {
             return Ok(None);
@@ -426,10 +431,11 @@ impl<'a> MergeMapper<'a> {
             let nearest = moved
                 .occurrences
                 .iter()
-                .map(|&line| (line.abs_diff(start), line))
-                .filter(|&(distance, _)| distance <= NEAREST_OCCURRENCE_LIMIT)
+                .zip(&moved.lines)
+                .map(|(&line, &at)| (line.abs_diff(start), line, at))
+                .filter(|&(distance, ..)| distance <= NEAREST_OCCURRENCE_LIMIT)
                 .min();
-            let Some((distance, line)) = nearest else {
+            let Some((distance, line, at)) = nearest else {
                 continue;
             };
             let tied = moved
@@ -440,13 +446,14 @@ impl<'a> MergeMapper<'a> {
             if tied > 1 {
                 continue;
             }
-            let span = (line, (line + (old.1 - old.0)).min(moved.total.max(line)));
+            let span = placed_span(old, at, line, moved.total);
             if anchor_miss(&merged, span, &anchor).is_none() {
                 return Ok(Some(span));
             }
         }
         // It held on a side and the merge broke it, and nothing safe remains.
-        self.unplaced.push((failure.line, failure.citation.clone()));
+        self.unplaced
+            .push((failure.line, failure.citation.clone(), moved.lines.clone()));
         Ok(None)
     }
 }
@@ -456,7 +463,7 @@ struct Plan {
     /// `(doc, merged text re-anchored)` for each doc that changes.
     writes: Vec<(PathBuf, String)>,
     outcome: ReanchorOutcome,
-    unplaced: Vec<(PathBuf, usize, String)>,
+    unplaced: Vec<(PathBuf, usize, String, Vec<usize>)>,
     blocked: BTreeSet<String>,
     /// Docs among `writes` whose working tree is not what the index holds.
     dirty_docs: Vec<String>,
@@ -532,7 +539,7 @@ fn plan_reanchor_against(root: &Path, theirs: &str) -> Result<Plan, String> {
             mapper
                 .unplaced
                 .drain(..)
-                .map(|(line, citation)| (doc.clone(), line, citation)),
+                .map(|(line, citation, lines)| (doc.clone(), line, citation, lines)),
         );
         if new != text {
             if dirty.contains(&name) {
@@ -622,13 +629,21 @@ fn stage_plan(root: &Path, plan: Plan, resolved: Vec<PathBuf>) -> Result<MergeDo
         let cites: Vec<String> = plan
             .unplaced
             .iter()
-            .map(|(doc, line, citation)| format!("{}:{line} [src: {citation}]", doc.display()))
+            .map(|(doc, line, citation, candidates)| {
+                let candidates: Vec<String> = candidates.iter().map(usize::to_string).collect();
+                format!(
+                    "{}:{line} [src: {citation}] (candidate lines {})",
+                    doc.display(),
+                    candidates.join(", ")
+                )
+            })
             .collect();
         return Err(SettleError::Unplaced {
             docs: docs.into_iter().collect(),
             message: format!(
-                "the merge broke doc citations that cannot be re-anchored safely (the symbol moved \
-                 more than {NEAREST_OCCURRENCE_LIMIT} lines, or two occurrences are equally near): \
+                "the merge broke doc citations that cannot be re-anchored safely (the symbol is \
+                 defined or held on several lines and none is within {NEAREST_OCCURRENCE_LIMIT} \
+                 lines of where the change maps it, or two are equally near): \
                  {}. Point each at its new lines by hand.",
                 cites.join("; ")
             ),

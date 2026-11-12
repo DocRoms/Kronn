@@ -98,6 +98,32 @@ describe('WorkflowWizard — shadow sub-rows under the step agent (KT-1696)', ()
     expect(screen.getByTestId('wf-step-shadows-0')).toBeInTheDocument();
   });
 
+  it('opens the block with the Principal row, which hosts the step agent picker (KT-1707)', () => {
+    toStepsPage(steps());
+    const principal = screen.getByTestId('wf-wiz-shadow-rows-0-principal');
+    expect(principal.querySelector('.kr-agent-switch-btn, .kr-agent-switch-static')).not.toBeNull();
+    // One picker only: the routing block no longer carries a second one outside the rows.
+    const routing = principal.closest('.wf-step-agent-routing') as HTMLElement;
+    const outside = Array.from(routing.querySelectorAll('.kr-agent-switch-btn, .kr-agent-switch-static'))
+      .filter(node => !node.closest('[data-testid="wf-wiz-shadow-rows-0"]'));
+    expect(outside).toHaveLength(0);
+    expect(principal).toHaveTextContent('wf.shadow.rows.alwaysActive');
+  });
+
+  it('turns the agent line into the block with the first shadow and back with the last one (KT-1707)', async () => {
+    toStepsPage([mkStep(), mkStep({ id: '22222222-2222-4222-8222-222222222222', name: 'publish' })]);
+    expect(screen.queryByTestId('wf-wiz-shadow-rows-0-principal')).toBeNull();
+    const routing = screen.getByTestId('wf-wiz-shadow-rows-0-add').closest('.wf-step-agent-routing') as HTMLElement;
+    expect(routing.querySelector(':scope > .kr-agent-switch, :scope > .kr-agent-switch-static')).not.toBeNull();
+    fireEvent.click(screen.getByTestId('wf-wiz-shadow-rows-0-add'));
+    fireEvent.click(await screen.findByTestId('wf-wiz-shadow-rows-0-add-same'));
+    expect(screen.getByTestId('wf-wiz-shadow-rows-0-principal')).toBeInTheDocument();
+    expect(routing.querySelector(':scope > .kr-agent-switch, :scope > .kr-agent-switch-static')).toBeNull();
+    fireEvent.click(screen.getByTestId('wf-wiz-shadow-rows-0-shadow-1-remove'));
+    expect(screen.queryByTestId('wf-wiz-shadow-rows-0-principal')).toBeNull();
+    expect(routing.querySelector(':scope > .kr-agent-switch, :scope > .kr-agent-switch-static')).not.toBeNull();
+  });
+
   it('simple mode shows the rows too', () => {
     renderWizard([mkStep({ shadows: [twin] })]);
     fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger

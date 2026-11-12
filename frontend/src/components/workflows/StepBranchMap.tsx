@@ -1,15 +1,19 @@
 // #15 — a compact SVG map for a workflow's steps. It always draws the linear
 // spine so every workflow keeps the same detail layout, then overlays Goto arcs
 // in the gutter when branches exist. Not an editor — a read-only navigator.
-import { AGENT_LABELS } from '../../lib/constants';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { activeMergedIds } from '../../lib/shadowMerge';
-import type { WorkflowStep } from '../../types/generated';
+import type { ModelTiersConfig, WorkflowStep } from '../../types/generated';
+import type { AgentSwitchTarget } from '../AgentSwitchPicker';
+import { agentModelLabel, stepMainAgent } from './shadowRowModel';
 import './StepShadowRows.css';
 
 interface StepBranchMapProps {
   steps: WorkflowStep[];
   t: (key: string, ...args: (string | number)[]) => string;
+  /** The agents the page offers and the families' configured models: they resolve the default model a line names. */
+  choices?: readonly AgentSwitchTarget[];
+  modelTiers?: ModelTiersConfig | null;
   selectedStepIndex?: number;
   onSelectStep?: (index: number) => void;
 }
@@ -18,7 +22,7 @@ const ROW_H = 24;
 const GUTTER = 52;   // left space reserved for Goto arcs
 const WIDTH = 300;
 const PAD_TOP = 6;
-const LINE_H = 14;   // one shadow line, or the merged-result line, under a step
+const LINE_H = 14;   // the principal line, one shadow line, or the merged-result line, under a step
 
 const clipName = (name: string, max: number) => (name.length > max ? `${name.slice(0, max - 1)}…` : name);
 
@@ -27,16 +31,19 @@ const clipName = (name: string, max: number) => (name.length > max ? `${name.sli
 const SHADOW_X = GUTTER + 24;
 const SHADOW_CHARS = Math.floor((WIDTH - SHADOW_X - 4) / 6);
 
-/** KT-1696 — a step's shadows and whether they feed a merged result: the lines drawn under it. */
+/** KT-1696 — a step's shadows and whether they feed a merged result: the lines drawn under it.
+ *  KT-1707 — a doubled step starts with its principal line, before the ⑂ lines. */
 function shadowLines(step: WorkflowStep) {
   const shadows = step.shadows ?? [];
   const merged = activeMergedIds(step.shadow_merge, shadows).length > 0;
-  return { shadows, merged, count: shadows.length + (merged ? 1 : 0) };
+  return { shadows, merged, count: (shadows.length > 0 ? 1 : 0) + shadows.length + (merged ? 1 : 0) };
 }
 
 export function StepBranchMap({
   steps,
   t,
+  choices = [],
+  modelTiers,
   selectedStepIndex,
   onSelectStep,
 }: StepBranchMapProps) {
@@ -102,29 +109,42 @@ export function StepBranchMap({
               {lines[i].shadows.length > 0 && <tspan className="wf-bm-tag" dx={6} data-testid={`wf-bm-shadow-tag-${i}`}>⑂ {lines[i].shadows.length}</tspan>}
               {lines[i].merged && <tspan className="wf-bm-tag wf-bm-tag-merge" dx={4} data-testid={`wf-bm-merge-tag-${i}`}>⊕</tspan>}
             </text>
+            {lines[i].shadows.length > 0 && (() => {
+              const fullName = agentModelLabel(undefined, stepMainAgent(s), choices, t, modelTiers);
+              const shownName = clipName(fullName, SHADOW_CHARS - 12);
+              return (
+                <text
+                  x={SHADOW_X}
+                  y={cy(i) + 3 + LINE_H}
+                  className="wf-bm-shadow wf-bm-principal"
+                  data-testid={`wf-bm-principal-${i}`}
+                >
+                  {t('wf.branchMap.principal', shownName)}
+                  {shownName !== fullName && <title>{fullName}</title>}
+                </text>
+              );
+            })()}
             {lines[i].shadows.map((shadow, k) => {
-              const fullName = shadow.label || shadow.id;
-              const agentName = AGENT_LABELS[shadow.agent?.agent ?? s.agent] ?? shadow.agent?.agent ?? s.agent;
-              // "⑂ " + name + " · " + agent: the name gets what the column leaves it.
-              const shownName = clipName(fullName, Math.max(SHADOW_CHARS - 5 - agentName.length, 8));
+              const fullName = agentModelLabel(shadow.agent, stepMainAgent(s), choices, t, modelTiers);
+              const shownName = clipName(fullName, SHADOW_CHARS - 2);
               return (
               <text
                 key={shadow.id}
                 x={SHADOW_X}
-                y={cy(i) + 3 + (k + 1) * LINE_H}
+                y={cy(i) + 3 + (k + 2) * LINE_H}
                 className="wf-bm-shadow"
                 data-paused={shadow.enabled === false}
                 data-testid={`wf-bm-shadow-${i}-${shadow.id}`}
               >
-                ⑂ {shownName} · {agentName}
-                {shownName !== fullName && <title>{fullName}</title>}
+                ⑂ {shownName}
+                <title>{shownName !== fullName ? `${fullName} — ${shadow.label || shadow.id}` : shadow.label || shadow.id}</title>
               </text>
               );
             })}
             {lines[i].merged && (
               <text
                 x={SHADOW_X}
-                y={cy(i) + 3 + (lines[i].shadows.length + 1) * LINE_H}
+                y={cy(i) + 3 + (lines[i].shadows.length + 2) * LINE_H}
                 className="wf-bm-shadow wf-bm-merged"
                 data-testid={`wf-bm-merged-${i}`}
               >

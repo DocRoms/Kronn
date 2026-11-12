@@ -39,6 +39,7 @@ import { AutoDisabledReview } from '../components/workflows/AutoDisabledReview';
 import { AUTO_DISABLE_REASON_KEY } from '../lib/autoDisableReason';
 import { WorkflowWizard, type WorkflowWizardSection } from '../components/workflows/WorkflowWizard';
 import { agentSettingsForSelection } from '../lib/agentSelection';
+import { saveDecisionModel, type DecisionModelChoice } from '../lib/decisionModels';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
@@ -1228,6 +1229,26 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
         t('wf.stepAgentChanged', step.name, AGENT_LABELS[agent] ?? agent),
         'success',
       );
+    } catch (error) {
+      toastProp?.(userError(error), 'error');
+      throw error;
+    }
+  };
+
+  // KT-1697 — a Decide step's model, saved the moment it is picked. The card
+  // shows the choice at once and goes back to the saved one if the save fails.
+  const changeStepDecisionModel = async (stepIndex: number, choice: DecisionModelChoice) => {
+    const workflow = detailWorkflow;
+    const step = workflow?.steps[stepIndex];
+    if (!workflow || !step) return;
+    try {
+      const saved = await saveDecisionModel(workflow, stepIndex, choice, {
+        show: shown => setDetailWorkflow(current => current?.id === workflow.id ? shown : current),
+        save: steps => workflowsApi.update(workflow.id, { steps }),
+      });
+      if (!saved) return;
+      void refetch();
+      toastProp?.(t('decisionPicker.changed', step.name, choice.model ?? t('decisionPicker.defaultShort')), 'success');
     } catch (error) {
       toastProp?.(userError(error), 'error');
       throw error;
@@ -3152,6 +3173,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                 runs={detailRuns}
                 availableAgentTypes={installedAgentTypes}
                 onChangeStepAgent={changeStepAgent}
+                onChangeStepDecisionModel={changeStepDecisionModel}
                 onChangeStepShadows={changeStepShadows}
                 onApplyUnsafeFix={applyUnsafeFix}
                 onApproveUnsafeStep={approveUnsafeStep}

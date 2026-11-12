@@ -13,6 +13,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- **KT-1697 — A Decide step chooses its decision model from the workflow overview.** The step card and its pipeline chip show `Décision · <model> ▾` with a Local/HTTP badge, like the Agent step's model picker: one click lists the decision models (« Par défaut » first), the choice is saved at once and rolled back if the save fails; the editor has the same picker. A step with no model of its own still runs the configured Decision model. An OpenRouter connection's `decision_model` (e.g. `perplexity/pplx-decider-flash-v1.2`) is listed over HTTP and called on OpenRouter's System One API (`POST /api/v1/systemone`) with the connection's credential; a refused token fails the step with the usual `auth_refused` signal. Other providers have no documented decision contract and are not listed. Readiness flags a step whose model Ollama no longer lists or whose connection can no longer serve it, and the model is never swapped (see `docs/operations/ollama-local-models.md`).
+
 - Orchestration: an integration never targets the owner's working checkout, and
   an unspecified target is no longer `main` (KT-1688). A launch takes its
   integration branch from `base_rev`, else from its room's campaign; with
