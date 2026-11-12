@@ -562,6 +562,8 @@ pub async fn run_decide_step(
         None,
         &signals,
     );
+    // Provider-supplied values (probabilities) reach the output: no token in it.
+    let output = scrubbed(route, output);
     let condition_action = action_for(&step.on_result, &decision.signals);
     let condition_result = condition_action.as_ref().map(|action| match action {
         ConditionAction::Stop => "Stop".to_string(),
@@ -592,13 +594,16 @@ enum CallError {
 }
 
 /// The provider's own words for an error: Ollama answers `{"error": "..."}`,
-/// OpenRouter `{"error": {"code": .., "message": ".."}}`.
-fn provider_reason(value: &Value, text: &str) -> String {
+/// OpenRouter `{"error": {"code": .., "message": ".."}}`. The whole message is
+/// scrubbed of the connection's token before it is capped: a token straddling
+/// the cut would otherwise no longer match any form `SecretSet` knows.
+fn provider_reason(route: &Route, value: &Value, text: &str) -> String {
     let error = &value["error"];
-    error
+    let full = error
         .as_str()
         .or_else(|| error["message"].as_str())
-        .unwrap_or(text)
+        .unwrap_or(text);
+    scrubbed(route, full.to_string())
         .chars()
         .take(300)
         .collect()
@@ -670,13 +675,13 @@ async fn call(route: &Route, body: &Value) -> Result<Value, CallError> {
     if route.bearer.is_some() && matches!(status.as_u16(), 401 | 403) {
         return Err(CallError::Refused {
             status: status.as_u16(),
-            detail: provider_reason(&value, &text),
+            detail: provider_reason(route, &value, &text),
         });
     }
     if !status.is_success() {
         return Err(CallError::Failed(format!(
             "answered HTTP {status}: {}",
-            provider_reason(&value, &text)
+            provider_reason(route, &value, &text)
         )));
     }
     if value.is_null() {
@@ -1284,6 +1289,113 @@ mod tests {
             assert_eq!(outcome.result.step_model.as_deref(), Some(OPENROUTER_MODEL));
             assert!(outcome.condition_action.is_none());
         }
+    }
+
+    /// A provider that echoes the token in an error, with the token straddling
+    /// the 300-character cut of the reason, leaks no fragment of it: the
+    /// message is scrubbed whole before it is capped. A refusal (401), a
+    /// failure (500) and a body that is not JSON are all covered.
+    #[tokio::test]
+    async fn a_token_straddling_the_error_cut_leaks_no_fragment() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // The token starts 10 characters before the cut: unscrubbed, the first
+        // ten characters of it would survive the cut.
+        let message = format!("{}{FAKE_TOKEN}{}", "x".repeat(290), "y".repeat(50));
+        assert!(message
+            .chars()
+            .take(300)
+            .collect::<String>()
+            .contains("sk-or-test"));
+        let fragment = &FAKE_TOKEN[..8];
+
+        for (status, as_json) in [(401u16, true), (403, true), (500, true), (500, false)] {
+            let server = MockServer::start().await;
+            let response = if as_json {
+                ResponseTemplate::new(status)
+                    .set_body_json(json!({"error": {"code": status, "message": message}}))
+            } else {
+                ResponseTemplate::new(status).set_body_string(message.clone())
+            };
+            Mock::given(method("POST"))
+                .and(path("/v1/systemone"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let state = state_with(
+                vec![connection_of(
+                    "or-1",
+                    ExternalApiConnectionPreset::OpenRouter,
+                    &server.uri(),
+                    Some(OPENROUTER_MODEL),
+                )],
+                &[("credential-or-1", FAKE_TOKEN)],
+            )
+            .await;
+            let outcome = execute_decide_step(
+                &openrouter_step(),
+                &rendered(),
+                &state,
+                "http://127.0.0.1:9",
+                None,
+            )
+            .await;
+            let output = &outcome.result.output;
+            assert_eq!(outcome.result.status, RunStatus::Failed, "{output}");
+            assert!(
+                !output.contains(fragment),
+                "status {status} json {as_json}: {output}"
+            );
+            // The answer is still the provider's own words, capped.
+            assert!(output.contains("xxxx"), "status {status}: {output}");
+        }
+    }
+
+    /// A provider-supplied value copied into a successful output (the level
+    /// probabilities here) cannot carry the connection's token out.
+    #[tokio::test]
+    async fn a_success_output_never_carries_the_token() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/systemone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "answers": {"route": {
+                    "type": "choice",
+                    "choice": "local",
+                    "confidence": 0.9,
+                    "probabilities": {"local": 0.9, FAKE_TOKEN: 0.1}
+                }}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = state_with(
+            vec![connection_of(
+                "or-1",
+                ExternalApiConnectionPreset::OpenRouter,
+                &server.uri(),
+                Some(OPENROUTER_MODEL),
+            )],
+            &[("credential-or-1", FAKE_TOKEN)],
+        )
+        .await;
+        let step = step_with(DecideConfig {
+            model: Some(OPENROUTER_MODEL.into()),
+            connection_id: Some("or-1".into()),
+            ..config(vec![question("route", DecideKind::Choice)])
+        });
+        let outcome =
+            execute_decide_step(&step, &rendered(), &state, "http://127.0.0.1:9", None).await;
+        let output = &outcome.result.output;
+        assert_eq!(outcome.result.status, RunStatus::Success, "{output}");
+        assert!(output.contains("[SIGNAL: route_local]"), "{output}");
+        assert!(!output.contains(FAKE_TOKEN), "{output}");
+        assert!(!output.contains(&FAKE_TOKEN[..8]), "{output}");
     }
 
     /// A connection that is gone, of another provider, with another decision
