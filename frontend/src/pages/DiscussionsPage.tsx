@@ -12,6 +12,7 @@ import { ImportantMessagesBar } from '../components/ImportantMessageCard';
 import { ImportantMessageForm } from '../components/ImportantMessageForm';
 import { submitImportantMessage } from '../lib/submitImportantMessage';
 import { refreshImportantMessages } from '../lib/importantMessages';
+import { supersededActivationCards } from '../lib/activationCard';
 import { pinScrollTarget } from '../lib/pinScrollTarget';
 import { preparePublication } from '../lib/importantPublication';
 import { unseenBasis } from '../lib/discussionUiUtils';
@@ -3915,6 +3916,7 @@ export function DiscussionsPage({
             forceVisibleIds,
           },
         );
+        const supersededCards = supersededActivationCards(msgs);
         const mainUserIds = new Set(
           msgs
             .filter(message => message.role === 'User' && message.channel === 'main')
@@ -4062,6 +4064,10 @@ export function DiscussionsPage({
             );
           }
           const pending = renderPendingAfter([msg.id]);
+          if (supersededCards.has(msg.id)) {
+            // KT-1695 — one activation card per Quick Exec: the latest stays.
+            return <Fragment key={msg.id}>{separator}{pending}</Fragment>;
+          }
           const mediaRun = mediaJobsByMessage[msg.id];
           const isDedicatedMediaAnchor = mediaRun
             && msg.source_msg_id === `kronn-media-anchor:${mediaRun.id}`;

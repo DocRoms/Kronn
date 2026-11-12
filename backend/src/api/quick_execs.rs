@@ -1978,6 +1978,77 @@ mod tests {
         assert_eq!(edited.data.unwrap().unmodelled_args_approved, None);
     }
 
+    /// KT-1695: « Activate all » is the single activation, once per Quick
+    /// Exec: an agent is refused on each and activates none, a human's
+    /// activation settles each line it read, and a line that changed since is
+    /// refused alone, leaving the others activated.
+    #[tokio::test]
+    async fn activating_several_lines_is_the_single_human_activation_each_time() {
+        let state = state();
+        let mut lines = Vec::new();
+        for (name, args) in [
+            ("Top 5xx", vec!["logs", "get-query-results", "{{query_id}}"]),
+            ("Start query", vec!["logs", "start-query", "{{from}}"]),
+            ("Stop query", vec!["logs", "stop-query", "{{query_id}}"]),
+        ] {
+            let mut line = request("aws");
+            line.name = name.into();
+            line.args = args.into_iter().map(String::from).collect();
+            let Json(saved) = create_as(state.clone(), line, true).await;
+            lines.push(saved.data.expect("an agent's line is saved inactive"));
+        }
+        let read = |item: &QuickExec| ActivateQuickExecRequest {
+            command: item.command.clone(),
+            args: item.args.clone(),
+        };
+
+        // An agent activates none of them, whichever line it names.
+        for item in &lines {
+            let Json(by_agent) = activate(
+                State(state.clone()),
+                Path(item.id.clone()),
+                bridge(),
+                None,
+                Json(read(item)),
+            )
+            .await;
+            assert!(!by_agent.success, "{}", item.name);
+            assert_eq!(
+                stored(&state, &item.id).await.unmodelled_args_approved,
+                None
+            );
+        }
+        let Json(pending) = pending_approvals(State(state.clone())).await;
+        assert_eq!(pending.data.unwrap().len(), 3);
+
+        // The last line changed after the human read it: only it is refused.
+        let mut changed = read(&lines[2]);
+        changed.args.push("--force".into());
+        let requests = [read(&lines[0]), read(&lines[1]), changed];
+        let mut outcomes = Vec::new();
+        for (item, request) in lines.iter().zip(requests) {
+            let Json(outcome) = activate(
+                State(state.clone()),
+                Path(item.id.clone()),
+                None,
+                None,
+                Json(request),
+            )
+            .await;
+            outcomes.push(outcome.success);
+        }
+        assert_eq!(outcomes, [true, true, false]);
+        for (item, approved) in lines.iter().zip([Some(true), Some(true), None]) {
+            let stored = stored(&state, &item.id).await;
+            assert_eq!(stored.unmodelled_args_approved, approved, "{}", item.name);
+            assert_eq!(stored.agent_written, Some(true));
+        }
+        let Json(pending) = pending_approvals(State(state.clone())).await;
+        let pending = pending.data.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, lines[2].id);
+    }
+
     /// KT-1490: the human activates the line they read. A line whose program
     /// alone changed since is refused, though its args are the ones read.
     #[tokio::test]
