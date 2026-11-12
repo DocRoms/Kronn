@@ -4,7 +4,7 @@
  */
 import { AGENT_LABELS } from '../../lib/constants';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
-import { stepCanCarryShadows } from './StepShadowsEditor';
+import { stepCanCarryShadows } from './shadowEditorModel';
 import type { MainAgent } from './ShadowAgentPicker';
 import { resolveCatalogTier } from '../../lib/modelCatalogSelection';
 import type { ModelTiersConfig, ShadowAgent, WorkflowStep } from '../../types/generated';

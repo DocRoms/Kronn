@@ -13,6 +13,7 @@ import { AGENT_LABELS, ALL_AGENT_TYPES } from '../../lib/constants';
 import { freshShadowId, shadowTally } from '../../lib/shadowMerge';
 import { isIdenticalShadow, pruneMerge, shadowTestedCount } from '../../lib/shadowRuns';
 import { StepMergeEditor } from './StepShadowMergeEditor';
+import { MAX_SHADOWS, stepCanCarryShadows, useVersions, type Versions } from './shadowEditorModel';
 import type {
   AgentType, Project, QuickPrompt, ShadowAgent, ShadowBudget, ShadowMerge, ShadowPrompt, Skill, StepShadow, WorkflowStep,
 } from '../../types/generated';
@@ -39,9 +40,6 @@ interface Props {
   testId?: string;
 }
 
-type Versions = { state: 'loading' | 'error' | 'ready'; list: number[] };
-
-export const MAX_SHADOWS = 8;
 const SHADOW_ID = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 
 /** The empty text of an input is no value. */
@@ -50,24 +48,6 @@ const positive = (text: string): number | undefined => {
   const n = Number(text);
   return Number.isFinite(n) && n > 0 ? n : undefined;
 };
-
-/** Versions of one skill or QP, newest first. */
-export function useVersions(load: () => Promise<{ version_index: number }[] | null | undefined>, key: string): Versions {
-  const [loaded, setLoaded] = useState<{ key: string; versions: Versions } | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    load()
-      .then(list => {
-        const sorted = (list ?? []).map(v => v.version_index).sort((a, b) => b - a);
-        if (!cancelled) setLoaded({ key, versions: { state: 'ready', list: sorted } });
-      })
-      .catch(() => { if (!cancelled) setLoaded({ key, versions: { state: 'error', list: [] } }); });
-    return () => { cancelled = true; };
-    // `load` is rebuilt each render; the key names what it loads.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-  return loaded?.key === key ? loaded.versions : { state: 'loading', list: [] };
-}
 
 /** What the step loads, readable: « v3 épinglée », « dernière (v5) ». */
 function normalLabel(ref: number | null, latest: number | undefined, t: Translate): string {
@@ -440,11 +420,6 @@ function ShadowEditor({ shadow, shadows, onChange, onRemove, step, projects, ski
       </div>
     </div>
   );
-}
-
-/** Whether a step may carry shadows: an Agent step that stays inside Kronn. */
-export function stepCanCarryShadows(step: WorkflowStep): boolean {
-  return (!step.step_type || step.step_type.type === 'Agent') && !step.external_effect;
 }
 
 export function StepShadowsEditor({ step, onChange, projects, skills, quickPrompts, t, focusOnOpen = false, onFocused, testId = 'wf-step-shadows' }: Props) {
