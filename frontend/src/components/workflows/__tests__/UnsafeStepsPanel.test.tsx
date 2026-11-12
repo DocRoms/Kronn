@@ -371,6 +371,25 @@ describe('UnsafeStepsPanel', () => {
       expect(screen.getByText(/qeActivation\.usedBy\|start$/)).toBeDefined();
     });
 
+    it('puts "Activate all" on the title row and opens the confirmation under it, above the cards', async () => {
+      await renderPanel();
+      const head = screen.getByTestId('qe-activate-all-head');
+      const button = screen.getByText('qeActivateAll.button|4');
+      expect(head.contains(button)).toBe(true);
+      // Same row as the panel title, which comes first.
+      const title = head.querySelector('h4.wf-unsafe-title') as HTMLElement;
+      expect(title).not.toBeNull();
+      expect(title.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // The header is above every card.
+      const firstCard = screen.getAllByTestId('readiness-quick-exec')[0];
+      expect(head.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      fireEvent.click(button);
+      const confirmation = screen.getByTestId('qe-activate-all-confirm');
+      // Right under the title, above the cards.
+      expect(title.compareDocumentPosition(confirmation) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(confirmation.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
     it('opens one confirmation for the four, then activates each through the single activation', async () => {
       await renderPanel();
       fireEvent.click(screen.getByText('qeActivateAll.button|4'));

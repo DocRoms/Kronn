@@ -138,7 +138,18 @@
   display: flex;
   flex-direction: column;
   gap: var(--kr-sp-3);
-  margin-top: var(--kr-sp-3);
+}
+
+/* The button sits on the right of the title row (or alone on the row, at the
+ * top of the notice), above the cards. */
+.qe-activate-all__head {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.qe-activate-all__head > .qe-activation-btn {
+  margin-left: auto;
 }
 
 .qe-activate-all__confirm {

@@ -53,6 +53,18 @@ describe('activate all', () => {
     expect(screen.getAllByText(/qeActivation.activateNamed/)).toHaveLength(2);
   });
 
+  it('puts the button at the top of the notice, above the cards, and opens the confirmation there', () => {
+    render(<PendingActivationNotice items={[logs, start]} />);
+    const head = screen.getByTestId('qe-activate-all-head');
+    const button = screen.getByText('qeActivateAll.button:2');
+    expect(head.contains(button)).toBe(true);
+    const firstCard = document.querySelector('.qe-pending-activation__item') as HTMLElement;
+    expect(head.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(button);
+    const confirmation = screen.getByTestId('qe-activate-all-confirm');
+    expect(confirmation.compareDocumentPosition(firstCard) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('lists the steps that use each Quick Exec', () => {
     render(<PendingActivationNotice items={[logs, start]} />);
     expect(screen.getByText(/qeActivation.usedBy:top-a, top-b, top-c/)).toBeDefined();

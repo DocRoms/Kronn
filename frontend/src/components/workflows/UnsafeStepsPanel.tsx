@@ -207,10 +207,18 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
       aria-label={title}
       data-tone={waitingOnly ? 'neutral' : 'error'}
     >
-      <h4 className="wf-unsafe-title">
-        {waitingOnly ? <ShieldCheck size={14} /> : <AlertTriangle size={14} />}
-        {title}
-      </h4>
+      <ActivateAllQuickExecs
+        items={activatable}
+        disabled={applying !== null}
+        onActivated={() => setReload(value => value + 1)}
+        onRefresh={() => setReload(value => value + 1)}
+        heading={(
+          <h4 className="wf-unsafe-title">
+            {waitingOnly ? <ShieldCheck size={14} /> : <AlertTriangle size={14} />}
+            {title}
+          </h4>
+        )}
+      />
       {codeIssues.length > 0 && <p className="wf-unsafe-intro" data-kind="code">{t('wf.unsafeIntro')}</p>}
       {approvalIssues.length > 0 && (
         <p className="wf-unsafe-intro" data-kind="approval">{t('wf.approvalIntro')}</p>
@@ -260,12 +268,6 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
           })}
         </ul>
       )}
-      <ActivateAllQuickExecs
-        items={activatable}
-        disabled={applying !== null}
-        onActivated={() => setReload(value => value + 1)}
-        onRefresh={() => setReload(value => value + 1)}
-      />
       {elsewhere.size > 0 && (
         <div className="wf-unsafe-chain" data-testid="readiness-chain">
           <p className="wf-unsafe-intro">{t('wf.readinessChildren')}</p>

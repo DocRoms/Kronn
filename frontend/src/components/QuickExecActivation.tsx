@@ -3,7 +3,7 @@
 // they already are: the room that created it, a Page action, a workflow step.
 // Activation is the human's only: it names the line that was read, and the
 // server refuses it if the line changed since.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 import { quickExecs as quickExecsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
@@ -160,6 +160,10 @@ interface ActivateAllProps {
   onRefresh?: () => void;
   /** The caller is already activating something: nothing else is started. */
   disabled?: boolean;
+  /** The title of the surface: the button sits on its row, on the right, and
+   * the confirmation opens right under it. Without one, the button heads the
+   * block on a row of its own. */
+  heading?: ReactNode;
 }
 
 /** KT-1695 — « Activate all (N) »: one confirmation for every Quick Exec that
@@ -167,14 +171,14 @@ interface ActivateAllProps {
  * program carries the wording of a single activation. Confirming activates
  * each line through the same human-only endpoint as the per-card button: the
  * line shown is the line sent, and a line that changed since is refused. */
-export function ActivateAllQuickExecs({ items, onActivated, onRefresh, disabled = false }: ActivateAllProps) {
+export function ActivateAllQuickExecs({ items, onActivated, onRefresh, disabled = false, heading }: ActivateAllProps) {
   const { t } = useT();
   const [open, setOpen] = useState(false);
   const [ticked, setTicked] = useState<Set<string>>(new Set());
   const [running, setRunning] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const programs = useMemo(() => [...new Set(items.map(item => item.program))], [items]);
-  if (items.length < 2 && errors.length === 0) return null;
+  if (items.length < 2 && errors.length === 0 && !heading) return null;
 
   const allTicked = programs.every(program => ticked.has(program));
   const toggle = (program: string) => setTicked(current => {
@@ -211,17 +215,22 @@ export function ActivateAllQuickExecs({ items, onActivated, onRefresh, disabled 
   };
 
   return (
-    <div className="qe-activate-all" data-testid="qe-activate-all">
-      {!open && items.length >= 2 && (
-        <button
-          type="button"
-          className="qe-activation-btn"
-          data-kind="primary"
-          disabled={disabled}
-          onClick={() => setOpen(true)}
-        >
-          {t('qeActivateAll.button', items.length)}
-        </button>
+    <div className="qe-activate-all" data-testid="qe-activate-all" data-headed={heading ? 'true' : undefined}>
+      {(heading || (!open && items.length >= 2)) && (
+        <div className="qe-activate-all__head" data-testid="qe-activate-all-head">
+          {heading}
+          {!open && items.length >= 2 && (
+            <button
+              type="button"
+              className="qe-activation-btn"
+              data-kind="primary"
+              disabled={disabled}
+              onClick={() => setOpen(true)}
+            >
+              {t('qeActivateAll.button', items.length)}
+            </button>
+          )}
+        </div>
       )}
       {open && (
         <section
@@ -326,6 +335,12 @@ export function PendingActivationNotice({ items, steps = [], onActivated, onRefr
 
   return (
     <div className="qe-pending-activation" data-testid="qe-pending-activation" role="status">
+      <ActivateAllQuickExecs
+        items={items}
+        disabled={busy !== null}
+        onActivated={onActivated}
+        onRefresh={onRefresh}
+      />
       {items.map(item => (
         <div key={item.id} className="qe-pending-activation__item">
           <AlertTriangle size={12} aria-hidden="true" />
@@ -356,12 +371,6 @@ export function PendingActivationNotice({ items, steps = [], onActivated, onRefr
           </a>
         </div>
       ))}
-      <ActivateAllQuickExecs
-        items={items}
-        disabled={busy !== null}
-        onActivated={onActivated}
-        onRefresh={onRefresh}
-      />
       {error && <p role="alert" className="qe-pending-activation__error">{error}</p>}
     </div>
   );
