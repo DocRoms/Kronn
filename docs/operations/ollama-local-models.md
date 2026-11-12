@@ -662,7 +662,7 @@ default itself is never written, so someone who never touched it keeps the
 automatic behaviour. Folded, its summary line counts the suggestions and the
 downloads in progress. A download or an update in flight is drawn above the
 block, outside the fold, with its progress and its Cancel, so folding the block
-back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:155-157#usePersistentFold]
+back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:161-163#usePersistentFold]
 [src: file: frontend/src/hooks/usePersistentFold.ts:13-31#usePersistentFold]
 
 ### The suggestions, and what "verified" means here
@@ -717,7 +717,7 @@ Next to each model's Update button a badge says whether the tag has moved on:
 **Update available**, **Up to date**, or **Not checked**. When the block is
 folded, its summary counts the updates waiting. Updating a model withholds its
 badge until the library has been asked again, so a verdict that described the
-replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:446-452#freshnessOf]
+replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:453-459#freshnessOf]
 
 ### Reading the official library
 

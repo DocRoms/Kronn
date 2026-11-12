@@ -1,5 +1,6 @@
-/* KT-1518 — the « Fallback to » block of an agent card. Same pill language as
-   the concurrency control above it, stacked: one row per setting. */
+/* KT-1693 — the « Fallback » block of an agent card: a title, then one row per
+   mode (see FallbackRow.css). The step / discussion override and the run notice
+   share the same pill language. */
 .set-agent-fallback {
   display: flex;
   flex-direction: column;
@@ -13,197 +14,52 @@
   display: inline-flex;
   align-items: center;
   gap: var(--kr-sp-2);
-  min-height: 28px;
   font-weight: 650;
 }
 
-.set-agent-fallback-row select,
-.set-agent-fallback-row input[type="text"] {
-  flex: 1;
-  min-width: 0;
-  height: 24px;
-  padding: 0 var(--kr-sp-2);
-  color: var(--kr-text-primary);
-  font-size: var(--kr-fs-2xs);
-  border: 1px solid var(--kr-border);
-  border-radius: 999px;
-  background: var(--kr-bg);
-}
-
-.set-agent-fallback-chain {
-  font-weight: 650;
-  color: var(--kr-text-primary);
-}
-
-.set-agent-fallback-gap,
-.set-agent-fallback-error,
 .set-agent-fallback-cooldown {
   display: flex;
   align-items: center;
   gap: var(--kr-sp-1);
 }
 
-.set-agent-fallback-gap {
-  color: var(--kr-warning, var(--kr-text-muted));
-}
-
-.set-agent-fallback-error {
-  color: var(--kr-danger, var(--kr-text-primary));
-}
-
-/* The chain as a timeline, read left to right: origin → fallback → fallback. */
-.fb-timeline {
+/* The override of a discussion or a step: the row, and what it does with the default. */
+.fb-override {
   display: flex;
   flex-direction: column;
-  gap: var(--kr-sp-2);
-}
-
-.fb-track {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--kr-sp-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.fb-node {
-  display: inline-flex;
-  align-items: flex-start;
-  gap: var(--kr-sp-2);
-}
-
-.fb-node--origin {
-  align-items: center;
-  min-height: 24px;
-  padding: 0 var(--kr-sp-3);
-  font-weight: 700;
-  color: var(--kr-text-primary);
-  border: 1px solid var(--kr-border);
-  border-radius: 999px;
-  background: var(--kr-bg);
-}
-
-.fb-arrow {
-  margin-top: 6px;
+  font-size: var(--kr-fs-2xs);
   color: var(--kr-text-muted);
 }
 
-.fb-entry {
-  display: flex;
-  flex-direction: column;
-  gap: var(--kr-sp-1);
-  padding: var(--kr-sp-2);
-  border: 1px solid var(--kr-border);
-  border-radius: var(--kr-radius-md, 8px);
-  background: var(--kr-bg);
-}
-
-.fb-entry select,
-.fb-entry input[type="text"],
-.fb-add select,
-.fb-override select {
-  height: 24px;
-  min-width: 0;
-  padding: 0 var(--kr-sp-2);
-  color: var(--kr-text-primary);
-  font-size: var(--kr-fs-2xs);
-  border: 1px solid var(--kr-border);
-  border-radius: 999px;
-  background: var(--kr-bg);
-}
-
-.fb-add {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--kr-sp-1);
-  margin-top: 2px;
-}
-
-.fb-actions {
-  display: inline-flex;
-  gap: var(--kr-sp-1);
-}
-
-.fb-actions button,
-.fb-cut {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
+.fb-override-action {
   height: 22px;
-  padding: 0 var(--kr-sp-2);
+  padding: 0 var(--kr-sp-3);
   color: var(--kr-text-muted);
-  font-size: var(--kr-fs-2xs);
-  border: 1px solid var(--kr-border);
-  border-radius: 999px;
+  font-size: var(--kr-fs-xs);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-pill);
   background: transparent;
   cursor: pointer;
 }
 
-.fb-actions button:disabled,
-.fb-cut:disabled {
+.fb-override-action:hover:not(:disabled) {
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-hover);
+}
+
+.fb-override-action:disabled {
   opacity: 0.4;
   cursor: default;
 }
 
-.fb-cut {
-  align-self: flex-start;
-}
-
-.fb-paid {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--kr-sp-1);
-}
-
-.fb-empty,
 .fb-override-default {
-  color: var(--kr-text-muted);
-}
-
-.fb-gap,
-.fb-error {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-1);
-}
-
-.fb-gap {
-  color: var(--kr-warning, var(--kr-text-muted));
-}
-
-.fb-error {
-  color: var(--kr-danger, var(--kr-text-primary));
-}
-
-.fb-override {
-  display: flex;
-  flex-direction: column;
-  gap: var(--kr-sp-2);
-  font-size: var(--kr-fs-2xs);
-  color: var(--kr-text-muted);
-}
-
-.fb-override-modes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--kr-sp-3);
-}
-
-.fb-override-mode {
   display: inline-flex;
   align-items: center;
-  gap: var(--kr-sp-1);
-  font-weight: 650;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-muted);
 }
 
-.fb-override-mode[data-active="true"] {
-  color: var(--kr-text-primary);
-}
-
-/* The room / run line when a turn or a step moved on the chain. */
+/* The room / run line when a turn or a step moved on to a fallback. */
 .fb-notice {
   display: flex;
   flex-wrap: wrap;
@@ -213,7 +69,7 @@
   font-size: var(--kr-fs-2xs);
   color: var(--kr-text-muted);
   border: 1px dashed var(--kr-border);
-  border-radius: var(--kr-radius-md, 8px);
+  border-radius: var(--kr-radius-md);
 }
 
 .fb-notice-from,

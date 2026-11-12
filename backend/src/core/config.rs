@@ -613,6 +613,13 @@ pub async fn load() -> Result<Option<AppConfig>> {
         }
     }
 
+    // KT-1693 — the agent-level fallback chain of 0.15.3 moves onto the text
+    // mode rows; nothing configured is lost, and the legacy field is not written.
+    if crate::core::agent_fallback::migrate_legacy_chains(&mut config.agents) {
+        needs_save = true;
+        tracing::info!("Migrated the agent fallback chains onto the per-mode fallback rows");
+    }
+
     if needs_save {
         // Before the boot migration: the credential store is not armed yet, so
         // the file keeps whatever credentials it had.
@@ -1043,6 +1050,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                mode_fallbacks: Vec::new(),
                 fallback_chain: Vec::new(),
                 tools_enabled: None,
             },
@@ -1054,6 +1062,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                mode_fallbacks: Vec::new(),
                 fallback_chain: Vec::new(),
                 tools_enabled: None,
             },

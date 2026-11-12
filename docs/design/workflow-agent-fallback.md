@@ -70,7 +70,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:1074-1149#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:1197-1272#AgentDetection]
 
 ## Policy and precedence
 
@@ -328,7 +328,7 @@ Required UI:
 Workflow runs persist token totals (`WorkflowRun.tokens_used`) and each Agent
 attempt carries its own `cost_usd`, but there is no run-level cost total. Exact
 cross-provider cost display therefore needs additive persistence of that total,
-not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2122-2131#tokens_used] [src: file: backend/src/models/workflows.rs:2392-2400#cost_usd]
+not only a frontend estimate. [src: file: backend/src/models/workflows.rs:2122-2131#tokens_used] [src: file: backend/src/models/workflows.rs:2394-2402#cost_usd]
 
 The current workflow budget also increments once per logical Agent step, even
 though retry, repair, escalation, or debate can perform more model invocations.

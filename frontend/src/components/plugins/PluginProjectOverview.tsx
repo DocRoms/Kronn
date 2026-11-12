@@ -1,4 +1,4 @@
-import { RefreshCw, SearchCheck, Star } from 'lucide-react';
+import { KeyRound, RefreshCw, SearchCheck, Star } from 'lucide-react';
 import type { McpConfigDisplay, PluginInterface } from '../../types/generated';
 import { accessHealth, isAvailableLocally, visibleToPluginProject } from './pluginHealth';
 import { PluginHealthBadge } from './PluginHealthBadge';
@@ -15,6 +15,7 @@ export function PluginProjectOverview({ state }: { state: McpPageState }) {
     probeByConfig, probeTestedAtByConfig, driftBySlug, mcpOverview, healthFor,
     testingProjectId, handleTestProject, syncing, handlePreviewRescan,
     rescanPreview, setRescanPreview, handleApplyRescan,
+    checkingAllTokens, handleCheckAllTokens,
   } = state;
   const selectedProject = projects.find(project => project.id === selectedProjectId);
   const scopeLabel = selectedProjectId === '__all__'
@@ -63,6 +64,18 @@ export function PluginProjectOverview({ state }: { state: McpPageState }) {
             ? 'mcp.testingProject'
             : selectedProjectId === '__all__' ? 'mcp.testAll' : 'mcp.testProject')}
         </button>
+        {configs.some(config => config.token_probe) && (
+          <button
+            type="button"
+            className="mcp-btn-action"
+            disabled={checkingAllTokens}
+            onClick={() => void handleCheckAllTokens()}
+            data-testid="mcp-check-tokens"
+          >
+            <KeyRound size={13} className={checkingAllTokens ? 'spin' : undefined} />
+            {t(checkingAllTokens ? 'mcp.tokenCheck.checking' : 'mcp.tokenCheck.checkAll')}
+          </button>
+        )}
         <button
           type="button"
           className="mcp-btn-action"

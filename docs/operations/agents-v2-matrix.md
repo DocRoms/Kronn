@@ -189,7 +189,7 @@ read; opening a selector additionally refreshes stale CLI targets in the
 background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:199-200#useModelCatalogSnapshot]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:201-202#useModelCatalogSnapshot]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1363-1388#SearchableSelect]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
@@ -227,6 +227,6 @@ only on an actual target/tier change, distinguishes an absent connection from
 explicit null, and preserves historical message models. Isolated API tests
 cover this path, not provider inference or a new browser qualification.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
-[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1372-1380#currentConnectionId]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1382-1390#currentConnectionId]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1202-1219#agentSettingsForSelection]
 [src: file: backend/tests/discussion_target_model.rs:98-219#changing_agent_clears_the_previous_explicit_model]

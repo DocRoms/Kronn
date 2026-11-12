@@ -84,7 +84,7 @@ workflow has it under its one task):
 Only a person sets shadows: they start extra executions, so an agent's save that
 sets or changes them is refused, and a save that sends the steps back keeps the
 stored ones.
-[src: file: backend/src/api/workflows.rs:2894#AGENT_SHADOW_REFUSAL]
+[src: file: backend/src/api/workflows.rs:2903#AGENT_SHADOW_REFUSAL]
 [src: file: backend/src/workflows/shadow.rs:1032#keep_stored_shadows]
 A save is checked: the ids, the sampling, the overrides, the budgets, and that
 the step is an Agent step that stays inside Kronn.
@@ -269,7 +269,7 @@ loads and the one each of its shadows tests.
 Either way that shadow stops testing it; the other shadows keep theirs. Promotion
 is a person's decision too: the route has no agent access.
 [src: file: backend/src/workflows/shadow.rs:1092#promote]
-[src: file: backend/src/api/workflows.rs:2873#promote_shadow]
+[src: file: backend/src/api/workflows.rs:2882#promote_shadow]
 
 ## From the workflow-level shadow
 

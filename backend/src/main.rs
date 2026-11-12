@@ -916,6 +916,10 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     ));
     tokio::spawn(async move { learning_sweep.start().await });
 
+    // KT-1692 — probe every API connection's token at start and once a day, so
+    // an expired or revoked one is flagged before a workflow needs it.
+    kronn::core::token_checks::spawn_scheduler(state.clone());
+
     // 0.8.11 (B6) — periodic DB backup (default every 24h, keep 7). Targets
     // KRONN_BACKUP_DIR (a host-mounted dir outside the data volume) when set;
     // KRONN_BACKUP_INTERVAL_HOURS=0 disables it entirely.

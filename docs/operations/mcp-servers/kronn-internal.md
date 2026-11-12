@@ -100,7 +100,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2975-3023#decline]`
+`[src: file: backend/src/lib.rs:2984-3032#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:655-770#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
@@ -660,7 +660,7 @@ alias or display name; a name two connections share is refused rather than
 guessed, and every refusal lists the connections that can generate the
 modality asked for, with their ids.
 [src: file: backend/src/api/media.rs:150-205#ConnectionReference]
-[src: file: backend/src/db/external_api_connections.rs:132-160#ConnectionReference]
+[src: file: backend/src/db/external_api_connections.rs:159-187#ConnectionReference]
 
 The catalogue reports `configured` and `reachable`
 independently; its only strict implication is
@@ -774,7 +774,7 @@ one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
 `[src: file: backend/src/api/agent_tools.rs:4151-4173#native_worker_execution_for_trusted_dispatch]`
-`[src: file: backend/src/api_tests.rs:7218-7357#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
+`[src: file: backend/src/api_tests.rs:7227-7366#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
 two deliberately distinct identity domains. The live
