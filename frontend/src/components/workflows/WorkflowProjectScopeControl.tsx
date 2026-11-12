@@ -35,24 +35,26 @@ export function WorkflowProjectScopeControl({ value, onChange, projects, homePro
   };
 
   return (
-    <fieldset className="mt-6" data-testid="workflow-project-scope">
+    <fieldset className="wf-scope mt-6" data-testid="workflow-project-scope">
       <legend className="wf-label">{t('wiz.projectScope')}</legend>
-      {(['home', 'all', 'chosen'] as Mode[]).map(option => (
-        <label key={option} className="flex items-center gap-2 text-sm">
-          <input
-            type="radio"
-            name="workflow-project-scope"
-            checked={mode === option}
-            onChange={() => selectMode(option)}
-          />
-          {t(`wiz.projectScope.${option}`)}
-        </label>
-      ))}
+      <div className="wf-scope-options">
+        {(['home', 'all', 'chosen'] as Mode[]).map(option => (
+          <label key={option} className="wf-checkbox-label">
+            <input
+              type="radio"
+              name="workflow-project-scope"
+              checked={mode === option}
+              onChange={() => selectMode(option)}
+            />
+            {t(`wiz.projectScope.${option}`)}
+          </label>
+        ))}
+      </div>
       {mode === 'chosen' && (
-        <div className="mt-2 ml-6">
-          {others.length === 0 && <p className="text-2xs text-muted">{t('wiz.projectScope.none')}</p>}
+        <div className="wf-scope-projects">
+          {others.length === 0 && <p className="wf-field-hint">{t('wiz.projectScope.none')}</p>}
           {others.map(project => (
-            <label key={project.id} className="flex items-center gap-2 text-sm">
+            <label key={project.id} className="wf-checkbox-label">
               <input
                 type="checkbox"
                 checked={chosen.includes(project.id)}
@@ -63,7 +65,7 @@ export function WorkflowProjectScopeControl({ value, onChange, projects, homePro
           ))}
         </div>
       )}
-      <p className="text-2xs text-muted">
+      <p className="wf-field-hint wf-scope-hint">
         {t(homeProjectId ? 'wiz.projectScope.hint' : 'wiz.projectScope.hintGlobal')}
       </p>
     </fieldset>

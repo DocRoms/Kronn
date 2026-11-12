@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:6565-6622#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:6780-6876#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:6569-6586#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:7005-7071#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:6592-6649#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:6810-6906#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:6596-6613#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:7035-7101#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains

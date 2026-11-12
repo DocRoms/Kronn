@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:2974-3042#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:3093-3150#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:3004-3072#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:3123-3180#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -662,7 +662,7 @@ default itself is never written, so someone who never touched it keeps the
 automatic behaviour. Folded, its summary line counts the suggestions and the
 downloads in progress. A download or an update in flight is drawn above the
 block, outside the fold, with its progress and its Cancel, so folding the block
-back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:155-157#usePersistentFold]
+back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:161-163#usePersistentFold]
 [src: file: frontend/src/hooks/usePersistentFold.ts:13-31#usePersistentFold]
 
 ### The suggestions, and what "verified" means here
@@ -717,7 +717,7 @@ Next to each model's Update button a badge says whether the tag has moved on:
 **Update available**, **Up to date**, or **Not checked**. When the block is
 folded, its summary counts the updates waiting. Updating a model withholds its
 badge until the library has been asked again, so a verdict that described the
-replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:446-452#freshnessOf]
+replaced copy is never shown. [src: file: frontend/src/components/settings/OllamaCard.tsx:453-459#freshnessOf]
 
 ### Reading the official library
 

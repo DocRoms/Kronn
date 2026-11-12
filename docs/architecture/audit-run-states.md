@@ -199,7 +199,7 @@ this degrades and continues.
   `lease_orphaned`. The cleanup action (`POST /api/audit-runs/cleanup`) never
   touches a live audit. It settles the stale `Running` rows and releases the
   orphaned leases.
-  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:285#lease_orphaned] [src: file: backend/src/api/audit/run.rs:328#lease_orphaned] [src: file: backend/src/api/audit/run.rs:191-223#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:962-1003#reconcile_running_except]
+  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:289#lease_orphaned] [src: file: backend/src/api/audit/run.rs:328#lease_orphaned] [src: file: backend/src/api/audit/run.rs:191-223#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:962-1003#reconcile_running_except]
 - **Validation agents.** Before an audit touches `docs/`, it stops any agent
   still answering in a validation discussion linked to one of the project's
   runs. While an audit of the project shows progress, such an agent is not
@@ -365,7 +365,7 @@ sections.
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:2043-2046#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
+  [src: file: backend/src/lib.rs:2050-2053#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
 
 ## The action offered in each state
 
@@ -440,7 +440,7 @@ Historical runs without fingerprints require a new audit before signoff.
 [src: file: backend/src/core/audit_documents.rs:11-45#capture]
 [src: file: backend/src/core/audit_documents.rs:51-65#verify]
 [src: file: backend/src/db/discussions.rs:1895-1932#insert_native_agent_message_with_audit_documents]
-[src: file: backend/src/api/discussions/streaming.rs:5213-5235#validation_documents]
+[src: file: backend/src/api/discussions/streaming.rs:5227-5249#validation_documents]
 [src: file: backend/src/db/sql/260_audit_document_fingerprints.sql:1-3#final_doc_fingerprints_json]
 
 The explicit re-anchor action sends `deterministic_only: true`. It returns the

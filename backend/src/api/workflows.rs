@@ -717,8 +717,17 @@ pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), Stri
         .as_ref()
         .and_then(|settings| settings.fallback.as_deref())
     {
-        crate::core::agent_fallback::check_shape(Some(&s.agent), chain)
-            .map_err(|e| format!("Step « {} »: {e}", s.name))?;
+        crate::core::agent_fallback::check_shape(
+            Some(&s.agent),
+            Some(crate::models::FallbackMode::from_tier(
+                s.agent_settings
+                    .as_ref()
+                    .and_then(|settings| settings.tier)
+                    .unwrap_or_default(),
+            )),
+            chain,
+        )
+        .map_err(|e| format!("Step « {} »: {e}", s.name))?;
     }
     crate::core::skill_versions::validate_pins(&s.skill_ids)
         .map_err(|e| format!("Step « {} »: {e}", s.name))?;

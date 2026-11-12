@@ -3655,17 +3655,9 @@
   outline-offset: 2px;
 }
 
-.set-agent-tools-defaults {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--kr-sp-3);
-  margin-bottom: var(--kr-sp-3);
-}
-
-.set-agent-tools-default {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--kr-sp-2);
+.set-ollama-tools {
+  margin-bottom: var(--kr-sp-4);
+  padding-left: var(--kr-sp-9);
 }
 
 .set-ext-api-conn-tools-off {

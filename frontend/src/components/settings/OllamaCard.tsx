@@ -28,6 +28,10 @@ interface OllamaCardProps {
   t: (key: string, ...args: (string | number)[]) => string;
   modelCostSuffix?: (model: string) => string;
   headerAccessory?: ReactNode;
+  /** KT-1693 — the fallback rows of the card (one per mode Ollama has), under the header. */
+  fallbackRows?: ReactNode;
+  /** The "Can act in Kronn" switch, printed with its help inside the card (KT-1687). */
+  toolsControl?: ReactNode;
   /** KT-586 — lets the settings page pass the name-as-mention-colour control,
    *  so the card says "Ollama" once instead of once as a title and again as a
    *  colour chip beside it. */
@@ -130,7 +134,7 @@ function PullProgressRow({ model, state, active, onCancel, t }: {
   );
 }
 
-export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: OllamaCardProps) {
+export function OllamaCard({ t, modelCostSuffix, headerAccessory, fallbackRows, toolsControl, title }: OllamaCardProps) {
   const [health, setHealth] = useState<OllamaHealthResponse | null>(null);
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -475,6 +479,7 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
             </button>
           </div>
         </div>
+        {fallbackRows}
       </div>
 
       {/* canirun.ai info box — visible right under the title in EVERY
@@ -487,6 +492,8 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, title }: Ollam
        *  reads as "FYI before you commit" rather than "after-thought
        *  hint". */}
       <CaniRunHint t={t} />
+
+      {toolsControl ? <div className="set-ollama-tools" data-testid="ollama-tools">{toolsControl}</div> : null}
 
       {/* State-specific content */}
       {!loading && health && (
