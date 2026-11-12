@@ -40,6 +40,7 @@ import { RunRetentionCard } from './RunRetentionCard';
 import QuickPromptVersionPin from '../QuickPromptVersionPin';
 import { StepShadowsEditor } from './StepShadowsEditor';
 import { StepShadowRows } from './StepShadowRows';
+import { hasShadowBlock } from './shadowRowModel';
 import type { ShadowEdit } from '../../lib/shadowMerge';
 import { WorkflowRefsCard } from './WorkflowRefsCard';
 import type { RefOptions } from '../../lib/workflowRefs';
@@ -1649,11 +1650,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             {t('wiz.agentAndTierLabel')} <HelpTip hint={t('wiz.helpAgent')} />
           </label>
           <div className="wf-wizard-agent-tier mb-6">
-            {steps[0] && renderAgentTierPicker(steps[0], patch => updateStep(0, patch))}
+            {steps[0] && !hasShadowBlock(steps[0]) && renderAgentTierPicker(steps[0], patch => updateStep(0, patch))}
             {steps[0] && (
               <StepShadowRows
                 step={steps[0]}
                 choices={agentChoices}
+                mainPicker={hasShadowBlock(steps[0]) ? renderAgentTierPicker(steps[0], patch => updateStep(0, patch)) : undefined}
                 onEdit={edit => applyShadowEdit(0, edit)}
                 addWhenEmpty
                 t={t}
@@ -2378,12 +2380,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 {activeStepType === 'Agent' && (
                   <div className="wf-step-agent-routing">
                     <label className="wf-label">{t('wiz.agentAndTierLabel')}</label>
-                    {renderAgentTierPicker(step, patch => updateStep(i, patch))}
-                    {/* KT-1696 — the shadows sit right under the agent, not in « Advanced ». */}
+                    {!hasShadowBlock(step) && renderAgentTierPicker(step, patch => updateStep(i, patch))}
+                    {/* KT-1696 — the shadows sit right under the agent, not in « Advanced ».
+                        KT-1707 — with shadows, the agent picker moves into the Principal row. */}
                     <StepShadowRows
                       step={step}
                       nextStepName={steps[i + 1]?.name}
                       choices={agentChoices}
+                      mainPicker={hasShadowBlock(step) ? renderAgentTierPicker(step, patch => updateStep(i, patch)) : undefined}
                       onEdit={edit => applyShadowEdit(i, edit)}
                       addWhenEmpty
                       t={t}

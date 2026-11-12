@@ -13,10 +13,12 @@
   color: var(--kr-text-secondary);
 }
 
+/* One row layout for the Principal and the shadows: role | agent · model | badge | controls.
+   The shadows are indented by their dashed rule; the columns are the same. */
 .wf-shadow-subrow {
-  display: flex;
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr) auto auto;
   align-items: center;
-  flex-wrap: wrap;
   gap: 4px 8px;
   min-width: 0;
   padding: 3px 8px;
@@ -25,27 +27,46 @@
   background: rgba(var(--kr-purple-rgb), 0.06);
   font-size: var(--kr-fs-xs);
 }
+.wf-shadow-subrow[data-role='shadow'] { margin-left: 12px; }
 .wf-shadow-subrow[data-paused='true'] { opacity: 0.7; }
 .wf-shadow-subrow[data-paused='true'] .wf-shadow-subrow-name { text-decoration: line-through; }
+
+/* The Principal: teal, solid, always active, the base of the merge. */
+.wf-shadow-principal {
+  border: 1px solid rgba(var(--kr-cyan-rgb), 0.55);
+  border-left-width: 2px;
+  border-left-style: solid;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-cyan-rgb), 0.1);
+}
+.wf-shadow-principal .wf-shadow-subrow-name { color: var(--kr-cyan); }
 
 .wf-shadow-subrow-name {
   color: var(--kr-purple);
   font-weight: 700;
-  /* Natural width: the name only clips when it alone is wider than the card. */
-  flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.wf-shadow-subrow-agent { display: inline-flex; align-items: center; min-width: 0; }
+.wf-shadow-static { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--kr-text-primary); }
 
 .wf-shadow-subrow-toggles {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
-  margin-left: auto;
 }
+.wf-shadow-chip {
+  padding: 0 7px;
+  border: 1px solid var(--kr-cyan);
+  border-radius: var(--kr-r-pill);
+  color: var(--kr-cyan);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.wf-shadow-base { color: var(--kr-text-muted); font-size: var(--kr-fs-2xs); white-space: nowrap; }
 
 /* Agent/model picker: same trigger look as the step's own agent picker. */
 .wf-shadow-picker { display: inline-flex; min-width: 0; }
@@ -67,6 +88,9 @@
 .wf-shadow-picker-btn > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wf-shadow-picker-btn:hover:not(:disabled) { border-color: var(--kr-purple); }
 .wf-shadow-picker-btn:disabled { cursor: default; opacity: 0.75; }
+/* « = principal »: the shadow has no agent of its own, the one shown is the principal's. */
+.wf-shadow-picker-hint { flex: none; color: var(--kr-text-muted); font-size: var(--kr-fs-2xs); font-style: normal; }
+.wf-shadow-add { margin-left: 12px; }
 .wf-shadow-add .wf-shadow-picker-btn {
   align-self: flex-start;
   border-style: dashed;
@@ -260,6 +284,7 @@
 .wf-bm-shadow { fill: var(--kr-purple); font-size: 10px; font-family: var(--kr-font-mono, monospace); }
 .wf-bm-shadow[data-paused='true'] { text-decoration: line-through; opacity: 0.65; }
 .wf-bm-merged { fill: var(--kr-warning-amber); }
+.wf-bm-principal { fill: var(--kr-cyan); font-weight: 700; }
 
 /* Runs list: « ⑂ 2 · ⊕ ok ». */
 .wf-run-compact-shadows {

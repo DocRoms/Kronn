@@ -1,9 +1,9 @@
 /**
  * KT-1696 — the agent/model menu of a shadow (and of the merge's condense
  * agent): one click opens the agents grouped with their transport, each with the
- * models it offers. « = step agent » picks the step's own agent, which makes an
- * identical shadow. The step's own model is greyed out: that is what « = step
- * agent » already says.
+ * models it offers. « = principal » picks the step's own agent, which makes an
+ * identical shadow. The step's own model is greyed out: that is what « = principal »
+ * already says.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -13,6 +13,7 @@ import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES } from '../../lib/constants
 import { modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
 import { agentTransport, type AgentTransport } from '../../lib/shadowMerge';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
+import { agentModelLabel } from './shadowRowModel';
 import type { AgentType, ShadowAgent } from '../../types/generated';
 
 type Translate = (key: string, ...args: (string | number)[]) => string;
@@ -49,14 +50,6 @@ interface Props {
 const FALLBACK_TARGETS: readonly AgentSwitchTarget[] = [...ALL_AGENT_TYPES, 'Custom' as AgentType].map(agent => ({ agent }));
 
 const targetLabel = (target: AgentSwitchTarget) => target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
-
-/** What the trigger shows for a value: `Agent · model`, or « = step agent ». */
-function shadowAgentLabel(value: ShadowAgent | undefined, choices: readonly AgentSwitchTarget[], t: Translate): string {
-  if (!value) return t('wf.shadow.rows.sameAgent');
-  const known = choices.find(target => target.agent === value.agent && (target.connectionId ?? null) === (value.connection_id ?? null));
-  const agent = known ? targetLabel(known) : AGENT_LABELS[value.agent] ?? value.agent;
-  return `${agent} · ${value.model || t('wf.shadow.rows.defaultModel')}`;
-}
 
 export function ShadowAgentPicker({ value, onChange, choices, main, ariaLabel, testId, t, disabled = false, children, className }: Props) {
   const [open, setOpen] = useState(false);
@@ -120,7 +113,8 @@ export function ShadowAgentPicker({ value, onChange, choices, main, ariaLabel, t
         disabled={disabled}
         onClick={() => setOpen(current => !current)}
       >
-        {children ?? <span>{shadowAgentLabel(value, targets, t)}</span>}
+        {children ?? <span>{agentModelLabel(value, main, targets, t)}</span>}
+        {!children && !value && <em className="wf-shadow-picker-hint">{t('wf.shadow.rows.sameAgent')}</em>}
         <ChevronDown size={9} aria-hidden />
       </button>
       {open && position && createPortal(
