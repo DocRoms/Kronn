@@ -6,6 +6,7 @@ import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { useIsMobile } from '../../hooks/useMediaQuery';
 import { OllamaCard } from './OllamaCard';
 import { AgentFallbackControl } from './AgentFallbackControl';
+import { CatalogHint } from './CatalogHint';
 import { ConnectionFallbackRow } from './ConnectionFallbackRow';
 import type { ExternalApiConnectionView } from '../../lib/api';
 import { buildMediaOptions, COMFYUI_OWNER, type ComfyMediaSource } from '../../lib/mediaFallbackOptions';
@@ -657,7 +658,7 @@ export function AgentsSection({
   /** KT-1693 — what continues a turn this agent cannot serve (rate limit, quota,
    *  outage, not signed in), one row per mode the agent has. Every installed
    *  agent has them, OpenCode included. */
-  const renderFallbackControl = (agentType: AgentType, pickers?: Partial<Record<FallbackMode, ReactNode>>) => {
+  const renderFallbackControl = (agentType: AgentType, pickers?: Partial<Record<FallbackMode, ReactNode>>, hint?: ReactNode) => {
     if (agentType === 'Custom') return null;
     const { overview, options, tiers, catalog, refetch } = fallbackData;
     const modes = modesOf(agentType, tiers, catalog);
@@ -671,6 +672,7 @@ export function AgentsSection({
         agentType={agentType}
         modes={modes}
         pickers={pickers}
+        hint={hint}
         options={options}
         chains={overview?.chains ?? []}
         cooldown={overview?.cooldowns.find((cooldown) => cooldown.agent === agentType)}
@@ -899,16 +901,19 @@ export function AgentsSection({
     };
   };
 
-  /** What the catalogue says about the pickers of a card, once, above its block. */
-  const renderCatalogNotices = (agentType: AgentType) => {
+  /** What the catalogue says about the pickers of a card: one muted line inside its block, under the title. */
+  const renderCatalogHint = (agentType: AgentType) => {
     const target = catalog.catalog?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agentType));
     return (
-      <>
-        {catalog.loading && <p className="set-hint" role="status">{t('common.loading')}</p>}
-        {catalog.error && <p className="set-hint" role="alert">{t('modelCatalog.loadError')} <button type="button" className="set-icon-btn" onClick={catalog.refetch}>{t('modelCatalog.reload')}</button></p>}
-        {!catalog.loading && !catalog.error && !target?.models.length && <p className="set-hint">{t('modelCatalog.empty')}</p>}
-        {target?.stale && <p className="set-hint">{t('modelCatalog.stale')}{target.last_error_reason ? ` — ${target.last_error_reason}` : ''}</p>}
-      </>
+      <CatalogHint
+        t={t}
+        loading={catalog.loading}
+        failed={Boolean(catalog.error)}
+        empty={!catalog.loading && !catalog.error && !target?.models.length}
+        stale={Boolean(target?.stale)}
+        reason={target?.last_error_reason}
+        onReload={catalog.refetch}
+      />
     );
   };
 
@@ -918,8 +923,7 @@ export function AgentsSection({
     const pickers = renderTierPickers(agent);
     return (
       <div className="set-agent-models-block" data-testid={`agent-models-${agent.agent_type}`}>
-        {pickers && renderCatalogNotices(agent.agent_type)}
-        {renderFallbackControl(agent.agent_type, pickers)}
+        {renderFallbackControl(agent.agent_type, pickers, pickers && renderCatalogHint(agent.agent_type))}
       </div>
     );
   };
@@ -1913,7 +1917,7 @@ export function AgentsSection({
                   modelCostSuffix={modelCostSuffix}
                   title={renderAgentNameControl('Ollama', 'Ollama')}
                   headerAccessory={renderConcurrencyControl('Ollama')}
-                  modelsBlock={pickers => renderFallbackControl('Ollama', pickers)}
+                  modelsBlock={(pickers, hint) => renderFallbackControl('Ollama', pickers, hint)}
                   toolsControl={renderToolsControl('Ollama')}
                 />
               </div>

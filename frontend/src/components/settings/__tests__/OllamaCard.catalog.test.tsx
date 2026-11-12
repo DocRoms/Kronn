@@ -162,7 +162,10 @@ describe('OllamaCard shared catalogue and safe persistence (KT-531)', () => {
       stale: false, live_refresh_ok: false, last_error_reason: 'provider_error',
     })));
     const input = await show();
-    expect(screen.getByText(/modelCatalog.stale.*provider_error/)).toBeInTheDocument();
+    // Plain words inside the block, never the raw reason code.
+    const hint = screen.getByText('modelCatalog.staleHint.provider_error');
+    expect(hint.closest('[data-testid="ollama-models"]')).not.toBeNull();
+    expect(screen.queryByText(/—\s*provider_error/)).not.toBeInTheDocument();
     fireEvent.focus(input);
     expect(await screen.findByRole('option', { name: 'current' })).toHaveTextContent('modelCatalog.provenance.cached');
     expect(setTiers).not.toHaveBeenCalled();

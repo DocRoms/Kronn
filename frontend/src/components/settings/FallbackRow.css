@@ -45,11 +45,32 @@
   flex: 1 1 100%;
 }
 
+/* The picker takes the room the fallback pill leaves, so a model id is not cut
+   at a fixed width while the row has space; the pill wraps under it only when
+   the two cannot share the line. The full label stays in the field's tooltip. */
 .fbr-model {
-  display: inline-flex;
+  display: flex;
+  flex: 1 1 200px;
   align-items: center;
-  min-width: 0;
+  gap: var(--kr-sp-2);
+  min-width: min(160px, 100%);
   max-width: 100%;
+}
+
+.fbr-model > .searchable-select,
+.fbr-model > .flex-row {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* NVIDIA's free-text model field (its catalogue is long and partly uncallable). */
+.fbr-model > .flex-row .set-tier-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fbr-model > .searchable-select .searchable-select-control input {
+  text-overflow: ellipsis;
 }
 
 .fbr-track {

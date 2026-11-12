@@ -189,7 +189,7 @@ read; opening a selector additionally refreshes stale CLI targets in the
 background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:204-205#useModelCatalogSnapshot]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:206-207#useModelCatalogSnapshot]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:879-891#SearchableSelect]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]

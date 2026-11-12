@@ -22,6 +22,7 @@ import type { FallbackMode, OllamaHealthResponse, OllamaModel, OllamaRegistryRes
 import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2, Save, RotateCcw, ChevronRight } from 'lucide-react';
 import { suggestedModelsFor } from './ollamaModels';
 import { SearchableSelect } from '../SearchableSelect';
+import { CatalogHint } from './CatalogHint';
 import './FallbackRow.css';
 import '../../pages/SettingsPage.css';
 
@@ -32,7 +33,7 @@ interface OllamaCardProps {
   /** KT-1706 — the card's one « Models and fallbacks » block, drawn under the header: given the model
    *  picker of each mode (eco, standard, advanced, decision) it returns the rows with their fallbacks.
    *  Without it the pickers are listed alone. */
-  modelsBlock?: (pickers: Partial<Record<FallbackMode, ReactNode>>) => ReactNode;
+  modelsBlock?: (pickers: Partial<Record<FallbackMode, ReactNode>>, hint: ReactNode) => ReactNode;
   /** The "Can act in Kronn" switch, printed with its help inside the card (KT-1687). */
   toolsControl?: ReactNode;
   /** KT-586 — lets the settings page pass the name-as-mention-colour control,
@@ -471,6 +472,18 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, modelsBlock, t
   const withSizes = (options: ReturnType<typeof catalogModelOptions>) => options
     .map(option => ({ ...option, description: [option.description, sizeOfInstalled(option.value)].filter(Boolean).join(' · ') }));
   const pickerLocked = !tiers || savingTier !== null || catalog.loading;
+  const catalogHint = (
+    <CatalogHint
+      t={t}
+      loading={catalog.loading}
+      failed={Boolean(catalog.error)}
+      empty={!catalog.loading && !catalog.error && !target?.models.length}
+      stale={Boolean(target?.stale) && !catalog.error && !catalog.loading}
+      reason={target?.last_error_reason}
+      reloading={catalog.loading}
+      onReload={reloadCatalog}
+    />
+  );
   const pickers: Partial<Record<FallbackMode, ReactNode>> = {};
   for (const [mode, tier] of [['eco', 'economy'], ['standard', 'default'], ['advanced', 'reasoning']] as const) {
     const configuredDefault = tier === 'default' ? '' : tiers?.ollama.default || '';
@@ -530,8 +543,9 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, modelsBlock, t
         </div>
       </div>
 
-      {modelsBlock ? modelsBlock(pickers) : (
+      {modelsBlock ? modelsBlock(pickers, catalogHint) : (
         <div className="set-agent-fallback" data-testid="ollama-models">
+          {catalogHint}
           {(['eco', 'standard', 'advanced', 'decision'] as const).map(mode => (
             <div className="fbr" data-with-model="true" data-mode={mode} key={mode}>
               <span className="fbr-mode">{t(`fallback.mode.${mode}`)}</span>
@@ -701,13 +715,6 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, modelsBlock, t
           <div className="set-ollama-models">
             {tiersLoadError && <p className="set-ollama-context-error" role="alert">{t('common.error')} — {t('ollama.tierPickerTitle')}</p>}
             {tierError && <p className="set-ollama-context-error" role="alert">{tierError}</p>}
-            {catalog.error && <p className="set-hint" role="alert">
-              {t('modelCatalog.loadError')}{' '}
-              <button type="button" className="set-icon-btn" disabled={catalog.loading} onClick={reloadCatalog}>{t('modelCatalog.reload')}</button>
-            </p>}
-            {catalog.loading && <p className="set-hint" role="status">{t('common.loading')}</p>}
-            {!catalog.loading && !catalog.error && !target?.models.length && <p className="set-hint">{t('modelCatalog.empty')}</p>}
-            {target?.stale && <p className="set-hint">{t('modelCatalog.stale')}{target.last_error_reason ? ` — ${target.last_error_reason}` : ''}</p>}
             {/* Bench-based guidance (2026-07) — which local model fits which
                 job, so users don't put a weak model on a demanding step. */}
             <div className="set-ollama-tier-guidance">💡 {t('ollama.tierGuidance')}</div>

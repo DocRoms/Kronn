@@ -20,6 +20,9 @@ interface Props {
   /** KT-1706 — the model picker of each mode (« Mode · [model ▾] → fallback »). A mode with no picker shows
    *  its resolved model as a read-only pill. */
   pickers?: Partial<Record<FallbackMode, ReactNode>>;
+  /** KT-1706 — what the catalogue says about the pickers (loading, nothing known, stale): one muted line
+   *  under the block's title. */
+  hint?: ReactNode;
   /** KT-1706 — more rows of the same block, after the agent's own (an HTTP connection's image and video rows). */
   extraRows?: ReactNode;
   /** Every agent/model that could be a fallback; each row keeps the kind of its mode. */
@@ -49,7 +52,7 @@ const REASONS: Record<string, string> = {
  *  picker sets the mode's model; the fallback is what takes over when the
  *  provider cannot serve it. A discussion or a workflow step can override a
  *  mode; with no override this one applies. */
-export function AgentFallbackControl({ agentType, modes, pickers, extraRows, options, chains, cooldown, onChange, onOpenAgent }: Props) {
+export function AgentFallbackControl({ agentType, modes, pickers, hint, extraRows, options, chains, cooldown, onChange, onOpenAgent }: Props) {
   const { t } = useT();
   return (
     <div className="set-agent-fallback" data-testid={`agent-fallback-${agentType}`}>
@@ -57,6 +60,7 @@ export function AgentFallbackControl({ agentType, modes, pickers, extraRows, opt
         <Shuffle size={12} aria-hidden="true" />
         <span>{t('agents.modelsAndFallbacks')}</span>
       </div>
+      {hint}
       {modes.map(({ mode, model }) => {
         const view = chains.find((chain) => chain.agent === agentType && chain.mode === mode);
         const links: AgentFallback[] = (view?.links ?? []).map((link) => ({
