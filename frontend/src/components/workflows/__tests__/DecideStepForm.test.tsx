@@ -1,5 +1,21 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { buildApiMock } from '../../../test/apiMock';
+
+vi.mock('../../../lib/api', () => buildApiMock({
+  modelCatalogApi: {
+    list: vi.fn().mockResolvedValue({
+      targets: [{
+        runtime_target_id: 'agent:ollama', agent_type: 'Ollama', stale: false, live_refresh_ok: true,
+        models: ['clef-flash:9b', 'clef-pro:27b'].map(model_id => ({
+          model_id, display_name: model_id, display_alias: null, capabilities: ['decision'],
+          runtime_target_id: 'agent:ollama', availability: 'available',
+        })),
+      }],
+    }),
+  },
+}));
+
 import { DecideStepForm } from '../DecideStepForm';
 import { blankDecideConfig, decideConfigProblem, decideSignals } from '../../../lib/decideStep';
 import type { DecideConfig } from '../../../types/generated';
@@ -40,5 +56,25 @@ describe('DecideStepForm (KT-1367)', () => {
     expect(screen.getByTestId('decide-signals')).toHaveTextContent('route_unsure');
     fireEvent.click(screen.getByText('{{steps.tests.output}}'));
     expect((onChange.mock.calls.at(-1)![0] as DecideConfig).state).toBe('{{steps.tests.output}}');
+  });
+
+  // KT-1697 — the same picker as the overview card, writing the step's model.
+  it('picks the step\'s decision model from the editor, and back to the default', async () => {
+    const onChange = vi.fn();
+    const config: DecideConfig = { state: 's', questions: [{ id: 'route', kind: 'noul', instructions: 'Which tier?' }] };
+    const { rerender } = render(<DecideStepForm config={config} defaultModel="clef-flash:9b" previousSteps={[]} onChange={onChange} t={t} />);
+    expect(screen.getByTestId('decide-model')).toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId('decision-model-picker'));
+    fireEvent.click(await screen.findByTestId('decision-option-clef-pro:27b'));
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    const own = onChange.mock.calls[0][0] as DecideConfig;
+    expect(own.model).toBe('clef-pro:27b');
+    expect(own.connection_id).toBeUndefined();
+
+    rerender(<DecideStepForm config={own} defaultModel="clef-flash:9b" previousSteps={[]} onChange={onChange} t={t} />);
+    fireEvent.click(await screen.findByTestId('decision-model-picker'));
+    fireEvent.click(await screen.findByTestId('decision-option-default'));
+    await waitFor(() => expect(onChange).toHaveBeenCalledTimes(2));
+    expect('model' in (onChange.mock.calls[1][0] as DecideConfig)).toBe(false);
   });
 });

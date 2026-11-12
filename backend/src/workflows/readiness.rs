@@ -3,7 +3,7 @@
 //! its sub-workflows and every rollback chain. Read-only: it never approves,
 //! rewrites or clears anything.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::doctrine_warnings::{self, ConfiguredApi};
 use crate::models::{
@@ -34,7 +34,7 @@ pub type ApprovalCheck<'a> = dyn FnMut(&Workflow) -> Result<Option<String>, Stri
 /// which needs the database: production callers use [`assess_in_db`].
 /// Sub-workflows resolve through `workflows` (`root` need not be in it).
 pub fn assess(root: &Workflow, workflows: &HashMap<String, Workflow>) -> WorkflowReadiness {
-    assess_full(root, workflows, &HashMap::new(), &mut |_| Ok(None))
+    assess_full(root, workflows, &HashMap::new(), None, &mut |_| Ok(None))
 }
 
 /// [`assess`] that also reads the saved Quick Execs CollectApiData sources run
@@ -44,7 +44,7 @@ pub fn assess_with(
     workflows: &HashMap<String, Workflow>,
     quick_execs: &HashMap<String, QuickExec>,
 ) -> WorkflowReadiness {
-    assess_full(root, workflows, quick_execs, &mut |_| Ok(None))
+    assess_full(root, workflows, quick_execs, None, &mut |_| Ok(None))
 }
 
 /// [`assess`] with the approval gate read through `approval`.
@@ -53,7 +53,41 @@ pub fn assess_with_approvals(
     workflows: &HashMap<String, Workflow>,
     approval: &mut ApprovalCheck<'_>,
 ) -> WorkflowReadiness {
-    assess_full(root, workflows, &HashMap::new(), approval)
+    assess_full(root, workflows, &HashMap::new(), None, approval)
+}
+
+/// [`assess`] that also knows which decision models Ollama has installed
+/// (KT-1697), so a Decide step on a missing model is flagged.
+pub fn assess_with_decision_models(
+    root: &Workflow,
+    workflows: &HashMap<String, Workflow>,
+    decision_models: &HashSet<String>,
+) -> WorkflowReadiness {
+    assess_full(
+        root,
+        workflows,
+        &HashMap::new(),
+        Some(decision_models),
+        &mut |_| Ok(None),
+    )
+}
+
+/// The decision models Ollama's catalogue lists as available, or `None` when
+/// the catalogue cannot be read (the model check is then skipped, never
+/// guessed).
+pub fn installed_decision_models(conn: &rusqlite::Connection) -> Option<HashSet<String>> {
+    let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::Ollama);
+    let entries = crate::db::model_catalog::list_for_target(conn, &target).ok()?;
+    Some(
+        entries
+            .into_iter()
+            .filter(|entry| {
+                entry.availability == crate::models::ModelAvailability::Available
+                    && entry.capabilities.iter().any(|c| c == "decision")
+            })
+            .map(|entry| entry.model_id)
+            .collect(),
+    )
 }
 
 /// [`assess`] plus the repository-import approval gate the run checks before
@@ -73,9 +107,15 @@ pub fn assess_in_db(
     // KT-1216: the plugins an Exec could bypass. A failed read only drops that
     // one advisory check: it is never a blocker.
     let apis = configured_apis(conn).unwrap_or_default();
-    assess_walk(root, workflows, &quick_execs, &apis, &mut |wf| {
-        repository_approval_refusal(conn, wf)
-    })
+    let decision_models = installed_decision_models(conn);
+    assess_walk(
+        root,
+        workflows,
+        &quick_execs,
+        &apis,
+        decision_models.as_ref(),
+        &mut |wf| repository_approval_refusal(conn, wf),
+    )
 }
 
 /// The API plugins with at least one saved configuration, by the host their
@@ -118,9 +158,10 @@ pub fn assess_full(
     root: &Workflow,
     workflows: &HashMap<String, Workflow>,
     quick_execs: &HashMap<String, QuickExec>,
+    decision_models: Option<&HashSet<String>>,
     approval: &mut ApprovalCheck<'_>,
 ) -> WorkflowReadiness {
-    assess_walk(root, workflows, quick_execs, &[], approval)
+    assess_walk(root, workflows, quick_execs, &[], decision_models, approval)
 }
 
 /// [`assess_full`] that also knows the configured API plugins, which the
@@ -130,9 +171,11 @@ pub fn assess_walk(
     workflows: &HashMap<String, Workflow>,
     quick_execs: &HashMap<String, QuickExec>,
     apis: &[ConfiguredApi],
+    decision_models: Option<&HashSet<String>>,
     approval: &mut ApprovalCheck<'_>,
 ) -> WorkflowReadiness {
     let mut walk = Walk {
+        decision_models,
         workflows,
         quick_execs,
         apis,
@@ -188,6 +231,8 @@ struct Walk<'a, 'b> {
     full_access_refusals: HashMap<String, bool>,
     /// Whether a decision model is saved, read once per check.
     decision_model_saved: Option<bool>,
+    /// The decision models Ollama has installed; `None` = not read, no check.
+    decision_models: Option<&'a HashSet<String>>,
     /// The repository-import gate every run of a checked workflow passes.
     approval: &'a mut ApprovalCheck<'b>,
 }
@@ -275,6 +320,56 @@ impl Walk<'_, '_> {
     fn decision_blockers(&mut self, wf: &Workflow, step: &WorkflowStep, on_failure: bool) {
         if step.step_type != StepType::Decide {
             return;
+        }
+        // KT-1697 — a step that chose its model depends on that one, never on
+        // the configured Decision model, and is never run on another.
+        if let Some(config) = step.decide.as_ref() {
+            let blocked = |reason: &str, message: String, action: String| WorkflowBlocker {
+                workflow_id: wf.id.clone(),
+                workflow_name: wf.name.clone(),
+                step: Some(step.name.clone()),
+                on_failure,
+                kind: WorkflowBlockerKind::MisconfiguredStep,
+                phase: None,
+                reason: Some(reason.into()),
+                message,
+                action,
+                human_only: false,
+                quick_exec: None,
+            };
+            if let Some(connection) = config.connection_id.as_deref() {
+                self.blockers.push(blocked(
+                    "decision_connection_unavailable",
+                    format!(
+                        "This Decide step uses the decision model of connection {connection}, \
+                         which cannot be called: no HTTP provider has a verified decision \
+                         contract, or the connection is gone."
+                    ),
+                    "Pick a local decision model for this step (workflow_update: decide.model, \
+                     no decide.connection_id), or clear the model to use the configured one."
+                        .into(),
+                ));
+                return;
+            }
+            if let Some(model) = super::decide_step::own_model(config) {
+                if self
+                    .decision_models
+                    .is_some_and(|installed| !installed.contains(model))
+                {
+                    self.blockers.push(blocked(
+                        "decision_model_not_installed",
+                        format!(
+                            "This Decide step uses the decision model `{model}`, which Ollama \
+                             does not list. Kronn does not run another model in its place."
+                        ),
+                        format!(
+                            "Pull `{model}` in Ollama, or pick an installed decision model \
+                             for this step, or clear its model to use the configured one."
+                        ),
+                    ));
+                }
+                return;
+            }
         }
         let saved = *self
             .decision_model_saved

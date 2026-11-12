@@ -2033,6 +2033,8 @@ pub(crate) async fn list_with_visibility(
                     .into_iter()
                     .map(|exec| (exec.id.clone(), exec))
                     .collect();
+            // The decision models Ollama lists, for the Decide steps' own models.
+            let decision_models = crate::workflows::readiness::installed_decision_models(conn);
             // The run's gate renders and hashes an imported workflow: a child
             // several cards reach is checked once per list, not once per card.
             let mut approvals: std::collections::HashMap<String, Result<Option<String>, String>> =
@@ -2053,6 +2055,7 @@ pub(crate) async fn list_with_visibility(
                             &wf,
                             &by_id,
                             &quick_execs,
+                            decision_models.as_ref(),
                             &mut approval,
                         ),
                     );

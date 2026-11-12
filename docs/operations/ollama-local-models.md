@@ -854,6 +854,36 @@ without `completion`. [src: url: https://docs.ollama.com/capabilities/decision]
 - Ollama 0.34.2 refuses to pull `clef-flash` with `412 … requires a newer
   version of Ollama`; the card now says to update Ollama. Measured on
   0.40.6: first call 8.5 s (load), then 0.2–0.6 s.
+- **A Decide step picks its own model (KT-1697).** `decide.model` (and
+  `decide.connection_id`, see below) live in the step JSON, so no migration. Unset,
+  the step runs the configured Decision model, as before; set, the runner calls
+  that model over Ollama's `/v1/systemone` and records it as the step's model.
+  [src: file: backend/src/workflows/decide_step.rs:158#resolve_model]
+  The model is picked from the workflow overview (step card and pipeline chip,
+  `Décision · <model> ▾` with a Local/HTTP badge, saved at once, rolled back if the
+  save fails) and from the editor, with the same `DecisionModelPicker`. A single
+  decision model stays visible, read-only.
+  [src: file: frontend/src/lib/decisionModels.ts:30]
+  Readiness flags a step whose model Ollama no longer lists
+  (`decision_model_not_installed`) or whose connection cannot be called
+  (`decision_connection_unavailable`); the run refuses it the same way. The model
+  is never swapped for the configured one.
+  [src: file: backend/src/workflows/readiness.rs:320]
+- **A connection's `decision_model` is kept, and not wired (KT-1697).** The owner
+  decided (2026-11-11) to keep the field, not remove it, and to call a connection's
+  decision model only over a contract measured on its provider. What is established:
+  OpenRouter lists decision models when asked
+  `/v1/models?output_modalities=decisions` (the listing the connection test reads).
+  What is not: how a decision model is *called* on OpenRouter or LiteLLM (endpoint,
+  request, how the probability or the choice comes back). Nothing in this repository
+  records it, `/v1/systemone` is Ollama's own route, and the worker that did KT-1697
+  had no network access to read the providers' documentation or to measure. So no
+  HTTP provider has a usable decision contract yet: the step picker lists the Ollama
+  decision models only, and a step carrying a `connection_id` is refused with that
+  reason. To wire one: read its contract from the provider's docs or a real call,
+  record the request and an answer here, then branch on `connection_id` in the
+  runner and list that connection's `decision_model` in `decisionModelOptions`
+  (`transport: 'http'`).
 
 ## Bench snapshot (M5 Max 64 GB, Q4_K_M, informational)
 

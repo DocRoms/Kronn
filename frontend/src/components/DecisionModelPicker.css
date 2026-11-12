@@ -1,0 +1,40 @@
+/* KT-1697 — the Decide step's model picker. The button and the menu reuse the
+   Agent switch's classes (AgentSwitchPicker.css); only the transport badge, the
+   missing mark and the read-only form are specific. */
+.kr-decision-btn,
+.kr-decision-static {
+  gap: 4px;
+  color: var(--kr-text-secondary);
+}
+
+.kr-decision-static {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+
+.kr-decision-transport {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-tertiary);
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.kr-decision-transport[data-transport='http'] {
+  background: var(--kr-info-bg);
+  color: var(--kr-info);
+}
+
+.kr-decision-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--kr-warning-soft);
+  font-size: 9px;
+  font-weight: 600;
+}

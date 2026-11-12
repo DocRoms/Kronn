@@ -3144,7 +3144,19 @@ questions: Array<DecideQuestion>,
  * `<id>_unsure` and `low_confidence` instead. `None` = the default of
  * each question kind, measured in docs/research.
  */
-min_confidence?: number, };
+min_confidence?: number,
+/**
+ * KT-1697 — this step's own decision model. `None` = the configured
+ * Decision model (`model_tiers.ollama.decision`). Without `connection_id`
+ * it is a local Ollama model.
+ */
+model?: string,
+/**
+ * KT-1697 — the external API connection `model` comes from. No HTTP
+ * provider has a verified decision contract yet, so a step carrying one
+ * is flagged by readiness and refused at run time, never swapped.
+ */
+connection_id?: string, };
 
 export type DecideKind = "noul" | "choice" | "score";
 

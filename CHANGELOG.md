@@ -13,6 +13,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- **KT-1697 — A Decide step chooses its decision model from the workflow overview.** The step card and its pipeline chip show `Décision · <model> ▾` with a Local/HTTP badge, like the Agent step's model picker: one click lists the Ollama decision models (« Par défaut » first), the choice is saved at once and rolled back if the save fails; the editor has the same picker. A step with no model of its own still runs the configured Decision model. Readiness flags a step whose model Ollama no longer lists, and the model is never swapped. A connection's `decision_model` is kept but not callable yet: no HTTP provider has a verified decision contract (see `docs/operations/ollama-local-models.md`).
+
 - **KT-1544 — Merge a step's main execution with its shadows.** A step with shadows can now condense the main execution and the shadows it selects (one, several or all) into one result that becomes the step's output. The merge waits for the shadows with a timeout and reports the missing ones; a condense pass dedups their points, verifies each against the code and records which executions found it, and a point it cannot verify is never published. The run view shows each execution's contribution and the merged result against each execution. Off by default.
 
 ### Security

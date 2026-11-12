@@ -1666,6 +1666,18 @@ pub struct DecideConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub min_confidence: Option<f32>,
+    /// KT-1697 — this step's own decision model. `None` = the configured
+    /// Decision model (`model_tiers.ollama.decision`). Without `connection_id`
+    /// it is a local Ollama model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    /// KT-1697 — the external API connection `model` comes from. No HTTP
+    /// provider has a verified decision contract yet, so a step carrying one
+    /// is flagged by readiness and refused at run time, never swapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connection_id: Option<String>,
 }
 
 /// One typed question. Its answer becomes the signal `<id>_<answer>`.

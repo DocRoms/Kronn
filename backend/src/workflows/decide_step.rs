@@ -1,7 +1,8 @@
 //! Executor for `StepType::Decide` (KT-1367).
 //!
-//! Asks the configured decision model typed questions about a templated
-//! state, in one call to Ollama's `POST /v1/systemone`, and turns each answer
+//! Asks the step's decision model (its own, else the configured one) typed
+//! questions about a templated state, in one call to Ollama's
+//! `POST /v1/systemone`, and turns each answer
 //! into a signal the step's `on_result` rules branch on. Zero agent tokens.
 //!
 //! Signals, besides `OK`:
@@ -73,6 +74,12 @@ pub fn config_problem(config: &DecideConfig) -> Option<String> {
             return Some("`decide.min_confidence` must be between 0 and 1".into());
         }
     }
+    if config.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+        return Some("`decide.model` is empty: pick a model or leave it unset".into());
+    }
+    if config.connection_id.is_some() && own_model(config).is_none() {
+        return Some("`decide.connection_id` needs the connection's `decide.model`".into());
+    }
     let mut ids = BTreeSet::new();
     for question in &config.questions {
         if !signal_safe(&question.id) {
@@ -135,8 +142,40 @@ pub fn config_problem(config: &DecideConfig) -> Option<String> {
     None
 }
 
-/// Why a workflow with Decide steps cannot run here: no decision model is
-/// set. Refused at launch and shown as a blocker, never a silent skip.
+/// The model a step chose for itself, if it did.
+pub fn own_model(config: &DecideConfig) -> Option<&str> {
+    config
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
+/// The model a Decide step calls: its own, else the configured Decision model.
+/// A connection's model has no verified HTTP decision contract (see
+/// docs/operations/ollama-local-models.md, « Decision models »): it is refused
+/// with the reason, never run on another model.
+pub fn resolve_model<'a>(
+    config: &'a DecideConfig,
+    configured: Option<&'a str>,
+) -> Result<&'a str, String> {
+    if let Some(connection) = config.connection_id.as_deref() {
+        return Err(format!(
+            "Decision model of connection {connection}: no HTTP provider has a verified \
+             decision contract yet, so this step cannot run. Pick a local Decision model."
+        ));
+    }
+    own_model(config)
+        .or(configured.map(str::trim).filter(|model| !model.is_empty()))
+        .ok_or_else(|| {
+            "No decision model is configured: choose one in Config › Agents › Ollama (row « Décision »)."
+                .to_string()
+        })
+}
+
+/// Why a workflow with Decide steps cannot run here: a step relies on the
+/// configured decision model and none is set. Refused at launch and shown as
+/// a blocker, never a silent skip.
 pub fn launch_refusal(
     workflow: &crate::models::Workflow,
     model_tiers: &crate::models::ModelTiersConfig,
@@ -145,7 +184,12 @@ pub fn launch_refusal(
         .steps
         .iter()
         .chain(workflow.on_failure.iter())
-        .any(|step| step.step_type == crate::models::StepType::Decide);
+        .filter(|step| step.step_type == crate::models::StepType::Decide)
+        .any(|step| {
+            step.decide
+                .as_ref()
+                .is_none_or(|config| own_model(config).is_none())
+        });
     let configured = model_tiers
         .ollama
         .decision
@@ -319,13 +363,10 @@ pub async fn execute_decide_step(
     let Some(config) = step.decide.as_ref() else {
         return fail(step, start, None, "Decide step has no `decide` config.");
     };
-    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
-        return fail(
-            step,
-            start,
-            None,
-            "No decision model is configured: choose one in Config › Agents › Ollama (row « Décision »).",
-        );
+    // `model` is the configured Decision model; the step's own wins over it.
+    let model = match resolve_model(config, model) {
+        Ok(model) => model,
+        Err(reason) => return fail(step, start, None, reason),
     };
     if let Some(problem) = config_problem(config) {
         return fail(step, start, Some(model), format!("Decide step: {problem}."));
@@ -509,7 +550,7 @@ mod tests {
         DecideConfig {
             state: "{{steps.tests.output}}".into(),
             questions,
-            min_confidence: None,
+            ..Default::default()
         }
     }
 
@@ -742,6 +783,93 @@ mod tests {
             outcome.result.condition_result.as_deref(),
             Some("Goto:merge")
         );
+    }
+
+    fn step_with(decide: DecideConfig) -> WorkflowStep {
+        WorkflowStep {
+            name: "decide".into(),
+            step_type: StepType::Decide,
+            decide: Some(decide),
+            ..Default::default()
+        }
+    }
+
+    /// KT-1697 — the step's own model is the one called; unset keeps the
+    /// configured Decision model.
+    #[tokio::test]
+    async fn the_runner_calls_the_steps_own_model_and_falls_back_to_the_configured_one() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for model in ["step-own:7b", "clef-flash:9b"] {
+            Mock::given(method("POST"))
+                .and(path("/v1/systemone"))
+                .and(body_partial_json(json!({ "model": model })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(captured()))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("tests", "ok");
+        let questions = vec![question("ship", DecideKind::Noul)];
+
+        let own = step_with(DecideConfig {
+            model: Some("step-own:7b".into()),
+            ..config(questions.clone())
+        });
+        let outcome = execute_decide_step(&own, &ctx, &server.uri(), Some("clef-flash:9b")).await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert_eq!(outcome.result.step_model.as_deref(), Some("step-own:7b"));
+
+        let unset = step_with(config(questions));
+        let outcome = execute_decide_step(&unset, &ctx, &server.uri(), Some("clef-flash:9b")).await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert_eq!(outcome.result.step_model.as_deref(), Some("clef-flash:9b"));
+    }
+
+    /// A connection's model has no verified HTTP contract: refused with the
+    /// reason, with no call and never on another model.
+    #[tokio::test]
+    async fn a_connection_model_is_refused_and_never_swapped_for_the_default() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("tests", "ok");
+        let step = step_with(DecideConfig {
+            model: Some("perplexity/pplx-decider-flash-v1.2".into()),
+            connection_id: Some("conn-1".into()),
+            ..config(vec![question("ship", DecideKind::Noul)])
+        });
+        // Port 9 is closed: any call would fail with "not reachable".
+        let outcome =
+            execute_decide_step(&step, &ctx, "http://127.0.0.1:9", Some("clef-flash:9b")).await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.contains("no HTTP provider"),
+            "{}",
+            outcome.result.output
+        );
+        assert_eq!(outcome.result.step_model, None);
+    }
+
+    #[test]
+    fn a_step_model_is_validated() {
+        let questions = vec![question("ship", DecideKind::Noul)];
+        let blank = DecideConfig {
+            model: Some("  ".into()),
+            ..config(questions.clone())
+        };
+        assert!(config_problem(&blank).unwrap().contains("decide.model"));
+        let orphan = DecideConfig {
+            connection_id: Some("conn-1".into()),
+            ..config(questions.clone())
+        };
+        assert!(config_problem(&orphan).unwrap().contains("connection_id"));
+        let own = DecideConfig {
+            model: Some("step-own:7b".into()),
+            ..config(questions)
+        };
+        assert_eq!(config_problem(&own), None);
     }
 
     #[tokio::test]
