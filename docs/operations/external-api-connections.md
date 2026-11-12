@@ -248,7 +248,7 @@ those tokens ahead of the call.
   connection card (`POST /api/mcps/configs/{id}/check-token`) and **Check all
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
-  [src: file: backend/src/core/token_checks.rs:326-331#spawn_scheduler]
+  [src: file: backend/src/core/token_checks.rs:318-336#spawn_scheduler]
   [src: file: backend/src/lib.rs:2541-2543#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
