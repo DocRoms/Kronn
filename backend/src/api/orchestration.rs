@@ -1559,6 +1559,33 @@ fn handoff_notice_in(
     tx: Option<&rusqlite::Connection>,
     execution_id: Option<&str>,
 ) -> String {
+    // KT-1408 — an earlier generation the execution time limit stopped: the
+    // handoff names how long it ran and the WIP checkpoint it left, and never
+    // claims "no work has been recorded" over a commit that holds it.
+    let limit_note = tx.zip(execution_id).and_then(|(tx, exec_id)| {
+        crate::api::worker_time_limit::handoff_note(tx, exec_id, lang == RoomLang::Fr)
+    });
+    let Some(limit_note) = limit_note else {
+        return handoff_notice_base_in(lang, has_delivered, generation, tx, execution_id);
+    };
+    if has_delivered {
+        let base = handoff_notice_base_in(lang, has_delivered, generation, tx, execution_id);
+        return format!("{base}\n\n{limit_note}");
+    }
+    let suffix = generation
+        .map(|number| format!(" — {} {number}", lang.pick("génération", "generation")))
+        .unwrap_or_default();
+    let title = lang.pick("Reprends la tâche", "Resume the task");
+    format!("**{title}{suffix}**\n\n{limit_note}")
+}
+
+fn handoff_notice_base_in(
+    lang: RoomLang,
+    has_delivered: bool,
+    generation: Option<u32>,
+    tx: Option<&rusqlite::Connection>,
+    execution_id: Option<&str>,
+) -> String {
     if lang == RoomLang::En {
         return handoff_notice_en(has_delivered, generation, tx, execution_id);
     }
@@ -11505,6 +11532,23 @@ fn worker_brief_markdown_in(
     // path-limited commit mid-merge otherwise erases MERGE_HEAD, and the
     // single-parent commit it then makes turns into add/add conflicts at
     // integration (KT-854).
+    // KT-1408 — only a spawned CLI worker reads `time_limit` in the results of
+    // the mediated tools; a worker that commits itself has neither of them.
+    let time_limit_rule = match (mediated_host_commit, fr) {
+        (false, _) => "",
+        (true, false) => {
+            "- The execution has a time limit. Commit as you go; when it nears, the results of \
+             `task_exec_status` and `task_exec_commit` carry a `time_limit` notice — then commit \
+             and deliver at once. Uncommitted work at the limit is only checkpointed (WIP), \
+             never delivered.\n"
+        }
+        (true, true) => {
+            "- L'exécution a une limite de temps. Commite au fil de l'eau ; quand elle approche, \
+             les résultats de `task_exec_status` et `task_exec_commit` portent un avis \
+             `time_limit` — commite et livre alors sans attendre. Le travail non commité à la \
+             limite est seulement sauvegardé (WIP), jamais livré.\n"
+        }
+    };
     let target_integration = if !can_run_shell {
         String::new()
     } else if !fr && mediated_host_commit {
@@ -11601,7 +11645,8 @@ fn worker_brief_markdown_in(
              - Work ONLY in this worktree; never touch another checkout.\n\
              - No `git push`, no force-push, no merge into the target: the protected integration \
              is done by Kronn AFTER review.\n\
-             - Stay within the DoD's scope.\n\n\
+             - Stay within the DoD's scope.\n\
+             {time_limit_rule}\n\
              {target_integration}\
              {citations}{ui_captures}\
              ## Tests\n\
@@ -11642,7 +11687,8 @@ fn worker_brief_markdown_in(
          - Travaille UNIQUEMENT dans ce worktree ; ne touche jamais un autre checkout.\n\
          - Pas de `git push`, pas de force-push, pas de merge vers la cible : l'intégration \
          protégée est faite par Kronn APRÈS revue.\n\
-         - Reste dans le périmètre de la DoD.\n\n\
+         - Reste dans le périmètre de la DoD.\n\
+         {time_limit_rule}\n\
          {target_integration}\
          {citations}{ui_captures}\
          ## Tests\n\
@@ -16740,6 +16786,8 @@ pub async fn task_exec_status(
         wait_for,
         timeout_secs,
     } = request;
+    // KT-1408 — a spawned worker is told how close the execution limit is.
+    let mut worker_limit_clock: Option<(AgentType, String)> = None;
     let execution_id = if let Some(caller) = request.spawned_agent {
         if !request.source_agent.trim().is_empty()
             || !request.source_session_id.trim().is_empty()
@@ -16761,6 +16809,7 @@ pub async fn task_exec_status(
                 }
             };
         let alias = crate::db::orchestration::agent_type_to_db(&agent_type);
+        worker_limit_clock = Some((agent_type.clone(), dispatch_job_id.to_string()));
         match spawned_native_worker_execution_for_caller(
             &state.db,
             &exec_id,
@@ -16886,8 +16935,24 @@ pub async fn task_exec_status(
             body
         }),
     };
+    let time_limit = match worker_limit_clock {
+        Some((agent_type, dispatch_job_id)) => {
+            crate::api::worker_time_limit::worker_time_limit_notice(
+                &state,
+                &dispatch_job_id,
+                &agent_type,
+            )
+            .await
+        }
+        None => None,
+    };
     match body {
-        Ok(body) => Json(ApiResponse::ok(body)),
+        Ok(mut body) => {
+            if let (Some(time_limit), Some(object)) = (time_limit, body.as_object_mut()) {
+                object.insert("time_limit".into(), time_limit);
+            }
+            Json(ApiResponse::ok(body))
+        }
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
             error.to_string(),
@@ -17672,8 +17737,16 @@ pub async fn commit_spawned_worker(
             )
         },
     );
+    let time_limit = crate::api::worker_time_limit::worker_time_limit_notice(
+        &state,
+        dispatch_job_id,
+        &agent_type,
+    )
+    .await;
     match supervisor.await {
-        Ok((committed, release_error)) => spawned_commit_response(committed, release_error),
+        Ok((committed, release_error)) => {
+            spawned_commit_response(committed, release_error, time_limit)
+        }
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
             format!("worker commit supervisor failed: {error}"),
@@ -17770,6 +17843,7 @@ where
 fn spawned_commit_response(
     committed: Result<Result<serde_json::Value, String>, tokio::task::JoinError>,
     release_error: Option<String>,
+    time_limit: Option<serde_json::Value>,
 ) -> Json<ApiResponse<serde_json::Value>> {
     if let Some(error) = release_error {
         tracing::warn!(
@@ -17777,7 +17851,12 @@ fn spawned_commit_response(
         );
     }
     match committed {
-        Ok(Ok(payload)) => Json(ApiResponse::ok(payload)),
+        Ok(Ok(mut payload)) => {
+            if let (Some(time_limit), Some(object)) = (time_limit, payload.as_object_mut()) {
+                object.insert("time_limit".into(), time_limit);
+            }
+            Json(ApiResponse::ok(payload))
+        }
         Ok(Err(message)) => Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
@@ -22934,6 +23013,7 @@ pub(crate) mod tests {
         let Json(response) = spawned_commit_response(
             Ok(Ok(serde_json::json!({ "commit": "abc123" }))),
             Some("simulated release failure".into()),
+            None,
         );
         assert!(response.success);
         assert_eq!(response.data.unwrap()["commit"], "abc123");
@@ -45193,6 +45273,126 @@ pub(crate) mod tests {
             !msg.contains("aucun travail n'a"),
             "must NOT claim empty state: {msg}"
         );
+    }
+
+    /// KT-1408 — the limit stopped a worker with a dirty worktree: Kronn
+    /// checkpoints it, and the resume handoff names the commit and the time the
+    /// generation ran instead of claiming that no work was recorded.
+    #[tokio::test]
+    async fn handoff_after_a_limit_stop_names_the_wip_checkpoint_and_the_elapsed_time() {
+        use crate::api::worker_time_limit::{checkpoint_worktree, record_stop_event};
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let exec = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("kt-1408-limit".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let workspace_exec_id = exec.id.clone();
+        let workspace_path = db
+            .with_conn(move |conn| {
+                crate::db::discussion_workspaces::get_managed_for_execution(
+                    conn,
+                    &workspace_exec_id,
+                )?
+                .and_then(|workspace| workspace.canonical_path)
+                .context("managed workspace missing")
+            })
+            .await
+            .unwrap();
+        std::fs::write(
+            std::path::Path::new(&workspace_path).join("half-done.txt"),
+            "uncommitted",
+        )
+        .unwrap();
+        let limit = std::time::Duration::from_secs(120 * 60);
+        let checkpoint = checkpoint_worktree(
+            std::path::Path::new(&workspace_path),
+            "KT-1408",
+            limit,
+            limit,
+            None,
+        )
+        .unwrap()
+        .expect("the dirty worktree is checkpointed");
+        let commit = checkpoint.commit.clone().expect("a WIP commit");
+        assert!(
+            crate::core::worktree::worktree_dirty_files(std::path::Path::new(&workspace_path))
+                .unwrap()
+                .is_empty()
+        );
+
+        let exec_id = exec.id.clone();
+        let (fr, en) = db
+            .with_conn(move |conn| {
+                record_stop_event(
+                    conn,
+                    &exec_id,
+                    "dispatch-1",
+                    limit,
+                    limit,
+                    Some(&checkpoint),
+                )?;
+                Ok((
+                    handoff_notice_in(RoomLang::Fr, false, Some(2), Some(conn), Some(&exec_id)),
+                    handoff_notice_in(RoomLang::En, false, Some(2), Some(conn), Some(&exec_id)),
+                ))
+            })
+            .await
+            .unwrap();
+
+        assert!(fr.contains("génération 1 : 120 min"), "{fr}");
+        assert!(fr.contains(&commit), "{fr}");
+        assert!(fr.contains("génération 2"), "{fr}");
+        assert!(
+            en.contains("generation 1: 120 min of the 120-min limit"),
+            "{en}"
+        );
+        assert!(en.contains(&format!("WIP commit `{commit}`")), "{en}");
+        assert!(
+            !en.contains("No work has been recorded") && !fr.contains("Aucun travail n'a encore"),
+            "a checkpointed generation is recorded work: {en}"
+        );
+    }
+
+    /// KT-1408 — the brief tells a spawned CLI worker its tool results carry the
+    /// time-limit notice; a worker that commits itself has neither tool.
+    #[test]
+    fn the_cli_worker_brief_announces_the_time_limit_notice() {
+        let brief = |lang, shell, projection| {
+            worker_brief_markdown_in(
+                lang,
+                "KT-1408",
+                "Limit",
+                "desc",
+                &[],
+                "/wt",
+                "branch",
+                "abc",
+                shell,
+                projection,
+                None,
+            )
+        };
+        let en = brief(RoomLang::En, true, true);
+        assert!(en.contains("`time_limit` notice"), "{en}");
+        assert!(en.contains("checkpointed (WIP)"), "{en}");
+        let fr = brief(RoomLang::Fr, true, true);
+        assert!(fr.contains("avis `time_limit`"), "{fr}");
+        for self_committing in [
+            brief(RoomLang::En, false, false),
+            brief(RoomLang::Fr, true, false),
+        ] {
+            assert!(!self_committing.contains("time_limit"), "{self_committing}");
+        }
     }
 
     #[tokio::test]
