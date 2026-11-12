@@ -3,10 +3,10 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/re
 import { buildApiMock } from '../../../test/apiMock';
 import { ApiRequestError } from '../../../lib/apiRequestError';
 
-const { getMock, saveMock } = vi.hoisted(() => ({ getMock: vi.fn(), saveMock: vi.fn() }));
+const { getMock, saveMock, getServerMock } = vi.hoisted(() => ({ getMock: vi.fn(), saveMock: vi.fn(), getServerMock: vi.fn() }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
-  config: { getWorkers: getMock as never, saveWorkers: saveMock as never },
+  config: { getWorkers: getMock as never, saveWorkers: saveMock as never, getServerConfig: getServerMock as never },
 }));
 
 import { WorkersSection } from '../WorkersSection';
@@ -46,6 +46,8 @@ describe('WorkersSection (KT-1345)', () => {
       max_concurrent_task_workers: 2,
       background_priority: true,
       heavy_output_kb: 256,
+      bash_default_timeout_min: 15,
+      bash_max_timeout_min: 60,
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentRounds(8)'));
@@ -70,6 +72,8 @@ describe('WorkersSection (KT-1345)', () => {
       max_concurrent_task_workers: 2,
       background_priority: true,
       heavy_output_kb: 256,
+      bash_default_timeout_min: 15,
+      bash_max_timeout_min: 60,
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentUnlimited'));
@@ -124,6 +128,8 @@ describe('WorkersSection (KT-1345)', () => {
       max_concurrent_task_workers: 3,
       background_priority: true,
       heavy_output_kb: 256,
+      bash_default_timeout_min: 15,
+      bash_max_timeout_min: 60,
     }));
     await waitFor(() => expect(screen.getByTestId('workers-cap-current'))
       .toHaveTextContent('config.workers.maxConcurrentCurrent(3)'));
@@ -168,6 +174,8 @@ describe('WorkersSection (KT-1345)', () => {
       max_concurrent_task_workers: 2,
       background_priority: false,
       heavy_output_kb: 256,
+      bash_default_timeout_min: 15,
+      bash_max_timeout_min: 60,
     }));
     await waitFor(() => expect(box).not.toBeChecked());
     expect(screen.getByTestId('workers-save')).toBeDisabled();
@@ -189,7 +197,7 @@ describe('WorkersSection (KT-1345)', () => {
   });
 
   it('KT-1525 — shows the heavy-output threshold, saves a new one and refuses 0 or too many', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256 };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60 };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, heavy_output_kb: 512 });
     render(<WorkersSection t={t} />);
@@ -210,5 +218,42 @@ describe('WorkersSection (KT-1345)', () => {
     await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, heavy_output_kb: 512 }));
     await waitFor(() => expect(screen.getByTestId('workers-heavy-current'))
       .toHaveTextContent('config.workers.heavyOutputCurrent(512)'));
+  });
+
+  it('KT-1718 — shows the per-command cap next to the generation limit, saves new limits and refuses a default above the maximum', async () => {
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60 };
+    getMock.mockResolvedValue(saved);
+    saveMock.mockResolvedValue({ ...saved, bash_max_timeout_min: 90 });
+    getServerMock.mockResolvedValue({ agent_global_timeout_min: 120 });
+    render(<WorkersSection t={t} />);
+    const max = await screen.findByTestId('workers-bash-max-input');
+    await waitFor(() => expect(max).toHaveValue(60));
+    expect(screen.getByTestId('workers-bash-default-input')).toHaveValue(15);
+    await waitFor(() => expect(screen.getByTestId('workers-generation-limit')).toHaveTextContent('120'));
+    expect(screen.getByTestId('workers-shell-current'))
+      .toHaveTextContent('config.workers.shellTimeoutsSummary(15,60,120)');
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+    expect(screen.queryByTestId('workers-shell-outlive-warning')).not.toBeInTheDocument();
+
+    for (const bad of ['0', '241', '1.5']) {
+      fireEvent.change(max, { target: { value: bad } });
+      expect(screen.getByTestId('workers-shell-invalid')).toHaveTextContent('config.workers.shellTimeoutsInvalid(1,240)');
+      expect(screen.getByTestId('workers-save')).toBeDisabled();
+    }
+    fireEvent.change(max, { target: { value: '10' } });
+    expect(screen.getByTestId('workers-shell-invalid')).toBeInTheDocument();
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+
+    // A command allowed as long as the generation would be cut with it.
+    fireEvent.change(max, { target: { value: '120' } });
+    expect(screen.queryByTestId('workers-shell-invalid')).not.toBeInTheDocument();
+    expect(screen.getByTestId('workers-shell-outlive-warning')).toHaveTextContent('config.workers.shellTimeoutsOutlive');
+
+    fireEvent.change(max, { target: { value: '90' } });
+    expect(screen.queryByTestId('workers-shell-outlive-warning')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('workers-save'));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, bash_max_timeout_min: 90 }));
+    await waitFor(() => expect(screen.getByTestId('workers-shell-current'))
+      .toHaveTextContent('config.workers.shellTimeoutsSummary(15,90,120)'));
   });
 });

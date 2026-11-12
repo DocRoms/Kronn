@@ -675,6 +675,8 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     );
     // KT-1633 — Settings > Workers: background priority of the workers' processes.
     crate::core::background_priority::set_enabled(config.workers.background_priority);
+    // KT-1718 — Settings > Workers: the shell limits of a Claude task worker.
+    crate::core::task_worker_env::set_bash_timeouts(&config.workers);
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())

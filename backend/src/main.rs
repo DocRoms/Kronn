@@ -416,6 +416,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         );
         // KT-1633 — the background-priority switch, before the first worker of this boot.
         kronn::core::background_priority::set_enabled(config.workers.background_priority);
+        // KT-1718 — the shell limits of a Claude task worker, before the first one.
+        kronn::core::task_worker_env::set_bash_timeouts(&config.workers);
     }
     // KT-1633 — ask the host once whether its priority launcher runs, off the
     // async path, before recovery can dispatch a worker. A spawn only reads the answer.
