@@ -1,8 +1,11 @@
 // #15 — a compact SVG map for a workflow's steps. It always draws the linear
 // spine so every workflow keeps the same detail layout, then overlays Goto arcs
 // in the gutter when branches exist. Not an editor — a read-only navigator.
+import { AGENT_LABELS } from '../../lib/constants';
 import { computeGotoEdges } from '../../lib/stepGraph';
+import { activeMergedIds } from '../../lib/shadowMerge';
 import type { WorkflowStep } from '../../types/generated';
+import './StepShadowRows.css';
 
 interface StepBranchMapProps {
   steps: WorkflowStep[];
@@ -15,6 +18,16 @@ const ROW_H = 24;
 const GUTTER = 52;   // left space reserved for Goto arcs
 const WIDTH = 300;
 const PAD_TOP = 6;
+const LINE_H = 14;   // one shadow line, or the merged-result line, under a step
+
+const clipName = (name: string, max: number) => (name.length > max ? `${name.slice(0, max - 1)}…` : name);
+
+/** KT-1696 — a step's shadows and whether they feed a merged result: the lines drawn under it. */
+function shadowLines(step: WorkflowStep) {
+  const shadows = step.shadows ?? [];
+  const merged = activeMergedIds(step.shadow_merge, shadows).length > 0;
+  return { shadows, merged, count: shadows.length + (merged ? 1 : 0) };
+}
 
 export function StepBranchMap({
   steps,
@@ -25,8 +38,12 @@ export function StepBranchMap({
   const edges = computeGotoEdges(steps);
   if (steps.length === 0) return null;
 
-  const cy = (i: number) => i * ROW_H + ROW_H / 2 + PAD_TOP;
-  const height = steps.length * ROW_H + PAD_TOP * 2;
+  // A doubled step is taller: one line per shadow, then the merged result.
+  const lines = steps.map(shadowLines);
+  const tops = steps.map((_, i) => PAD_TOP + lines.slice(0, i).reduce((sum, line) => sum + ROW_H + line.count * LINE_H, 0));
+  const cy = (i: number) => tops[i] + ROW_H / 2;
+  const height = PAD_TOP * 2 + lines.reduce((sum, line) => sum + ROW_H + line.count * LINE_H, 0);
+  const doubledSteps = lines.filter(line => line.shadows.length > 0).length;
   const spineX = GUTTER;
 
   return (
@@ -69,15 +86,41 @@ export function StepBranchMap({
                 x={spineX - 7}
                 y={cy(i) - 10}
                 width={WIDTH - spineX + 2}
-                height={20}
+                height={20 + lines[i].count * LINE_H}
                 rx={5}
                 className="wf-bm-node-hit"
               />
             )}
             <circle cx={spineX} cy={cy(i)} r={3.5} className="wf-bm-node" />
             <text x={spineX + 10} y={cy(i) + 3} className="wf-bm-node-label">
-              {i + 1}. {s.name.length > 26 ? `${s.name.slice(0, 25)}…` : s.name}
+              {i + 1}. {clipName(s.name, lines[i].shadows.length > 0 ? 20 : 26)}
+              {lines[i].shadows.length > 0 && <tspan className="wf-bm-tag" dx={6} data-testid={`wf-bm-shadow-tag-${i}`}>⑂ {lines[i].shadows.length}</tspan>}
+              {lines[i].merged && <tspan className="wf-bm-tag wf-bm-tag-merge" dx={4} data-testid={`wf-bm-merge-tag-${i}`}>⊕</tspan>}
             </text>
+            {lines[i].shadows.map((shadow, k) => (
+              <text
+                key={shadow.id}
+                x={spineX + 24}
+                y={cy(i) + 3 + (k + 1) * LINE_H}
+                className="wf-bm-shadow"
+                data-paused={shadow.enabled === false}
+                data-testid={`wf-bm-shadow-${i}-${shadow.id}`}
+              >
+                ⑂ {clipName(shadow.label || shadow.id, 14)} · {AGENT_LABELS[shadow.agent?.agent ?? s.agent] ?? shadow.agent?.agent ?? s.agent}
+              </text>
+            ))}
+            {lines[i].merged && (
+              <text
+                x={spineX + 24}
+                y={cy(i) + 3 + (lines[i].shadows.length + 1) * LINE_H}
+                className="wf-bm-shadow wf-bm-merged"
+                data-testid={`wf-bm-merged-${i}`}
+              >
+                {steps[i + 1]
+                  ? t('wf.branchMap.mergedTo', clipName(steps[i + 1].name, 22))
+                  : t('wf.branchMap.mergedLast')}
+              </text>
+            )}
           </g>
         ))}
         {/* Goto arcs in the left gutter. Each drawable arc gets: a categorical
@@ -119,7 +162,11 @@ export function StepBranchMap({
             <span className="wf-bm-legend-back">⇠ {t('wf.branchMap.legendLoop')}</span>
           </>
         ) : (
-          <span className="wf-bm-legend-linear">│ {t('wf.branchMap.linear')}</span>
+          <span className="wf-bm-legend-linear" data-testid="wf-bm-legend-linear">
+            │ {doubledSteps > 0
+              ? t(doubledSteps === 1 ? 'wf.branchMap.linearDoubledOne' : 'wf.branchMap.linearDoubledMany', doubledSteps)
+              : t('wf.branchMap.linear')}
+          </span>
         )}
       </div>
     </div>
