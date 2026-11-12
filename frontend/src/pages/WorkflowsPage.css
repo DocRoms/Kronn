@@ -8437,3 +8437,11 @@
 @media (max-width: 560px) {
   .wf-shadow-cmp-diff { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* KT-1693 — the step's fallback override sits under its agent/mode choice. */
+.wf-step-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-4);
+}

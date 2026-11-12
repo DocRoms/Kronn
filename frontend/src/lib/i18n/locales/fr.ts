@@ -4242,6 +4242,8 @@ const fr: TranslationDict = {
   'fallback.inheritedHint': 'Utilisé quand le repli qui précède est indisponible à son tour',
   'fallback.menu': 'Choisir un repli',
   'fallback.menuEmpty': 'Aucun autre agent n’a de modèle pour ce mode.',
+  'fallback.menuNoMatch': 'Aucun agent ni modèle ne correspond à cette recherche.',
+  'fallback.search': 'Rechercher un agent ou un modèle…',
   'fallback.inChain': 'Déjà dans la chaîne',
   'fallback.modelDefault': 'modèle par défaut',
   'fallback.gaps': '{0} peut manquer de : {1}',

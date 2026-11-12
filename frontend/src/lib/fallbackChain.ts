@@ -132,3 +132,36 @@ export function inheritedAfter(
   }
   return out;
 }
+
+const MENU_MARGIN = 8;
+const MENU_GAP = 6;
+const MENU_MAX_HEIGHT = 320;
+
+export interface MenuPlacement {
+  left: number;
+  top: number;
+  maxHeight: number;
+}
+
+/** Where the add / change menu goes so it is never clipped: under its anchor and
+ *  left-aligned when there is room, flipped onto the anchor's right edge when it
+ *  would cross the viewport's right side, above the anchor when there is more room
+ *  above than below. */
+export function placeMenu(
+  anchor: { left: number; right: number; top: number; bottom: number },
+  size: { width: number; height: number },
+  viewport: { width: number; height: number },
+): MenuPlacement {
+  const width = Math.min(size.width, viewport.width - 2 * MENU_MARGIN);
+  let left = anchor.left;
+  if (left + width > viewport.width - MENU_MARGIN) left = anchor.right - width;
+  left = Math.max(MENU_MARGIN, Math.min(left, viewport.width - MENU_MARGIN - width));
+  const below = viewport.height - anchor.bottom - MENU_GAP - MENU_MARGIN;
+  const above = anchor.top - MENU_GAP - MENU_MARGIN;
+  const flipUp = size.height > below && above > below;
+  const room = flipUp ? above : below;
+  const maxHeight = Math.max(120, Math.min(MENU_MAX_HEIGHT, room));
+  const height = Math.min(size.height, maxHeight);
+  const top = flipUp ? Math.max(MENU_MARGIN, anchor.top - MENU_GAP - height) : anchor.bottom + MENU_GAP;
+  return { left, top, maxHeight };
+}

@@ -4232,6 +4232,8 @@ const en: TranslationDict = {
   'fallback.inheritedHint': 'Used when the fallback before it is unavailable too',
   'fallback.menu': 'Pick a fallback',
   'fallback.menuEmpty': 'No other agent has a model for this mode.',
+  'fallback.menuNoMatch': 'No agent or model matches this search.',
+  'fallback.search': 'Search an agent or a model…',
   'fallback.inChain': 'Already in the chain',
   'fallback.modelDefault': 'default model',
   'fallback.gaps': '{0} may lack: {1}',

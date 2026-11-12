@@ -93,6 +93,22 @@ function renderPanel(
   );
 }
 
+describe('DiscussionSettingsPanel — fallback override placement (KT-1693)', () => {
+  it('shows the fallback override right under the agent, before the details and sharing sections', () => {
+    const { container } = renderPanel(makeDiscussion(), { contacts: [{ id: 'c1', pseudo: 'Ana' }] });
+    const overview = container.querySelector('.disc-settings-overview') as HTMLElement;
+    const fallback = screen.getByTestId('disc-fallback-section');
+    // Visible as is: nothing to expand, one row per text mode.
+    for (const mode of ['eco', 'standard', 'advanced']) {
+      expect(screen.getByTestId(`disc-fallback-${mode}`)).toBeInTheDocument();
+    }
+    // The very next section after the one that names the agent.
+    expect(overview.nextElementSibling).toBe(fallback);
+    const sections = [...container.querySelectorAll('.disc-settings-body > section')];
+    expect(sections.indexOf(fallback)).toBe(sections.indexOf(overview) + 1);
+  });
+});
+
 describe('DiscussionSettingsPanel — collapsed context sections', () => {
   it('uses the shared themed utility-panel shell', () => {
     const { container } = renderPanel();

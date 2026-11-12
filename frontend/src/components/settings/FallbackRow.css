@@ -196,24 +196,50 @@ button.fbp-main:hover:not(:disabled) {
   background: var(--kr-bg-hover);
 }
 
-/* ── The « + Add a fallback » menu ─────────────────────────────────────── */
+/* ── The « + Add a fallback » menu ─────────────────────────────────────────
+   Drawn in the page body (portal) and placed from its anchor, so the card's
+   overflow never clips it; left/top/max-height are set by placeMenu(). */
 .fbm {
-  position: absolute;
-  top: calc(100% + var(--kr-sp-2));
-  left: 0;
-  z-index: 30;
+  position: fixed;
+  z-index: var(--kr-z-popover);
   display: flex;
   flex-direction: column;
   gap: var(--kr-sp-2);
+  width: max-content;
   min-width: 260px;
-  max-height: 280px;
-  overflow-y: auto;
+  max-width: calc(100vw - 16px);
+  max-height: 320px;
   padding: var(--kr-sp-3);
   color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
   border: 1px solid var(--kr-border-medium);
   border-radius: var(--kr-r-md);
   background: var(--kr-bg-elevated);
   box-shadow: var(--kr-shadow-lg);
+}
+
+.fbm-search {
+  flex: none;
+  width: 100%;
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  color: var(--kr-text-primary);
+  font: inherit;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-surface);
+}
+
+.fbm-search:focus {
+  outline: none;
+  border-color: var(--kr-accent-border);
+}
+
+.fbm-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .fbm-empty {
@@ -250,8 +276,15 @@ button.fbp-main:hover:not(:disabled) {
   cursor: pointer;
 }
 
-.fbm-item:hover:not(:disabled) {
+.fbm-item:hover:not(:disabled),
+.fbm-item[data-active="true"]:not(:disabled) {
   background: var(--kr-bg-hover);
+}
+
+/* The badges are never the part that gives way: the model name ellipsizes instead. */
+.fbm-item .fbp-mode,
+.fbm-item .fbp-badge {
+  flex: none;
 }
 
 .fbm-item[aria-current="true"] {

@@ -4199,6 +4199,8 @@ const zh: TranslationDict = {
   "fallback.inheritedHint": "当前一个回退也不可用时使用",
   "fallback.menu": "选择回退",
   "fallback.menuEmpty": "没有其他代理拥有此模式的模型。",
+  "fallback.menuNoMatch": "没有代理或模型与此搜索匹配。",
+  "fallback.search": "搜索代理或模型…",
   "fallback.inChain": "已在链中",
   "fallback.modelDefault": "默认模型",
   "fallback.gaps": "{0} 可能缺少：{1}",

@@ -4232,6 +4232,8 @@ const es: TranslationDict = {
   'fallback.inheritedHint': 'Se usa cuando el respaldo anterior tampoco está disponible',
   'fallback.menu': 'Elegir un respaldo',
   'fallback.menuEmpty': 'Ningún otro agente tiene un modelo para este modo.',
+  'fallback.menuNoMatch': 'Ningún agente ni modelo coincide con esta búsqueda.',
+  'fallback.search': 'Buscar un agente o un modelo…',
   'fallback.inChain': 'Ya está en la cadena',
   'fallback.modelDefault': 'modelo por defecto',
   'fallback.gaps': '{0} puede carecer de: {1}',

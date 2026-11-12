@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect, useLayoutEffect, useRef, useState,
+  type KeyboardEvent as ReactKeyboardEvent, type ReactNode,
+} from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, ArrowRight, Plus, X } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { AGENT_LABELS } from '../../lib/constants';
@@ -9,10 +13,12 @@ import {
   linkMode,
   modeKind,
   optionsFor,
+  placeMenu,
   toLink,
   transportOf,
   type FallbackOption,
   type InheritedLink,
+  type MenuPlacement,
 } from '../../lib/fallbackChain';
 import './FallbackRow.css';
 
@@ -90,6 +96,8 @@ export function FallbackPill({
 interface MenuProps {
   testId: string;
   options: FallbackOption[];
+  /** The element the menu hangs from: the menu is drawn in the page body, so no card clips it. */
+  anchor: HTMLElement | null;
   /** Agents the walk already goes through: never offered again (a chain never has an agent twice). */
   taken: AgentType[];
   /** The target being changed, if any: marked, not disabled. */
@@ -99,13 +107,24 @@ interface MenuProps {
   onClose: () => void;
 }
 
-/** The options of a row grouped by agent, each with its model, its mode and its transport. */
-function FallbackMenu({ testId, options, taken, selected, replaced, onPick, onClose }: MenuProps) {
+const keyOf = (option: FallbackOption) => `${option.agent}|${option.model ?? ''}|${option.mode}`;
+
+/** The options of a row grouped by agent, each with its model, its mode and its
+ *  transport. A search field filters by agent and model; the arrows, Enter and
+ *  Escape drive it from the keyboard. */
+function FallbackMenu({ testId, options, anchor, taken, selected, replaced, onPick, onClose }: MenuProps) {
   const { t } = useT();
   const ref = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState('');
+  const [active, setActive] = useState(0);
+  const [placement, setPlacement] = useState<MenuPlacement | null>(null);
+
   useEffect(() => {
     const away = (event: MouseEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) onClose();
+      const target = event.target as Node;
+      // The anchor's own button toggles the menu: closing here would make its click reopen it.
+      if (ref.current?.contains(target) || anchor?.contains(target)) return;
+      onClose();
     };
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
     document.addEventListener('mousedown', away);
@@ -114,48 +133,135 @@ function FallbackMenu({ testId, options, taken, selected, replaced, onPick, onCl
       document.removeEventListener('mousedown', away);
       document.removeEventListener('keydown', escape);
     };
-  }, [onClose]);
+  }, [onClose, anchor]);
 
+  const needle = query.trim().toLowerCase();
+  const shown = needle
+    ? options.filter((option) => `${label(option.agent)} ${option.agent} ${option.model ?? ''}`.toLowerCase().includes(needle))
+    : options;
   const groups: { agent: AgentType; items: FallbackOption[] }[] = [];
-  for (const option of options) {
+  for (const option of shown) {
     const group = groups.find((entry) => entry.agent === option.agent);
     if (group) group.items.push(option);
     else groups.push({ agent: option.agent, items: [option] });
   }
-  return (
-    <div className="fbm" role="menu" aria-label={t('fallback.menu')} ref={ref} data-testid={testId}>
-      {groups.length === 0 && <div className="fbm-empty">{t('fallback.menuEmpty')}</div>}
-      {groups.map((group) => (
-        <div key={group.agent} className="fbm-group" role="group" aria-label={label(group.agent)}>
-          <div className="fbm-agent">{label(group.agent)}</div>
-          {group.items.map((option) => {
-            const isSelected = selected !== undefined
-              && selected.agent === option.agent
-              && (selected.model ?? null) === option.model
-              && linkMode(selected, replaced) === option.mode;
-            const inChain = !isSelected && taken.includes(option.agent) && selected?.agent !== option.agent;
-            return (
-              <button
-                key={`${option.model ?? ''}|${option.mode}`}
-                type="button"
-                role="menuitem"
-                className="fbm-item"
-                disabled={inChain}
-                aria-current={isSelected ? 'true' : undefined}
-                title={inChain ? t('fallback.inChain') : undefined}
-                data-testid={`${testId}-${option.agent}-${option.mode}${option.model ? `-${option.model}` : ''}`}
-                onClick={() => onPick(option)}
-              >
-                <span className="fbm-model">{option.model ?? t('fallback.modelDefault')}</span>
-                <span className="fbp-mode">{t(`fallback.mode.${option.mode}`)}</span>
-                <TransportBadge transport={transportOf(option.agent)} />
-              </button>
-            );
-          })}
-        </div>
-      ))}
+
+  const isSelected = (option: FallbackOption) => selected !== undefined
+    && selected.agent === option.agent
+    && (selected.model ?? null) === option.model
+    && linkMode(selected, replaced) === option.mode;
+  const isTaken = (option: FallbackOption) => !isSelected(option)
+    && taken.includes(option.agent) && selected?.agent !== option.agent;
+  // The keyboard walks the options that can be picked, in the order they are drawn.
+  const pickable = groups.flatMap((group) => group.items).filter((option) => !isTaken(option));
+  const current = Math.min(active, Math.max(pickable.length - 1, 0));
+  const activeKey = pickable[current] ? keyOf(pickable[current]) : null;
+
+  // Placed before paint, and again when the list (so its height) or the viewport changes.
+  useLayoutEffect(() => {
+    if (!anchor) return;
+    const place = () => {
+      if (!ref.current) return;
+      const box = ref.current.getBoundingClientRect();
+      setPlacement(placeMenu(
+        anchor.getBoundingClientRect(),
+        { width: box.width, height: box.height },
+        { width: window.innerWidth, height: window.innerHeight },
+      ));
+    };
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [anchor, shown.length]);
+
+  useEffect(() => {
+    ref.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeKey]);
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (pickable.length === 0) return;
+      setActive((current + (event.key === 'ArrowDown' ? 1 : pickable.length - 1)) % pickable.length);
+    } else if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      setActive(event.key === 'Home' ? 0 : Math.max(pickable.length - 1, 0));
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      if (pickable[current]) onPick(pickable[current]);
+    } else if (event.key === 'Escape') {
+      event.stopPropagation();
+      onClose();
+    }
+  };
+
+  const menu = (
+    <div
+      className="fbm"
+      aria-label={t('fallback.menu')}
+      ref={ref}
+      data-testid={testId}
+      style={placement
+        ? { left: placement.left, top: placement.top, maxHeight: placement.maxHeight }
+        : { left: 0, top: 0, visibility: 'hidden' }}
+    >
+      <input
+        type="search"
+        className="fbm-search"
+        autoFocus
+        value={query}
+        placeholder={t('fallback.search')}
+        aria-label={t('fallback.search')}
+        aria-activedescendant={activeKey ? `${testId}-opt-${activeKey}` : undefined}
+        data-testid={`${testId}-search`}
+        onChange={(event) => { setQuery(event.target.value); setActive(0); }}
+        onKeyDown={onKeyDown}
+      />
+      <div className="fbm-list" role="menu">
+        {options.length === 0 && <div className="fbm-empty">{t('fallback.menuEmpty')}</div>}
+        {options.length > 0 && groups.length === 0 && (
+          <div className="fbm-empty" data-testid={`${testId}-nomatch`}>{t('fallback.menuNoMatch')}</div>
+        )}
+        {groups.map((group) => (
+          <div key={group.agent} className="fbm-group" role="group" aria-label={label(group.agent)}>
+            <div className="fbm-agent">{label(group.agent)}</div>
+            {group.items.map((option) => {
+              const inChain = isTaken(option);
+              return (
+                <button
+                  key={`${option.model ?? ''}|${option.mode}`}
+                  id={`${testId}-opt-${keyOf(option)}`}
+                  type="button"
+                  role="menuitem"
+                  tabIndex={-1}
+                  className="fbm-item"
+                  disabled={inChain}
+                  aria-current={isSelected(option) ? 'true' : undefined}
+                  data-active={activeKey === keyOf(option) ? 'true' : undefined}
+                  title={inChain ? t('fallback.inChain') : undefined}
+                  data-testid={`${testId}-${option.agent}-${option.mode}${option.model ? `-${option.model}` : ''}`}
+                  onMouseMove={() => {
+                    const at = pickable.findIndex((entry) => keyOf(entry) === keyOf(option));
+                    if (at >= 0 && at !== current) setActive(at);
+                  }}
+                  onClick={() => onPick(option)}
+                >
+                  <span className="fbm-model">{option.model ?? t('fallback.modelDefault')}</span>
+                  <span className="fbp-mode">{t(`fallback.mode.${option.mode}`)}</span>
+                  <TransportBadge transport={transportOf(option.agent)} />
+                </button>
+              );
+            })}
+          </div>
+        ))}
+      </div>
     </div>
   );
+  return createPortal(menu, document.body);
 }
 
 interface RowProps {
@@ -196,6 +302,9 @@ export function FallbackRow({
   const [menu, setMenu] = useState<null | { index: number }>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The anchor of the open menu; the menu is drawn in the page body and placed from it.
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const closeMenu = () => setMenu(null);
 
   const apply = async (next: AgentFallback[]) => {
     const problem = chainProblem(origin, mode, next);
@@ -228,6 +337,9 @@ export function FallbackRow({
   };
   const gapsOf = (index: number) => view?.links[index]?.gaps ?? [];
   const modeLabel = t(`fallback.mode.${mode}`);
+  const anchorFor = (index: number) => (element: HTMLElement | null) => {
+    if (menu?.index === index && element) setAnchor((previous) => (previous === element ? previous : element));
+  };
 
   return (
     <div className="fbr" data-testid={testId} data-mode={mode} data-kind={modeKind(mode)}>
@@ -246,7 +358,7 @@ export function FallbackRow({
         {links.map((link, index) => (
           <span className="fbr-step" key={`${link.agent}-${link.model ?? ''}-${index}`}>
             <ArrowRight size={11} className="fbr-arrow" aria-hidden="true" />
-            <span className="fbr-anchor">
+            <span className="fbr-anchor" ref={anchorFor(index)}>
               <FallbackPill
                 testId={`${testId}-link-${index}`}
                 tone="own"
@@ -265,11 +377,12 @@ export function FallbackRow({
                 <FallbackMenu
                   testId={`${testId}-menu`}
                   options={offered}
+                  anchor={anchor}
                   taken={taken}
                   selected={link}
                   replaced={mode}
                   onPick={(option) => pick(index, option)}
-                  onClose={() => setMenu(null)}
+                  onClose={closeMenu}
                 />
               )}
             </span>
@@ -294,7 +407,7 @@ export function FallbackRow({
         {links.length === 0 && empty !== undefined && empty}
         {links.length === 0 && empty === undefined && <span className="fbr-off">{t('fallback.off')}</span>}
         {links.length === 0 && (
-          <span className="fbr-anchor">
+          <span className="fbr-anchor" ref={anchorFor(links.length)}>
             <button
               type="button"
               className="fbr-add"
@@ -309,10 +422,11 @@ export function FallbackRow({
               <FallbackMenu
                 testId={`${testId}-menu`}
                 options={offered}
+                anchor={anchor}
                 taken={taken}
                 replaced={mode}
                 onPick={(option) => pick(links.length, option)}
-                onClose={() => setMenu(null)}
+                onClose={closeMenu}
               />
             )}
           </span>

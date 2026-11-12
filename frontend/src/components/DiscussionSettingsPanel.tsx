@@ -294,6 +294,25 @@ export function DiscussionSettingsPanel({
           {agentCollaborationControl}
         </section>
 
+        {/* KT-1693 — the fallback of the discussion's agent, per mode, right under the agent it belongs to. */}
+        <section className="disc-settings-section" data-testid="disc-fallback-section">
+          <h3>{t('fallback.discussionTitle')}</h3>
+          <small className="disc-settings-hint">{t('fallback.discussionHint')}</small>
+          {TEXT_MODES.map(mode => (
+            <FallbackOverride
+              key={mode}
+              testId={`disc-fallback-${mode}`}
+              origin={discussion.agent}
+              mode={mode}
+              value={fallbackOverrides.find(entry => entry.mode === mode)?.chain ?? null}
+              onChange={async (next: AgentFallback[] | null) => {
+                const saved = await discussionsApi.setFallback(discussion.id, mode, next);
+                setFallbackOverrides(saved?.overrides ?? []);
+              }}
+            />
+          ))}
+        </section>
+
         <DiscussionDetailsSection
           discussion={discussion}
           projects={projects}
@@ -336,24 +355,6 @@ export function DiscussionSettingsPanel({
             </div>
           </section>
         )}
-
-        <section className="disc-settings-section" data-testid="disc-fallback-section">
-          <h3>{t('fallback.discussionTitle')}</h3>
-          <small className="disc-settings-hint">{t('fallback.discussionHint')}</small>
-          {TEXT_MODES.map(mode => (
-            <FallbackOverride
-              key={mode}
-              testId={`disc-fallback-${mode}`}
-              origin={discussion.agent}
-              mode={mode}
-              value={fallbackOverrides.find(entry => entry.mode === mode)?.chain ?? null}
-              onChange={async (next: AgentFallback[] | null) => {
-                const saved = await discussionsApi.setFallback(discussion.id, mode, next);
-                setFallbackOverrides(saved?.overrides ?? []);
-              }}
-            />
-          ))}
-        </section>
 
         <section className="disc-settings-section">
           <h3>{t('disc.settingsContext')}</h3>
