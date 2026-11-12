@@ -346,7 +346,7 @@ worker finishes with `task_exec_commit` runs the same settlement.
 [src: file: backend/src/core/worktree.rs:2378-2482#build_candidate_detailed]
 [src: file: backend/src/core/worktree.rs:2639-2702#settle_branch_docs]
 [src: file: backend/src/core/docs_citations/merge.rs:306-322#resolve_anchor_only_conflicts]
-[src: file: backend/src/core/docs_citations/merge.rs:685-745#newly_unresolved]
+[src: file: backend/src/core/docs_citations/merge.rs:695-755#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]
 
 ### A DoD item the principal checks live, after integration
