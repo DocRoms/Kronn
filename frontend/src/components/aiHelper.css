@@ -54,7 +54,7 @@
 
 .wf-apicall-ai-agent-popover {
   position: absolute;
-  z-index: 60;
+  z-index: calc(var(--kr-z-sticky) + 10);
   margin-top: var(--kr-sp-2);
   display: flex;
   flex-direction: column;
@@ -115,7 +115,7 @@
   position: fixed;
   bottom: 24px;
   right: 24px;
-  z-index: 70;
+  z-index: calc(var(--kr-z-sticky) + 20);
   width: 380px;
   max-width: calc(100vw - 32px);
   max-height: 70vh;
@@ -557,7 +557,7 @@
   position: fixed;
   bottom: 24px;
   right: 24px;
-  z-index: 70;
+  z-index: calc(var(--kr-z-sticky) + 20);
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -610,7 +610,7 @@
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
-  z-index: 60;
+  z-index: calc(var(--kr-z-sticky) + 10);
   width: min(340px, calc(100vw - 32px));
   max-height: 320px;
   overflow-y: auto;
