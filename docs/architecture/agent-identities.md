@@ -24,7 +24,7 @@ room: `@claude` is the discussion agent in a ClaudeCode-configured room
 and a punctual spawn everywhere else. This is intentional and the
 autocomplete must always show which one is being picked (KT-211).
 [src: file: frontend/src/lib/messageTargets.ts:54-68#isPrincipal]
-[src: file: backend/scripts/disc-introspection-mcp.py:5261-5269#principal]
+[src: file: backend/scripts/disc-introspection-mcp.py:5270-5278#principal]
 
 ## 2. Alias resolution, exactly
 
@@ -112,7 +112,7 @@ the CLI alias.
 [src: file: backend/src/db/discussions.rs:2101-2104#reply_author]
 [src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
 [src: file: backend/src/api/disc_invite.rs:1708-1718#addressed_to_caller]
-[src: file: backend/scripts/disc-introspection-mcp.py:11363-11373#attention_required]
+[src: file: backend/scripts/disc-introspection-mcp.py:11420-11430#attention_required]
 [src: file: backend/src/api/discussions/streaming.rs:2416-2464#punctual_identity_notice]
 [src: file: backend/src/api/disc_prompts.rs:337-355#transcript_agent_label]
 [src: file: backend/src/api/disc_invite.rs:1622-1630#reply_target]
@@ -152,7 +152,7 @@ context the short alias stays free (both identities may be wanted).
   native identity rotated (fresh session id) needs one `disc_join` with
   a token, which mints its credential — one-shot, by design. Unacked
   awareness survives reloads (server cursors, migrations 105/106).
-  [src: file: backend/scripts/disc-introspection-mcp.py:3586-3595#_BINDING_DIR]
+  [src: file: backend/scripts/disc-introspection-mcp.py:3598-3607#_BINDING_DIR]
   [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 
 ## 7. Autocomplete presentation (KT-211 contract)

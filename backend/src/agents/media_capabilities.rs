@@ -157,6 +157,30 @@ pub fn image_capabilities(entry: &Value) -> MediaModelCapabilities {
     }
 }
 
+/// Reads every entry of one catalogue payload, in the provider's own order.
+///
+/// The discovery tool (KT-1420 slice 1) must show the provider's whole list,
+/// not a filtered subset, so an entry whose frame positions do not parse
+/// still lands here with what parsed — the same drop-not-guess rule the
+/// single-model reader applies.
+pub fn catalogue_capabilities(
+    body: &Value,
+    modality: MediaModality,
+) -> Vec<MediaModelCapabilities> {
+    body.get("data")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| match modality {
+                    MediaModality::Video => video_capabilities(entry),
+                    MediaModality::Image => image_capabilities(entry),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Finds one model in a catalogue payload and reads what it advertises.
 ///
 /// A model absent from the catalogue yields `None` rather than an empty
@@ -340,6 +364,73 @@ mod tests {
         let caps = capabilities_for(&body, "alibaba/wan-3.0", MediaModality::Video).unwrap();
         assert!(caps.supports_reference_mode(MediaReferenceMode::FirstFrame));
         assert!(!caps.supports_reference_mode(MediaReferenceMode::LastFrame));
+    }
+
+    #[test]
+    fn the_catalogue_reader_lists_every_entry_in_order() {
+        // KT-1420 slice 1: the discovery tool lists the provider's whole
+        // catalogue, not only the configured model.
+        let video = json!({"data": [
+            {"id": "bytedance/seedance-2.0-mini", "supported_durations": [4, 5],
+             "supported_frame_images": ["first_frame"]},
+            {"id": "google/veo-3.1", "supported_durations": [8],
+             "supported_frame_images": ["first_frame", "last_frame"]},
+            {"id": "openai/sora-2", "supported_durations": [4, 8, 12]}
+        ]});
+        let videos = catalogue_capabilities(&video, MediaModality::Video);
+        assert_eq!(videos.len(), 3);
+        assert_eq!(videos[0].model, "bytedance/seedance-2.0-mini");
+        assert_eq!(videos[0].durations_secs, vec![4, 5]);
+        assert_eq!(
+            videos[0].frame_positions,
+            vec![MediaFramePosition::FirstFrame]
+        );
+        assert_eq!(videos[1].model, "google/veo-3.1");
+        assert_eq!(
+            videos[1].frame_positions,
+            vec![
+                MediaFramePosition::FirstFrame,
+                MediaFramePosition::LastFrame
+            ]
+        );
+        assert_eq!(videos[2].model, "openai/sora-2");
+        assert!(videos[2].frame_positions.is_empty());
+
+        let image = json!({"data": [
+            {"id": "google/gemini-2.5-flash-image",
+             "supported_parameters": {"input_references": {"type": "range", "min": 0, "max": 3}}},
+            {"id": "openai/gpt-image-2"}
+        ]});
+        let images = catalogue_capabilities(&image, MediaModality::Image);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].model, "google/gemini-2.5-flash-image");
+        assert_eq!(images[0].max_input_references, Some(3));
+        assert_eq!(images[1].model, "openai/gpt-image-2");
+        assert_eq!(images[1].max_input_references, None);
+    }
+
+    #[test]
+    fn an_entry_with_an_unreadable_frame_position_is_still_listed() {
+        // The doc comment of catalogue_capabilities promises that a position
+        // the parser does not know never drops the whole entry.
+        let video = json!({"data": [
+            {"id": "bytedance/seedance-2.0-mini",
+             "supported_frame_images": ["middle_frame", "first_frame"]}
+        ]});
+        let videos = catalogue_capabilities(&video, MediaModality::Video);
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].model, "bytedance/seedance-2.0-mini");
+        assert_eq!(
+            videos[0].frame_positions,
+            vec![MediaFramePosition::FirstFrame]
+        );
+    }
+
+    #[test]
+    fn the_catalogue_reader_survives_an_empty_or_absent_data_array() {
+        assert!(catalogue_capabilities(&json!({"data": []}), MediaModality::Video).is_empty());
+        assert!(catalogue_capabilities(&json!({}), MediaModality::Video).is_empty());
+        assert!(catalogue_capabilities(&json!([]), MediaModality::Video).is_empty());
     }
 
     #[test]

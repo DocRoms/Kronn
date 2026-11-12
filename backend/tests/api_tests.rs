@@ -28426,6 +28426,55 @@ async fn media_generate_reaches_the_local_comfyui_once_a_model_is_chosen() {
 }
 
 #[tokio::test]
+async fn media_models_list_reports_the_seeded_connection_and_the_local_comfyui() {
+    let state = test_state();
+    seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;
+    // The seed points at the real API host, which no test may reach: repoint
+    // it at a closed port so the catalogue answers deterministically.
+    state
+        .db
+        .with_conn(|connection| {
+            connection.execute(
+                "UPDATE external_api_connections SET endpoint = 'http://127.0.0.1:1'
+                 WHERE id = 'conn-media'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    state.config.write().await.comfyui.video_model = Some("RealVisXL_V5.0_fp16.safetensors".into());
+    let app = build_router_with_auth(state, false);
+
+    let (_, report) = get_json(app, "/api/media/models/list").await;
+    assert_eq!(report["success"], true, "{report}");
+    let connections = report["data"]["connections"].as_array().unwrap();
+
+    let stored = connections
+        .iter()
+        .find(|row| row["connection_id"] == "conn-media")
+        .expect("the seeded connection is in the report");
+    assert_eq!(stored["video"]["configured"], "bytedance/seedance-2.0-mini");
+    // Closed on purpose, so the catalogue answers `unreachable` — not an
+    // empty list that would read as "the provider serves nothing".
+    assert_eq!(stored["video"]["state"], "unreachable");
+    assert_eq!(stored["decision"]["configured"], serde_json::Value::Null);
+
+    // The local ComfyUI is never a row, yet it is a media source like one.
+    let local = connections
+        .iter()
+        .find(|row| row["connection_id"] == "local:comfyui")
+        .expect("the local ComfyUI is in the report");
+    assert_eq!(
+        local["video"]["configured"],
+        "RealVisXL_V5.0_fp16.safetensors"
+    );
+    let models = local["video"]["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["model"], "RealVisXL_V5.0_fp16.safetensors");
+}
+
+#[tokio::test]
 async fn media_generate_caps_duration_and_resolution() {
     let state = test_state();
     seed_media_connection(&state, None, Some("bytedance/seedance-2.0-mini")).await;

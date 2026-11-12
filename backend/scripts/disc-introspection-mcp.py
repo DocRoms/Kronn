@@ -691,9 +691,9 @@ TOOLS = [
         "description": (
             "Post to the bound room. Human decision → `kronn-question` fence "
             "(`tool_manual disc_question_list`); a refused one returns in `invalid_cards`: repost. "
-            "NEVER invent a pseudo: the human is `@user`; "
-            "native aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
-            "`@copilot`, `@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
+            "NEVER invent a pseudo: the human is `@user`; native aliases are "
+            "`@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, `@copilot`, "
+            "`@ollama`; a joined CLI requires its exact `@…-cli[-N]` alias "
             "from `disc_meta`; ambiguous bare aliases are refused. POSTING ALSO LISTENS unless "
             "`wait_for_reply:false`; `last_sort_order` is a write receipt, not a "
             "read cursor. Bulk import/dedup: "
@@ -2324,12 +2324,11 @@ TOOLS = [
         "description": (
             "Invoke a configured API without exposing credentials. Reuse a "
             "matching `qa_list`/`qa_run` first; else discover real ids with "
-            "`mcp_list` and pass `api_plugin_slug` + `api_config_id`, or a "
-            "`quick_api_id`. Never put auth in path, query, headers or body. "
-            "Returns `{success,data,status,summary,http_status,error?}`. Scope, "
+            "`mcp_list`. Never put auth in path, query, headers or body. "
+            "Suggest `qa_create_draft` for a recurring call rather than "
+            "rebuilding it. Discovery detail, return envelope, scope, "
             "`${ENV.KEY}`, time expressions and safe persistence: "
-            "`tool_manual({tool: \"api_call\"})`. Suggest `qa_create_draft` for a "
-            "recurring call rather than rebuilding it."
+            "`tool_manual({tool: \"api_call\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -2487,15 +2486,19 @@ TOOLS = [
         },
     },
     {
+        "name": "media_models_list",
+        "description": (
+            "Media models reachable per connection and capability (image, "
+            "video): choice, eligibility, cost, decisions. Contract: tool_manual."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "workflow_trigger",
         "description": (
-            "Launch a Kronn workflow run, like the UI's Trigger button. "
-            "Returns `{run_id, workflow_id, "
-            "workflow_name, status, started_at, expected_duration_ms?, "
-            "samples, next_check}`. The workflow must be enabled.\n\n"
-            "⚠ Honour `next_check.wait_seconds` before calling "
-            "`workflow_run_status`: naive 10s polling on a 2-min workflow "
-            "burns ~13× more tokens.\n\n"
+            "Launch a Kronn workflow run. Returns "
+            "`{run_id, workflow_id, workflow_name, status, started_at, "
+            "expected_duration_ms?, samples, next_check}`. "
             "Variables, agents, confidence: "
             "`tool_manual({tool: \"workflow_trigger\"})`."
         ),
@@ -9202,6 +9205,11 @@ def call_media_job_status(args):
     return _unwrap(_http("GET", f"/api/media/jobs/{job_id}"))
 
 
+def call_media_models_list(args):
+    """List every media model the configured connections can reach."""
+    return _unwrap(_http("GET", "/api/media/models/list"))
+
+
 def call_workflow_trigger(args):
     """0.8.6 phase 4 — launch a workflow run via the JSON wrapper route.
 
@@ -10447,7 +10455,12 @@ TOOL_MANUALS = {
         "changed by hand.\n\n"
         "Everything else about this tool — mentions, targets, the fact that "
         "posting also listens — is in its own description, because getting it "
-        "wrong means a peer never hears you."
+        "wrong means a peer never hears you.\n\n"
+        "**Addressees.** Never invent a pseudo: the human is `@user`; native "
+        "aliases are `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, "
+        "`@copilot`, `@ollama`; a joined CLI requires its exact "
+        "`@…-cli[-N]` alias from `disc_meta`; ambiguous bare aliases are "
+        "refused."
     ),
     "disc_wait_for_peer": (
         ROOM_WORK_PROTOCOL + "\n\n"
@@ -10646,6 +10659,9 @@ TOOL_MANUALS = {
         "time. Use the qp-improver flow for an existing QP rather than creating a duplicate."
     ),
     "api_call": (
+        "Discovery: when no saved QA matches, discover real ids with `mcp_list` "
+        "and pass `api_plugin_slug` + `api_config_id`, or a `quick_api_id`. The "
+        "call returns `{success, data, status, summary, http_status, error?}`.\n\n"
         "**Project scope** — resolved server-side from three sources, in "
         "priority order: (1) an explicit `project_id` argument, (2) the disc "
         "context when Kronn spawned you from a disc (auto-injected), (3) the "
@@ -10880,6 +10896,9 @@ TOOL_MANUALS["task_assign"] = (
     "owner, unless someone other than a reviewer is on it. Safe to retry."
 )
 TOOL_MANUALS["media_generate"] = (
+    "Pace. Use the shortest useful clip. Keep `wait: false` (default): the "
+    "asset arrives in the discussion as a context file for all agents. Use "
+    "`wait: true` only if you need it inside this very answer.\n\n"
     "Which connection. `connection_id` is OPTIONAL: leave it out and Kronn uses "
     "the only connection configured for the modality you asked for. Never ask a "
     "human for it. When several can serve it, the refusal names them and you "
@@ -10926,6 +10945,35 @@ TOOL_MANUALS["media_generate"] = (
     "Cost. Video is billed per second and image per picture, audio included "
     "unless `generate_audio: false`. Nothing here is free to retry: reuse the "
     "same `idempotency_key` for a retry of a generation you already asked for."
+)
+TOOL_MANUALS["media_models_list"] = (
+    "Read the full report once, before promising a modality, a duration or a "
+    "reference mode, and when recommending a model to a human; never infer "
+    "capabilities from habit.\n\n"
+    "Per connection the report carries `image` and `video` catalogues plus "
+    "`decision`. A catalogue entry advertises durations, resolutions, ratios, "
+    "frame positions and `reference_modes`. Image-to-video comes from "
+    "`reference_modes` (or `frame_positions`): a video can start from a "
+    "picture only when it lists a frame mode; `max_input_references` null "
+    "means unknown, never no. `observed_unit_cost_usd` is what Kronn itself "
+    "was billed for that exact model, per second for video and per image "
+    "otherwise, BYOK rows excluded; `cost_samples: 0` means unknown, never "
+    "free.\n\n"
+    "`state` per modality: `ok` lists the provider's real catalogue; `absent` "
+    "is a provider with no media catalogue at all (NVIDIA, Ollama) — that "
+    "connection is working, not down; `unreachable` is a dead host or a "
+    "refusing one; `unauthorized` is an auth refusal; `unreadable` is a 200 "
+    "whose body cannot be parsed. An empty list under `absent` or "
+    "`unreachable` is not \"the provider serves nothing\".\n\n"
+    "`configured` names the model each connection currently has for the "
+    "modality, and `configured_capabilities` resolves it against the "
+    "catalogue — null when the catalogue never mentions it, never \"no\". The "
+    "local ComfyUI (`local:comfyui`) is listed from its built-in envelope "
+    "whenever a ComfyUI slot is configured: checkpoints, T5, custom nodes and "
+    "filesystem layout are not verified. `decision` lists only the models the "
+    "connection's catalogue marks with the `decision` capability, projected "
+    "to `model_id`, `display_name`, `capabilities` and `cost_hint`; a model "
+    "absent from that list is not absent from the world."
 )
 
 
@@ -11564,6 +11612,7 @@ DISPATCH = {
     # to cut mobile token cost ~80% (cf. [[project_mcp_remote_control_0_8_6]]).
     "media_generate": call_media_generate,
     "media_job_status": call_media_job_status,
+    "media_models_list": call_media_models_list,
     "workflow_trigger": call_workflow_trigger,
     "workflow_run_status": call_workflow_run_status,
     "qp_run": call_qp_run,

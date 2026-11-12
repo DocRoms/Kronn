@@ -168,6 +168,24 @@ without a reload.
   native orchestration catalogue
   [src: file: backend/src/api/agent_tools.rs:1285-1325#media_generate]. The bridge route came
   first; the native one closed the half of the fleet that could not reach it.
+* Discovery: `media_models_list` and its HTTP route `GET /api/media/models/list`
+  report, per connection and per capability, every model the provider's
+  catalogue advertises — durations, resolutions, ratios, frame positions,
+  `reference_modes` — plus the model each connection has configured and whether
+  the catalogue names that exact model. Every entry carries the envelope the
+  preflight enforces: the operator's Config reference limits and, for the local
+  ComfyUI, the reference support its workflows take — never a hardcoded zero.
+  `observed_unit_cost_usd` is what Kronn itself was billed for that exact
+  model, from past `media_jobs` rows; no sample means unknown, never free. A
+  catalogue that answers nothing reports its cause — `unreachable`, `absent` (a
+  provider with no media catalogue at all), `unauthorized` or `unreadable` —
+  and a model the catalogue never mentions stays unknown, never "no". Each
+  connection's decision models come from the shared model catalogue, filtered
+  to the entries the Decision picker shows
+  [src: file: backend/src/api/agent_tools.rs:1365-1370#media_models_list]
+  [src: file: backend/src/api/media.rs:1160-1195#models_list]. CLI agents read
+  the same report through the `kronn-internal` bridge
+  [src: file: backend/scripts/disc-introspection-mcp.py:2487-2493#media_models_list].
 * A workflow Agent step on an HTTP or local agent has the same two tools since 0.15.3, through
   the same handler. Its asset lands in a room opened for the run (linked to it) and, when the
   job completes, as a file in the run artifacts directory; the step waits with
@@ -305,7 +323,7 @@ in Config before source images can be queued; an explicit zero refuses them.
 An unreadable catalogue is "unknown", never "no": it is not cached, a frame
 request goes to the provider as before, and a visual-reference request is
 refused naming the unreadable catalogue.
-[src: file: backend/src/api/media.rs:2021-2311#resolve_references]
+[src: file: backend/src/api/media.rs:2917-3207#resolve_references]
 
 Only the id is persisted, in `media_jobs.params_json`. The worker re-reads the
 file on each attempt, so a job resumed after a restart uses the same picture
