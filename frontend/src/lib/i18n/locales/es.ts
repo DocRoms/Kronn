@@ -4237,6 +4237,8 @@ const es: TranslationDict = {
   'fallback.mode.video': 'Vídeo',
   'fallback.current': 'Modelo de este modo: {0}',
   'fallback.add': 'Añadir un respaldo',
+  'fallback.namedText': 'Aún sin respaldo',
+  'fallback.namedTextHint': 'Un respaldo de texto se define en LiteLLM y NVIDIA, en los agentes CLI y en Ollama; otra conexión con nombre se elige en el workflow y todavía no puede tener uno. Sus modos de imagen y vídeo sí.',
   'fallback.change': 'Cambiar este respaldo',
   'fallback.remove': 'Quitar este respaldo',
   'fallback.off': 'Sin respaldo',

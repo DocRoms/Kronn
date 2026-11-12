@@ -4204,6 +4204,8 @@ const zh: TranslationDict = {
   "fallback.mode.video": "视频",
   "fallback.current": "此模式使用的模型：{0}",
   "fallback.add": "添加回退",
+  "fallback.namedText": "暂无回退",
+  "fallback.namedTextHint": "文本回退可在 LiteLLM、NVIDIA、CLI 代理和 Ollama 上设置；其他命名连接在工作流中选择，暂时不能设置。它们的图像和视频模式可以。",
   "fallback.change": "更改此回退",
   "fallback.remove": "移除此回退",
   "fallback.off": "无回退",

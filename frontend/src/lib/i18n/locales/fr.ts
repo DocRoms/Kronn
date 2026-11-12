@@ -4247,6 +4247,8 @@ const fr: TranslationDict = {
   'fallback.mode.video': 'Vidéo',
   'fallback.current': 'Modèle de ce mode : {0}',
   'fallback.add': 'Ajouter un repli',
+  'fallback.namedText': 'Pas encore de repli',
+  'fallback.namedTextHint': 'Un repli texte se règle sur LiteLLM et NVIDIA, sur les agents CLI et sur Ollama ; une autre connexion nommée est choisie dans le workflow et ne peut pas en avoir pour l’instant. Ses modes image et vidéo le peuvent.',
   'fallback.change': 'Changer ce repli',
   'fallback.remove': 'Retirer ce repli',
   'fallback.off': 'Aucun repli',

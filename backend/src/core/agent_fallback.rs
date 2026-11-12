@@ -761,6 +761,8 @@ pub fn chain_view_of(
 pub struct FallbackOverview {
     pub chains: Vec<ChainView>,
     pub cooldowns: Vec<Cooldown>,
+    /// KT-1706 — the image and video rows of ComfyUI and of the named HTTP connections.
+    pub media: Vec<crate::core::connection_fallback::ConnectionChainView>,
 }
 
 /// One view per mode row that has a fallback (the rows without one have none to
@@ -778,6 +780,7 @@ pub fn overview(agents: &AgentsConfig, cooldowns: Vec<Cooldown>) -> FallbackOver
             })
             .collect(),
         cooldowns,
+        media: crate::core::connection_fallback::overview(agents),
     }
 }
 

@@ -1074,6 +1074,7 @@ pub fn default_config() -> AppConfig {
             lite_llm: AgentConfig::default(),
             nvidia: AgentConfig::default(),
             model_tiers: Default::default(),
+            connection_fallbacks: Vec::new(),
         },
         language: "fr".into(),
         ui_language: "fr".into(),

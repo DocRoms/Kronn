@@ -4237,6 +4237,8 @@ const en: TranslationDict = {
   'fallback.mode.video': 'Video',
   'fallback.current': 'Model this mode runs on: {0}',
   'fallback.add': 'Add a fallback',
+  'fallback.namedText': 'No fallback yet',
+  'fallback.namedTextHint': 'A text fallback is set on LiteLLM and NVIDIA, and on the CLI agents and Ollama; another named connection is chosen in the workflow and cannot have one yet. Its image and video modes can.',
   'fallback.change': 'Change this fallback',
   'fallback.remove': 'Remove this fallback',
   'fallback.off': 'No fallback',

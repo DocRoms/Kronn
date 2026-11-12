@@ -1,11 +1,14 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi } from '../../lib/api';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, type CSSProperties, type ReactNode } from 'react';
+import { config as configApi, agents as agentsApi, usage as usageApi, nvidia as nvidiaApi, externalApi, comfyui as comfyuiApi } from '../../lib/api';
 import { catalogModelOptions, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
 import { userError } from '../../lib/userError';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { useIsMobile } from '../../hooks/useMediaQuery';
 import { OllamaCard } from './OllamaCard';
 import { AgentFallbackControl } from './AgentFallbackControl';
+import { ConnectionFallbackRow } from './ConnectionFallbackRow';
+import type { ExternalApiConnectionView } from '../../lib/api';
+import { buildMediaOptions, COMFYUI_OWNER, type ComfyMediaSource } from '../../lib/mediaFallbackOptions';
 import { useFallbackData } from '../../hooks/useFallbackData';
 import { modesOf } from '../../lib/fallbackOptions';
 import { ComfyUiCard } from './ComfyUiCard';
@@ -27,7 +30,7 @@ import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, FallbackMode
 /** Only the keys of `AgentsConfig` that hold an `AgentConfig` — `model_tiers`
  *  lives in the same object but is a different shape. */
 type AgentConfigKey = {
-  [K in keyof AgentsConfig]: AgentsConfig[K] extends AgentConfig ? K : never
+  [K in keyof AgentsConfig]-?: AgentsConfig[K] extends AgentConfig ? K : never
 }[keyof AgentsConfig];
 
 const AGENT_CONCURRENCY: Partial<Record<AgentType, { key: AgentConfigKey; fallback: number | null }>> = {
@@ -57,7 +60,7 @@ import {
   Plus, Trash2, Download, Check,
   Loader2, RefreshCw, X, Eye, EyeOff, Play, StopCircle,
   ExternalLink, FolderSearch, ArrowUpCircle, Copy, Gauge, FileText, Palette, GitFork, Info, Layers,
-  Pencil, Terminal, HardDrive,
+  Pencil, Terminal, HardDrive, Shuffle,
 } from 'lucide-react';
 import {
   ALL_USAGE_FILTER,
@@ -205,6 +208,28 @@ export function AgentsSection({
   // KT-1693 — the fallback of every mode row, the cooldowns still running, and
   // everything a fallback can be.
   const fallbackData = useFallbackData(agents);
+  // KT-1706 — the media sources an image or video fallback can be: ComfyUI and the named connections.
+  const [mediaConnections, setMediaConnections] = useState<ExternalApiConnectionView[]>([]);
+  const [comfyMedia, setComfyMedia] = useState<ComfyMediaSource | null>(null);
+  const loadMediaSources = useCallback(async () => {
+    const [connections, comfy] = await Promise.allSettled([
+      Promise.resolve().then(() => externalApi.list()),
+      Promise.resolve().then(() => comfyuiApi.status()),
+    ]);
+    setMediaConnections(connections.status === 'fulfilled' ? connections.value ?? [] : []);
+    setComfyMedia(comfy.status === 'fulfilled' && comfy.value
+      ? { models: comfy.value.models, image_model: comfy.value.image_model ?? null, video_model: comfy.value.video_model ?? null }
+      : null);
+  }, []);
+  useEffect(() => {
+    void loadMediaSources();
+    window.addEventListener('kronn:comfyui-changed', loadMediaSources);
+    window.addEventListener('kronn:connections-changed', loadMediaSources);
+    return () => {
+      window.removeEventListener('kronn:comfyui-changed', loadMediaSources);
+      window.removeEventListener('kronn:connections-changed', loadMediaSources);
+    };
+  }, [loadMediaSources]);
   const saveTierPreference = useAsyncGuard(async (
     agentKey: keyof ModelTiersConfig,
     field: ModelTier,
@@ -661,6 +686,45 @@ export function AgentsSection({
       />
     );
   };
+
+  /** KT-1706 — one image or video row of ComfyUI or of a connection, with its fallback. */
+  const renderMediaRow = (owner: string, mode: FallbackMode, model: ReactNode) => (
+    <ConnectionFallbackRow
+      key={`${owner}-${mode}`}
+      testId={`connection-fallback-${owner}-${mode}`}
+      mode={mode}
+      owner={owner}
+      model={model}
+      view={fallbackData.overview?.media?.find(view => view.owner === owner && view.mode === mode)}
+      options={buildMediaOptions(mediaConnections, comfyMedia, 'ComfyUI')}
+      onChange={async next => {
+        await configApi.setConnectionFallback({ owner, mode, fallback: next });
+        fallbackData.refetch();
+      }}
+    />
+  );
+
+  /** The « Models and fallbacks » block of ComfyUI: its image and video rows. */
+  const renderComfyBlock = (pickers: Record<'image' | 'video', ReactNode>) => (
+    <div className="set-agent-fallback" data-testid="agent-fallback-comfyui">
+      <div className="set-agent-fallback-row" title={t('agents.fallbackHint')}>
+        <Shuffle size={12} aria-hidden="true" />
+        <span>{t('agents.modelsAndFallbacks')}</span>
+      </div>
+      {renderMediaRow(COMFYUI_OWNER, 'image', pickers.image)}
+      {renderMediaRow(COMFYUI_OWNER, 'video', pickers.video)}
+    </div>
+  );
+
+  const renderConnectionBlock = (connection: ExternalApiConnectionView, rows: { mode: FallbackMode; model: ReactNode }[]) => (
+    <div className="set-agent-fallback" data-testid={`connection-models-${connection.id}`}>
+      <div className="set-agent-fallback-row" title={t('agents.fallbackHint')}>
+        <Shuffle size={12} aria-hidden="true" />
+        <span>{t('agents.modelsAndFallbacks')}</span>
+      </div>
+      {rows.map(row => renderMediaRow(connection.id, row.mode, row.model))}
+    </div>
+  );
 
   /** "Can act in Kronn" on the Ollama card (KT-1600): on unless the operator
    *  turned it off. "On" clears the setting rather than storing `true`, so the
@@ -1856,7 +1920,7 @@ export function AgentsSection({
             ))}
             {/* KT-1381 — local images and videos, next to the local chat models. */}
             <div className="set-agent-row set-agent-row-ollama" data-agent-type="ComfyUI">
-              <ComfyUiCard t={t} />
+              <ComfyUiCard t={t} modelsBlock={renderComfyBlock} />
             </div>
           </div>
         </section>
@@ -1871,6 +1935,7 @@ export function AgentsSection({
           toast={toast}
           modelCostSuffix={modelCostSuffix}
           onModelTiersChanged={refetchAgentAccess}
+          modelsBlock={renderConnectionBlock}
         />
 
         {/* After the modes: a catalogue is what the modes draw from, not a

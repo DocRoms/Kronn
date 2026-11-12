@@ -20,6 +20,8 @@ interface Props {
   /** KT-1706 — the model picker of each mode (« Mode · [model ▾] → fallback »). A mode with no picker shows
    *  its resolved model as a read-only pill. */
   pickers?: Partial<Record<FallbackMode, ReactNode>>;
+  /** KT-1706 — more rows of the same block, after the agent's own (an HTTP connection's image and video rows). */
+  extraRows?: ReactNode;
   /** Every agent/model that could be a fallback; each row keeps the kind of its mode. */
   options: FallbackOption[];
   /** Every mode row that has a fallback, as the backend resolved it (inherited links, gaps, refusals). */
@@ -47,7 +49,7 @@ const REASONS: Record<string, string> = {
  *  picker sets the mode's model; the fallback is what takes over when the
  *  provider cannot serve it. A discussion or a workflow step can override a
  *  mode; with no override this one applies. */
-export function AgentFallbackControl({ agentType, modes, pickers, options, chains, cooldown, onChange, onOpenAgent }: Props) {
+export function AgentFallbackControl({ agentType, modes, pickers, extraRows, options, chains, cooldown, onChange, onOpenAgent }: Props) {
   const { t } = useT();
   return (
     <div className="set-agent-fallback" data-testid={`agent-fallback-${agentType}`}>
@@ -79,6 +81,7 @@ export function AgentFallbackControl({ agentType, modes, pickers, options, chain
           />
         );
       })}
+      {extraRows}
       {cooldown && (
         <div className="set-agent-fallback-cooldown" data-testid={`agent-fallback-cooldown-${agentType}`}>
           {t('agents.fallbackCooldown', clockTime(cooldown.until), REASONS[cooldown.reason] ?? cooldown.reason)}

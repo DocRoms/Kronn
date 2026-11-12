@@ -777,6 +777,12 @@ pub struct AgentsConfig {
     /// Per-agent model tier overrides (Economy/Reasoning model names).
     #[serde(default)]
     pub model_tiers: ModelTiersConfig,
+    /// KT-1706 — what takes over the image or video mode of ComfyUI or of a named
+    /// HTTP connection when its provider cannot serve a generation. Kept apart
+    /// from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(skip)]
+    pub connection_fallbacks: Vec<ConnectionFallback>,
 }
 
 /// Endpoint slots of the OpenAI-wire providers, carried as one value.
@@ -1145,6 +1151,36 @@ pub struct AgentFallback {
 pub struct ModeFallback {
     pub row: FallbackMode,
     pub fallback: AgentFallback,
+}
+
+/// KT-1706 — where a media fallback runs: ComfyUI (`local:comfyui`) or a named
+/// HTTP connection (its id), and optionally the model; without one, the model
+/// that target has in its own image / video slot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConnectionFallbackTarget {
+    pub connection: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// KT-1706 — the fallback of one media mode (`image` or `video`) of an owner
+/// (`local:comfyui` or a connection id).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConnectionFallback {
+    pub owner: String,
+    pub row: FallbackMode,
+    pub fallback: ConnectionFallbackTarget,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetConnectionFallbackRequest {
+    pub owner: String,
+    pub mode: FallbackMode,
+    /// The fallback of this media row; `None` removes it.
+    pub fallback: Option<ConnectionFallbackTarget>,
 }
 
 #[derive(Debug, Deserialize, TS)]
