@@ -116,6 +116,22 @@ describe('the Notifications tab', () => {
     expect(within(outage).getByTestId('notif-outage-retry')).toBeInTheDocument();
   });
 
+  it('counts the pinned outage in All and Kronn, and shows no empty state while it is the only entry', () => {
+    confirmOutage();
+    renderPanel();
+    expect(screen.getByTestId('notif-outage')).toBeInTheDocument();
+    expect(screen.queryByText('Rien à signaler')).toBeNull();
+    const chips = screen.getByTestId('notifications-tab');
+    expect(within(chips).getByRole('button', { name: /Tout/ })).toHaveTextContent('1');
+    expect(within(chips).getByRole('button', { name: /Kronn/ })).toHaveTextContent('1');
+    expect(within(chips).getByRole('button', { name: /Discussions/ })).toHaveTextContent('0');
+
+    // The pinned entry stays, and still no empty state, under a filter it is not part of.
+    fireEvent.click(within(chips).getByRole('button', { name: /Discussions/ }));
+    expect(screen.getByTestId('notif-outage')).toBeInTheDocument();
+    expect(screen.queryByText('Rien à signaler')).toBeNull();
+  });
+
   it('turns into "Rétabli après …" in the history when the backend answers again', () => {
     confirmOutage(10_000);
     renderPanel();
@@ -224,7 +240,7 @@ describe('the category chips', () => {
     expect(screen.getByTestId('activity-chip-kronn')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('keep the red alert pinned whatever the filter, and out of the counts', () => {
+  it('keep the red alert pinned whatever the filter, and counted in All and Kronn', () => {
     confirmOutage();
     fail('/discussions/1/messages');
     renderPanel({ initialTab: 'notifications' });
@@ -232,7 +248,10 @@ describe('the category chips', () => {
       fireEvent.click(screen.getByTestId(`activity-chip-${chip}`));
       expect(screen.getByTestId('notif-outage')).toBeInTheDocument();
     }
-    expect(screen.getByTestId('activity-chip-count-all')).toHaveTextContent('1');
+    // The outage (Kronn) and the discussions error.
+    expect(screen.getByTestId('activity-chip-count-all')).toHaveTextContent('2');
+    expect(screen.getByTestId('activity-chip-count-kronn')).toHaveTextContent('1');
+    expect(screen.getByTestId('activity-chip-count-discussions')).toHaveTextContent('1');
     fireEvent.click(screen.getByTestId('activity-chip-automations'));
     expect(screen.queryByTestId('notif-error')).toBeNull();
     expect(screen.getByText('Rien dans cette catégorie.')).toBeInTheDocument();

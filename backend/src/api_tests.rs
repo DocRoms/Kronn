@@ -3794,7 +3794,11 @@ mod tests {
     /// hiding twice changes nothing.
     #[tokio::test]
     async fn hidden_repo_stays_out_of_the_scan_until_forever() {
-        let root = tempfile::TempDir::new().unwrap();
+        // Not `TempDir::new()`: its `.tmpXXXX` name makes the scanner flag every repo hidden.
+        let root = tempfile::Builder::new()
+            .prefix("kt1684-scan-")
+            .tempdir()
+            .unwrap();
         for name in ["repo-a", "repo-b"] {
             std::fs::create_dir_all(root.path().join(name).join(".git")).unwrap();
         }

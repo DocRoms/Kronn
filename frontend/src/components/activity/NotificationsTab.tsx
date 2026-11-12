@@ -50,6 +50,11 @@ export function NotificationsTab({ notifications, now, filter, onFilterChange }:
     ...history.map((entry): Item => ({ kind: 'history', key: entry.id, category: entry.category, entry })),
   ];
   const counts = countByCategory(items, item => item.category);
+  // The pinned outage is a Kronn entry: it counts in All and Kronn, but is never filtered out.
+  if (outage) {
+    counts.all += 1;
+    counts.kronn += 1;
+  }
   const visible = filter === 'all' ? items : items.filter(item => item.category === filter);
 
   const renderItem = (item: Item) =>
@@ -86,7 +91,10 @@ export function NotificationsTab({ notifications, now, filter, onFilterChange }:
 
       <div className="activity-tabbody">
         {visible.length === 0 ? (
-          <p className="activity-empty">{t(items.length === 0 ? 'notif.empty' : 'notif.empty.filtered')}</p>
+          // "Nothing to report" would contradict the pinned outage, which is itself an entry.
+          items.length === 0
+            ? !outage && <p className="activity-empty">{t('notif.empty')}</p>
+            : <p className="activity-empty">{t('notif.empty.filtered')}</p>
         ) : filter === 'all' ? (
           ACTIVITY_CATEGORIES.map(category => {
             const section = visible.filter(item => item.category === category);
