@@ -12922,7 +12922,20 @@ max_concurrent_task_workers: number,
  * « heavy output » warning in the run view and on the workflow card.
  * The run itself is never refused.
  */
-heavy_output_kb: number, };
+heavy_output_kb: number,
+/**
+ * KT-1718 — the time, in minutes, a Claude task worker's shell command may
+ * run when it names no limit of its own (`BASH_DEFAULT_TIMEOUT_MS`).
+ */
+bash_default_timeout_min: number,
+/**
+ * KT-1718 — the longest a Claude task worker's shell command may run, even
+ * when it asks for more (`BASH_MAX_TIMEOUT_MS`). Claude Code's own cap is
+ * 10 minutes: a cold test-profile build outlasts it, and the worker loses
+ * the turn. Keep it below the generation limit (`agent_global_timeout_min`),
+ * which cuts the whole turn whatever a command is allowed.
+ */
+bash_max_timeout_min: number, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

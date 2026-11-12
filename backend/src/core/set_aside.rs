@@ -276,9 +276,11 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
         ["tts_voices", _] => Text,
         ["disabled_agents" | "unlocked_profiles" | "disabled_auto_skills", "[]"] => Text,
         ["embed_allowed_origins", "[]"] => Url,
-        ["workers", "default_max_review_rounds" | "max_concurrent_task_workers" | "heavy_output_kb"] => {
-            Number
-        }
+        ["workers", "default_max_review_rounds"
+        | "max_concurrent_task_workers"
+        | "heavy_output_kb"
+        | "bash_default_timeout_min"
+        | "bash_max_timeout_min"] => Number,
         ["workers", "review_rounds_unlimited"] => Flag,
         ["workers", "background_priority"] => Flag,
         ["tokens", "disabled_overrides", "[]"] => Text,

@@ -680,6 +680,8 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     );
     // KT-1633 — Settings > Workers: background priority of the workers' processes.
     crate::core::background_priority::set_enabled(config.workers.background_priority);
+    // KT-1718 — Settings > Workers: the shell limits of a Claude task worker.
+    crate::core::task_worker_env::set_bash_timeouts(&config.workers);
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())
@@ -1263,7 +1265,9 @@ const KEY_NAME: &str = "encryption_secret";
 /// - a line is read by its decoded key, not its spelling: `"encryption_secret"`
 ///   and the same name with a Unicode escape for one letter are the key, and a
 ///   line that does not parse
-///   with a quote or an escape before its `=` is `unreadable` too.
+///   with a quote or an escape before its `=` is `unreadable` too, and so is,
+///   inside an open string or array, a line that spells the name or is an
+///   assignment with such a key part (`may_spell_key`).
 pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     let mut scan = KeyScan::default();
     // The delimiter of the multi-line string the scan is inside, if any, and the
@@ -1278,13 +1282,13 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
         };
         let mut rest = line;
         if let Some(delimiter) = open_string {
-            scan.unreadable |= line.contains(KEY_NAME);
+            scan.unreadable |= may_spell_key(line);
             match string_end(line, delimiter) {
                 Some(after) => rest = after,
                 None => continue,
             }
         } else if depth > 0 {
-            scan.unreadable |= line.contains(KEY_NAME);
+            scan.unreadable |= may_spell_key(line);
         } else {
             let top = line.trim_start();
             if top.starts_with('[') {
@@ -1305,6 +1309,16 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
         (open_string, depth) = line_state(rest, depth);
     }
     scan
+}
+
+/// Whether a line inside a string or an array that is still open could be the
+/// key's line: it spells the name, or it is an assignment (it has a `=`) whose
+/// key part is quoted or escaped (`"encryption_secret" = …` decodes to the
+/// name whatever its spelling). A line without a `=` cannot be a key, so a
+/// quoted array element is not flagged. The scan cannot tell such a line from a
+/// key line of the top level, so it is never proven harmless.
+fn may_spell_key(line: &str) -> bool {
+    line.contains(KEY_NAME) || (line.contains('=') && quoted_key_part(line))
 }
 
 /// Whether the part of `line` before its first `=` is written with a quote or

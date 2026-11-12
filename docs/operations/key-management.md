@@ -277,7 +277,10 @@ Safe to interrupt at any point; a rerun converges:
    header does not hide it). The key is read by its decoded name, not its
    spelling: `"encryption_secret"`, `'encryption_secret'` and
    `"encryption\u005fsecret"` are the key line, and a line that does not parse
-   with a quote or an escape before its `=` is treated as a possible key line.
+   with a quote or an escape before its `=` is treated as a possible key line,
+   inside an open array or multi-line string as well: there, any line that
+   spells the name, or is an assignment whose key part is quoted or escaped, is
+   never proven harmless (a quoted array element, with no `=`, is).
    Such a copy is cut down or removed like any other. A
    symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard
@@ -293,7 +296,9 @@ Safe to interrupt at any point; a rerun converges:
    once a key exists); the key-only copy is for one readable key. A TOML parse
    error of any config file is logged by kind and position only (`invalid TOML
    at line 3, column 9`), never with the offending line, which would put a key
-   or a credential in the log (`redact::toml_error_summary`). The pass reads
+   or a credential in the log (`redact::toml_error_summary`); that holds for
+   `~/.codex/config.toml` too (the host-MCP scan, and the adopt error returned
+   by the API). The pass reads
    a copy then renames over it, once at start in the single process that owns
    the data directory; a copy swapped in between is out of scope. One failure
    does not stop the others. The key lookup tells three cases apart. A key is found:

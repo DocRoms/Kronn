@@ -971,6 +971,71 @@ fn a_quoted_or_escaped_key_name_is_still_the_key_line() {
     }
 }
 
+/// A quoted or escaped key line inside a string or an array that is still open is
+/// not proven harmless either: whatever its spelling, it may be the live key, so
+/// the copy is kept whole (bytes unchanged) and reported, and a config.toml set
+/// aside keeps its whole content. A quoted array element is still harmless.
+#[test]
+fn a_quoted_or_escaped_key_line_inside_an_open_region_keeps_the_copy_whole() {
+    let k = crypto::generate_secret();
+    let hidden = [
+        // An array that never closes.
+        format!("x = [\n\"encryption_secret\" = \"{k}\"\n"),
+        format!("x = [\n\"encryption\\u005fsecret\" = \"{k}\"\n"),
+        format!("x = [\n  \"\\u0065ncryption_secret\" = \"{k}\"\n"),
+        format!("x = [\n'encryption_secret' = '{k}'\n"),
+        // A multi-line string that never closes, or does and leaves the text broken.
+        format!("x = \"\"\"\n\"encryption_secret\" = \"{k}\"\n"),
+        format!("x = \"\"\"\n\"enc\\u0072yption_secret\" = \"{k}\"\n\"\"\"\nbroken\n"),
+        format!("x = '''\n\"encryption\\u005fsecret\" = \"{k}\"\n"),
+        // An inline table over several lines.
+        format!("x = {{\n\"encryption\\u005fsecret\" = \"{k}\",\n"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    for (i, text) in hidden.iter().enumerate() {
+        let text = format!("pat = \"pat-clear\"\ncookie = \"cookie-clear\"\n{text}");
+        assert!(text.parse::<toml::Table>().is_err(), "{text}");
+        assert!(config::salvage_key_scan(&text).unreadable, "{text}");
+        assert!(key_lines(&text).unreadable, "{text}");
+        std::fs::write(
+            dir.path()
+                .join(format!("config.toml.backup.2026100{i}T000000Z")),
+            &text,
+        )
+        .unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(
+                set_aside_content(bare.path(), text.as_bytes(), None).unwrap(),
+                Aside::KeptAsIs(_)
+            ),
+            "{text}"
+        );
+    }
+    for _ in 0..2 {
+        let report = protect_clear_copies(dir.path(), None);
+        assert_eq!(
+            (report.reduced, report.failures.len()),
+            (0, hidden.len()),
+            "{report:?}"
+        );
+        for (i, text) in hidden.iter().enumerate() {
+            let copy = format!("config.toml.backup.2026100{i}T000000Z");
+            let kept = std::fs::read_to_string(dir.path().join(copy)).unwrap();
+            assert!(kept.ends_with(text.as_str()), "{kept}");
+        }
+    }
+
+    // Quoted array elements and plain lines in an open region are harmless.
+    for harmless in [
+        "x = [\n\"a\",\n\"b\"\n",
+        "x = \"\"\"\nplain prose\n",
+        "x = [\n{ a = 1 },\n",
+    ] {
+        assert!(!config::salvage_key_scan(harmless).unreadable, "{harmless}");
+    }
+}
+
 /// An unreadable config.toml set aside with no key: several different keys, or a
 /// key line that cannot be read, keep the whole content (owner-only) and say so,
 /// never one key line or nothing; one readable key is still the only thing kept.

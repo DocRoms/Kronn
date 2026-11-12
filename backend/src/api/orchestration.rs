@@ -11429,10 +11429,14 @@ fn worker_brief_markdown_in(
          `tests/`); report each exit code in the evidence of its `tests` entry. The long \
          validations persisted by the principal are run by Kronn at integration, after the \
          review: do not replay them in full. The shell tool \
-         cuts a long command (Bash: 600 s): never start one in the background to wait for it, \
-         because your process ends as soon as you hand the turn back and the execution ends \
-         without a delivery. Chain it all in the same turn: targeted tests, commit, then \
-         `task_exec_deliver`."
+         cuts a command at the per-command cap of Settings > Workers (60 min by default). A cold \
+         test-profile build can take many minutes: run it in the foreground and pass the Bash \
+         tool an explicit `timeout` up to that cap, never cut it short and never restart it in \
+         a loop. Never end your turn while a command runs in the background, and never start \
+         one to wait for it later: your process ends as soon as you hand the turn back, takes \
+         the build with it, and the execution ends without a delivery; if you must background \
+         a command, wait for it in the same turn. Chain it all in the same turn: targeted \
+         tests, commit, then `task_exec_deliver`."
             .to_string()
     } else if !fr {
         "You have no shell: never claim to have run `cargo`, `pnpm`, `make` or any other \
@@ -11452,10 +11456,15 @@ fn worker_brief_markdown_in(
          --tests` ou une sortie filtrée ne lintent pas `tests/`) ; reporte le code de sortie \
          de chacun dans la preuve de son entrée `tests`. Les validations longues persistées par le principal sont \
          jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
-         L'outil shell coupe une commande longue (Bash : 600 s) : n'en lance jamais une en \
-         arrière-plan pour l'attendre, car ton processus s'arrête dès que tu rends la main \
-         et l'exécution finit sans livraison. Enchaîne dans le même tour : tests ciblés, \
-         commit, puis `task_exec_deliver`."
+         L'outil shell coupe une commande au plafond par commande de Settings > Workers \
+         (60 min par défaut). Un build à froid du profil de test peut durer de nombreuses \
+         minutes : lance-le au premier plan en passant à l'outil Bash un `timeout` explicite \
+         jusqu'à ce plafond, ne l'interromps jamais et ne le relance pas en boucle. Ne \
+         termine jamais ton tour pendant qu'une commande tourne en arrière-plan et n'en lance \
+         jamais une pour l'attendre plus tard : ton processus s'arrête dès que tu rends la \
+         main, emporte le build, et l'exécution finit sans livraison ; si tu dois mettre une \
+         commande en arrière-plan, attends sa fin dans le même tour. Enchaîne dans le même \
+         tour : tests ciblés, commit, puis `task_exec_deliver`."
             .to_string()
     } else {
         "Tu n'as pas de shell : n'affirme jamais avoir exécuté `cargo`, `pnpm`, `make` \
@@ -20919,8 +20928,9 @@ pub(crate) mod tests {
                 "Les validations longues persistées par le principal",
                 "jouées par Kronn à l'intégration",
                 // …and it never waits on a background command…
-                "n'en lance jamais une en arrière-plan pour l'attendre",
-                "Bash : 600 s",
+                "Ne termine jamais ton tour pendant qu'une commande tourne en arrière-plan",
+                "plafond par commande de Settings > Workers",
+                "`timeout` explicite",
                 // …but commits and delivers within the same turn.
                 "Enchaîne dans le même tour : tests ciblés, commit, puis `task_exec_deliver`",
             ] {
@@ -20958,7 +20968,7 @@ pub(crate) mod tests {
         );
         assert!(http.contains("Tu n'as pas de shell"), "{http}");
         assert!(!http.contains("arrière-plan"), "{http}");
-        assert!(!http.contains("Bash : 600 s"), "{http}");
+        assert!(!http.contains("plafond par commande"), "{http}");
     }
 
     /// KT-854: the brief says how to bring the target branch in without erasing
