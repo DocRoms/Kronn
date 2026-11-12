@@ -1,11 +1,13 @@
 use super::*;
-use crate::models::AgentFallback;
+use crate::models::{AgentFallback, FallbackMode, FallbackTransport};
 
 fn agents(chains: &[(AgentType, Vec<AgentFallback>)]) -> AgentsConfig {
     let mut agents = crate::core::config::default_config().agents;
     for (from, chain) in chains {
         agents.agent_config_mut(from).unwrap().fallback_chain = chain.clone();
     }
+    // The way a 0.15.3 chain is read now: carried onto the rows of the agents.
+    migrate_legacy_chains(&mut agents);
     agents
 }
 
@@ -21,7 +23,7 @@ fn pick(
 ) -> Selection {
     select(
         config,
-        default_chain(config, origin),
+        &default_chain(config, origin, FallbackMode::Standard),
         origin,
         failing,
         usable,
@@ -34,14 +36,7 @@ fn link(agent: AgentType) -> AgentFallback {
     AgentFallback {
         agent,
         model: None,
-        allow_paid: false,
-    }
-}
-
-fn paid_ok(agent: AgentType) -> AgentFallback {
-    AgentFallback {
-        allow_paid: true,
-        ..link(agent)
+        mode: None,
     }
 }
 
@@ -142,14 +137,28 @@ fn the_chain_is_the_ordered_list_of_the_agent_the_turn_starts_on() {
         vec![link(AgentType::Codex), link(AgentType::Ollama)],
     )]);
     assert_eq!(
-        agents_of(default_chain(&config, &AgentType::ClaudeCode)),
+        agents_of(&default_chain(
+            &config,
+            &AgentType::ClaudeCode,
+            FallbackMode::Standard
+        )),
         vec![AgentType::Codex, AgentType::Ollama]
     );
-    assert!(default_chain(&config, &AgentType::Codex).is_empty());
+    assert_eq!(
+        agents_of(&default_chain(
+            &config,
+            &AgentType::Codex,
+            FallbackMode::Eco
+        )),
+        vec![AgentType::Ollama],
+        "the fallback of a fallback is the one set on ITS own row"
+    );
+    assert!(default_chain(&config, &AgentType::Ollama, FallbackMode::Eco).is_empty());
     validate_chain(
         &config,
         Some(&AgentType::ClaudeCode),
-        default_chain(&config, &AgentType::ClaudeCode),
+        Some(FallbackMode::Standard),
+        &default_chain(&config, &AgentType::ClaudeCode, FallbackMode::Standard),
     )
     .unwrap();
 }
@@ -162,13 +171,25 @@ fn an_override_replaces_the_default_chain_and_an_empty_one_cuts_it() {
         agents_of(&effective_chain(
             &config,
             &AgentType::ClaudeCode,
+            FallbackMode::Standard,
             Some(&own)
         )),
         vec![AgentType::GeminiCli]
     );
-    assert!(effective_chain(&config, &AgentType::ClaudeCode, Some(&[])).is_empty());
+    assert!(effective_chain(
+        &config,
+        &AgentType::ClaudeCode,
+        FallbackMode::Standard,
+        Some(&[])
+    )
+    .is_empty());
     assert_eq!(
-        agents_of(&effective_chain(&config, &AgentType::ClaudeCode, None)),
+        agents_of(&effective_chain(
+            &config,
+            &AgentType::ClaudeCode,
+            FallbackMode::Standard,
+            None
+        )),
         vec![AgentType::Codex]
     );
 }
@@ -225,6 +246,7 @@ fn a_loop_is_refused_the_starting_agent_or_one_agent_twice() {
     let error = validate_chain(
         &config,
         Some(&AgentType::ClaudeCode),
+        None,
         &[link(AgentType::Codex), link(AgentType::Codex)],
     )
     .expect_err("Codex twice");
@@ -234,25 +256,71 @@ fn a_loop_is_refused_the_starting_agent_or_one_agent_twice() {
         validate_chain(
             &config,
             Some(&AgentType::Codex),
+            None,
             &[link(AgentType::GeminiCli), link(AgentType::Codex)]
         ),
         Err(ChainError::SelfFallback(AgentType::Codex)),
         "a chain that comes back to its own agent loops"
     );
-    // A written-by-hand loop is not walked either.
+    // A loop written by hand across two rows is not walked: the chain stops
+    // where it would come back to an agent already on it.
     let mut hand = agents(&[]);
-    hand.claude_code.fallback_chain = vec![link(AgentType::Codex), link(AgentType::Codex)];
-    match pick(
+    set_row(
+        &mut hand,
+        &AgentType::ClaudeCode,
+        FallbackMode::Standard,
+        Some(link(AgentType::Codex)),
+    );
+    set_row(
+        &mut hand,
+        &AgentType::Codex,
+        FallbackMode::Standard,
+        Some(link(AgentType::ClaudeCode)),
+    );
+    assert_eq!(
+        agents_of(&default_chain(
+            &hand,
+            &AgentType::ClaudeCode,
+            FallbackMode::Standard
+        )),
+        vec![AgentType::Codex]
+    );
+    // And one that would be written through the API is refused with the path.
+    let error = validate_row(
         &hand,
+        &AgentType::Codex,
+        FallbackMode::Standard,
+        &link(AgentType::ClaudeCode),
+    )
+    .expect_err("Claude Code → Codex → Claude Code");
+    assert!(matches!(
+        error,
+        ChainError::SelfFallback(_) | ChainError::Cycle(_)
+    ));
+    let mut rows = agents(&[]);
+    set_row(
+        &mut rows,
+        &AgentType::Codex,
+        FallbackMode::Standard,
+        Some(link(AgentType::GeminiCli)),
+    );
+    set_row(
+        &mut rows,
+        &AgentType::GeminiCli,
+        FallbackMode::Standard,
+        Some(link(AgentType::ClaudeCode)),
+    );
+    let error = validate_row(
+        &rows,
         &AgentType::ClaudeCode,
-        &AgentType::ClaudeCode,
-        &everyone(),
-        &TurnNeeds::default(),
-        &never_cooling,
-    ) {
-        Selection::Stop { why } => assert!(why.contains("loop"), "{why}"),
-        other => panic!("{other:?}"),
-    }
+        FallbackMode::Standard,
+        &link(AgentType::Codex),
+    )
+    .expect_err("the loop passes through two other rows");
+    assert!(matches!(error, ChainError::Cycle(_)), "{error}");
+    assert!(error
+        .to_string()
+        .contains("Claude Code → Codex → Gemini CLI → Claude Code"));
 }
 
 #[test]
@@ -265,13 +333,13 @@ fn a_chain_past_the_depth_limit_is_refused() {
         link(AgentType::Vibe),
     ];
     assert_eq!(four.len(), MAX_CHAIN_DEPTH);
-    validate_chain(&config, Some(&AgentType::ClaudeCode), &four).unwrap();
+    validate_chain(&config, Some(&AgentType::ClaudeCode), None, &four).unwrap();
     let five: Vec<AgentFallback> = four
         .iter()
         .cloned()
         .chain([link(AgentType::CopilotCli)])
         .collect();
-    let error = validate_chain(&config, Some(&AgentType::ClaudeCode), &five)
+    let error = validate_chain(&config, Some(&AgentType::ClaudeCode), None, &five)
         .expect_err("a fifth link is over the limit");
     assert!(matches!(error, ChainError::TooDeep { .. }), "{error}");
     assert!(error.to_string().contains("at most 4"));
@@ -284,6 +352,7 @@ fn a_fallback_never_gets_more_access_than_the_agent_it_replaces() {
     let error = validate_chain(
         &config,
         Some(&AgentType::ClaudeCode),
+        None,
         &[link(AgentType::Codex)],
     )
     .unwrap_err();
@@ -293,6 +362,7 @@ fn a_fallback_never_gets_more_access_than_the_agent_it_replaces() {
     validate_chain(
         &config,
         Some(&AgentType::ClaudeCode),
+        None,
         &[link(AgentType::Codex)],
     )
     .unwrap();
@@ -305,6 +375,7 @@ fn a_named_connection_cannot_take_part_and_a_blank_model_is_refused() {
         validate_chain(
             &config,
             Some(&AgentType::ClaudeCode),
+            None,
             &[link(AgentType::Custom)]
         ),
         Err(ChainError::NoCardFor(AgentType::Custom))
@@ -314,14 +385,14 @@ fn a_named_connection_cannot_take_part_and_a_blank_model_is_refused() {
         ..link(AgentType::Codex)
     };
     assert!(matches!(
-        validate_chain(&config, Some(&AgentType::ClaudeCode), &[blank]),
+        validate_chain(&config, Some(&AgentType::ClaudeCode), None, &[blank]),
         Err(ChainError::BadModel(_))
     ));
     let named = AgentFallback {
         model: Some("sonnet".into()),
         ..link(AgentType::Codex)
     };
-    validate_chain(&config, Some(&AgentType::ClaudeCode), &[named]).unwrap();
+    validate_chain(&config, Some(&AgentType::ClaudeCode), None, &[named]).unwrap();
 }
 
 #[test]
@@ -330,28 +401,293 @@ fn the_chain_view_shows_the_gaps_of_each_link_as_warnings() {
         AgentType::ClaudeCode,
         vec![
             link(AgentType::Codex),
-            paid_ok(AgentType::LiteLlm),
+            link(AgentType::LiteLlm),
             link(AgentType::Ollama),
         ],
     )]);
-    let view = chain_view(&config, &AgentType::ClaudeCode);
+    let view = chain_view(&config, &AgentType::ClaudeCode, FallbackMode::Standard);
     assert_eq!(view.error, None);
-    assert_eq!(view.links.len(), 3);
+    assert_eq!(view.links.len(), 1, "one fallback is set on the row itself");
     assert!(view.links[0].gaps.is_empty(), "a CLI agent has everything");
-    assert!(view.links[1].paid && view.links[1].allow_paid);
-    assert!(view.links[1].gaps.contains(&"no MCP tools".to_string()));
-    assert!(view.links[2]
+    // The next ones are inherited: set on the rows of the fallbacks.
+    assert_eq!(view.inherited.len(), 2);
+    assert_eq!(view.inherited[0].source, AgentType::Codex);
+    assert_eq!(view.inherited[0].link.agent, AgentType::LiteLlm);
+    assert!(view.inherited[0]
+        .link
+        .gaps
+        .contains(&"no MCP tools".to_string()));
+    assert_eq!(view.inherited[1].source, AgentType::LiteLlm);
+    assert!(view.inherited[1]
+        .link
         .gaps
         .contains(&"capped context window".to_string()));
-    // A link lacks only what the agent it replaces had: Ollama after Ollama-class
-    // agents is no gap, and Claude Code → itself is flagged as an error.
-    let looped = agents(&[(
-        AgentType::ClaudeCode,
-        vec![link(AgentType::Codex), link(AgentType::Codex)],
-    )]);
-    assert!(chain_view(&looped, &AgentType::ClaudeCode).error.is_some());
-    let own = chain_view_of(&config, None, &[link(AgentType::Ollama)]);
+    let own = chain_view_of(
+        &config,
+        None,
+        FallbackMode::Standard,
+        &[link(AgentType::Ollama)],
+    );
     assert!(own.links[0].gaps.contains(&"no MCP tools".to_string()));
+}
+
+#[test]
+fn every_link_carries_its_transport() {
+    assert_eq!(transport(&AgentType::ClaudeCode), FallbackTransport::Cli);
+    assert_eq!(transport(&AgentType::OpenCode), FallbackTransport::Cli);
+    assert_eq!(transport(&AgentType::LiteLlm), FallbackTransport::Http);
+    assert_eq!(transport(&AgentType::Nvidia), FallbackTransport::Http);
+    assert_eq!(transport(&AgentType::Ollama), FallbackTransport::Local);
+    let config = agents(&[(AgentType::OpenCode, vec![link(AgentType::Ollama)])]);
+    let view = chain_view(&config, &AgentType::OpenCode, FallbackMode::Eco);
+    assert_eq!(view.links[0].transport, FallbackTransport::Local);
+}
+
+#[test]
+fn a_fallback_goes_to_the_same_kind_of_mode_only() {
+    let config = agents(&[]);
+    let to = |mode: FallbackMode| AgentFallback {
+        mode: Some(mode),
+        ..link(AgentType::Codex)
+    };
+    // Text goes to any text mode.
+    for from in FallbackMode::TEXT {
+        for target in FallbackMode::TEXT {
+            validate_row(&config, &AgentType::ClaudeCode, from, &to(target)).unwrap();
+        }
+    }
+    // The other kinds stay with their own.
+    for mode in [
+        FallbackMode::Image,
+        FallbackMode::Video,
+        FallbackMode::Decision,
+    ] {
+        validate_row(&config, &AgentType::ClaudeCode, mode, &to(mode)).unwrap();
+    }
+    for from in FallbackMode::ALL {
+        for target in FallbackMode::ALL {
+            if from.kind() == target.kind() {
+                continue;
+            }
+            let error = validate_row(&config, &AgentType::ClaudeCode, from, &to(target))
+                .expect_err("incompatible kinds are never accepted");
+            assert!(
+                matches!(error, ChainError::WrongKind { .. }),
+                "{from:?} → {target:?}: {error}"
+            );
+        }
+    }
+    assert_eq!(
+        validate_row(
+            &config,
+            &AgentType::ClaudeCode,
+            FallbackMode::Image,
+            &link(AgentType::ClaudeCode)
+        ),
+        Err(ChainError::SelfFallback(AgentType::ClaudeCode))
+    );
+}
+
+#[test]
+fn rows_are_per_mode_and_every_agent_opencode_included_has_them() {
+    let mut config = agents(&[]);
+    assert!(!is_configured(&config));
+    // Every agent can have a row on every mode, and OpenCode is a target like
+    // the others (each row is checked on its own, from an empty configuration).
+    for agent in all_agents() {
+        for mode in FallbackMode::ALL {
+            let target = if agent == AgentType::OpenCode {
+                AgentType::Codex
+            } else {
+                AgentType::OpenCode
+            };
+            let fallback = AgentFallback {
+                mode: Some(mode),
+                ..link(target)
+            };
+            validate_row(&agents(&[]), &agent, mode, &fallback)
+                .unwrap_or_else(|error| panic!("{agent:?} {mode:?}: {error}"));
+        }
+    }
+    // OpenCode has its own rows, one per mode, and Codex falls back to it.
+    for mode in FallbackMode::ALL {
+        let fallback = AgentFallback {
+            mode: Some(mode),
+            ..link(AgentType::Codex)
+        };
+        assert!(set_row(
+            &mut config,
+            &AgentType::OpenCode,
+            mode,
+            Some(fallback)
+        ));
+    }
+    assert!(is_configured(&config));
+    assert_eq!(
+        config.open_code.mode_fallbacks.len(),
+        FallbackMode::ALL.len()
+    );
+    assert_eq!(
+        row(&config, &AgentType::OpenCode, FallbackMode::Video).map(|link| link.agent.clone()),
+        Some(AgentType::Codex)
+    );
+    // A row is changed alone, and removed alone.
+    assert!(set_row(
+        &mut config,
+        &AgentType::OpenCode,
+        FallbackMode::Eco,
+        None
+    ));
+    assert!(row(&config, &AgentType::OpenCode, FallbackMode::Eco).is_none());
+    assert!(row(&config, &AgentType::OpenCode, FallbackMode::Standard).is_some());
+    assert!(!set_row(
+        &mut config,
+        &AgentType::Custom,
+        FallbackMode::Eco,
+        None
+    ));
+}
+
+#[test]
+fn the_fallback_of_the_fallback_is_the_one_on_its_own_row_and_depth_is_bounded() {
+    let mut config = agents(&[]);
+    // Claude Code standard → Codex; Codex standard → Kiro, but Codex eco → Vibe.
+    set_row(
+        &mut config,
+        &AgentType::ClaudeCode,
+        FallbackMode::Standard,
+        Some(link(AgentType::Codex)),
+    );
+    set_row(
+        &mut config,
+        &AgentType::Codex,
+        FallbackMode::Standard,
+        Some(link(AgentType::Kiro)),
+    );
+    set_row(
+        &mut config,
+        &AgentType::Codex,
+        FallbackMode::Eco,
+        Some(link(AgentType::Vibe)),
+    );
+    assert_eq!(
+        agents_of(&default_chain(
+            &config,
+            &AgentType::ClaudeCode,
+            FallbackMode::Standard
+        )),
+        vec![AgentType::Codex, AgentType::Kiro]
+    );
+    // A link running in another mode chains through THAT mode's row of the target.
+    let advanced_to_eco = AgentFallback {
+        mode: Some(FallbackMode::Eco),
+        ..link(AgentType::Codex)
+    };
+    set_row(
+        &mut config,
+        &AgentType::ClaudeCode,
+        FallbackMode::Advanced,
+        Some(advanced_to_eco),
+    );
+    assert_eq!(
+        agents_of(&default_chain(
+            &config,
+            &AgentType::ClaudeCode,
+            FallbackMode::Advanced
+        )),
+        vec![AgentType::Codex, AgentType::Vibe]
+    );
+    // Depth: a straight line of rows is cut at MAX_CHAIN_DEPTH links, and a row
+    // that would make it longer is refused when saved.
+    let line = [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::GeminiCli,
+        AgentType::Kiro,
+        AgentType::Vibe,
+        AgentType::CopilotCli,
+    ];
+    let mut deep = agents(&[]);
+    for pair in line.windows(2) {
+        set_row(
+            &mut deep,
+            &pair[0],
+            FallbackMode::Eco,
+            Some(link(pair[1].clone())),
+        );
+    }
+    assert_eq!(
+        default_chain(&deep, &AgentType::ClaudeCode, FallbackMode::Eco).len(),
+        MAX_CHAIN_DEPTH
+    );
+    let mut shallow = agents(&[]);
+    for pair in line[..5].windows(2) {
+        set_row(
+            &mut shallow,
+            &pair[0],
+            FallbackMode::Eco,
+            Some(link(pair[1].clone())),
+        );
+    }
+    let error = validate_row(
+        &shallow,
+        &AgentType::OpenCode,
+        FallbackMode::Eco,
+        &link(AgentType::ClaudeCode),
+    )
+    .expect_err("OpenCode → Claude Code → … is five links");
+    assert!(matches!(error, ChainError::TooDeep { .. }), "{error}");
+}
+
+#[test]
+fn a_0_15_3_agent_chain_is_carried_onto_the_text_rows() {
+    let mut config = crate::core::config::default_config().agents;
+    config.claude_code.fallback_chain = vec![
+        AgentFallback {
+            model: Some("gpt-5.6".into()),
+            ..link(AgentType::Codex)
+        },
+        link(AgentType::Ollama),
+    ];
+    config.gemini_cli.fallback_chain = vec![link(AgentType::OpenCode)];
+    assert!(migrate_legacy_chains(&mut config));
+    assert!(config.claude_code.fallback_chain.is_empty());
+    for mode in FallbackMode::TEXT {
+        assert_eq!(
+            row(&config, &AgentType::ClaudeCode, mode)
+                .map(|link| (link.agent.clone(), link.model.clone())),
+            Some((AgentType::Codex, Some("gpt-5.6".to_string())))
+        );
+        assert_eq!(
+            row(&config, &AgentType::Codex, mode).map(|link| link.agent.clone()),
+            Some(AgentType::Ollama)
+        );
+        assert_eq!(
+            row(&config, &AgentType::GeminiCli, mode).map(|link| link.agent.clone()),
+            Some(AgentType::OpenCode)
+        );
+    }
+    // Decision, image and video were never part of it.
+    for mode in [
+        FallbackMode::Decision,
+        FallbackMode::Image,
+        FallbackMode::Video,
+    ] {
+        assert!(row(&config, &AgentType::ClaudeCode, mode).is_none());
+    }
+    // The walk is the one the owner had: Claude Code → Codex → Ollama.
+    assert_eq!(
+        agents_of(&default_chain(
+            &config,
+            &AgentType::ClaudeCode,
+            FallbackMode::Advanced
+        )),
+        vec![AgentType::Codex, AgentType::Ollama]
+    );
+    assert!(
+        !migrate_legacy_chains(&mut config),
+        "nothing left to carry: a second start changes nothing"
+    );
 }
 
 // ─── Choosing the next link ──────────────────────────────────────────────
@@ -428,34 +764,19 @@ fn a_link_on_cooldown_or_not_installed_is_skipped_for_the_next_one() {
 }
 
 #[test]
-fn a_paid_fallback_is_used_only_with_the_owners_opt_in() {
-    let usable = everyone();
-    let without = agents(&[(AgentType::ClaudeCode, vec![link(AgentType::LiteLlm)])]);
-    match pick(
-        &without,
-        &AgentType::ClaudeCode,
-        &AgentType::ClaudeCode,
-        &usable,
-        &TurnNeeds::default(),
-        &never_cooling,
-    ) {
-        Selection::Stop { why } => assert!(why.contains("bills by API key"), "{why}"),
-        other => panic!("a paid link without opt-in must not be used: {other:?}"),
-    }
-    let with = agents(&[(AgentType::ClaudeCode, vec![paid_ok(AgentType::LiteLlm)])]);
+fn a_fallback_that_bills_by_api_key_needs_no_opt_in() {
+    let config = agents(&[(AgentType::ClaudeCode, vec![link(AgentType::LiteLlm)])]);
     assert_eq!(
         pick(
-            &with,
+            &config,
             &AgentType::ClaudeCode,
             &AgentType::ClaudeCode,
-            &usable,
+            &everyone(),
             &TurnNeeds::default(),
             &never_cooling
         ),
-        Selection::Switch(paid_ok(AgentType::LiteLlm))
-    );
-    assert!(
-        is_paid(&AgentType::Nvidia) && !is_paid(&AgentType::Codex) && !is_paid(&AgentType::Ollama)
+        Selection::Switch(link(AgentType::LiteLlm)),
+        "enabling the fallback is the consent"
     );
 }
 
@@ -463,7 +784,7 @@ fn a_paid_fallback_is_used_only_with_the_owners_opt_in() {
 fn a_link_that_lacks_what_the_turn_needs_is_skipped() {
     let config = agents(&[(
         AgentType::ClaudeCode,
-        vec![paid_ok(AgentType::LiteLlm), link(AgentType::Codex)],
+        vec![link(AgentType::LiteLlm), link(AgentType::Codex)],
     )]);
     let needs_mcp = TurnNeeds {
         mcp_tools: true,
@@ -543,7 +864,7 @@ fn the_room_line_names_the_agent_the_reason_the_time_and_the_continuation() {
             &explicit,
             ModelTier::Default
         ),
-        "Codex (gpt-5.6-sol): quota exhausted until 14:00 UTC -> continued with Claude Code (sonnet)"
+        "Codex · gpt-5.6-sol: quota exhausted until 14:00 UTC → continued with Claude Code · sonnet [CLI]"
     );
     assert_eq!(
         notice(
@@ -554,11 +875,36 @@ fn the_room_line_names_the_agent_the_reason_the_time_and_the_continuation() {
             &link(AgentType::ClaudeCode),
             ModelTier::Economy
         ),
-        "Codex (economy tier): rate limited -> continued with Claude Code (economy tier)"
+        "Codex · eco mode: rate limited → continued with Claude Code · eco mode [CLI]"
     );
+    let local = AgentFallback {
+        model: Some("qwen3".into()),
+        ..link(AgentType::Ollama)
+    };
+    assert_eq!(
+        notice(
+            &AgentType::OpenCode,
+            Some("big-pickle"),
+            Trigger::Outage,
+            None,
+            &local,
+            ModelTier::Default
+        ),
+        "OpenCode · big-pickle: provider unavailable → continued with Ollama · qwen3 [Local]"
+    );
+    let http = link(AgentType::Nvidia);
+    assert!(notice(
+        &AgentType::Codex,
+        None,
+        Trigger::RateLimit,
+        None,
+        &http,
+        ModelTier::Reasoning
+    )
+    .ends_with("NVIDIA · advanced mode [HTTP]"));
     assert!(
         stop_notice(&AgentType::Codex, Trigger::Outage, "nothing usable")
-            .starts_with("Codex: provider unavailable -> no fallback")
+            .starts_with("Codex: provider unavailable → no fallback")
     );
 }
 
@@ -660,7 +1006,7 @@ fn a_provider_that_answers_again_or_a_new_account_ends_the_cooldown_at_once() {
 fn new_turns_start_on_the_fallback_while_the_agent_cools_down_then_return() {
     let connection = connection();
     let config = agents(&[(AgentType::Codex, vec![link(AgentType::ClaudeCode)])]);
-    let chain = default_chain(&config, &AgentType::Codex).to_vec();
+    let chain = default_chain(&config, &AgentType::Codex, FallbackMode::Standard);
     let needs = TurnNeeds::default();
     // Not cooling: the agent itself.
     assert!(preferred_start(
@@ -757,7 +1103,7 @@ fn a_turn_continued_on_a_fallback_keeps_its_pin() {
 }
 
 #[test]
-fn the_overview_lists_the_chains_and_the_cooldowns_for_the_agent_cards() {
+fn the_overview_lists_the_rows_and_the_cooldowns_for_the_agent_cards() {
     let connection = connection();
     set_cooldown(
         &connection,
@@ -767,63 +1113,134 @@ fn the_overview_lists_the_chains_and_the_cooldowns_for_the_agent_cards() {
         at(10),
     )
     .unwrap();
-    let config = agents(&[(AgentType::Codex, vec![link(AgentType::ClaudeCode)])]);
+    let mut config = agents(&[]);
+    set_row(
+        &mut config,
+        &AgentType::Codex,
+        FallbackMode::Image,
+        Some(AgentFallback {
+            mode: Some(FallbackMode::Image),
+            ..link(AgentType::ClaudeCode)
+        }),
+    );
     let overview = overview(&config, list_cooldowns(&connection, at(11)).unwrap());
     assert_eq!(overview.chains.len(), 1);
     assert_eq!(overview.chains[0].agent, AgentType::Codex);
+    assert_eq!(overview.chains[0].mode, FallbackMode::Image);
     assert_eq!(overview.cooldowns[0].reason, "quota_exhausted");
 }
 
 #[test]
-fn the_chain_is_stored_in_config_toml_and_read_back_and_old_configs_still_load() {
-    let config = agents(&[(
-        AgentType::ClaudeCode,
-        vec![
-            AgentFallback {
-                agent: AgentType::Codex,
-                model: Some("gpt-5.6-sol".into()),
-                allow_paid: false,
-            },
-            link(AgentType::Ollama),
-        ],
-    )]);
+fn the_rows_are_stored_in_config_toml_and_read_back_and_old_configs_still_load() {
+    let mut config = agents(&[]);
+    set_row(
+        &mut config,
+        &AgentType::ClaudeCode,
+        FallbackMode::Advanced,
+        Some(AgentFallback {
+            model: Some("gpt-5.6-sol".into()),
+            mode: Some(FallbackMode::Standard),
+            ..link(AgentType::Codex)
+        }),
+    );
     let text = toml::to_string(&config.claude_code).unwrap();
-    assert!(text.contains("[[fallback_chain]]"), "{text}");
+    assert!(text.contains("[[mode_fallbacks]]"), "{text}");
     let back: crate::models::AgentConfig = toml::from_str(&text).unwrap();
-    assert_eq!(back.fallback_chain, config.claude_code.fallback_chain);
-    // An agent with no chain writes nothing, and a config written before the
+    assert_eq!(back.mode_fallbacks, config.claude_code.mode_fallbacks);
+    // An agent with no row writes nothing, and a config written before the
     // feature existed loads with none.
     assert!(!toml::to_string(&config.codex)
         .unwrap()
-        .contains("fallback_chain"));
+        .contains("mode_fallbacks"));
     let old: crate::models::AgentConfig = toml::from_str("installed = true").unwrap();
-    assert!(old.fallback_chain.is_empty());
-    // The opt-in defaults to refused when a hand-written link omits it.
-    let hand: crate::models::AgentConfig =
-        toml::from_str("[[fallback_chain]]\nagent = \"LiteLlm\"").unwrap();
-    assert!(!hand.fallback_chain[0].allow_paid);
+    assert!(old.mode_fallbacks.is_empty());
+    // A 0.15.3 chain is read (with its `allow_paid`, now ignored) and never
+    // written back: it is carried onto the rows at start-up.
+    let mut legacy: crate::models::AgentConfig =
+        toml::from_str("[[fallback_chain]]\nagent = \"LiteLlm\"\nallow_paid = true").unwrap();
+    assert_eq!(legacy.fallback_chain.len(), 1);
+    assert!(!toml::to_string(&legacy).unwrap().contains("fallback_chain"));
+    legacy.fallback_chain.clear();
 }
 
 #[test]
-fn a_discussion_override_is_stored_replaced_and_removed() {
+fn a_discussion_override_is_stored_per_mode_replaced_and_removed() {
     let connection = connection();
     connection
         .execute_batch("PRAGMA foreign_keys=OFF;")
         .unwrap();
     assert_eq!(get_discussion_override(&connection, "d1").unwrap(), None);
-    set_discussion_override(&connection, "d1", Some(&[link(AgentType::Codex)])).unwrap();
+    set_discussion_override(
+        &connection,
+        "d1",
+        FallbackMode::Eco,
+        Some(&[link(AgentType::Codex)]),
+    )
+    .unwrap();
+    let eco = ModeOverride {
+        mode: FallbackMode::Eco,
+        chain: vec![link(AgentType::Codex)],
+    };
     assert_eq!(
         get_discussion_override(&connection, "d1").unwrap(),
-        Some(vec![link(AgentType::Codex)])
+        Some(vec![eco.clone()])
     );
-    // An empty list is "no fallback here", distinct from no override.
-    set_discussion_override(&connection, "d1", Some(&[])).unwrap();
+    // An empty list is "no fallback here", distinct from no override, and the
+    // other modes are untouched.
+    set_discussion_override(&connection, "d1", FallbackMode::Advanced, Some(&[])).unwrap();
+    let stored = get_discussion_override(&connection, "d1").unwrap();
+    assert_eq!(
+        override_for(stored.as_deref(), FallbackMode::Advanced),
+        Some(&[][..])
+    );
+    assert_eq!(
+        override_for(stored.as_deref(), FallbackMode::Eco),
+        Some(&[link(AgentType::Codex)][..])
+    );
+    assert_eq!(
+        override_for(stored.as_deref(), FallbackMode::Standard),
+        None
+    );
+    // Back to the default, mode by mode: the last one removes the row.
+    set_discussion_override(&connection, "d1", FallbackMode::Advanced, None).unwrap();
     assert_eq!(
         get_discussion_override(&connection, "d1").unwrap(),
-        Some(vec![])
+        Some(vec![eco])
     );
-    set_discussion_override(&connection, "d1", None).unwrap();
+    set_discussion_override(&connection, "d1", FallbackMode::Eco, None).unwrap();
     assert_eq!(get_discussion_override(&connection, "d1").unwrap(), None);
+}
+
+#[test]
+fn a_0_15_3_discussion_override_applies_to_the_three_text_modes() {
+    let connection = connection();
+    connection
+        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .unwrap();
+    for (id, json) in [
+        ("d-chain", "[{\"agent\":\"Codex\",\"allow_paid\":true}]"),
+        ("d-cut", "[]"),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO discussion_fallback_overrides (discussion_id, chain_json, updated_at)
+                 VALUES (?1, ?2, '2026-11-10T00:00:00Z')",
+                params![id, json],
+            )
+            .unwrap();
+    }
+    let chain = get_discussion_override(&connection, "d-chain").unwrap();
+    for mode in FallbackMode::TEXT {
+        assert_eq!(
+            override_for(chain.as_deref(), mode),
+            Some(&[link(AgentType::Codex)][..])
+        );
+    }
+    assert_eq!(override_for(chain.as_deref(), FallbackMode::Image), None);
+    let cut = get_discussion_override(&connection, "d-cut").unwrap();
+    for mode in FallbackMode::TEXT {
+        assert_eq!(override_for(cut.as_deref(), mode), Some(&[][..]));
+    }
 }
 
 #[test]

@@ -15,7 +15,7 @@ fn link(agent: AgentType) -> AgentFallback {
     AgentFallback {
         agent,
         model: None,
-        allow_paid: false,
+        mode: None,
     }
 }
 
@@ -31,6 +31,8 @@ fn usable() -> Vec<AgentType> {
 fn state_with_chain(db: &std::sync::Arc<Database>, first: Option<AgentFallback>) -> AppState {
     let mut config = crate::core::config::default_config();
     config.agents.claude_code.fallback_chain = first.into_iter().collect();
+    // The chain of 0.15.3, carried onto the rows the way a start-up does.
+    fallback::migrate_legacy_chains(&mut config.agents);
     AppState::new_defaults(
         std::sync::Arc::new(tokio::sync::RwLock::new(config)),
         db.clone(),
@@ -96,8 +98,8 @@ async fn a_quota_refused_worker_continues_on_the_fallback_in_its_own_room_with_t
         .await
         .expect("room line");
     assert!(
-        notice.starts_with("Claude Code (economy tier): quota exhausted until ")
-            && notice.ends_with(" -> continued with Codex (economy tier)"),
+        notice.starts_with("Claude Code · eco mode: quota exhausted until ")
+            && notice.ends_with(" → continued with Codex · eco mode [CLI]"),
         "{notice}"
     );
     // The refused agent is on cooldown, so new turns start on the fallback.
@@ -188,12 +190,10 @@ async fn a_worker_whose_agent_has_no_fallback_or_whose_fallback_is_unusable_stay
             .await
             .unwrap()
     );
-    // A paid link without the owner's opt-in is skipped, and the room is told why.
-    let paid = state_with_chain(&db, Some(link(AgentType::LiteLlm)));
-    let mut with_litellm = usable();
-    with_litellm.push(AgentType::LiteLlm);
+    // A fallback that is not installed is skipped, and the room is told why.
+    let missing = state_with_chain(&db, Some(link(AgentType::LiteLlm)));
     assert!(
-        !worker_after_quota_among(&paid, &job, CLAUDE_LIMIT, Some(with_litellm))
+        !worker_after_quota_among(&missing, &job, CLAUDE_LIMIT, Some(usable()))
             .await
             .unwrap()
     );
@@ -204,8 +204,10 @@ async fn a_worker_whose_agent_has_no_fallback_or_whose_fallback_is_unusable_stay
         .expect("the stop is said");
     assert!(
         stop.content
-            .starts_with("Claude Code: quota exhausted -> no fallback")
-            && stop.content.contains("bills by API key"),
+            .starts_with("Claude Code: quota exhausted → no fallback")
+            && stop
+                .content
+                .contains("LiteLLM is not installed or not enabled"),
         "{}",
         stop.content
     );

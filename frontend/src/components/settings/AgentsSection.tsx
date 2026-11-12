@@ -6,6 +6,8 @@ import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { useIsMobile } from '../../hooks/useMediaQuery';
 import { OllamaCard } from './OllamaCard';
 import { AgentFallbackControl } from './AgentFallbackControl';
+import { useFallbackData } from '../../hooks/useFallbackData';
+import { modesOf } from '../../lib/fallbackOptions';
 import { ComfyUiCard } from './ComfyUiCard';
 import { ExternalApiSection } from './ExternalApiSection';
 import { ToolsSwitch } from './ToolsSwitch';
@@ -200,6 +202,9 @@ export function AgentsSection({
   const catalog = useModelCatalogSnapshot(true, [...expandedAgents].map(agent => modelRuntimeTargetId(agent as AgentType)));
   const catalogRef = useRef(catalog.catalog);
   useLayoutEffect(() => { catalogRef.current = catalog.catalog; }, [catalog.catalog]);
+  // KT-1693 — the fallback of every mode row, the cooldowns still running, and
+  // everything a fallback can be.
+  const fallbackData = useFallbackData(agents);
   const saveTierPreference = useAsyncGuard(async (
     agentKey: keyof ModelTiersConfig,
     field: ModelTier,
@@ -238,6 +243,7 @@ export function AgentsSection({
       }
       const next: ModelTiersConfig = { ...current, [agentKey]: nextAgent };
       await configApi.setModelTiers(next);
+      void fallbackData.reload();
       setTierEditing(editableTiers(next));
       toast(t('config.saved'), 'success');
     } catch {
@@ -313,8 +319,6 @@ export function AgentsSection({
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
   const { data: effectiveAccess } = useApi(() => configApi.getAgentAccessEffective(), [agentAccess]);
-  // KT-1518 — every agent's fallback chain and the cooldowns still running.
-  const { data: fallbackOverview, refetch: refetchFallback } = useApi(() => configApi.getAgentFallback(), [agentAccess]);
   const { data: providerQuotaStates, refetch: refetchProviderQuotaStates } = useApi(() => agentsApi.quotaStates(), []);
   const [rearmingProvider, setRearmingProvider] = useState<AgentType | null>(null);
 
@@ -625,42 +629,43 @@ export function AgentsSection({
     );
   };
 
-  /** KT-1518 — « Fallback to »: the agent that continues a turn this one cannot
-   *  serve (rate limit, quota, outage, not signed in), with the chain it makes. */
+  /** KT-1693 — what continues a turn this agent cannot serve (rate limit, quota,
+   *  outage, not signed in), one row per mode the agent has. Every installed
+   *  agent has them, OpenCode included. */
   const renderFallbackControl = (agentType: AgentType) => {
-    const slot = AGENT_CONCURRENCY[agentType];
-    if (!slot) return null;
-    const current = agentAccess?.[slot.key]?.fallback_chain ?? [];
-    const candidates = agents
-      .filter((other) => (other.installed || current.some((link) => link.agent === other.agent_type))
-        && other.agent_type !== agentType
-        && AGENT_CONCURRENCY[other.agent_type])
-      .map((other) => other.agent_type);
+    if (agentType === 'Custom') return null;
+    const { overview, options, tiers, catalog, refetch } = fallbackData;
     return (
       <AgentFallbackControl
         agentType={agentType}
-        current={current}
-        candidates={candidates}
-        chain={fallbackOverview?.chains.find((chain) => chain.agent === agentType)}
-        cooldown={fallbackOverview?.cooldowns.find((cooldown) => cooldown.agent === agentType)}
-        onChange={async (next) => {
-          await configApi.setAgentFallback({ agent: agentType, fallback_chain: next });
+        modes={modesOf(agentType, tiers, catalog)}
+        options={options}
+        chains={overview?.chains ?? []}
+        cooldown={overview?.cooldowns.find((cooldown) => cooldown.agent === agentType)}
+        onOpenAgent={(source) => {
+          setExpandedAgents((current) => new Set(current).add(source));
+          document.querySelector(`[data-agent-type="${source}"]`)?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+        }}
+        onChange={async (mode, next) => {
+          await configApi.setAgentFallback({ agent: agentType, mode, fallback: next });
           refetchAgentAccess();
-          refetchFallback();
+          refetch();
         }}
       />
     );
   };
 
-  /** Kronn tools on an HTTP agent (KT-1600): on unless the operator turned them
-   *  off. "On" clears the setting rather than storing `true`, so the default
-   *  stays the default. */
+  /** "Can act in Kronn" on the Ollama card (KT-1600): on unless the operator
+   *  turned it off. "On" clears the setting rather than storing `true`, so the
+   *  default stays the default. LiteLLM and NVIDIA have theirs on the
+   *  connection card (KT-1687). */
   const renderToolsControl = (agentType: AgentType) => {
     const slot = AGENT_CONCURRENCY[agentType];
     if (!slot) return null;
     const enabled = agentAccess?.[slot.key]?.tools_enabled !== false;
     return (
       <ToolsSwitch
+        variant="field"
         subject={AGENT_LABELS[agentType]}
         checked={enabled}
         testId={`agent-tools-${agentType}`}
@@ -1836,12 +1841,9 @@ export function AgentsSection({
                   t={t}
                   modelCostSuffix={modelCostSuffix}
                   title={renderAgentNameControl('Ollama', 'Ollama')}
-                  headerAccessory={(
-                    <>
-                      {renderToolsControl('Ollama')}
-                      {renderConcurrencyControl('Ollama')}
-                    </>
-                  )}
+                  headerAccessory={renderConcurrencyControl('Ollama')}
+                  fallbackRows={renderFallbackControl('Ollama')}
+                  toolsControl={renderToolsControl('Ollama')}
                 />
               </div>
             ))}
@@ -1855,16 +1857,8 @@ export function AgentsSection({
         {/* KT-339 — unified External API zone: LiteLLM, NVIDIA and any other
             OpenAI-compatible service live here as named connections. KT-586 —
             third of the three modes, so the three sit together. */}
-        {/* KT-1600 — LiteLLM and NVIDIA have no card of their own; their agent
-            slot still decides a run that names no connection. */}
-        <div className="set-agent-tools-defaults" data-testid="external-agent-tools">
-          {EXTERNAL_API_AGENTS.map(agentType => (
-            <span key={agentType} className="set-agent-tools-default">
-              <span className="set-hint">{AGENT_LABELS[agentType]}</span>
-              {renderToolsControl(agentType)}
-            </span>
-          ))}
-        </div>
+        {/* KT-1687 — no Kronn-tools control out here: the LiteLLM and NVIDIA agent
+            slots follow the switch of their default connection, in its card. */}
         <ExternalApiSection
           t={t}
           toast={toast}

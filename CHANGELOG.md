@@ -70,26 +70,34 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
-- Agents: a fallback chain (KT-1518). Settings > Agents shows each agent's
-  fallback chain as a timeline read left to right (« Claude Code → Codex →
-  Ollama »): add, change, give a model, move earlier or later, stop the chain at
-  a point, or cut it; paid fallbacks (API key) need the owner's opt-in. Every
-  discussion (discussion settings) and every workflow Agent step (step editor)
-  can override the chain or cancel it; with no override the agent's default chain
-  applies. When an agent's provider cannot serve a turn — a rate limit, a quota or
-  credits spent, an outage past its retries, a CLI not signed in — the turn
-  continues on the next entry with the SAME tier, on a discussion turn, a
-  workflow Agent step and a task worker, and the room or run shows from which
-  agent/model, why, until when and to which agent/model
-  (« Codex (gpt-5.6-sol): quota exhausted until 14:00 UTC -> continued with
-  Claude Code (sonnet) »). A task failure, a refusal, a failing test or the work's
-  own timeout never triggers it. The failing agent is left alone until its
+- Agents: a fallback per mode (KT-1518, redesigned by KT-1693). Each agent card
+  in Settings > Agents has one row per mode the agent has (eco, standard,
+  advanced, and decision, image, video where it has such a model) drawn as an
+  inline chain — the mode's current model, → its fallback, → the inherited
+  fallback in a dashed pill (« set on <agent>'s card », a click opens that card)
+  — and every pill carries its transport badge: CLI, HTTP or Local. « + Add a
+  fallback » opens a menu filtered by kind of mode (text goes to any text mode,
+  image to image, video to video, decision to decision), grouped by agent; click
+  a pill to change it, ✕ to remove it. A fallback is off by default, one per mode
+  row; when it is itself unavailable, the one set on ITS own mode row applies
+  (4 links at most, a loop is refused). **Every installed agent takes part,
+  OpenCode included**, and the « paid fallback needs the owner's opt-in » rule is
+  gone: enabling a fallback is the consent. Every discussion (one row per text
+  mode in its settings) and every workflow Agent step (the row of its tier) uses
+  the same component to replace the fallback, go back to the default or cut it.
+  When an agent's provider cannot serve a turn — a rate limit, a quota or credits
+  spent, an outage past its retries, a CLI not signed in — the turn continues on
+  the fallback with the SAME tier, on a discussion turn, a workflow Agent step
+  and a task worker, and the room or run says
+  « Codex · gpt-5.6-sol: quota exhausted until 14:00 UTC → continued with
+  Claude Code · sonnet [CLI] ». A task failure, a refusal, a failing test or the
+  work's own timeout never triggers it. The failing agent is left alone until its
   announced reset (or a short re-try window), new turns going straight to the
-  fallback, then returns by itself. A loop, a chain past 4 entries or an entry
-  with more access than the agent it replaces is refused with the reason. The
-  KT-1657 quota pause and the KT-1664 quota escalation offer the chain as their
-  alternative to waiting.
-  See
+  fallback, then returns by itself. **Migration**: the agent-level chain of
+  0.15.3 is carried at start-up onto that agent's text mode rows (« A → B → C »
+  stays « A → B → C »), and a discussion's stored override onto each text mode;
+  nothing else to do. The decision, image and video rows are stored, validated
+  and chained; the runtime switch of those step types is not wired yet. See
   `docs/operations/agent-fallback-chain.md`.
 - HTTP agents: an operator switch for Kronn's tools, and a gate on models that
   cannot take them (KT-1600). Tools stay on by default for every HTTP agent. Turn
@@ -264,6 +272,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- Settings > Agents: one « Can act in Kronn » switch per model, inside its card
+  (KT-1687, follow-up of KT-1600). The loose LiteLLM / NVIDIA « Outils Kronn »
+  block between the sections is gone; the switch lives on the Ollama card and on
+  each external API connection card, with a plain help text (en / fr / es / zh).
+  Rule: LiteLLM and NVIDIA have no agent-level switch any more — a run that names
+  no connection follows the switch of that provider's default connection
+  (`sync_runtime_config`), and `POST /api/config/agent-tools` now refuses them
+  like `Custom`. An agent-level « off » set under KT-1600 is carried onto the
+  default connection at startup when that connection has no setting of its own
+  (`carry_agent_tools_off`), so no choice is lost; a switch already set on the
+  connection wins. No schema change.
 - Workflow authoring: `workflow_step_schema` serves a lean contract by default
   (KT-1681). The full one sat 18 estimated tokens under the 32 768-token MLX
   window, so the next step type would have overflowed it; the lean one leaves

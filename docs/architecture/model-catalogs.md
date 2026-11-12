@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:1075-1105#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:1198-1228#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -275,9 +275,9 @@ explained disabled option, and clears an incompatible effort in the same save
 that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:200-245#saveTierPreference]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:208-253#saveTierPreference]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1391-1420#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1463-1468#supportsEffort]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1469-1474#supportsEffort]
 
 ## Migration and test invariants
 

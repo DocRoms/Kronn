@@ -5,7 +5,7 @@ use super::intercept_failed_turn_among;
 use crate::api::discussions::agent_fallback_start::start_on_fallback_among;
 use crate::core::agent_fallback as fallback;
 use crate::db::agent_dispatch::AgentDispatchJob;
-use crate::models::{AgentFallback, AgentType, MessageRole, ModelTier};
+use crate::models::{AgentFallback, AgentType, FallbackMode, MessageRole, ModelTier};
 use std::sync::Arc;
 
 const ROOM: &str = "d-fallback";
@@ -16,7 +16,7 @@ fn link(agent: AgentType) -> AgentFallback {
     AgentFallback {
         agent,
         model: None,
-        allow_paid: false,
+        mode: None,
     }
 }
 
@@ -46,6 +46,8 @@ async fn state_with_chain(first: AgentFallback, second: Option<AgentFallback>) -
     .unwrap();
     let mut config = crate::core::config::default_config();
     config.agents.claude_code.fallback_chain = std::iter::once(first).chain(second).collect();
+    // The chain of 0.15.3, carried onto the rows the way a start-up does.
+    crate::core::agent_fallback::migrate_legacy_chains(&mut config.agents);
     crate::AppState::new_defaults(
         Arc::new(tokio::sync::RwLock::new(config)),
         db,
@@ -205,8 +207,8 @@ async fn a_quota_refused_turn_continues_on_the_fallback_with_the_same_tier_and_t
     let lines = room_system_lines(&state).await;
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
-        lines[0].starts_with("Claude Code (economy tier): quota exhausted until ")
-            && lines[0].ends_with(" -> continued with Codex (economy tier)"),
+        lines[0].starts_with("Claude Code · eco mode: quota exhausted until ")
+            && lines[0].ends_with(" → continued with Codex · eco mode [CLI]"),
         "{}",
         lines[0]
     );
@@ -236,7 +238,9 @@ async fn an_explicit_model_on_the_link_replaces_the_tier_in_the_room_line_and_th
         pin(&state, "job-1").await.unwrap().model.as_deref(),
         Some("gpt-5.6-sol")
     );
-    assert!(room_system_lines(&state).await[0].ends_with("continued with Codex (gpt-5.6-sol)"));
+    assert!(
+        room_system_lines(&state).await[0].ends_with("continued with Codex · gpt-5.6-sol [CLI]")
+    );
 }
 
 #[tokio::test]
@@ -266,7 +270,7 @@ async fn each_provider_side_trigger_switches_a_room_turn() {
         assert_eq!(error, Some(format!("agent_fallback:{code}")));
         assert!(
             room_system_lines(&state).await[0]
-                .starts_with(&format!("Claude Code (economy tier): {words}")),
+                .starts_with(&format!("Claude Code · eco mode: {words}")),
             "{response}"
         );
     }
@@ -347,7 +351,7 @@ async fn an_agent_without_a_fallback_keeps_the_failure_as_it_was() {
         .await
         .agents
         .claude_code
-        .fallback_chain
+        .mode_fallbacks
         .clear();
     let job = running_dispatch(&state, 1).await;
     assert!(!intercept_failed_turn_among(&state, &job, CLAUDE_LIMIT, Some(everyone())).await);
@@ -356,36 +360,16 @@ async fn an_agent_without_a_fallback_keeps_the_failure_as_it_was() {
 }
 
 #[tokio::test]
-async fn a_paid_fallback_needs_the_owners_opt_in_and_the_room_says_why_when_it_is_missing() {
+async fn a_fallback_billed_by_api_key_needs_no_opt_in() {
     let state = state_with_chain(link(AgentType::LiteLlm), None).await;
     let job = running_dispatch(&state, 1).await;
-    assert!(!intercept_failed_turn_among(&state, &job, CLAUDE_LIMIT, Some(everyone())).await);
-    assert_eq!(
-        row(&state, "job-1").await.0,
-        "Running",
-        "the turn is not moved"
-    );
+    assert!(intercept_failed_turn_among(&state, &job, CLAUDE_LIMIT, Some(everyone())).await);
+    assert_eq!(row(&state, "job-1").await.1.as_deref(), Some("\"LiteLlm\""));
     let lines = room_system_lines(&state).await;
     assert!(
-        lines[0].starts_with("Claude Code: quota exhausted -> no fallback")
-            && lines[0].contains("bills by API key"),
+        lines[0].ends_with("→ continued with LiteLLM · eco mode [HTTP]"),
         "{}",
         lines[0]
-    );
-
-    let opted_in = state_with_chain(
-        AgentFallback {
-            allow_paid: true,
-            ..link(AgentType::LiteLlm)
-        },
-        None,
-    )
-    .await;
-    let job = running_dispatch(&opted_in, 1).await;
-    assert!(intercept_failed_turn_among(&opted_in, &job, CLAUDE_LIMIT, Some(everyone())).await);
-    assert_eq!(
-        row(&opted_in, "job-1").await.1.as_deref(),
-        Some("\"LiteLlm\"")
     );
 }
 
@@ -437,10 +421,10 @@ async fn a_fallback_that_fails_too_moves_on_to_the_next_link_with_the_same_tier(
     assert_eq!(pinned.tier, ModelTier::Economy);
     let lines = room_system_lines(&state).await;
     assert!(
-        lines.iter().any(
-            |line| line.starts_with("Codex (economy tier): rate limited")
-                && line.ends_with("continued with Gemini CLI (economy tier)")
-        ),
+        lines
+            .iter()
+            .any(|line| line.starts_with("Codex · eco mode: rate limited")
+                && line.ends_with("continued with Gemini CLI · eco mode [CLI]")),
         "{lines:?}"
     );
 }
@@ -461,8 +445,8 @@ async fn new_turns_go_straight_to_the_fallback_while_the_agent_cools_down_and_re
     let pinned = pin(&state, "job-2").await.expect("pinned before it runs");
     assert_eq!(pinned.tier, ModelTier::Economy);
     assert!(room_system_lines(&state).await.iter().any(|line| line
-        .starts_with("Claude Code (economy tier): quota exhausted until ")
-        && line.ends_with("-> continued with Codex (economy tier)")));
+        .starts_with("Claude Code · eco mode: quota exhausted until ")
+        && line.ends_with("→ continued with Codex · eco mode [CLI]")));
 
     // Once the reset has passed the room's own agent is used again.
     state
@@ -502,6 +486,7 @@ async fn a_discussion_override_replaces_the_agents_chain_and_an_empty_one_cuts_i
             crate::core::agent_fallback::set_discussion_override(
                 conn,
                 ROOM,
+                FallbackMode::Eco,
                 Some(&[link(AgentType::GeminiCli)]),
             )
         })
@@ -517,7 +502,12 @@ async fn a_discussion_override_replaces_the_agents_chain_and_an_empty_one_cuts_i
     let cut = state_with_chain(link(AgentType::Codex), None).await;
     cut.db
         .with_conn(|conn| {
-            crate::core::agent_fallback::set_discussion_override(conn, ROOM, Some(&[]))
+            crate::core::agent_fallback::set_discussion_override(
+                conn,
+                ROOM,
+                FallbackMode::Eco,
+                Some(&[]),
+            )
         })
         .await
         .unwrap();
@@ -528,7 +518,7 @@ async fn a_discussion_override_replaces_the_agents_chain_and_an_empty_one_cuts_i
 }
 
 #[tokio::test]
-async fn the_discussion_settings_store_replace_cancel_and_remove_the_override() {
+async fn the_discussion_settings_store_replace_cancel_and_remove_the_override_per_mode() {
     use crate::api::discussions::agent_fallback_override::{
         get_discussion_fallback, set_discussion_fallback, SetDiscussionFallbackRequest,
     };
@@ -536,21 +526,30 @@ async fn the_discussion_settings_store_replace_cancel_and_remove_the_override() 
     use axum::Json;
 
     let state = state_with_chain(link(AgentType::Codex), None).await;
-    let set = |chain: Option<Vec<AgentFallback>>| {
+    let set = |mode: FallbackMode, chain: Option<Vec<AgentFallback>>| {
         set_discussion_fallback(
             State(state.clone()),
             Path(ROOM.to_string()),
             Json(SetDiscussionFallbackRequest {
+                mode,
                 chain_override: chain,
             }),
         )
     };
+    let overridden =
+        |data: &crate::api::discussions::agent_fallback_override::DiscussionFallback,
+         mode: FallbackMode| {
+            data.overrides
+                .iter()
+                .find(|entry| entry.mode == mode)
+                .map(|entry| entry.chain.clone())
+        };
 
-    // No override yet: the agent's default chain applies.
+    // No override yet: the agent's default applies.
     let read = get_discussion_fallback(State(state.clone()), Path(ROOM.to_string())).await;
-    assert!(read.0.data.unwrap().chain_override.is_none());
+    assert!(read.0.data.unwrap().overrides.is_empty());
 
-    // Its own chain, trimmed models, a view with the gaps of each link.
+    // Its own fallback on one mode, trimmed model, a view with the gaps.
     let own = vec![
         AgentFallback {
             model: Some("  sonnet ".into()),
@@ -558,15 +557,32 @@ async fn the_discussion_settings_store_replace_cancel_and_remove_the_override() 
         },
         link(AgentType::Ollama),
     ];
-    let saved = set(Some(own)).await.0.data.unwrap();
-    let chain = saved.chain_override.unwrap();
+    let saved = set(FallbackMode::Standard, Some(own)).await.0.data.unwrap();
+    let chain = overridden(&saved, FallbackMode::Standard).unwrap();
     assert_eq!(chain[0].model.as_deref(), Some("sonnet"));
-    assert!(saved.view.unwrap().links[1]
+    assert!(saved.views[0].links[1]
         .gaps
         .contains(&"capped context window".to_string()));
+    assert_eq!(
+        overridden(&saved, FallbackMode::Eco),
+        None,
+        "other modes follow the default"
+    );
 
-    // A loop or a chain past the depth is refused and nothing is stored.
-    let looped = set(Some(vec![link(AgentType::Codex), link(AgentType::Codex)])).await;
+    // A fallback of another kind of mode, a loop or a chain past the depth is
+    // refused and nothing is stored.
+    let image_for_text = AgentFallback {
+        mode: Some(FallbackMode::Image),
+        ..link(AgentType::Codex)
+    };
+    let wrong = set(FallbackMode::Standard, Some(vec![image_for_text])).await;
+    assert!(!wrong.0.success);
+    assert!(wrong.0.error.unwrap().contains("must be a text"));
+    let looped = set(
+        FallbackMode::Standard,
+        Some(vec![link(AgentType::Codex), link(AgentType::Codex)]),
+    )
+    .await;
     assert!(!looped.0.success);
     assert!(looped.0.error.unwrap().contains("loop"));
     let long: Vec<AgentFallback> = [
@@ -579,21 +595,32 @@ async fn the_discussion_settings_store_replace_cancel_and_remove_the_override() 
     .into_iter()
     .map(link)
     .collect();
-    assert!(!set(Some(long)).await.0.success);
+    assert!(!set(FallbackMode::Standard, Some(long)).await.0.success);
     let still = get_discussion_fallback(State(state.clone()), Path(ROOM.to_string())).await;
-    assert_eq!(still.0.data.unwrap().chain_override.unwrap().len(), 2);
+    assert_eq!(
+        overridden(&still.0.data.unwrap(), FallbackMode::Standard)
+            .unwrap()
+            .len(),
+        2
+    );
 
-    // An empty chain cancels the fallback here; `None` goes back to the default.
-    let cancelled = set(Some(Vec::new())).await.0.data.unwrap();
-    assert_eq!(cancelled.chain_override, Some(Vec::new()));
-    let removed = set(None).await.0.data.unwrap();
-    assert!(removed.chain_override.is_none());
+    // An empty chain cuts the fallback on that mode; `None` goes back to the default.
+    let cancelled = set(FallbackMode::Eco, Some(Vec::new()))
+        .await
+        .0
+        .data
+        .unwrap();
+    assert_eq!(overridden(&cancelled, FallbackMode::Eco), Some(Vec::new()));
+    assert!(overridden(&cancelled, FallbackMode::Standard).is_some());
+    let removed = set(FallbackMode::Eco, None).await.0.data.unwrap();
+    assert!(overridden(&removed, FallbackMode::Eco).is_none());
 
     // An unknown discussion is refused.
     let unknown = set_discussion_fallback(
         State(state.clone()),
         Path("nope".to_string()),
         Json(SetDiscussionFallbackRequest {
+            mode: FallbackMode::Eco,
             chain_override: Some(vec![link(AgentType::Codex)]),
         }),
     )

@@ -70,6 +70,7 @@ fn chain_of(
     fallback::effective_chain(
         agents,
         origin,
+        crate::models::FallbackMode::from_tier(tier_of(step)),
         step.agent_settings
             .as_ref()
             .and_then(|settings| settings.fallback.as_deref()),
