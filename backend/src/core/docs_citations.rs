@@ -1039,6 +1039,34 @@ mod tests {
         assert_eq!(check_doc(&new, root), vec![]);
     }
 
+    /// KT-1687: `lib.rs:288 -> 289 #lease_orphaned` and `setup.rs:896 -> 902
+    /// #set_agent_tools` were bounced for a 1- and a 6-line move; the hint names
+    /// the line the symbol is on and the re-anchor writes exactly that.
+    #[test]
+    fn a_symbol_that_moved_a_few_lines_is_named_at_its_real_line() {
+        let tmp = repo();
+        let root = tmp.path();
+        for (name, cited, real, symbol) in [
+            ("lib", 288, 289, "lease_orphaned"),
+            ("setup", 896, 902, "set_agent_tools"),
+        ] {
+            let mut file = "x\n".repeat(real - 1);
+            file.push_str(&format!("pub fn {symbol}() {{}}\nz\n"));
+            std::fs::write(root.join(format!("src/{name}.rs")), file).unwrap();
+            let doc = format!("[src: file: src/{name}.rs:{cited}#{symbol}]");
+            assert_eq!(
+                reasons(&doc, root),
+                [format!(
+                    "symbol `{symbol}` not in line {cited}; it is defined at line {real} — try `src/{name}.rs:{real}#{symbol}`"
+                )]
+            );
+            let (new, outcome) = reanchor(root, "docs/m.md", &format!("{doc}\n"));
+            assert_eq!(new, format!("[src: file: src/{name}.rs:{real}#{symbol}]\n"));
+            assert_eq!(outcome.rewritten.len(), 1);
+            assert_eq!(check_doc(&new, root), vec![]);
+        }
+    }
+
     #[test]
     fn a_unique_definition_is_re_anchored_however_far_it_moved() {
         let tmp = repo();
