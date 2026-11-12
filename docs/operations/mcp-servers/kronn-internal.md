@@ -1064,7 +1064,7 @@ provenance or marks a line human-written. `ready:true` means no
 known refusal, not a guaranteed run: report the real outcome from
 `workflow_run_get`. The bridge forwards the backend's verdict and never
 re-derives it.
-[src: file: backend/src/workflows/readiness.rs:32-57#assess] [src: file: backend/src/workflows/readiness.rs:151-167#collection_failure] [src: file: backend/src/workflows/readiness.rs:357-447#visit]
+[src: file: backend/src/workflows/readiness.rs:32-57#assess] [src: file: backend/src/workflows/readiness.rs:215-231#collection_failure] [src: file: backend/src/workflows/readiness.rs:480-570#visit]
 [src: file: backend/scripts/disc-introspection-mcp.py:4453-4471#kronn_readiness] [src: file: backend/scripts/disc-introspection-mcp.py:7786-7793#call_workflow_validate]
 
 ## Workflow trigger agents

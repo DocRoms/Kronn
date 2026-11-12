@@ -1,9 +1,13 @@
 import { Compass, Plus, Trash2 } from 'lucide-react';
 import type { DecideConfig, DecideKind, DecideQuestion } from '../../types/generated';
 import { DECIDE_KINDS, blankDecideQuestion, decideSignals } from '../../lib/decideStep';
+import { decideModelChoice, withDecisionModel } from '../../lib/decisionModels';
+import { DecisionModelPicker } from '../DecisionModelPicker';
 
 interface DecideStepFormProps {
   config: DecideConfig;
+  /// The configured Decision model: what the step runs when it picks none.
+  defaultModel?: string | null;
   /// Names of the steps before this one, for the state shortcuts.
   previousSteps: string[];
   onChange: (config: DecideConfig) => void;
@@ -11,7 +15,7 @@ interface DecideStepFormProps {
 }
 
 /** KT-1367 — the Decide step's form: what the model reads and what it answers. */
-export function DecideStepForm({ config, previousSteps, onChange, t }: DecideStepFormProps) {
+export function DecideStepForm({ config, defaultModel, previousSteps, onChange, t }: DecideStepFormProps) {
   const setQuestion = (index: number, patch: Partial<DecideQuestion>) =>
     onChange({ ...config, questions: config.questions.map((question, i) => i === index ? { ...question, ...patch } : question) });
   const setKind = (index: number, kind: DecideKind) => {
@@ -35,6 +39,16 @@ export function DecideStepForm({ config, previousSteps, onChange, t }: DecideSte
           <strong>{t('wiz.decideTitle')}</strong>
           <p className="text-xs text-muted">{t('wiz.decideHint')}</p>
         </div>
+      </div>
+
+      <div className="flex-row gap-2 mb-2" data-testid="decide-model">
+        <span className="text-xs text-muted">{t('decisionPicker.editorLabel')}</span>
+        <DecisionModelPicker
+          choice={decideModelChoice(config)}
+          defaultModel={defaultModel}
+          onChange={choice => onChange(withDecisionModel(config, choice))}
+          ariaLabel={t('decisionPicker.editorAria')}
+        />
       </div>
 
       <label className="text-xs text-muted mb-1" htmlFor="decide-state">{t('wiz.decideState')}</label>
