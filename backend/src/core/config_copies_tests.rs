@@ -420,6 +420,192 @@ fn an_encryption_secret_below_the_top_level_is_never_the_key() {
     assert_eq!(sealing(with_section_key.path(), true), Sealing::Key(top));
 }
 
+/// With no key anywhere, an `encryption_secret` that holds no key (under a table,
+/// empty, commented out) does not keep a copy whole in clear for good: the copy
+/// is dropped. Only a top-level, non-blank string that is no key is kept and
+/// reported (it may be the only trace of one).
+#[test]
+fn only_a_top_level_non_blank_string_keeps_a_copy_without_a_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let k = crypto::generate_secret();
+    // LEAKY ends with `[tokens]`: the line below is a value of that table.
+    let droppable = [
+        (
+            "config.toml.backup",
+            format!("{LEAKY}encryption_secret = \"{k}\"\n"),
+        ),
+        (
+            "config.toml.backup.20261001T000000Z",
+            format!("encryption_secret = \"\"\n{LEAKY}"),
+        ),
+        (
+            "config.toml.backup.20261002T000000Z",
+            format!("# encryption_secret = \"{k}\"\n{LEAKY}"),
+        ),
+        (
+            "config.toml.backup.20261003T000000Z",
+            format!("encryption_secret = \"  \"\n{LEAKY}"),
+        ),
+        // Does not parse, and the key line is below its first table.
+        (
+            "config.toml.backup.20261004T000000Z",
+            format!("{LEAKY}encryption_secret = \"{k}\"\n[broken\n"),
+        ),
+        // A number can never be a key.
+        (
+            "config.toml.backup.20261006T000000Z",
+            format!("encryption_secret = 12345\n{LEAKY}"),
+        ),
+        (
+            "config.toml.corrupt.20261005T000000Z",
+            format!("note = '''\nencryption_secret = \"{k}\"\n'''\n{LEAKY}"),
+        ),
+    ];
+    for (name, text) in &droppable {
+        std::fs::write(d.join(name), text).unwrap();
+    }
+    let report = protect_clear_copies(d, None);
+    assert_eq!(
+        (report.reduced, report.deferred, report.failures.len()),
+        (droppable.len(), 0, 0),
+        "{report:?}"
+    );
+    assert!(files_holding(d, NEEDLES, &[]).is_empty());
+    assert!(names(d).is_empty(), "{:?}", names(d));
+    assert_eq!(protect_clear_copies(d, None), Protected::default());
+
+    // A top-level value that is no key stays, whatever else surrounds it.
+    let kept = [
+        (
+            "config.toml.backup",
+            format!("encryption_secret = \"junk\"\n{LEAKY}"),
+        ),
+        (
+            "config.toml.backup.20261002T000000Z",
+            format!("encryption_secret = \"junk\"\nencryption_secret = \"\"\n{LEAKY}[broken\n"),
+        ),
+    ];
+    for (name, text) in &kept {
+        std::fs::write(d.join(name), text).unwrap();
+    }
+    for _ in 0..2 {
+        let report = protect_clear_copies(d, None);
+        assert_eq!(
+            (report.reduced, report.deferred, report.failures.len()),
+            (0, 0, kept.len()),
+            "{report:?}"
+        );
+        for (name, text) in &kept {
+            assert_eq!(&std::fs::read_to_string(d.join(name)).unwrap(), text);
+        }
+    }
+}
+
+/// A retired-key file holding a value that is no key is deferred (sealed whole
+/// once a key exists), but one holding an unreadable `encryption_secret` is
+/// reported in `failures`, never deferred or dropped: with no key anywhere, and
+/// through `protect_copies` when the stores prove it.
+#[test]
+fn an_unreadable_key_line_in_a_retired_key_file_is_a_failure_not_a_deferral() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let retired = |ts: &str| format!("config.toml.retired-key.{ts}");
+    let junk = retired("20261001T000000Z");
+    let bare = retired("20261002T000000Z");
+    let empty = retired("20261003T000000Z");
+    std::fs::write(d.join(&junk), "encryption_secret = \"junk\"\n").unwrap();
+    std::fs::write(d.join(&bare), "an-old-value\n").unwrap();
+    std::fs::write(d.join(&empty), "encryption_secret = \"\"\n").unwrap();
+
+    for report in [
+        protect_clear_copies(d, None),
+        protect_copies(d, &Sealing::Absent),
+    ] {
+        assert_eq!(
+            (report.deferred, report.failures.len(), report.reduced),
+            (2, 1, 0),
+            "{report:?}"
+        );
+        assert!(report.failures[0].starts_with(&junk), "{report:?}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(d.join(&junk)).unwrap(),
+        "encryption_secret = \"junk\"\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join(&bare)).unwrap(),
+        "an-old-value\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join(&empty)).unwrap(),
+        "encryption_secret = \"\"\n"
+    );
+
+    // Once a key exists, the deferred ones are sealed whole.
+    let key = crypto::generate_secret();
+    let report = protect_clear_copies(d, Some(&key));
+    assert_eq!((report.sealed, report.deferred), (3, 0), "{report:?}");
+    assert!(names(d).iter().all(|n| n.ends_with(".enc")));
+}
+
+/// A copy holding two different keys (a duplicate key makes it invalid TOML)
+/// is never cut down to one line: the other may be the only copy of a live key.
+/// The same key twice is one key.
+#[test]
+fn a_copy_holding_two_different_keys_is_never_cut_down() {
+    let (dir, key) = dir_with_key();
+    let d = dir.path();
+    let (k1, k2) = (crypto::generate_secret(), crypto::generate_secret());
+    let two = format!("encryption_secret = \"{k1}\"\nencryption_secret = \"{k2}\"\n{LEAKY}");
+    assert!(two.parse::<toml::Table>().is_err());
+    // The first key stays the key for whoever needs one.
+    assert_eq!(key_of(&two), Some(k1.clone()));
+
+    std::fs::write(d.join("config.toml.backup"), &two).unwrap();
+    for key_hex in [None, Some(key.as_str())] {
+        // With a key, make the seal fail so that the cut-down is attempted.
+        if key_hex.is_some() {
+            std::fs::create_dir(d.join(".config.toml.backup.enc.tmp")).unwrap();
+        }
+        let report = protect_clear_copies(d, key_hex);
+        assert_eq!(
+            (report.failures.len(), report.reduced, report.sealed),
+            (1, 0, 0),
+            "{report:?}"
+        );
+        assert!(report.failures[0].contains("different encryption_secret keys"));
+        assert_eq!(
+            std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
+            two
+        );
+    }
+    std::fs::remove_dir(d.join(".config.toml.backup.enc.tmp")).unwrap();
+
+    // Sealed whole when the seal works: both keys are in the ciphertext.
+    let report = protect_clear_copies(d, Some(&key));
+    assert_eq!((report.sealed, report.failures.len()), (1, 0), "{report:?}");
+    assert_eq!(
+        open_sealed(&d.join("config.toml.backup.enc"), &[key]).unwrap(),
+        two
+    );
+
+    // The same key twice (or in another spelling) is one key.
+    let same = format!("encryption_secret = \"{k1}\"\nencryption_secret = \"{k1}\"\n{LEAKY}");
+    assert!(same.parse::<toml::Table>().is_err());
+    std::fs::write(d.join("config.toml.backup.20261001T000000Z"), &same).unwrap();
+    let report = protect_clear_copies(d, None);
+    assert_eq!(
+        (report.reduced, report.failures.len()),
+        (1, 0),
+        "{report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.join("config.toml.backup.20261001T000000Z")).unwrap(),
+        format!("encryption_secret = \"{k1}\"\n")
+    );
+}
+
 /// A copy whose seal fails and that holds no key line is removed (nothing a later
 /// start needs); a `corrupt` copy is never touched on a failed seal: a config.toml
 /// that could never be read may hold credentials that reached no encrypted store.
@@ -876,8 +1062,9 @@ fn sealing_keeps_the_raw_bytes() {
 }
 
 /// A clear retired-key file holding a value that is not a key is never dropped
-/// for lack of a key: kept until one exists, then sealed whole. Only a file
-/// proven empty goes.
+/// for lack of a key: kept (and reported, as it holds an unreadable
+/// `encryption_secret`) until one exists, then sealed whole. Only a file proven
+/// empty goes.
 #[test]
 fn a_retired_key_file_holding_a_non_key_value_is_sealed_not_dropped() {
     let dir = tempfile::tempdir().unwrap();
@@ -889,7 +1076,11 @@ fn a_retired_key_file_holding_a_non_key_value_is_sealed_not_dropped() {
     std::fs::write(d.join(empty), "  \n").unwrap();
 
     let report = protect_clear_copies(d, None);
-    assert_eq!((report.deferred, report.reduced), (1, 1), "{report:?}");
+    assert_eq!(
+        (report.deferred, report.reduced, report.failures.len()),
+        (0, 1, 1),
+        "{report:?}"
+    );
     assert_eq!(std::fs::read_to_string(d.join(kept)).unwrap(), value);
     assert!(!d.join(empty).exists());
 

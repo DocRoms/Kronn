@@ -264,10 +264,14 @@ Safe to interrupt at any point; a rerun converges:
    left as it is and logged once. A `config.toml.corrupt.<timestamp>` whose
    encryption fails is not cut down: a config.toml that could never be read may
    hold credentials that reached no encrypted store, so it is left whole and
-   reported until the encryption succeeds. A copy holding an
-   `encryption_secret` that is not a readable key is never dropped (it may be
-   the only trace of a key): it is left as it is and reported, as is a symbolic
-   link or Windows reparse point, a file that is not a regular file (a FIFO
+   reported until the encryption succeeds. A copy holding a top-level
+   `encryption_secret` with a non-blank string that is not a readable key (a
+   `retired-key` file included), or two different keys (a key-only copy keeps one
+   line), is never dropped, cut down or deferred (it may be the only trace of a
+   key): it is left as it is and reported. An empty value, a number, a commented
+   line or a value under a table holds no key and does not keep a copy: it is cut down or
+   removed like any other. A symbolic
+   link or Windows reparse point is reported too, as is a file that is not a regular file (a FIFO
    would block the pass) or a file with several hard links, which the pass
    never reads through, renames over or removes. The key is the top-level
    `encryption_secret`: a text that parses is decided by that value alone, a

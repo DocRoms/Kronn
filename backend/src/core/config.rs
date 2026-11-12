@@ -1201,7 +1201,20 @@ fn set_aside_unreadable_config(
 
 /// A top-level `encryption_secret = "..."` line that parses on its own: the
 /// first whose value is a real key, else the first non-empty one (a value that
-/// is not a key never hides a valid key line further down).
+/// is not a key never hides a valid key line further down). See
+/// [`salvage_key_values`] for what counts as a top-level line.
+pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
+    let values = salvage_key_values(content);
+    values
+        .iter()
+        .find(|v| super::crypto::canonical_secret(v).is_ok())
+        .or(values.first())
+        .cloned()
+}
+
+/// Every non-empty value of a top-level `encryption_secret` line of `content`
+/// that parses on its own, in order: a duplicate key makes the whole text
+/// invalid TOML, and each of its values may be the only copy of a live key.
 ///
 /// Only the top level of the text is read: the scan stops at the first line that
 /// opens a table (`[` or `[[`), and a line inside a multi-line string is not a
@@ -1209,8 +1222,8 @@ fn set_aside_unreadable_config(
 /// table or in a string is a value of something else, never the key. (A
 /// multi-line array whose element line starts with `[` also ends the scan: the
 /// safe side, the key is then looked for in the other stores.)
-pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
-    let mut first = None;
+pub(crate) fn salvage_key_values(content: &str) -> Vec<String> {
+    let mut values = Vec::new();
     // The delimiter of the multi-line string the scan is inside, if any.
     let mut open_string: Option<&str> = None;
     for line in content.lines() {
@@ -1223,25 +1236,23 @@ pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
         } else if line.trim_start().starts_with('[') {
             break;
         } else if let Some(value) = key_value_of(line) {
-            if super::crypto::canonical_secret(&value).is_ok() {
-                return Some(value);
-            }
-            first.get_or_insert(value);
+            values.push(value);
         }
         // A multi-line string opened on this line swallows the following ones.
         open_string = opened_string(rest);
     }
-    first
+    values
 }
 
-/// The value of `encryption_secret = "..."` when `line` is that assignment on
-/// its own and the value is not empty.
+/// The value of `encryption_secret = "..."` when `line` is that assignment on its
+/// own and the value is a string that is not blank (a number or an array can
+/// never be a key).
 fn key_value_of(line: &str) -> Option<String> {
     let table = line.trim().parse::<toml::Table>().ok()?;
     table
         .get("encryption_secret")
         .and_then(|v| v.as_str())
-        .filter(|k| !k.is_empty())
+        .filter(|k| !k.trim().is_empty())
         .map(str::to_string)
 }
 
