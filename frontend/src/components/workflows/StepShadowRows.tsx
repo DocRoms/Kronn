@@ -17,7 +17,7 @@ import {
   activeMergedIds, canPauseShadow, freshShadowId, withMergeAgent, withShadowAdded, withShadowChanged, withShadowEnabled,
   withShadowMerged, withShadowRemoved, type ShadowEdit,
 } from '../../lib/shadowMerge';
-import { MAX_SHADOWS, stepCanCarryShadows } from './StepShadowsEditor';
+import { MAX_SHADOWS, stepCanCarryShadows } from './shadowEditorModel';
 import { ShadowAgentPicker, TransportBadge, type MainAgent } from './ShadowAgentPicker';
 import { agentModelLabel, stepMainAgent } from './shadowRowModel';
 import type { AgentSwitchTarget } from '../AgentSwitchPicker';
