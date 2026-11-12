@@ -1,6 +1,8 @@
 // KT-1696 — the shadows of an Agent step as sub-rows: agent/model picker with
 // its transport badge, the Active and Merge toggles, ✕ and + Shadow, the summary
 // of the merged result with its `?` popover.
+// KT-1707 — the block opens with a highlighted Principal row; every row has the same
+// `role · agent · model [badge]` structure, and the shadow's free label is a tooltip.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +14,7 @@ const { list } = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock('../../../lib/api', () => buildApiMock({ modelCatalogApi: { list: list as never } }));
 
 import { StepShadowRows } from '../StepShadowRows';
+import { hasShadowBlock } from '../shadowRowModel';
 import type { ShadowEdit } from '../../../lib/shadowMerge';
 
 const t = (key: string, ...args: (string | number)[]) => (args.length ? `${key}(${args.join('|')})` : key);
@@ -56,14 +59,23 @@ const withShadows = (extra: Partial<WorkflowStep> = {}) =>
   step({ shadows: [argon, twin], shadow_merge: merge({ shadows: ['argon'], timeout_secs: 600 }), ...extra });
 
 describe('StepShadowRows — the sub-rows', () => {
-  it('shows one row per shadow with its agent, model and transport badge', () => {
+  it('shows a Shadow row per shadow: role, agent · model, transport badge — and no free label', () => {
     renderRows(withShadows());
     const rowArgon = screen.getByTestId('wf-shadow-rows-argon');
-    expect(within(rowArgon).getByText('⑂ Argon')).toBeInTheDocument();
+    expect(within(rowArgon).getByText('wf.shadow.rows.roleShadow')).toBeInTheDocument();
     expect(within(rowArgon).getByTestId('wf-shadow-rows-argon-agent')).toHaveTextContent('LiteLLM · gemini-4-argon');
     expect(within(rowArgon).getByText('wf.shadow.rows.transport.http')).toBeInTheDocument();
+    expect(rowArgon).not.toHaveTextContent('Argon');
+    // The free label stays reachable as the row's tooltip.
+    expect(rowArgon).toHaveAttribute('title', 'Argon');
     const rowTwin = screen.getByTestId('wf-shadow-rows-twin');
-    expect(within(rowTwin).getByTestId('wf-shadow-rows-twin-agent')).toHaveTextContent('wf.shadow.rows.sameAgent');
+    expect(rowTwin).not.toHaveTextContent('Qwen identique');
+    expect(rowTwin).toHaveAttribute('title', 'Qwen identique');
+    // Without an agent of its own the shadow shows the principal's, resolved, with a muted « = principal ».
+    const twinAgent = within(rowTwin).getByTestId('wf-shadow-rows-twin-agent');
+    expect(twinAgent).toHaveTextContent('Ollama · qwen3.8:27b-mlx');
+    expect(twinAgent).toHaveTextContent('wf.shadow.rows.sameAgent');
+    expect(within(rowArgon).getByTestId('wf-shadow-rows-argon-agent')).not.toHaveTextContent('wf.shadow.rows.sameAgent');
     // The identical shadow runs on the step's own agent: Ollama is a local runtime.
     expect(within(rowTwin).getByText('wf.shadow.rows.transport.local')).toBeInTheDocument();
   });
@@ -83,7 +95,7 @@ describe('StepShadowRows — the sub-rows', () => {
   it('explains both toggles in their tooltips, with the shadow and the next step by name', () => {
     renderRows(withShadows());
     expect(screen.getByTestId('wf-shadow-rows-twin-active')).toHaveAttribute('title', 'wf.shadow.rows.activeTip');
-    expect(screen.getByTestId('wf-shadow-rows-twin-merge')).toHaveAttribute('title', 'wf.shadow.rows.mergeTip(Qwen identique|publish)');
+    expect(screen.getByTestId('wf-shadow-rows-twin-merge')).toHaveAttribute('title', 'wf.shadow.rows.mergeTip(Ollama · qwen3.8:27b-mlx|publish)');
   });
 
   it('Merge on a shadow that is not merged writes an explicit list', () => {
@@ -149,22 +161,64 @@ describe('StepShadowRows — the sub-rows', () => {
 const rowsCss = readFileSync(resolve(process.cwd(), 'src/components/workflows/StepShadowRows.css'), 'utf8');
 const ruleOf = (selector: string) => rowsCss.match(new RegExp(`^${selector.replace('.', '\\.')}\\s*\\{([^}]*)\\}`, 'm'))?.[1] ?? '';
 
-describe('StepShadowRows — names and wrapping', () => {
-  const longName = 'Argon (LiteLLM) · gemini-4 long'; // 31 characters
-  it('renders a ~30 character shadow name whole: no ellipsis class, no inline clipping, full title', () => {
-    renderRows(withShadows({ shadows: [shadow('argon', { label: longName, agent: argon.agent }), twin] }));
-    const name = screen.getByText(`⑂ ${longName}`);
-    expect(longName).toHaveLength(31);
-    expect(name.className).toBe('wf-shadow-subrow-name');
-    expect(name).not.toHaveAttribute('style');
-    expect(name).toHaveAttribute('title', longName);
+describe('StepShadowRows — the Principal row', () => {
+  it('opens the block: first row, highlighted, same structure as a shadow row', () => {
+    renderRows(withShadows());
+    const rows = screen.getByTestId('wf-shadow-rows');
+    const principal = screen.getByTestId('wf-shadow-rows-principal');
+    expect(rows.firstElementChild).toBe(principal);
+    expect(principal).toHaveAttribute('data-role', 'principal');
+    expect(principal).toHaveClass('wf-shadow-subrow', 'wf-shadow-principal');
+    expect(principal.children[0]).toHaveTextContent('wf.shadow.rows.principal');
+    expect(within(principal).getByTestId('wf-shadow-rows-principal-agent')).toHaveTextContent('Ollama · qwen3.8:27b-mlx');
+    expect(within(principal).getByText('wf.shadow.rows.transport.local')).toBeInTheDocument();
+    // A shadow row has the same first columns, then comes after it.
+    const argon = screen.getByTestId('wf-shadow-rows-argon');
+    expect(argon).toHaveClass('wf-shadow-subrow');
+    expect(principal.compareDocumentPosition(argon) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(argon.children[0]).toHaveTextContent('wf.shadow.rows.roleShadow');
+    expect(argon).toHaveAttribute('data-role', 'shadow');
   });
 
-  it('lets the name size naturally in the stylesheet: no fixed character cap, it only shrinks inside the card', () => {
-    const rule = ruleOf('.wf-shadow-subrow-name');
-    expect(rule).not.toMatch(/max-width:\s*\d+(\.\d+)?(ch|px|em|rem)/);
-    expect(rule).toMatch(/max-width:\s*100%/);
-    expect(rule).toMatch(/flex:\s*0 1 auto/);
+  it('is always active: a chip, no Active / Merge toggle, no ✕', () => {
+    renderRows(withShadows());
+    const principal = screen.getByTestId('wf-shadow-rows-principal');
+    expect(within(principal).getByTestId('wf-shadow-rows-principal-active')).toHaveTextContent('wf.shadow.rows.alwaysActive');
+    expect(within(principal).queryByRole('switch')).toBeNull();
+    expect(within(principal).queryByRole('button')).toBeNull();
+  });
+
+  it('says « base of the merge » only while a merge is on', () => {
+    const { rerender } = render(<StepShadowRows step={withShadows()} nextStepName="publish" choices={choices} onEdit={vi.fn()} t={t} />);
+    expect(screen.getByTestId('wf-shadow-rows-principal-base')).toHaveTextContent('wf.shadow.rows.mergeBase');
+    rerender(<StepShadowRows step={withShadows({ shadow_merge: merge({ enabled: false, shadows: [] }) })} nextStepName="publish" choices={choices} onEdit={vi.fn()} t={t} />);
+    expect(screen.queryByTestId('wf-shadow-rows-principal-base')).toBeNull();
+    expect(screen.getByTestId('wf-shadow-rows-principal')).toBeInTheDocument();
+  });
+
+  it('hosts the step\'s own picker when given one, in place of the read-only label', () => {
+    renderRows(withShadows(), { mainPicker: <button type="button" data-testid="own-picker">picker</button> });
+    expect(within(screen.getByTestId('wf-shadow-rows-principal')).getByTestId('own-picker')).toBeInTheDocument();
+  });
+
+  it('appears with the first shadow and goes with the last one', () => {
+    const { rerender } = render(<StepShadowRows step={step()} onEdit={vi.fn()} addWhenEmpty t={t} />);
+    expect(screen.queryByTestId('wf-shadow-rows-principal')).toBeNull();
+    expect(hasShadowBlock(step())).toBe(false);
+    rerender(<StepShadowRows step={step({ shadows: [twin] })} onEdit={vi.fn()} addWhenEmpty t={t} />);
+    expect(screen.getByTestId('wf-shadow-rows-principal')).toBeInTheDocument();
+    expect(hasShadowBlock(step({ shadows: [twin] }))).toBe(true);
+    rerender(<StepShadowRows step={step({ shadows: [] })} onEdit={vi.fn()} addWhenEmpty t={t} />);
+    expect(screen.queryByTestId('wf-shadow-rows-principal')).toBeNull();
+    expect(screen.getByTestId('wf-shadow-rows-add')).toBeInTheDocument();
+  });
+
+  it('is teal, the shadows violet and indented, in the same grid', () => {
+    expect(ruleOf('.wf-shadow-principal')).toMatch(/--kr-cyan-rgb/);
+    expect(ruleOf('.wf-shadow-subrow')).toMatch(/grid-template-columns/);
+    expect(ruleOf('.wf-shadow-subrow')).toMatch(/--kr-purple-rgb/);
+    expect(rowsCss).toMatch(/\.wf-shadow-subrow\[data-role='shadow'\]\s*\{\s*margin-left:/);
+    expect(rowsCss).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 });
 
@@ -174,7 +228,7 @@ describe('StepShadowRows — the agent/model menu', () => {
     return screen.getByTestId(`${id}-menu`);
   };
 
-  it('opens on one click, grouped by agent with transport, and includes « = step agent »', async () => {
+  it('opens on one click, grouped by agent with transport, and includes « = principal »', async () => {
     renderRows(withShadows());
     const menu = await open('wf-shadow-rows-twin-agent');
     expect(within(menu).getByTestId('wf-shadow-rows-twin-agent-same')).toBeInTheDocument();
@@ -210,7 +264,7 @@ describe('StepShadowRows — the agent/model menu', () => {
     expect(edits[0].shadows.find(s => s.id === 'twin')?.agent).toEqual({ agent: 'LiteLlm', model: 'gemini-4-argon', connection_id: 'lite-1' });
   });
 
-  it('« = step agent » makes the shadow identical', async () => {
+  it('« = principal » makes the shadow identical', async () => {
     const edits = renderRows(withShadows());
     const menu = await open('wf-shadow-rows-argon-agent');
     fireEvent.click(within(menu).getByTestId('wf-shadow-rows-argon-agent-same'));
@@ -239,9 +293,10 @@ describe('StepShadowRows — the merged result', () => {
   it('summarises main + the merged shadows → the next step, with the condense agent', () => {
     renderRows(withShadows());
     const summary = screen.getByTestId('wf-shadow-rows-merged');
-    expect(summary).toHaveTextContent('wf.shadow.rows.summary(Argon|publish)');
+    expect(summary).toHaveTextContent('wf.shadow.rows.summary(wf.shadow.rows.shadowNamed(LiteLLM · gemini-4-argon)|publish)');
     expect(summary).toHaveTextContent('wf.shadow.rows.mergedBy');
     expect(within(summary).getByTestId('wf-shadow-rows-condense')).toHaveTextContent('wf.shadow.rows.sameAgent');
+    expect(within(summary).getByTestId('wf-shadow-rows-condense')).toHaveTextContent('Ollama · qwen3.8:27b-mlx');
   });
 
   it('keeps « merged by » and its picker in one group that never splits', () => {
@@ -259,7 +314,7 @@ describe('StepShadowRows — the merged result', () => {
 
   it('names every merged shadow, and says « the step result » on the last step', () => {
     renderRows(withShadows({ shadow_merge: merge({ shadows: ['argon', 'twin'] }) }), { nextStepName: undefined });
-    expect(screen.getByTestId('wf-shadow-rows-merged')).toHaveTextContent('wf.shadow.rows.summaryLast(Argon + Qwen identique)');
+    expect(screen.getByTestId('wf-shadow-rows-merged')).toHaveTextContent('wf.shadow.rows.summaryLast(wf.shadow.rows.shadowNamed(LiteLLM · gemini-4-argon) + wf.shadow.rows.shadowNamed(Ollama · qwen3.8:27b-mlx))');
   });
 
   it('is not a setting for the shadows, and disappears when nothing is merged', () => {
@@ -287,7 +342,7 @@ describe('StepShadowRows — the merged result', () => {
       fireEvent.mouseEnter(help.parentElement as HTMLElement);
       const pop = screen.getByTestId('wf-shadow-rows-help-pop');
       expect(pop).toHaveTextContent('wf.shadow.rows.helpOne');
-      expect(pop).toHaveTextContent('wf.shadow.rows.helpFlow(main + Argon|publish)');
+      expect(pop).toHaveTextContent('wf.shadow.rows.helpFlow(wf.shadow.rows.shadowNamed(LiteLLM · gemini-4-argon)|publish)');
       expect(pop).toHaveTextContent('wf.shadow.rows.helpDedupe');
       expect(pop).toHaveTextContent('wf.shadow.rows.helpCompared');
       // timeout_secs 600 shows as minutes.

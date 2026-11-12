@@ -328,7 +328,7 @@ long-lived right pane so their internal scroll areas remain stable.
 Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5#collection-detail-header]`
-`[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1872#collection-detail-header]`
+`[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1895#collection-detail-header]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:3299#selectedQuickPromptId]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:3779#selectedQuickApiId]`
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:4202#selectedQuickExecId]`
@@ -593,7 +593,7 @@ run list and never encrypted, so it holds plain labels such as the ticket a run
 is about, never a secret. `GET /api/workflows/{id}/runs?state_key=ticketKey&state_value=EW-7791&limit=1`
 returns the newest run carrying that entry, whether it was seeded or written by
 a step, without reading any step output.
-`[src: file: backend/src/api/workflows.rs:5583-5615#validate_initial_run_state]`
+`[src: file: backend/src/api/workflows.rs:5595-5627#validate_initial_run_state]`
 `[src: file: backend/src/api/workflows.rs:6225-6239#list_runs_by_state_visible]`
 `[src: file: backend/src/db/workflows.rs:1645-1681#list_runs_by_state_visible]`
 
