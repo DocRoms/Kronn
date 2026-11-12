@@ -72,12 +72,12 @@
 .disc-weight-panel-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 900;
+  z-index: var(--kr-z-popover);
 }
 
 .disc-weight-panel {
   position: fixed;
-  z-index: 901;
+  z-index: calc(var(--kr-z-popover) + 1);
   min-width: 210px;
   max-width: min(280px, calc(100vw - 24px));
   padding: 8px 10px;
