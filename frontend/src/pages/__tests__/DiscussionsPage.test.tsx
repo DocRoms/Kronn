@@ -205,6 +205,8 @@ vi.mock('../../lib/api', () => ({
     getServerConfig: vi.fn().mockResolvedValue({ default_model_tier: 'default' }),
     // KT-1518 — the settings panel's fallback override lists the agents' chains.
     getAgentFallback: vi.fn().mockResolvedValue({ chains: [], cooldowns: [] }),
+    // KT-1693 — useFallbackData also reads the model tiers for the fallback options.
+    getModelTiers: vi.fn().mockResolvedValue({}),
   },
   media: {
     capabilities: vi.fn().mockResolvedValue({ model: 'image-model', capabilities: null }),

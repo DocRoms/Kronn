@@ -198,10 +198,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:11091-11095#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:11097-11146#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:9405-9429#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:40566-40667#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:11173-11177#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:11179-11228#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:9487-9511#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:40668-40769#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -233,7 +233,7 @@ The activity clock default is 20 minutes
 (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
 wins). A tool call in flight (a cold build run by the worker itself) is activity
 up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
-[src: file: backend/src/db/orchestration.rs:8106#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8148#DEFAULT_ACTIVITY_TIMEOUT_SECS]
 
 **Queue deadline.** An execution queued longer than the queue deadline is
 reported, never interrupted: the principal room receives one orchestration
@@ -244,8 +244,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8135#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8163#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8177#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8205#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -550,6 +550,24 @@ the replacement can continue from the same evidence. Reassignment is the normal
 response to provider quota/rate limits. Provider, tier, explicit model and
 profile change together; Kronn refuses the reassignment if it cannot update the
 durable child discussion that the runtime will actually execute.
+
+**Automatic fallback of a task worker (KT-1713).** When the worker's provider
+refuses a turn for a quota, a rate limit or a missing login and its agent has a
+fallback configured, Kronn reassigns the execution to that fallback in the same
+child room and worktree, and the parent room says « Task worker execution
+<id>: … → continued with … ». Two rules:
+
+- Codex is never chosen for it: its sandbox cannot write the linked worktree's
+  git directory, so it could not merge the target, commit or deliver. The room
+  names this reason when no other fallback can take over, and you reassign
+  yourself.
+- The move lasts as long as the quota window. Once it has ended, resuming the
+  execution (or the periodic quota sweep) hands it back to the worker you
+  declared, and the room says « … back on its declared worker … » instead of
+  redispatching the fallback. Reassigning by hand ends this memory.
+
+See [agent-fallback-chain](../operations/agent-fallback-chain.md#task-workers-kt-1713)
+for the mechanism.
 
 ## Resolve common failures
 

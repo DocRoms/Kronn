@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
-import { StepShadowCompare, useStepShadows } from './StepShadowCompare';
+import { StepShadowCompare } from './StepShadowCompare';
+import { useStepShadows } from './useStepShadows';
 import { isShadowRun } from '../../lib/shadowRuns';
 import { newTabClickProps } from '../../lib/newTabNavigation';
 import { livePagePath, workflowPath } from '../../lib/routes';

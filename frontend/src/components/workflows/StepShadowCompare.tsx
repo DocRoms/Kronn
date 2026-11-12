@@ -6,49 +6,22 @@
  * two side by side; and for the shadows identical to the step, how many
  * distinct outputs there are out of N+1.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { FlaskConical } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi } from '../../lib/api';
 import { diffLines } from '../../lib/qp-history-diff';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import {
   clip, comparableOutput, compareIdentities, determinism, executionKey, fieldValue, formatCost, hasOutput,
-  mergeExecutionLabel, mergeInProgress, mergeStatusKey, percent, readableOutput, shadowLabel, shadowStatusKey,
+  mergeExecutionLabel, mergeStatusKey, percent, readableOutput, shadowLabel, shadowStatusKey,
   type IdentityField,
 } from '../../lib/shadowRuns';
 import type { ShadowExecution, ShadowMergeReport, StepShadowComparison } from '../../types/generated';
+import { useStepShadows } from './useStepShadows';
 import '../QPHistoryDrawer.css';
 
 const MAX_OUTPUT = 6000;
-const POLL_MS = 3000;
 type Translate = (key: string, ...args: (string | number)[]) => string;
-
-/** The comparison of a run's steps; refreshed while a shadow still runs. */
-export function useStepShadows(workflowId: string, runId: string, runStatus: string): StepShadowComparison[] {
-  const [steps, setSteps] = useState<StepShadowComparison[]>([]);
-  const running = steps.some(step => step.shadows.some(shadow => shadow.status === 'running') || mergeInProgress(step.merge));
-  // Read on arrival and whenever the run moves on; the shadows outlive the run's own steps.
-  useEffect(() => {
-    let active = true;
-    workflowsApi.stepShadows(workflowId, runId)
-      .then(list => { if (active) setSteps(list ?? []); })
-      .catch(() => { /* nothing to compare is nothing to show */ });
-    return () => { active = false; };
-  }, [workflowId, runId, runStatus]);
-  // Then every few seconds, for as long as one shadow still runs.
-  useEffect(() => {
-    if (!running) return undefined;
-    let active = true;
-    const timer = setInterval(() => {
-      workflowsApi.stepShadows(workflowId, runId)
-        .then(list => { if (active) setSteps(list ?? []); })
-        .catch(() => { /* the next tick tries again */ });
-    }, POLL_MS);
-    return () => { active = false; clearInterval(timer); };
-  }, [workflowId, runId, running]);
-  return steps;
-}
 
 function DiffBlock({ left, right, leftLabel, rightLabel, testId }: {
   left: ShadowExecution; right: ShadowExecution; leftLabel: string; rightLabel: string; testId: string;
