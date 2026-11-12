@@ -17,8 +17,10 @@ This page is the operator workflow.
    brief.
 2. Attach the discussion to a registered project repository. Kronn refuses to
    provision an unmanaged or unresolved path.
-3. Select a committed base SHA and preserve unrelated workspace changes. The
-   child is pinned to that SHA; it never edits the parent checkout. Integration
+3. Name the integration branch (`base_rev`), or launch from a room that
+   declares one. The child is pinned to that branch's commit; it never edits
+   the parent checkout. Kronn never defaults to `main`; see
+   [Where integration happens](#where-integration-happens). Integration
    requires the selected target branch's checked-out worktree to be clean, not
    every checkout of the project; a target no worktree has checked out has
    nothing to keep clean.
@@ -47,6 +49,42 @@ Validation commands belong to the principal's launch policy. Kronn persists
 them on both campaign runs and the implicit run created by a single-task
 `task_exec_launch`; a worker manifest can report observations but cannot add,
 remove or replace these gates.
+
+### Where integration happens
+
+An integration advances the target branch, and a checkout that holds that
+branch is written to. So the target is never the owner's working checkout, and
+never `main` by default:
+
+- **The target is explicit or declared.** A launch takes the branch from
+  `base_rev`. Without one it takes the integration branch its room declares: the
+  `target_branch` of the room's active campaign (for example `integ/0.15.x`).
+  With neither, the launch is refused with `integration_target_undeclared`; it
+  does not fall back to `main`.
+- **The checkout holding the target must be Kronn's.** A target checked out
+  nowhere is advanced by a ref compare-and-swap that touches no checkout. One
+  checked out in a Kronn-owned worktree (under `<repo>/.kronn/worktrees`) is
+  advanced inside it. One checked out in the project's own working checkout is
+  refused with `integration_target_owner_checkout`, and one checked out in any
+  other worktree with `integration_target_foreign_worktree`. Those checkouts
+  hold files the owner is working on, and fast-forwarding `main` there would
+  also land a change without going through the pull request.
+- **The refusal comes at preflight and launch.** `task_exec_prepare` accepts the
+  `base_rev` you will launch with (or checks the room's declared branch) and
+  answers `launchable: false` with the same code; `task_exec_launch` refuses it
+  before an execution, a child room or a worktree exists. It is not discovered
+  at integration.
+- **The status shows where it will land.** `task_exec_status` carries
+  `target_branch`, `integration_worktree` (the worktree holding the branch,
+  absent when none does) and `integration_target_state` (`kronn_worktree`,
+  `not_checked_out`, `owner_checkout`, `foreign_worktree` or `unresolved`); the
+  `full` view has them as `target_branch` and `integration_target`. A wrong
+  target reads there before the integration, not at it.
+
+To integrate somewhere the owner is not working, create the integration branch
+and leave it checked out nowhere (or in a worktree under
+`<repo>/.kronn/worktrees`), then declare it on the campaign or pass it as
+`base_rev`.
 
 ### Default validations: fmt + clippy + targeted lib tests
 
@@ -490,6 +528,7 @@ durable child discussion that the runtime will actually execute.
 | Target branch moved | Refresh/relaunch against the new target; Kronn will not overwrite it. |
 | Dirty target worktree | Intentionally preserve or commit changes in the selected target branch's checkout, then retry integration. Do not move unrelated files from another checkout. |
 | Target checked out in several worktrees, or not a local branch | Leave at most one checkout of the pinned local target branch, and make sure the target is a branch, not a tag or SHA, before retrying; Kronn does not choose or switch a branch for you. |
+| `integration_target_undeclared`, `integration_target_owner_checkout` or `integration_target_foreign_worktree` at preflight or launch | Name an integration branch (`base_rev`) or declare one on the room's campaign, and pick one that is checked out nowhere or in a Kronn-owned worktree. Kronn never integrates into the owner's checkout or defaults to `main`. |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
 | Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, set the task back to `todo` (`task_update status=todo`; the cancel keeps its status, usually `in_progress`, and the launch preflight refuses any other status), then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |

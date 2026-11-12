@@ -7643,7 +7643,13 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             .success());
     }
     std::fs::write(repo.path().join("README.md"), "return lifecycle\n").unwrap();
-    for args in [vec!["add", "."], vec!["commit", "-m", "initial"]] {
+    // The integration target is a branch no checkout holds: the owner's `main`
+    // checkout is never an integration target (KT-1688).
+    for args in [
+        vec!["add", "."],
+        vec!["commit", "-m", "initial"],
+        vec!["branch", "integ"],
+    ] {
         assert!(std::process::Command::new("git")
             .args(args)
             .current_dir(repo.path())
@@ -7691,7 +7697,7 @@ async fn orchestrator_return_resume_route_authenticates_and_replays_exact_rotati
             task_reference: task_reference.clone(),
             parent_discussion_id: "return-http-parent".into(),
             worker: kronn::models::MessageTarget::cli(kronn::models::AgentType::Codex, 657),
-            base_rev: Some("main".into()),
+            base_rev: Some("integ".into()),
             idempotency_key: Some("return-http-cycle".into()),
         },
     )

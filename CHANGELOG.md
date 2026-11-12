@@ -13,6 +13,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Orchestration: an integration never targets the owner's working checkout, and
+  an unspecified target is no longer `main` (KT-1688). A launch takes its
+  integration branch from `base_rev`, else from its room's campaign; with
+  neither it is refused (`integration_target_undeclared`). A target checked out
+  in the project's own checkout, or in a worktree outside `.kronn/worktrees`, is
+  refused at preflight and launch (`integration_target_owner_checkout`,
+  `integration_target_foreign_worktree`) instead of at integration; a branch no
+  checkout holds, or one held by a Kronn-owned worktree, stays valid.
+  `task_exec_prepare` accepts `base_rev`, and `task_exec_status` names the
+  target branch and its worktree (`integration_worktree`,
+  `integration_target_state`). The integration branch must now be named: a
+  launch that relied on the `main` default needs a `base_rev`.
 - HTTP agents: an operator switch for Kronn's tools, and a gate on models that
   cannot take them (KT-1600). Tools stay on by default for every HTTP agent. Turn
   them off per agent (Settings > Agents: Ollama, LiteLLM, NVIDIA) or per external
