@@ -6857,7 +6857,7 @@ mod workers_config_tests;
 mod context_files_tests;
 
 /// GET /api/config/agent-fallback
-/// Every agent's fallback chain (KT-1518) with the cooldowns still running.
+/// Every mode row that has a fallback (KT-1693) with the cooldowns still running.
 pub async fn get_agent_fallback(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
@@ -6873,38 +6873,37 @@ pub async fn get_agent_fallback(
 }
 
 /// POST /api/config/agent-fallback
-/// Sets the whole chain of agents that take over, in order, when this one is
-/// unavailable on the provider side (an empty chain cuts it). A loop, a chain
-/// past the depth limit, a fallback with more access than the agent it replaces,
-/// or an agent that cannot take part is refused with the reason; nothing is
-/// stored then. Applies to the next turn, no restart.
+/// Sets (or, with `fallback: null`, removes) the fallback of one mode row of an
+/// agent: what takes over when this agent is unavailable on the provider side
+/// for that mode. A loop, a chain past the depth limit, a fallback of another
+/// kind of mode (text goes to text, image to image...), a fallback with more
+/// access than the agent it replaces, or an agent that cannot take part is
+/// refused with the reason; nothing is stored then. Applies to the next turn, no
+/// restart.
 pub async fn set_agent_fallback(
     State(state): State<AppState>,
     Json(req): Json<SetAgentFallbackRequest>,
 ) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
     let mut config = state.config.write().await;
-    let chain: Vec<crate::models::AgentFallback> = req
-        .fallback_chain
-        .into_iter()
-        .map(|mut link| {
-            link.model = link
-                .model
-                .map(|model| model.trim().to_string())
-                .filter(|model| !model.is_empty());
-            link
-        })
-        .collect();
-    if let Err(error) =
-        crate::core::agent_fallback::validate_chain(&config.agents, Some(&req.agent), &chain)
-    {
-        return Json(ApiResponse::err(error.to_string()));
+    let fallback = req.fallback.map(|mut link| {
+        link.model = link
+            .model
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty());
+        link
+    });
+    if let Some(link) = &fallback {
+        if let Err(error) =
+            crate::core::agent_fallback::validate_row(&config.agents, &req.agent, req.mode, link)
+        {
+            return Json(ApiResponse::err(error.to_string()));
+        }
     }
-    let Some(agent) = config.agents.agent_config_mut(&req.agent) else {
+    if !crate::core::agent_fallback::set_row(&mut config.agents, &req.agent, req.mode, fallback) {
         return Json(ApiResponse::err(
             "This agent cannot have a fallback: a named connection is chosen in the workflow",
         ));
-    };
-    agent.fallback_chain = chain;
+    }
     if let Err(error) = config::save(&config).await {
         return Json(ApiResponse::err(format!("Failed to save: {error}")));
     }

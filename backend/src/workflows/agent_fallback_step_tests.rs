@@ -10,7 +10,7 @@ fn link(agent: AgentType) -> AgentFallback {
     AgentFallback {
         agent,
         model: None,
-        allow_paid: false,
+        mode: None,
     }
 }
 
@@ -27,6 +27,8 @@ fn state_with(first: Option<AgentFallback>) -> (AppState, AgentsConfig) {
     let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
     let mut config = crate::core::config::default_config();
     config.agents.claude_code.fallback_chain = first.into_iter().collect();
+    // The chain of 0.15.3, carried onto the rows the way a start-up does.
+    fallback::migrate_legacy_chains(&mut config.agents);
     let agents = config.agents.clone();
     let state = AppState::new_defaults(
         Arc::new(tokio::sync::RwLock::new(config)),
@@ -143,8 +145,8 @@ async fn each_provider_side_trigger_reruns_the_step_on_the_fallback_with_the_sam
         );
         assert_eq!(moved.prompt_template, "analyse the diff");
         assert!(
-            notice.starts_with(&format!("Claude Code (claude-opus-4): {words}"))
-                && notice.ends_with("-> continued with Codex (economy tier)"),
+            notice.starts_with(&format!("Claude Code · claude-opus-4: {words}"))
+                && notice.ends_with("→ continued with Codex · eco mode [CLI]"),
             "{notice}"
         );
         assert!(
@@ -178,7 +180,7 @@ async fn the_links_own_model_replaces_the_tier_on_the_rerun() {
         Some("gpt-5.6-sol")
     );
     assert!(
-        notice.ends_with("continued with Codex (gpt-5.6-sol)"),
+        notice.ends_with("continued with Codex · gpt-5.6-sol [CLI]"),
         "{notice}"
     );
 }
@@ -248,31 +250,10 @@ async fn a_step_whose_agent_has_no_fallback_fails_or_waits_as_before() {
 }
 
 #[tokio::test]
-async fn a_paid_fallback_without_the_owners_opt_in_stops_with_the_reason() {
+async fn a_fallback_billed_by_api_key_is_used_without_any_opt_in() {
     let (state, agents) = state_with(Some(link(AgentType::LiteLlm)));
     let failed = outcome(RunStatus::Failed, "HTTP 429 Too Many Requests");
-    match continue_after_among(
-        &state,
-        &agents,
-        &AgentType::ClaudeCode,
-        &step(),
-        &failed,
-        Some(everyone()),
-    )
-    .await
-    {
-        Next::Stopped { notice } => assert!(
-            notice.starts_with("Claude Code: rate limited -> no fallback")
-                && notice.contains("bills by API key"),
-            "{notice}"
-        ),
-        _ => panic!("a paid link without opt-in must not be used"),
-    }
-    let (state, agents) = state_with(Some(AgentFallback {
-        allow_paid: true,
-        ..link(AgentType::LiteLlm)
-    }));
-    let (moved, _) = rerun(
+    let (moved, notice) = rerun(
         continue_after_among(
             &state,
             &agents,
@@ -284,6 +265,51 @@ async fn a_paid_fallback_without_the_owners_opt_in_stops_with_the_reason() {
         .await,
     );
     assert_eq!(moved.agent, AgentType::LiteLlm);
+    assert!(
+        notice.ends_with("→ continued with LiteLLM · eco mode [HTTP]"),
+        "{notice}"
+    );
+}
+
+#[tokio::test]
+async fn a_fallback_on_its_own_row_chains_when_the_first_one_is_unavailable() {
+    // Claude Code → Codex, and Codex → Gemini CLI on Codex's own row.
+    let (state, mut agents) = state_with(Some(link(AgentType::Codex)));
+    fallback::set_row(
+        &mut agents,
+        &AgentType::Codex,
+        crate::models::FallbackMode::Eco,
+        Some(link(AgentType::GeminiCli)),
+    );
+    let failed = outcome(RunStatus::Failed, "HTTP 429 Too Many Requests");
+    let (moved, _) = rerun(
+        continue_after_among(
+            &state,
+            &agents,
+            &AgentType::ClaudeCode,
+            &step(),
+            &failed,
+            Some(everyone()),
+        )
+        .await,
+    );
+    assert_eq!(moved.agent, AgentType::Codex);
+    // Codex refuses in its turn: the fallback of ITS row takes over.
+    let mut on_codex = moved.clone();
+    on_codex.agent = AgentType::Codex;
+    let (next, notice) = rerun(
+        continue_after_among(
+            &state,
+            &agents,
+            &AgentType::ClaudeCode,
+            &on_codex,
+            &failed,
+            Some(everyone()),
+        )
+        .await,
+    );
+    assert_eq!(next.agent, AgentType::GeminiCli);
+    assert!(notice.contains("→ continued with Gemini CLI"), "{notice}");
 }
 
 #[tokio::test]
@@ -315,8 +341,8 @@ async fn a_step_starts_on_the_fallback_while_its_agent_cools_down_and_returns_af
         .expect("straight to the fallback");
     assert_eq!(moved.agent, AgentType::Codex);
     assert!(
-        notice.starts_with("Claude Code (claude-opus-4): quota exhausted until ")
-            && notice.ends_with("-> continued with Codex (economy tier)"),
+        notice.starts_with("Claude Code · claude-opus-4: quota exhausted until ")
+            && notice.ends_with("→ continued with Codex · eco mode [CLI]"),
         "{notice}"
     );
 
@@ -362,9 +388,12 @@ fn the_notices_lead_the_steps_output_as_quoted_lines() {
     assert_eq!(
         with_notices(
             "result".into(),
-            &["Claude Code: rate limited -> continued with Codex (economy tier)".into()]
+            &[
+                "Claude Code · eco mode: rate limited → continued with Codex · eco mode [CLI]"
+                    .into()
+            ]
         ),
-        "> Claude Code: rate limited -> continued with Codex (economy tier)\n\nresult"
+        "> Claude Code · eco mode: rate limited → continued with Codex · eco mode [CLI]\n\nresult"
     );
 }
 

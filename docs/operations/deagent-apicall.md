@@ -121,7 +121,7 @@ Omitting the field (or `{"type": "Json"}`) keeps the JSON behaviour unchanged.
 [src: file: backend/src/workflows/api_call_binary.rs:51-97#resolve_binary_policy]
 [src: file: backend/src/workflows/api_call_binary.rs:101-150#read_binary_body]
 [src: file: backend/src/workflows/api_call_binary.rs:152-157#binary_summary]
-[src: file: backend/src/api/workflows.rs:1247-1248#resolve_binary_policy]
+[src: file: backend/src/api/workflows.rs:1256-1257#resolve_binary_policy]
 
 `base64` and `data_uri` carry the same bytes. Use `api_extract` to keep the one
 you need, for example `{"path": "$.data_uri"}` for a Page image, so the payload
@@ -287,8 +287,8 @@ The workflow wizard flags references already missing from the saved catalogue,
 including old deletions or imported workflows. It waits for a successful
 catalogue read and clears the warning when the reference is replaced or removed.
 The warning identifies the step and missing id and remains visible across wizard
-stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1432-1445#missingQuickApis]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1491-1502#missingQuickApis]
+stages. [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1451-1464#missingQuickApis]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:1510-1521#missingQuickApis]
 
 ## Run-anchored time templates
 

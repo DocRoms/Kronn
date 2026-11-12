@@ -593,7 +593,7 @@ run list and never encrypted, so it holds plain labels such as the ticket a run
 is about, never a secret. `GET /api/workflows/{id}/runs?state_key=ticketKey&state_value=EW-7791&limit=1`
 returns the newest run carrying that entry, whether it was seeded or written by
 a step, without reading any step output.
-`[src: file: backend/src/api/workflows.rs:5583-5615#validate_initial_run_state]`
+`[src: file: backend/src/api/workflows.rs:5595-5627#validate_initial_run_state]`
 `[src: file: backend/src/api/workflows.rs:6225-6239#list_runs_by_state_visible]`
 `[src: file: backend/src/db/workflows.rs:1645-1681#list_runs_by_state_visible]`
 
