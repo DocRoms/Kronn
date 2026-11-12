@@ -100,7 +100,7 @@ is selected without moving the transcript. A page reload starts navigation
 fresh. Publication invalidations during a pending GET coalesce into a fresh
 follow-up read rather than accepting the old snapshot as the final state.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:194-264#goTo]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4624-4628#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4630-4634#ImportantMessagesBar]
 [src: file: frontend/src/components/ImportantMessageCard.tsx:151-180#selections]
 [src: file: frontend/src/lib/importantMessages.ts:50-75#load]
 [src: file: frontend/src/lib/importantMessages.ts:84-90#refreshImportantMessages]
@@ -123,7 +123,7 @@ The bar re-fetches when the transcript's newest durable message id changes
 fetch per arrival, not one per render or per bubble, and never stuck on the
 first GET while a new card lands.
 [src: file: frontend/src/components/ImportantMessageCard.tsx:182-192#messageRevision]
-[src: file: frontend/src/pages/DiscussionsPage.tsx:4624-4628#ImportantMessagesBar]
+[src: file: frontend/src/pages/DiscussionsPage.tsx:4630-4634#ImportantMessagesBar]
 
 ## Human form (0.13.0, KT-643)
 

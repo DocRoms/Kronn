@@ -309,7 +309,7 @@ function AdoptModal({ entry, onConfirm, onCancel, loading, error }: AdoptModalPr
       aria-modal="true"
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 'var(--kr-z-modal)',
       }}
       onClick={onCancel}
     >

@@ -248,7 +248,7 @@ those tokens ahead of the call.
   connection card (`POST /api/mcps/configs/{id}/check-token`) and **Check all
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
-  [src: file: backend/src/core/token_checks.rs:318-336#spawn_scheduler]
+  [src: file: backend/src/core/token_checks.rs:326-344#spawn_scheduler]
   [src: file: backend/src/lib.rs:2541-2543#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
@@ -273,11 +273,15 @@ those tokens ahead of the call.
   [src: file: backend/src/api/activity.rs:444-444#ConnectionTokenSource]
 - **No probe.** A connection that cannot be probed shows "Not checked since
   *date of its last good call*", or "Never checked" when no call has worked yet.
-  Every good call records that date.
-  [src: file: backend/src/workflows/api_auth_failure.rs:203-203#mark_good_call]
+  Every good call records that date, after the refusal flag is cleared: a
+  failed date write is logged and never keeps a refusal (or its bell entry) up.
+  [src: file: backend/src/workflows/api_auth_failure.rs:207-207#mark_good_call]
 - **Rate limits.** A connection is never probed twice within five minutes (a
   click storm, a restart loop or a second request while one is running gets the
   stored answer, marked `rate_limited`), and a batch runs two probes at a time.
+  The in-flight guard is taken before the stored row is read, so a check that
+  finishes in between cannot make a second request judge a stale row and probe
+  again.
   [src: file: backend/src/core/token_checks.rs:34-34#MIN_RECHECK]
   [src: file: backend/src/core/token_checks.rs:43-43#CHECK_CONCURRENCY]
 

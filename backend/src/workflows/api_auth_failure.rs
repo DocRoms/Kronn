@@ -198,10 +198,17 @@ pub async fn track_outcome(
         let cleared = state
             .db
             .with_conn(move |conn| {
+                let cleared = crate::db::mcps::clear_auth_failure(conn, &id);
                 // KT-1692: the token worked now — the date a connection without
-                // a probe shows as "last good call".
-                crate::db::mcps::mark_good_call(conn, &id, chrono::Utc::now())?;
-                crate::db::mcps::clear_auth_failure(conn, &id)
+                // a probe shows as "last good call". Written after the flag is
+                // cleared and never fatal: a failed date write must not keep a
+                // refusal (and its bell entry) up after a good call.
+                if let Err(error) =
+                    crate::db::mcps::mark_good_call(conn, &id, chrono::Utc::now())
+                {
+                    tracing::warn!(target: "kronn::api_auth", "recording the last good call failed: {error}");
+                }
+                cleared
             })
             .await;
         if let Err(error) = cleared {

@@ -92,7 +92,14 @@ impl InFlight {
     fn enter(state: &AppState, config_id: &str) -> Option<Self> {
         let key = format!("{:p}:{config_id}", Arc::as_ptr(&state.db));
         let mut set = in_flight().lock().unwrap_or_else(|e| e.into_inner());
-        set.insert(key.clone()).then_some(Self(key))
+        // Not `then_some(Self(key))`: that builds the guard eagerly, and the
+        // dropped one would lock the set again (deadlock) and free the key of
+        // the check that really holds it.
+        if set.insert(key.clone()) {
+            Some(Self(key))
+        } else {
+            None
+        }
     }
 }
 
@@ -148,6 +155,11 @@ pub(crate) async fn check_connection_with(
     now: DateTime<Utc>,
     policy: SecurityPolicy,
 ) -> Result<McpTokenCheckResult, CheckError> {
+    // The guard comes before the stored row is read: a check that finishes
+    // between our read and our entry would leave us judging a stale row as not
+    // fresh and sending a second probe. Held, it makes the row we read the
+    // one the previous check left.
+    let guard = InFlight::enter(state, config_id);
     let secret = state
         .config
         .read()
@@ -180,7 +192,6 @@ pub(crate) async fn check_connection_with(
         last_good_at: None,
     });
 
-    let guard = InFlight::enter(state, config_id);
     if guard.is_none() || is_fresh(&stored, now) {
         return Ok(McpTokenCheckResult {
             config_id: config_id.to_string(),
@@ -585,6 +596,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_concurrent_checks_of_one_connection_send_one_provider_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({}))
+                    .set_delay(std::time::Duration::from_millis(150)),
+            )
+            .mount(&server)
+            .await;
+        let state = state_with_connections(&server.uri()).await;
+        let now = Utc::now();
+
+        let (a, b, c) = tokio::join!(check(&state, now), check(&state, now), check(&state, now));
+        // A check arriving once the first is done reads what it stored.
+        let after = check(&state, now).await.unwrap();
+
+        let results = [a.unwrap(), b.unwrap(), c.unwrap()];
+        assert_eq!(
+            results.iter().filter(|result| !result.rate_limited).count(),
+            1,
+            "{results:#?}"
+        );
+        assert!(after.rate_limited);
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "one probe reaches the provider"
+        );
+    }
+
+    #[tokio::test]
     async fn the_stored_answer_never_holds_the_token_a_provider_echoes() {
         let server = MockServer::start().await;
         refuse(
@@ -669,6 +712,66 @@ mod tests {
             "a custom API with a GET endpoint has a probe"
         );
         assert!(slides.token_check.is_none(), "never checked, never called");
+    }
+
+    #[tokio::test]
+    async fn a_good_call_clears_the_flag_even_when_the_last_good_date_cannot_be_written() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let state = state_with_connections(&server.uri()).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::mcps::record_auth_failure(
+                    conn,
+                    "cfg-slides",
+                    McpAuthFailureKind::Refused,
+                    Some(401),
+                    "Bad credentials",
+                )?;
+                // The date write now fails; the refusal flag lives elsewhere.
+                conn.execute_batch("DROP TABLE mcp_token_checks")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(bell_rows(&state).await.len(), 1);
+        let (config, server_def, env) = {
+            let secret = state.config.read().await.encryption_secret.clone().unwrap();
+            state
+                .db
+                .with_conn(move |conn| {
+                    let config = crate::db::mcps::get_config(conn, "cfg-slides")?.unwrap();
+                    let server = crate::db::mcps::list_servers(conn)?
+                        .into_iter()
+                        .find(|server| server.id == config.server_id)
+                        .unwrap();
+                    let env = crate::db::mcps::decrypt_env(&config.env_encrypted, &secret).unwrap();
+                    Ok::<_, anyhow::Error>((config, server, env))
+                })
+                .await
+                .unwrap()
+        };
+
+        let probe = crate::api::mcps::probe_api_with_policy(
+            &state,
+            &server_def,
+            &config,
+            &env,
+            true,
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+
+        assert!(probe.ok, "{}", probe.detail);
+        assert!(
+            flag(&state).await.is_none(),
+            "a failed date write must not keep the refusal up"
+        );
+        assert!(bell_rows(&state).await.is_empty());
     }
 
     #[tokio::test]
