@@ -1,4 +1,5 @@
 import { Shuffle } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { useT } from '../../lib/I18nContext';
 import type { AgentFallback, AgentType, ChainView, Cooldown, FallbackMode } from '../../types/generated';
 import { inheritedAfter, type FallbackOption } from '../../lib/fallbackChain';
@@ -16,6 +17,9 @@ interface Props {
   agentType: AgentType;
   /** The modes this agent has: eco / standard / advanced, and decision, image or video when it has such a model. */
   modes: AgentModeRow[];
+  /** KT-1706 — the model picker of each mode (« Mode · [model ▾] → fallback »). A mode with no picker shows
+   *  its resolved model as a read-only pill. */
+  pickers?: Partial<Record<FallbackMode, ReactNode>>;
   /** Every agent/model that could be a fallback; each row keeps the kind of its mode. */
   options: FallbackOption[];
   /** Every mode row that has a fallback, as the backend resolved it (inherited links, gaps, refusals). */
@@ -38,16 +42,18 @@ const REASONS: Record<string, string> = {
   not_authenticated: 'not authenticated',
 };
 
-/** Settings > Agents: what takes over for each mode of an agent, one row per
- *  mode — « [current model] → fallback → inherited fallback ». A discussion or a
- *  workflow step can override a mode; with no override this one applies. */
-export function AgentFallbackControl({ agentType, modes, options, chains, cooldown, onChange, onOpenAgent }: Props) {
+/** Settings > Agents: the one « Models and fallbacks » block of a card, one row
+ *  per mode — « Mode · [model ▾] → fallback → inherited fallback ». The model
+ *  picker sets the mode's model; the fallback is what takes over when the
+ *  provider cannot serve it. A discussion or a workflow step can override a
+ *  mode; with no override this one applies. */
+export function AgentFallbackControl({ agentType, modes, pickers, options, chains, cooldown, onChange, onOpenAgent }: Props) {
   const { t } = useT();
   return (
     <div className="set-agent-fallback" data-testid={`agent-fallback-${agentType}`}>
       <div className="set-agent-fallback-row" title={t('agents.fallbackHint')}>
         <Shuffle size={12} aria-hidden="true" />
-        <span>{t('agents.fallbackTo')}</span>
+        <span>{t('agents.modelsAndFallbacks')}</span>
       </div>
       {modes.map(({ mode, model }) => {
         const view = chains.find((chain) => chain.agent === agentType && chain.mode === mode);
@@ -63,6 +69,7 @@ export function AgentFallbackControl({ agentType, modes, options, chains, cooldo
             mode={mode}
             origin={agentType}
             current={{ agent: agentType, model }}
+            model={pickers?.[mode]}
             links={links}
             view={view}
             inherited={view?.inherited ?? inheritedAfter(chains, agentType, mode, links)}

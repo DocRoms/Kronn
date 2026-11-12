@@ -23,6 +23,35 @@
   color: var(--kr-text-secondary);
 }
 
+/* KT-1706 — a row with its model picker reads « MODE  [model ▾] → fallback »:
+   the label on the left, the track after it, wrapping under it on a narrow card. */
+.fbr[data-with-model='true'] {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--kr-sp-3);
+}
+
+.fbr[data-with-model='true'] > .fbr-mode {
+  flex: 0 0 76px;
+}
+
+.fbr[data-with-model='true'] > .fbr-track {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.fbr[data-with-model='true'] > .fbr-error {
+  flex: 1 1 100%;
+}
+
+.fbr-model {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .fbr-track {
   display: flex;
   flex-wrap: wrap;

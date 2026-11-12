@@ -272,6 +272,9 @@ interface RowProps {
   origin: AgentType | null;
   /** The model this mode runs on today: the first pill of the row. */
   current?: { agent: AgentType; model: string | null } | null;
+  /** KT-1706 — the model picker of the mode: when given it IS the first element of the row,
+   *  in place of the read-only `current` pill (« Mode · [model ▾] → fallback »). */
+  model?: ReactNode;
   /** The fallbacks set here, in order (one per row; an override may carry more). */
   links: AgentFallback[];
   /** What the backend resolved for them (gaps of each link, its own refusal). */
@@ -296,7 +299,7 @@ interface RowProps {
  *  Clicking a pill changes it, ✕ removes it; the menu is filtered by kind of
  *  mode, grouped by agent, and a model already in the chain is disabled. */
 export function FallbackRow({
-  testId, mode, origin, current, links, view, inherited = [], options, disabled, empty, actions, onChange, onOpenAgent,
+  testId, mode, origin, current, model, links, view, inherited = [], options, disabled, empty, actions, onChange, onOpenAgent,
 }: RowProps) {
   const { t } = useT();
   const [menu, setMenu] = useState<null | { index: number }>(null);
@@ -342,10 +345,17 @@ export function FallbackRow({
   };
 
   return (
-    <div className="fbr" data-testid={testId} data-mode={mode} data-kind={modeKind(mode)}>
+    <div
+      className="fbr"
+      data-testid={testId}
+      data-mode={mode}
+      data-kind={modeKind(mode)}
+      data-with-model={model !== undefined ? 'true' : undefined}
+    >
       <span className="fbr-mode">{modeLabel}</span>
       <div className="fbr-track">
-        {current && (
+        {model !== undefined && <span className="fbr-model" data-testid={`${testId}-model`}>{model}</span>}
+        {model === undefined && current && (
           <FallbackPill
             testId={`${testId}-current`}
             tone="current"

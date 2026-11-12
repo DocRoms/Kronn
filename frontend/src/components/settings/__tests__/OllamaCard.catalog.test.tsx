@@ -172,11 +172,11 @@ describe('OllamaCard shared catalogue and safe persistence (KT-531)', () => {
     list.mockResolvedValue(snapshot(target([model('current'), model('runtime-default', { tier_assignment: 'default' })])));
     const input = await show();
     fireEvent.focus(input);
-    const option = await screen.findByRole('option', { name: 'ollama.tierAuto (runtime-default)' });
+    const option = await screen.findByRole('option', { name: 'agents.modelAuto:runtime-default' });
     await act(async () => { fireEvent.click(option); });
     await waitFor(() => expect(setTiers).toHaveBeenCalledWith({ ...tiers(), ollama: { ...tiers().ollama, default: null } }));
     expect(input).toHaveValue('');
-    expect(input).toHaveAttribute('placeholder', 'ollama.tierAuto (runtime-default)');
+    expect(input).toHaveAttribute('placeholder', 'agents.modelAuto:runtime-default');
   });
 
   it('reports an initial settings failure and recovers through explicit refresh without writing', async () => {

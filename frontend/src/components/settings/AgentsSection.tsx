@@ -17,7 +17,7 @@ import { ContextHelp } from '../ContextHelp';
 import { SearchableSelect } from '../SearchableSelect';
 import { useApi } from '../../hooks/useApi';
 import { useModelCatalogSnapshot } from '../../hooks/useModelCatalogSnapshot';
-import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, ModelTier, ModelTierConfig, ModelTiersConfig, UsageReport } from '../../types/generated';
+import type { AgentConfig, AgentDetection, AgentsConfig, AgentType, FallbackMode, ModelTier, ModelTierConfig, ModelTiersConfig, UsageReport } from '../../types/generated';
 
 /** Where each agent's config lives, and how many runs it allows by default.
  *  `null` = unlimited: a remote endpoint someone else scales is not this
@@ -632,13 +632,20 @@ export function AgentsSection({
   /** KT-1693 — what continues a turn this agent cannot serve (rate limit, quota,
    *  outage, not signed in), one row per mode the agent has. Every installed
    *  agent has them, OpenCode included. */
-  const renderFallbackControl = (agentType: AgentType) => {
+  const renderFallbackControl = (agentType: AgentType, pickers?: Partial<Record<FallbackMode, ReactNode>>) => {
     if (agentType === 'Custom') return null;
     const { overview, options, tiers, catalog, refetch } = fallbackData;
+    const modes = modesOf(agentType, tiers, catalog);
+    // Ollama always shows its decision row: it has a picker even while no decision model is set.
+    if (agentType === 'Ollama' && !modes.some(row => row.mode === 'decision')) {
+      const at = modes.findIndex(row => row.mode === 'image' || row.mode === 'video');
+      modes.splice(at < 0 ? modes.length : at, 0, { mode: 'decision', model: null });
+    }
     return (
       <AgentFallbackControl
         agentType={agentType}
-        modes={modesOf(agentType, tiers, catalog)}
+        modes={modes}
+        pickers={pickers}
         options={options}
         chains={overview?.chains ?? []}
         cooldown={overview?.cooldowns.find((cooldown) => cooldown.agent === agentType)}
@@ -734,34 +741,207 @@ export function AgentsSection({
   // KT-586 — rendered from two independent columns rather than one grid, so
   // a tall card does not leave a hole beside it and expanding one never moves
   // the other column. Extracted for that reason alone: the markup is unchanged.
-  const renderTierPreview = (agent: AgentDetection) => {
+  /** KT-1706 — the model picker of each text mode of a CLI agent: the one place a
+   *  mode's model is chosen (the card has no separate tier block). An unset mode
+   *  shows the model the catalogue resolves for it, never « default model ». */
+  const renderTierPickers = (agent: AgentDetection): Partial<Record<FallbackMode, ReactNode>> | undefined => {
+    const agentKey = AGENT_TIER_KEY[agent.agent_type];
+    if (!agentKey || !(agent.installed || agent.runtime_available)) return undefined;
+    const editing = tierEditing[agentKey];
+    if (!editing) return undefined;
+    const target = catalog.catalog?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
+    const saveTiers = (field: ModelTier, value: string) => saveTierPreference(agentKey, field, { kind: 'model', value });
+
+    // KT-337 — a fetched-catalogue provider needs a free-text field, not a
+    // dropdown: the catalogue is long, partly uncallable, and a pasted id
+    // must be accepted. The datalist offers the catalogue as suggestions
+    // once loaded; the badge shows what a real probe said, because being
+    // listed is NOT being usable for this provider.
+    const renderCatalogueInput = (field: ModelTier) => {
+      const current = editing[field] ?? '';
+      const probe = current ? nvidiaProbes[current] : undefined;
+      const badge = probe
+        ? (probe.verdict === 'Usable' ? '✅' : probe.verdict === 'NoAnswer' ? '⏳' : '⛔')
+        : '';
+      const draftKey = `${agentKey}:${field}`;
+      const shown = nvidiaDraft[draftKey] ?? current;
+      const commit = (raw: string) => {
+        const value = raw.trim();
+        setNvidiaDraft(d => { const next = { ...d }; delete next[draftKey]; return next; });
+        if (value !== current) saveTiers(field, value);
+      };
+      return (
+        <div className="flex-row gap-2" key={field}>
+          <input
+            className="set-tier-input"
+            list="nvidia-model-catalogue"
+            data-model-tier-agent={agent.agent_type}
+            data-model-tier={field}
+            placeholder={t('config.defaultModel')}
+            value={shown}
+            onChange={e => {
+              const next = e.target.value;
+              setNvidiaDraft(d => ({ ...d, [draftKey]: next }));
+              // A datalist pick lands as a complete catalogue id in one
+              // change event: commit it right away instead of waiting for
+              // blur. Free text keeps committing on Enter/blur so a save
+              // does not fire on every keystroke.
+              if ((nvidiaCatalogue ?? []).includes(next)) commit(next);
+            }}
+            onKeyDown={e => { if (e.key === 'Enter') commit((e.target as HTMLInputElement).value); }}
+            onBlur={e => commit(e.target.value)}
+            aria-label={t('disc.modelTier') + ' ' + field}
+          />
+          {current && (
+            <button
+              className="set-icon-btn"
+              style={{ fontSize: 10 }}
+              title={probe ? probe.detail : t('config.nvidiaVerifyModel')}
+              onClick={() => probeNvidiaModel(current)}
+            >{badge || '🔍'}</button>
+          )}
+        </div>
+      );
+    };
+
+    const renderSelect = (field: ModelTier) => {
+      if (agent.agent_type === 'Nvidia') return renderCatalogueInput(field);
+      const resolved = target?.models.find(model => model.tier_assignment === field);
+      const options = catalogModelOptions(target && catalog.error ? { ...target, stale: true } : target, editing[field], t, modelCostSuffix);
+      const resolvedDetail = resolved?.availability === 'unavailable'
+        ? ` — ${t('modelCatalog.unavailable')}` : resolved ? modelCostSuffix(resolved.model_id) : '';
+      const autoLabel = resolved ? t('agents.modelAuto', resolved.model_id) : t('config.defaultModel');
+      return (
+        <SearchableSelect
+          className="searchable-select--compact set-agent-model-select"
+          value={editing[field]}
+          options={options}
+          disabled={savingTiers || catalog.loading}
+          onChange={value => void saveTiers(field, value)}
+          label={`${t('disc.modelTier')} ${field}`}
+          placeholder={editing[field] ? t('config.searchModel') : autoLabel}
+          emptyLabel={t('modelCatalog.empty')}
+          clearLabel={`${autoLabel}${resolvedDetail}`}
+          dataModelTierAgent={agent.agent_type}
+          dataModelTier={field}
+        />
+      );
+    };
+
+    return {
+      eco: renderSelect('economy'),
+      standard: renderSelect('default'),
+      advanced: renderSelect('reasoning'),
+    };
+  };
+
+  /** What the catalogue says about the pickers of a card, once, above its block. */
+  const renderCatalogNotices = (agentType: AgentType) => {
+    const target = catalog.catalog?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agentType));
+    return (
+      <>
+        {catalog.loading && <p className="set-hint" role="status">{t('common.loading')}</p>}
+        {catalog.error && <p className="set-hint" role="alert">{t('modelCatalog.loadError')} <button type="button" className="set-icon-btn" onClick={catalog.refetch}>{t('modelCatalog.reload')}</button></p>}
+        {!catalog.loading && !catalog.error && !target?.models.length && <p className="set-hint">{t('modelCatalog.empty')}</p>}
+        {target?.stale && <p className="set-hint">{t('modelCatalog.stale')}{target.last_error_reason ? ` — ${target.last_error_reason}` : ''}</p>}
+      </>
+    );
+  };
+
+  /** KT-1706 — the one « Models and fallbacks » block of a card, under its header:
+   *  one row per mode, « Mode · [model ▾] → fallback ». */
+  const renderModelsBlock = (agent: AgentDetection) => {
+    const pickers = renderTierPickers(agent);
+    return (
+      <div className="set-agent-models-block" data-testid={`agent-models-${agent.agent_type}`}>
+        {pickers && renderCatalogNotices(agent.agent_type)}
+        {renderFallbackControl(agent.agent_type, pickers)}
+      </div>
+    );
+  };
+
+  /** Reasoning effort per tier (Claude Code, Codex): a secondary setting of the card's fold,
+   *  the model of each tier being chosen in the « Models and fallbacks » block. */
+  const renderEffortPanel = (agent: AgentDetection) => {
+    if (!(agent.installed || agent.runtime_available)) return null;
     const agentKey = AGENT_TIER_KEY[agent.agent_type];
     if (!agentKey) return null;
     const editing = tierEditing[agentKey];
-    const target = catalog.catalog?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
     if (!editing) return null;
-    const icons = { economy: '\u26A1', default: '\uD83C\uDFAF', reasoning: '\uD83E\uDDE0' } as const;
+    const modelsUrl = AGENT_MODELS_URL[agentKey];
+    const target = catalog.catalog?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
+    const supportsEffort = agent.agent_type === 'ClaudeCode' || agent.agent_type === 'Codex';
+
+    const renderEffortSelect = (field: ModelTier) => {
+      if (!supportsEffort) return null;
+      const effortField = `${field}_effort` as 'economy_effort' | 'default_effort' | 'reasoning_effort';
+      const configuredModel = editing[field]
+        || target?.models.find(model => model.tier_assignment === field)?.model_id;
+      const entry = target?.models.find(model => model.model_id === configuredModel);
+      // Match the runner's projection: unavailable and unknown
+      // entries have no launchable effort modes.
+      const modes = entry?.availability === 'available' ? entry.reasoning_modes : [];
+      const saved = editing[effortField];
+      const supported = modes.includes(saved);
+      return (
+        <label className="flex-row gap-2 text-2xs" key={`${field}-effort`}>
+          <span>{t(`disc.tier.${field}`)} · {t('config.reasoningEffort')}</span>
+          <select
+            aria-label={`${t('config.reasoningEffort')} ${field}`}
+            data-model-tier-effort-agent={agent.agent_type}
+            data-model-tier-effort={field}
+            value={saved}
+            // Even without modes, an invalid saved effort must remain clearable.
+            disabled={savingTiers || catalog.loading}
+            onChange={event => void saveTierPreference(agentKey, field, { kind: 'effort', value: event.target.value })}
+          >
+            <option value="">{t('config.defaultModel')}</option>
+            {saved && !supported && <option value={saved} disabled>{saved} — {t('config.reasoningEffortUnavailable')}</option>}
+            {modes.map(mode => <option value={mode} key={mode}>{mode}</option>)}
+          </select>
+        </label>
+      );
+    };
+
     return (
-      <div
-        className="set-ext-api-conn-tiers set-agent-tier-preview"
-        role="group"
-        aria-label={t('disc.modelTier')}
-        data-testid={`agent-tier-preview-${agent.agent_type}`}
-      >
-        {(['economy', 'default', 'reasoning'] as const).map(tier => {
-          // The override if there is one, else what the backend falls back to.
-          // "Par défaut" alone would hide which model actually runs.
-          const model = editing[tier] || target?.models.find(entry => entry.tier_assignment === tier)?.model_id || t('config.defaultModel');
-          return (
-            <div key={tier} className="set-ext-api-conn-tier" data-tier={tier}>
-              <span className="set-ext-api-conn-tier-label">
-                <span aria-hidden="true">{icons[tier]}</span>
-                {t(`disc.tier.${tier}`)}
-              </span>
-              <code title={model}>{model}</code>
-            </div>
-          );
-        })}
+      <div className="set-agent-panel set-agent-panel-models">
+        <div className="set-agent-section-title">
+          <span>{t('config.reasoningEffort')}</span>
+          {usageReport && (
+            <ContextHelp title={t('config.modelCostObservedTitle')}>
+              <p>{t('config.modelCostObservedHelp')}</p>
+            </ContextHelp>
+          )}
+          {modelsUrl && (
+            <a href={modelsUrl} target="_blank" rel="noopener noreferrer"
+              title={t('config.viewModels')}
+            >
+              <ExternalLink size={8} /> {t('config.viewModels')}
+            </a>
+          )}
+        </div>
+        {agent.agent_type === 'Nvidia' && (
+          <>
+            {/* One shared datalist feeds the three tier inputs. */}
+            <datalist id="nvidia-model-catalogue">
+              {(nvidiaCatalogue ?? []).map(id => <option key={id} value={id} />)}
+            </datalist>
+            <button
+              className="set-icon-btn text-2xs"
+              disabled={nvidiaLoading}
+              title={t('config.nvidiaLoadCatalogue')}
+              onClick={() => loadNvidiaCatalogue()}
+            >
+              {nvidiaCatalogue ? `${nvidiaCatalogue.length} ⟳` : (nvidiaLoading ? '…' : '⟳')}
+            </button>
+          </>
+        )}
+        {supportsEffort && <div className="flex-row gap-5" data-testid={`agent-tier-efforts-${agent.agent_type}`}>
+          {renderEffortSelect('economy')}
+          {renderEffortSelect('default')}
+          {renderEffortSelect('reasoning')}
+        </div>}
+        {!supportsEffort && <p className="set-hint">{t('config.reasoningEffortUnsupported')}</p>}
       </div>
     );
   };
@@ -1044,7 +1224,6 @@ export function AgentsSection({
                   is "Activé". */}
               <div className="set-agent-actions">
                 {renderConcurrencyControl(agent.agent_type)}
-                {renderFallbackControl(agent.agent_type)}
                 {agent.installed ? (
                   <>
                   <button
@@ -1110,7 +1289,7 @@ export function AgentsSection({
                 )}
               </div>
             </div>
-            {renderTierPreview(agent)}
+            {renderModelsBlock(agent)}
             {perm && (agent.installed || agent.runtime_available) && (
               <div className="set-agent-access-row">
                 <AgentFullAccessSwitch
@@ -1302,179 +1481,7 @@ export function AgentsSection({
               </div>
               );
             })()}
-            {/* Model tier configuration */}
-            {(agent.installed || agent.runtime_available) && (() => {
-              const agentKey = AGENT_TIER_KEY[agent.agent_type];
-              if (!agentKey) return null;
-              const editing = tierEditing[agentKey];
-              if (!editing) return null;
-              const modelsUrl = AGENT_MODELS_URL[agentKey];
-              const target = catalog.catalog?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
-              const saveTiers = (field: ModelTier, value: string) => saveTierPreference(agentKey, field, { kind: 'model', value });
-              const supportsEffort = agent.agent_type === 'ClaudeCode' || agent.agent_type === 'Codex';
-
-              // KT-337 — a fetched-catalogue provider needs a free-text field, not a
-              // dropdown: the catalogue is long, partly uncallable, and a pasted id
-              // must be accepted. The datalist offers the catalogue as suggestions
-              // once loaded; the badge shows what a real probe said, because being
-              // listed is NOT being usable for this provider.
-              const renderCatalogueInput = (field: 'economy' | 'default' | 'reasoning', icon: string, iconColor: string) => {
-                const current = editing[field] ?? '';
-                const probe = current ? nvidiaProbes[current] : undefined;
-                const badge = probe
-                  ? (probe.verdict === 'Usable' ? '✅' : probe.verdict === 'NoAnswer' ? '⏳' : '⛔')
-                  : '';
-                const draftKey = `${agentKey}:${field}`;
-                const shown = nvidiaDraft[draftKey] ?? current;
-                const commit = (raw: string) => {
-                  const value = raw.trim();
-                  setNvidiaDraft(d => { const next = { ...d }; delete next[draftKey]; return next; });
-                  if (value !== current) saveTiers(field, value);
-                };
-                return (
-                  <div className="flex-row gap-2" key={field}>
-                    <span className="text-2xs" style={{ color: iconColor, width: 14 }} title={field}>{icon}</span>
-                    <input
-                      className="set-tier-input"
-                      list="nvidia-model-catalogue"
-                      data-model-tier-agent={agent.agent_type}
-                      data-model-tier={field}
-                      placeholder={t('config.defaultModel')}
-                      value={shown}
-                      onChange={e => {
-                        const next = e.target.value;
-                        setNvidiaDraft(d => ({ ...d, [draftKey]: next }));
-                        // A datalist pick lands as a complete catalogue id in one
-                        // change event: commit it right away instead of waiting for
-                        // blur. Free text keeps committing on Enter/blur so a save
-                        // does not fire on every keystroke.
-                        if ((nvidiaCatalogue ?? []).includes(next)) commit(next);
-                      }}
-                      onKeyDown={e => { if (e.key === 'Enter') commit((e.target as HTMLInputElement).value); }}
-                      onBlur={e => commit(e.target.value)}
-                      aria-label={t('disc.modelTier') + ' ' + field}
-                    />
-                    {current && (
-                      <button
-                        className="set-icon-btn"
-                        style={{ fontSize: 10 }}
-                        title={probe ? probe.detail : t('config.nvidiaVerifyModel')}
-                        onClick={() => probeNvidiaModel(current)}
-                      >{badge || '🔍'}</button>
-                    )}
-                  </div>
-                );
-              };
-
-              const renderSelect = (field: ModelTier, icon: string, iconColor: string) => {
-                if (agent.agent_type === 'Nvidia') return renderCatalogueInput(field, icon, iconColor);
-                const fallback = target?.models.find(model => model.tier_assignment === field);
-                const options = catalogModelOptions(target && catalog.error ? { ...target, stale: true } : target, editing[field], t, modelCostSuffix);
-                const fallbackDetail = fallback?.availability === 'unavailable'
-                  ? ` — ${t('modelCatalog.unavailable')}` : fallback ? modelCostSuffix(fallback.model_id) : '';
-                const clearLabel = `${t('config.defaultModel')}${fallback ? ` (${fallback.model_id}${fallbackDetail})` : ''}`;
-                return (
-                  <div className="set-agent-tier-row">
-                    <span className="text-2xs" style={{ color: iconColor, width: 14 }} title={field}>{icon}</span>
-                    <SearchableSelect
-                      className="searchable-select--compact set-agent-model-select"
-                      value={editing[field]}
-                      options={options}
-                      disabled={savingTiers || catalog.loading}
-                      onChange={value => void saveTiers(field, value)}
-                      label={`${t('disc.modelTier')} ${field}`}
-                      placeholder={editing[field] ? t('config.searchModel') : clearLabel}
-                      emptyLabel={t('modelCatalog.empty')}
-                      clearLabel={clearLabel}
-                      dataModelTierAgent={agent.agent_type}
-                      dataModelTier={field}
-                    />
-                  </div>
-                );
-              };
-
-              const renderEffortSelect = (field: ModelTier) => {
-                if (!supportsEffort) return null;
-                const effortField = `${field}_effort` as 'economy_effort' | 'default_effort' | 'reasoning_effort';
-                const configuredModel = editing[field]
-                  || target?.models.find(model => model.tier_assignment === field)?.model_id;
-                const entry = target?.models.find(model => model.model_id === configuredModel);
-                // Match the runner's projection: unavailable and unknown
-                // entries have no launchable effort modes.
-                const modes = entry?.availability === 'available' ? entry.reasoning_modes : [];
-                const saved = editing[effortField];
-                const supported = modes.includes(saved);
-                return (
-                  <label className="flex-row gap-2 text-2xs" key={`${field}-effort`}>
-                    <span>{t(`disc.tier.${field}`)} · {t('config.reasoningEffort')}</span>
-                    <select
-                      aria-label={`${t('config.reasoningEffort')} ${field}`}
-                      data-model-tier-effort-agent={agent.agent_type}
-                      data-model-tier-effort={field}
-                      value={saved}
-                      // Even without modes, an invalid saved effort must remain clearable.
-                      disabled={savingTiers || catalog.loading}
-                      onChange={event => void saveTierPreference(agentKey, field, { kind: 'effort', value: event.target.value })}
-                    >
-                      <option value="">{t('config.defaultModel')}</option>
-                      {saved && !supported && <option value={saved} disabled>{saved} — {t('config.reasoningEffortUnavailable')}</option>}
-                      {modes.map(mode => <option value={mode} key={mode}>{mode}</option>)}
-                    </select>
-                  </label>
-                );
-              };
-
-              return (
-                <div className="set-agent-panel set-agent-panel-models">
-                  <div className="set-agent-section-title">
-                    <span>{t('disc.modelTier')}</span>
-                    {usageReport && (
-                      <ContextHelp title={t('config.modelCostObservedTitle')}>
-                        <p>{t('config.modelCostObservedHelp')}</p>
-                      </ContextHelp>
-                    )}
-                    {modelsUrl && (
-                      <a href={modelsUrl} target="_blank" rel="noopener noreferrer"
-                        title={t('config.viewModels')}
-                      >
-                        <ExternalLink size={8} /> {t('config.viewModels')}
-                      </a>
-                    )}
-                  </div>
-                  {catalog.loading && <p className="set-hint" role="status">{t('common.loading')}</p>}
-                  {catalog.error && <p className="set-hint" role="alert">{t('modelCatalog.loadError')} <button type="button" className="set-icon-btn" onClick={catalog.refetch}>{t('modelCatalog.reload')}</button></p>}
-                  {!catalog.loading && !catalog.error && !target?.models.length && <p className="set-hint">{t('modelCatalog.empty')}</p>}
-                  {target?.stale && <p className="set-hint">{t('modelCatalog.stale')}{target.last_error_reason ? ` — ${target.last_error_reason}` : ''}</p>}
-                  <div className="set-agent-tier-selects">
-                    {agent.agent_type === 'Nvidia' && (
-                      <>
-                        {/* One shared datalist feeds the three tier inputs. */}
-                        <datalist id="nvidia-model-catalogue">
-                          {(nvidiaCatalogue ?? []).map(id => <option key={id} value={id} />)}
-                        </datalist>
-                        <button
-                          className="set-icon-btn text-2xs"
-                          disabled={nvidiaLoading}
-                          title={t('config.nvidiaLoadCatalogue')}
-                          onClick={() => loadNvidiaCatalogue()}
-                        >
-                          {nvidiaCatalogue ? `${nvidiaCatalogue.length} ⟳` : (nvidiaLoading ? '…' : '⟳')}
-                        </button>
-                      </>
-                    )}
-                    {renderSelect('economy', '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)')}
-                    {renderSelect('default', '\uD83C\uDFAF', 'rgba(var(--kr-info-rgb), 0.6)')}
-                    {renderSelect('reasoning', '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)')}
-                  </div>
-                  {supportsEffort && <div className="flex-row gap-5" data-testid={`agent-tier-efforts-${agent.agent_type}`}>
-                    {renderEffortSelect('economy')}
-                    {renderEffortSelect('default')}
-                    {renderEffortSelect('reasoning')}
-                  </div>}
-                  {!supportsEffort && <p className="set-hint">{t('config.reasoningEffortUnsupported')}</p>}
-                </div>
-              );
-            })()}
+            {renderEffortPanel(agent)}
             </div>
             )}
           </div>
@@ -1842,7 +1849,7 @@ export function AgentsSection({
                   modelCostSuffix={modelCostSuffix}
                   title={renderAgentNameControl('Ollama', 'Ollama')}
                   headerAccessory={renderConcurrencyControl('Ollama')}
-                  fallbackRows={renderFallbackControl('Ollama')}
+                  modelsBlock={pickers => renderFallbackControl('Ollama', pickers)}
                   toolsControl={renderToolsControl('Ollama')}
                 />
               </div>
