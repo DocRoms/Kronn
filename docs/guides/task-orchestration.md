@@ -551,6 +551,24 @@ response to provider quota/rate limits. Provider, tier, explicit model and
 profile change together; Kronn refuses the reassignment if it cannot update the
 durable child discussion that the runtime will actually execute.
 
+**Automatic fallback of a task worker (KT-1713).** When the worker's provider
+refuses a turn for a quota, a rate limit or a missing login and its agent has a
+fallback configured, Kronn reassigns the execution to that fallback in the same
+child room and worktree, and the parent room says « Task worker execution
+<id>: … → continued with … ». Two rules:
+
+- Codex is never chosen for it: its sandbox cannot write the linked worktree's
+  git directory, so it could not merge the target, commit or deliver. The room
+  names this reason when no other fallback can take over, and you reassign
+  yourself.
+- The move lasts as long as the quota window. Once it has ended, resuming the
+  execution (or the periodic quota sweep) hands it back to the worker you
+  declared, and the room says « … back on its declared worker … » instead of
+  redispatching the fallback. Reassigning by hand ends this memory.
+
+See [agent-fallback-chain](../operations/agent-fallback-chain.md#task-workers-kt-1713)
+for the mechanism.
+
 ## Resolve common failures
 
 | Symptom | Safe response |

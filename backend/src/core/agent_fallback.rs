@@ -184,6 +184,8 @@ pub struct TurnNeeds {
     pub mcp_tools: bool,
     /// Writes in the worktree.
     pub write_access: bool,
+    /// A task worker must also perform Git writes in a linked worktree.
+    pub task_worker: bool,
     /// Image attachments to read.
     pub image_input: bool,
     /// A transcript past [`LONG_CONTEXT_CHARS`].
@@ -217,6 +219,9 @@ pub fn capabilities(agent: &AgentType) -> Capabilities {
 
 /// The first thing `needs` asks that `agent` cannot give.
 pub fn capability_gap(agent: &AgentType, needs: &TurnNeeds) -> Option<&'static str> {
+    if needs.task_worker && *agent == AgentType::Codex {
+        return Some("Codex task-worker fallback is disabled: its sandbox cannot write the linked worktree Git administrative directories; server-side commit alone does not enable merges");
+    }
     let has = capabilities(agent);
     if needs.mcp_tools && !has.mcp_tools {
         return Some("it has no MCP tools");
