@@ -1744,6 +1744,10 @@ pub(crate) struct AnchorMiss {
     pub starts: Vec<usize>,
     /// The range contains a definition of the symbol that does not open it.
     pub definition: bool,
+    /// The file defines the symbol somewhere. `lines` then names definitions
+    /// only, never call sites: the anchor is the source of truth, so a single
+    /// one is where the citation belongs, however far it moved.
+    pub defined: bool,
 }
 
 /// Sibling lines (a constant and its comment, say) a range may open with
@@ -1880,6 +1884,7 @@ pub(crate) fn anchor_miss_in(
         .collect();
     let in_range = |line: &usize| (start..=end).contains(line);
     let is_defined = |line: &usize| defines_symbol(text[line - 1], symbol);
+    let definitions: Vec<usize> = holding.iter().copied().filter(is_defined).collect();
     let defined_here: Vec<usize> = holding
         .iter()
         .copied()
@@ -1889,7 +1894,14 @@ pub(crate) fn anchor_miss_in(
         if holding.iter().any(in_range) {
             return None;
         }
-        let starts = holding
+        // A symbol the file defines is placed by its definitions: its call
+        // sites are not where a citation of it belongs.
+        let lines = if definitions.is_empty() {
+            holding
+        } else {
+            definitions.clone()
+        };
+        let starts = lines
             .iter()
             .map(|&l| {
                 if is_defined(&l) {
@@ -1900,9 +1912,10 @@ pub(crate) fn anchor_miss_in(
             })
             .collect();
         return Some(AnchorMiss {
-            lines: holding,
+            lines,
             starts,
             definition: false,
+            defined: !definitions.is_empty(),
         });
     }
     let opens_range = defined_here.iter().any(|&line| {
@@ -1920,6 +1933,7 @@ pub(crate) fn anchor_miss_in(
         lines: defined_here,
         starts,
         definition: true,
+        defined: true,
     })
 }
 
@@ -1957,8 +1971,13 @@ pub(crate) fn anchor_miss_detail(span: (usize, usize), symbol: &str, miss: &Anch
     let shown: Vec<String> = lines.iter().take(5).map(usize::to_string).collect();
     let noun = if lines.len() == 1 { "line" } else { "lines" };
     if !miss.definition {
+        let verb = if miss.defined {
+            "it is defined at"
+        } else {
+            "it appears at"
+        };
         return format!(
-            "symbol `{symbol}` not in {range}; it appears at {noun} {}",
+            "symbol `{symbol}` not in {range}; {verb} {noun} {}",
             shown.join(", ")
         );
     }
@@ -7225,7 +7244,7 @@ mod anchor_citations {
         assert!(c.status.is_fabricated());
         assert_eq!(
             c.detail,
-            "symbol `retry_once` not in lines 3-4; it appears at lines 2, 5"
+            "symbol `retry_once` not in lines 3-4; it is defined at line 2"
         );
         let c = check("file: src/a.rs:1#nowhere", tmp.path());
         assert_eq!(
