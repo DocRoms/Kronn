@@ -3804,7 +3804,7 @@ impl KronnToolExecutor {
                                 &canonical_path,
                             )?
                         else {
-                            return Ok(false);
+                            return Ok(None);
                         };
                         native_execution_for_caller(
                             conn,
@@ -3814,15 +3814,16 @@ impl KronnToolExecutor {
                             source_message_id.as_deref(),
                             false,
                         )?;
-                        Ok(true)
+                        Ok(Some(execution.base_sha))
                     })
                     .await;
-                if !matches!(authorised, Ok(true)) {
+                // The pinned base the doc citations are compared with (KT-1721).
+                let Ok(Some(base_sha)) = authorised else {
                     return fail(
                         call,
                         "git_commit is available only to the exact active native worker in its managed task worktree",
                     );
-                }
+                };
                 let Some(files) = call.arguments["files"].as_array() else {
                     return fail(call, "missing array field `files`");
                 };
@@ -3842,9 +3843,21 @@ impl KronnToolExecutor {
                 let Some(message) = call.arguments["message"].as_str() else {
                     return fail(call, "missing required field `message`");
                 };
-                match ws::git_commit_payload(&canonical_root, &files, message) {
-                    Ok(payload) => ok(call, payload),
-                    Err(message) => fail(call, message),
+                let message = message.to_string();
+                let committed = tokio::task::spawn_blocking(move || {
+                    ws::git_commit_payload_reanchoring_docs(
+                        &canonical_root,
+                        &files,
+                        &message,
+                        None,
+                        base_sha.as_deref(),
+                    )
+                })
+                .await;
+                match committed {
+                    Ok(Ok(payload)) => ok(call, payload),
+                    Ok(Err(message)) => fail(call, message),
+                    Err(error) => fail(call, format!("git_commit task failed: {error}")),
                 }
             }
             "find_files" => match call.arguments["pattern"].as_str() {
