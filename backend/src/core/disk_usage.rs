@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::models::setup::DEFAULT_DISK_SWEEP_IDLE_HOURS;
+use crate::models::setup::{DEFAULT_DISK_STALLED_BUILD_DAYS, DEFAULT_DISK_SWEEP_IDLE_HOURS};
 
 const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 
@@ -28,6 +28,70 @@ const BYTES_PER_GIB: u64 = 1024 * 1024 * 1024;
 /// refused by a threshold nobody chose.
 static LAUNCH_MIN_FREE_GIB: AtomicU64 = AtomicU64::new(0);
 static SWEEP_IDLE_HOURS: AtomicU64 = AtomicU64::new(DEFAULT_DISK_SWEEP_IDLE_HOURS);
+/// KT-1691 — days a Blocked or Interrupted execution's build dir must be idle
+/// before it is offered for a purge.
+static STALLED_BUILD_DAYS: AtomicU64 = AtomicU64::new(DEFAULT_DISK_STALLED_BUILD_DAYS);
+
+/// The shortest idle period after which a stalled execution's build dir is
+/// offered for a purge: `0` would offer every Blocked execution's build dir at
+/// once, so it is read as one day.
+pub const MIN_STALLED_BUILD_DAYS: u64 = 1;
+
+/// Publish `server.disk_stalled_build_days`. Called at boot and on every
+/// config save.
+pub fn set_stalled_build_days(days: u64) {
+    STALLED_BUILD_DAYS.store(days.max(MIN_STALLED_BUILD_DAYS), Ordering::Relaxed);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Same reason as `TEST_POLICY`: a test reads its own thread's value.
+    static TEST_STALLED_DAYS: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The configured number of days a Blocked or Interrupted execution's build
+/// dir must be idle to be purgeable (the calling thread's own under `cfg(test)`).
+pub fn stalled_build_days() -> u64 {
+    #[cfg(test)]
+    {
+        TEST_STALLED_DAYS
+            .with(std::cell::Cell::get)
+            .map_or(DEFAULT_DISK_STALLED_BUILD_DAYS, |days| {
+                days.max(MIN_STALLED_BUILD_DAYS)
+            })
+    }
+    #[cfg(not(test))]
+    {
+        STALLED_BUILD_DAYS
+            .load(Ordering::Relaxed)
+            .max(MIN_STALLED_BUILD_DAYS)
+    }
+}
+
+/// [`stalled_build_days`] as a duration.
+pub fn stalled_build_idle() -> Duration {
+    Duration::from_secs(stalled_build_days().saturating_mul(24 * 3600))
+}
+
+/// Sets the calling test thread's stalled-build period, restoring the previous
+/// one on drop.
+#[cfg(test)]
+pub struct TestStalledDays(Option<u64>);
+
+#[cfg(test)]
+impl TestStalledDays {
+    pub fn set(days: u64) -> Self {
+        Self(TEST_STALLED_DAYS.with(|cell| cell.replace(Some(days))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestStalledDays {
+    fn drop(&mut self) {
+        TEST_STALLED_DAYS.with(|cell| cell.set(self.0));
+    }
+}
 
 /// The shortest quiet period a lane build dir must have before a sweep may take
 /// it. A configured `0` would make every finished lane an orphan the instant it
@@ -152,8 +216,14 @@ pub enum DiskState {
     Active,
     /// Kept on purpose or by a refusal (dirty worktree, unreadable state).
     Kept,
-    /// Not created by Kronn (no ownership marker). Reported, never touched.
+    /// Not created by Kronn (no ownership marker) or owned by no workspace row.
+    /// Reported; never touched by a sweep, only by a confirmed per-entry delete.
     Foreign,
+    /// KT-1691 — the build dir of an execution that is Blocked or Interrupted
+    /// and has not been written for `server.disk_stalled_build_days`. Only a
+    /// confirmed per-entry delete takes it; its worktree and branch stay and the
+    /// next resume rebuilds.
+    Stalled,
 }
 
 impl DiskState {
@@ -164,6 +234,7 @@ impl DiskState {
             DiskState::Active => "active",
             DiskState::Kept => "kept",
             DiskState::Foreign => "foreign",
+            DiskState::Stalled => "stalled",
         }
     }
 }
@@ -214,10 +285,95 @@ pub fn total_bytes(path: &Path) -> Option<u64> {
 }
 
 /// A size that is exact, or a floor.
+///
+/// `bytes` is the **apparent** size: what the files add up to, which counts the
+/// blocks a copy-on-write clone shares with another tree in full (a lane cloned
+/// from the seed `target/debug` reads as big as the seed). `unique_bytes` is the
+/// **real** one: the blocks no other file shares, i.e. what deleting the tree
+/// frees. `None` when the file system cannot say (anything but APFS, today), and
+/// then only the apparent figure exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Measured {
     pub bytes: u64,
     pub partial: bool,
+    pub unique_bytes: Option<u64>,
+}
+
+impl Measured {
+    /// What deleting frees when the file system can tell, else the apparent
+    /// size (an upper bound).
+    pub fn real_or_apparent(&self) -> u64 {
+        self.unique_bytes.unwrap_or(self.bytes)
+    }
+}
+
+/// Bytes of `path` no other file shares (APFS `ATTR_CMNEXT_PRIVATESIZE`), or
+/// `None` when the file system cannot say. A plain file on a volume without
+/// clones has nothing shared, but the file system is the one to say so.
+#[cfg(target_os = "macos")]
+pub fn private_size(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    /// `struct attrlist` of `<sys/attr.h>`.
+    #[repr(C)]
+    struct AttrList {
+        bitmapcount: u16,
+        reserved: u16,
+        commonattr: u32,
+        volattr: u32,
+        dirattr: u32,
+        fileattr: u32,
+        forkattr: u32,
+    }
+    extern "C" {
+        fn getattrlist(
+            path: *const libc::c_char,
+            attr_list: *mut AttrList,
+            attr_buf: *mut libc::c_void,
+            attr_buf_size: libc::size_t,
+            options: libc::c_ulong,
+        ) -> libc::c_int;
+    }
+    const ATTR_BIT_MAP_COUNT: u16 = 5;
+    const ATTR_CMNEXT_PRIVATESIZE: u32 = 0x0000_0008;
+    const FSOPT_NOFOLLOW: libc::c_ulong = 0x0000_0001;
+    const FSOPT_ATTR_CMN_EXTENDED: libc::c_ulong = 0x0000_0020;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut list = AttrList {
+        bitmapcount: ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: ATTR_CMNEXT_PRIVATESIZE,
+    };
+    // The reply: a u32 length, then the off_t (8 bytes, 4-byte aligned).
+    let mut buffer = [0u8; 16];
+    // SAFETY: `c_path` is NUL-terminated, `list` and `buffer` outlive the call
+    // and `buffer`'s size is passed.
+    let status = unsafe {
+        getattrlist(
+            c_path.as_ptr(),
+            &mut list,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let length = u32::from_ne_bytes(buffer[0..4].try_into().ok()?);
+    if length < 12 {
+        return None;
+    }
+    let size = i64::from_ne_bytes(buffer[4..12].try_into().ok()?);
+    u64::try_from(size).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn private_size(_path: &Path) -> Option<u64> {
+    None
 }
 
 /// What one measure may spend. A Rust target holds more than a million files,
@@ -243,6 +399,9 @@ impl MeasureBudget {
 /// measures them as an entry of their own).
 pub fn measure_bounded(root: &Path, skip: &[&str], budget: MeasureBudget) -> Measured {
     let mut measured = Measured::default();
+    // Unique bytes are only reported when the file system answered for every
+    // file: one it could not answer for would make the sum a lie.
+    let mut unique = Some(0u64);
     let mut visited = 0usize;
     let mut stack = vec![(root.to_path_buf(), true)];
     while let Some((dir, top_level)) = stack.pop() {
@@ -256,6 +415,7 @@ pub fn measure_bounded(root: &Path, skip: &[&str], budget: MeasureBudget) -> Mea
                 || (visited.is_multiple_of(256) && Instant::now() > budget.deadline)
             {
                 measured.partial = true;
+                measured.unique_bytes = unique;
                 return measured;
             }
             if top_level && skip.iter().any(|name| entry.file_name() == *name) {
@@ -271,9 +431,14 @@ pub fn measure_bounded(root: &Path, skip: &[&str], budget: MeasureBudget) -> Mea
                 stack.push((entry.path(), false));
             } else {
                 measured.bytes += meta.len();
+                unique = match (unique, private_size(&entry.path())) {
+                    (Some(total), Some(private)) => Some(total + private),
+                    _ => None,
+                };
             }
         }
     }
+    measured.unique_bytes = unique;
     measured
 }
 

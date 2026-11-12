@@ -4691,7 +4691,8 @@ pub(super) async fn make_agent_stream_inner(
                 // KT-403 — no hidden Ollama multiplier. The effective value is
                 // the explicit local-agent budget shown in Settings (240 min by
                 // default), so the UI and the runtime report the same policy.
-                let global_deadline = tokio::time::Instant::now() + global_timeout;
+                let run_started = tokio::time::Instant::now();
+                let global_deadline = run_started + global_timeout;
 
                 // Periodic checkpoint of full_response → discussions.partial_response
                 // so a backend crash/restart doesn't lose what the agent has thought.
@@ -5150,6 +5151,19 @@ pub(super) async fn make_agent_stream_inner(
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
+                // KT-1408 — the process is dead: a worker the global limit
+                // stopped leaves a WIP checkpoint instead of a dirty worktree.
+                if let (Some(AgentTimeoutReason::Global(_)), Some(job_id)) =
+                    (timeout_reason.as_ref(), dispatch_job_id.as_deref())
+                {
+                    crate::api::worker_time_limit::checkpoint_stopped_worker(
+                        &state,
+                        job_id,
+                        run_started.elapsed(),
+                        global_timeout,
+                    )
+                    .await;
+                }
                 let finished_worker_launch = match served_model {
                     Some(recorder) => Some(recorder.finish().await),
                     None => None,

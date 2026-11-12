@@ -22,23 +22,31 @@ fn only_a_marked_finished_idle_lane_without_worktree_is_an_orphan() {
         owner: owner(),
         worktree_present: false,
     };
-    let (state, reason, purgeable) =
-        lane_entry_state(&gone, Some(SIX_HOURS + Duration::from_secs(1)), SIX_HOURS);
+    let (state, reason, purgeable) = lane_entry_state(
+        &gone,
+        Some(SIX_HOURS + Duration::from_secs(1)),
+        SIX_HOURS,
+        None,
+    );
     assert_eq!((state, reason, purgeable), (DiskState::Orphan, None, true));
 
     // Exactly at the threshold counts as idle; a minute short does not.
     assert_eq!(
-        lane_entry_state(&gone, Some(SIX_HOURS), SIX_HOURS).0,
+        lane_entry_state(&gone, Some(SIX_HOURS), SIX_HOURS, None).0,
         DiskState::Orphan
     );
-    let (state, reason, purgeable) =
-        lane_entry_state(&gone, Some(SIX_HOURS - Duration::from_secs(60)), SIX_HOURS);
+    let (state, reason, purgeable) = lane_entry_state(
+        &gone,
+        Some(SIX_HOURS - Duration::from_secs(60)),
+        SIX_HOURS,
+        None,
+    );
     assert_eq!(state, DiskState::Reclaimable);
     assert!(reason.unwrap().contains("idle threshold"));
     assert!(purgeable, "an explicit, confirmed delete may still take it");
 
     // An unreadable age is never proof of idleness.
-    let (state, reason, _) = lane_entry_state(&gone, None, SIX_HOURS);
+    let (state, reason, _) = lane_entry_state(&gone, None, SIX_HOURS, None);
     assert_eq!(state, DiskState::Reclaimable);
     assert!(reason.unwrap().contains("not provably idle"));
 }
@@ -49,28 +57,24 @@ fn a_lane_whose_clean_worktree_is_kept_is_reclaimable_never_an_orphan() {
         owner: owner(),
         worktree_present: true,
     };
-    let (state, reason, purgeable) = lane_entry_state(&kept, Some(SIX_HOURS * 10), SIX_HOURS);
+    let (state, reason, purgeable) = lane_entry_state(&kept, Some(SIX_HOURS * 10), SIX_HOURS, None);
     assert_eq!(state, DiskState::Reclaimable);
     assert!(reason.unwrap().contains("worktree is kept"));
     assert!(purgeable);
 }
 
 #[test]
-fn an_active_kept_or_foreign_lane_is_never_purgeable_whatever_its_age() {
+fn an_active_or_kept_lane_is_never_purgeable_whatever_its_age() {
     let old = Some(SIX_HOURS * 100);
     let active = LaneTargetState::Claimed(owner(), "execution exec-1 is Working".into());
-    let (state, reason, purgeable) = lane_entry_state(&active, old, SIX_HOURS);
+    let (state, reason, purgeable) = lane_entry_state(&active, old, SIX_HOURS, None);
     assert_eq!(state, DiskState::Active);
     assert!(reason.unwrap().contains("Working"));
     assert!(!purgeable);
 
     let dirty = LaneTargetState::Kept(Some(owner()), "kept with uncommitted changes".into());
-    let (state, _, purgeable) = lane_entry_state(&dirty, old, SIX_HOURS);
+    let (state, _, purgeable) = lane_entry_state(&dirty, old, SIX_HOURS, None);
     assert_eq!((state, purgeable), (DiskState::Kept, false));
-
-    let (state, reason, purgeable) = lane_entry_state(&LaneTargetState::Unmarked, old, SIX_HOURS);
-    assert_eq!((state, purgeable), (DiskState::Foreign, false));
-    assert!(reason.unwrap().contains(worktree::LANE_OWNER_MARKER));
 }
 
 fn entry(kind: DiskKind, state: DiskState, bytes: u64, partial: bool) -> DiskEntry {
@@ -80,6 +84,7 @@ fn entry(kind: DiskKind, state: DiskState, bytes: u64, partial: bool) -> DiskEnt
         path: format!("/repo/{bytes}"),
         name: "n".into(),
         bytes,
+        unique_bytes: None,
         bytes_are_partial: partial,
         idle_seconds: None,
         owner: None,
@@ -132,7 +137,10 @@ fn report_of_two_projects() -> DiskReport {
         policy: thresholds_policy(),
         volumes: vec![volume("p1"), volume("p2")],
         totals: totals_by_kind(&entries),
+        apparent_bytes: 100,
+        unique_bytes: None,
         orphan_bytes: 30,
+        orphan_unique_bytes: 30,
         orphan_count: 1,
         entries,
         scoped: false,
@@ -187,7 +195,10 @@ fn the_refusal_names_the_number_the_setting_and_what_was_swept() {
         reason.contains("server.disk_launch_min_free_gib"),
         "{reason}"
     );
-    assert!(reason.contains("4 removed, 12288 MiB"), "{reason}");
+    assert!(
+        reason.contains("4 removed, 12288 MiB really freed"),
+        "{reason}"
+    );
 }
 
 #[tokio::test]
@@ -238,4 +249,143 @@ async fn the_default_purge_and_the_report_of_an_unknown_project_are_refused_clea
     let empty = build_disk_report(&db, None).await.unwrap();
     assert!(empty.entries.is_empty() && empty.orphan_count == 0 && !empty.under_pressure);
     assert_eq!(empty.totals.len(), 3);
+}
+
+const THREE_DAYS: Duration = Duration::from_secs(3 * 24 * 3600);
+
+/// KT-1691 — a foreign `wt-*` (no marker, no durable owner) is never touched by
+/// a sweep, but the owner may delete it, one entry at a time, once it has been
+/// quiet for the idle threshold: a build may be running in it.
+#[test]
+fn a_foreign_lane_is_offered_to_the_owner_only_once_quiet() {
+    let old = Some(SIX_HOURS * 100);
+    let (state, reason, purgeable) =
+        lane_entry_state(&LaneTargetState::Unmarked, old, SIX_HOURS, None);
+    assert_eq!((state, purgeable), (DiskState::Foreign, true));
+    assert!(reason.unwrap().contains(worktree::LANE_OWNER_MARKER));
+
+    for recent in [Some(Duration::from_secs(60)), None] {
+        let (state, reason, purgeable) =
+            lane_entry_state(&LaneTargetState::Unmarked, recent, SIX_HOURS, None);
+        assert_eq!((state, purgeable), (DiskState::Foreign, false));
+        assert!(reason.unwrap().contains("may be in use"));
+    }
+}
+
+/// KT-1691 — a Blocked/Interrupted execution's build dir becomes purgeable once
+/// idle for N days; before that, or when durable state says anything works for
+/// it (`stalled_after: None`), it stays active and unpurgeable.
+#[test]
+fn a_blocked_executions_lane_becomes_purgeable_after_n_idle_days_only() {
+    let claimed = LaneTargetState::Claimed(owner(), "execution exec-1 is Blocked".into());
+
+    let (state, reason, purgeable) = lane_entry_state(
+        &claimed,
+        Some(THREE_DAYS + Duration::from_secs(1)),
+        SIX_HOURS,
+        Some(THREE_DAYS),
+    );
+    assert_eq!((state, purgeable), (DiskState::Stalled, true));
+    assert!(reason.unwrap().contains("next resume rebuilds"));
+
+    // Exactly at the threshold counts; a minute short does not.
+    assert_eq!(
+        lane_entry_state(&claimed, Some(THREE_DAYS), SIX_HOURS, Some(THREE_DAYS)).0,
+        DiskState::Stalled
+    );
+    let (state, reason, purgeable) = lane_entry_state(
+        &claimed,
+        Some(THREE_DAYS - Duration::from_secs(60)),
+        SIX_HOURS,
+        Some(THREE_DAYS),
+    );
+    assert_eq!((state, purgeable), (DiskState::Active, false));
+    assert!(reason.unwrap().contains("3 day(s)"));
+
+    // An unreadable age is never idle.
+    let (state, _, purgeable) = lane_entry_state(&claimed, None, SIX_HOURS, Some(THREE_DAYS));
+    assert_eq!((state, purgeable), (DiskState::Active, false));
+
+    // Anything durable says is working (or any other status): never.
+    let old = Some(THREE_DAYS * 100);
+    let (state, _, purgeable) = lane_entry_state(&claimed, old, SIX_HOURS, None);
+    assert_eq!((state, purgeable), (DiskState::Active, false));
+}
+
+#[test]
+fn an_ownerless_checkout_is_kept_and_offered_once_quiet() {
+    let (state, reason, purgeable) = ownerless_entry_state(Some(SIX_HOURS), SIX_HOURS);
+    assert_eq!((state, purgeable), (DiskState::Kept, true));
+    assert!(reason.unwrap().contains("no workspace row"));
+    for recent in [Some(Duration::from_secs(60)), None] {
+        let (state, _, purgeable) = ownerless_entry_state(recent, SIX_HOURS);
+        assert_eq!((state, purgeable), (DiskState::Kept, false));
+    }
+}
+
+fn sized(bytes: u64, unique: Option<u64>) -> DiskEntry {
+    DiskEntry {
+        unique_bytes: unique,
+        ..entry(DiskKind::LaneBuildDir, DiskState::Orphan, bytes, false)
+    }
+}
+
+/// KT-1691 — 33 lanes cloned from one seed read ~190 GB each (1.85 TB) while the
+/// disk really held a fraction: totals carry both figures, and the real one is
+/// `None` (not a guess) as soon as one entry cannot say.
+#[test]
+fn totals_carry_apparent_and_real_bytes_and_never_guess_the_real_one() {
+    let cloned = vec![
+        sized(190, Some(12)),
+        sized(190, Some(8)),
+        sized(190, Some(0)),
+    ];
+    let lanes = totals_by_kind(&cloned)
+        .into_iter()
+        .find(|total| total.kind == DiskKind::LaneBuildDir)
+        .unwrap();
+    assert_eq!(lanes.bytes, 570, "apparent counts shared blocks in full");
+    assert_eq!(
+        lanes.unique_bytes,
+        Some(20),
+        "real counts only what is owned"
+    );
+    assert_eq!((lanes.orphan_bytes, lanes.orphan_unique_bytes), (570, 20));
+
+    let mixed = vec![sized(100, Some(5)), sized(100, None)];
+    let lanes = totals_by_kind(&mixed)
+        .into_iter()
+        .find(|total| total.kind == DiskKind::LaneBuildDir)
+        .unwrap();
+    assert_eq!(lanes.unique_bytes, None);
+    // The orphan figure falls back to apparent for the unknown one: an upper bound.
+    assert_eq!(lanes.orphan_unique_bytes, 105);
+    assert_eq!(sum_unique(&mixed), None);
+    let empty = totals_by_kind(&[]);
+    assert!(empty.iter().all(|total| total.unique_bytes == Some(0)));
+}
+
+#[test]
+fn a_purge_reports_what_it_really_freed() {
+    let item = |bytes, unique| PurgeItem {
+        path: "p".into(),
+        purged: true,
+        bytes,
+        unique_bytes: unique,
+        bytes_are_partial: false,
+        reason: None,
+    };
+    let result = finish_purge(
+        "entries",
+        vec![item(190, Some(12)), item(190, None), refused("q", "no")],
+        0,
+        &[],
+        Some(100),
+    );
+    assert_eq!(result.freed_bytes, 380);
+    assert_eq!(
+        result.freed_unique_bytes, 202,
+        "unknown falls back to apparent"
+    );
+    assert_eq!(result.available_bytes_before, Some(100));
 }

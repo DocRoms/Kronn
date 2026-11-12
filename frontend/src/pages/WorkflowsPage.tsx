@@ -64,6 +64,7 @@ import { isHeavyOutput } from '../lib/heavyOutput';
 import { formatBytes } from '../lib/live-page-weight';
 import { useHeavyOutputThreshold } from '../hooks/useHeavyOutputThreshold';
 import type { AgentSwitchTarget } from '../components/AgentSwitchPicker';
+import type { ShadowEdit } from '../lib/shadowMerge';
 import { AgentCompareSelector } from '../components/AgentCompareSelector';
 import { defaultCompareTargets, type CompareTarget } from '../lib/compareTargets';
 import { CollectionRowActions } from '../components/CollectionRowActions';
@@ -1230,6 +1231,32 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
     } catch (error) {
       toastProp?.(userError(error), 'error');
       throw error;
+    }
+  };
+
+  // KT-1696 — a change of a step's shadows or of its merge saves at once, like
+  // the main agent: shown first, put back with the reason if the save fails.
+  const changeStepShadows = async (stepIndex: number, edit: ShadowEdit) => {
+    const workflow = detailWorkflow;
+    const step = workflow?.steps[stepIndex];
+    if (!workflow || !step || (step.step_type && step.step_type.type !== 'Agent')) return;
+    const edited: WorkflowStep = {
+      ...step,
+      shadows: edit.shadows,
+      shadow_merge: edit.merge === undefined ? step.shadow_merge : edit.merge ?? undefined,
+    };
+    const withStep = (replacement: WorkflowStep) => (current: Workflow | null): Workflow | null =>
+      (current?.id === workflow.id
+        ? { ...current, steps: current.steps.map((existing, index) => (index === stepIndex ? replacement : existing)) }
+        : current);
+    setDetailWorkflow(withStep(edited));
+    try {
+      const updated = await workflowsApi.update(workflow.id, { steps: workflow.steps.map((existing, index) => (index === stepIndex ? edited : existing)) });
+      setDetailWorkflow(current => current?.id === workflow.id ? updated : current);
+      void refetch();
+    } catch (error) {
+      setDetailWorkflow(withStep(step));
+      toastProp?.(t('wf.shadow.rows.saveFailed', userError(error)), 'error');
     }
   };
 
@@ -3125,6 +3152,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                 runs={detailRuns}
                 availableAgentTypes={installedAgentTypes}
                 onChangeStepAgent={changeStepAgent}
+                onChangeStepShadows={changeStepShadows}
                 onApplyUnsafeFix={applyUnsafeFix}
                 onApproveUnsafeStep={approveUnsafeStep}
                 agentChoices={compareAgentChoices}

@@ -515,6 +515,17 @@ fn closed_task_blocker(
             status.as_str()
         )));
     }
+    execution_activity_blocker(conn, execution_id, disc_id)
+}
+
+/// Why something is still working for `execution_id`, or `None` when nothing is:
+/// a pending or running worker dispatch, an unsettled commit lease, or a session
+/// attached to the execution's room or bound to it.
+fn execution_activity_blocker(
+    conn: &Connection,
+    execution_id: &str,
+    disc_id: &str,
+) -> Result<Option<String>> {
     let busy = |sql: &str, key: &str| -> Result<bool> {
         Ok(conn.query_row(sql, params![key], |row| row.get::<_, bool>(0))?)
     };
@@ -554,6 +565,99 @@ fn closed_task_blocker(
         )));
     }
     Ok(None)
+}
+
+/// Why the build dir of a Blocked or Interrupted execution must stay, or `None`
+/// when it may be offered for a purge (KT-1691).
+///
+/// The execution must be Blocked or Interrupted (anything else is running or
+/// finished, and judged elsewhere) and nothing may still work for it: no
+/// dispatch, no unsettled commit lease, no attached session, no held worker
+/// lease on its checkout. The idle age is the caller's to check on the lane.
+pub fn stalled_execution_blocker(conn: &Connection, execution_id: &str) -> Result<Option<String>> {
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM task_executions WHERE id = ?1",
+            params![execution_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(status) = status else {
+        return Ok(Some(format!(
+            "execution {execution_id} is not in the database"
+        )));
+    };
+    match TaskExecutionStatus::from_str(&status) {
+        Ok(TaskExecutionStatus::Blocked | TaskExecutionStatus::Interrupted) => {}
+        Ok(_) => {
+            return Ok(Some(format!(
+                "execution {execution_id} is {status}, not Blocked or Interrupted"
+            )))
+        }
+        Err(error) => {
+            return Ok(Some(format!(
+                "execution {execution_id} has an unreadable status: {error}"
+            )))
+        }
+    }
+    let disc_id: String = conn
+        .query_row(
+            "SELECT disc_id FROM discussion_workspaces WHERE task_execution_id = ?1",
+            params![execution_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    if let Some(reason) = execution_activity_blocker(conn, execution_id, &disc_id)? {
+        return Ok(Some(reason));
+    }
+    let mut statement = conn.prepare(
+        "SELECT canonical_path FROM discussion_workspaces
+          WHERE task_execution_id = ?1 AND canonical_path IS NOT NULL",
+    )?;
+    let paths = statement
+        .query_map(params![execution_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for path in paths {
+        let held: Option<String> = conn
+            .query_row(
+                "SELECT branch FROM discussion_workspace_history_leases
+                  WHERE canonical_path = ?1 AND released_at IS NULL
+                  LIMIT 1",
+                params![path],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(branch) = held {
+            return Ok(Some(format!(
+                "an unreleased worker lease holds {path} on branch {branch}"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether a workspace row of any kind still names `path` (KT-1691): by its live
+/// checkout, or by the path a retired row remembers, spelled in full or only by
+/// its directory name (a row may have been written under another spelling of
+/// the same directory). A worktree no row names belongs to nothing durable; a
+/// path with no readable name is treated as named.
+pub fn workspace_row_names_path(conn: &Connection, path: &str) -> Result<bool> {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return Ok(true);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM discussion_workspaces
+                        WHERE canonical_path = ?1 OR workspace_path = ?1
+                           OR substr(canonical_path, -(length(?2) + 1)) = '/' || ?2
+                           OR substr(workspace_path, -(length(?2) + 1)) = '/' || ?2)",
+        params![path, name],
+        |row| row.get(0),
+    )?)
 }
 
 fn workspace_liveness(

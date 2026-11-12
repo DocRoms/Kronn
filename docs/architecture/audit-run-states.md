@@ -199,7 +199,7 @@ this degrades and continues.
   `lease_orphaned`. The cleanup action (`POST /api/audit-runs/cleanup`) never
   touches a live audit. It settles the stale `Running` rows and releases the
   orphaned leases.
-  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:288#lease_orphaned] [src: file: backend/src/api/audit/run.rs:328#lease_orphaned] [src: file: backend/src/api/audit/run.rs:191-223#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:962-1003#reconcile_running_except]
+  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:289#lease_orphaned] [src: file: backend/src/api/audit/run.rs:328#lease_orphaned] [src: file: backend/src/api/audit/run.rs:191-223#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:962-1003#reconcile_running_except]
 - **Validation agents.** Before an audit touches `docs/`, it stops any agent
   still answering in a validation discussion linked to one of the project's
   runs. While an audit of the project shows progress, such an agent is not
@@ -309,7 +309,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 - **One name on every surface.** The MCP descriptions and manuals say
   “Verify docs” like the English label, present the full audit as an advanced
   option, and carry none of the retired CTA names.
-  [src: file: backend/scripts/test_disc_introspection_mcp.py:8564-8590#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
+  [src: file: backend/scripts/test_disc_introspection_mcp.py:8575-8601#test_audit_surface_uses_the_verify_docs_vocabulary_of_the_ui]
 - **Header layout.** The compact header keeps the status, one next action, the
   doc-state summary and the « Détails » disclosure without overlap at 360, 768
   and 1440 px, closed and open.
@@ -440,7 +440,7 @@ Historical runs without fingerprints require a new audit before signoff.
 [src: file: backend/src/core/audit_documents.rs:11-45#capture]
 [src: file: backend/src/core/audit_documents.rs:51-65#verify]
 [src: file: backend/src/db/discussions.rs:1895-1932#insert_native_agent_message_with_audit_documents]
-[src: file: backend/src/api/discussions/streaming.rs:5213-5235#validation_documents]
+[src: file: backend/src/api/discussions/streaming.rs:5227-5249#validation_documents]
 [src: file: backend/src/db/sql/260_audit_document_fingerprints.sql:1-3#final_doc_fingerprints_json]
 
 The explicit re-anchor action sends `deterministic_only: true`. It returns the

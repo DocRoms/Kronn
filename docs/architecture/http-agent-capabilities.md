@@ -181,7 +181,7 @@ implementation detail:
   `..` or by symlink. The root is the discussion's `managed` workspace row (else its first
   declared row) when it has one, otherwise the path of the project the discussion belongs
   to; a workflow step has no discussion and resolves straight to its project's path
-  [src: file: backend/src/api/agent_tools.rs:3420-3487#workspace_root]. The project fallback is the common
+  [src: file: backend/src/api/agent_tools.rs:3430-3497#workspace_root]. The project fallback is the common
   case, not the exception: a workspace row is only created by orchestration, so on
   2026-08-19 just 16 of 395 discussions had one. Requiring such a row before granting the
   file tools was the original bug — the path was reachable all along.
@@ -227,7 +227,7 @@ So the boundary today is **not** "HTTP agents cannot write". It is:
 One trap in that sentence, worth naming because the catalogue says otherwise: `git_commit`
 IS declared to a discussion agent, and its handler refuses every caller that is not the
 active native worker in its managed task worktree
-`[src: file: backend/src/api/agent_tools.rs:3723-3771#git_commit]`. So an ordinary `@ollama` in a room
+`[src: file: backend/src/api/agent_tools.rs:3730-3778#git_commit]`. So an ordinary `@ollama` in a room
 sees the tool and is turned away by it. The refusal is correct; the declaration is the part
 that misleads, and it is kept declared only because a worker room is built by narrowing the
 same catalogue.
@@ -332,7 +332,7 @@ setting `KRONN_TIERED_TOOLS=1` starts with the core tools and an index of the
 `pages`, `media`, `delegation`, `edit` and `automations` families. `tools_load` adds a family
 for the remainder of the run. Bounded workers cannot expand their catalogue.
 [src: file: backend/src/api/agent_tools.rs:428-508#TOOL_FAMILIES]
-[src: file: backend/src/api/agent_tools.rs:2696-2704#tools_load]
+[src: file: backend/src/api/agent_tools.rs:2697-2705#tools_load]
 
 The native dispatcher now routes `tools_load` correctly. Earlier benchmarks used
 a substitute dispatcher and their claimed savings did not validate this path.
@@ -461,7 +461,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:955-983#extract]
-  [src: file: backend/src/api/agent_tools.rs:4886-4910#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4901-4925#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -555,7 +555,7 @@ contract and can request one step type or shared section. This avoids paying
 the full schema on every turn while keeping both interfaces on the same source.
 The examples are deserialized as real `WorkflowStep` values in regression tests.
 [src: file: backend/src/api/workflow_step_schema.json:1-457#fields_by_type]
-[src: file: backend/scripts/disc-introspection-mcp.py:9696-9698#call_workflow_step_schema]
+[src: file: backend/scripts/disc-introspection-mcp.py:9701-9703#call_workflow_step_schema]
 [src: file: backend/src/api/agent_workflow_tests.rs:146-170#workflow_schema_sections_preserve_the_canonical_contract]
 
 Ollama tool-result clamping preserves this authoring contract as complete JSON

@@ -83,4 +83,4 @@ lane's first build (KT-1255): the deny-default profile, never the backend's own
 rights. If vitest cannot load its config under that profile the frontend reads
 as unavailable, with the command's output as the reason.
 [src: file: backend/src/core/task_worker_env.rs:1124-1184#check_frontend]
-[src: file: backend/src/api/orchestration.rs:2562-2582#worker_probe_runner]
+[src: file: backend/src/api/orchestration.rs:2596-2616#worker_probe_runner]
