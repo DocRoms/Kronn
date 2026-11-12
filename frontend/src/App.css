@@ -62,7 +62,7 @@
   position: fixed;
   top: 8px;
   right: 12px;
-  z-index: 9999;
+  z-index: var(--kr-z-toast);
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -116,7 +116,7 @@
   position: fixed;
   top: 48px; /* sits below the UpdateBanner pill */
   right: 12px;
-  z-index: 9999;
+  z-index: var(--kr-z-toast);
   display: inline-flex;
   align-items: center;
   gap: 8px;

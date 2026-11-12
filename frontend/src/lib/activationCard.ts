@@ -24,3 +24,21 @@ export function parseActivationCard(content: string): ActivationCardPayload | nu
     return null;
   }
 }
+
+/** KT-1695 — a room shows one card per Quick Exec: a line saved again adds a
+ * card, and the card reads the Quick Exec live, so only the latest one stays.
+ * Returns the ids of the earlier cards of the same Quick Exec. */
+export function supersededActivationCards(
+  messages: ReadonlyArray<{ id: string; role: string; content: string }>,
+): Set<string> {
+  const latest = new Map<string, string>();
+  const cards: Array<{ id: string; quickExecId: string }> = [];
+  for (const message of messages) {
+    if (message.role !== 'System') continue;
+    const card = parseActivationCard(message.content);
+    if (!card) continue;
+    latest.set(card.quick_exec_id, message.id);
+    cards.push({ id: message.id, quickExecId: card.quick_exec_id });
+  }
+  return new Set(cards.filter(card => latest.get(card.quickExecId) !== card.id).map(card => card.id));
+}

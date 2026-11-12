@@ -159,7 +159,7 @@ isolates the run in that project's worktree (KT-851):
   [src: file: backend/src/workflows/project_scope.rs:15-60#resolve_run_project]
   [src: file: backend/src/workflows/project_scope.rs:62-81#scheduled_projects]
   [src: file: backend/src/workflows/project_scope.rs:83-128#tracker_project]
-  [src: file: backend/src/workflows/mod.rs:321-331#tracker_project].
+  [src: file: backend/src/workflows/mod.rs:322-332#tracker_project].
 - The run records its project (`workflow_runs.project_id`, KT-1015) and runs
   in that project's checkout or worktree, with its environment. A
   multi-project sub-workflow follows its parent run's project when it serves
@@ -210,7 +210,7 @@ parent `node_modules`, Python's site-packages) are not covered
 [src: file: backend/src/core/approved_scripts.rs:127-134#validate_files]
 [src: file: backend/src/core/approved_scripts.rs:173-179#copy_dir]
 [src: file: backend/src/core/approved_scripts.rs:181-231#prepare_copy]
-[src: file: backend/src/api/workflows.rs:1639-1711#pin_exec_script_files]
+[src: file: backend/src/api/workflows.rs:1648-1720#pin_exec_script_files]
 [src: file: backend/src/workflows/runner.rs:1334-1371#carrying_repository]
 [src: file: backend/src/workflows/exec_step.rs:143-189#approved_script_child].
 
@@ -331,7 +331,7 @@ the step by name. A discussion still reads the checkout as it is.
   `workflow:triage`, `skill:block-migration`, `plugin:github`.
 - Instance-bound references (API config, MCP config, connection, agent or
   model) are requirements resolved locally on import, as `rebind_api_configs`
-  already does for API configs [src: file: backend/src/api/workflows.rs:4549-4582#rebind_api_configs].
+  already does for API configs [src: file: backend/src/api/workflows.rs:4561-4594#rebind_api_configs].
 - Ids embedded in artifact HTML are rewritten on import, as `remap_html`
   already does [src: file: backend/src/api/artifact_portability/import.rs:338-377#remap_html].
 - Workflows (KT-917). One resolver serves every kind (`workflow`, `qe`, `qa`,

@@ -90,7 +90,7 @@ alone does not establish a user-visible duration.
    `scrollTop = scrollHeight` on animation frames for up to 700 ms; the effect
    is reached after a non-empty message list loads.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:2028-2067#bottomSettleRafRef]
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:2093-2107#lastSettledDiscIdRef]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:2099-2113#lastSettledDiscIdRef]
 2. For streaming content while stuck to the bottom, the page calls
    `scrollIntoView` no more often than once per 250 ms.
    [src: file: frontend/src/pages/DiscussionsPage.tsx:2075-2085#lastScrollRef]
@@ -99,7 +99,7 @@ alone does not establish a user-visible duration.
    [src: file: frontend/src/hooks/useRafBatchedStream.ts:20-49#useRafBatchedStream]
    The active streaming text is
    deferred before being passed to the streaming reply renderer.
-   [src: file: frontend/src/pages/DiscussionsPage.tsx:1558#deferredStreamingText]
+   [src: file: frontend/src/pages/DiscussionsPage.tsx:1559#deferredStreamingText]
    [src: file: frontend/src/pages/DiscussionsPage.tsx:3960-3968#deferredStreamingText]
 
 ## Findings and priorities

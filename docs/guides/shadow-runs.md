@@ -19,7 +19,8 @@ A step carries `shadows`, 0 to 8 of them. Every time the step runs in a project
 a shadow covers, the shadow re-runs **only that step**, with the step's rendered
 prompt context, previous outputs and variables as the main step received them.
 **Only the main output continues the workflow**: a shadow's output never feeds a
-later step.
+later step (a later step can read a summary of what ran, never an output: see
+[Show the shadows on a Page](#show-the-shadows-on-a-page)).
 [src: file: backend/src/workflows/shadow.rs:494#start_for_step]
 
 Only an Agent step can carry shadows, and not one marked **Acts outside Kronn**.
@@ -83,7 +84,7 @@ workflow has it under its one task):
 Only a person sets shadows: they start extra executions, so an agent's save that
 sets or changes them is refused, and a save that sends the steps back keeps the
 stored ones.
-[src: file: backend/src/api/workflows.rs:2894#AGENT_SHADOW_REFUSAL]
+[src: file: backend/src/api/workflows.rs:2903#AGENT_SHADOW_REFUSAL]
 [src: file: backend/src/workflows/shadow.rs:1032#keep_stored_shadows]
 A save is checked: the ids, the sampling, the overrides, the budgets, and that
 the step is an Agent step that stays inside Kronn.
@@ -194,6 +195,64 @@ each execution's contribution (kept, only this one, duplicate, dropped as
 unverified), the provenance of every point, what the condense pass spent and the
 merged result against each execution. Only a person sets a merge, like a shadow.
 
+## Show the shadows on a Page
+
+A Page only reads the datasets a workflow published, and a shadow's output
+never reaches a later step. What a later step can read is a **summary** of the
+step's shadows and merge, `{{steps.<name>.shadows}}` (also
+`{{previous_step.shadows}}`): who ran with which agent, model and transport,
+how each ended and what it cost, what the merge kept, and how deterministic the
+step is. A `PublishPageData` step writes it into a dataset with
+`value_from: "steps.advise.shadows"`, and the Page then shows the merged shadow
+and the identical one beside the step's own agent.
+[src: file: backend/src/workflows/shadow_summary.rs:297#summarize]
+[src: file: backend/src/workflows/template.rs:229#set_step_shadows]
+
+```json
+{ "step": "advise",
+  "executions": [
+    { "key": "main", "label": "main", "identical": false, "agent": "ClaudeCode", "model": "claude-opus-4-1",
+      "transport": "cli", "status": "success", "tokens": 8200, "cost_usd": 0.31, "duration_ms": 41000 },
+    { "key": "argon", "label": "Argon", "identical": false, "agent": "LiteLlm", "model": "argon",
+      "transport": "http", "status": "success", "tokens": 7400, "cost_usd": null, "duration_ms": 52000 },
+    { "key": "qwen", "label": "Qwen", "identical": true, "agent": "ClaudeCode", "model": "claude-opus-4-1",
+      "transport": "cli", "status": "running", "tokens": null, "cost_usd": null, "duration_ms": null } ],
+  "merge": { "status": "merged", "included": ["argon"], "missing": [{ "key": "qwen", "reason": "still running when the merge stopped waiting (600 s)" }],
+    "points": { "kept": 5, "unique": 2, "duplicate": 3, "dropped": 1 },
+    "per_execution": { "main": { "kept": 3, "duplicate": 0, "dropped": 0 }, "argon": { "kept": 2, "duplicate": 3, "dropped": 1 } } },
+  "determinism": { "identical_runs": 1, "distinct_outputs": 1 } }
+```
+
+- **`executions`** lists the main execution first, then the shadows that
+  started, in start order. `status` is `success`, `failed`, `skipped`,
+  `over_budget`, `timed_out`, `interrupted` (Kronn stopped while it ran) or
+  `running`. `transport` is `cli` (an agent CLI), `http` (a remote endpoint)
+  or `local` (Ollama). A measure not known yet, or never reported (a cost, for
+  a provider that returns none), is `null`, never `0`.
+- **`merge`** is `null` when the step merges nothing. `included` are the
+  shadows whose output went into the condense pass, `missing` those that did
+  not, with the reason. `points` counts the points by what became of them
+  (`unique` is the kept points only one execution found), `per_execution` the
+  share of each execution.
+  [src: file: backend/src/workflows/shadow_summary.rs:259#merge_summary]
+- **`determinism`** is `null` without an identical shadow; otherwise how many
+  executions produced an output (the main one and the identical shadows) and how
+  many distinct outputs they gave, timings left out, as the run view counts them.
+  [src: file: backend/src/workflows/shadow_summary.rs:221#determinism]
+- **It is final when the next step renders.** The merge runs inside the
+  shadowed step, so the step after it waits for the merge, up to its timeout. A
+  shadow still going (not selected by the merge, or past its timeout) is
+  reported `running` and the summary is not rewritten afterwards. A run resumed
+  after a Gate rebuilds it from what was stored.
+  [src: file: backend/src/workflows/shadow_summary.rs:366#restore]
+- **No output, prompt or secret is in it**: the identity (agent, model,
+  transport), the status, the measures and the merge's counts only. The outputs
+  and the merge's points stay in the run view.
+- **A step without shadows** has the same summary with `executions: []`, so a
+  template never needs to know whether the step carries any. The save-time check
+  of `{{steps.X.…}}` references does not cover `.shadows`: a misspelt step name
+  fails when the run renders it.
+
 ## Promote the better version
 
 A Page shows, in its **Quick Prompts and skills** panel, every Quick Prompt and
@@ -210,7 +269,7 @@ loads and the one each of its shadows tests.
 Either way that shadow stops testing it; the other shadows keep theirs. Promotion
 is a person's decision too: the route has no agent access.
 [src: file: backend/src/workflows/shadow.rs:1092#promote]
-[src: file: backend/src/api/workflows.rs:2873#promote_shadow]
+[src: file: backend/src/api/workflows.rs:2878#promote_shadow]
 
 ## From the workflow-level shadow
 

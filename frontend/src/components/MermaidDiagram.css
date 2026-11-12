@@ -120,13 +120,13 @@
 
 /* Fullscreen overlay — opaque dark background, centered SVG.
  * `position: fixed` + `inset: 0` covers the viewport regardless of
- * scroll position. z-index 9000 stays under our toast (9500) but
- * above every page-level chrome. */
+ * scroll position. The nested-modal layer stays under popovers and
+ * toasts but above every page-level chrome. */
 .kronn-mermaid-fullscreen-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.82);
-  z-index: 9000;
+  z-index: var(--kr-z-modal-nested);
   display: flex;
   align-items: center;
   justify-content: center;

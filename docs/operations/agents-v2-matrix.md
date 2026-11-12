@@ -97,7 +97,7 @@ The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
 [src: file: backend/src/db/orchestration.rs:250-264#agent_type_from_db]
-[src: file: backend/src/db/orchestration_tests.rs:4340-4373#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
+[src: file: backend/src/db/orchestration_tests.rs:4563-4596#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
 
@@ -189,7 +189,7 @@ read; opening a selector additionally refreshes stale CLI targets in the
 background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:199-200#useModelCatalogSnapshot]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:201-202#useModelCatalogSnapshot]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1363-1388#SearchableSelect]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]

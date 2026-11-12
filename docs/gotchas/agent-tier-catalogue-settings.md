@@ -20,7 +20,7 @@ synchronous re-entry. It updates its displayed state after a successful write,
 not optimistically. This preserves edits already saved by another card, but is
 not a server-side compare-and-swap guarantee against another client writing
 between that GET and POST.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:200-245#saveTierPreference]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:208-253#saveTierPreference]
 
 The component regressions cover dynamic IDs, runtime separation, OpenCode,
 manual Kiro/Vibe entries, unavailable/cache metadata, empty/error recovery,
@@ -52,7 +52,7 @@ is appended separately.
 [src: file: frontend/src/components/settings/OllamaCard.tsx:174-202#refresh]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:236-259#pickTierModel]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:261-317#saveContextOverride]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:637-638#tiersLoadError]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:640-641#tiersLoadError]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:648-652#configuredDefault]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:105-141#merges]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:182-194#initial]
@@ -307,7 +307,7 @@ pipeline. Search, exact connection namespaces, provenance and unavailable tiers
 therefore share the existing picker behavior.
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:313-342#renderAgentTierPicker]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4986-4989#updateRb]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:309-313#renderAgentTierPicker]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:310-314#renderAgentTierPicker]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.coverage.test.tsx:984-1048#recover]
 
 Five picker controls failed against the previous compensation form; the
