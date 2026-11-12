@@ -387,6 +387,7 @@ fn set_full_access_covers_every_cli_agent_and_refuses_the_rest() {
         lite_llm: off(),
         nvidia: off(),
         model_tiers: Default::default(),
+        connection_fallbacks: Vec::new(),
     };
     for agent in [
         AgentType::ClaudeCode,
@@ -429,6 +430,7 @@ fn effective_full_access_forces_codex_in_a_container_only() {
         lite_llm: off(),
         nvidia: off(),
         model_tiers: Default::default(),
+        connection_fallbacks: Vec::new(),
     };
     let agents = [
         AgentType::ClaudeCode,
@@ -515,6 +517,7 @@ fn full_access_for_returns_per_agent_setting() {
             ..Default::default()
         },
         model_tiers: Default::default(),
+        connection_fallbacks: Vec::new(),
     };
     assert!(config.full_access_for(&AgentType::ClaudeCode));
     assert!(!config.full_access_for(&AgentType::Codex));

@@ -61,7 +61,7 @@ that may be hosted by a third party.
 
 ## What they have
 
-The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_workspace_tools.rs:1119-1133#TOOL_NAMES]:
+The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_workspace_tools.rs:1244-1258#TOOL_NAMES]:
 
 | Tool | Purpose |
 |---|---|
@@ -461,7 +461,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:955-983#extract]
-  [src: file: backend/src/api/agent_tools.rs:4901-4925#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4914-4938#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down
@@ -547,7 +547,7 @@ Cron and Tracker drafts default to concurrency 1. The existing workflow HTTP
 handlers validate steps, references, allowlists and stored command bindings.
 [src: file: backend/src/api/agent_workflow_tools.rs:63-120#draft_patch]
 [src: file: backend/src/api/agent_workflow_tools.rs:211-213#enabled]
-[src: file: backend/src/api/workflows.rs:2990-3050#validate_step_references]
+[src: file: backend/src/api/workflows.rs:2993-3053#validate_step_references]
 
 The canonical schema lives in `workflow_step_schema.json`. MCP reads the complete
 contract from `GET /api/workflows/step-schema`; native agents receive the same

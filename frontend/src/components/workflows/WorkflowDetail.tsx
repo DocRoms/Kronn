@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
-import { StepShadowCompare, useStepShadows } from './StepShadowCompare';
+import { StepShadowCompare } from './StepShadowCompare';
+import { useStepShadows } from './useStepShadows';
 import { isShadowRun } from '../../lib/shadowRuns';
 import { newTabClickProps } from '../../lib/newTabNavigation';
 import { livePagePath, workflowPath } from '../../lib/routes';
@@ -13,6 +14,8 @@ import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
 import { requiresFullAccessToRun } from '../../lib/agentFullAccess';
 import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
+import { DecisionModelPicker } from '../DecisionModelPicker';
+import { decideModelChoice, type DecisionModelChoice } from '../../lib/decisionModels';
 import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier, Project, UnsafeExecStep } from '../../types/generated';
 import {
   Trash2, Play, Loader2, Check, X, ChevronLeft, ChevronRight, ChevronDown,
@@ -216,6 +219,8 @@ export interface WorkflowDetailProps {
   availableAgentTypes?: AgentType[];
   agentChoices?: AgentSwitchTarget[];
   onChangeStepAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => Promise<void>;
+  /** KT-1697 — save the decision model of a Decide step (`model: null` = the configured one). */
+  onChangeStepDecisionModel?: (stepIndex: number, choice: DecisionModelChoice) => Promise<void>;
   /** KT-1696 — saves a change of a step's shadows or of its merge; puts it back and says why when it fails. */
   onChangeStepShadows?: (stepIndex: number, edit: ShadowEdit) => Promise<void>;
   /** KT-1017 — apply the suggested rewrite of an unsafe Exec command line. */
@@ -408,13 +413,14 @@ export function BatchItemsList({
   );
 }
 
-function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, availableAgentTypes, agentChoices, onChangeAgent, onSelectStep, onNavigatePage, nested = false }: {
+function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, availableAgentTypes, agentChoices, onChangeAgent, onChangeDecision, onSelectStep, onNavigatePage, nested = false }: {
   step: WorkflowStep; index: number; agentAccess?: AgentsConfig | null;
   projectId?: string | null; t: (key: string, ...args: (string | number)[]) => string;
   quickPromptsById?: Map<string, QuickPrompt>;
   availableAgentTypes?: AgentType[];
   agentChoices?: AgentSwitchTarget[];
   onChangeAgent?: WorkflowDetailProps['onChangeStepAgent'];
+  onChangeDecision?: WorkflowDetailProps['onChangeStepDecisionModel'];
   onSelectStep?: (stepIndex: number) => void;
   onNavigatePage?: (pageId: string) => void;
   /** Workflow id is needed to key the dry-run test state cache (see module
@@ -832,6 +838,15 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             availableAgentTypes={availableAgentTypes}
             agentChoices={agentChoices}
             onChange={onChangeAgent}
+            agentAccess={agentAccess}
+            t={t}
+          />
+        )}
+        {step.step_type?.type === 'Decide' && (
+          <StepDecisionPicker
+            step={step}
+            stepIndex={index}
+            onChange={onChangeDecision}
             agentAccess={agentAccess}
             t={t}
           />
@@ -1400,6 +1415,33 @@ function StepAgentSwitcher({
   );
 }
 
+/** KT-1697 — a Decide step's model, picked in place like the Agent step's. */
+function StepDecisionPicker({
+  step,
+  stepIndex,
+  onChange,
+  agentAccess,
+  t,
+  compact = false,
+}: {
+  step: WorkflowStep;
+  stepIndex: number;
+  onChange?: WorkflowDetailProps['onChangeStepDecisionModel'];
+  agentAccess?: AgentsConfig | null;
+  t: (key: string, ...args: (string | number)[]) => string;
+  compact?: boolean;
+}) {
+  return (
+    <DecisionModelPicker
+      choice={decideModelChoice(step.decide)}
+      defaultModel={agentAccess?.model_tiers?.ollama?.decision}
+      onChange={onChange ? choice => onChange(stepIndex, choice) : undefined}
+      compact={compact}
+      ariaLabel={t('decisionPicker.stepLabel', step.name)}
+    />
+  );
+}
+
 /** KT-1696 — what a run's row says of its step shadows: how many ran and how their merge went. */
 function RunShadowTag({ workflowId, run, t }: {
   workflowId: string;
@@ -1636,7 +1678,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onChangeStepShadows, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, noOpRunsHidden = 0, showNoOpRuns = false, onToggleNoOpRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onChangeStepDecisionModel, onChangeStepShadows, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, noOpRunsHidden = 0, showNoOpRuns = false, onToggleNoOpRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -2095,6 +2137,16 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                             />
                           )}
                           {isAgentStep && !hasShadowBlock(step) && agentPicker(step, i)}
+                          {step.step_type?.type === 'Decide' && (
+                            <StepDecisionPicker
+                              step={step}
+                              stepIndex={i}
+                              onChange={onChangeStepDecisionModel}
+                              agentAccess={agentAccess}
+                              t={t}
+                              compact
+                            />
+                          )}
                         </span>
                         {isAgentStep && (
                           <StepShadowRows
@@ -2238,6 +2290,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                     availableAgentTypes={availableAgentTypes}
                     agentChoices={agentChoices}
                     onChangeAgent={onChangeStepAgent}
+                    onChangeDecision={onChangeStepDecisionModel}
                     onSelectStep={index => selectStep(index)}
                     onNavigatePage={onNavigatePage}
                   />

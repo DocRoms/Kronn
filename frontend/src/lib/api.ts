@@ -116,6 +116,7 @@ import type {
   DbCompaction,
   SetAgentAccessRequest,
   SetAgentFallbackRequest,
+  SetConnectionFallbackRequest,
   DiscussionFallback,
   AgentFallback,
   FallbackMode,
@@ -997,6 +998,9 @@ export const config = {
   /** Sets the whole chain of agents that take over, in order, when this one is unavailable (empty cuts it); a loop, an over-long chain or a broader access is refused with the reason. */
   setAgentFallback: (req: SetAgentFallbackRequest) =>
     api<FallbackOverview>('POST', '/config/agent-fallback', req),
+  /** KT-1706 — sets (or, with `null`, removes) the fallback of the image or video mode of ComfyUI (`local:comfyui`) or of a named connection (its id); a loop, an over-long chain or another kind of mode is refused with the reason. */
+  setConnectionFallback: (req: SetConnectionFallbackRequest) =>
+    api<FallbackOverview>('POST', '/config/connection-fallback', req),
   /** Kronn tool executor switch of an HTTP agent (KT-1600): `false` = off, `null` = the default (on). */
   setAgentTools: (req: { agent: AgentType; enabled: boolean | null }) => api<void>('POST', '/config/agent-tools', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>

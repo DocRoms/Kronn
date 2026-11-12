@@ -2,7 +2,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { McpConfigDisplay } from '../../../types/generated';
-import { TokenCheckStatus, tokenCheckSummary } from '../TokenCheckStatus';
+import { TokenCheckStatus } from '../TokenCheckStatus';
+import { tokenCheckSummary } from '../tokenCheckSummary';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length ? `${key} ${args.join(' ')}` : key;

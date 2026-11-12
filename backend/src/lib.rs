@@ -1770,6 +1770,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_agent_fallback).post(api::setup::set_agent_fallback),
         )
         .route(
+            "/api/config/connection-fallback",
+            axum::routing::post(api::setup::set_connection_fallback),
+        )
+        .route(
             "/api/config/agent-access",
             get(api::setup::get_agent_access).post(api::setup::set_agent_access),
         )

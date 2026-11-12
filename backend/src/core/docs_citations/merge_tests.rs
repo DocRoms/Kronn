@@ -1314,3 +1314,90 @@ fn a_symbol_defined_twice_still_bounces_and_lists_both_candidate_lines() {
     assert!(detail.contains("candidate lines 103, 153"), "{detail}");
     assert!(!merge::merge_in_progress(dir));
 }
+
+/// KT-1684: the doc cites `<Outlet` at 1241-1244 of a 1250-line file; a later
+/// commit drops 27 lines at the top, so the file has 1223 lines and the citation
+/// lies past its end while the symbol sits once, at 1214. Linear history: the
+/// branch descends from the target, no `checkout` needed.
+///
+/// `extra` are further lines of the shrunk file that hold the symbol too.
+fn shrunk_file_repo(extra: &[usize]) -> (tempfile::TempDir, String) {
+    let repo = scratch_repo();
+    let dir = repo.path();
+    let outlet = "      <Outlet />";
+    let base = source_of(1250, &[(1241, outlet)]);
+    write_lines(dir, "src/Dashboard.tsx", &base);
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    fs::write(
+        dir.join("docs/ui.md"),
+        "Layout: [src: file: src/Dashboard.tsx:1241-1244#Outlet]\n",
+    )
+    .unwrap();
+    let target = commit_all(dir, "base");
+    let mut shrunk = base[27..].to_vec();
+    for &at in extra {
+        shrunk[at - 1] = outlet.to_string();
+    }
+    write_lines(dir, "src/Dashboard.tsx", &shrunk);
+    commit_all(dir, "drop 27 lines at the top");
+    (repo, target)
+}
+
+#[test]
+fn a_citation_left_beyond_the_shrunk_file_is_re_anchored_to_its_unique_symbol() {
+    let (repo, target) = shrunk_file_repo(&[]);
+    let dir = repo.path();
+    assert_eq!(
+        broken(dir),
+        vec![
+            "docs/ui.md:1 [src: file: src/Dashboard.tsx:1241-1244#Outlet] line 1241 beyond file length 1223; symbol `Outlet` not in lines 1241-1244; it appears at line 1214 — try `src/Dashboard.tsx:1214-1217#Outlet`"
+                .to_string()
+        ]
+    );
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert!(
+        matches!(build.outcome, CandidateOutcome::Built { .. }),
+        "{:?} {:?}",
+        build.outcome,
+        build.detail
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/ui.md")).unwrap(),
+        "Layout: [src: file: src/Dashboard.tsx:1214-1217#Outlet]\n"
+    );
+    assert_eq!(broken(dir), Vec::<String>::new());
+}
+
+#[test]
+fn a_citation_beyond_the_shrunk_file_with_two_candidates_is_settled_by_the_diff() {
+    // The symbol also sits at 1220: the unique-definition rule cannot choose,
+    // but the lines the branch dropped map 1241 to 1214 exactly.
+    let (repo, target) = shrunk_file_repo(&[1220]);
+    let dir = repo.path();
+    let failures = check_corpus(dir);
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0]
+            .1
+            .reason
+            .contains("ambiguous: pick by hand among lines 1214, 1220"),
+        "{}",
+        failures[0].1.reason
+    );
+
+    let build = build_candidate_detailed(dir, &target).unwrap();
+
+    assert!(
+        matches!(build.outcome, CandidateOutcome::Built { .. }),
+        "{:?} {:?}",
+        build.outcome,
+        build.detail
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("docs/ui.md")).unwrap(),
+        "Layout: [src: file: src/Dashboard.tsx:1214-1217#Outlet]\n"
+    );
+    assert_eq!(broken(dir), Vec::<String>::new());
+}

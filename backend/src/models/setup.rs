@@ -132,6 +132,17 @@ pub struct WorkersConfig {
     /// The run itself is never refused.
     #[serde(default = "default_workers_heavy_output_kb")]
     pub heavy_output_kb: u32,
+    /// KT-1718 — the time, in minutes, a Claude task worker's shell command may
+    /// run when it names no limit of its own (`BASH_DEFAULT_TIMEOUT_MS`).
+    #[serde(default = "default_workers_bash_default_timeout_min")]
+    pub bash_default_timeout_min: u32,
+    /// KT-1718 — the longest a Claude task worker's shell command may run, even
+    /// when it asks for more (`BASH_MAX_TIMEOUT_MS`). Claude Code's own cap is
+    /// 10 minutes: a cold test-profile build outlasts it, and the worker loses
+    /// the turn. Keep it below the generation limit (`agent_global_timeout_min`),
+    /// which cuts the whole turn whatever a command is allowed.
+    #[serde(default = "default_workers_bash_max_timeout_min")]
+    pub bash_max_timeout_min: u32,
 }
 
 impl Default for WorkersConfig {
@@ -142,6 +153,8 @@ impl Default for WorkersConfig {
             background_priority: true,
             max_concurrent_task_workers: DEFAULT_MAX_CONCURRENT_TASK_WORKERS,
             heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
+            bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
+            bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
         }
     }
 }
@@ -152,6 +165,14 @@ fn default_workers_review_rounds() -> u32 {
 
 fn default_workers_heavy_output_kb() -> u32 {
     DEFAULT_HEAVY_OUTPUT_KB
+}
+
+fn default_workers_bash_default_timeout_min() -> u32 {
+    DEFAULT_BASH_DEFAULT_TIMEOUT_MIN
+}
+
+fn default_workers_bash_max_timeout_min() -> u32 {
+    DEFAULT_BASH_MAX_TIMEOUT_MIN
 }
 
 fn default_workers_max_concurrent_task_workers() -> u32 {
@@ -177,8 +198,30 @@ impl WorkersConfig {
             .clamp(1, MAX_CONCURRENT_TASK_WORKERS_LIMIT) as usize
     }
 
+    /// `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` for a Claude task
+    /// worker, in milliseconds, whatever a hand-edited `config.toml` holds: the
+    /// default never exceeds the maximum.
+    pub fn effective_bash_timeouts_ms(&self) -> (u64, u64) {
+        let max = self
+            .bash_max_timeout_min
+            .clamp(1, MAX_BASH_TIMEOUT_MIN_LIMIT);
+        let default = self.bash_default_timeout_min.clamp(1, max);
+        (u64::from(default) * 60_000, u64::from(max) * 60_000)
+    }
+
     /// Refuse what the Settings form must never persist.
     pub fn validate(&self) -> Result<(), String> {
+        if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
+            return Err(format!(
+                "bash_max_timeout_min must be between 1 and {MAX_BASH_TIMEOUT_MIN_LIMIT}"
+            ));
+        }
+        if !(1..=self.bash_max_timeout_min).contains(&self.bash_default_timeout_min) {
+            return Err(format!(
+                "bash_default_timeout_min must be between 1 and bash_max_timeout_min ({})",
+                self.bash_max_timeout_min
+            ));
+        }
         if !(1..=MAX_CONCURRENT_TASK_WORKERS_LIMIT).contains(&self.max_concurrent_task_workers) {
             return Err(format!(
                 "max_concurrent_task_workers must be between 1 and \
@@ -203,6 +246,16 @@ impl WorkersConfig {
 pub const DEFAULT_HEAVY_OUTPUT_KB: u32 = 256;
 /// Largest threshold the Settings form accepts (100 MB).
 pub const MAX_HEAVY_OUTPUT_KB: u32 = 102_400;
+/// KT-1718 — default time a Claude task worker's shell command may run when it
+/// names no limit of its own. Claude Code's own default is 2 minutes.
+pub const DEFAULT_BASH_DEFAULT_TIMEOUT_MIN: u32 = 15;
+/// KT-1718 — default longest shell command of a Claude task worker (Claude
+/// Code's own cap is 10 minutes, which a cold `cargo test` build exceeds).
+pub const DEFAULT_BASH_MAX_TIMEOUT_MIN: u32 = 60;
+/// Largest per-command cap the Settings form accepts: the largest generation
+/// limit (`clamp_agent_global_timeout_min`), since a command outliving the
+/// generation is cut with it.
+pub const MAX_BASH_TIMEOUT_MIN_LIMIT: u32 = 240;
 /// Default cap on local task workers running at once (KT-1632). Builds, not
 /// agent processes, are what loads the machine: two lanes is what it carries.
 pub const DEFAULT_MAX_CONCURRENT_TASK_WORKERS: u32 = 2;
@@ -777,6 +830,12 @@ pub struct AgentsConfig {
     /// Per-agent model tier overrides (Economy/Reasoning model names).
     #[serde(default)]
     pub model_tiers: ModelTiersConfig,
+    /// KT-1706 — what takes over a mode of a named HTTP connection (or the image or
+    /// video mode of ComfyUI) when its provider cannot serve a request. Kept apart
+    /// from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(skip)]
+    pub connection_fallbacks: Vec<ConnectionFallback>,
 }
 
 /// Endpoint slots of the OpenAI-wire providers, carried as one value.
@@ -1145,6 +1204,36 @@ pub struct AgentFallback {
 pub struct ModeFallback {
     pub row: FallbackMode,
     pub fallback: AgentFallback,
+}
+
+/// KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
+/// id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
+/// model; without one, the model that target has in its own slot of the mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConnectionFallbackTarget {
+    pub connection: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// KT-1706 — the fallback of one mode of an owner (a connection id, or
+/// `local:comfyui` for `image` and `video`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConnectionFallback {
+    pub owner: String,
+    pub row: FallbackMode,
+    pub fallback: ConnectionFallbackTarget,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct SetConnectionFallbackRequest {
+    pub owner: String,
+    pub mode: FallbackMode,
+    /// The fallback of this row; `None` removes it.
+    pub fallback: Option<ConnectionFallbackTarget>,
 }
 
 #[derive(Debug, Deserialize, TS)]

@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -774,6 +775,51 @@ pub fn apply_launch_env(command: &mut std::process::Command, work_dir: &Path) {
             }
         }
         Err(error) => tracing::warn!("task worker lane not applied: {error}"),
+    }
+}
+
+// ─── Shell command time limits (KT-1718) ──────────────────────────────────
+
+/// Claude Code's own variable for the time a shell command gets when it names
+/// no limit.
+pub const BASH_DEFAULT_TIMEOUT_ENV: &str = "BASH_DEFAULT_TIMEOUT_MS";
+/// Claude Code's own variable for the longest a shell command may run, whatever
+/// it asks for. Unset, the cap is 10 minutes: a cold test-profile build outlasts
+/// it, each timeout kills the compiler, and the worker loses the turn.
+pub const BASH_MAX_TIMEOUT_ENV: &str = "BASH_MAX_TIMEOUT_MS";
+
+/// Settings > Workers, published by `config::save` and at boot. The defaults
+/// are the model's, so a launch before the first publication matches a fresh
+/// config.
+static BASH_DEFAULT_TIMEOUT_MS: AtomicU64 =
+    AtomicU64::new(crate::models::DEFAULT_BASH_DEFAULT_TIMEOUT_MIN as u64 * 60_000);
+static BASH_MAX_TIMEOUT_MS: AtomicU64 =
+    AtomicU64::new(crate::models::DEFAULT_BASH_MAX_TIMEOUT_MIN as u64 * 60_000);
+
+/// Publish the owner's Settings > Workers shell limits to this process.
+pub fn set_bash_timeouts(workers: &crate::models::WorkersConfig) {
+    let (default_ms, max_ms) = workers.effective_bash_timeouts_ms();
+    BASH_DEFAULT_TIMEOUT_MS.store(default_ms, Ordering::Relaxed);
+    BASH_MAX_TIMEOUT_MS.store(max_ms, Ordering::Relaxed);
+}
+
+/// The two variables Kronn sets on a Claude task worker, as `(name, value)`.
+pub fn bash_timeout_env(default_ms: u64, max_ms: u64) -> [(&'static str, String); 2] {
+    [
+        (BASH_DEFAULT_TIMEOUT_ENV, default_ms.min(max_ms).to_string()),
+        (BASH_MAX_TIMEOUT_ENV, max_ms.to_string()),
+    ]
+}
+
+/// Give a Claude task worker the shell limits of Settings > Workers. They win
+/// over the backend's own environment: the worker's limit is a Kronn setting,
+/// not whatever shell the owner started Kronn from.
+pub fn apply_bash_timeouts(command: &mut std::process::Command) {
+    for (name, value) in bash_timeout_env(
+        BASH_DEFAULT_TIMEOUT_MS.load(Ordering::Relaxed),
+        BASH_MAX_TIMEOUT_MS.load(Ordering::Relaxed),
+    ) {
+        command.env(name, value);
     }
 }
 

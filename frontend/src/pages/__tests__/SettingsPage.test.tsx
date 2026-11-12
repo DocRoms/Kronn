@@ -62,6 +62,9 @@ vi.mock('../../lib/api', () => ({
     setScanIgnore: vi.fn(),
     getAgentAccess: vi.fn(),
     setAgentAccess: vi.fn(),
+    // KT-1693 — useFallbackData (the fallback rows of the agent modes) reads the
+    // fallbacks on mount.
+    getAgentFallback: vi.fn().mockResolvedValue({ chains: [], cooldowns: [] }),
     getModelTiers: vi.fn().mockResolvedValue({
       claude_code: { economy: null, reasoning: null },
       codex: { economy: null, reasoning: null },
@@ -98,6 +101,10 @@ vi.mock('../../lib/api', () => ({
     create: vi.fn().mockResolvedValue({}),
     update: vi.fn().mockResolvedValue({}),
     remove: vi.fn().mockResolvedValue(null),
+  },
+  // KT-1693 — useFallbackData lists the model catalogue for the fallback options.
+  modelCatalogApi: {
+    list: vi.fn().mockResolvedValue({ targets: [] }),
   },
   agents: {
     detect: vi.fn(),
@@ -867,7 +874,11 @@ describe('SettingsPage', () => {
 
     it('shows no value, writes nothing, and keeps the select disabled until the server answers', async () => {
       let answer!: (cfg: unknown) => void;
-      getServerConfig.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
+      // ONE shared pending promise for every getServerConfig call: SettingsPage and
+      // WorkersSection (KT-1718) each fetch the config, and a per-call promise would
+      // overwrite `answer` so the retention request would never resolve.
+      const pending = new Promise(resolve => { answer = resolve; });
+      getServerConfig.mockImplementation(() => pending);
       await wrap(<SettingsPage {...defaultProps} />);
       const select = screen.getByLabelText(label) as HTMLSelectElement;
       expect(select).toBeDisabled();

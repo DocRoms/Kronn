@@ -44,9 +44,17 @@ export interface FallbackOption {
   /** `null`: the agent's own model for the mode (the row's mode only). */
   model: string | null;
   mode: FallbackMode;
+  /** KT-1706 — a media source that is not an agent: ComfyUI (`local:comfyui`) or a named HTTP connection (its id). */
+  connection?: string;
+  /** The name shown for that connection. */
+  name?: string;
 }
 
-export const transportOfOption = (option: FallbackOption): FallbackTransport => transportOf(option.agent);
+/** What identifies the source of an option: the connection of a media source, else the agent. */
+export const sourceOf = (option: { agent: AgentType; connection?: string }): string => option.connection ?? option.agent;
+
+export const transportOfOption = (option: FallbackOption): FallbackTransport =>
+  option.connection ? (option.connection === 'local:comfyui' ? 'local' : 'http') : transportOf(option.agent);
 
 export const toLink = (option: FallbackOption, replaced: FallbackMode): AgentFallback => ({
   agent: option.agent,

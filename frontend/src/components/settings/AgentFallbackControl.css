@@ -17,6 +17,33 @@
   font-weight: 650;
 }
 
+/* The block sits inside the card's own content inset, the same as its header:
+   on a CLI card the block is a direct child of the card, so it carries it. */
+.set-agent-models-block {
+  padding: 0 var(--kr-sp-6) var(--kr-sp-4);
+}
+
+.set-agent-models-block:empty {
+  display: none;
+}
+
+/* An HTTP connection card has no wrapper either: same inset as its header. */
+.set-ext-api-conn > .set-agent-fallback {
+  padding: 0 var(--kr-sp-5) var(--kr-sp-5);
+}
+
+/* What the catalogue says about the pickers (loading, nothing known, stale):
+   one muted line under the block's title, not body text above the block. */
+.set-agent-fallback-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+}
+
 .set-agent-fallback-cooldown {
   display: flex;
   align-items: center;

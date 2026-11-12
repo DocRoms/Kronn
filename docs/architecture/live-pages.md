@@ -8,7 +8,7 @@ workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
 “Page” for that domain model.
-[src: file: frontend/src/lib/i18n/locales/en.ts:203-204#nav.pages]
+[src: file: frontend/src/lib/i18n/locales/en.ts:213-214#nav.pages]
 [src: file: frontend/src/lib/live-page-navigation.ts:50-55#standaloneLivePageUrl]
 
 ## Portable JSON bundles
@@ -617,10 +617,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1230-1253#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:14766-14955#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:16028-16070#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:16312-16354#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:16256-16326#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:14877-15066#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:16186-16228#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:16423-16465#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:16467-16537#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
@@ -747,7 +747,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:5280-5290#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5283-5293#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
@@ -1021,7 +1021,7 @@ the full run even when the compact list already contains its id.
 [src: file: backend/src/workflows/collect_api_data_step.rs:604-625#source_id]
 [src: file: backend/src/workflows/collect_api_data_step.rs:1075-1118#missing_required_api_keeps_its_alias_id_and_cause]
 [src: file: frontend/src/components/workflows/LoadedRunDetail.tsx:18-40#needsDetail]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1049-1059#focusedRun]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1050-1060#focusedRun]
 
 Rolling windows use the common run-anchored time grammar in source variables,
 for example

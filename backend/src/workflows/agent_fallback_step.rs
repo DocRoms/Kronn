@@ -46,6 +46,7 @@ fn needs_of(step: &WorkflowStep, agents: &AgentsConfig) -> TurnNeeds {
         // A step run by an agent that was granted full access is one that may
         // write; a read-only agent's step is not asked to.
         write_access: agents.full_access_for(&step.agent),
+        task_worker: false,
         image_input: false,
         long_context: false,
     }
@@ -195,10 +196,7 @@ pub(crate) async fn continue_after_among(
     usable: Option<Vec<AgentType>>,
 ) -> Next {
     use crate::models::RunStatus;
-    if step.step_type != StepType::Agent
-        || outcome.result.status != RunStatus::Failed
-        || step.agent == AgentType::Custom
-    {
+    if step.step_type != StepType::Agent || outcome.result.status != RunStatus::Failed {
         return Next::Keep;
     }
     // A failure is the provider's only when its own words say so; the step's
@@ -206,6 +204,45 @@ pub(crate) async fn continue_after_among(
     let Some(trigger) = fallback::classify_trigger(&outcome.result.output) else {
         return Next::Keep;
     };
+    if let Some(settings) = step
+        .agent_settings
+        .as_ref()
+        .filter(|settings| settings.connection_id.is_some())
+    {
+        // An explicit per-step override (including off) must win over the card.
+        if settings.fallback.is_some() {
+            return Next::Keep;
+        }
+        let owner = settings.connection_id.as_deref().unwrap();
+        let mode = crate::models::FallbackMode::from_tier(tier_of(step));
+        if let Some((connection, model)) =
+            crate::core::connection_fallback::next_text_target(state, owner, mode).await
+        {
+            let agent =
+                crate::db::external_api_connections::target_for_connection(&connection).agent_type;
+            if settings
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.validate(&agent).is_err())
+            {
+                return Next::Keep;
+            }
+            let mut next = step.clone();
+            next.agent = agent;
+            let settings = next.agent_settings.as_mut().unwrap();
+            settings.connection_id = Some(connection.id.clone());
+            settings.model = Some(model);
+            settings.reasoning_effort = None;
+            return Next::Rerun {
+                step: Box::new(next),
+                notice: format!(
+                    "{} could not serve this step; continued on {}",
+                    owner, connection.display_name
+                ),
+            };
+        }
+        return Next::Keep;
+    }
     let chain = chain_of(step, agents, origin);
     if chain.is_empty() {
         return Next::Keep;

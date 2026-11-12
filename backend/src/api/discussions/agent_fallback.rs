@@ -37,7 +37,6 @@ struct Plan {
     from_model: Option<String>,
     trigger: Trigger,
     until: DateTime<Utc>,
-    announced: Option<DateTime<Utc>>,
     selection: Selection,
     surface: Surface,
     tier: ModelTier,
@@ -173,6 +172,7 @@ async fn plan(
     let needs = match surface {
         Surface::Worker { .. } => TurnNeeds {
             write_access: true,
+            task_worker: true,
             ..Default::default()
         },
         Surface::Room => TurnNeeds {
@@ -223,7 +223,6 @@ async fn plan(
         from_model,
         trigger,
         until,
-        announced,
         selection,
         surface,
         tier,
@@ -303,6 +302,9 @@ pub(crate) async fn intercept_failed_turn_among(
         && super::is_transient_provider_overload(response)
     {
         return false;
+    }
+    if job.connection_id.is_some() {
+        return requeue_named_connection(state, job, trigger).await;
     }
     let Some(plan) = plan(state, job, trigger, response, usable).await else {
         return false;
@@ -414,6 +416,93 @@ async fn requeue_same_agent(state: &AppState, job: &AgentDispatchJob) -> bool {
             false
         }
     }
+}
+
+async fn requeue_named_connection(
+    state: &AppState,
+    job: &AgentDispatchJob,
+    trigger: Trigger,
+) -> bool {
+    let Some(owner) = job.connection_id.as_deref() else {
+        return false;
+    };
+    let lookup = job.clone();
+    let context = state
+        .db
+        .with_read_conn(move |conn| {
+            if crate::db::orchestration::get_execution_for_dispatch(conn, &lookup.id)?.is_some() {
+                return Ok(None);
+            }
+            // Discussion overrides remain authoritative.
+            if fallback::get_discussion_override(conn, &lookup.discussion_id)?.is_some() {
+                return Ok(None);
+            }
+            let discussion = crate::db::discussions::get_discussion(conn, &lookup.discussion_id)?;
+            let pin = fallback::get_pin(conn, &lookup.id)?;
+            let targets =
+                crate::db::discussions::list_message_targets(conn, &lookup.trigger_message_id)?;
+            Ok(discussion.map(|discussion| (discussion, pin, targets)))
+        })
+        .await
+        .ok()
+        .flatten();
+    let Some((discussion, previous, targets)) = context else {
+        return false;
+    };
+    let hops = previous.as_ref().map_or(0, |pin| pin.hops);
+    if hops as usize >= fallback::MAX_CHAIN_DEPTH {
+        return false;
+    }
+    let tier = previous
+        .as_ref()
+        .map(|pin| pin.tier)
+        .or_else(|| {
+            super::runtime::dispatch_target_tier(&targets, job.agent_override.as_ref(), Some(owner))
+        })
+        .unwrap_or(discussion.tier);
+    let Some((connection, model)) = crate::core::connection_fallback::next_text_target(
+        state,
+        owner,
+        FallbackMode::from_tier(tier),
+    )
+    .await
+    else {
+        return false;
+    };
+    let agent = crate::db::external_api_connections::target_for_connection(&connection).agent_type;
+    let pin = Pin {
+        from_agent: job.agent_override.clone().unwrap_or(discussion.agent),
+        to_agent: agent.clone(),
+        model: Some(model),
+        tier,
+        hops: hops + 1,
+    };
+    let notice = system_notice(
+        format!(
+            "{} could not serve this turn; continued on {}",
+            owner, connection.display_name
+        ),
+        &agent,
+        tier,
+        &job.trigger_message_id,
+    );
+    let job = job.clone();
+    let changed = state.db.with_conn(move |conn| {
+        let tx = conn.unchecked_transaction()?;
+        let count = tx.execute("UPDATE agent_dispatch_jobs SET connection_id = ?2, agent_override_json = ?3 WHERE id = ?1 AND status = 'Running'", params![job.id, connection.id, serde_json::to_string(&agent)?])?;
+        if count == 0 { return Ok(false); }
+        fallback::set_pin(&tx, &job.id, &pin, trigger)?;
+        anyhow::ensure!(crate::db::agent_dispatch::retry_after(&tx, &job.id, 0, "connection_fallback")?, "dispatch no longer running");
+        crate::db::discussions::delete_dispatch_reply_messages(&tx, &job.discussion_id, &job.id)?;
+        crate::db::discussions::set_awaiting_agent(&tx, &job.discussion_id, true)?;
+        crate::db::discussions::insert_message(&tx, &job.discussion_id, &notice)?;
+        tx.commit()?;
+        Ok(true)
+    }).await.unwrap_or(false);
+    if changed {
+        state.agent_dispatch_notify.notify_one();
+    }
+    changed
 }
 
 async fn requeue_on_link(
@@ -564,6 +653,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
         link,
         plan.tier,
     );
+    let notice = format!("Task worker execution {execution_id}: {notice}");
     crate::api::orchestration::reassign_native_execution_as(
         state,
         execution_id,
@@ -574,7 +664,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
         },
         &format!("automatic agent fallback: {notice}"),
         crate::api::orchestration::ReassignCause::QuotaFallback {
-            reset_at: plan.announced,
+            reset_at: Some(plan.until),
         },
     )
     .await?;
@@ -647,11 +737,14 @@ async fn post_stop(state: &AppState, job: &AgentDispatchJob, plan: &Plan, why: &
             job.discussion_id.clone(),
             system_notice(content, &plan.failing, plan.tier, &job.trigger_message_id),
         ),
-        Surface::Worker { parent_room, .. } => (
+        Surface::Worker {
+            parent_room,
+            execution_id,
+        } => (
             parent_room.clone(),
             crate::api::orchestration::orchestrator_message(
                 format!("agent-fallback-stop:{}", job.id),
-                content,
+                format!("Task worker execution {execution_id}: {content}"),
             ),
         ),
     };

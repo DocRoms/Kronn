@@ -2803,7 +2803,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   </div>
                 ) : step.step_type?.type === 'Decide' ? (
                   <>
-                    {!decisionModel && decisionModel !== undefined && (
+                    {!decisionModel && decisionModel !== undefined && !step.decide?.model?.trim() && (
                       <div className="wf-restricted-warning" role="alert">
                         <AlertTriangle size={12} />
                         <span>{t('wiz.decideNoModel')}</span>
@@ -2811,6 +2811,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     )}
                     <DecideStepForm
                       config={step.decide ?? blankDecideConfig()}
+                      defaultModel={decisionModel}
                       previousSteps={steps.slice(0, i).map(prev => prev.name)}
                       onChange={decide => updateStep(i, { decide })}
                       t={t}

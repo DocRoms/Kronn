@@ -20,7 +20,7 @@ import type {
   ExternalApiPreset,
   UpsertExternalApiConnection,
 } from '../../lib/api';
-import type { CatalogModelEntry } from '../../types/generated';
+import type { CatalogModelEntry, FallbackMode } from '../../types/generated';
 import { useModelCatalogSnapshot } from '../../hooks/useModelCatalogSnapshot';
 import { modelCallVerdict, modelSweepCounts } from '../../lib/modelCatalogSelection';
 import { userError } from '../../lib/userError';
@@ -52,6 +52,10 @@ interface ExternalApiSectionProps {
   toast: ToastFn;
   modelCostSuffix?: (model: string) => string;
   onModelTiersChanged?: () => void;
+  /** KT-1706 — the card's one « Models and fallbacks » block: given the row of each mode the connection
+   *  serves (its model, as the card shows it) it returns the rows with their fallbacks. Without it the
+   *  card keeps its plain tier list. */
+  modelsBlock?: (connection: ExternalApiConnectionView, rows: { mode: FallbackMode; model: ReactNode }[]) => ReactNode;
 }
 
 /** A preset only seeds the endpoint field. `endpoint: ''` means "the user must
@@ -613,8 +617,11 @@ function ConnectionForm({
   );
 }
 
-export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChanged }: ExternalApiSectionProps) {
+export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChanged, modelsBlock }: ExternalApiSectionProps) {
   const [connections, setConnections] = useState<ExternalApiConnectionView[] | null>(null);
+  const cardCatalog = useModelCatalogSnapshot(true);
+  const savingModelRef = useRef(false);
+  const [savingModel, setSavingModel] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const editedTarget = editingId ? `http:${editingId}` : null;
@@ -877,6 +884,35 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
           ? 'OpenRouter'
           : t('config.extApi.presetOther');
 
+  const saveRowModel = async (connection: ExternalApiConnectionView, field: keyof FormState, model: string) => {
+    if (savingModelRef.current) return;
+    savingModelRef.current = true;
+    setSavingModel(connection.id);
+    try {
+      const payload = toPayload({ ...formFromConnection(connection), [field]: model });
+      await externalApi.update(connection.id, payload);
+      setConnections(previous => previous?.map(item => item.id === connection.id ? { ...item, [field]: model || null } : item) ?? null);
+      onModelTiersChanged?.();
+      window.dispatchEvent(new Event('kronn:connections-changed'));
+    } catch (error) {
+      toast(t('common.actionFailed', userError(error)), 'error');
+    } finally {
+      savingModelRef.current = false;
+      setSavingModel(null);
+    }
+  };
+
+  const rowPicker = (connection: ExternalApiConnectionView, mode: FallbackMode, value: string | null) => {
+    const field = ({ eco: 'economy_model', standard: 'default_model', advanced: 'reasoning_model', decision: 'decision_model', image: 'image_model', video: 'video_model' } as const)[mode];
+    const capability = ['eco', 'standard', 'advanced'].includes(mode) ? 'chat' : mode;
+    const catalog = cardCatalog.data?.targets.find(target => target.runtime_target_id === `http:${connection.id}`)?.models ?? [];
+    const options = catalog.filter(model => model.capabilities.includes(capability)).map(model => ({ value: model.model_id, label: model.display_alias || model.display_name || model.model_id }));
+    if (value && !options.some(option => option.value === value)) options.unshift({ value, label: value });
+    return <SearchableSelect value={value ?? ''} options={options} allowCustomValue disabled={savingModel !== null}
+      onChange={model => void saveRowModel(connection, field, model)} label={t(`fallback.mode.${mode}`)}
+      placeholder={t('config.defaultModel')} emptyLabel={t('config.searchModelEmpty')} className="searchable-select--compact" testId={`connection-model-${connection.id}-${mode}`} />;
+  };
+
   const renderTiers = (c: ExternalApiConnectionView): ReactNode => {
     const models: Record<Tier, string | null> = {
       economy: c.economy_model,
@@ -893,6 +929,56 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
         model: c[MEDIA_FIELD[modality]]?.trim() || null,
       }))
       .filter((slot): slot is { modality: MediaModality; model: string } => slot.model !== null);
+    if (modelsBlock) {
+      const tierCheck = (tier: Tier) => {
+        const check = savedTests[c.id]?.tier_checks?.find(
+          entry => entry.tier === tier && entry.model === models[tier],
+        );
+        return check ? (
+          <small
+            className={check.ok ? 'set-hint' : 'set-hint set-ext-api-tier-check-failed'}
+            data-testid={`ext-api-saved-tier-status-${tier}-${c.id}`}
+            data-tier-check={check.status}
+          >
+            {t(`config.extApi.tierCheck.${check.status}`, check.http_status ?? '')}
+          </small>
+        ) : null;
+      };
+      const tierRow = (mode: FallbackMode, tier: Tier) => ({
+        mode,
+        model: (
+          <>
+            {rowPicker(c, mode, models[tier] ?? c.default_model)}
+            {tierCheck(tier)}
+          </>
+        ),
+      });
+      const mediaRow = (mode: FallbackMode, model: string) => ({ mode, model: rowPicker(c, mode, model) });
+      const decision = mediaSlots.find(slot => slot.modality === 'decision');
+      const image = mediaSlots.find(slot => slot.modality === 'image');
+      const video = mediaSlots.find(slot => slot.modality === 'video');
+      const rows = [
+        tierRow('eco', 'economy'),
+        tierRow('standard', 'default'),
+        tierRow('advanced', 'reasoning'),
+        ...(decision ? [mediaRow('decision', decision.model)] : []),
+        ...(image ? [mediaRow('image', image.model)] : []),
+        ...(video ? [mediaRow('video', video.model)] : []),
+      ];
+      return (
+        <>
+          {modelsBlock(c, rows)}
+          {mediaSlots.some(slot => slot.modality !== 'decision') && (
+            <div className="set-ext-api-conn-media" data-testid={`ext-api-conn-media-${c.id}`}>
+              {mediaSlots.filter(slot => slot.modality !== 'decision').map(({ modality, model }) => (
+                <MediaReferenceSettings
+                  key={`${modality}:${model}`} connectionId={c.id} model={model} modality={modality as 'image' | 'video'} t={t} />
+              ))}
+            </div>
+          )}
+        </>
+      );
+    }
     return (
       <div className="set-ext-api-conn-tiers" role="group" aria-label={t('disc.modelTier')}>
         {TIERS.map(tier => (
@@ -940,7 +1026,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                 </span>
                 <code title={model}>{model}</code>
                 {modality !== 'decision' && <MediaReferenceSettings
-                  key={`${modality}:${model}`} connectionId={c.id} model={model} modality={modality} t={t} />}
+                  key={`${modality}:${model}`} connectionId={c.id} model={model} modality={modality as 'image' | 'video'} t={t} />}
               </div>
             ))}
           </div>
@@ -1063,6 +1149,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                     </button>
                   </div>
                 </div>
+                {renderTiers(c)}
                 {endpointForConnection(c) && (
                   <div className="set-ext-api-conn-endpoint-row">
                     <Link2 size={13} aria-hidden="true" />
@@ -1103,7 +1190,7 @@ export function ExternalApiSection({ t, toast, modelCostSuffix, onModelTiersChan
                     {savedTests[c.id]?.models.map(model => <code key={model}>{model}</code>)}
                   </div>
                 ) : null}
-                {renderTiers(c)}
+
               </div>
             ),
           )}

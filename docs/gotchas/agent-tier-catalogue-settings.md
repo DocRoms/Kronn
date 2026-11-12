@@ -12,7 +12,7 @@ snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1369-1394#renderSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:871-896#renderSelect]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
 the editor rereads it and merges only the selected agent/tier, guarded against
@@ -20,14 +20,14 @@ synchronous re-entry. It updates its displayed state after a successful write,
 not optimistically. This preserves edits already saved by another card, but is
 not a server-side compare-and-swap guarantee against another client writing
 between that GET and POST.
-[src: file: frontend/src/components/settings/AgentsSection.tsx:208-253#saveTierPreference]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:233-278#saveTierPreference]
 
 The component regressions cover dynamic IDs, runtime separation, OpenCode,
 manual Kiro/Vibe entries, unavailable/cache metadata, empty/error recovery,
 explicit clearing, independent Ollama edits, duplicate clicks and write failure.
 They mock the API and do not mutate provider accounts or user settings.
 [src: file: frontend/src/components/settings/__tests__/AgentsSection.catalog.test.tsx:77-254#Fable]
-[src: file: frontend/src/components/settings/__tests__/AgentsSection.catalog.test.tsx:343-355#Kiro]
+[src: file: frontend/src/components/settings/__tests__/AgentsSection.catalog.test.tsx:342-354#Kiro]
 
 ## Ollama settings use the same catalogue
 
@@ -37,8 +37,8 @@ Its three tier controls remain visible offline or without installed models.
 Unknown configured IDs and unavailable rows stay visible and disabled; failed
 or pending snapshot reads and offline health never turn cached data into live
 discovery. Reloading that snapshot or typing a query does not probe Ollama.
-[src: file: frontend/src/components/settings/OllamaCard.tsx:461-463#savedTarget]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:633-683#pickTierModel]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:464-466#savedTarget]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:243-293#pickTierModel]
 
 Tier writes reread the complete settings document, merge only the selected
 field, reject synchronous re-entry and replace the displayed value only after
@@ -49,11 +49,11 @@ and resets also use a synchronous guard, including their follow-up inventory
 read; the manual refresh cannot race those writes. Automatic labels no longer
 promise an embedded default model: the known configured/catalogue fallback ID
 is appended separately.
-[src: file: frontend/src/components/settings/OllamaCard.tsx:174-202#refresh]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:236-259#pickTierModel]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:261-317#saveContextOverride]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:644-645#tiersLoadError]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:655-659#configuredDefault]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:181-209#refresh]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:243-266#pickTierModel]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:268-324#saveContextOverride]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:716-717#tiersLoadError]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:489-493#configuredDefault]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:105-141#merges]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:182-194#initial]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.test.tsx:269-288#serializes]
@@ -127,8 +127,8 @@ caller still explicitly clears its old override when choosing a new agent/tier.
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-93#useModelCatalogSnapshot]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
 [src: file: frontend/src/components/ChatHeader.tsx:315#currentModel]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1684-1715#changeQuickPromptAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:3329-3330#currentModel]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1705-1736#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:3351-3352#currentModel]
 
 KT-627 separately removed the HTTP runner's embedded fallback and qualified
 production-library resolution/preflight. The final migration and cross-surface
@@ -252,7 +252,7 @@ Unavailable known entries remain disabled. Clearing an override is explicit
 and leaves tier resolution to the caller/backend.
 [src: file: frontend/src/components/ModelCatalogPicker.tsx:21-71#ModelCatalogPicker]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:309-315#ModelCatalogPicker]
-[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4539-4554#ModelCatalogPicker]
+[src: file: frontend/src/components/workflows/WorkflowWizard.tsx:4540-4555#ModelCatalogPicker]
 
 Reasoning choices come from the effective model's `reasoning_modes`, not a
 fixed low/medium/high list. An existing value absent from that list is retained
@@ -285,14 +285,14 @@ opening, editing or rereading the catalogue preserves the saved overrides.
 [src: file: frontend/src/lib/agentSelection.ts:3-16#agentSettingsForSelection]
 [src: file: frontend/src/components/workflows/WorkflowWizard.tsx:332-361#renderAgentTierPicker]
 [src: file: frontend/src/pages/WorkflowsPage.tsx:1202-1234#changeStepAgent]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1684-1715#changeQuickPromptAgent]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1705-1736#changeQuickPromptAgent]
 
 The creation wizard, full editor, inline inspector, pipeline and QP card receive
 the configured named targets. Their selectors display the saved explicit model
 and pass the selected immutable connection instead of carrying an old one via
 an object spread. Component tests inspect the actual update payloads and exact
 connection callback; these are not live workflow/provider executions.
-[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1350-1392#StepAgentSwitcher]
+[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1368-1410#StepAgentSwitcher]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowWizard.test.tsx:780-830#explicit]
 [src: file: frontend/src/components/workflows/__tests__/WorkflowDetail.steps.test.tsx:475-517#onChangeStepAgent]
 
