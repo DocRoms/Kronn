@@ -71,6 +71,64 @@ pub fn saved_full_access(agent: &crate::models::AgentType) -> bool {
     }
 }
 
+/// KT-1367 — whether config.toml names a decision model for Decide steps
+/// (`agents.model_tiers.ollama.decision`), read without any other effect.
+pub fn saved_decision_model() -> bool {
+    #[cfg(test)]
+    {
+        test_saved_decision::get()
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(path) = config_path() else {
+            return false;
+        };
+        saved_decision_model_in(&std::fs::read_to_string(path).unwrap_or_default())
+    }
+}
+
+pub(crate) fn saved_decision_model_in(raw: &str) -> bool {
+    raw.parse::<toml::Table>()
+        .ok()
+        .and_then(|table| {
+            table
+                .get("agents")?
+                .get("model_tiers")?
+                .get("ollama")?
+                .get("decision")?
+                .as_str()
+                .map(|model| !model.trim().is_empty())
+        })
+        .unwrap_or(false)
+}
+
+/// The saved decision model a test states, per thread.
+#[cfg(test)]
+pub(crate) mod test_saved_decision {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SAVED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Restores the previous value when dropped.
+    pub(crate) struct SavedDecision(bool);
+
+    impl Drop for SavedDecision {
+        fn drop(&mut self) {
+            SAVED.with(|saved| saved.set(self.0));
+        }
+    }
+
+    pub(crate) fn set(value: bool) -> SavedDecision {
+        SavedDecision(SAVED.with(|saved| saved.replace(value)))
+    }
+
+    pub(crate) fn get() -> bool {
+        SAVED.with(Cell::get)
+    }
+}
+
 /// The saved full-access setting a test states, per thread (each tokio test
 /// runs on its own thread).
 #[cfg(test)]
@@ -603,6 +661,7 @@ pub async fn save(config: &AppConfig) -> Result<()> {
         config.server.disk_launch_min_free_gib,
         config.server.disk_sweep_idle_hours,
     );
+    crate::core::disk_usage::set_stalled_build_days(config.server.disk_stalled_build_days);
     crate::core::task_worker_lane_seeds::set_seed_policy(
         config.server.lane_seeds_copy_enabled,
         config.server.lane_seeds_adopt_suggested,
@@ -911,6 +970,7 @@ pub fn default_config() -> AppConfig {
             disk_warning_gib: crate::models::setup::DEFAULT_DISK_WARNING_GIB,
             disk_launch_min_free_gib: crate::models::setup::DEFAULT_DISK_LAUNCH_MIN_FREE_GIB,
             disk_sweep_idle_hours: crate::models::setup::DEFAULT_DISK_SWEEP_IDLE_HOURS,
+            disk_stalled_build_days: crate::models::setup::DEFAULT_DISK_STALLED_BUILD_DAYS,
             max_concurrent_agents: 5,
             agent_stall_timeout_min: 5,
             agent_global_timeout_min: crate::models::DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN,
@@ -983,6 +1043,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                fallback_chain: Vec::new(),
                 tools_enabled: None,
             },
             codex: AgentConfig {
@@ -993,6 +1054,7 @@ pub fn default_config() -> AppConfig {
                 full_access: false,
                 mention_color: None,
                 base_url: None,
+                fallback_chain: Vec::new(),
                 tools_enabled: None,
             },
             open_code: AgentConfig::default(),

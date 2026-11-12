@@ -2481,6 +2481,43 @@ fi
         }
     }
 
+    /// KT-1681 — the authoring contract left 18 tokens under the MLX cap, so the
+    /// next step type or field would have tripped the test above. It keeps room:
+    /// the heavy guidance is read per step type, not carried by default.
+    #[test]
+    fn the_authoring_contract_keeps_two_thousand_tokens_under_the_mlx_cap() {
+        let cap = 32768;
+        let mut body = build_ollama_chat_body(
+            "qwen3.8:27b-mlx",
+            "sys",
+            "Create a workflow",
+            None,
+            cap,
+            None,
+        );
+        body["tools"] = serde_json::json!(crate::api::agent_tools::full_discussion_catalogue());
+        // The same load as the clamp test: the contract, the model's prior
+        // reasoning, and the tool-history stub the clamp leaves.
+        body["messages"].as_array_mut().unwrap().extend([
+            serde_json::json!({
+                "role":"tool","tool_call_id":"schema","name":"workflow_step_schema",
+                "content":crate::api::workflows::canonical_step_schema().to_string()
+            }),
+            serde_json::json!({
+                "role":"assistant","content":"prior reasoning ".repeat(400)
+            }),
+            serde_json::json!({
+                "role":"tool","tool_call_id":"history","name":"git_diff","content":"d".repeat(512)
+            }),
+        ]);
+        let used = estimated_chat_history_tokens(&body);
+        assert!(
+            used + 2000 <= cap,
+            "the contract leaves {} estimated tokens under {cap}",
+            cap.saturating_sub(used)
+        );
+    }
+
     #[test]
     fn clamp_never_blindly_cuts_a_checkpoint_receipt_envelope() {
         let mut body = build_ollama_chat_body("qwen3.8:27b", "sys", "hi", None, 4096, None);

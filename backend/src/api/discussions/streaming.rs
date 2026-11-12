@@ -3012,10 +3012,21 @@ pub(super) async fn make_agent_stream_inner(
     let disc_tier = tier_override.unwrap_or(disc.tier);
     // 0.8.10 — explicit per-discussion model (e.g. inherited from a launching
     // Quick Prompt) wins over the tier; None → resolve from tier as before.
-    let disc_model = if tier_override.is_some() {
-        None
-    } else {
-        disc.model.clone()
+    // KT-1518 — a turn continued on a fallback runs on the link's own model, or
+    // on the tier it already had: never on the model of the agent that was refused.
+    let fallback_pin = match dispatch_job_id.clone() {
+        Some(job_id) => state
+            .db
+            .with_read_conn(move |conn| crate::core::agent_fallback::get_pin(conn, &job_id))
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let disc_model = match &fallback_pin {
+        Some(pin) => pin.model.clone(),
+        None if tier_override.is_some() => None,
+        None => disc.model.clone(),
     };
     let disc_model = disc_model.or_else(|| {
         external_connection.as_ref().and_then(|connection| {
@@ -4680,7 +4691,8 @@ pub(super) async fn make_agent_stream_inner(
                 // KT-403 — no hidden Ollama multiplier. The effective value is
                 // the explicit local-agent budget shown in Settings (240 min by
                 // default), so the UI and the runtime report the same policy.
-                let global_deadline = tokio::time::Instant::now() + global_timeout;
+                let run_started = tokio::time::Instant::now();
+                let global_deadline = run_started + global_timeout;
 
                 // Periodic checkpoint of full_response → discussions.partial_response
                 // so a backend crash/restart doesn't lose what the agent has thought.
@@ -5139,6 +5151,19 @@ pub(super) async fn make_agent_stream_inner(
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
+                // KT-1408 — the process is dead: a worker the global limit
+                // stopped leaves a WIP checkpoint instead of a dirty worktree.
+                if let (Some(AgentTimeoutReason::Global(_)), Some(job_id)) =
+                    (timeout_reason.as_ref(), dispatch_job_id.as_deref())
+                {
+                    crate::api::worker_time_limit::checkpoint_stopped_worker(
+                        &state,
+                        job_id,
+                        run_started.elapsed(),
+                        global_timeout,
+                    )
+                    .await;
+                }
                 let finished_worker_launch = match served_model {
                     Some(recorder) => Some(recorder.finish().await),
                     None => None,

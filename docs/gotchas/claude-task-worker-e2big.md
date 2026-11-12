@@ -21,7 +21,7 @@ the sandbox to enumerate. Any other unreadable Git root still fails closed with
 [src: file: backend/src/agents/runner.rs:13367-13416#claude_sandbox_catalogue_receipt]
 [src: file: backend/src/agents/runner.rs:13416-13445#claude_sandbox_catalogue_roots]
 [src: file: backend/src/agents/runner.rs:13449-13456#claude_task_worker_catalogue_preflight]
-[src: file: backend/src/api/orchestration.rs:11881-11891#worker_project_refusal]
+[src: file: backend/src/api/orchestration.rs:12024-12034#worker_project_refusal]
 
 The worker remains fail-closed: sandbox availability is mandatory,
 unsandboxed commands are disabled, and the explicit write roots are the
@@ -33,9 +33,9 @@ accepted and refused catalogue sizes, common-directory deduplication and
 path-free diagnostics, and separately preserves the write boundary: an
 unmanaged worktree is the only write root, a managed one adds only its lane
 target.
-[src: file: backend/src/agents/runner_test.rs:11282-11481#synthetic_git_worktree_catalogue]
-[src: file: backend/src/agents/runner_test.rs:10648-10698#claude_task_worker_uses_fail_closed_workspace_sandbox]
-[src: file: backend/src/agents/runner_test.rs:10712-10753#claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain]
+[src: file: backend/src/agents/runner_test.rs:11319-11518#synthetic_git_worktree_catalogue]
+[src: file: backend/src/agents/runner_test.rs:10685-10735#claude_task_worker_uses_fail_closed_workspace_sandbox]
+[src: file: backend/src/agents/runner_test.rs:10749-10790#claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain]
 
 ## Build and test policy (KT-1246)
 

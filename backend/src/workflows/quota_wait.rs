@@ -679,6 +679,9 @@ pub struct QuotaRechecker {
     probe: std::sync::Arc<dyn QuotaProbe>,
     interval: Duration,
     book: std::sync::Mutex<RecheckBook>,
+    /// KT-1518 — the agents a fallback may be handed to. `None`: the ones the
+    /// host has installed and enabled; a test gives its own.
+    usable: Option<Vec<crate::models::AgentType>>,
 }
 
 impl QuotaRechecker {
@@ -691,7 +694,20 @@ impl QuotaRechecker {
                 seen_requests,
                 ..Default::default()
             }),
+            usable: None,
         }
+    }
+
+    /// The agents a fallback may be handed to, instead of the host's own.
+    pub fn with_usable_agents(mut self, usable: Vec<crate::models::AgentType>) -> Self {
+        self.usable = Some(usable);
+        self
+    }
+
+    /// The agents a fallback may be handed to: the test's own, or `None` to let
+    /// the chain lookup detect the host's (only once a chain exists).
+    fn usable_agents(&self) -> Option<Vec<crate::models::AgentType>> {
+        self.usable.clone()
     }
 
     pub fn production() -> Self {
@@ -778,11 +794,17 @@ impl QuotaRechecker {
             };
             let agent = leaf.step.agent.clone();
             let project_path = project_path_of(state, &run).await;
-            if self
+            let verdict = self
                 .verdict(state, &mut verdicts, &agent, &project_path)
-                .await
-                != Some(true)
-            {
+                .await;
+            if verdict != Some(true) {
+                // KT-1518 — the provider still refuses: the step's fallback chain
+                // is the alternative to waiting. The step moves to the next link
+                // like an owner's "switch agent" would, and the next pass asks
+                // that provider instead.
+                if verdict == Some(false) {
+                    offer_fallback(state, &run, &leaf.step, self.usable_agents()).await;
+                }
                 continue;
             }
             let workflow_id = run.workflow_id.clone();
@@ -840,7 +862,33 @@ impl QuotaRechecker {
                 .iter()
                 .find_map(|escalation| escalation.project_path.clone())
                 .unwrap_or_default();
-            if self.verdict(state, verdicts, &agent, &project_path).await != Some(true) {
+            let verdict = self.verdict(state, verdicts, &agent, &project_path).await;
+            if verdict != Some(true) {
+                // KT-1518 — still refused: the agent's chain is the alternative
+                // to waiting, through the same selection as a failing turn.
+                if verdict == Some(false) {
+                    let usable = self.usable_agents();
+                    for escalation in group {
+                        match crate::api::discussions::agent_fallback::offer_to_escalated_execution_among(
+                            state,
+                            &escalation.execution_id,
+                            usable.clone(),
+                        )
+                        .await
+                        {
+                            Ok(true) => tracing::info!(
+                                execution_id = %escalation.execution_id,
+                                provider,
+                                "provider still refuses: escalated execution continued on its fallback"
+                            ),
+                            Ok(false) => {}
+                            Err(error) => tracing::info!(
+                                execution_id = %escalation.execution_id,
+                                "agent fallback of an escalated execution skipped: {error}"
+                            ),
+                        }
+                    }
+                }
                 continue;
             }
             for escalation in group {
@@ -889,6 +937,18 @@ impl QuotaRechecker {
             .probe
             .quota_is_back(agent, project_path, &tokens, full_access)
             .await;
+        // KT-1518 — the provider answers again: its agent is back in play now,
+        // not when the cooldown would have run out.
+        if verdict == Some(true) {
+            let back = agent.clone();
+            if let Err(error) = state
+                .db
+                .with_conn(move |conn| crate::core::agent_fallback::clear_cooldown(conn, &back))
+                .await
+            {
+                tracing::warn!("agent cooldown could not be cleared: {error}");
+            }
+        }
         verdicts.insert(key, verdict);
         verdict
     }
@@ -907,6 +967,40 @@ impl QuotaRechecker {
                 book.last.insert(key.to_string(), now);
                 forced
             }
+        }
+    }
+}
+
+/// KT-1518 — switches the Agent step a quota-paused run waits on to the next
+/// usable link of its agent's fallback chain. Nothing happens without a chain,
+/// or when nothing in it can take the step.
+async fn offer_fallback(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &crate::models::WorkflowStep,
+    usable: Option<Vec<crate::models::AgentType>>,
+) {
+    let agents = state.config.read().await.agents.clone();
+    let Some(link) =
+        super::agent_fallback_step::link_for_waiting_step_among(state, &agents, step, usable).await
+    else {
+        return;
+    };
+    let choice = crate::models::StepAgentOverride {
+        agent: link.agent.clone(),
+        model: link.model.clone(),
+        reasoning_effort: None,
+    };
+    match crate::api::workflows::switch_quota_agent_inner(state, run.id.clone(), choice).await {
+        Ok(switched) => tracing::info!(
+            run_id = %run.id,
+            step = %switched.step_name,
+            from = %crate::core::agent_fallback::display_name(&step.agent),
+            to = %crate::core::agent_fallback::display_name(&link.agent),
+            "provider still refuses: the paused step continues on its fallback"
+        ),
+        Err(error) => {
+            tracing::info!(run_id = %run.id, "agent fallback of a paused run skipped: {error}")
         }
     }
 }

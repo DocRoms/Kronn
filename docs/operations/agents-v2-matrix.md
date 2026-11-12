@@ -97,7 +97,7 @@ The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
 [src: file: backend/src/db/orchestration.rs:250-264#agent_type_from_db]
-[src: file: backend/src/db/orchestration_tests.rs:4340-4373#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
+[src: file: backend/src/db/orchestration_tests.rs:4563-4596#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
 
@@ -118,7 +118,7 @@ the same job.
   negotiated `session/resume` contract and exact proof boundaries.
   [src: file: backend/src/agents/runner.rs:2951-3011#load_completed_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2626-2757#resume_with_delta_if_possible]
-  [src: file: backend/src/api/discussions/streaming.rs:8912-9233#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
+  [src: file: backend/src/api/discussions/streaming.rs:8941-9262#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
   upstream v1 schema supports `usage_update.cost` as a cumulative amount with
   an explicit currency; this is not a per-turn USD price. Kronn's native ACP
@@ -189,8 +189,8 @@ read; opening a selector additionally refreshes stale CLI targets in the
 background, preserving visible options and configuration. Claude's
 initialization-only SDK catalogue is independent of the ACP execution toggle.
 See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
-[src: file: frontend/src/components/settings/AgentsSection.tsx:198-199#useModelCatalogSnapshot]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1332-1357#SearchableSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:199-200#useModelCatalogSnapshot]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1363-1388#SearchableSelect]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
 [src: file: backend/src/core/model_catalog/mod.rs:423-433#discover_inner]

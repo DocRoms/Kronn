@@ -106,13 +106,13 @@ describe('the tabs and the default tab', () => {
 });
 
 describe('the Notifications tab', () => {
-  it('shows the outage as one red entry with a clock and a Retry', () => {
+  it('shows the outage as one red entry with a human duration and a Retry', () => {
     vi.useFakeTimers({ now: 100_000 });
     confirmOutage(100_000 - 42_000);
     renderPanel();
     const outage = screen.getByTestId('notif-outage');
     expect(outage).toHaveAttribute('role', 'alert');
-    expect(within(outage).getByTestId('notif-outage-title')).toHaveTextContent('Service local injoignable depuis 0:42 — reconnexion…');
+    expect(within(outage).getByTestId('notif-outage-title')).toHaveTextContent('Service local injoignable depuis 42 s — reconnexion…');
     expect(within(outage).getByTestId('notif-outage-retry')).toBeInTheDocument();
   });
 
@@ -122,7 +122,7 @@ describe('the Notifications tab', () => {
     expect(screen.getByTestId('notif-outage')).toBeInTheDocument();
     act(() => { noteBackendAnswered(82_000); });
     expect(screen.queryByTestId('notif-outage')).toBeNull();
-    expect(screen.getByTestId('notif-history')).toHaveTextContent('Rétabli après 1m 12s');
+    expect(screen.getByTestId('notif-history')).toHaveTextContent('Rétabli après 1 min 12');
   });
 
   it('groups other 5xx by status + method + route, with the count and the server message', () => {

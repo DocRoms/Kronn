@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Check, CircleAlert, Copy, RefreshCw, TriangleAlert } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { BACKEND_CHECK_NOW_EVENT } from '../../hooks/useBackendMonitor';
-import { formatClock, formatDuration, formatTimeOfDay } from '../../lib/activity';
+import { formatTimeOfDay, splitOutageDuration } from '../../lib/activity';
 import {
   ACTIVITY_CATEGORIES,
   countByCategory,
@@ -35,6 +35,12 @@ type Item =
  * filter, then the server errors still pending (orange) and the session's
  * history, under the same category chips as the other tab.
  */
+/** `10 s`, `1 min 12`, `2 h 05`: worded per locale, never as a clock. */
+function outageLength(t: (key: string, ...args: (string | number)[]) => string, ms: number): string {
+  const { unit, first, second } = splitOutageDuration(ms);
+  return t(`notif.duration.${unit}`, first, second);
+}
+
 export function NotificationsTab({ notifications, now, filter, onFilterChange }: NotificationsTabProps) {
   const { t } = useT();
   const { outage, errors, history } = notifications;
@@ -59,7 +65,7 @@ export function NotificationsTab({ notifications, now, filter, onFilterChange }:
             <CircleAlert size={14} aria-hidden="true" className="notif-outage-icon" />
             <div className="notif-body">
               <span className="notif-title" data-testid="notif-outage-title">
-                {t('notif.outage.title', formatClock(now - outage.since))}
+                {t('notif.outage.title', outageLength(t, now - outage.since))}
               </span>
               <span className="notif-meta">{t('notif.outage.since', formatTimeOfDay(outage.since))}</span>
             </div>
@@ -161,7 +167,7 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
       <li className="notif-row notif-row-resolved" data-testid="notif-history" data-kind="outage" data-category={entry.category}>
         <Check size={13} aria-hidden="true" className="notif-resolved-icon" />
         <div className="notif-body">
-          <span className="notif-title">{t('notif.outage.resolved', formatDuration(entry.resolvedAt - entry.since))}</span>
+          <span className="notif-title">{t('notif.outage.resolved', outageLength(t, entry.resolvedAt - entry.since))}</span>
           <span className="notif-meta">{t('notif.outage.resolvedAt', formatTimeOfDay(entry.since), formatTimeOfDay(entry.resolvedAt))}</span>
         </div>
       </li>

@@ -148,7 +148,7 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4225-4271#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:4236-4282#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:999-1029#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:1075-1105#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -276,8 +276,8 @@ that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
 [src: file: frontend/src/components/settings/AgentsSection.tsx:200-245#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1360-1389#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1432-1437#supportsEffort]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1391-1420#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1463-1468#supportsEffort]
 
 ## Migration and test invariants
 
@@ -287,7 +287,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:2046-2080#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:2071-2105#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
 [src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
 [src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]

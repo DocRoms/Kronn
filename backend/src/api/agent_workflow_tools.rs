@@ -29,34 +29,17 @@ pub(super) fn declarations() -> Vec<Value> {
     [
         ("workflow_list", "List accessible workflows with ids, trigger, enabled state and step counts.", json!({}), json!([])),
         ("workflow_get", "Read the complete accessible workflow before editing it; omitted fields are preserved by update.", json!({"workflow_id":{"type":"string"}}), json!(["workflow_id"])),
-        ("workflow_step_schema", "Read the canonical step contracts and `authoring_doctrine` (which step type to prefer) before authoring. Optional step_type narrows to one type; section selects a shared contract.", json!({"step_type":{"type":"string"},"section":{"type":"string","enum":["template_vars","data_pipeline_contract","authoring_doctrine"]}}), json!([])),
+        ("workflow_step_schema", "Read the authoring contract before authoring: required fields per step type and `authoring_doctrine` (which step type to prefer). Then step_type returns that type's whole contract and example; section returns a shared contract.", json!({"step_type":{"type":"string"},"section":{"type":"string","enum":["template_vars","data_pipeline_contract","authoring_doctrine"]}}), json!([])),
         ("workflow_create_draft", "Save a disabled workflow for human review. Never runs or enables it. Read `authoring_doctrine` (workflow_step_schema) before composing, then tool_manual. Its kronn_readiness says if it can start.", create, json!(["name","trigger","steps"])),
         ("workflow_update", "Patch a disabled workflow, preserving omitted fields and project. Enabled workflows must first be disabled in the Workflows UI. Read workflow_get before replacing steps, and `authoring_doctrine` (workflow_step_schema) before changing them.", editable, json!(["workflow_id"])),
     ].into_iter().map(|(name,description,properties,required)| json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required}}})).collect()
 }
 
 fn schema_section(arguments: &Value) -> Result<Value, String> {
-    let schema = crate::api::workflows::canonical_step_schema();
-    if let Some(kind) = arguments["step_type"].as_str() {
-        let fields = schema["fields_by_type"].get(kind).ok_or_else(|| format!("Unknown step_type {kind}; call workflow_step_schema with no arguments for the closed set"))?;
-        return Ok(json!({"shape":schema["shape"],"step_type":kind,"contract":fields}));
-    }
-    if let Some(section) = arguments["section"].as_str() {
-        if ![
-            "template_vars",
-            "data_pipeline_contract",
-            "authoring_doctrine",
-        ]
-        .contains(&section)
-        {
-            return Err(
-                "section must be template_vars, data_pipeline_contract or authoring_doctrine"
-                    .into(),
-            );
-        }
-        return Ok(json!({"section":section,"contract":schema[section]}));
-    }
-    Ok(schema)
+    crate::api::workflows::step_schema_view(
+        arguments["step_type"].as_str(),
+        arguments["section"].as_str(),
+    )
 }
 
 /// What an agent may author on a workflow; anything else is dropped.

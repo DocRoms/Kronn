@@ -19,7 +19,7 @@ loss = **lost forever** without a copy.
 
 Kronn writes three kinds of copies. The scheduled one is built from the
 environment by `[src: file: backend/src/core/backup.rs:316-330#BackupScheduler]`;
-the manual one is `[src: file: backend/src/api/setup.rs:1965-1976#db_backup]`;
+the manual one is `[src: file: backend/src/api/setup.rs:1979-1990#db_backup]`;
 the pre-migration one is described below.
 
 | Copy | When | Where |
@@ -44,16 +44,16 @@ The pre-migration copy is a file copy of the checkpointed database to
 `kronn.db.backup.tmp`, synced, then renamed over `kronn.db.backup`. If the
 disk lacks room or the copy fails, boot stops before any migration with a
 message saying so. `KRONN_MIGRATION_BACKUP=0` upgrades without a backup; use
-it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1317-1380#backup_before_migration]`
+it only after taking a copy by hand. `[src: file: backend/src/db/migrations.rs:1338-1401#backup_before_migration]`
 The copy is taken only when a migration is pending, after the WAL is folded in
-and pinned. `[src: file: backend/src/db/migrations.rs:1473-1504#has_pending]`
+and pinned. `[src: file: backend/src/db/migrations.rs:1494-1525#has_pending]`
 
 ## Run retention and compaction
 
 Step outputs are almost all of a workflow run's weight, and `workflow_runs`
 was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
 `[src: file: backend/src/db/run_retention.rs:139-165#compact_run_payloads_chunk]`
-`[src: file: backend/src/db/run_retention.rs:218-236#delete_runs_chunk]`
+`[src: file: backend/src/db/run_retention.rs:237-255#delete_runs_chunk]`
 `[src: file: backend/src/core/run_retention.rs:27-28#FIRST_PASS_DELAY]`
 
 - **Payload retention, opt-in on every install.** Once enabled, every 6 h (first pass 10 min after
@@ -92,7 +92,7 @@ was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
   nothing until a human enables it.
   `[src: file: backend/src/core/run_retention.rs:50-68#window_hours]`
   `[src: file: backend/src/core/run_retention.rs:91-131#run_pass]`
-  `[src: file: backend/src/db/workflows.rs:2971-2982#retention_from_column]`
+  `[src: file: backend/src/db/workflows.rs:3046-3057#retention_from_column]`
 
 Never touched, whatever their age: runs that are not `Success`, `Partial`,
 `Failed`, `Cancelled` or `StoppedByGuard` (so not `Running`, `Pending`,

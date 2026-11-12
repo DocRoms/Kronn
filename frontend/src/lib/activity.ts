@@ -80,13 +80,14 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(hours / 24)}d ${String(hours % 24).padStart(2, '0')}h`;
 }
 
-/** `0:42`, `12:05`, `1:02:03`: how long an outage has lasted, as a clock. */
-export function formatClock(ms: number): string {
+/** An outage's length split for a locale's wording: 10 s, 1 min 12, 2 h 05 (never a clock). */
+export function splitOutageDuration(ms: number): { unit: 'sec' | 'min' | 'hour'; first: number; second: string } {
   const total = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = String(total % 60).padStart(2, '0');
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  if (total < 60) return { unit: 'sec', first: total, second: '' };
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return { unit: 'min', first: minutes, second: pad(total % 60) };
+  return { unit: 'hour', first: Math.floor(minutes / 60), second: pad(minutes % 60) };
 }
 
 /** `14:02`: a moment of today in the reader's own format. */

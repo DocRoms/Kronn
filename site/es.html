@@ -1579,7 +1579,7 @@
     <a class="level-tag" href="#kronn-way">SIDE QUEST · THE KRONN WAY</a>
     <h2 class="section-title">Ingeniería,<br><span class="li">no conjuros</span>.</h2>
     <p class="section-intro">
-      <strong>Descomponer</strong>: el código hace lo que el código sabe hacer (obtener, transformar, ejecutar un comando) a 0 tokens, y el agente solo interviene donde hace falta criterio, con un prompt corto y acotado. <strong>Medir</strong>: los skills y los Quick Prompts están versionados, y un run shadow muestra si una nueva versión es realmente mejor antes de ponerla en marcha. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/the-kronn-way.md" target="_blank" rel="noopener">El enfoque Kronn en detalle (en inglés)</a>.
+      <strong>Descomponer</strong>: el código hace lo que el código sabe hacer (obtener, transformar, ejecutar un comando) a 0 tokens, y el agente solo interviene donde hace falta criterio, con un prompt corto y acotado. <strong>Medir</strong>: los skills y los Quick Prompts están versionados, y un shadow de paso muestra si una nueva versión es realmente mejor antes de ponerla en marcha. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/the-kronn-way.md" target="_blank" rel="noopener">El enfoque Kronn en detalle (en inglés)</a>.
     </p>
 
     <!-- Decomposition diagram : mega-prompt vs Kronn workflow -->
@@ -1687,15 +1687,15 @@
       </svg>
     </div>
 
-    <h3 class="qs-title subsection-title">Probar una nueva versión sin riesgo (runs shadow)</h3>
+    <h3 class="qs-title subsection-title">Probar una nueva versión sin riesgo (shadows de paso)</h3>
     <p class="section-intro">
-      Cada run normal de un workflow puede lanzar un <strong>run shadow</strong> con las mismas entradas reales, que carga la versión del skill o del Quick Prompt que estás probando. Cada paso marcado como que actúa fuera de Kronn (publicar, enviar, escribir en otro sitio) se salta, igual que cada Gate: no publica ni rompe nada. La lista de runs compara los dos runs paso a paso, y un clic promueve la mejor versión. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/shadow-runs.md" target="_blank" rel="noopener">La guía de los runs shadow (en inglés)</a>.
+      Un paso puede llevar <strong>shadows</strong>: cada uno repite ese paso junto a su ejecución principal, con exactamente la misma entrada, con otro agente, modelo, prompt u otras versiones de skills (o con nada de esto, para ver lo determinista que es el paso). Solo la salida principal continúa el workflow. Un shadow nunca ejecuta un paso marcado como que actúa fuera de Kronn (publicar, enviar, escribir en otro sitio), ni un Gate, y un shadow que falla o gasta de más nunca hace fallar el paso. La vista del run compara la ejecución principal y sus shadows paso a paso (qué difiere, tokens, coste, duración, diff de las salidas y cuántas salidas distintas da un shadow idéntico), y un clic promueve la mejor versión. Como opción, un paso también puede <strong>fusionar</strong> su ejecución principal con uno, varios o todos sus shadows (desactivado por defecto): una pasada de condensación deduplica sus puntos, verifica cada punto que planteó un shadow y guarda la procedencia de cada uno, y el resultado fusionado pasa a ser la salida del paso. Un punto que no puede verificar no se publica nunca: la salida principal sigue entonces siendo la salida del paso. <a href="https://github.com/DocRoms/Kronn/blob/main/docs/guides/shadow-runs.md" target="_blank" rel="noopener">La guía de los shadows (en inglés)</a>.
     </p>
 
     <div class="decomp-wrap">
-      <div class="decomp-wrap-label">▸ Fig. III · runs shadow</div>
-      <a href="diagrams/shadow-runs.es.svg" target="_blank" rel="noopener"><img class="decomp-diagram" src="diagrams/shadow-runs.es.svg" width="1200" height="380" loading="lazy" decoding="async"
-           alt="Las mismas entradas reales lanzan un run normal, publicado, con Prompt v2 y Skill v1, y un run shadow sin efectos secundarios, con Prompt v2 y Skill v2. Los dos alimentan una comparación paso a paso y luego se promueve la mejor versión en un clic."></a>
+      <div class="decomp-wrap-label">▸ Fig. III · shadows de paso</div>
+      <a href="diagrams/shadow-runs.es.svg" target="_blank" rel="noopener"><img class="decomp-diagram" src="diagrams/shadow-runs.es.svg" width="1200" height="464" loading="lazy" decoding="async"
+           alt="Un paso recibe su entrada. La ejecución principal, publicada, es el paso tal cual. A su lado, un shadow idéntico y un shadow variante (otro agente, modelo, prompt o skills) repiten únicamente ese paso con la misma entrada, sin efectos secundarios. Una comparación por paso muestra qué difiere, los tokens, el coste, la duración, un diff de las salidas y un resumen de determinismo, y la versión probada se promueve en un clic. Una fusión opcional condensa la ejecución principal con los shadows elegidos, con verificación y procedencia, y el resultado fusionado pasa a ser la salida del paso."></a>
     </div>
   </section>
 
@@ -2203,8 +2203,8 @@
       </div>
 
       <div class="concept-card">
-        <div class="concept-term">Shadow run</div>
-        <p class="concept-def">Un run lanzado junto a un run normal, con las mismas entradas y otras versiones de skills o de Quick Prompts. Se saltan los Gates y los pasos que actúan fuera de Kronn: <strong>primero comparas</strong>, luego cambias (<a href="#kronn-way">cómo</a>).</p>
+        <div class="concept-term">Shadow de paso</div>
+        <p class="concept-def">Una repetición de un paso junto a su ejecución principal, con la misma entrada y otro agente, modelo, prompt u otras versiones de skills. Los Gates y los pasos que actúan fuera de Kronn nunca lanzan uno; fusionable como opción en la salida del paso: <strong>primero comparas</strong>, luego cambias (<a href="#kronn-way">cómo</a>).</p>
       </div>
 
       <div class="concept-card">

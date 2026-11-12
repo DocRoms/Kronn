@@ -790,11 +790,28 @@ fn collect(
             &step.profile_ids,
             &step.directive_ids,
         );
+        // KT-1459 — what a shadow of the step loads is pinned with the run: it
+        // runs on the revision the run started with, like the step itself.
+        let mut shadow_prompts: Vec<&String> = Vec::new();
+        for shadow in &step.shadows {
+            let swapped: Vec<String> = shadow
+                .skills
+                .values()
+                .filter(|skill| !skill.trim().is_empty())
+                .cloned()
+                .collect();
+            deps.bindings(project_id, &swapped, &[], &[]);
+            if let Some(crate::models::ShadowPrompt::QuickPrompt { id, .. }) = &shadow.prompt {
+                shadow_prompts.push(id);
+            }
+            shadow_prompts.extend(shadow.quick_prompt_versions.keys());
+        }
         let prompt_ids = step
             .quick_prompt_id
             .iter()
             .chain(step.batch_quick_prompt_id.iter())
-            .chain(step.batch_chain_prompt_ids.iter());
+            .chain(step.batch_chain_prompt_ids.iter())
+            .chain(shadow_prompts);
         for id in prompt_ids {
             if deps.prompts.contains_key(id) {
                 continue;
@@ -853,7 +870,6 @@ mod tests {
         Workflow {
             refs: Default::default(),
             retention: None,
-            shadow: None,
             project_scope: None,
             pinned: false,
             id: id.into(),

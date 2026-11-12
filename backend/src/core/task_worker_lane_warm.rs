@@ -30,6 +30,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::background_priority::Priority;
+use crate::core::seed_prune::{self, PruneReport};
 use crate::core::task_worker_env::{
     prepare_launch, ProbeCommand, ProbeRunner, Provisioned, WorkerLane,
 };
@@ -54,7 +55,8 @@ const WARM_MARKER: &str = ".kronn-warm.json";
 const DEBUG_DIR: &str = "debug";
 /// Cargo's own advisory lock on a profile directory, held for a build's whole
 /// duration (`<target>/debug/.cargo-lock`).
-const CARGO_BUILD_LOCK: &str = ".cargo-lock";
+#[cfg(test)]
+const CARGO_BUILD_LOCK: &str = seed_prune::CARGO_BUILD_LOCK;
 const TIMED_OUT_DETAIL_PREFIX: &str = "timed out after";
 /// How often a queued first build looks at its cancellation.
 const GATE_POLL: Duration = Duration::from_millis(100);
@@ -288,6 +290,11 @@ pub enum SeedOutcome {
         source: PathBuf,
         kind: SeedSourceKind,
         clone_ms: u64,
+        /// KT-1691 — what pruning the seed to its latest build removed before
+        /// this clone (nothing when it had no stale artifact, `None` when it
+        /// was not pruned).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pruned: Option<PruneReport>,
     },
     /// The lane target already had a `debug/`; left untouched.
     AlreadyPresent,
@@ -564,14 +571,26 @@ fn seed_candidates(lane: &WorkerLane, home: &HomeKey) -> Vec<SeedCandidate> {
     }]
 }
 
-/// Hold Cargo's own build lock shared. It is refused while a build writes the
-/// profile directory (so a target being written is never a source), and while
-/// it is held a starting build waits instead of changing what is being cloned.
-fn lock_source_shared(debug_dir: &Path) -> Result<std::fs::File, String> {
-    let lock = std::fs::File::open(debug_dir.join(CARGO_BUILD_LOCK))
-        .map_err(|error| format!("no Cargo build lock ({error})"))?;
-    FileExt::try_lock_shared(&lock).map_err(|_| "a build is writing it".to_string())?;
-    Ok(lock)
+/// The package names the main checkout's `Cargo.lock` files list (its root and
+/// each first-level directory: a repository may hold several workspaces over one
+/// `target/`), or `None` when none could be read.
+fn main_checkout_locked_packages(lane: &WorkerLane) -> Option<std::collections::HashSet<String>> {
+    let main = lane.main_checkout.as_ref()?;
+    let mut texts: Vec<String> = Vec::new();
+    let mut read = |dir: &Path| {
+        if let Ok(text) = std::fs::read_to_string(dir.join("Cargo.lock")) {
+            texts.push(text);
+        }
+    };
+    read(main);
+    for entry in std::fs::read_dir(main).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let skip = name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules");
+        if !skip && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            read(&entry.path());
+        }
+    }
+    seed_prune::locked_package_names(texts.iter().map(String::as_str))
 }
 
 /// Seed `lane`'s `debug/` from the best warm source. Never raises: the outcome
@@ -600,13 +619,30 @@ fn seed_lane(lane: &WorkerLane, home: &HomeKey, clone: CloneTree<'_>) -> SeedOut
     let mut unsupported: Option<String> = None;
     for candidate in candidates {
         let source = candidate.target.join(DEBUG_DIR);
-        let lock = match lock_source_shared(&source) {
-            Ok(lock) => lock,
+        // KT-1691 — prune the seed to its latest build first: Cargo never removes
+        // an old artifact, and every lane would clone (then rewrite) all of it.
+        // Cargo's own build lock is taken exclusively for that, so a seed a build
+        // is writing is never pruned nor cloned; it is then held shared for the
+        // clone, so a build that starts waits.
+        let (lock, pruned) = match seed_prune::prune_and_lock_shared(
+            &source,
+            main_checkout_locked_packages(lane).as_ref(),
+        ) {
+            Ok((lock, report)) => (lock, Some(report)),
             Err(reason) => {
                 skipped.push(format!("{}: {reason}", candidate.target.display()));
                 continue;
             }
         };
+        if let Some(report) = pruned.as_ref().filter(|report| report.removed_entries > 0) {
+            tracing::info!(
+                seed = %source.display(),
+                units = report.removed_units,
+                entries = report.removed_entries,
+                bytes = report.removed_bytes,
+                "pruned stale artifacts from the seed build dir before cloning it"
+            );
+        }
         let _ = std::fs::remove_dir_all(&staging);
         let started = Instant::now();
         let cloned =
@@ -618,6 +654,7 @@ fn seed_lane(lane: &WorkerLane, home: &HomeKey, clone: CloneTree<'_>) -> SeedOut
                     source: candidate.target,
                     kind: candidate.kind,
                     clone_ms: started.elapsed().as_millis() as u64,
+                    pruned,
                 };
             }
             Err(error) => {

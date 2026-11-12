@@ -43,7 +43,7 @@ This is the supported escape hatch when a human or agent needs to discuss the
 syntax itself (write `` `@codex` `` rather than a live mention). The UI composer
 and MCP bridge apply the same exemption before resolving targets.
 [src: file: frontend/src/lib/messageTargets.ts:131-147#proseOnly]
-[src: file: backend/scripts/disc-introspection-mcp.py:5184-5195#_structured_message_targets]
+[src: file: backend/scripts/disc-introspection-mcp.py:5190-5201#_structured_message_targets]
 
 | Room mode | Target state | Result |
 |---|---|---|
@@ -85,9 +85,9 @@ time, so any other Kronn call ends that wait; the call's result carries
 `wait_preempted` and the agent must re-arm. True zero-turn silence on such a
 host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
-[src: file: backend/src/api/disc_invite.rs:1071-1075#AWARENESS_MAX_MESSAGES]
+[src: file: backend/src/api/disc_invite.rs:1086-1090#AWARENESS_MAX_MESSAGES]
 [src: file: backend/scripts/disc-introspection-mcp.py:7412-7443#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12372-12379#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12387-12394#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -100,7 +100,7 @@ replay, never a skipped turn. Message revision events ride the same backlog.
 New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/sql/105_user_turn_catchup.sql:12-23#user_catchup_cursor]
 [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
-[src: file: backend/src/api/disc_invite.rs:1362-1390#ack_awareness_upto]
+[src: file: backend/src/api/disc_invite.rs:1377-1405#ack_awareness_upto]
 [src: file: backend/scripts/disc-introspection-mcp.py:3528-3537#_PENDING_AWARENESS_ACK_BY_DISC]
 [src: file: backend/scripts/disc-introspection-mcp.py:4037-4054#_ack_pending_read_cursors]
 [src: file: backend/scripts/disc-introspection-mcp.py:4077-4089#_stage_awareness_ack]
@@ -128,8 +128,8 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/db/discussions.rs:3539-3801#revise_message_with_dispatch]
 [src: file: backend/src/api/federation.rs:16-73#federate_message]
 [src: file: backend/src/api/federation.rs:130-175#federate_message_revision]
-[src: file: backend/src/api/ws.rs:1179-1187#resolved_targets]
-[src: file: backend/src/api/ws.rs:934#target_agent]
+[src: file: backend/src/api/ws.rs:1206-1214#resolved_targets]
+[src: file: backend/src/api/ws.rs:968#target_agent]
 
 New-discussion aliases follow the same independent fan-out contract. Creation
 persists the initial typed targets and keeps every native target visible as a
@@ -189,7 +189,7 @@ receives the Agent turn through its next poll, while every unrelated CLI skips
 it and advances its cursor. Bulk imports, historical appends, duplicates and
 appends without a live JOIN session never start a runner.
 [src: file: backend/src/db/discussions.rs:1559-1578#insert_message_with_targets_and_dispatches]
-[src: file: backend/src/api/disc_invite.rs:1698-1717#addressed_to_caller]
+[src: file: backend/src/api/disc_invite.rs:1713-1732#addressed_to_caller]
 
 Every verified live MCP append also records its exact author session in
 `message_cli_authors`. This is local routing provenance, not portable transcript
@@ -210,7 +210,7 @@ loading session tables.
 [src: file: backend/src/db/sql/100_message_cli_authors.sql:1-14#message_cli_authors]
 [src: file: backend/src/api/disc_source.rs:455-488#author_cli_session_id] [src: file: backend/src/api/disc_source.rs:542-577#message_cli_author_target]
 [src: file: backend/src/api/disc_invite.rs:1615-1673#reply_target]
-[src: file: backend/src/api/disc_invite.rs:1979-1999#addressed_to_session]
+[src: file: backend/src/api/disc_invite.rs:1994-2014#addressed_to_session]
 [src: file: backend/src/api/disc_introspection.rs:83-86#reply_target] [src: file: backend/src/api/disc_introspection.rs:515-528#reply_target]
 
 An untargeted live peer append in a native discussion deliberately addresses
@@ -278,7 +278,7 @@ Two distinctions the reason must not blur, and does not:
   before its independent dispatches start, so every responder resolves its own tier;
   targets without an override inherit the discussion tier.
   [src: file: backend/src/api/discussions/crud.rs:673-716#replace_message_targets]
-  [src: file: backend/src/api/discussions/runtime.rs:711-730#dispatch_target_tier]
+  [src: file: backend/src/api/discussions/runtime.rs:721-740#dispatch_target_tier]
 - `message_cli_authors` records the exact local CLI author for verified live MCP
   appends, enabling deterministic `reply_to` routing across same-provider peers.
 - `messages.target_agent` remains the first-target compatibility projection.

@@ -1371,6 +1371,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Required sentinel proving the current tool contract was transported. scoped requires worker_scope; generic forbids it."},
                 "worker_scope": worker_scope_schema.clone(),
                 "validations": validations_schema("Optional: the gates you will launch with. A command that could never run (shell syntax, a binary off the allowlist) makes launchable false, with the form that runs."),
+                "base_rev": {"type": "string", "description": "Optional: the integration branch you will launch with. A branch checked out in the owner's working checkout or in a worktree Kronn does not own makes launchable false. Absent: the room's declared integration branch is checked."},
                 "max_review_rounds": max_review_rounds_schema()
             }),
             json!(["task_reference", "worker", "worker_scope_intent"]),
@@ -1383,7 +1384,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
                 "worker": {"type": "object"},
                 "worker_scope_intent": {"type": "string", "enum": ["generic", "scoped"], "description": "Must exactly match the preflighted scope intent."},
                 "worker_scope": worker_scope_schema,
-                "base_rev": {"type": "string"},
+                "base_rev": {"type": "string", "description": "The integration branch: the task branch is cut from it and integrates back into it. Absent: the room's declared integration branch (its campaign target); with none declared the launch is refused, it never defaults to `main`. A branch checked out in the owner's working checkout is refused."},
                 "idempotency_key": {"type": "string"},
                 "validations": validations_schema("Principal-owned mechanical gates run on the candidate before integration. Never read from the worker's own manifest. Refused at launch when a command could never run."),
                 "max_review_rounds": max_review_rounds_schema(),
@@ -2798,6 +2799,7 @@ impl KronnToolExecutor {
                     Err(error) => return fail(call, error),
                 };
                 let parent = discussion_id;
+                let base_rev = required_string(call, "base_rev");
                 crate::api::orchestration::reclaim_finished_worktrees_for_launch(
                     &self.state.db,
                     &task_reference,
@@ -2813,6 +2815,11 @@ impl KronnToolExecutor {
                             &task_reference,
                             &parent,
                             &worker,
+                        )?;
+                        crate::api::orchestration::integration_target_preparation(
+                            conn,
+                            &mut preparation,
+                            base_rev.as_deref(),
                         )?;
                         preparation.warnings.extend(full_suite_warnings);
                         preparation.default_max_review_rounds =
@@ -4498,10 +4505,10 @@ pub(crate) const SKILL_CREATE_MANUAL: &str = "skill_create({name, description, i
 
 pub(crate) const SKILL_UPDATE_MANUAL: &str = "skill_update({skill_id, ...}) changes only the fields passed (name, description, icon, category, content, license) and keeps the others, its project and allowed_tools included. Each save that changes the skill adds a version; one that changes nothing adds none. A step, Quick Prompt or discussion pinned to custom-x@N keeps loading version N, while an enabled workflow loading the bare custom-x is disabled until a human enables it again. Writable: a custom skill of this room's or workflow's project; in a room without a project, the global skills it created once granted « General · write »; never a builtin skill. To try the new version on real runs, a human picks it in the workflow's Shadow runs settings. Restoring a version and deleting a skill are human actions.";
 
-pub(crate) const QP_GET_MANUAL: &str = "qp_get({qp_id}) returns the Quick Prompt whole with its `versions`: version_index, created_at and current, newest first, without bodies; each save adds one, v1 is its creation. qp_get({qp_id, version: N}) returns version N whole: its template, variables and bindings as saved then. A step cannot pin a Quick Prompt version; only a workflow's shadow loads another one (shadow.quick_prompt_versions, set by a human). A project's Quick Prompt and its versions are read only where that project is in reach. Deleting a version is a human action. Shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
+pub(crate) const QP_GET_MANUAL: &str = "qp_get({qp_id}) returns the Quick Prompt whole with its `versions`: version_index, created_at and current, newest first, without bodies; each save adds one, v1 is its creation. qp_get({qp_id, version: N}) returns version N whole: its template, variables and bindings as saved then. A step cannot pin a Quick Prompt version; only a shadow of a step loads another one (its quick_prompt_versions, set by a human). A project's Quick Prompt and its versions are read only where that project is in reach. Deleting a version is a human action. Shadow runs: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
 
 /// What a workflow author must know of shadow runs, refs and pins.
-pub(crate) const WORKFLOW_VARIANTS_MANUAL: &str = "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a shadow run skips it, an unmarked one acts twice. Use {{run.variant}} (normal or shadow) in every branch name or path both runs would share, and {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. `custom-x@N` in skill_ids pins a skill version. The shadow config is human-only: workflow_get shows it, no agent tool sets it; point the user to the workflow editor's Shadow runs settings, and to the Resources panel of a Page the workflow feeds to promote a version. Details: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
+pub(crate) const WORKFLOW_VARIANTS_MANUAL: &str = "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a step shadow never runs it and the step cannot carry shadows. Write {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. `custom-x@N` in skill_ids pins a skill version. Step shadows are human-only: workflow_get shows each step's shadows, no agent tool sets them and a save keeps the stored ones; a shadow re-runs only its step beside the main execution, on the same input, with another agent, model, prompt or skills (or none, to measure determinism), and never runs a Gate or a step marked external_effect, nor fails or delays the main step; a step's optional shadow_merge (human-only too) waits for the shadows it selects, condenses them with the main output and verifies every point, and its result becomes the step's output; point the user to the step editor's Shadows section, and to the Resources panel of a Page the workflow feeds to promote a version. Details: tool_manual({tool: \"workflow-architect\", section: \"Versions and shadow runs\"}).";
 
 fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[
@@ -4606,6 +4613,14 @@ fn tool_manual(name: Option<&str>, section: Option<&str>) -> Value {
              agent_list, `worker_scope_intent` (`generic`, or `scoped` with a `worker_scope`), and \
              optionally the `validations` you will launch with. Only `launchable: true` permits a \
              matching task_exec_launch.\n\n\
+             **Integration target** — pass the `base_rev` you will launch with, or leave it out \
+             to check the room's declared integration branch (its campaign target). A branch \
+             checked out in the owner's working checkout, or in a worktree Kronn does not own, \
+             makes the answer `launchable: false` with reason \
+             `integration_target_owner_checkout` or `integration_target_foreign_worktree`: \
+             integration writes into the checkout that holds the branch. With no `base_rev` \
+             and no declared branch the answer carries an `integration_target_undeclared` \
+             warning, and task_exec_launch refuses: it never defaults to `main`.\n\n\
              **Review rounds** — `max_review_rounds` (prepare and launch) is the number of \
              `request_changes` rounds before the execution escalates: an integer from 1 to 1000 \
              or `\"unlimited\"` (no cap; a looping review burns tokens until a stall or a \

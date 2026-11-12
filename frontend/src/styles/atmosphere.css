@@ -9,8 +9,8 @@
 
 /* ── CRT scanlines overlay (always-on arcade) ──────────────────────────────
    Body::after is unused elsewhere — body::before already carries the aurora.
-   pointer-events:none keeps clicks alive. z-index 200 puts the lines above
-   content but below modals/tooltips (which sit at 5000+).
+   pointer-events:none keeps clicks alive. the sticky+40 layer puts the lines
+   above content but below drawers, modals and tooltips.
    Two-layer recipe : black darken bands + faint lime phosphor micro-rows
    so the CRT feel is visible without crushing the readability.            */
 :root[data-theme="arcade"] body::after {
@@ -18,7 +18,7 @@
   position: fixed;
   inset: 0;
   pointer-events: none;
-  z-index: 200;
+  z-index: calc(var(--kr-z-sticky) + 40);
   /* Two-layer scanlines, low intensity to stay readable :
        - Layer A : subtle dark bands (darken-only, very gentle)
        - Layer B : magenta phosphor micro-rows (the site's signature pink

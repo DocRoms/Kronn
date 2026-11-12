@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
-import { ShadowCompare } from './ShadowCompare';
-import { RunPairTabs } from './RunPairTabs';
-import { isShadowRun, pairedShadows, pairPanelId, pairTabId, runListRows, runStatusKey, shadowOf, type PairView } from '../../lib/shadowRuns';
+import { StepShadowCompare, useStepShadows } from './StepShadowCompare';
+import { isShadowRun } from '../../lib/shadowRuns';
 import { newTabClickProps } from '../../lib/newTabNavigation';
 import { livePagePath, workflowPath } from '../../lib/routes';
 import { useT } from '../../lib/I18nContext';
@@ -19,13 +18,15 @@ import {
   Trash2, Play, Loader2, Check, X, ChevronLeft, ChevronRight, ChevronDown,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
-  Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search,
+  Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search, Compass,
   Eye, Pencil, FileText, Database, Shuffle, Clock,
 } from 'lucide-react';
 import { filterRuns, foldNoOpRuns, groupRunsByParent, isNoOpRun, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
+import { StepShadowRows } from './StepShadowRows';
+import { runShadowSummary, type ShadowEdit } from '../../lib/shadowMerge';
 import { RunStatusTrail } from './RunDetail';
 import { LoadedRunDetail } from './LoadedRunDetail';
 import { RunStatusCard } from '../RunStatusCard';
@@ -34,7 +35,7 @@ import { liveStepWaitingKey, runStatusTimeline } from '../../lib/workflowUiUtils
 import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
 import { CopyIdPill } from '../CopyIdPill';
 import { WorkflowWizard, type WorkflowWizardSection } from './WorkflowWizard';
-import { ShadowStatusButton } from './ShadowRunsCard';
+import { ShadowStatusButton } from './StepShadowsEditor';
 import { StepTokensBadge } from './StepTokens';
 import '../../pages/WorkflowsPage.css';
 
@@ -214,6 +215,8 @@ export interface WorkflowDetailProps {
   availableAgentTypes?: AgentType[];
   agentChoices?: AgentSwitchTarget[];
   onChangeStepAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => Promise<void>;
+  /** KT-1696 — saves a change of a step's shadows or of its merge; puts it back and says why when it fails. */
+  onChangeStepShadows?: (stepIndex: number, edit: ShadowEdit) => Promise<void>;
   /** KT-1017 — apply the suggested rewrite of an unsafe Exec command line. */
   onApplyUnsafeFix?: (issue: UnsafeExecStep) => Promise<void>;
   /** KT-1017 — a human approves a step that waits for it. */
@@ -1392,6 +1395,22 @@ function StepAgentSwitcher({
   );
 }
 
+/** KT-1696 — what a run's row says of its step shadows: how many ran and how their merge went. */
+function RunShadowTag({ workflowId, run, t }: {
+  workflowId: string;
+  run: WorkflowRun;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const summary = runShadowSummary(useStepShadows(workflowId, run.id, run.status));
+  if (!summary) return null;
+  return (
+    <span className="wf-run-compact-shadows" data-testid="wf-run-shadows" data-merge={summary.merge ?? 'none'}>
+      ⑂ {summary.shadows}
+      {summary.merge && <> · ⊕ {t(summary.merge === 'ok' ? 'wf.shadow.rows.runMergeOk' : 'wf.shadow.rows.runMergePartial')}</>}
+    </span>
+  );
+}
+
 function compactStepMeta(step: WorkflowStep): {
   kind: string;
   Icon: typeof Plug;
@@ -1409,6 +1428,7 @@ function compactStepMeta(step: WorkflowStep): {
     case 'TransformData': return { kind: 'transform-data', Icon: Shuffle, usesTokens: false, labelKey: 'wiz.stepTypeTransformData' };
     case 'PublishPageData': return { kind: 'page-data', Icon: FileText, usesTokens: false, labelKey: 'wiz.stepTypePublishPage' };
     case 'TaskBoard': return { kind: 'page-data', Icon: FileText, usesTokens: false, labelKey: 'wiz.stepTypeTaskBoard' };
+    case 'Decide': return { kind: 'gate', Icon: Compass, usesTokens: false, labelKey: 'wiz.stepTypeDecide' };
     case 'SubWorkflow': return { kind: 'subworkflow', Icon: GitBranch, usesTokens: false, labelKey: 'wiz.stepTypeSubWorkflow' };
     case 'TriggerWorkflow': return { kind: 'triggerworkflow', Icon: Play, usesTokens: false, labelKey: 'wiz.stepTypeTriggerWorkflow' };
     case 'BatchQuickPrompt': return { kind: 'batch-qp', Icon: Layers, usesTokens: true, labelKey: 'wiz.stepTypeBatchQP' };
@@ -1610,7 +1630,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, noOpRunsHidden = 0, showNoOpRuns = false, onToggleNoOpRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onChangeStepShadows, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, noOpRunsHidden = 0, showNoOpRuns = false, onToggleNoOpRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1648,9 +1668,6 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
-  // KT-1449 — a normal run and its shadow share one row; its view defaults to
-  // the comparison unless the normal run awaits a decision.
-  const [pairViews, setPairViews] = useState<Record<string, PairView>>({});
   // #14 — sub-runs of one parent tick collapse under a group accordion.
   // Default open when the group holds a run still needing attention; a user
   // click records an explicit override that wins over the default.
@@ -1677,10 +1694,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
     if (!focusRunId) return;
     const focused = runs.find(r => r.id === focusRunId);
     if (!focused) return;
-    // A paired shadow lives in its normal run's row, opened on the shadow view.
-    const normalId = shadowOf(focused);
-    const target = (normalId && runs.find(r => r.id === normalId)) || focused;
-    if (target !== focused) setPairViews(prev => ({ ...prev, [target.id]: 'shadow' }));
+    const target = focused;
     setRunFilter('all');
     setRunSearch('');
     setExpandedRunIds(prev => new Set(prev).add(target.id));
@@ -1874,7 +1888,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
           </button>
         </div>
         <div className="wf-detail-actions">
-          <ShadowStatusButton shadow={workflow.shadow} projects={projects} onOpen={() => onEdit('shadow')} t={t} />
+          <ShadowStatusButton steps={workflow.steps} projects={projects} onOpen={() => onEdit('shadow')} t={t} />
           <button className="wf-small-btn" onClick={() => onEdit()}>
             <Settings size={10} /> {t('wf.edit')}
           </button>
@@ -2071,6 +2085,16 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                             </>
                           )}
                         </span>
+                        {isAgentStep && (
+                          <StepShadowRows
+                            step={step}
+                            nextStepName={workflow.steps[i + 1]?.name}
+                            choices={agentChoices}
+                            onEdit={onChangeStepShadows ? edit => void onChangeStepShadows(i, edit) : undefined}
+                            t={t}
+                            testId={`wf-shadow-rows-${i}`}
+                          />
+                        )}
                       </div>
                     </Fragment>
                   );
@@ -2513,8 +2537,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
 
       {(() => {
         if (!showRuns) return null;
-        const pairs = pairedShadows(runs);
-        const visible = runListRows(runs, filterRuns(runs, runFilter, runSearch), pairs);
+        const visible = filterRuns(runs, runFilter, runSearch);
         const groups = groupRunsByParent(visible);
         const runDuration = (run: WorkflowRun) => (run.finished_at
           ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
@@ -2574,6 +2597,8 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
               }}
             />
             <ExecutionVariablesInspector runId={run.id} />
+            {/* KT-1459 — the steps of this run that ran shadows, side by side. */}
+            <StepShadowCompare workflowId={workflow.id} runId={run.id} runStatus={run.status} />
             {childBatch && onNavigateToBatch && (
               <button
                 type="button"
@@ -2592,14 +2617,11 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
         </>);
         };
         const renderRunItem = (run: WorkflowRun) => {
-        const shadow = pairs.get(run.id);
-        const expanded = isRunExpanded(run) || (!!shadow && isRunExpanded(shadow));
+        const expanded = isRunExpanded(run);
         const statusTimeline = runStatusTimeline(run);
         const durMs = runDuration(run);
-        const view: PairView = pairViews[run.id] ?? (run.status === 'WaitingApproval' ? 'normal' : 'compare');
-        const shadowDurMs = shadow ? runDuration(shadow) : null;
         return (
-          <div key={run.id} className="wf-run-item" data-testid="wf-run-item" data-run-id={run.id} data-shadow-run-id={shadow?.id}>
+          <div key={run.id} className="wf-run-item" data-testid="wf-run-item" data-run-id={run.id}>
             {/* #6 — compact row = the always-visible accordion header. */}
             <button
               type="button"
@@ -2615,6 +2637,9 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
               {run.parent_workflow_name && (
                 <span className="wf-run-compact-parent" title={run.parent_workflow_name}>↳ {run.parent_workflow_name}</span>
               )}
+              {(workflow.steps ?? []).some(step => (step.shadows ?? []).length > 0) && (
+                <RunShadowTag workflowId={workflow.id} run={run} t={t} />
+              )}
               {isShadowRun(run) && (
                 <span className="wf-run-compact-shadow" title={t('wf.shadow.badgeTitle')} data-testid="wf-run-shadow-badge">
                   <FlaskConical size={10} aria-hidden /> {t('wf.shadow.badge')}
@@ -2625,38 +2650,9 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                 {durMs != null && formatDurationCompact(durMs)}
                 {run.tokens_used > 0 && ` · ${run.tokens_used} tk`}
               </span>
-              {shadow && (
-                <span
-                  className="wf-run-compact-shadow wf-run-compact-pair"
-                  data-variant="paired"
-                  data-status={shadow.status}
-                  title={t('wf.shadow.pairedTitle')}
-                  data-testid="wf-run-shadow-paired"
-                >
-                  <FlaskConical size={10} aria-hidden /> {t('wf.shadow.badge')}
-                  <span className="wf-run-compact-pair-dot" aria-hidden />
-                  <span>{t(runStatusKey(shadow.status))}</span>
-                  {(shadowDurMs != null || shadow.tokens_used > 0) && (
-                    <span className="wf-run-compact-pair-meta">
-                      {shadowDurMs != null && formatDurationCompact(shadowDurMs)}
-                      {shadow.tokens_used > 0 && `${shadowDurMs != null ? ' · ' : ''}${shadow.tokens_used} tk`}
-                    </span>
-                  )}
-                </span>
-              )}
               <ChevronRight size={12} className={expanded ? 'wf-chevron-rotated' : 'wf-chevron'} />
             </button>
-            {expanded && !shadow && renderRunBody(run)}
-            {expanded && shadow && (
-              <div className="wf-run-pair">
-                <RunPairTabs runId={run.id} view={view} onChange={next => setPairViews(prev => ({ ...prev, [run.id]: next }))} />
-                <div role="tabpanel" id={pairPanelId(run.id)} aria-labelledby={pairTabId(run.id, view)} data-testid={`wf-run-pair-panel-${view}`}>
-                  {view === 'compare' && <ShadowCompare normal={run} shadow={shadow} onOpenRun={onNavigateToRun} />}
-                  {view === 'normal' && renderRunBody(run)}
-                  {view === 'shadow' && renderRunBody(shadow)}
-                </div>
-              </div>
-            )}
+            {expanded && renderRunBody(run)}
           </div>
         );
         };

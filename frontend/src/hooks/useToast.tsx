@@ -107,7 +107,7 @@ export function useToast() {
             position: 'fixed',
             top: 16,
             right: 16,
-            zIndex: 9999,
+            zIndex: 'var(--kr-z-toast)',
             display: 'flex',
             flexDirection: 'column',
             gap: 8,

@@ -28,7 +28,7 @@ the step, clear its condition action and stop normal workflow continuation.
 The persisted step output names the paths and detection reasons without
 copying suspected credentials. Files and index entries remain available for
 inspection. An incomplete snapshot prevents the agent launch; an incomplete
-post-step audit also fails the step. [src: file: backend/src/workflows/runner.rs:18-27#fail_document_audit] [src: file: backend/src/workflows/runner.rs:2612-2619#preparation_error] [src: file: backend/src/workflows/runner.rs:2767-2793#audit_docs_writes]
+post-step audit also fails the step. [src: file: backend/src/workflows/runner.rs:18-27#fail_document_audit] [src: file: backend/src/workflows/runner.rs:2612-2619#preparation_error] [src: file: backend/src/workflows/runner.rs:2821-2847#audit_docs_writes]
 
 Explicit failure compensation and workspace hooks keep their existing
 behavior. This audit is a post-step check, not a sandbox: it cannot undo an
