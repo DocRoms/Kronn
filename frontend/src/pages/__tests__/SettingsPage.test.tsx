@@ -874,7 +874,11 @@ describe('SettingsPage', () => {
 
     it('shows no value, writes nothing, and keeps the select disabled until the server answers', async () => {
       let answer!: (cfg: unknown) => void;
-      getServerConfig.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
+      // ONE shared pending promise for every getServerConfig call: SettingsPage and
+      // WorkersSection (KT-1718) each fetch the config, and a per-call promise would
+      // overwrite `answer` so the retention request would never resolve.
+      const pending = new Promise(resolve => { answer = resolve; });
+      getServerConfig.mockImplementation(() => pending);
       await wrap(<SettingsPage {...defaultProps} />);
       const select = screen.getByLabelText(label) as HTMLSelectElement;
       expect(select).toBeDisabled();
