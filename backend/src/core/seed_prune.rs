@@ -12,15 +12,31 @@
 //! exactly what a lane wants):
 //!
 //! * a **unit** is a `.fingerprint/<package>-<hash>` directory; its **kind** is
-//!   the artifact it describes (`lib-serde`, `bin-kronn`, `test-lib-kronn`...).
-//!   Within one `(package, kind)`, the unit written last is the latest build; an
-//!   older one is a leftover of another rustc, feature set or version, and goes
-//!   with every file of the same hash (`deps/*-<hash>.*`, `build/<package>-<hash>/`).
-//!   Units written within [`SAME_BUILD_WINDOW`] of the newest are one build's
-//!   siblings and stay. The only unit of its kind is never touched, however old;
+//!   the artifact it describes (`lib-serde`, `bin-kronn`, `test-lib-kronn`...) and
+//!   its `<kind>.json` is the fingerprint Cargo itself compares: `rustc`,
+//!   `features`, `profile`, `target`, `path`, `rustflags`, `compile_kind`...
+//!   Units of one package that differ by any of these are **distinct valid
+//!   variants** (`hashbrown` with `["raw"]` and with its default features, a
+//!   dependency built for the host and for the target) and one build needs
+//!   several of them: a package is never reduced to its newest unit. Only units
+//!   with the *same identity* (package, kind, features, profile, target, path,
+//!   config, rustflags, compile kind) are one unit built several times, and the
+//!   one written last is the current one. The older ones are leftovers (a
+//!   dependency changed underneath them) and go with every file of the same hash
+//!   (`deps/*-<hash>.*`, `build/<package>-<hash>/`);
+//! * a unit built by a **different `rustc`** than the units written last is stale
+//!   whatever its age (a toolchain upgrade): Cargo rebuilds it anyway. When the
+//!   last writes disagree on the compiler, nothing is judged by it;
+//! * a unit whose fingerprint cannot be read or parsed, or whose write time
+//!   cannot be read, is never judged: it stays. So does a unit that carries no
+//!   `target` and no `path` (the run of a build script, zeroed by Cargo): it
+//!   cannot be told apart from the run of another version of the package;
 //! * a unit of a package the main checkout's `Cargo.lock` no longer lists (a
 //!   removed dependency) is stale whatever its age, when the caller gives the
 //!   locked package names.
+//!
+//! Pruning cannot ping-pong: what it removes is what a build of the same
+//! configuration has already superseded, never a variant the next build needs.
 //!
 //! `incremental/` is left alone: its directories are keyed by crate name, where
 //! a library and its tests share a name and are both current.
@@ -44,8 +60,8 @@ const DEPS_DIR: &str = "deps";
 const BUILD_DIR: &str = "build";
 /// Cargo's advisory lock on a profile directory, held for a build's duration.
 pub const CARGO_BUILD_LOCK: &str = ".cargo-lock";
-/// Units written within this of the newest of their kind are one build's
-/// siblings (two feature sets of a crate built together), not leftovers.
+/// The compiler of the latest build is the one every unit written within this
+/// of the newest write agrees on.
 pub const SAME_BUILD_WINDOW: Duration = Duration::from_secs(3600);
 /// A hash in Cargo's file names: 16 lowercase hex digits.
 const HASH_LEN: usize = 16;
@@ -126,9 +142,48 @@ fn hash_of_deps_entry(name: &str) -> Option<&str> {
 }
 
 struct Unit {
+    package: String,
+    kind: String,
     dir_name: String,
     hash: String,
     written: SystemTime,
+    fingerprint: Fingerprint,
+}
+
+/// What of a unit's `<kind>.json` the prune reads.
+struct Fingerprint {
+    /// Cargo's hash of the compiler that built it.
+    rustc: String,
+    /// The configuration of the unit; `None` when it carries no `target` and no
+    /// `path` (the run of a build script) and so identifies nothing.
+    identity: Option<String>,
+}
+
+/// Read `<kind>.json`; `None` when it cannot be read or is not a fingerprint.
+fn read_fingerprint(dir: &Path, kind: &str) -> Option<Fingerprint> {
+    let text = fs::read_to_string(dir.join(format!("{kind}.json"))).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let field = |name: &str| json.get(name).filter(|value| !value.is_null());
+    let rustc = field("rustc")?.to_string();
+    let features = field("features")?;
+    let profile = field("profile")?;
+    let target = field("target")?;
+    let path = field("path")?;
+    let zero = |value: &serde_json::Value| value.as_u64() == Some(0);
+    // `config`, `rustflags` and `compile_kind` are absent from older Cargos.
+    let identity = (!(zero(target) && zero(path))).then(|| {
+        serde_json::json!([
+            features,
+            profile,
+            target,
+            path,
+            field("config"),
+            field("rustflags"),
+            field("compile_kind"),
+        ])
+        .to_string()
+    });
+    Some(Fingerprint { rustc, identity })
 }
 
 /// What a unit describes: the extension-less file Cargo keeps in its
@@ -190,16 +245,34 @@ fn remove_entry(path: &Path, report: &mut PruneReport) -> io::Result<()> {
     Ok(())
 }
 
-/// The hashes of the stale units of `debug_dir`, with the fingerprint
-/// directories to remove.
+/// The compiler of the latest build: the one the units written within
+/// [`SAME_BUILD_WINDOW`] of the newest write all agree on, `None` when they do
+/// not (two toolchains in use: nothing is stale by its compiler).
+fn latest_rustc(units: &[Unit]) -> Option<&str> {
+    let newest = units.iter().map(|unit| unit.written).max()?;
+    let mut latest = units
+        .iter()
+        .filter(|unit| {
+            newest
+                .duration_since(unit.written)
+                .is_ok_and(|behind| behind <= SAME_BUILD_WINDOW)
+        })
+        .map(|unit| unit.fingerprint.rustc.as_str());
+    let first = latest.next()?;
+    latest.all(|rustc| rustc == first).then_some(first)
+}
+
+/// The hashes of the stale units of `debug_dir`, the hashes that stay, and the
+/// fingerprint directories to remove.
 fn stale_units(
     debug_dir: &Path,
     locked: Option<&HashSet<String>>,
 ) -> (HashSet<String>, HashSet<String>, Vec<(String, PathBuf)>) {
     let fingerprints = debug_dir.join(FINGERPRINT_DIR);
-    let mut groups: HashMap<(String, String), Vec<Unit>> = HashMap::new();
-    let mut unlisted: Vec<Unit> = Vec::new();
+    let mut units: Vec<Unit> = Vec::new();
+    let mut stale_hashes = HashSet::new();
     let mut kept_hashes = HashSet::new();
+    let mut stale_dirs = Vec::new();
     for entry in fs::read_dir(&fingerprints).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let Some((package, hash)) = split_unit_name(&name) else {
@@ -214,43 +287,54 @@ fn stale_units(
             kept_hashes.insert(hash.to_string());
             continue;
         };
-        let unit = Unit {
+        if locked.is_some_and(|names| !names.contains(&unify(package))) {
+            stale_hashes.insert(hash.to_string());
+            stale_dirs.push((hash.to_string(), path));
+            continue;
+        }
+        // Nor one whose fingerprint cannot be read or parsed.
+        let kind = unit_kind(&path);
+        let Some(fingerprint) = read_fingerprint(&path, &kind) else {
+            kept_hashes.insert(hash.to_string());
+            continue;
+        };
+        units.push(Unit {
+            package: package.to_string(),
+            kind,
             dir_name: name.clone(),
             hash: hash.to_string(),
             written,
-        };
-        if locked.is_some_and(|names| !names.contains(&unify(package))) {
-            unlisted.push(unit);
-            continue;
-        }
-        groups
-            .entry((package.to_string(), unit_kind(&path)))
-            .or_default()
-            .push(unit);
+            fingerprint,
+        });
     }
 
-    let mut stale_hashes = HashSet::new();
-    let mut stale_dirs = Vec::new();
-    for unit in unlisted {
-        stale_hashes.insert(unit.hash.clone());
-        stale_dirs.push((unit.hash, fingerprints.join(unit.dir_name)));
+    let latest = latest_rustc(&units).map(str::to_string);
+    let mut groups: HashMap<(&str, &str, &str), Vec<&Unit>> = HashMap::new();
+    for unit in &units {
+        if latest
+            .as_deref()
+            .is_some_and(|rustc| rustc != unit.fingerprint.rustc)
+        {
+            stale_hashes.insert(unit.hash.clone());
+            stale_dirs.push((unit.hash.clone(), fingerprints.join(&unit.dir_name)));
+        } else if let Some(identity) = &unit.fingerprint.identity {
+            groups
+                .entry((&unit.package, &unit.kind, identity))
+                .or_default()
+                .push(unit);
+        } else {
+            kept_hashes.insert(unit.hash.clone());
+        }
     }
-    for units in groups.into_values() {
-        let newest = units
-            .iter()
-            .map(|unit| unit.written)
-            .max()
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        for unit in units {
-            let sibling = newest
-                .duration_since(unit.written)
-                .map(|behind| behind <= SAME_BUILD_WINDOW)
-                .unwrap_or(true);
-            if sibling {
-                kept_hashes.insert(unit.hash);
+    for same_identity in groups.into_values() {
+        let newest = same_identity.iter().map(|unit| unit.written).max();
+        for unit in same_identity {
+            // A tie on the write time is not a verdict: both stay.
+            if Some(unit.written) == newest {
+                kept_hashes.insert(unit.hash.clone());
             } else {
                 stale_hashes.insert(unit.hash.clone());
-                stale_dirs.push((unit.hash, fingerprints.join(unit.dir_name)));
+                stale_dirs.push((unit.hash.clone(), fingerprints.join(&unit.dir_name)));
             }
         }
     }

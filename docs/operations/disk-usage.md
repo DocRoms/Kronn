@@ -57,21 +57,32 @@ A lane starts as a copy-on-write clone of the main checkout's `target/debug` (th
 cloning it, Kronn prunes the seed to its latest build, so a lane never inherits months of stale artifacts and
 never pays to rewrite them. The prune runs in `seed_lane`, on every lane start, and costs a walk of the
 fingerprint directory: with nothing stale it removes nothing.
-[src: file: backend/src/core/seed_prune.rs:305-322#prune_and_lock_shared]
+[src: file: backend/src/core/seed_prune.rs:389-401#prune_and_lock_shared]
 
 **What is stale is decided from Cargo's bookkeeping, never from a file's age alone** (an unchanged dependency
 keeps its months-old mtime and is exactly what a lane wants):
 
 - a *unit* is a `.fingerprint/<package>-<hash>` directory; its *kind* is the artifact it describes
-  (`lib-serde`, `bin-kronn`, `test-lib-kronn`, a build script's...). Within one `(package, kind)` the unit
-  written last is the latest build; an older one is the leftover of another rustc, feature set or version,
-  and goes with every file of its hash (`deps/*-<hash>.*`, `build/<package>-<hash>/`). Units written within
-  an hour of the newest are one build's siblings and stay. The **only** unit of its kind is never touched,
-  however old;
+  (`lib-serde`, `bin-kronn`, `test-lib-kronn`, a build script's...), and its `<kind>.json` is the fingerprint
+  Cargo itself compares (`rustc`, `features`, `profile`, `target`, `path`, `rustflags`, `compile_kind`...).
+  Units of one package that differ by any of these are **distinct valid variants** (`hashbrown` with
+  `["raw"]` and with its default features, a dependency built for the host and for the target): one build
+  needs several of them, so a package is never reduced to its newest unit. Only units with the **same
+  identity** (package, kind, features, profile, target, path, config, rustflags, compile kind) are one unit
+  built several times; the one written last is current, the older ones are leftovers (a dependency changed
+  underneath them) and go with every file of their hash (`deps/*-<hash>.*`, `build/<package>-<hash>/`). A
+  rebuild makes its predecessor the leftover and nothing else, so pruning again right after a rebuild removes
+  nothing: no ping-pong between the main checkout's build and the next lane;
+- a unit built by a **different `rustc`** than the units written last (all those within an hour of the newest
+  write) is stale whatever its age: a toolchain upgrade, Cargo rebuilds it anyway. When those last writes
+  disagree on the compiler (a stable and a nightly build in the same hour) nothing is judged by it;
+- **never judged, always kept**: a unit whose fingerprint cannot be read or parsed (or whose write time cannot
+  be read), and the zeroed run of a build script (`target`, `path` and `profile` are all `0`: the runs of two
+  versions of one package cannot be told apart);
 - a unit of a package the main checkout's `Cargo.lock` files (root and each first-level directory) no longer
   list — a removed dependency — is stale whatever its age. No lock read means no such rule, never "everything
   is stale".
-[src: file: backend/src/core/seed_prune.rs:195-262#stale_units]
+[src: file: backend/src/core/seed_prune.rs:267-342#stale_units]
 [src: file: backend/src/core/task_worker_lane_warm.rs:577-595#main_checkout_locked_packages]
 
 `incremental/` is left alone: its directories are keyed by crate name, and a library and its tests share one
@@ -312,9 +323,13 @@ The first three keys are editable in Settings → Disk or `POST /api/config/serv
 - **Pre-existing lanes carry no marker.** Those that a managed workspace row still names are attributed
   and swept like any orphan. The others (no row, or a row of an unmanaged workspace) show as `foreign`: no
   sweep takes them, a quiet one can be deleted from the panel, one entry at a time.
-- **Seed pruning keeps one build per kind.** Two feature sets of one crate built days apart are two
-  "builds": the older is pruned and a lane rebuilds it. A removed dependency is only recognised through the
-  main checkout's `Cargo.lock`; `incremental/` and artifacts no fingerprint names are never pruned.
+- **Seed pruning is by configuration, not by crate.** Two feature sets of one crate stay, however far apart
+  they were built, so the seed can hold a few variants a build no longer uses (they are only superseded by
+  a rebuild of the same configuration). On the 894-unit seed of 2026-11-12 (one rustc) the rule removes 77
+  units (415 `deps/` and `build/` entries, about 0.5 GB apparent of 13 GB), not the 326 a per-crate rule
+  would have pruned. Alternating two dependency states in the main checkout (a branch switch back and
+  forth) still costs a lane one rebuild per switch. A removed dependency is only recognised through the main
+  checkout's `Cargo.lock`; `incremental/` and artifacts no fingerprint names are never pruned.
 - **Real sizes exist on APFS only.** On another file system the panel shows apparent sizes, labelled as such.
   A real size is per entry: it never adds up lanes that share blocks with each other.
 - A checkout over the evidence cap, or recently written, stays until a human acts or it goes idle; the
@@ -329,8 +344,9 @@ The first three keys are editable in Settings → Disk or `POST /api/config/serv
 
 Unit: ownership and age rules (`core/worktree.rs` idle tests, `api/disk_test.rs`: foreign, ownerless and
 stalled states, apparent vs real totals), the guard's decision, the bounded measure and the real (unique)
-size of an APFS clone (`core/disk_usage_test.rs`), the seed prune: latest build kept, nothing pruned by age
-alone, removed dependencies, never while a build holds the lock (`core/seed_prune_test.rs`), and a lane that
+size of an APFS clone (`core/disk_usage_test.rs`), the seed prune on real fingerprint JSON shapes: variants of a crate kept, an identical
+identity pruned, a changed `rustc` pruned, an unparseable fingerprint kept, no ping-pong after a rebuild,
+nothing pruned by age alone, removed dependencies, never while a build holds the lock (`core/seed_prune_test.rs`), and a lane that
 never clones a stale seed artifact (`core/task_worker_lane_warm_test.rs`). End to end (`api/orchestration.rs`): an aged orphan is
 swept and a fresh, foreign or live-execution lane never; a launch under pressure sweeps first, then is
 refused, parks the execution and alerts the principal room. KT-1691 adds, on a real repository and database:

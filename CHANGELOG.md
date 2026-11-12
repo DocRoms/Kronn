@@ -18,8 +18,9 @@ Release notes for 0.9.3 and earlier are available in the
 - **KT-1691 — Disk hygiene, second pass.** Three fixes after the 2026-11-11
   incident (a 2 TB disk down to 173 GB free while 33 lane build dirs read ~190 GB
   each). A lane's seed (`target/debug` of the main checkout) is now **pruned to its
-  latest build before it is cloned**: units superseded within the same package and
-  kind, and units of packages `Cargo.lock` no longer lists, go with every file of
+  latest build before it is cloned**: units of one configuration (package, kind, features,
+  profile, target, rustflags) superseded by a newer build of it, units built by an
+  older `rustc`, and units of packages `Cargo.lock` no longer lists, go with every file of
   their hash; a unit is never pruned by age alone, and never while a build holds
   Cargo's lock. Sizes are reported **real next to apparent**: `unique_bytes` is what
   deleting an entry frees (APFS private size), `bytes` counts shared clone blocks in
