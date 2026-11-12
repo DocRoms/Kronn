@@ -264,21 +264,29 @@ Safe to interrupt at any point; a rerun converges:
    left as it is and logged once. A `config.toml.corrupt.<timestamp>` whose
    encryption fails is not cut down: a config.toml that could never be read may
    hold credentials that reached no encrypted store, so it is left whole and
-   reported until the encryption succeeds. A copy holding a top-level
-   `encryption_secret` with a non-blank string that is not a readable key (a
-   `retired-key` file included), or two different keys (a key-only copy keeps one
-   line), is never dropped, cut down or deferred (it may be the only trace of a
-   key): it is left as it is and reported. An empty value, a number, a commented
-   line or a value under a table holds no key and does not keep a copy: it is cut down or
-   removed like any other. A symbolic
-   link or Windows reparse point is reported too, as is a file that is not a regular file (a FIFO
-   would block the pass) or a file with several hard links, which the pass
-   never reads through, renames over or removes. The key is the top-level
-   `encryption_secret`: a text that parses is decided by that value alone, a
-   text that does not (a duplicate key, say) is scanned line by line down to its
-   first table, so a valid key line is still found past a value that is not a
-   key, and an `encryption_secret` under `[tokens]`, in an MCP env table or
-   inside a multi-line string is never taken for the key. The pass reads
+   reported until the encryption succeeds. A copy that mentions
+   `encryption_secret` where it may be the only trace of a key it cannot read is
+   never dropped, cut down or deferred: it is left as it is and reported. That is
+   a top-level non-blank string that is not a readable key (a `retired-key` file
+   included), a damaged key line (missing quote, trailing text), a multi-line
+   opener, a line inside a multi-line string or an array left open, or two
+   different keys (a key-only copy keeps one line); a readable key beside such a
+   value is not cut down either. What is proven harmless does not keep a copy: an
+   empty value, a number, a commented line, or a mention under a table the scan
+   reached with no string or array open (a byte-order mark before the table
+   header does not hide it). Such a copy is cut down or removed like any other. A
+   symbolic link or Windows reparse point is reported too, as is a file that is
+   not a regular file (a FIFO would block the pass) or a file with several hard
+   links, which the pass never reads through, renames over or removes. The key is
+   the top-level `encryption_secret`: a text that parses is decided by that value
+   alone, a text that does not (a duplicate key, say) is scanned line by line
+   down to its first table, so a valid key line is still found past a value that
+   is not a key, and an `encryption_secret` under `[tokens]`, in an MCP env table
+   or inside a multi-line string is never taken for the key. An unreadable
+   `config.toml` set aside while no key exists follows the same policy: several
+   different keys, or a key line that cannot be read, keep the whole content as
+   `config.toml.corrupt.<timestamp>` (`0600`, reported at every start, encrypted
+   once a key exists); the key-only copy is for one readable key. The pass reads
    a copy then renames over it, once at start in the single process that owns
    the data directory; a copy swapped in between is out of scope. One failure
    does not stop the others. The key lookup tells three cases apart. A key is found:

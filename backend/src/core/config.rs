@@ -490,6 +490,11 @@ pub async fn load() -> Result<Option<AppConfig>> {
                          once you have checked them.",
                         if parseable { "holds" } else { "may hold" }
                     ),
+                    (config_copies::Aside::KeptAsIs(name), true) => format!(
+                        " {name} {} credentials in clear (readable only by you): delete it once \
+                         you have checked it and its encryption key line.",
+                        if parseable { "holds" } else { "may hold" }
+                    ),
                     (config_copies::Aside::Deferred(name), true) => format!(
                         " {name} {} credentials in clear until it is encrypted at the next start: \
                          restart once the encryption key can be read.",
@@ -1204,9 +1209,9 @@ fn set_aside_unreadable_config(
 /// A top-level `encryption_secret = "..."` line that parses on its own: the
 /// first whose value is a real key, else the first non-empty one (a value that
 /// is not a key never hides a valid key line further down). See
-/// [`salvage_key_values`] for what counts as a top-level line.
+/// [`salvage_key_scan`] for what counts as a top-level line.
 pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
-    let values = salvage_key_values(content);
+    let values = salvage_key_scan(content).values;
     values
         .iter()
         .find(|v| super::crypto::canonical_secret(v).is_ok())
@@ -1214,48 +1219,90 @@ pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
         .cloned()
 }
 
-/// Every non-empty value of a top-level `encryption_secret` line of `content`
-/// that parses on its own, in order: a duplicate key makes the whole text
-/// invalid TOML, and each of its values may be the only copy of a live key.
+/// What the top level of a text that does not parse says about its
+/// `encryption_secret` ([`salvage_key_scan`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct KeyScan {
+    /// Every non-blank string of a top-level `encryption_secret` line that parses
+    /// on its own, in order.
+    pub values: Vec<String>,
+    /// The text mentions `encryption_secret` somewhere the scan cannot tell it is
+    /// harmless (a line that does not parse, the opener of a multi-line string, a
+    /// line inside a string or an array that is still open): it may hold the only
+    /// copy of a live key, so a copy of it is never dropped nor cut down.
+    pub unreadable: bool,
+}
+
+/// The name of the key's line in config.toml.
+const KEY_NAME: &str = "encryption_secret";
+
+/// Scan a text that does not parse (a duplicate key, a broken line) for its
+/// top-level `encryption_secret`, line by line: a duplicate key makes the whole
+/// text invalid TOML, and each of its values may be the only copy of a live key.
 ///
-/// Only the top level of the text is read: the scan stops at the first line that
-/// opens a table (`[` or `[[`), and a line inside a multi-line string is not a
-/// line of the document. An `encryption_secret` under `[tokens]`, an MCP env
-/// table or in a string is a value of something else, never the key. (A
-/// multi-line array whose element line starts with `[` also ends the scan: the
-/// safe side, the key is then looked for in the other stores.)
-pub(crate) fn salvage_key_values(content: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    // The delimiter of the multi-line string the scan is inside, if any.
+/// Only the top level is read, and what is mentioned elsewhere is told from what
+/// is merely unreadable:
+/// - the scan ends at the first line that opens a table (`[` or `[[`, a leading
+///   byte-order mark ignored) reached with no string or array open: a mention
+///   below it belongs to that table (`[tokens]`, an MCP env table), not to the
+///   key;
+/// - a mention in a comment, or with a blank or non-string value, holds no key;
+/// - any other mention is `unreadable`: a line that does not parse (missing
+///   quote, trailing text), a multi-line opener, a line inside a multi-line
+///   string or inside an array still open (a `[` there is an element, not a
+///   table).
+pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
+    let mut scan = KeyScan::default();
+    // The delimiter of the multi-line string the scan is inside, if any, and the
+    // depth of the arrays and inline tables it is inside.
     let mut open_string: Option<&str> = None;
-    for line in content.lines() {
+    let mut depth = 0usize;
+    for (n, raw) in content.lines().enumerate() {
+        let line = if n == 0 {
+            raw.strip_prefix('\u{FEFF}').unwrap_or(raw)
+        } else {
+            raw
+        };
         let mut rest = line;
         if let Some(delimiter) = open_string {
-            match string_end(rest, delimiter) {
+            scan.unreadable |= line.contains(KEY_NAME);
+            match string_end(line, delimiter) {
                 Some(after) => rest = after,
                 None => continue,
             }
-        } else if line.trim_start().starts_with('[') {
-            break;
-        } else if let Some(value) = key_value_of(line) {
-            values.push(value);
+        } else if depth > 0 {
+            scan.unreadable |= line.contains(KEY_NAME);
+        } else {
+            let top = line.trim_start();
+            if top.starts_with('[') {
+                break;
+            }
+            if !top.is_empty() && !top.starts_with('#') && top.contains(KEY_NAME) {
+                match key_value_of(line) {
+                    Some(Some(value)) => scan.values.push(value),
+                    Some(None) => {}
+                    None => scan.unreadable = true,
+                }
+            }
         }
-        // A multi-line string opened on this line swallows the following ones.
-        open_string = opened_string(rest);
+        (open_string, depth) = line_state(rest, depth);
     }
-    values
+    scan
 }
 
-/// The value of `encryption_secret = "..."` when `line` is that assignment on its
-/// own and the value is a string that is not blank (a number or an array can
-/// never be a key).
-fn key_value_of(line: &str) -> Option<String> {
+/// `line` read on its own as one `key = value` line that mentions
+/// `encryption_secret`: `None` when it does not parse, else the value of the
+/// assignment when it is a string that is not blank (a number, an array or a
+/// value of another key can never be a key).
+fn key_value_of(line: &str) -> Option<Option<String>> {
     let table = line.trim().parse::<toml::Table>().ok()?;
-    table
-        .get("encryption_secret")
-        .and_then(|v| v.as_str())
-        .filter(|k| !k.trim().is_empty())
-        .map(str::to_string)
+    Some(
+        table
+            .get(KEY_NAME)
+            .and_then(|v| v.as_str())
+            .filter(|k| !k.trim().is_empty())
+            .map(str::to_string),
+    )
 }
 
 /// What follows the end of a multi-line string (`delimiter` is `"""` or `'''`)
@@ -1276,13 +1323,15 @@ fn string_end<'a>(line: &'a str, delimiter: &str) -> Option<&'a str> {
     None
 }
 
-/// The delimiter of the multi-line string that `line` opens and leaves open:
-/// single-line strings and comments are skipped over.
-fn opened_string(line: &str) -> Option<&'static str> {
+/// What `line` leaves open after it: the delimiter of the multi-line string it
+/// opens and does not close, and the depth of the arrays and inline tables
+/// (`depth` is the one before the line). Single-line strings and comments are
+/// skipped over.
+fn line_state(line: &str, mut depth: usize) -> (Option<&'static str>, usize) {
     let mut rest = line;
     while let Some(c) = rest.chars().next() {
         if c == '#' {
-            return None;
+            break;
         }
         let delimiter = if rest.starts_with("\"\"\"") {
             Some("\"\"\"")
@@ -1294,7 +1343,7 @@ fn opened_string(line: &str) -> Option<&'static str> {
         if let Some(delimiter) = delimiter {
             match string_end(&rest[3..], delimiter) {
                 Some(after) => rest = after,
-                None => return Some(delimiter),
+                None => return (Some(delimiter), depth),
             }
         } else if c == '"' || c == '\'' {
             // A single-line string: up to its closing quote (or the end of the line).
@@ -1310,10 +1359,15 @@ fn opened_string(line: &str) -> Option<&'static str> {
             }
             rest = &rest[end..];
         } else {
+            match c {
+                '[' | '{' => depth += 1,
+                ']' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
             rest = &rest[c.len_utf8()..];
         }
     }
-    None
+    (None, depth)
 }
 
 /// `default_config()` without a key: a missing config.toml must not offer a

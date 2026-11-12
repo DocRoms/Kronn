@@ -312,15 +312,18 @@ fn a_valid_key_line_behind_a_junk_one_is_kept_and_a_junk_key_is_never_dropped() 
     let junk = format!("encryption_secret = \"junk\"\n{LEAKY}");
     std::fs::write(d.join("config.toml.corrupt.20261001T000000Z"), &junk).unwrap();
 
+    // The valid key is found past the junk one (above), but a copy holding a
+    // value it cannot read is not cut down to the key line: the junk value may be
+    // the only trace of another key. Both are kept whole and reported.
     let report = protect_clear_copies(d, None);
     assert_eq!(
         (report.reduced, report.failures.len()),
-        (1, 1),
+        (0, 2),
         "{report:?}"
     );
     assert_eq!(
         std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
-        format!("encryption_secret = \"{k}\"\n")
+        dup
     );
     assert_eq!(
         std::fs::read_to_string(d.join("config.toml.corrupt.20261001T000000Z")).unwrap(),
@@ -759,6 +762,183 @@ fn without_a_key_a_clear_copy_keeps_only_its_key_line() {
     let after = names(d);
     assert_eq!(protect_clear_copies(d, None), Protected::default());
     assert_eq!(names(d), after);
+}
+
+/// A top-level key line the line scanner cannot read is never dropped (with no
+/// key anywhere nothing else holds it): kept as it is and reported. One input
+/// per way a line can be damaged.
+#[test]
+fn a_damaged_key_line_keeps_the_copy_whole_and_reported() {
+    let k = crypto::generate_secret();
+    let inputs = [
+        // (a) missing closing quote
+        format!(
+            "encryption_secret = \"{k}\nlanguage = \"fr\"\n[tokens]\nanthropic = \"sk-clear\"\n"
+        ),
+        // (b) trailing text
+        format!("encryption_secret = \"{k}\" x\n{LEAKY}"),
+        // (c) a multi-line string, in a text that does not parse
+        format!("encryption_secret = \"\"\"\n{k}\"\"\"\nbroken\n{LEAKY}"),
+        format!("encryption_secret = '''\n{k}'''\nbroken\n{LEAKY}"),
+        // (d) an intact key line below a line that starts with `[` in an array
+        // left open: that line is an element, not a table
+        format!("a = [\n  [1, 2],\nencryption_secret = \"{k}\"\n{LEAKY}"),
+        // (e) a key line swallowed by a multi-line string left open above it
+        format!("a = \"\"\"\nencryption_secret = \"{k}\"\n{LEAKY}"),
+        format!("a = '''\nencryption_secret = \"{k}\"\n{LEAKY}"),
+        // a readable key beside a value that cannot be read
+        format!("encryption_secret = \"{k}\"\nencryption_secret = \"junk\"\n{LEAKY}"),
+        format!("encryption_secret = \"{k}\"\nencryption_secret = \"{k}\" x\n{LEAKY}"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for (i, text) in inputs.iter().enumerate() {
+        assert!(text.parse::<toml::Table>().is_err(), "{text}");
+        assert!(key_lines(text).unreadable, "{text}");
+        std::fs::write(
+            d.join(format!("config.toml.backup.2026100{i}T000000Z")),
+            text,
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        let report = protect_clear_copies(d, None);
+        assert_eq!(
+            (report.reduced, report.deferred, report.failures.len()),
+            (0, 0, inputs.len()),
+            "{report:?}"
+        );
+        for (i, text) in inputs.iter().enumerate() {
+            let name = format!("config.toml.backup.2026100{i}T000000Z");
+            assert_eq!(&std::fs::read_to_string(d.join(name)).unwrap(), text);
+        }
+    }
+
+    // The same through the stores' proof, and sealed whole once a key exists.
+    let report = protect_copies(d, &Sealing::Absent);
+    assert_eq!(report.failures.len(), inputs.len(), "{report:?}");
+    let key = crypto::generate_secret();
+    let report = protect_clear_copies(d, Some(&key));
+    assert_eq!(
+        (report.sealed, report.failures.len()),
+        (inputs.len(), 0),
+        "{report:?}"
+    );
+    assert!(names(d).iter().all(|n| n.ends_with(".enc")));
+}
+
+/// A mention proven harmless does not keep a credential copy in clear, in a text
+/// that does not parse either: a comment, a value under a table the scan reached
+/// with nothing open (a byte-order mark before the header included), a blank or
+/// non-string value, an array element that is not a key line.
+#[test]
+fn a_mention_proven_harmless_is_dropped_even_in_a_text_that_does_not_parse() {
+    let k = crypto::generate_secret();
+    let droppable = [
+        format!("{LEAKY}encryption_secret = \"{k}\"\n[broken\n"),
+        format!("# encryption_secret = \"{k}\"\n{LEAKY}[broken\n"),
+        format!("language = \"fr\" # encryption_secret = \"{k}\"\n{LEAKY}[broken\n"),
+        format!("encryption_secret = \"\"\nbroken\n{LEAKY}"),
+        format!("encryption_secret = 7\n[broken\n{LEAKY}"),
+        // A byte-order mark before a table header: the table is still a table.
+        format!("\u{FEFF}[tokens]\nencryption_secret = \"{k}\"\n{LEAKY}[broken\n"),
+        // An array closed before the key's table: the `[` below it is a header.
+        format!("a = [\n  [1, 2],\n]\n[tokens]\nencryption_secret = \"{k}\"\n[broken\n"),
+        // A string closed before it.
+        format!("a = \"\"\"\nx\n\"\"\"\n[tokens]\nencryption_secret = \"{k}\"\n[broken\n"),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for (i, text) in droppable.iter().enumerate() {
+        assert!(text.parse::<toml::Table>().is_err(), "{text}");
+        assert_eq!(key_of(text), None, "{text}");
+        assert!(!config::salvage_key_scan(text).unreadable, "{text}");
+        std::fs::write(
+            d.join(format!("config.toml.backup.2026100{i}T000000Z")),
+            text,
+        )
+        .unwrap();
+    }
+    let report = protect_clear_copies(d, None);
+    assert_eq!(
+        (report.reduced, report.deferred, report.failures.len()),
+        (droppable.len(), 0, 0),
+        "{report:?}"
+    );
+    assert!(names(d).is_empty(), "{:?}", names(d));
+
+    // A byte-order mark does not hide a key line on the first line either.
+    let bom_key = format!("\u{FEFF}encryption_secret = \"{k}\"\n[broken\n");
+    assert_eq!(key_of(&bom_key), Some(k));
+}
+
+/// An unreadable config.toml set aside with no key: several different keys, or a
+/// key line that cannot be read, keep the whole content (owner-only) and say so,
+/// never one key line or nothing; one readable key is still the only thing kept.
+#[test]
+fn an_unreadable_config_with_several_keys_or_a_damaged_key_line_is_kept_whole() {
+    let (k1, k2) = (crypto::generate_secret(), crypto::generate_secret());
+    let kept = [
+        format!("encryption_secret = \"{k1}\"\nencryption_secret = \"{k2}\"\n{LEAKY}"),
+        format!("encryption_secret = \"garbled\"\nx = [broken\n{LEAKY}"),
+        format!("encryption_secret = \"{k1}\nlanguage = \"fr\"\n{LEAKY}"),
+        format!("encryption_secret = \"{k1}\"\nencryption_secret = \"junk\"\n{LEAKY}"),
+    ];
+    for text in &kept {
+        let bare = tempfile::tempdir().unwrap();
+        let Aside::KeptAsIs(name) = set_aside_content(bare.path(), text.as_bytes(), None).unwrap()
+        else {
+            panic!("kept whole: {text}")
+        };
+        assert!(name.starts_with(CORRUPT_PREFIX), "{name}");
+        assert_eq!(
+            &std::fs::read_to_string(bare.path().join(&name)).unwrap(),
+            text
+        );
+        assert!(Aside::KeptAsIs(name.clone()).describe().contains(&name));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(bare.path().join(&name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        // No other file, no temp file left behind.
+        assert_eq!(names(bare.path()), vec![name.clone()]);
+
+        // The next start reports it, and seals it once a key exists.
+        let report = protect_clear_copies(bare.path(), None);
+        assert_eq!(
+            (report.reduced, report.failures.len()),
+            (0, 1),
+            "{report:?}"
+        );
+        assert_eq!(
+            &std::fs::read_to_string(bare.path().join(&name)).unwrap(),
+            text
+        );
+        let key = crypto::generate_secret();
+        let report = protect_clear_copies(bare.path(), Some(&key));
+        assert_eq!(report.sealed, 1, "{report:?}");
+        assert_eq!(
+            open_sealed(&bare.path().join(format!("{name}.enc")), &[key]).unwrap(),
+            *text
+        );
+    }
+
+    // One readable key, even written twice: only the key line is kept.
+    let same = format!("encryption_secret = \"{k1}\"\nencryption_secret = \"{k1}\"\n{LEAKY}");
+    let bare = tempfile::tempdir().unwrap();
+    let Aside::KeyOnly(name) = set_aside_content(bare.path(), same.as_bytes(), None).unwrap()
+    else {
+        panic!("one key is kept alone")
+    };
+    assert_eq!(
+        std::fs::read_to_string(bare.path().join(name)).unwrap(),
+        format!("encryption_secret = \"{k1}\"\n")
+    );
 }
 
 /// The kept-aside content of an unreadable config.toml: whole but encrypted
