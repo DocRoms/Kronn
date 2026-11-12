@@ -80,8 +80,11 @@ update the token in Settings → APIs.`) and ends with `[SIGNAL: auth_refused]`;
 a `CollectApiData` step repeats it with the `N of M sources` count. The run page
 (`RunDetail`) keys its run-level notice on that signal.
 
-Not covered: a token's *known expiry date* — connections store none, so an
-expiring token is only caught by the call (or probe) that gets refused.
+A token's *known expiry date* is not stored, so an expiring token is caught by
+the call or probe that gets refused. Since KT-1692 that probe also runs by itself
+(at start, daily, on demand) for every connection that has a test endpoint — see
+`docs/operations/external-api-connections.md`, "Token checks of API plugin
+connections".
 
 ## Rescan report
 

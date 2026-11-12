@@ -277,7 +277,7 @@ usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
 [src: file: frontend/src/components/settings/AgentsSection.tsx:208-253#saveTierPreference]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1391-1420#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1463-1468#supportsEffort]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1469-1474#supportsEffort]
 
 ## Migration and test invariants
 

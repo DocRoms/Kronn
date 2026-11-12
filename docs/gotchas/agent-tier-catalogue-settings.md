@@ -12,7 +12,7 @@ snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1363-1388#renderSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1369-1394#renderSelect]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
 the editor rereads it and merges only the selected agent/tier, guarded against
@@ -37,7 +37,7 @@ Its three tier controls remain visible offline or without installed models.
 Unknown configured IDs and unavailable rows stay visible and disabled; failed
 or pending snapshot reads and offline health never turn cached data into live
 discovery. Reloading that snapshot or typing a query does not probe Ollama.
-[src: file: frontend/src/components/settings/OllamaCard.tsx:457-459#savedTarget]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:461-463#savedTarget]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:633-683#pickTierModel]
 
 Tier writes reread the complete settings document, merge only the selected
@@ -52,8 +52,8 @@ is appended separately.
 [src: file: frontend/src/components/settings/OllamaCard.tsx:174-202#refresh]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:236-259#pickTierModel]
 [src: file: frontend/src/components/settings/OllamaCard.tsx:261-317#saveContextOverride]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:640-641#tiersLoadError]
-[src: file: frontend/src/components/settings/OllamaCard.tsx:648-652#configuredDefault]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:644-645#tiersLoadError]
+[src: file: frontend/src/components/settings/OllamaCard.tsx:655-659#configuredDefault]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:105-141#merges]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.catalog.test.tsx:182-194#initial]
 [src: file: frontend/src/components/settings/__tests__/OllamaCard.test.tsx:269-288#serializes]

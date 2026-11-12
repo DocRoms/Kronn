@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
 use crate::core::crypto;
@@ -618,6 +618,11 @@ pub fn clear_auth_failure(conn: &Connection, config_id: &str) -> Result<bool> {
     Ok(removed > 0)
 }
 
+/// The last refusal of one config, `None` while its credentials are not refused.
+pub fn get_auth_failure(conn: &Connection, config_id: &str) -> Result<Option<McpAuthFailure>> {
+    Ok(list_auth_failures(conn)?.remove(config_id))
+}
+
 /// Every refused config's last refusal, keyed by `config_id`.
 pub fn list_auth_failures(conn: &Connection) -> Result<HashMap<String, McpAuthFailure>> {
     let mut stmt = conn.prepare(
@@ -640,6 +645,99 @@ pub fn list_auth_failures(conn: &Connection) -> Result<HashMap<String, McpAuthFa
     Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
 }
 
+// ─── Token checks (KT-1692) ──────────────────────────────────────────────────
+
+fn token_outcome_to_str(outcome: McpTokenCheckOutcome) -> &'static str {
+    match outcome {
+        McpTokenCheckOutcome::Ok => "ok",
+        McpTokenCheckOutcome::Refused => "refused",
+        McpTokenCheckOutcome::Inconclusive => "inconclusive",
+    }
+}
+
+fn parse_token_outcome(value: &str) -> Option<McpTokenCheckOutcome> {
+    match value {
+        "ok" => Some(McpTokenCheckOutcome::Ok),
+        "refused" => Some(McpTokenCheckOutcome::Refused),
+        "inconclusive" => Some(McpTokenCheckOutcome::Inconclusive),
+        _ => None,
+    }
+}
+
+/// Store the answer of one proactive probe at `at`. A good answer also moves
+/// `last_good_at`; any other keeps the date of the last good one. A config
+/// deleted meanwhile is not an error: there is nothing left to record.
+pub fn record_token_check(
+    conn: &Connection,
+    config_id: &str,
+    outcome: McpTokenCheckOutcome,
+    detail: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let at = at.to_rfc3339();
+    let good = (outcome == McpTokenCheckOutcome::Ok).then(|| at.clone());
+    conn.execute(
+        "INSERT INTO mcp_token_checks (config_id, checked_at, outcome, detail, last_good_at)
+         SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM mcp_configs WHERE id = ?1)
+         ON CONFLICT(config_id) DO UPDATE SET
+           checked_at = excluded.checked_at,
+           outcome = excluded.outcome,
+           detail = excluded.detail,
+           last_good_at = COALESCE(excluded.last_good_at, mcp_token_checks.last_good_at)",
+        params![config_id, at, token_outcome_to_str(outcome), detail, good],
+    )?;
+    Ok(())
+}
+
+/// A real call just worked: the connection's token was good at `at`. Keeps the
+/// "last good call" of a connection that has no probe.
+pub fn mark_good_call(
+    conn: &Connection,
+    config_id: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO mcp_token_checks (config_id, last_good_at)
+         SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM mcp_configs WHERE id = ?1)
+         ON CONFLICT(config_id) DO UPDATE SET last_good_at = excluded.last_good_at",
+        params![config_id, at.to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn token_check_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<McpTokenCheck> {
+    let outcome: Option<String> = row.get(offset)?;
+    Ok(McpTokenCheck {
+        outcome: outcome.as_deref().and_then(parse_token_outcome),
+        detail: row.get(offset + 1)?,
+        checked_at: row.get(offset + 2)?,
+        last_good_at: row.get(offset + 3)?,
+    })
+}
+
+/// The stored check of one config, `None` when it was never probed nor called.
+pub fn get_token_check(conn: &Connection, config_id: &str) -> Result<Option<McpTokenCheck>> {
+    Ok(conn
+        .query_row(
+            "SELECT outcome, detail, checked_at, last_good_at FROM mcp_token_checks
+             WHERE config_id = ?1",
+            params![config_id],
+            |row| token_check_from_row(row, 0),
+        )
+        .optional()?)
+}
+
+/// Every config's stored check, keyed by `config_id`.
+pub fn list_token_checks(conn: &Connection) -> Result<HashMap<String, McpTokenCheck>> {
+    let mut stmt = conn.prepare(
+        "SELECT config_id, outcome, detail, checked_at, last_good_at FROM mcp_token_checks",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, token_check_from_row(row, 1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
 // ─── Display helpers ─────────────────────────────────────────────────────────
 
 /// Build McpConfigDisplay list with masked secrets and server names.
@@ -651,6 +749,7 @@ pub fn list_configs_display(
     let configs = list_configs(conn)?;
     let mut last_probes = list_last_probes(conn)?;
     let mut auth_failures = list_auth_failures(conn)?;
+    let mut token_checks = list_token_checks(conn)?;
     let preferences = list_config_preferences(conn)?;
     let servers = list_servers(conn)?;
     let registry = crate::core::registry::builtin_registry();
@@ -782,6 +881,10 @@ pub fn list_configs_display(
 
             let config_last_probes = last_probes.remove(&c.id).unwrap_or_default();
             let auth_failure = auth_failures.remove(&c.id);
+            let token_check = token_checks.remove(&c.id);
+            let token_probe = server_map
+                .get(&c.server_id)
+                .is_some_and(|server| crate::core::token_checks::has_token_probe(server));
 
             McpConfigDisplay {
                 id: c.id,
@@ -810,6 +913,8 @@ pub fn list_configs_display(
                 merged_into_existing: None,
                 last_probes: config_last_probes,
                 auth_failure,
+                token_probe,
+                token_check,
             }
         })
         .collect())

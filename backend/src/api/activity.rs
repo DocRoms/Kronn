@@ -52,6 +52,7 @@ pub fn default_sources() -> Vec<Box<dyn ActivitySource>> {
         Box::new(WorkflowRunSource),
         Box::new(TaskWorkerSource),
         Box::new(AuditSource),
+        Box::new(ConnectionTokenSource),
     ]
 }
 
@@ -427,6 +428,66 @@ impl ActivitySource for AuditSource {
                     .as_ref()
                     .and_then(|recent| recent.entries.first())
                     .map(|entry| entry.at);
+                row
+            })
+            .collect())
+    }
+}
+
+// ─── Connection tokens (KT-1692) ────────────────────────────────────────────
+
+/// An API connection whose provider refused the token, from `mcp_auth_failures`
+/// (set by a refused call or a refused proactive probe, cleared by the next good
+/// one). Nothing is stored for the bell: the row lives exactly as long as the
+/// flag, so a probe that finds the token good takes it off. It waits for the
+/// owner, so it sits under "needs a decision", parked rather than running.
+pub struct ConnectionTokenSource;
+
+impl ActivitySource for ConnectionTokenSource {
+    fn name(&self) -> &'static str {
+        "mcp_auth_failures"
+    }
+
+    fn collect(&self, ctx: &ActivityContext<'_>) -> Result<Vec<ActivityRow>> {
+        let mut stmt = ctx.conn.prepare(
+            "SELECT f.config_id, c.label, f.http_status, f.message, f.failed_at
+               FROM mcp_auth_failures f
+               JOIN mcp_configs c ON c.id = f.config_id",
+        )?;
+        let found = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(found
+            .into_iter()
+            .map(|(config_id, label, status, message, failed_at)| {
+                let mut row = running_row(
+                    self.name(),
+                    &config_id,
+                    "connection_token",
+                    ActivityState::Paused,
+                    format!("Update {label}"),
+                    parse_stored(Some(failed_at)).unwrap_or(ctx.now),
+                    Some(link(ActivityLinkTarget::Plugin, &config_id, None)),
+                    Vec::new(),
+                );
+                row.compartment = ActivityCompartment::NeedsDecision;
+                let refused = match status {
+                    Some(status) => format!("Token refused (HTTP {status})"),
+                    None => "Token refused".to_string(),
+                };
+                row.detail = Some(if message.is_empty() {
+                    refused
+                } else {
+                    format!("{refused}: {message}")
+                });
                 row
             })
             .collect())

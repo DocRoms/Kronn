@@ -655,15 +655,17 @@ export function AgentsSection({
     );
   };
 
-  /** Kronn tools on an HTTP agent (KT-1600): on unless the operator turned them
-   *  off. "On" clears the setting rather than storing `true`, so the default
-   *  stays the default. */
+  /** "Can act in Kronn" on the Ollama card (KT-1600): on unless the operator
+   *  turned it off. "On" clears the setting rather than storing `true`, so the
+   *  default stays the default. LiteLLM and NVIDIA have theirs on the
+   *  connection card (KT-1687). */
   const renderToolsControl = (agentType: AgentType) => {
     const slot = AGENT_CONCURRENCY[agentType];
     if (!slot) return null;
     const enabled = agentAccess?.[slot.key]?.tools_enabled !== false;
     return (
       <ToolsSwitch
+        variant="field"
         subject={AGENT_LABELS[agentType]}
         checked={enabled}
         testId={`agent-tools-${agentType}`}
@@ -1839,13 +1841,9 @@ export function AgentsSection({
                   t={t}
                   modelCostSuffix={modelCostSuffix}
                   title={renderAgentNameControl('Ollama', 'Ollama')}
-                  headerAccessory={(
-                    <>
-                      {renderToolsControl('Ollama')}
-                      {renderConcurrencyControl('Ollama')}
-                    </>
-                  )}
+                  headerAccessory={renderConcurrencyControl('Ollama')}
                   fallbackRows={renderFallbackControl('Ollama')}
+                  toolsControl={renderToolsControl('Ollama')}
                 />
               </div>
             ))}
@@ -1859,16 +1857,8 @@ export function AgentsSection({
         {/* KT-339 — unified External API zone: LiteLLM, NVIDIA and any other
             OpenAI-compatible service live here as named connections. KT-586 —
             third of the three modes, so the three sit together. */}
-        {/* KT-1600 — LiteLLM and NVIDIA have no card of their own; their agent
-            slot still decides a run that names no connection. */}
-        <div className="set-agent-tools-defaults" data-testid="external-agent-tools">
-          {EXTERNAL_API_AGENTS.map(agentType => (
-            <span key={agentType} className="set-agent-tools-default">
-              <span className="set-hint">{AGENT_LABELS[agentType]}</span>
-              {renderToolsControl(agentType)}
-            </span>
-          ))}
-        </div>
+        {/* KT-1687 — no Kronn-tools control out here: the LiteLLM and NVIDIA agent
+            slots follow the switch of their default connection, in its card. */}
         <ExternalApiSection
           t={t}
           toast={toast}

@@ -1092,6 +1092,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "299_step_shadow_merges",
         include_str!("sql/299_step_shadow_merges.sql"),
     ),
+    (
+        "300_mcp_token_checks",
+        include_str!("sql/300_mcp_token_checks.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup.enc` (owner-only), encrypted whole
