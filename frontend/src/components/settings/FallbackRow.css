@@ -1,12 +1,22 @@
-/* KT-1693 — one mode row of the fallback (proposal B v2):
-     Standard  [Claude Code · sonnet CLI] → [Codex · gpt-5.6 CLI ✕] → ┄ [Ollama · qwen3 Local] ┄  + Add a fallback
-   Pills carry the transport badge; the inherited one is dashed. Tokens only, so
-   every theme (light, dark…) reads it. */
+/* KT-1757 — one mode row of the « Models and fallbacks » block (proposal A):
+
+     STANDARD  [ model ▾ ]
+               Si indisponible :
+               ① Codex · gpt-5.6 · standard · CLI     ↑ ↓ ✕
+               ② ┄ Ollama · qwen3 · standard · Local  ⚠ …
+               + Ajouter un repli
+
+   The mode label on the left (one width on every row, stacked above under 560 px),
+   ONE vertical axis on the right: the model, the caption, the numbered fallbacks in
+   the order Kronn tries them, the add button. The same on a CLI, a Local and an HTTP
+   card. Tokens only, so every theme (light, dark…) reads it. */
 .fbr {
-  display: flex;
-  flex-direction: column;
-  gap: var(--kr-sp-2);
-  padding: var(--kr-sp-2) 0;
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--kr-sp-3);
+  row-gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3) 0;
   font-size: var(--kr-fs-xs);
   color: var(--kr-text-muted);
 }
@@ -16,6 +26,7 @@
 }
 
 .fbr-mode {
+  padding-top: var(--kr-sp-2);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -23,37 +34,36 @@
   color: var(--kr-text-secondary);
 }
 
-/* KT-1706 — a row with its model picker reads « MODE  [model ▾] → fallback »:
-   the label on the left, the track after it, wrapping under it on a narrow card. */
-.fbr[data-with-model='true'] {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  column-gap: var(--kr-sp-3);
-}
-
-.fbr[data-with-model='true'] > .fbr-mode {
-  flex: 0 0 76px;
-}
-
-.fbr[data-with-model='true'] > .fbr-track {
-  flex: 1 1 220px;
+/* The single column: model, caption, chain, add. */
+.fbr-track {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--kr-sp-2);
   min-width: 0;
 }
 
-.fbr[data-with-model='true'] > .fbr-error {
-  flex: 1 1 100%;
+.fbr-error {
+  grid-column: 1 / -1;
 }
 
-/* The picker takes the room the fallback pill leaves, so a model id is not cut
-   at a fixed width while the row has space; the pill wraps under it only when
-   the two cannot share the line. The full label stays in the field's tooltip. */
+@media (max-width: 560px) {
+  .fbr {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fbr-mode {
+    padding-top: 0;
+  }
+}
+
+/* The picker fills the column, so a model id is not cut at a fixed width. The
+   full label stays in the field's tooltip. */
 .fbr-model {
   display: flex;
-  flex: 1 1 200px;
   align-items: center;
   gap: var(--kr-sp-2);
-  min-width: min(160px, 100%);
+  min-width: 0;
   max-width: 100%;
 }
 
@@ -73,31 +83,26 @@
   text-overflow: ellipsis;
 }
 
-.fbr-track {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--kr-sp-2);
-}
-
-.fbr-step {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--kr-sp-2);
-}
-
-.fbr-arrow {
+.fbr-caption {
+  font-size: var(--kr-fs-2xs);
   color: var(--kr-text-muted);
-  flex: none;
 }
 
 .fbr-anchor {
   position: relative;
   display: inline-flex;
+  min-width: 0;
 }
 
 .fbr-off {
   font-style: italic;
+}
+
+.fbr-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
 }
 
 .fbr-add {
@@ -128,6 +133,127 @@
   display: flex;
   align-items: center;
   gap: var(--kr-sp-1);
+  color: var(--kr-error);
+}
+
+/* ── The numbered chain ────────────────────────────────────────────────── */
+.fbc-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fbc {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+
+.fbc-n {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+  color: var(--kr-accent-text);
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-surface);
+}
+
+.fbc[data-tone="inherited"] .fbc-n {
+  color: var(--kr-text-muted);
+  border-style: dashed;
+  border-color: var(--kr-border-medium);
+}
+
+/* On a narrow card the entry's tags wrap inside its pill instead of pushing it under its number. */
+.fbc-anchor {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  max-width: calc(100% - 26px);
+}
+
+.fbc-main {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  min-width: 0;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 0 var(--kr-sp-3);
+  color: var(--kr-text-primary);
+  font: inherit;
+  text-align: left;
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-surface);
+}
+
+button.fbc-main {
+  cursor: pointer;
+}
+
+button.fbc-main:hover:not(:disabled) {
+  background: var(--kr-bg-hover);
+}
+
+/* Set on another agent's card: dashed, read-only here (it opens that card). */
+.fbc[data-tone="inherited"] .fbc-main {
+  color: var(--kr-text-secondary);
+  border-style: dashed;
+  border-color: var(--kr-border-medium);
+  background: transparent;
+}
+
+.fbc-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  margin-left: auto;
+}
+
+.fbc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--kr-text-muted);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbc-btn:hover:not(:disabled) {
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-hover);
+}
+
+.fbc-btn:focus-visible,
+.fbc-main:focus-visible,
+.fbr-add:focus-visible {
+  outline: 2px solid var(--kr-accent-border);
+  outline-offset: 1px;
+}
+
+.fbc-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.fbc-remove:hover:not(:disabled) {
   color: var(--kr-error);
 }
 
@@ -222,8 +348,13 @@ button.fbp-main:hover:not(:disabled) {
   color: var(--kr-success);
 }
 
+/* The warning of one fallback, drawn beside it (never on the model or another item). */
 .fbp-gap {
   display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  min-width: 0;
+  font-size: var(--kr-fs-2xs);
   color: var(--kr-warning);
 }
 

@@ -1,8 +1,8 @@
-// KT-1693 — the fallback of each mode of an agent, as proposal B draws it: one row
-// per mode, the current model, then → fallback pills with their transport badge,
-// then → the inherited fallback in a dashed pill; « + Add a fallback » opens a
-// menu filtered by kind of mode and grouped by agent. The same row serves the
-// override of a discussion or a step.
+// KT-1693 / KT-1757 — the fallback of each mode of an agent, as proposal A draws it: one row
+// per mode, the current model, « If unavailable: », then ONE numbered column of fallbacks
+// (transport badge, tier tag, ↑ ↓ ✕), the inherited ones dashed after the own one;
+// « + Add a fallback » opens a menu filtered by kind of mode and grouped by agent. The same
+// row serves the override of a discussion or a step.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
@@ -104,7 +104,7 @@ describe('the fallback rows of an agent card', () => {
     for (const [mode, model] of [['eco', 'haiku'], ['standard', 'sonnet'], ['advanced', 'opus']]) {
       const row = screen.getByTestId(ROW(mode));
       expect(within(row).getByTestId(`${ROW(mode)}-current`).textContent).toContain(model);
-      expect(within(row).getByText('Aucun repli')).toBeTruthy();
+      expect(within(row).getByTestId(`${ROW(mode)}-none`).textContent).toBe('Aucun repli : Kronn s’arrête si ce modèle est indisponible');
       expect(within(row).getByTestId(`${ROW(mode)}-add`)).toBeTruthy();
     }
     expect(screen.queryByTestId(ROW('image'))).toBeNull();
@@ -120,7 +120,7 @@ describe('the fallback rows of an agent card', () => {
     const inherited = within(row).getByTestId(`${ROW('standard')}-inherited-0`);
     expect(inherited.getAttribute('data-tone')).toBe('inherited');
     expect(within(inherited).getByTestId('fallback-transport-local').textContent).toBe('Local');
-    expect(inherited.querySelector('.fbp-main')?.getAttribute('title')).toContain('Défini sur la carte de Codex');
+    expect(inherited.querySelector('.fbc-main')?.getAttribute('title')).toContain('Défini sur la carte de Codex');
     expect(row.textContent).not.toMatch(/paid/i);
   });
 

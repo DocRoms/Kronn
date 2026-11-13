@@ -1,9 +1,9 @@
 import { useRef, useState, type ReactNode } from 'react';
-import { AlertTriangle, ArrowRight, Plus } from 'lucide-react';
+import { AlertTriangle, Plus } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import type { FallbackMode, ConnectionChainView, ConnectionFallbackTarget, ConnectionLinkView } from '../../types/generated';
 import { modeKind, type FallbackOption } from '../../lib/fallbackChain';
-import { FallbackMenu, FallbackPill } from './FallbackRow';
+import { FallbackChainItem, FallbackMenu } from './FallbackRow';
 import './FallbackRow.css';
 
 interface Props {
@@ -28,7 +28,7 @@ const nameOf = (options: FallbackOption[], link: ConnectionLinkView): string =>
   options.find((option) => option.connection === link.connection)?.name ?? link.connection;
 
 /** KT-1706 — one media mode of ComfyUI or of an HTTP connection, drawn like the
- *  rows of an agent: `Mode · [model ▾] → [fallback] ✕  + Add a fallback`. The
+ *  rows of an agent: the model, « If unavailable: », the numbered fallback, `+ Add a fallback`. The
  *  fallback goes to the same kind of mode only (image to image, video to video),
  *  never to the source itself; nothing is shown as changed until the backend has
  *  stored it, so a refusal leaves the row as it was. */
@@ -79,62 +79,77 @@ export function ConnectionFallbackRow({ testId, mode, owner, model, view, option
     if (menuOpen && element) setAnchor((previous) => (previous === element ? previous : element));
   };
 
+  const own = link && (
+    <FallbackChainItem
+      testId={`${testId}-link-0`}
+      position={1}
+      tone="own"
+      agent="Custom"
+      name={nameOf(options, link)}
+      model={link.model ?? null}
+      mode={mode}
+      transport={link.transport}
+      title={t('fallback.change')}
+      disabled={busy}
+      onClick={() => setMenuOpen((open) => !open)}
+      anchorRef={anchorRef}
+      controls={{
+        canUp: false,
+        canDown: false,
+        onUp: () => undefined,
+        onDown: () => undefined,
+        onRemove: () => void apply(null),
+      }}
+    >
+      {menuOpen && menu(link)}
+    </FallbackChainItem>
+  );
+  const inherited = view?.inherited ?? [];
+
   return (
     <div className="fbr" data-testid={testId} data-mode={mode} data-kind={modeKind(mode)} data-with-model="true">
       <span className="fbr-mode">{t(`fallback.mode.${mode}`)}</span>
       <div className="fbr-track">
         <span className="fbr-model" data-testid={`${testId}-model`}>{model}</span>
-        {link && (
-          <span className="fbr-step">
-            <ArrowRight size={11} className="fbr-arrow" aria-hidden="true" />
-            <span className="fbr-anchor" ref={anchorRef}>
-              <FallbackPill
-                testId={`${testId}-link-0`}
-                tone="own"
+        <span className="fbr-caption">{t('fallback.ifUnavailable')}</span>
+        {(link || inherited.length > 0) && (
+          <ol className="fbc-list" data-testid={`${testId}-chain`}>
+            {own}
+            {inherited.map((entry, index) => (
+              <FallbackChainItem
+                key={`inherited-${entry.connection}-${index}`}
+                testId={`${testId}-inherited-${index}`}
+                position={(link ? 1 : 0) + index + 1}
+                tone="inherited"
                 agent="Custom"
-                name={nameOf(options, link)}
-                model={link.model ?? null}
-                transport={link.transport}
-                title={t('fallback.change')}
-                disabled={busy}
-                removeLabel={t('fallback.remove')}
-                onClick={() => setMenuOpen((open) => !open)}
-                onRemove={() => void apply(null)}
+                name={nameOf(options, entry)}
+                model={entry.model ?? null}
+                mode={mode}
+                transport={entry.transport}
+                title={t('fallback.inheritedHint')}
               />
-              {menuOpen && menu(link)}
-            </span>
-          </span>
+            ))}
+          </ol>
         )}
-        {(view?.inherited ?? []).map((entry, index) => (
-          <span className="fbr-step" key={`inherited-${entry.connection}-${index}`}>
-            <ArrowRight size={11} className="fbr-arrow" aria-hidden="true" />
-            <FallbackPill
-              testId={`${testId}-inherited-${index}`}
-              tone="inherited"
-              agent="Custom"
-              name={nameOf(options, entry)}
-              model={entry.model ?? null}
-              transport={entry.transport}
-              title={t('fallback.inheritedHint')}
-            />
-          </span>
-        ))}
-        {!link && <span className="fbr-off">{t('fallback.off')}</span>}
-        {!link && (
-          <span className="fbr-anchor" ref={anchorRef}>
+        {!link && inherited.length === 0 && (
+          <span className="fbr-off" data-testid={`${testId}-none`}>{t('fallback.none')}</span>
+        )}
+        <div className="fbr-foot">
+          <span className="fbr-anchor" ref={link ? undefined : anchorRef}>
             <button
               type="button"
               className="fbr-add"
-              disabled={busy}
+              disabled={busy || !!link}
+              title={link ? t('fallback.addFull') : undefined}
               data-testid={`${testId}-add`}
               onClick={() => setMenuOpen((open) => !open)}
             >
               <Plus size={11} aria-hidden="true" />
               {t('fallback.add')}
             </button>
-            {menuOpen && menu()}
+            {!link && menuOpen && menu()}
           </span>
-        )}
+        </div>
       </div>
       {(view?.error || refusal) && (
         <div className="fbr-error" role="alert" data-testid={`${testId}-refused`}>
