@@ -3626,7 +3626,8 @@ pub async fn run_integration(
     checkpoint(db, exec_id, CheckpointStep::Anchored(target_sha.clone())).await?;
 
     // ── Phase 1: build the candidate in the CHILD worktree ──
-    let build = match worktree::build_candidate_detailed(child, &target_sha) {
+    let hooks = worker_commit_hooks_of(db, Some(&project_id)).await;
+    let build = match worktree::build_candidate_with_hooks(child, &target_sha, hooks) {
         Ok(build) => build,
         Err(error) => {
             return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
@@ -3634,6 +3635,9 @@ pub async fn run_integration(
     };
     let merge_sha = match build.outcome {
         worktree::CandidateOutcome::Built { sha } => sha,
+        worktree::CandidateOutcome::HookRefused { hook, output } => {
+            return send_back_hook_refusal(db, exec_id, hook, output).await;
+        }
         worktree::CandidateOutcome::Conflict { files } => {
             send_back(
                 db,
@@ -3668,6 +3672,36 @@ pub async fn run_integration(
         },
     )
     .await
+}
+
+/// Which git hooks Kronn runs for its own merge commits for a worker of this
+/// project (KT-1745); none unless a human set otherwise.
+async fn worker_commit_hooks_of(
+    db: &Database,
+    project_id: Option<&str>,
+) -> crate::models::WorkerCommitHooks {
+    let project_id = project_id.map(str::to_string);
+    db.with_read_conn(move |conn| {
+        Ok(crate::db::projects::worker_commit_hooks(
+            conn,
+            project_id.as_deref(),
+        ))
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// A hook refused the candidate merge commit (KT-1745): the worker reads which
+/// hook and its first lines, not an empty conflict.
+async fn send_back_hook_refusal(
+    db: &Database,
+    exec_id: &str,
+    hook: String,
+    output: String,
+) -> Result<IntegrationOutcome, ProvisionError> {
+    let reason = crate::core::commit_hooks::HookRefusal { hook, output }.to_string();
+    send_back(db, exec_id, &ReworkReport::conflict(reason.clone())).await?;
+    Ok(IntegrationOutcome::SentBack { reason })
 }
 
 /// What the worker reads as the cause of a merge conflict: the files, and for a
@@ -3840,7 +3874,8 @@ async fn validate_and_apply(
             }
         };
         reanchor_candidate(db, exec_id, &tip, "target_advanced").await?;
-        let build = match worktree::build_candidate_detailed(child, &tip) {
+        let hooks = worker_commit_hooks_of(db, run.project_id.as_deref()).await;
+        let build = match worktree::build_candidate_with_hooks(child, &tip, hooks) {
             Ok(build) => build,
             Err(error) => {
                 return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
@@ -3848,6 +3883,9 @@ async fn validate_and_apply(
         };
         let merge_sha = match build.outcome {
             worktree::CandidateOutcome::Built { sha } => sha,
+            worktree::CandidateOutcome::HookRefused { hook, output } => {
+                return send_back_hook_refusal(db, exec_id, hook, output).await;
+            }
             worktree::CandidateOutcome::Conflict { files } => {
                 let reason = conflict_reason(
                     "merge conflict after the target advanced",
@@ -4254,7 +4292,8 @@ async fn resume_recovered_integration(
                     }
                 };
             reanchor_candidate(db, exec_id, &target_sha, "rebuild_candidate").await?;
-            let build = match worktree::build_candidate_detailed(child, &target_sha) {
+            let hooks = worker_commit_hooks_of(db, run.project_id.as_deref()).await;
+            let build = match worktree::build_candidate_with_hooks(child, &target_sha, hooks) {
                 Ok(build) => build,
                 Err(error) => {
                     return hold_integration(db, exec_id, generic, error, CHILD_WORKTREE_FIX).await
@@ -4262,6 +4301,9 @@ async fn resume_recovered_integration(
             };
             let merge_sha = match build.outcome {
                 worktree::CandidateOutcome::Built { sha } => sha,
+                worktree::CandidateOutcome::HookRefused { hook, output } => {
+                    return send_back_hook_refusal(db, exec_id, hook, output).await;
+                }
                 worktree::CandidateOutcome::Conflict { files } => {
                     let reason = conflict_reason(
                         "merge conflict after recovery",
@@ -18058,18 +18100,21 @@ pub async fn commit_spawned_worker(
     let data_dir_lock = state.data_dir_lock.clone();
     // The pinned base the doc citations are compared with (KT-1721).
     let base_sha = execution.base_sha.clone();
+    // Which hooks Kronn may run for this commit (KT-1745): the project's policy.
+    let hooks = worker_commit_hooks_of(&state.db, Some(&workspace.project_id)).await;
     let supervisor = spawn_spawned_commit_supervisor(
         state.db.clone(),
         execution.id,
         dispatch_job_id.to_string(),
         lease_id,
         move || {
-            crate::api::agent_workspace_tools::git_commit_payload_reanchoring_docs(
+            crate::api::agent_workspace_tools::git_commit_payload_reanchoring_docs_with_hooks(
                 &root,
                 &files,
                 &message,
                 data_dir_lock.as_deref(),
                 base_sha.as_deref(),
+                hooks,
             )
         },
     );

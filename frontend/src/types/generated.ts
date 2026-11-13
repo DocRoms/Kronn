@@ -8321,7 +8321,12 @@ docker_error?: string, };
  * Project defaults for worktree preparation hooks. Workflow hooks override them
  * field by field; omitted fields inherit the project value.
  */
-export type ProjectWorkspace = { hooks: WorkspaceHooks, };
+export type ProjectWorkspace = { hooks: WorkspaceHooks,
+/**
+ * Which git hooks Kronn's own commits and merges for a worker run
+ * (KT-1745). Only a human sets it; absent means [`WorkerCommitHooks::Off`].
+ */
+worker_commit_hooks: WorkerCommitHooks, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -12899,6 +12904,28 @@ timezone?: string, detection: WatchDetection, };
 export type WeightLevel = "green" | "amber" | "red";
 
 export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
+
+/**
+ * Which of the repository's git hooks Kronn runs when it commits or merges for
+ * a worker (KT-1745). Kronn makes those commits itself, outside the worker's OS
+ * sandbox and with the host user's rights, so a hook that lives in the worker's
+ * writable worktree (husky's relative `core.hooksPath`) is worker-written code.
+ */
+export type WorkerCommitHooks =
+/**
+ * No hook runs. The DCO sign-off is added by Kronn itself.
+ */
+"off" |
+/**
+ * The hooks of the main checkout's common git directory
+ * (`<git-common-dir>/hooks`), never a directory of the worktree.
+ */
+"main_checkout" |
+/**
+ * The worktree's own `pre-commit` hook runs inside the lane's OS sandbox,
+ * not as the host user. Refused when the host has no sandbox.
+ */
+"sandboxed";
 
 /**
  * Observed network connectivity, kept apart from `configured` (an address is

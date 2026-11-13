@@ -1103,7 +1103,7 @@ pub fn run_git_commit(
     amend: bool,
     sign: bool,
 ) -> Result<GitCommitResponse, String> {
-    run_git_commit_with_child_lock(repo_path, files, message, amend, sign, None)
+    commit_explicit_paths(repo_path, files, message, amend, sign, None, None)
 }
 
 /// Stage each explicit path (`git add`, or `git rm --cached` for a path that no
@@ -1164,11 +1164,22 @@ fn ensure_git_identity(repo_path: &Path) {
 /// Run `git commit <commit_args>` and return the new short HEAD, optionally
 /// retaining the backend's data-directory lock in Git and any hook descendants
 /// across backend death.
+///
+/// `hooks` is `None` for a commit the user asked for in their own checkout (the
+/// repository's hooks run, as ever). `Some((policy, gate))` is a commit Kronn
+/// makes for a worker (KT-1745): git runs no hook that lives in the worktree, and
+/// the gating hook `gate` runs first as `policy` allows, its refusal being a
+/// `HookRefused`.
 fn run_commit_command(
     repo_path: &Path,
     commit_args: &[&str],
     data_dir_lock: Option<&std::fs::File>,
+    hooks: Option<(crate::models::WorkerCommitHooks, &str)>,
 ) -> Result<String, String> {
+    if let Some((policy, gate)) = hooks {
+        crate::core::commit_hooks::run_gating_hook(repo_path, policy, gate, data_dir_lock)
+            .map_err(|refusal| refusal.to_string())?;
+    }
     // Only `git commit` executes hooks. Keep the inherited descriptor alive
     // through this spawn; descendants retain it until the whole hook tree exits.
     let child_lock = data_dir_lock
@@ -1177,7 +1188,10 @@ fn run_commit_command(
         .map_err(|error| {
             format!("Failed to inherit data-directory lock for git commit: {error}")
         })?;
-    let mut commit_command = crate::core::cmd::git_cmd();
+    let mut commit_command = match hooks {
+        Some((policy, _)) => crate::core::commit_hooks::worker_git_cmd(repo_path, policy),
+        None => crate::core::cmd::git_cmd(),
+    };
     commit_command.args(commit_args).current_dir(repo_path);
     #[cfg(unix)]
     if let Some(child_lock) = child_lock.as_ref() {
@@ -1213,6 +1227,9 @@ fn run_commit_command(
 
 /// Stage and commit explicit paths, optionally retaining the backend's
 /// data-directory lock in Git and any hook descendants across backend death.
+///
+/// This is a commit Kronn makes for a worker: no hook of the worktree runs
+/// (KT-1745), see [`run_git_commit_for_worker`].
 pub fn run_git_commit_with_child_lock(
     repo_path: &Path,
     files: &[String],
@@ -1220,6 +1237,49 @@ pub fn run_git_commit_with_child_lock(
     amend: bool,
     sign: bool,
     data_dir_lock: Option<&std::fs::File>,
+) -> Result<GitCommitResponse, String> {
+    run_git_commit_for_worker(
+        repo_path,
+        files,
+        message,
+        amend,
+        sign,
+        data_dir_lock,
+        crate::models::WorkerCommitHooks::default(),
+    )
+}
+
+/// [`run_git_commit_with_child_lock`] under the project's worker commit hook
+/// policy (KT-1745): git never resolves a hook inside the worktree, and the
+/// `pre-commit` hook runs only as `policy` allows.
+pub fn run_git_commit_for_worker(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    amend: bool,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+    policy: crate::models::WorkerCommitHooks,
+) -> Result<GitCommitResponse, String> {
+    commit_explicit_paths(
+        repo_path,
+        files,
+        message,
+        amend,
+        sign,
+        data_dir_lock,
+        Some(policy),
+    )
+}
+
+fn commit_explicit_paths(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    amend: bool,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+    policy: Option<crate::models::WorkerCommitHooks>,
 ) -> Result<GitCommitResponse, String> {
     // git add each file individually, skip missing files gracefully
     let clean_files = files
@@ -1252,7 +1312,12 @@ pub fn run_git_commit_with_child_lock(
     commit_args.push("--");
     commit_args.extend(clean_files);
 
-    let hash = run_commit_command(repo_path, &commit_args, data_dir_lock)?;
+    let hash = run_commit_command(
+        repo_path,
+        &commit_args,
+        data_dir_lock,
+        policy.map(|policy| (policy, "pre-commit")),
+    )?;
 
     Ok(GitCommitResponse {
         hash,
@@ -1345,6 +1410,26 @@ pub fn run_git_merge_commit_with_child_lock(
     message: &str,
     sign: bool,
     data_dir_lock: Option<&std::fs::File>,
+) -> Result<GitCommitResponse, String> {
+    run_git_merge_commit_for_worker(
+        repo_path,
+        files,
+        message,
+        sign,
+        data_dir_lock,
+        crate::models::WorkerCommitHooks::default(),
+    )
+}
+
+/// [`run_git_merge_commit_with_child_lock`] under the project's worker commit
+/// hook policy (KT-1745).
+pub fn run_git_merge_commit_for_worker(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    sign: bool,
+    data_dir_lock: Option<&std::fs::File>,
+    policy: crate::models::WorkerCommitHooks,
 ) -> Result<GitCommitResponse, String> {
     let clean_files = files
         .iter()
@@ -1443,7 +1528,12 @@ pub fn run_git_merge_commit_with_child_lock(
     let mut commit_args = vec!["commit", "-s"];
     commit_args.push(if sign { "-S" } else { "--no-gpg-sign" });
     commit_args.extend(["-m", message]);
-    let hash = run_commit_command(repo_path, &commit_args, data_dir_lock)?;
+    let hash = run_commit_command(
+        repo_path,
+        &commit_args,
+        data_dir_lock,
+        Some((policy, "pre-merge-commit")),
+    )?;
 
     let has_second_parent = crate::core::cmd::git_cmd()
         .args(["rev-parse", "-q", "--verify", "HEAD^2"])

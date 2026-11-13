@@ -701,7 +701,9 @@ pub async fn set_project_workspace(
             }
         }
     }
-    let stored = payload.filter(|workspace| !workspace.hooks.is_empty());
+    let stored = payload.filter(|workspace| {
+        !workspace.hooks.is_empty() || !workspace.worker_commit_hooks.is_default()
+    });
     match state
         .db
         .with_conn(move |conn| {

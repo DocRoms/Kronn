@@ -419,6 +419,25 @@ pub fn update_project_workspace(
     Ok(())
 }
 
+/// Which git hooks Kronn runs for its own commits and merges for a worker of
+/// `project_id` (KT-1745). A project that is unknown, unreadable or never set
+/// gets the safe default: none.
+pub fn worker_commit_hooks(
+    conn: &Connection,
+    project_id: Option<&str>,
+) -> crate::models::WorkerCommitHooks {
+    let Some(project_id) = project_id else {
+        return crate::models::WorkerCommitHooks::default();
+    };
+    match get_project(conn, project_id) {
+        Ok(Some(project)) => project
+            .workspace
+            .map(|workspace| workspace.worker_commit_hooks)
+            .unwrap_or_default(),
+        _ => crate::models::WorkerCommitHooks::default(),
+    }
+}
+
 pub fn update_project_briefing_notes(
     conn: &Connection,
     id: &str,

@@ -1,5 +1,5 @@
 use super::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MIN: u64 = 60;
 
@@ -126,30 +126,74 @@ fn a_dirty_worktree_is_checkpointed_as_a_signed_wip_commit() {
     );
 }
 
+/// A linked worktree, with a dirty `a.txt`, of a repository whose main checkout
+/// has a `pre-commit` hook that refuses everything (KT-1745: that hook is the
+/// owner's, in the main checkout's common git directory).
+#[cfg(unix)]
+fn refusing_main_checkout_with_worktree() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let main = repo();
+    let hook = main.path().join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let parent = tempfile::Builder::new()
+        .prefix("kronn-kt1745-wt-")
+        .tempdir()
+        .unwrap();
+    let worktree = parent.path().canonicalize().unwrap().join("work");
+    git(
+        main.path(),
+        &["worktree", "add", "-b", "work", worktree.to_str().unwrap()],
+    );
+    std::fs::write(worktree.join("a.txt"), "one\ntwo\n").unwrap();
+    (main, parent, worktree)
+}
+
 #[cfg(unix)]
 #[test]
 fn a_refused_commit_leaves_a_patch_in_the_evidence() {
-    use std::os::unix::fs::PermissionsExt;
-    let repo = repo();
-    let hook = repo.path().join(".git/hooks/pre-commit");
-    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::write(repo.path().join("a.txt"), "one\ntwo\n").unwrap();
-    let before = git(repo.path(), &["rev-parse", "HEAD"]);
+    let (_main, _parent, worktree) = refusing_main_checkout_with_worktree();
+    let before = git(&worktree, &["rev-parse", "HEAD"]);
 
-    let checkpoint = checkpoint_worktree(repo.path(), "KT-1", secs(120), secs(120), None)
-        .unwrap()
-        .expect("a dirty worktree is reported");
+    let checkpoint = checkpoint_worktree_with_hooks(
+        &worktree,
+        "KT-1",
+        secs(120),
+        secs(120),
+        None,
+        WorkerCommitHooks::MainCheckout,
+    )
+    .unwrap()
+    .expect("a dirty worktree is reported");
 
     assert_eq!(checkpoint.commit, None);
-    assert!(checkpoint.commit_error.is_some());
-    assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), before);
+    let error = checkpoint.commit_error.expect("the refusal is reported");
+    assert!(
+        error.contains("HookRefused") && error.contains("lint failed"),
+        "{error}"
+    );
+    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), before);
     let patch = checkpoint
         .patch
         .expect("the tracked changes are kept as a patch");
     assert!(patch.contains("+two"), "{patch}");
     assert!(!checkpoint.patch_truncated);
+}
+
+/// KT-1745: the default policy runs no hook, so a hook cannot stop the
+/// time-limit checkpoint from saving the worker's work.
+#[cfg(unix)]
+#[test]
+fn the_default_policy_checkpoints_past_a_refusing_hook() {
+    let (_main, _parent, worktree) = refusing_main_checkout_with_worktree();
+
+    let checkpoint = checkpoint_worktree(&worktree, "KT-1", secs(120), secs(120), None)
+        .unwrap()
+        .expect("a dirty worktree is checkpointed");
+
+    assert!(checkpoint.commit.is_some(), "{:?}", checkpoint.commit_error);
+    assert_eq!(checkpoint.patch, None);
 }
 
 #[test]

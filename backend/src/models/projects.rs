@@ -21,6 +21,43 @@ use super::AgentType;
 pub struct ProjectWorkspace {
     #[serde(default)]
     pub hooks: crate::models::WorkspaceHooks,
+    /// Which git hooks Kronn's own commits and merges for a worker run
+    /// (KT-1745). Only a human sets it; absent means [`WorkerCommitHooks::Off`].
+    #[serde(default, skip_serializing_if = "WorkerCommitHooks::is_default")]
+    pub worker_commit_hooks: WorkerCommitHooks,
+}
+
+/// Which of the repository's git hooks Kronn runs when it commits or merges for
+/// a worker (KT-1745). Kronn makes those commits itself, outside the worker's OS
+/// sandbox and with the host user's rights, so a hook that lives in the worker's
+/// writable worktree (husky's relative `core.hooksPath`) is worker-written code.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WorkerCommitHooks {
+    /// No hook runs. The DCO sign-off is added by Kronn itself.
+    #[default]
+    Off,
+    /// The hooks of the main checkout's common git directory
+    /// (`<git-common-dir>/hooks`), never a directory of the worktree.
+    MainCheckout,
+    /// The worktree's own `pre-commit` hook runs inside the lane's OS sandbox,
+    /// not as the host user. Refused when the host has no sandbox.
+    Sandboxed,
+}
+
+impl WorkerCommitHooks {
+    pub fn is_default(&self) -> bool {
+        *self == Self::Off
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::MainCheckout => "main_checkout",
+            Self::Sandboxed => "sandboxed",
+        }
+    }
 }
 
 /// Where Kronn writes a project's agent files (KT-971).

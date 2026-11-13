@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::task_worker_env::LANE_TARGET_PREFIX;
+use crate::models::WorkerCommitHooks;
 
 // ── KT-373 — disk as a provisioning precondition ─────────────────────────────
 //
@@ -2416,6 +2417,10 @@ pub enum CandidateOutcome {
     /// The child branch now descends from the pinned parent tip; the parent can be
     /// fast-forwarded onto `sha`.
     Built { sha: String },
+    /// A hook the project's worker commit policy runs refused the merge commit
+    /// (KT-1745), or could not be run safely. Nothing was committed and the merge
+    /// was undone; this is not a conflict and no file is named.
+    HookRefused { hook: String, output: String },
     /// The child cannot absorb the parent tip without a human decision. Nothing was
     /// left half-merged: the merge is aborted, so the worker keeps a usable worktree.
     Conflict { files: Vec<String> },
@@ -2464,6 +2469,15 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
     build_candidate_detailed(worktree_path, base_sha).map(|build| build.outcome)
 }
 
+/// [`build_candidate_detailed`] under the default worker commit hook policy
+/// (no hook runs).
+pub fn build_candidate_detailed(
+    worktree_path: &Path,
+    base_sha: &str,
+) -> Result<CandidateBuild, String> {
+    build_candidate_with_hooks(worktree_path, base_sha, WorkerCommitHooks::default())
+}
+
 /// A built candidate with what the merge settled or why it bounced (KT-1669).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateBuild {
@@ -2497,14 +2511,22 @@ impl CandidateBuild {
 /// citation line anchors never reaches the worker: the target's side is taken,
 /// the citations are re-anchored onto the merge, and every citation of those
 /// docs must resolve, else the merge is undone and the bounce lists them.
-pub fn build_candidate_detailed(
+///
+/// KT-1745 — the merge runs in the worker's worktree but in Kronn's process, as
+/// the host user: no git command here resolves a hook inside the worktree (a
+/// husky `.husky/_` is worker-written). The merge commit's gating hook runs only
+/// as `hooks` allows, and its refusal is [`CandidateOutcome::HookRefused`], never
+/// an empty conflict.
+pub fn build_candidate_with_hooks(
     worktree_path: &Path,
     base_sha: &str,
+    hooks: WorkerCommitHooks,
 ) -> Result<CandidateBuild, String> {
     reject_option_like_rev(base_sha)?;
     // The merge stops before its commit so the doc citations the two sides
     // shifted are settled into it (KT-1321) and the commit is made once.
-    let out = crate::core::cmd::git_cmd()
+    // A fast-forward does run `post-merge`, hence the hooks override here too.
+    let out = crate::core::commit_hooks::worker_git_cmd(worktree_path, hooks)
         .args(["merge", "--no-edit", "--no-commit", base_sha])
         .current_dir(worktree_path)
         .output()
@@ -2512,8 +2534,15 @@ pub fn build_candidate_detailed(
     if !crate::core::docs_citations::merge::merge_in_progress(worktree_path) {
         // Fast-forwarded, already up to date, or refused before any merge state.
         if out.status.success() {
-            return settle_branch_docs(worktree_path, base_sha);
+            return settle_branch_docs(worktree_path, base_sha, hooks);
         }
+        // The merge was refused before it started (a dirty tree, an unrelated
+        // history…): no file conflicts, and what git said is not lost.
+        tracing::warn!(
+            "git merge refused in {}: {}",
+            worktree_path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
         return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
             files: Vec::new(),
         }));
@@ -2578,7 +2607,16 @@ pub fn build_candidate_detailed(
         return Ok(bounce);
     }
     // Repositories that enforce DCO reject an unsigned merge commit.
-    let mut commit = crate::core::cmd::git_cmd();
+    if let Err(refusal) =
+        crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-merge-commit", None)
+    {
+        abort_merge(worktree_path);
+        return Ok(CandidateBuild::of(CandidateOutcome::HookRefused {
+            hook: refusal.hook,
+            output: refusal.output,
+        }));
+    }
+    let mut commit = crate::core::commit_hooks::worker_git_cmd(worktree_path, hooks);
     commit.args(["commit", "--signoff", "--cleanup=strip"]);
     match docs.as_ref().and_then(|docs| docs.summary()) {
         Some(note) => commit.args(["-m", &merge_subject(worktree_path, base_sha), "-m", &note]),
@@ -2589,10 +2627,15 @@ pub fn build_candidate_detailed(
         .output()
         .map_err(|e| format!("git commit failed: {e}"))?;
     if !committed.status.success() {
+        // Not a conflict: the tree merged cleanly, and no hook ran in this git
+        // command. Say what git printed rather than hand the worker an empty
+        // conflict it can only loop on.
+        let stderr = String::from_utf8_lossy(&committed.stderr).into_owned();
         abort_merge(worktree_path);
-        return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
-            files: Vec::new(),
-        }));
+        return Err(format!(
+            "cannot commit the candidate merge: {}",
+            crate::core::commit_hooks::first_lines(&stderr)
+        ));
     }
     Ok(CandidateBuild {
         outcome: CandidateOutcome::Built {
@@ -2636,7 +2679,11 @@ fn unresolved_bounce(worktree_path: &Path, target: &str) -> Option<CandidateBuil
 /// merged by its worker): no merge commit carries the re-anchoring, so the
 /// citations the branch's own code shift moved are re-anchored into a commit of
 /// their own, under the same rules as a merge (KT-1669).
-fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateBuild, String> {
+fn settle_branch_docs(
+    worktree_path: &Path,
+    base_sha: &str,
+    hooks: WorkerCommitHooks,
+) -> Result<CandidateBuild, String> {
     use crate::core::docs_citations::merge::{self, SettleError};
     let head = git_head(worktree_path)?;
     if head == base_sha {
@@ -2672,7 +2719,20 @@ fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateB
     }
     let settled = docs.as_ref().and_then(|docs| docs.settlement());
     if let Some(note) = docs.as_ref().and_then(|docs| docs.summary()) {
-        let committed = crate::core::cmd::git_cmd()
+        if let Err(refusal) =
+            crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-commit", None)
+        {
+            if let Some(docs) = &docs {
+                if let Err(error) = merge::undo_staged(worktree_path, docs) {
+                    tracing::warn!("re-anchored docs not restored: {error}");
+                }
+            }
+            return Ok(CandidateBuild::of(CandidateOutcome::HookRefused {
+                hook: refusal.hook,
+                output: refusal.output,
+            }));
+        }
+        let committed = crate::core::commit_hooks::worker_git_cmd(worktree_path, hooks)
             .args([
                 "commit",
                 "--signoff",

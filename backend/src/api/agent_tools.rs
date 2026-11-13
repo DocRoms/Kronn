@@ -3814,11 +3814,20 @@ impl KronnToolExecutor {
                             source_message_id.as_deref(),
                             false,
                         )?;
-                        Ok(Some(execution.base_sha))
+                        // Which hooks Kronn may run for this commit (KT-1745).
+                        let project_id =
+                            crate::db::discussion_workspaces::get_managed_for_execution(
+                                conn,
+                                &execution.id,
+                            )?
+                            .map(|workspace| workspace.project_id);
+                        let hooks =
+                            crate::db::projects::worker_commit_hooks(conn, project_id.as_deref());
+                        Ok(Some((execution.base_sha, hooks)))
                     })
                     .await;
                 // The pinned base the doc citations are compared with (KT-1721).
-                let Ok(Some(base_sha)) = authorised else {
+                let Ok(Some((base_sha, hooks))) = authorised else {
                     return fail(
                         call,
                         "git_commit is available only to the exact active native worker in its managed task worktree",
@@ -3845,12 +3854,13 @@ impl KronnToolExecutor {
                 };
                 let message = message.to_string();
                 let committed = tokio::task::spawn_blocking(move || {
-                    ws::git_commit_payload_reanchoring_docs(
+                    ws::git_commit_payload_reanchoring_docs_with_hooks(
                         &canonical_root,
                         &files,
                         &message,
                         None,
                         base_sha.as_deref(),
+                        hooks,
                     )
                 })
                 .await;

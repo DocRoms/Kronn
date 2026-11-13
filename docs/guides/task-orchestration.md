@@ -162,6 +162,14 @@ execution boundary according to the worker transport:
   cannot proceed without such a bypass, the task fails visibly and can be
   reassigned; Kronn does not trade confinement for apparent progress.
 
+Kronn's own commits and merges for a worker run in Kronn's process, not the
+worker's sandbox, so they never let git resolve a hook inside the worktree (a
+husky `.husky/pre-commit` is worker-written code). The project's
+`worker_commit_hooks` setting (`off` by default, `main_checkout`, `sandboxed`)
+decides which hook runs, and a refusing hook is reported as `HookRefused` with
+its output, not as a conflict; see
+[worker-commit-hooks](../operations/worker-commit-hooks.md).
+
 Sandbox startup failure is a launch failure, not a reason to run unsandboxed.
 Likewise, delivery is accepted only through the execution-scoped capability and
 against the exact managed branch/HEAD.

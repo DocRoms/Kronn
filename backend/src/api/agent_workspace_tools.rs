@@ -35,6 +35,8 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::models::WorkerCommitHooks;
+
 /// Cap on a fetched body and on a file read. Large enough for a page or a source
 /// file, small enough that one tool call cannot blow the model's window.
 const MAX_BYTES: usize = 256 * 1024;
@@ -618,6 +620,25 @@ pub fn git_commit_payload_with_data_dir_lock(
     message: &str,
     data_dir_lock: Option<&std::fs::File>,
 ) -> Result<Value, String> {
+    git_commit_payload_with_hooks(
+        root,
+        files,
+        message,
+        data_dir_lock,
+        WorkerCommitHooks::default(),
+    )
+}
+
+/// [`git_commit_payload_with_data_dir_lock`] under the project's worker commit
+/// hook policy (KT-1745): no hook of the worktree is ever run by git here, and
+/// the `pre-commit` hook runs only as `hooks` allows.
+pub fn git_commit_payload_with_hooks(
+    root: &Path,
+    files: &[String],
+    message: &str,
+    data_dir_lock: Option<&std::fs::File>,
+    hooks: WorkerCommitHooks,
+) -> Result<Value, String> {
     let (message, removed_trailers) = strip_identity_trailers(message);
     let message = message.as_str();
     if message.is_empty() {
@@ -657,21 +678,23 @@ pub fn git_commit_payload_with_data_dir_lock(
     // merge with both parents rather than leave the worker to erase MERGE_HEAD.
     let finishing_merge = crate::api::git_ops::merge_in_progress(&canonical_root);
     let committed = if finishing_merge {
-        crate::api::git_ops::run_git_merge_commit_with_child_lock(
+        crate::api::git_ops::run_git_merge_commit_for_worker(
             &canonical_root,
             &normalized,
             message,
             false,
             data_dir_lock,
+            hooks,
         )?
     } else {
-        crate::api::git_ops::run_git_commit_with_child_lock(
+        crate::api::git_ops::run_git_commit_for_worker(
             &canonical_root,
             &normalized,
             message,
             false,
             false,
             data_dir_lock,
+            hooks,
         )?
     };
     let mut payload = json!({
@@ -713,10 +736,31 @@ pub fn git_commit_payload_reanchoring_docs(
     data_dir_lock: Option<&std::fs::File>,
     base: Option<&str>,
 ) -> Result<Value, String> {
-    let mut payload = git_commit_payload_with_data_dir_lock(root, files, message, data_dir_lock)?;
+    git_commit_payload_reanchoring_docs_with_hooks(
+        root,
+        files,
+        message,
+        data_dir_lock,
+        base,
+        WorkerCommitHooks::default(),
+    )
+}
+
+/// [`git_commit_payload_reanchoring_docs`] under the project's worker commit hook
+/// policy (KT-1745). A hook that refuses is reported as `HookRefused` with its
+/// first lines (the error string starts with `HookRefused`).
+pub fn git_commit_payload_reanchoring_docs_with_hooks(
+    root: &Path,
+    files: &[String],
+    message: &str,
+    data_dir_lock: Option<&std::fs::File>,
+    base: Option<&str>,
+    hooks: WorkerCommitHooks,
+) -> Result<Value, String> {
+    let mut payload = git_commit_payload_with_hooks(root, files, message, data_dir_lock, hooks)?;
     let base = base.map(str::trim).filter(|base| !base.is_empty());
     if let (Some(base), None) = (base, payload.get("merge_commit")) {
-        if let Some(report) = reanchor_docs_after_commit(root, base, data_dir_lock) {
+        if let Some(report) = reanchor_docs_after_commit(root, base, data_dir_lock, hooks) {
             payload["doc_citations"] = report;
         }
     }
@@ -730,6 +774,7 @@ fn reanchor_docs_after_commit(
     root: &Path,
     base: &str,
     data_dir_lock: Option<&std::fs::File>,
+    hooks: WorkerCommitHooks,
 ) -> Option<Value> {
     use crate::core::docs_citations::merge::{self, SettleError};
     let mut report = serde_json::Map::new();
@@ -743,13 +788,14 @@ fn reanchor_docs_after_commit(
             if !touched.is_empty() {
                 let note = docs.summary().unwrap_or_default();
                 let subject = "Re-anchor doc citations moved by the worker's code";
-                match crate::api::git_ops::run_git_commit_with_child_lock(
+                match crate::api::git_ops::run_git_commit_for_worker(
                     root,
                     &touched,
                     &format!("{subject}\n\n{note}"),
                     false,
                     false,
                     data_dir_lock,
+                    hooks,
                 ) {
                     Ok(committed) => {
                         report.insert(
