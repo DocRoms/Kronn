@@ -148,7 +148,7 @@ this degrades and continues.
   bring it, so the blocker stays pre-existing. Only a step *handed* the blocker
   to fix is charged with it afterwards (`release`), and is then retried and
   redone like any other.
-  [src: file: backend/src/api/audit/document_repair.rs:178#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:247#release] [src: file: backend/src/api/audit/full.rs:3372#split_preexisting]
+  [src: file: backend/src/api/audit/document_repair.rs:178#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:247#release] [src: file: backend/src/api/audit/full.rs:3370#split_preexisting]
 - **The exemption is the run's, not the ledger's** (KT-1353). The ledger stores
   the content hash of each pre-existing blocker's document as the run last left
   it (`seal`, after every step and after the final gate's own write). The
@@ -183,7 +183,7 @@ this degrades and continues.
   re-fingerprinted as soon as it ends, so a chain of resumed runs leaves no
   rewritten doc with the fingerprints of an earlier audit, whichever run
   finishes the chain.
-  [src: file: backend/src/api/audit/full.rs:3149-3160#record_after_audit]
+  [src: file: backend/src/api/audit/full.rs:3147-3158#record_after_audit]
 - **A doc under a partial banner stays in the plan** (KT-1312): the revalidation
   plan queues its owning step (or lists it as manual when no step owns it)
   and the badge stays raised, even when relevance sees nothing wrong with its
@@ -205,7 +205,7 @@ this degrades and continues.
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:568#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1542-1545#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1552-1573#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:568#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1542-1545#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1552-1573#progress] [src: file: backend/src/api/audit/full.rs:3916-3919#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
@@ -342,17 +342,17 @@ sections.
   unchanged step re-verified its section. The drift baseline is merged for
   the done steps, whatever the run's status, after the terminal commit. A
   failed step's section stays stale.
-  [src: file: backend/src/api/audit/drift.rs:2025-2033#done_steps] [src: file: backend/src/api/audit/drift.rs:2371-2379#compute_merged_baseline]
+  [src: file: backend/src/api/audit/drift.rs:2012-2020#done_steps] [src: file: backend/src/api/audit/drift.rs:2358-2366#compute_merged_baseline]
 - **Status.** Without a failed step the run is `Completed`. The SSE `done`
   reads `complete` when a step rewrote its target, `no_change` when none did.
   With a failed step it is `Interrupted`.
-  [src: file: backend/src/api/audit/drift.rs:2414-2444#done_status_of]
+  [src: file: backend/src/api/audit/drift.rs:2403-2433#done_status_of]
 - **Validation.** The done steps get a validation discussion scoped to them,
   linked in the terminal transaction, on an `Interrupted` run too: the
   validate gate still refuses that run. A run that rewrote nothing, every
   step unchanged or stopped before its first write, restores the
   `validated_at` it revoked at launch, and then opens no discussion.
-  [src: file: backend/src/api/audit/drift.rs:2061-2067#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:2108#pending_validation] [src: file: backend/src/api/audit/drift.rs:2445-2460#Interrupted]
+  [src: file: backend/src/api/audit/drift.rs:2048-2054#restore_validation_if_untouched] [src: file: backend/src/api/audit/drift.rs:2095#pending_validation] [src: file: backend/src/api/audit/drift.rs:2432-2447#Interrupted]
 - **Citations.** A section with recorded citations is judged by them. A
   normal refresh re-fingerprints both rewritten and re-verified unchanged
   sections after the terminal commit; failed sections keep their previous
