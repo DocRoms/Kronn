@@ -1458,6 +1458,105 @@ fn a_header_glued_onto_a_line_is_seen_and_what_follows_is_never_the_key() {
     }
 }
 
+/// The last element of an array of arrays, with the closers on the same line
+/// (`[3]]`, `["ls"] ]`), is a value, not a header: the live key line below it is
+/// still read, the copy cut to it and boot recovers it. `[mcp.env]]` and
+/// `[mcp.env] ]` (not TOML values) are still headers.
+#[test]
+fn the_last_element_of_an_array_of_arrays_is_not_a_header() {
+    for head in [
+        "x = [\n  [1, 2],\n  [3]]\n",
+        "allow = [\n  [\"git\", \"status\"],\n  [\"ls\"]]\n",
+        "allow = [\n  [\"git\", \"status\"],\n  [\"ls\"] ]\n",
+        "x = { a = [\n  [3]]}\n",
+        "x = { a = [\n  [3]] }\n",
+        "x = [\n  [[3]]]\n",
+    ] {
+        let k = crypto::generate_secret();
+        let text = format!("{head}encryption_secret = \"{k}\"\n[broken\n");
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        assert_eq!(config::salvage_key_line(&text), Some(k.clone()), "{text:?}");
+        assert_eq!(key_of(&text), Some(k.clone()), "{text:?}");
+        // The copy is cut down to that line (no key anywhere else).
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("config.toml.backup");
+        std::fs::write(&copy, format!("{text}{LEAKY}")).unwrap();
+        let report = protect_clear_copies(dir.path(), None);
+        assert_eq!(
+            (report.reduced, report.failures.len()),
+            (1, 0),
+            "{report:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&copy).unwrap(),
+            format!("encryption_secret = \"{k}\"\n"),
+            "{text:?}"
+        );
+    }
+    // More closers than regions open, or a header-shaped text that is no value,
+    // are headers: nothing after them is the key.
+    let other = crypto::generate_secret();
+    let mut kept = Vec::new();
+    for head in [
+        "x = [\n  [3]]]\n",
+        "x = [\n  [mcp.env]]\n",
+        "x = [\n  [mcp.env] ]\n",
+        "x = { a = [\n  [mcp.env]]}\n",
+    ] {
+        let text = format!("{head}encryption_secret = \"{other}\"\n[broken\n");
+        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
+        assert_eq!(key_of(&text), None, "{text:?}");
+        kept.push(format!("{text}{LEAKY}"));
+    }
+    assert_kept_whole_and_reported(&kept);
+}
+
+/// A header glued after a comma (or after `{`) is a header like one glued after a
+/// value: a `[` starts a value only right after `=` at the top level and inside an
+/// inline table, and after `,` or `[` inside an array only when what it opens is a
+/// valid element. What follows is never the key, even buried; the copy is kept
+/// whole and reported.
+#[test]
+fn a_header_glued_after_a_comma_is_seen() {
+    let other = crypto::generate_secret();
+    let mut kept = Vec::new();
+    for head in [
+        "port = 1, [mcp.env]\n",
+        "x = [1], [mcp.env]\n",
+        "x = \"a\", [mcp.env]\n",
+        "x = [\n1], [mcp.env]\n",
+        "x = {}, [mcp.env]\n",
+        "x = {a = 1, [mcp.env]\n",
+        "x = { [mcp.env]\n",
+        "x = [1, [mcp.env]\n",
+        "x = [[mcp.env]\n",
+    ] {
+        let text = format!("{head}encryption_secret = \"{other}\"\n[b\n");
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        let scan = config::salvage_key_scan(&text);
+        assert!(scan.values.is_empty(), "{text:?}: {scan:?}");
+        assert!(scan.buried.is_empty(), "{text:?}: {scan:?}");
+        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
+        assert_eq!(key_of(&text), None, "{text:?}");
+        kept.push(format!("{text}{LEAKY}"));
+    }
+    assert_kept_whole_and_reported(&kept);
+
+    // A `[` that starts a value stays one: the key line below is still read.
+    for ok in [
+        "x = [1, [2, 3]]\n",
+        "x = [[1], [2]]\n",
+        "x = {a = [1], b = [2]}\n",
+        "x = [\n  1, [2],\n  3\n]\n",
+        "x = [\"a, [b]\", 'c, [d]']\n",
+    ] {
+        let k = crypto::generate_secret();
+        let text = format!("{ok}encryption_secret = \"{k}\"\nbroken\n");
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        assert_eq!(config::salvage_key_line(&text), Some(k), "{text:?}");
+    }
+}
+
 /// Two assignments joined on one line (a hand-edit or merge accident) hide a
 /// quoted or escaped key part behind a plain one: whichever the spelling, the line
 /// may hold the live key, so the copy is kept whole and reported, never dropped.

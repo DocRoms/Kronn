@@ -155,9 +155,16 @@ fn is_opaque_token(name: &str) -> bool {
     if super::crypto::canonical_secret(name).is_ok() {
         return true;
     }
+    // A canonical dashed UUID (8-4-4-4-12), alone or after a `<prefix>_`, is an
+    // identifier, not a key: only its prefix can still be a token. Nothing else
+    // escapes the squeeze below (two UUIDs side by side, groups of 16, a key
+    // with a UUID's shape plus more).
+    if let Some(prefix) = uuid_prefix(name) {
+        return !prefix.is_empty() && is_opaque_token(prefix);
+    }
     // A key written in groups (`<16 hex> <16 hex> …`, dashes, colons): with the
     // separators removed, any run of 32 hex digits or more is a key, or a hash
-    // or an identifier no setting is named after (a dashless or dashed UUID is
+    // or an identifier no setting is named after (a dashless UUID or a SHA is
     // one, and is hidden too: the safe side).
     let squeezed: String = name.chars().filter(char::is_ascii_alphanumeric).collect();
     if squeezed
@@ -184,6 +191,24 @@ fn is_opaque_token(name: &str) -> bool {
                 && run.bytes().any(|b| b.is_ascii_uppercase())
                 && run.bytes().any(|b| b.is_ascii_lowercase()))
     })
+}
+
+/// `Some(prefix)` when `name` is a canonical dashed UUID (`""` as prefix) or
+/// `<prefix>_<uuid>`: the part before the UUID.
+fn uuid_prefix(name: &str) -> Option<&str> {
+    let is_uuid = |s: &str| {
+        s.len() == 36
+            && s.bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+    };
+    if is_uuid(name) {
+        return Some("");
+    }
+    name.rsplit_once('_')
+        .filter(|(_, tail)| is_uuid(tail))
+        .map(|(prefix, _)| prefix)
 }
 
 /// A key name that is itself a secret: a vendor-shaped token, an opaque token
@@ -1290,7 +1315,12 @@ mod tests {
             format!("key {}", groups(" ", 16)),
             "0123456789abcdef0123456789abcdef".to_string(),
             "0123456789abcdef0123456789abcdef01234567".to_string(),
-            "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+            // Not a canonical UUID: two of them side by side, or one plus more.
+            "01234567-89ab-cdef-0123-456789abcdef 01234567-89ab-cdef-0123-456789abcdef".to_string(),
+            "01234567-89ab-cdef-0123-456789abcdef0123".to_string(),
+            "key_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef_\
+             01234567-89ab-cdef-0123-456789abcdef"
+                .to_string(),
         ];
         for name in &names {
             let text = format!("[server]\nport = 3140\n\"{name}\" = \"\"\n");
@@ -1304,6 +1334,35 @@ mod tests {
         }
         for plain in ["theme", "default_agent_timeout_seconds", "acbd-fade-cafe"] {
             assert!(!is_opaque_token(plain), "{plain}");
+        }
+    }
+
+    /// KT-1528 — a canonical dashed UUID (8-4-4-4-12), alone or after a
+    /// `<prefix>_`, is an identifier, not a secret: it is shown, and not a
+    /// credential on save. A prefix that is itself a token is still masked.
+    #[test]
+    fn a_canonical_uuid_key_name_is_shown() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for name in [
+            uuid.to_string(),
+            uuid.to_uppercase(),
+            format!("proj_{uuid}"),
+            format!("agent_profile_{uuid}"),
+        ] {
+            assert!(!is_opaque_token(&name), "{name}");
+            assert!(!secret_name(&name), "{name}");
+            assert_eq!(shown_key(&name, 0), name);
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"\"\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            assert!(notice.contains(&name), "{name}: {notice}");
+        }
+        for name in [format!("{hex}_{uuid}"), format!("{uuid}.{uuid}")] {
+            assert!(is_opaque_token(&name), "{name}");
+            assert!(!shown_key(&name, 0).contains("550e"), "{name}");
         }
     }
 

@@ -1315,7 +1315,8 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     // One entry per array or inline table still open (its depth is the length):
     // where `buried` stood when it opened. A region that closes, at any depth,
     // takes back what was buried inside it.
-    let mut open: Vec<usize> = Vec::new();
+    // (Each entry also records whether it is an array `[` or an inline table `{`.)
+    let mut open: Vec<(usize, char)> = Vec::new();
     // A table header was swallowed by an open region. What follows it, even once
     // the region closed, is that table's, or the file is too damaged to say: it is
     // never offered as the key (a mention is `unreadable`) for the rest of the text.
@@ -1348,7 +1349,7 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
             // An open array or inline table swallowing what looks like a table
             // header (`[mcp.env]`): the lines after it belong to that table,
             // not to the key, so none is offered from there on.
-            swallowed |= is_table_header_before_closers(line);
+            swallowed |= is_table_header_before_closers(line, open.len());
             bury(&mut scan, line, !swallowed);
         } else {
             let top = trim_lead(line);
@@ -1414,17 +1415,36 @@ fn trim_lead(line: &str) -> &str {
 /// (`]`, `}`) after it: inside an open array `[mcp.env]]` and `[mcp.env] ]` are a
 /// header-shaped text that also closes the array, and what follows the close
 /// would otherwise be read as top level.
-fn is_table_header_before_closers(line: &str) -> bool {
+///
+/// With closers after it, a text that is also a valid array element (`[3]]`,
+/// `["ls"] ]`: the last element of an array of arrays, the closers closing the
+/// enclosing arrays) is a value, not a header, when the closers are no more than
+/// the `depth` regions that are open; `mcp.env` is not a TOML value, so
+/// `[mcp.env]]` stays a header. Without closers the ambiguity resolves to
+/// "header" ([`is_table_header`]).
+fn is_table_header_before_closers(line: &str, depth: usize) -> bool {
     let mut text = line.trim_end();
+    let mut closers = 0usize;
     loop {
         if is_table_header(text) {
-            return true;
+            return closers == 0 || closers > depth || !is_array_value(trim_lead(text));
         }
         match text.strip_suffix([']', '}']) {
-            Some(shorter) => text = shorter.trim_end(),
+            Some(shorter) => {
+                text = shorter.trim_end();
+                closers += 1;
+            }
             None => return false,
         }
     }
+}
+
+/// Whether `text` is a valid TOML array value (`[3]`, `["ls"]`, `[[1], [2]]`).
+fn is_array_value(text: &str) -> bool {
+    text.starts_with('[')
+        && format!("x = {}", text.trim())
+            .parse::<toml::Table>()
+            .is_ok()
 }
 
 /// A line inside a string or an array that is still open. It could be the key's
@@ -1503,6 +1523,37 @@ fn string_end<'a>(line: &'a str, delimiter: &str) -> Option<&'a str> {
     None
 }
 
+/// The text from the `[` that starts `text` through its matching `]`, when that
+/// `]` is on the same line (single-line strings skipped over); `None` when the
+/// array goes on over the next lines.
+fn bracket_text(text: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut chars = text.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                while let Some((_, d)) = chars.next() {
+                    if c == '"' && d == '\\' {
+                        chars.next();
+                    } else if d == c {
+                        break;
+                    }
+                }
+            }
+            '#' => return None,
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&text[..at + 1]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// What `line` leaves open after it: the delimiter of the multi-line string it
 /// opens and does not close. `open` is the stack of the arrays and inline tables
 /// open before the line (each entry: where `buried` stood when it opened); it is
@@ -1511,14 +1562,16 @@ fn string_end<'a>(line: &'a str, delimiter: &str) -> Option<&'a str> {
 fn line_state(
     line: &str,
     before: Option<char>,
-    open: &mut Vec<usize>,
+    open: &mut Vec<(usize, char)>,
     buried: &mut Vec<String>,
     glued: &mut bool,
 ) -> Option<&'static str> {
     let mut rest = line;
     // The last significant character seen. A `[` that starts a value follows `=`,
-    // `,`, `[`, `{` or the start of a line; one that follows the end of a value
-    // (`1 [`, `"a" [`, `] [`) is a table header glued onto it.
+    // or, inside an array, `,` or `[` (when what it opens is a valid element) or
+    // the start of a line; one that follows the end of a value (`1 [`, `"a" [`,
+    // `] [`), a `,` at the top level or inside an inline table, or that opens text
+    // that is no TOML value (`[mcp.env]`) is a table header glued onto it.
     let mut last = before;
     while let Some(c) = rest.chars().next() {
         if c == '#' {
@@ -1556,13 +1609,30 @@ fn line_state(
         } else {
             match c {
                 '[' | '{' => {
-                    if c == '[' && last.is_some_and(|l| !matches!(l, '=' | ',' | '[' | '{')) {
-                        *glued = true;
+                    if c == '[' {
+                        if let Some(l) = last {
+                            let value_starts = match (l, open.last()) {
+                                ('=', _) => true,
+                                // At the top level, or in an inline table, a `[`
+                                // starts a value only right after `=`.
+                                (_, None) | (_, Some((_, '{'))) => false,
+                                // In an array: after `,` or `[`, when what it opens
+                                // is a valid element (a nested array the line does
+                                // not close is taken for one).
+                                (',' | '[', Some((_, '['))) => {
+                                    bracket_text(rest).is_none_or(is_array_value)
+                                }
+                                _ => false,
+                            };
+                            if !value_starts {
+                                *glued = true;
+                            }
+                        }
                     }
-                    open.push(buried.len());
+                    open.push((buried.len(), c));
                 }
                 ']' | '}' => {
-                    if let Some(start) = open.pop() {
+                    if let Some((start, _)) = open.pop() {
                         buried.truncate(start);
                     }
                 }
