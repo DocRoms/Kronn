@@ -36,7 +36,7 @@ no workspace row names, and the build dirs of executions Blocked or Interrupted 
 A lane's env is set in `WorkerLane::for_worktree`: a managed worktree gets `<repo>/target/wt-<lane>`, and the
 worker runs with it as `CARGO_TARGET_DIR`. The scratch dir, the private `CARGO_HOME` and the Vite cache live
 inside the lane or the worktree, so they go with it.
-[src: file: backend/src/core/task_worker_env.rs:256-311#for_worktree]
+[src: file: backend/src/core/task_worker_env.rs:274-329#for_worktree]
 
 **Ownership is a manifest, not a name.** `wt-*` proves nothing: humans and other tooling build in
 `target/wt-0151-integration`. Kronn writes `.kronn-lane.json` (execution id, lane, worktree) when it
