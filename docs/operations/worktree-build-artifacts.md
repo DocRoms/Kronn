@@ -479,11 +479,11 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 `.kronn-warm.json`.
 
 [src: file: backend/src/core/task_worker_env.rs:1161-1203#drain_output]
-[src: file: backend/src/core/task_worker_env.rs:86-86#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
+[src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
-[src: file: backend/src/core/task_worker_lane_warm.rs:729-911#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:925-932#first_build_args]
-[src: file: backend/src/core/task_worker_lane_warm.rs:936-940#has_lib_target]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1049-1231#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1460-1472#first_build_args]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1474-1478#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
 
@@ -692,7 +692,7 @@ project, read each `lane_warm_start` (`seed.aligned`, `crates`,
 [src: file: backend/src/core/task_worker_seed_align.rs:230-230#align_seed]
 [src: file: backend/src/core/task_worker_lane_settings.rs:67-67#resolve]
 [src: file: backend/src/core/project_toolchains.rs:72-72#rust_roots]
-[src: file: backend/src/core/task_worker_env.rs:86-86#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
+[src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
 
 ## Long builds in a task worker (KT-1718)
@@ -763,13 +763,13 @@ load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:204-211#effective_bash_timeouts_ms]
-[src: file: backend/src/core/task_worker_env.rs:877-887#apply_bash_timeouts]
+[src: file: backend/src/core/task_worker_env.rs:883-893#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15176-15178#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:678-679#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]
 [src: file: backend/src/core/task_worker_lane_warm.rs:872]
-[src: file: frontend/src/components/settings/WorkersSection.tsx:39#WorkersSection]
+[src: file: frontend/src/components/settings/WorkersSection.tsx:44#WorkersSection]
 
 ## Maintenance command
 

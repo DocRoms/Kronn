@@ -5,7 +5,7 @@ the latter stay with a human. A joined CLI checks durable answers before asking,
 publishes a numeric-version `kronn-question` card when needed, verifies its
 recording, and pauses only the affected scope. Narrower native and HTTP worker
 surfaces request that the principal relay the card; neither actor may decide for
-the human. [src: file: backend/src/api/orchestration.rs:11216-11265#human_arbitration]
+the human. [src: file: backend/src/api/orchestration.rs:11217-11266#human_arbitration]
 
 The parent-milestones section is transport-aware, not a single shared string, and
 the two joined-CLI tools do not share one restriction. `disc_append` defaults to
