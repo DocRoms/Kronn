@@ -38,9 +38,9 @@ Failure modes, all ending in a (cold) dispatch:
   (KT-1742). The repository's `.cargo/config.toml` `[env]` table sets the same two
   variables for every `cargo` run, and a unit test compares it with the lane's;
   even then the `kronn` crate's two compiles take ~33 min at load 14 (measured in
-  the same document), so the 30-min bound can still be too tight;
+  the same document), which is why the default bound is 60 min (KT-1742), not 30;
 - a queue that does not drain is given up after
-  `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 30 min) and the worker
+  `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 60 min) and the worker
   starts with the target it has;
 - a backend restart during the warm-up is the ordinary boot recovery
   (`ResumeProvisioning`): the saga skips what is persisted and warms again; the
@@ -250,7 +250,7 @@ The clone itself takes 14-38 s and no disk space.
 | --- | --- | --- |
 | `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker, and the budget of its test and build tools (KT-1634) |
 | `KRONN_WORKER_MAX_CONCURRENT_BUILDS` | 2 | first builds running at once on this backend process |
-| `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 1800 | bound of the first build and of its queue wait |
+| `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 3600 (was 1800 until KT-1742) | bound of the first build and of its queue wait |
 | `KRONN_WORKER_PRIVATE_CARGO_HOME` | unset | `1` keeps KT-1246's lane-private `CARGO_HOME` (no seeding) |
 
 ## Where the warming time goes (KT-1637)
@@ -297,7 +297,7 @@ check, so whatever `45.8 min - 6.8 min - queued_ms - clone_ms` leaves is not
 explained by that row, and it is not attributable to a step: the new steps are
 what cover it from now on. Reading that row is the only way to say whether the
 39 minutes were the gate wait (`queued_ms`, bounded by
-`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, 1800 s by default) or an uninstrumented
+`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, 3600 s by default since KT-1742, 1800 s when that row was written) or an uninstrumented
 gap; this was not done from a sandboxed worker, which cannot read the Kronn
 database. Run the execution's `lane_warm_start` event through
 `WarmStartRecord::timed_steps` (`backend/src/core/task_worker_lane_warm.rs`) and

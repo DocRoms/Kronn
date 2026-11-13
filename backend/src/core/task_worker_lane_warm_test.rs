@@ -233,6 +233,17 @@ fn jobs_the_limit_and_the_timeout_are_configurable() {
     assert_eq!(invalid.first_build_timeout, DEFAULT_FIRST_BUILD_TIMEOUT);
 }
 
+/// KT-1742: the default bound must stay above the measured 32 min 56 s of the
+/// kronn crate's own two compiles at load 14, or a healthy warm-up is killed.
+#[test]
+fn the_default_first_build_bound_is_sixty_minutes_and_stays_overridable() {
+    let unset = WarmStartSettings::resolve(None, None, None, 10);
+    assert_eq!(unset.first_build_timeout, Duration::from_secs(60 * 60));
+    assert_eq!(unset.first_build_timeout, DEFAULT_FIRST_BUILD_TIMEOUT);
+    let overridden = WarmStartSettings::resolve(None, None, Some("5400"), 10);
+    assert_eq!(overridden.first_build_timeout, Duration::from_secs(5400));
+}
+
 #[test]
 fn the_lane_environment_injects_cargo_build_jobs() {
     let fx = fixture();

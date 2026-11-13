@@ -12,7 +12,7 @@ target-dir = "target"
 # build script's fingerprint, so a lane cloned from THIS checkout's `target/debug`
 # is reusable only if this checkout built it with the very same value; otherwise
 # aws-lc-sys, libsqlite3-sys and everything that depends on them (rustls, reqwest,
-# axum, tungstenite…) rebuild in the lane and the warm-up times out (30 min).
+# axum, tungstenite…) rebuild in the lane and the warm-up times out.
 # The variables are target-scoped on purpose: they reach no Linux or Windows build,
 # and `cc` reads them before a plain `CFLAGS`. Cargo's `[env]` never overrides a
 # variable already set, so the lane's own (identical) environment wins harmlessly.

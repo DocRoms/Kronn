@@ -571,21 +571,26 @@ link in the 24 min was **not** separated (the linker prints `ld: __eh_frame
 section too large (max 16MB)`; the dev profile keeps no incremental objects here to
 date the link by). Two warm-ups at once were **not** run here.
 
-**Consequence, said plainly: the 30-minute bound is still too tight for this
-crate on a loaded host.** With the seed fixed the warm-up no longer rebuilds the
-dependency graph, but the two compiles of `kronn` alone took 33 min at load 14
-with 3 jobs (KT-1736 measured 22 min 19 s for a worker's own `cargo test --lib`
-build). At that load a warm-up would end `timed_out` a few minutes before the last
-`rustc` finishes, throw that work away (a killed `rustc` leaves no artifact) and
-the worker would pay it again. Three levers, none of
-them taken here because each is the owner's call: raise
-`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 1800); stop compiling the lib
-twice for `cargo test --lib` (the self dev-dependency exists for the `it`
-integration binary, KT-1189); lower the gate's concurrency under load. To read the
-real outcome on the owner's Mac after integration: launch two tasks at once on a
-project seeded from a main target built with this `.cargo/config.toml`, read each
-`lane_warm_start` (`first_build.outcome`, `duration_ms`, build_jobs, host load) and
-look for `.kronn-warm.json` in the lane target.
+**Consequence, said plainly: the former 30-minute bound was too tight for this
+crate on a loaded host, so the default is now 60 minutes.** With the seed fixed
+the warm-up no longer rebuilds the dependency graph, but the two compiles of
+`kronn` alone took 32 min 56 s at load 14 with 3 jobs (KT-1736 measured 22 min
+19 s for a worker's own `cargo test --lib` build). A 30-min bound would end
+`timed_out` just before the last `rustc` finishes and throw that work away (a
+killed `rustc` leaves no artifact), so the worker would pay it again.
+`DEFAULT_FIRST_BUILD_TIMEOUT` (`backend/src/core/task_worker_lane_warm.rs`) is
+therefore 3600 s: the measured 32 min 56 s plus a margin of about 27 min for a
+slower or busier host; `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` still overrides it.
+The same bound limits the gate (queue) wait. Not done here, each
+its own ticket: stop compiling the lib twice for `cargo test --lib` (the self
+dev-dependency exists for the `it` integration binary, KT-1189); lower the gate's
+concurrency under load. The live check, done by the principal after the restart,
+is: launch two tasks at once on a project seeded from a main target built with this
+`.cargo/config.toml`, read each `lane_warm_start` (`first_build.outcome`,
+`duration_ms`, build_jobs, host load) and look for `.kronn-warm.json` in the lane
+target.
+
+[src: file: backend/src/core/task_worker_lane_warm.rs:55-55#DEFAULT_FIRST_BUILD_TIMEOUT]
 
 [src: file: backend/src/core/task_worker_env.rs:86-86#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
