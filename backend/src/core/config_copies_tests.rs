@@ -283,146 +283,6 @@ fn a_failed_seal_that_cannot_be_cut_down_is_a_failure_not_a_cut_down() {
     assert_eq!(std::fs::read_to_string(d.join(rotated)).unwrap(), only);
 }
 
-/// A key line the parser rejects as a whole (duplicate key) is found past a
-/// value that is not a key; a copy whose `encryption_secret` is no key at all is
-/// never dropped.
-#[test]
-fn a_valid_key_line_behind_a_junk_one_is_kept_and_a_junk_key_is_never_dropped() {
-    let k = crypto::generate_secret();
-    // Duplicate top-level key: the whole text does not parse, the top-level lines
-    // are scanned (the second one with another value between).
-    let dup = format!("encryption_secret = \"junk\"\nencryption_secret = \"{k}\"\n{LEAKY}");
-    let apart = format!(
-        "encryption_secret = \"junk\"\nlanguage = \"fr\"\nencryption_secret = \"{k}\"\n{LEAKY}"
-    );
-    for text in [&dup, &apart] {
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        assert_eq!(key_of(text), Some(k.clone()), "{text}");
-        assert_eq!(config::salvage_key_line(text), Some(k.clone()), "{text}");
-    }
-    // Without a real key, the first value is still what is salvaged.
-    assert_eq!(
-        config::salvage_key_line("encryption_secret = \"junk\"\n"),
-        Some("junk".to_string())
-    );
-
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
-    std::fs::write(d.join("config.toml.backup"), &dup).unwrap();
-    let junk = format!("encryption_secret = \"junk\"\n{LEAKY}");
-    std::fs::write(d.join("config.toml.corrupt.20261001T000000Z"), &junk).unwrap();
-
-    // The valid key is found past the junk one (above), but a copy holding a
-    // value it cannot read is not cut down to the key line: the junk value may be
-    // the only trace of another key. Both are kept whole and reported.
-    let report = protect_clear_copies(d, None);
-    assert_eq!(
-        (report.reduced, report.failures.len()),
-        (0, 2),
-        "{report:?}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
-        dup
-    );
-    assert_eq!(
-        std::fs::read_to_string(d.join("config.toml.corrupt.20261001T000000Z")).unwrap(),
-        junk
-    );
-}
-
-/// An `encryption_secret` that is not a top-level line of the document (under a
-/// table, in a multi-line string, after the first table of a text that does not
-/// parse) is a value of something else: it is never the key, never kept as the
-/// key-only copy, never a key to seal under.
-#[test]
-fn an_encryption_secret_below_the_top_level_is_never_the_key() {
-    let section_value = crypto::generate_secret();
-    let top = crypto::generate_secret();
-
-    // Parses: only the top-level value decides.
-    let parsed = format!(
-        "encryption_secret = \"junk\"\n[tokens]\nencryption_secret = \"{section_value}\"\n"
-    );
-    assert!(parsed.parse::<toml::Table>().is_ok());
-    assert_eq!(key_of(&parsed), None);
-    let only_section =
-        format!("language = \"fr\"\n[tokens]\nencryption_secret = \"{section_value}\"\n");
-    assert_eq!(key_of(&only_section), None);
-    // The top-level key wins over a section value.
-    let both = format!(
-        "encryption_secret = \"{top}\"\n[tokens]\nencryption_secret = \"{section_value}\"\n"
-    );
-    assert_eq!(key_of(&both), Some(top.clone()));
-
-    // Does not parse (duplicate top-level key, then a table): the scan stops at
-    // the first table, a key line after it is ignored.
-    let after_table = format!(
-        "encryption_secret = \"junk\"\nencryption_secret = \"junk2\"\n[tokens]\n\
-         encryption_secret = \"{section_value}\"\n"
-    );
-    assert!(after_table.parse::<toml::Table>().is_err());
-    assert_eq!(key_of(&after_table), None);
-    assert_eq!(
-        config::salvage_key_line(&after_table),
-        Some("junk".to_string())
-    );
-    let array_table = format!(
-        "encryption_secret = \"junk\"\nencryption_secret = \"junk2\"\n[[tokens.keys]]\n\
-         encryption_secret = \"{section_value}\"\n"
-    );
-    assert_eq!(key_of(&array_table), None);
-
-    // A line of a multi-line string is not a line of the document.
-    for delimiter in ["\"\"\"", "'''"] {
-        let in_string = format!(
-            "encryption_secret = \"junk\"\nencryption_secret = \"junk2\"\n\
-             note = {delimiter}\nencryption_secret = \"{section_value}\"\n{delimiter}\n"
-        );
-        assert!(in_string.parse::<toml::Table>().is_err());
-        assert_eq!(key_of(&in_string), None, "{delimiter}");
-        // ... and the document goes on after the string closes.
-        let after_string = format!("{in_string}encryption_secret = \"{top}\"\n");
-        assert_eq!(key_of(&after_string), Some(top.clone()), "{delimiter}");
-        // A string closed on the line it opens does not hide the next line.
-        let inline = format!(
-            "encryption_secret = \"junk\"\nnote = {delimiter}x{delimiter}\n\
-             encryption_secret = \"{top}\"\n"
-        );
-        assert_eq!(key_of(&inline), Some(top.clone()), "{delimiter}");
-    }
-
-    // The copies: the section value is never written as the key-only copy, and
-    // a parsed copy whose top-level value is no key is kept whole and reported.
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
-    std::fs::write(d.join("config.toml.backup"), &parsed).unwrap();
-    std::fs::write(d.join("config.toml.backup.20261001T000000Z"), &after_table).unwrap();
-    for _ in 0..2 {
-        let report = protect_clear_copies(d, None);
-        assert_eq!(report.failures.len(), 2, "{report:?}");
-        assert_eq!(report.reduced, 0, "{report:?}");
-        assert_eq!(
-            std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
-            parsed
-        );
-        assert_eq!(
-            std::fs::read_to_string(d.join("config.toml.backup.20261001T000000Z")).unwrap(),
-            after_table
-        );
-    }
-
-    // No key in the stores: a section value never stands in for the key.
-    let empty = tempfile::tempdir().unwrap();
-    std::fs::write(empty.path().join("config.toml"), &parsed).unwrap();
-    assert_eq!(sealing(empty.path(), true), Sealing::Absent);
-    let with_section_key = tempfile::tempdir().unwrap();
-    std::fs::write(with_section_key.path().join("config.toml"), &only_section).unwrap();
-    assert_eq!(sealing(with_section_key.path(), true), Sealing::Absent);
-    std::fs::write(with_section_key.path().join("config.toml"), &both).unwrap();
-    assert_eq!(sealing(with_section_key.path(), true), Sealing::Key(top));
-}
-
 /// With no key anywhere, an `encryption_secret` that holds no key (under a table,
 /// empty, commented out) does not keep a copy whole in clear for good: the copy
 /// is dropped. Only a top-level, non-blank string that is no key is kept and
@@ -449,11 +309,6 @@ fn only_a_top_level_non_blank_string_keeps_a_copy_without_a_key() {
         (
             "config.toml.backup.20261003T000000Z",
             format!("encryption_secret = \"  \"\n{LEAKY}"),
-        ),
-        // Does not parse, and the key line is below its first table.
-        (
-            "config.toml.backup.20261004T000000Z",
-            format!("{LEAKY}encryption_secret = \"{k}\"\n[broken\n"),
         ),
         // A number can never be a key.
         (
@@ -487,6 +342,13 @@ fn only_a_top_level_non_blank_string_keeps_a_copy_without_a_key() {
         (
             "config.toml.backup.20261002T000000Z",
             format!("encryption_secret = \"junk\"\nencryption_secret = \"\"\n{LEAKY}[broken\n"),
+        ),
+        // Does not parse, and the key line sits under a table: no key is read,
+        // and the damaged text spells the name, so it is kept (it may be the
+        // only trace of one).
+        (
+            "config.toml.backup.20261004T000000Z",
+            format!("{LEAKY}encryption_secret = \"{k}\"\n[broken\n"),
         ),
     ];
     for (name, text) in &kept {
@@ -577,7 +439,7 @@ fn a_copy_holding_two_different_keys_is_never_cut_down() {
             (1, 0, 0),
             "{report:?}"
         );
-        assert!(report.failures[0].contains("different encryption_secret keys"));
+        assert!(report.failures[0].contains("encryption_secret"));
         assert_eq!(
             std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
             two
@@ -593,19 +455,21 @@ fn a_copy_holding_two_different_keys_is_never_cut_down() {
         two
     );
 
-    // The same key twice (or in another spelling) is one key.
+    // The same key twice is told from two keys by nothing but toml: the text does
+    // not parse, the key is read from its first line, and the second mention is
+    // past the first damaged line, so the copy is kept whole and reported too.
     let same = format!("encryption_secret = \"{k1}\"\nencryption_secret = \"{k1}\"\n{LEAKY}");
     assert!(same.parse::<toml::Table>().is_err());
     std::fs::write(d.join("config.toml.backup.20261001T000000Z"), &same).unwrap();
     let report = protect_clear_copies(d, None);
     assert_eq!(
         (report.reduced, report.failures.len()),
-        (1, 0),
+        (0, 1),
         "{report:?}"
     );
     assert_eq!(
         std::fs::read_to_string(d.join("config.toml.backup.20261001T000000Z")).unwrap(),
-        format!("encryption_secret = \"{k1}\"\n")
+        same
     );
 }
 
@@ -764,831 +628,340 @@ fn without_a_key_a_clear_copy_keeps_only_its_key_line() {
     assert_eq!(names(d), after);
 }
 
-/// A top-level key line the line scanner cannot read is never dropped (with no
-/// key anywhere nothing else holds it): kept as it is and reported. One input
-/// per way a line can be damaged.
+/// What a copy becomes when no key exists anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fate {
+    /// Cut down to its key line.
+    Cut,
+    /// Kept byte-identical and reported.
+    Whole,
+    /// Dropped: it holds nothing a later start needs.
+    Dropped,
+}
+
+/// KT-1528 — the key of a text is decided by toml itself: the top-level
+/// `encryption_secret` of a text that parses, else of the longest prefix of whole
+/// lines that parses, else nothing; no line of a damaged text is read on its own.
+/// One table over the regression corpus of the line-scanner rounds: the line
+/// boot recovery offers (`salvage_key_line`), `key_of`, and what becomes of the
+/// copy (`protect_clear_copies(dir, None)`) and of a config.toml set aside
+/// (`set_aside_content(.., None)`).
 #[test]
-fn a_damaged_key_line_keeps_the_copy_whole_and_reported() {
+fn the_key_is_read_by_toml_from_the_longest_parsing_prefix() {
     let k = crypto::generate_secret();
-    let inputs = [
-        // (a) missing closing quote
-        format!(
-            "encryption_secret = \"{k}\nlanguage = \"fr\"\n[tokens]\nanthropic = \"sk-clear\"\n"
+    let f = crypto::generate_secret();
+    let long_valid = "# filler\n".repeat(2_500);
+    let cases: Vec<(String, Option<String>, Fate)> = vec![
+        // ---- Positive: the key is in the part toml reads.
+        // K on line 1, damage later.
+        (
+            format!("encryption_secret = \"{k}\"\nlanguage = \"fr\"\n[server\n"),
+            Some(k.clone()),
+            Fate::Cut,
         ),
-        // (b) trailing text
-        format!("encryption_secret = \"{k}\" x\n{LEAKY}"),
-        // (c) a multi-line string, in a text that does not parse
-        format!("encryption_secret = \"\"\"\n{k}\"\"\"\nbroken\n{LEAKY}"),
-        format!("encryption_secret = '''\n{k}'''\nbroken\n{LEAKY}"),
-        // (d) an intact key line below a line that starts with `[` in an array
-        // left open: that line is an element, not a table
-        format!("a = [\n  [1, 2],\nencryption_secret = \"{k}\"\n{LEAKY}"),
-        // (e) a key line swallowed by a multi-line string left open above it
-        format!("a = \"\"\"\nencryption_secret = \"{k}\"\n{LEAKY}"),
-        format!("a = '''\nencryption_secret = \"{k}\"\n{LEAKY}"),
-        // a readable key beside a value that cannot be read
-        format!("encryption_secret = \"{k}\"\nencryption_secret = \"junk\"\n{LEAKY}"),
-        format!("encryption_secret = \"{k}\"\nencryption_secret = \"{k}\" x\n{LEAKY}"),
-    ];
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
-    for (i, text) in inputs.iter().enumerate() {
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        assert!(key_lines(text).unreadable, "{text}");
-        std::fs::write(
-            d.join(format!("config.toml.backup.2026100{i}T000000Z")),
-            text,
-        )
-        .unwrap();
-    }
-    for _ in 0..2 {
-        let report = protect_clear_copies(d, None);
-        assert_eq!(
-            (report.reduced, report.deferred, report.failures.len()),
-            (0, 0, inputs.len()),
-            "{report:?}"
-        );
-        for (i, text) in inputs.iter().enumerate() {
-            let name = format!("config.toml.backup.2026100{i}T000000Z");
-            assert_eq!(&std::fs::read_to_string(d.join(name)).unwrap(), text);
-        }
-    }
-
-    // The same through the stores' proof, and sealed whole once a key exists.
-    let report = protect_copies(d, &Sealing::Absent);
-    assert_eq!(report.failures.len(), inputs.len(), "{report:?}");
-    let key = crypto::generate_secret();
-    let report = protect_clear_copies(d, Some(&key));
-    assert_eq!(
-        (report.sealed, report.failures.len()),
-        (inputs.len(), 0),
-        "{report:?}"
-    );
-    assert!(names(d).iter().all(|n| n.ends_with(".enc")));
-}
-
-/// A mention proven harmless does not keep a credential copy in clear, in a text
-/// that does not parse either: a comment, a value under a table the scan reached
-/// with nothing open (a byte-order mark before the header included), a blank or
-/// non-string value, an array element that is not a key line.
-#[test]
-fn a_mention_proven_harmless_is_dropped_even_in_a_text_that_does_not_parse() {
-    let k = crypto::generate_secret();
-    let droppable = [
-        format!("{LEAKY}encryption_secret = \"{k}\"\n[broken\n"),
-        format!("# encryption_secret = \"{k}\"\n{LEAKY}[broken\n"),
-        format!("language = \"fr\" # encryption_secret = \"{k}\"\n{LEAKY}[broken\n"),
-        format!("encryption_secret = \"\"\nbroken\n{LEAKY}"),
-        format!("encryption_secret = 7\n[broken\n{LEAKY}"),
-        // A byte-order mark before a table header: the table is still a table.
-        format!("\u{FEFF}[tokens]\nencryption_secret = \"{k}\"\n{LEAKY}[broken\n"),
-        // An array closed before the key's table: the `[` below it is a header.
-        format!("a = [\n  [1, 2],\n]\n[tokens]\nencryption_secret = \"{k}\"\n[broken\n"),
-        // A string closed before it.
-        format!("a = \"\"\"\nx\n\"\"\"\n[tokens]\nencryption_secret = \"{k}\"\n[broken\n"),
-    ];
-    let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
-    for (i, text) in droppable.iter().enumerate() {
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        assert_eq!(key_of(text), None, "{text}");
-        assert!(!config::salvage_key_scan(text).unreadable, "{text}");
-        std::fs::write(
-            d.join(format!("config.toml.backup.2026100{i}T000000Z")),
-            text,
-        )
-        .unwrap();
-    }
-    let report = protect_clear_copies(d, None);
-    assert_eq!(
-        (report.reduced, report.deferred, report.failures.len()),
-        (droppable.len(), 0, 0),
-        "{report:?}"
-    );
-    assert!(names(d).is_empty(), "{:?}", names(d));
-
-    // A byte-order mark does not hide a key line on the first line either.
-    let bom_key = format!("\u{FEFF}encryption_secret = \"{k}\"\n[broken\n");
-    assert_eq!(key_of(&bom_key), Some(k));
-}
-
-/// The key line written with a quoted or escaped key is the key line: TOML decodes
-/// it to the same name, so a copy is cut down to it (and a config.toml set aside
-/// keeps it), never dropped; one that cannot be read is kept whole and reported.
-#[test]
-fn a_quoted_or_escaped_key_name_is_still_the_key_line() {
-    let k = crypto::generate_secret();
-    let spellings = [
-        "\"encryption_secret\"",
-        "'encryption_secret'",
-        "\"encryption\\u005fsecret\"",
-        "\"\\u0065ncryption_secret\"",
-        "  \"encryption_secret\"  ",
-    ];
-    for (i, name) in spellings.iter().enumerate() {
-        let text = format!("{name} = \"{k}\"\nbroken\n{LEAKY}");
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        assert_eq!(key_of(&text), Some(k.clone()), "{text}");
-        assert_eq!(config::salvage_key_line(&text), Some(k.clone()), "{text}");
-
-        let dir = tempfile::tempdir().unwrap();
-        let copy = format!("config.toml.backup.2026100{i}T000000Z");
-        std::fs::write(dir.path().join(&copy), &text).unwrap();
-        let report = protect_clear_copies(dir.path(), None);
-        assert_eq!(
-            (report.reduced, report.failures.len()),
-            (1, 0),
-            "{report:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join(&copy)).unwrap(),
-            format!("encryption_secret = \"{k}\"\n"),
-            "{text}"
-        );
-        assert!(files_holding(dir.path(), NEEDLES, &[]).is_empty());
-
-        let bare = tempfile::tempdir().unwrap();
-        let Aside::KeyOnly(kept) = set_aside_content(bare.path(), text.as_bytes(), None).unwrap()
-        else {
-            panic!("the key line is kept: {text}")
-        };
-        assert_eq!(
-            std::fs::read_to_string(bare.path().join(kept)).unwrap(),
-            format!("encryption_secret = \"{k}\"\n")
-        );
-    }
-
-    // A quoted key line that cannot be read, or whose value is no key, is never
-    // dropped: kept whole and reported.
-    let damaged = [
-        format!("\"encryption_secret\" = \"{k}\nbroken\n{LEAKY}"),
-        format!("\"encryption_secret\" = \"{k}\" x\n{LEAKY}"),
-        format!("\"encryption\\u005fsecret\" = \"{k}\" x\n{LEAKY}"),
-        format!("\"encryption\\u005fsecret\" = \"{k}\n{LEAKY}"),
-        format!("\"encryption\\u005fsecret\" = \"junk\"\nbroken\n{LEAKY}"),
-        format!("'encryption_secret' = '''\n{k}'''\nbroken\n{LEAKY}"),
-        // A quoted key that cannot be told from the key when it does not parse.
-        "\"enc\\u0072yption_secret\" = [\nbroken\n".to_string(),
-    ];
-    let dir = tempfile::tempdir().unwrap();
-    for (i, text) in damaged.iter().enumerate() {
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        assert!(key_lines(text).unreadable, "{text}");
-        std::fs::write(
-            dir.path()
-                .join(format!("config.toml.backup.2026100{i}T000000Z")),
-            text,
-        )
-        .unwrap();
-        let bare = tempfile::tempdir().unwrap();
-        assert!(
-            matches!(
-                set_aside_content(bare.path(), text.as_bytes(), None).unwrap(),
-                Aside::KeptAsIs(_)
-            ),
-            "{text}"
-        );
-    }
-    for _ in 0..2 {
-        let report = protect_clear_copies(dir.path(), None);
-        assert_eq!(
-            (report.reduced, report.failures.len()),
-            (0, damaged.len()),
-            "{report:?}"
-        );
-        for (i, text) in damaged.iter().enumerate() {
-            let copy = format!("config.toml.backup.2026100{i}T000000Z");
-            assert_eq!(
-                &std::fs::read_to_string(dir.path().join(copy)).unwrap(),
-                text
-            );
-        }
-    }
-
-    // A plain line that does not parse and is not the key stays harmless.
-    for harmless in ["language = \"fr\nbroken\n[x]\n", "a = [\nb = 1\n"] {
-        assert!(!config::salvage_key_scan(harmless).unreadable, "{harmless}");
-    }
-}
-
-/// A quoted or escaped key line inside a string or an array that is still open is
-/// not proven harmless either: whatever its spelling, it may be the live key, so
-/// the copy is kept whole (bytes unchanged) and reported, and a config.toml set
-/// aside keeps its whole content. A quoted array element is still harmless.
-#[test]
-fn a_quoted_or_escaped_key_line_inside_an_open_region_keeps_the_copy_whole() {
-    let k = crypto::generate_secret();
-    let hidden = [
-        // An array that never closes.
-        format!("x = [\n\"encryption_secret\" = \"{k}\"\n"),
-        format!("x = [\n\"encryption\\u005fsecret\" = \"{k}\"\n"),
-        format!("x = [\n  \"\\u0065ncryption_secret\" = \"{k}\"\n"),
-        format!("x = [\n'encryption_secret' = '{k}'\n"),
-        // A multi-line string that never closes, or does and leaves the text broken.
-        format!("x = \"\"\"\n\"encryption_secret\" = \"{k}\"\n"),
-        format!("x = \"\"\"\n\"enc\\u0072yption_secret\" = \"{k}\"\n\"\"\"\nbroken\n"),
-        format!("x = '''\n\"encryption\\u005fsecret\" = \"{k}\"\n"),
-        // An inline table over several lines.
-        format!("x = {{\n\"encryption\\u005fsecret\" = \"{k}\",\n"),
-    ];
-    let dir = tempfile::tempdir().unwrap();
-    for (i, text) in hidden.iter().enumerate() {
-        let text = format!("pat = \"pat-clear\"\ncookie = \"cookie-clear\"\n{text}");
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        assert!(config::salvage_key_scan(&text).unreadable, "{text}");
-        assert!(key_lines(&text).unreadable, "{text}");
-        std::fs::write(
-            dir.path()
-                .join(format!("config.toml.backup.2026100{i}T000000Z")),
-            &text,
-        )
-        .unwrap();
-        let bare = tempfile::tempdir().unwrap();
-        assert!(
-            matches!(
-                set_aside_content(bare.path(), text.as_bytes(), None).unwrap(),
-                Aside::KeptAsIs(_)
-            ),
-            "{text}"
-        );
-    }
-    for _ in 0..2 {
-        let report = protect_clear_copies(dir.path(), None);
-        assert_eq!(
-            (report.reduced, report.failures.len()),
-            (0, hidden.len()),
-            "{report:?}"
-        );
-        for (i, text) in hidden.iter().enumerate() {
-            let copy = format!("config.toml.backup.2026100{i}T000000Z");
-            let kept = std::fs::read_to_string(dir.path().join(copy)).unwrap();
-            assert!(kept.ends_with(text.as_str()), "{kept}");
-        }
-    }
-
-    // Quoted array elements and plain lines in an open region are harmless.
-    for harmless in [
-        "x = [\n\"a\",\n\"b\"\n",
-        "x = \"\"\"\nplain prose\n",
-        "x = [\n{ a = 1 },\n",
-    ] {
-        assert!(!config::salvage_key_scan(harmless).unreadable, "{harmless}");
-    }
-}
-
-/// Every text is a copy that is kept whole and reported when no key exists, and a
-/// config.toml set aside whole (owner-only): none is dropped or cut down.
-fn assert_kept_whole_and_reported(texts: &[String]) {
-    let dir = tempfile::tempdir().unwrap();
-    for (i, text) in texts.iter().enumerate() {
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        assert!(config::salvage_key_scan(text).unreadable, "{text}");
-        assert!(key_lines(text).unreadable, "{text}");
-        std::fs::write(
-            dir.path()
-                .join(format!("config.toml.backup.2026100{i}T000000Z")),
-            text,
-        )
-        .unwrap();
-        let bare = tempfile::tempdir().unwrap();
-        assert!(
-            matches!(
-                set_aside_content(bare.path(), text.as_bytes(), None).unwrap(),
-                Aside::KeptAsIs(_)
-            ),
-            "{text}"
-        );
-    }
-    for _ in 0..2 {
-        let report = protect_clear_copies(dir.path(), None);
-        assert_eq!(
-            (report.reduced, report.failures.len()),
-            (0, texts.len()),
-            "{report:?}"
-        );
-        for (i, text) in texts.iter().enumerate() {
-            let copy = format!("config.toml.backup.2026100{i}T000000Z");
-            assert_eq!(
-                &std::fs::read_to_string(dir.path().join(copy)).unwrap(),
-                text
-            );
-        }
-    }
-}
-
-/// An `encryption_secret` line that parses on its own but sits in a region a
-/// broken file left open (an array or a multi-line string that never closes) is
-/// offered to the boot recovery ([`config::salvage_key_line`]), so a key the
-/// breakage swallowed is not lost; a copy never reads, seals under or cuts down
-/// to it, and keeps the whole text, reported.
-#[test]
-fn a_key_buried_in_an_open_region_is_recovered_but_never_read_by_a_copy() {
-    let k = crypto::generate_secret();
-    let buried = [
-        format!("x = [\nencryption_secret = \"{k}\"\n"),
-        format!("x = [\n  encryption_secret = '{k}'\n"),
-        format!("x = \"\"\"\nencryption_secret = \"{k}\"\n"),
-        format!("x = '''\nencryption_secret = \"{k}\"\n"),
-        format!("x = [\n\"encryption_secret\" = \"{k}\"\n"),
-        format!("x = [\n\"encryption\\u005fsecret\" = \"{k}\"\n"),
-        format!("x = \"\"\"\n\"\\u0065ncryption_secret\" = \"{k}\"\n"),
-    ];
-    let texts: Vec<String> = buried
-        .iter()
-        .map(|b| format!("pat = \"pat-clear\"\ncookie = \"cookie-clear\"\n{b}"))
-        .collect();
-    for text in &texts {
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        let scan = config::salvage_key_scan(text);
-        assert!(scan.unreadable, "{text}");
-        assert!(scan.values.is_empty(), "not a top-level key: {text}");
-        assert_eq!(scan.buried, vec![k.clone()], "{text}");
-        // The boot recovery offers it; a copy never reads it as its key.
-        assert_eq!(config::salvage_key_line(text), Some(k.clone()), "{text}");
-        assert_eq!(key_of(text), None, "{text}");
-    }
-    assert_kept_whole_and_reported(&texts);
-
-    // A top-level key wins over a buried one.
-    let top = crypto::generate_secret();
-    let both = format!("encryption_secret = \"{top}\"\nx = [\nencryption_secret = \"{k}\"\n");
-    assert_eq!(config::salvage_key_line(&both), Some(top.clone()));
-    assert_eq!(key_of(&both), Some(top));
-}
-
-/// A key line written inside a string or an array that CLOSES again is a note or
-/// an element, not a key a broken file swallowed: the boot recovery never offers
-/// it, whether the file parses (the parsed top level decides alone) or not (only
-/// a region still open at the end of the text offers its lines).
-#[test]
-fn a_key_in_a_closed_region_is_never_recovered() {
-    let k = crypto::generate_secret();
-    // The text parses: its top-level value (not a string) is the answer, None.
-    let parsed = format!(
-        "encryption_secret = 5\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\"\n\
-         [server]\nport = 1\n"
-    );
-    assert!(parsed.parse::<toml::Table>().is_ok());
-    assert_eq!(config::salvage_key_line(&parsed), None);
-    // ... and so do a literal string, an array and a table value of a parsed text.
-    for region in [
-        format!("notes = '''\nencryption_secret = \"{k}\"\n'''\n"),
-        format!("x = [\n  \"a\",\n]\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\"\n"),
-    ] {
-        let text = format!("language = \"fr\"\n{region}");
-        assert!(text.parse::<toml::Table>().is_ok(), "{text}");
-        assert_eq!(config::salvage_key_line(&text), None, "{text}");
-    }
-    // The text parses with a junk top-level value: that value, never a section's.
-    let junk = format!("encryption_secret = \"junk\"\n[tokens]\nencryption_secret = \"{k}\"\n");
-    assert_eq!(config::salvage_key_line(&junk).as_deref(), Some("junk"));
-
-    // The text does not parse (a duplicate key): a region that closed offers
-    // nothing, the mention stays unreadable (the copy is kept, reported).
-    let closed = [
-        format!(
-            "encryption_secret = \"junk\"\nencryption_secret = \"junk2\"\n\
-             notes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\"\n"
-        ),
-        format!(
-            "encryption_secret = \"junk\"\nencryption_secret = \"junk2\"\n\
-             x = [\n\"a\",\nencryption_secret = \"{k}\"\n]\n"
-        ),
-    ];
-    for text in &closed {
-        assert!(text.parse::<toml::Table>().is_err(), "{text}");
-        let scan = config::salvage_key_scan(text);
-        assert!(scan.buried.is_empty(), "{text}");
-        assert!(scan.unreadable, "{text}");
-        assert_eq!(
-            config::salvage_key_line(text).as_deref(),
-            Some("junk"),
-            "{text}"
-        );
-    }
-    assert_kept_whole_and_reported(&closed.map(|c| format!("{c}{LEAKY}")));
-}
-
-/// An array a broken file left open swallows the table header after it: the
-/// `encryption_secret` of that table (an MCP env table, `[tokens]`) is that
-/// table's, never offered as the live key. A line before the header, and one
-/// after an array element that is not a header, still are.
-#[test]
-fn an_open_array_never_offers_the_key_of_a_table_it_swallowed() {
-    let (k1, k2) = (crypto::generate_secret(), crypto::generate_secret());
-    for header in ["[mcp.env]", "[[mcp]]", "[tokens] # a note"] {
-        let swallowed = format!("x = [\n{header}\nencryption_secret = \"{k1}\"\n");
-        assert!(swallowed.parse::<toml::Table>().is_err(), "{swallowed}");
-        let scan = config::salvage_key_scan(&swallowed);
-        assert!(scan.buried.is_empty(), "{swallowed}");
-        assert!(scan.unreadable, "{swallowed}");
-        assert_eq!(config::salvage_key_line(&swallowed), None, "{swallowed}");
-        assert_eq!(key_of(&swallowed), None, "{swallowed}");
-
-        // What the open array held before the header is still offered.
-        let before = format!(
-            "x = [\nencryption_secret = \"{k2}\"\n{header}\nencryption_secret = \"{k1}\"\n"
-        );
-        assert_eq!(
-            config::salvage_key_line(&before),
-            Some(k2.clone()),
-            "{before}"
-        );
-    }
-    // An array element is not a header, even at column 0 or like `[1]`'s cousin.
-    let element = format!("x = [\n[1, 2],\nencryption_secret = \"{k1}\"\n");
-    assert_eq!(config::salvage_key_line(&element), Some(k1.clone()));
-
-    // The copy is kept whole and reported, never dropped nor cut down.
-    assert_kept_whole_and_reported(&[
-        format!("x = [\n[mcp.env]\nencryption_secret = \"{k1}\"\n{LEAKY}"),
-        format!("x = [\n[[mcp]]\nencryption_secret = \"{k1}\"\n{LEAKY}"),
-    ]);
-}
-
-/// A table header swallowed by an open array or an unclosed multi-line string
-/// ends what is offered, indented (TOML allows it, with spaces or a tab) or not,
-/// whichever the quotes of the string: the `encryption_secret` after it is that
-/// table's, never the live key. What the region held before the header still is
-/// offered.
-#[test]
-fn a_header_swallowed_by_an_open_array_or_string_offers_nothing_after_it() {
-    let (k1, k2) = (crypto::generate_secret(), crypto::generate_secret());
-    let mut swallowed_texts = Vec::new();
-    for (open, indent) in [
-        ("x = [", "  "),
-        ("x = [", "\t"),
-        ("x = [", ""),
-        ("notes = \"\"\"", ""),
-        ("notes = \"\"\"", "  "),
-        ("notes = '''", ""),
-        ("notes = '''", "\t"),
-    ] {
-        for header in ["[mcp.env]", "[[mcp]]"] {
-            let swallowed =
-                format!("{open}\n{indent}{header}\n{indent}encryption_secret = \"{k1}\"\n");
-            assert!(swallowed.parse::<toml::Table>().is_err(), "{swallowed}");
-            let scan = config::salvage_key_scan(&swallowed);
-            assert!(scan.buried.is_empty(), "{swallowed:?}");
-            assert!(scan.values.is_empty(), "{swallowed:?}");
-            assert!(scan.unreadable, "{swallowed:?}");
-            assert_eq!(config::salvage_key_line(&swallowed), None, "{swallowed:?}");
-            assert_eq!(key_of(&swallowed), None, "{swallowed:?}");
-
-            // What the region held before the header is still offered.
-            let before = format!(
-                "{open}\n{indent}encryption_secret = \"{k2}\"\n{indent}{header}\n\
-                 {indent}encryption_secret = \"{k1}\"\n"
-            );
-            assert_eq!(
-                config::salvage_key_line(&before),
-                Some(k2.clone()),
-                "{before:?}"
-            );
-            swallowed_texts.push(format!("{swallowed}{LEAKY}"));
-        }
-    }
-    // The copy is kept whole and reported, never dropped nor cut down.
-    assert_kept_whole_and_reported(&swallowed_texts);
-}
-
-/// A region that closes and another that opens on the same line are two regions:
-/// what the first held is a note or an element, not a swallowed line, and is not
-/// offered; what the second holds, still open at the end, is.
-#[test]
-fn a_region_that_closes_and_another_that_opens_on_one_line_are_two_regions() {
-    let (k, k2) = (crypto::generate_secret(), crypto::generate_secret());
-    // (text, what the recovery offers)
-    let cases = [
-        // A: a string closes, another opens.
+        // AppConfig field order, damage after K.
         (
             format!(
-                "encryption_secret = 5\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\
-                 \"\"\" ; x = \"\"\"\nmore\n"
+                "language = \"fr\"\nui_language = \"fr\"\nstt_model = \"x\"\n\
+                 disabled_agents = []\nencryption_secret = \"{k}\"\n[server]\nport = 1\nport = 2\n"
+            ),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        // A duplicate `[server]` key after K.
+        (
+            format!("encryption_secret = \"{k}\"\n[server]\nport = 1\nport = 2\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        // A text that parses: its top-level value, a section one is another key.
+        (
+            format!("encryption_secret = \"{k}\"\n[tokens]\nencryption_secret = \"{f}\"\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        (format!("{LEAKY}encryption_secret = \"{f}\"\n"), None, Fate::Dropped),
+        (
+            format!("language = \"fr\"\n[tokens]\nencryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Dropped,
+        ),
+        // Y1: parses, the top-level value is a number, a closed string is a note.
+        (
+            format!(
+                "encryption_secret = 5\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\"\n\
+                 [server]\nport = 1\n"
             ),
             None,
+            Fate::Dropped,
         ),
-        // B: an array closes, another opens.
+        // A quoted or escaped spelling of the name is decoded by toml.
+        (
+            format!("\"encryption_secret\" = \"{k}\"\n[broken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        (
+            format!("\"encryption\\u005fsecret\" = \"{k}\"\nx = [broken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        // A byte-order mark on line 1 is ignored.
+        (
+            format!("\u{FEFF}encryption_secret = \"{k}\"\n[broken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        // The cap (2 000 lines) ends the read, not the key found before it.
+        (
+            format!("encryption_secret = \"{k}\"\n{long_valid}[broken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        // ---- Accepted: nothing is read, the copy is kept whole and reported.
+        // A key after the cap, or after the first damaged line.
+        (
+            format!("{long_valid}encryption_secret = \"{k}\"\n[broken\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("x = [broken\nencryption_secret = \"{k}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        // AR1: a header swallowed by an open array, the key line after it.
+        (
+            format!("x = [\n[mcp.env]\n]\nencryption_secret = \"{k}\"\n[broken\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("x = [\n  [mcp.env]\n]\nencryption_secret = \"{k}\"\n[broken\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("x = [\n[mcp.env]\nfoo = 1\n]\nencryption_secret = \"{k}\"\n[broken\n"),
+            None,
+            Fate::Whole,
+        ),
+        // N1: an indented header inside an open array (space, tab).
+        (
+            format!("a = [\n  [mcp.env]\n  encryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("a = [\n\t[mcp.env]\n\tencryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        // N2: a region closes and another opens on the same line.
+        (
+            format!(
+                "encryption_secret = 5\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\" ; x = \"\"\"\nmore\n"
+            ),
+            None,
+            Fate::Whole,
+        ),
         (
             format!("encryption_secret = 5\na = [\nencryption_secret = \"{k}\"\n], b = [\n"),
             None,
+            Fate::Whole,
         ),
-        // C: a string closes, a literal string opens; the junk top-level value
-        // stays the answer.
         (
             format!(
-                "encryption_secret = \"junk\"\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\
-                 \"\"\"x = '''\n"
-            ),
-            Some("junk".to_string()),
-        ),
-        // D: a string inside an array closes (the array stays open).
-        (
-            format!(
-                "encryption_secret = 5\na = [\"\"\"\nencryption_secret = \"{k}\"\n\"\"\", \"\"\"\n"
+                "encryption_secret = \"junk\"\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\"x = '''\n"
             ),
             None,
+            Fate::Whole,
         ),
-        // The second region's own key line is still offered.
+        // N3: a header swallowed by an unclosed multi-line string.
         (
-            format!(
-                "encryption_secret = 5\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\
-                 \"\"\" ; x = \"\"\"\nencryption_secret = \"{k2}\"\n"
-            ),
-            Some(k2.clone()),
+            format!("notes = \"\"\"\n[mcp.env]\nencryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Whole,
         ),
         (
-            format!(
-                "encryption_secret = 5\na = [\nencryption_secret = \"{k}\"\n], b = [\n\
-                 encryption_secret = \"{k2}\"\n"
-            ),
-            Some(k2.clone()),
+            format!("notes = '''\n[mcp.env]\nencryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        // AR2b-d: a region closing inside an open outer array.
+        (
+            format!("x = [\n[\nencryption_secret = \"{k}\"\n],\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("x = [\n{{\nencryption_secret = \"{k}\"\n}},\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("x = [[\n[\nencryption_secret = \"{k}\"\n],\n"),
+            None,
+            Fate::Whole,
+        ),
+        // R1: the last element of an array of arrays (accepted: kept whole).
+        (
+            format!("x = [\n  [1, 2],\n  [3]]\nencryption_secret = \"{k}\"\n[broken\n"),
+            None,
+            Fate::Whole,
+        ),
+        // R2: a header glued after a comma, or onto a value.
+        (
+            format!("port = 1, [mcp.env]\nencryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("x = {{a = 1, [mcp.env]\nencryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("port = 1 [mcp.env]\nencryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("x = [\n] [mcp.env]\nencryption_secret = \"{f}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        // A mid-file byte-order mark before a header inside an open array.
+        (
+            format!("x = [\n\u{FEFF}[mcp.env]\n]\nencryption_secret = \"{f}\"\n[b\n"),
+            None,
+            Fate::Whole,
+        ),
+        // K inside an open array with nothing parseable before it.
+        (
+            format!("a = [\nencryption_secret = \"{k}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        // A prefix that parses, but the name sits under a table.
+        (
+            format!("[tokens]\nencryption_secret = \"{k}\"\n[broken\n"),
+            None,
+            Fate::Whole,
+        ),
+        // A damaged key line (missing quote, trailing text, multi-line string).
+        (
+            format!("encryption_secret = \"{k}\nlanguage = \"fr\"\n[tokens]\nanthropic = \"sk-x\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("encryption_secret = \"{k}\" x\nlanguage = \"fr\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("encryption_secret = \"\"\"\n{k}\"\"\"\nbroken\n"),
+            None,
+            Fate::Whole,
+        ),
+        // Two assignments joined on one line, an escaped name past the damage.
+        (
+            format!("port = 8080 \"encryption_secret\" = \"{k}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        (
+            format!("x = [broken\n\"encryption\\u005fsecret\" = \"{k}\"\n"),
+            None,
+            Fate::Whole,
+        ),
+        // Two different keys, or one written twice: the second is past the first
+        // line toml cannot read, so the copy is kept whole.
+        (
+            format!("encryption_secret = \"{k}\"\nencryption_secret = \"{f}\"\n"),
+            Some(k.clone()),
+            Fate::Whole,
+        ),
+        // A string that is no key, on a text that parses.
+        (
+            "encryption_secret = \"junk\"\nlanguage = \"fr\"\n".to_string(),
+            Some("junk".to_string()),
+            Fate::Whole,
+        ),
+        // ---- A damaged text that never spells the name holds no key: dropped.
+        (
+            "x = [broken\napi_key = \"sk-clear-z\"\n".to_string(),
+            None,
+            Fate::Dropped,
         ),
     ];
-    for (text, offered) in &cases {
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        assert_eq!(
-            config::salvage_key_line(text),
-            *offered,
-            "{text:?}: {:?}",
-            config::salvage_key_scan(text)
-        );
-        // A copy never reads, seals under or cuts down to a buried value.
-        assert_eq!(key_of(text), None, "{text:?}");
-        assert!(config::salvage_key_scan(text).unreadable, "{text:?}");
-    }
-    assert_kept_whole_and_reported(
-        &cases
-            .iter()
-            .map(|(text, _)| format!("{text}{LEAKY}"))
-            .collect::<Vec<_>>(),
-    );
-}
 
-/// A nested array that quotes its inside and is the last element of an open array
-/// (`["x"]`, `['mcp']`, `[1]`) is also a valid table header read on its own. The
-/// ambiguity resolves to the safe side and this test pins it: such a line is read
-/// as a header, so the `encryption_secret` after it is not offered (the copy is
-/// kept whole and reported, only the recovery at boot misses it) rather than a
-/// table's key being adopted as the live one.
-#[test]
-fn a_quoted_nested_array_at_the_start_of_a_line_is_read_as_a_header() {
-    let k = crypto::generate_secret();
-    let mut texts = Vec::new();
-    for element in ["[\"x\"]", "['mcp']", "[1]"] {
-        let text = format!("a = [\n{element}\nencryption_secret = \"{k}\"\n");
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        let scan = config::salvage_key_scan(&text);
-        assert!(scan.buried.is_empty(), "{text:?}");
-        assert!(scan.unreadable, "{text:?}");
-        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
-        texts.push(format!("{text}{LEAKY}"));
-    }
-    assert_kept_whole_and_reported(&texts);
-}
+    for (text, salvaged, fate) in &cases {
+        let shown = text.chars().take(120).collect::<String>();
+        assert_eq!(&config::salvage_key_line(text), salvaged, "{shown:?}");
+        let real = salvaged
+            .clone()
+            .filter(|v| crypto::canonical_secret(v).is_ok());
+        assert_eq!(key_of(text), real, "{shown:?}");
 
-/// A table header swallowed by an open region stays swallowed when the region
-/// closes: every line after it is that table's (or the file is too damaged to
-/// say), so a top-level-looking `encryption_secret` after the close is never the
-/// key. The scan reads it as unreadable, offers nothing, and the copy (and a
-/// config.toml set aside) is kept whole and reported, never cut to that one line.
-#[test]
-fn a_header_swallowed_before_a_close_leaves_the_lines_after_it_unread() {
-    let k = crypto::generate_secret();
-    let mut texts = Vec::new();
-    for (swallowing, tail) in [
-        ("x = [\n[mcp.env]\n]\n", "[broken\n"),
-        ("x = [\n  [mcp.env]\n]\n", "[broken\n"),
-        ("x = [\n\t[mcp.env]\n]\n", "[broken\n"),
-        ("x = [\n[mcp.env]\nfoo = 1\n]\n", ""),
-        ("notes = \"\"\"\n[mcp.env]\n\"\"\"\n", "[broken\n"),
-        ("notes = '''\n  [[mcp]]\n'''\n", "[broken\n"),
-    ] {
-        let text = format!("{swallowing}encryption_secret = \"{k}\"\n{tail}");
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        let scan = config::salvage_key_scan(&text);
-        assert!(scan.values.is_empty(), "{text:?}: {scan:?}");
-        assert!(scan.buried.is_empty(), "{text:?}: {scan:?}");
-        assert!(scan.unreadable, "{text:?}");
-        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
-        assert_eq!(key_of(&text), None, "{text:?}");
-        texts.push(format!("{text}{LEAKY}"));
-    }
-    // The copy is kept byte-identical and reported (it may hold the only key).
-    assert_kept_whole_and_reported(&texts);
-}
-
-/// An array or inline table that closes INSIDE an open outer array takes back
-/// what it held, as a string does: it was a nested value, not a swallowed line.
-/// Nothing is offered for recovery at boot, the copy stays kept and reported.
-#[test]
-fn a_nested_region_that_closes_inside_an_open_array_offers_nothing() {
-    let k = crypto::generate_secret();
-    let mut texts = Vec::new();
-    for text in [
-        format!("x = [\n[\nencryption_secret = \"{k}\"\n],\n"),
-        format!("x = [\n{{\nencryption_secret = \"{k}\"\n}},\n"),
-        format!("x = [[\n[\nencryption_secret = \"{k}\"\n],\n"),
-        format!("x = [\n[\n[\nencryption_secret = \"{k}\"\n]\n],\n"),
-    ] {
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        let scan = config::salvage_key_scan(&text);
-        assert!(scan.buried.is_empty(), "{text:?}: {scan:?}");
-        assert!(scan.unreadable, "{text:?}");
-        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
-        assert_eq!(key_of(&text), None, "{text:?}");
-        texts.push(format!("{text}{LEAKY}"));
-    }
-    // A region still open at the end keeps offering what it holds, whatever
-    // closed inside it before.
-    let open = format!("x = [\n[\nencryption_secret = \"junk\"\n],\nencryption_secret = \"{k}\"\n");
-    assert_eq!(config::salvage_key_line(&open), Some(k.clone()), "{open:?}");
-    assert_kept_whole_and_reported(&texts);
-}
-
-/// A table header glued onto the end of a line (after a value, after a region
-/// that closes, after a closing string, or closing the open array with it) is a
-/// header like any other: what follows is that table's, so a later
-/// `encryption_secret` is never the key, and the copy is kept whole and reported,
-/// never cut to that line. A byte-order mark pasted mid-file before a header does
-/// not hide it either.
-#[test]
-fn a_header_glued_onto_a_line_is_seen_and_what_follows_is_never_the_key() {
-    let other = crypto::generate_secret();
-    let mut texts = Vec::new();
-    for head in [
-        "x = [\n] [mcp.env]\n",
-        "x = [\n][mcp.env]\n",
-        "x = {\n} [mcp.env]\n",
-        "x = \"\"\"\nfoo\"\"\" [mcp.env]\n",
-        "x = '''\nfoo''' [mcp.env]\n",
-        "x = [\n[mcp.env] ]\n",
-        "x = [\n[mcp.env]]\n",
-        "port = 1 [mcp.env]\n",
-        "x = \"a\" [mcp.env]\n",
-        "x = [1] [mcp.env]\n",
-        "x = [\n\u{FEFF}[mcp.env]\n]\n",
-        "x = [\n  \u{FEFF}[mcp.env]\n]\n",
-    ] {
-        let text = format!("{head}encryption_secret = \"{other}\"\n[b\n");
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        let scan = config::salvage_key_scan(&text);
-        assert!(scan.values.is_empty(), "{text:?}: {scan:?}");
-        assert!(scan.buried.is_empty(), "{text:?}: {scan:?}");
-        assert!(scan.unreadable, "{text:?}");
-        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
-        assert_eq!(key_of(&text), None, "{text:?}");
-        texts.push(format!("{text}{LEAKY}"));
-    }
-    assert_kept_whole_and_reported(&texts);
-
-    // A `[` that starts a value (after `=`, `,`, `[`, `{`, or at the start of a
-    // line inside an array) is no header: the live key line is still read.
-    for ok in [
-        "x = [1, 2]\n",
-        "x = [[1], [2]]\n",
-        "x = { a = [1] }\n",
-        "x = [\n  1,\n  [2, 3],\n  { a = [4] }\n]\n",
-        "x = \"\"\"\nfoo\"\"\"\n",
-    ] {
-        let k = crypto::generate_secret();
-        let text = format!("{ok}encryption_secret = \"{k}\"\nbroken\n");
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        assert_eq!(config::salvage_key_line(&text), Some(k), "{text:?}");
-    }
-}
-
-/// The last element of an array of arrays, with the closers on the same line
-/// (`[3]]`, `["ls"] ]`), is a value, not a header: the live key line below it is
-/// still read, the copy cut to it and boot recovers it. `[mcp.env]]` and
-/// `[mcp.env] ]` (not TOML values) are still headers.
-#[test]
-fn the_last_element_of_an_array_of_arrays_is_not_a_header() {
-    for head in [
-        "x = [\n  [1, 2],\n  [3]]\n",
-        "allow = [\n  [\"git\", \"status\"],\n  [\"ls\"]]\n",
-        "allow = [\n  [\"git\", \"status\"],\n  [\"ls\"] ]\n",
-        "x = { a = [\n  [3]]}\n",
-        "x = { a = [\n  [3]] }\n",
-        "x = [\n  [[3]]]\n",
-    ] {
-        let k = crypto::generate_secret();
-        let text = format!("{head}encryption_secret = \"{k}\"\n[broken\n");
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        assert_eq!(config::salvage_key_line(&text), Some(k.clone()), "{text:?}");
-        assert_eq!(key_of(&text), Some(k.clone()), "{text:?}");
-        // The copy is cut down to that line (no key anywhere else).
+        // The copy.
         let dir = tempfile::tempdir().unwrap();
-        let copy = dir.path().join("config.toml.backup");
-        std::fs::write(&copy, format!("{text}{LEAKY}")).unwrap();
-        let report = protect_clear_copies(dir.path(), None);
-        assert_eq!(
-            (report.reduced, report.failures.len()),
-            (1, 0),
-            "{report:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&copy).unwrap(),
-            format!("encryption_secret = \"{k}\"\n"),
-            "{text:?}"
-        );
-    }
-    // More closers than regions open, or a header-shaped text that is no value,
-    // are headers: nothing after them is the key.
-    let other = crypto::generate_secret();
-    let mut kept = Vec::new();
-    for head in [
-        "x = [\n  [3]]]\n",
-        "x = [\n  [mcp.env]]\n",
-        "x = [\n  [mcp.env] ]\n",
-        "x = { a = [\n  [mcp.env]]}\n",
-    ] {
-        let text = format!("{head}encryption_secret = \"{other}\"\n[broken\n");
-        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
-        assert_eq!(key_of(&text), None, "{text:?}");
-        kept.push(format!("{text}{LEAKY}"));
-    }
-    assert_kept_whole_and_reported(&kept);
-}
+        let d = dir.path();
+        std::fs::write(d.join("config.toml.backup"), text).unwrap();
+        for pass in 0..2 {
+            let report = protect_clear_copies(d, None);
+            match fate {
+                Fate::Cut => {
+                    assert_eq!(report.failures.len(), 0, "{shown:?} {report:?}");
+                    assert_eq!(
+                        std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
+                        format!("encryption_secret = \"{}\"\n", real.as_deref().unwrap()),
+                        "{shown:?}"
+                    );
+                    assert_eq!(report.reduced, usize::from(pass == 0), "{shown:?}");
+                }
+                Fate::Whole => {
+                    assert_eq!(
+                        (report.failures.len(), report.reduced),
+                        (1, 0),
+                        "{shown:?} {report:?}"
+                    );
+                    assert_eq!(
+                        &std::fs::read_to_string(d.join("config.toml.backup")).unwrap(),
+                        text,
+                        "{shown:?}"
+                    );
+                }
+                Fate::Dropped => {
+                    assert_eq!(
+                        (report.failures.len(), report.reduced),
+                        (0, usize::from(pass == 0)),
+                        "{shown:?} {report:?}"
+                    );
+                    assert!(!d.join("config.toml.backup").exists(), "{shown:?}");
+                }
+            }
+        }
 
-/// A header glued after a comma (or after `{`) is a header like one glued after a
-/// value: a `[` starts a value only right after `=` at the top level and inside an
-/// inline table, and after `,` or `[` inside an array only when what it opens is a
-/// valid element. What follows is never the key, even buried; the copy is kept
-/// whole and reported.
-#[test]
-fn a_header_glued_after_a_comma_is_seen() {
-    let other = crypto::generate_secret();
-    let mut kept = Vec::new();
-    for head in [
-        "port = 1, [mcp.env]\n",
-        "x = [1], [mcp.env]\n",
-        "x = \"a\", [mcp.env]\n",
-        "x = [\n1], [mcp.env]\n",
-        "x = {}, [mcp.env]\n",
-        "x = {a = 1, [mcp.env]\n",
-        "x = { [mcp.env]\n",
-        "x = [1, [mcp.env]\n",
-        "x = [[mcp.env]\n",
-    ] {
-        let text = format!("{head}encryption_secret = \"{other}\"\n[b\n");
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        let scan = config::salvage_key_scan(&text);
-        assert!(scan.values.is_empty(), "{text:?}: {scan:?}");
-        assert!(scan.buried.is_empty(), "{text:?}: {scan:?}");
-        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
-        assert_eq!(key_of(&text), None, "{text:?}");
-        kept.push(format!("{text}{LEAKY}"));
+        // A config.toml set aside while no key exists follows the same policy.
+        let bare = tempfile::tempdir().unwrap();
+        let aside = set_aside_content(bare.path(), text.as_bytes(), None).unwrap();
+        match (fate, aside) {
+            (Fate::Cut, Aside::KeyOnly(name)) => assert_eq!(
+                std::fs::read_to_string(bare.path().join(name)).unwrap(),
+                format!("encryption_secret = \"{}\"\n", real.as_deref().unwrap()),
+                "{shown:?}"
+            ),
+            (Fate::Whole, Aside::KeptAsIs(name)) => assert_eq!(
+                &std::fs::read_to_string(bare.path().join(name)).unwrap(),
+                text,
+                "{shown:?}"
+            ),
+            (Fate::Dropped, Aside::Nothing) => assert!(names(bare.path()).is_empty()),
+            (fate, aside) => panic!("{shown:?}: {fate:?} became {aside:?}"),
+        }
     }
-    assert_kept_whole_and_reported(&kept);
-
-    // A `[` that starts a value stays one: the key line below is still read.
-    for ok in [
-        "x = [1, [2, 3]]\n",
-        "x = [[1], [2]]\n",
-        "x = {a = [1], b = [2]}\n",
-        "x = [\n  1, [2],\n  3\n]\n",
-        "x = [\"a, [b]\", 'c, [d]']\n",
-    ] {
-        let k = crypto::generate_secret();
-        let text = format!("{ok}encryption_secret = \"{k}\"\nbroken\n");
-        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
-        assert_eq!(config::salvage_key_line(&text), Some(k), "{text:?}");
-    }
-}
-
-/// Two assignments joined on one line (a hand-edit or merge accident) hide a
-/// quoted or escaped key part behind a plain one: whichever the spelling, the line
-/// may hold the live key, so the copy is kept whole and reported, never dropped.
-#[test]
-fn a_key_joined_to_another_assignment_on_one_line_is_never_dropped() {
-    let k = crypto::generate_secret();
-    let joined = [
-        format!("port = 8080 \"encryption_secret\" = \"{k}\"\n{LEAKY}"),
-        format!("port = 8080 \"encryption\\u005fsecret\" = \"{k}\"\n{LEAKY}"),
-        format!("port = 8080 'encryption_secret' = '{k}'\n{LEAKY}"),
-        format!("language = \"fr\" \"\\u0065ncryption_secret\" = \"{k}\"\n{LEAKY}"),
-        format!("a = 1 b = 2 \"enc\\u0072yption_secret\" = \"{k}\"\n{LEAKY}"),
-        format!("port = 8080 encryption_secret = \"{k}\"\n{LEAKY}"),
-    ];
-    assert_kept_whole_and_reported(&joined);
-
-    // The same joined shape with no key part of ours stays harmless: a copy of it
-    // is dropped when no key exists, so a damaged credential line is no reason to
-    // keep a clear copy.
-    for harmless in [
-        "port = 8080 language = \"fr\"\n",
-        "anthropic = \"sk-x\" # a = b\n",
-        "a = 1 b = \"v=w\"\n",
-    ] {
-        assert!(!config::salvage_key_scan(harmless).unreadable, "{harmless}");
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let copy = dir.path().join("config.toml.backup.20261001T000000Z");
-    std::fs::write(&copy, format!("port = 8080 language = \"fr\"\n{LEAKY}")).unwrap();
-    let report = protect_clear_copies(dir.path(), None);
-    assert_eq!(report.failures.len(), 0, "{report:?}");
-    assert!(!copy.exists());
 }
 
 /// An unreadable config.toml set aside with no key: several different keys, or a
@@ -1647,10 +1020,11 @@ fn an_unreadable_config_with_several_keys_or_a_damaged_key_line_is_kept_whole() 
         );
     }
 
-    // One readable key, even written twice: only the key line is kept.
-    let same = format!("encryption_secret = \"{k1}\"\nencryption_secret = \"{k1}\"\n{LEAKY}");
+    // One readable key and a damage that never spells the name: only the key line
+    // is kept.
+    let once = format!("encryption_secret = \"{k1}\"\n{LEAKY}[broken\n");
     let bare = tempfile::tempdir().unwrap();
-    let Aside::KeyOnly(name) = set_aside_content(bare.path(), same.as_bytes(), None).unwrap()
+    let Aside::KeyOnly(name) = set_aside_content(bare.path(), once.as_bytes(), None).unwrap()
     else {
         panic!("one key is kept alone")
     };

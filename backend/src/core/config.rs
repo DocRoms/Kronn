@@ -1218,433 +1218,109 @@ fn set_aside_unreadable_config(
     Ok(aside)
 }
 
-/// A top-level `encryption_secret = "..."` line that parses on its own: the
-/// first whose value is a real key, else the first non-empty one (a value that
-/// is not a key never hides a valid key line further down). See
-/// [`salvage_key_scan`] for what counts as a top-level line.
+/// The top-level `encryption_secret` of `content` for the boot recovery: see
+/// [`read_key`] (the value it finds, whatever it says about the rest).
 pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
-    // A text that parses says by itself what its top-level `encryption_secret`
-    // is: nothing else is a candidate, whatever a string or an array of it
-    // spells out (`notes = """\nencryption_secret = "…"\n"""` is a note).
-    if let Ok(table) = content.parse::<toml::Table>() {
-        return table
-            .get(KEY_NAME)
-            .and_then(|v| v.as_str())
-            .filter(|k| !k.trim().is_empty())
-            .map(str::to_string);
-    }
-    let KeyScan { values, buried, .. } = salvage_key_scan(content);
-    let is_key = |v: &&String| super::crypto::canonical_secret(v).is_ok();
-    // A top-level key first; then one a broken file buried in a region that
-    // swallowed it (an unclosed string or array): better recovered than lost.
-    values
-        .iter()
-        .find(is_key)
-        .or_else(|| buried.iter().find(is_key))
-        .or(values.first())
-        .cloned()
+    read_key(content).value
 }
 
-/// What the top level of a text that does not parse says about its
-/// `encryption_secret` ([`salvage_key_scan`]).
+/// What a text says about its top-level `encryption_secret`.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct KeyScan {
-    /// Every non-blank string of a top-level `encryption_secret` line that parses
-    /// on its own, in order.
-    pub values: Vec<String>,
-    /// Every non-blank string of an `encryption_secret` assignment that parses on
-    /// its own but sits inside a string or an array that is STILL open at the end
-    /// of the text (a region that closes again was a note, an array, not a
-    /// swallowed line; one that a table header reaches stops
-    /// offering): a broken file swallowed it, so it is not proven to be the key. Only
-    /// [`salvage_key_line`] offers it (to recover a key at boot); a copy never
-    /// reads, seals under or cuts down to it, and the mention also sets
-    /// `unreadable`.
-    pub buried: Vec<String>,
-    /// The text mentions `encryption_secret` somewhere the scan cannot tell it is
-    /// harmless (a line that does not parse, the opener of a multi-line string, a
-    /// line inside a string or an array that is still open): it may hold the only
-    /// copy of a live key, so a copy of it is never dropped nor cut down.
+pub(crate) struct KeyRead {
+    /// The key line's string, when the text gives one ([`read_key`]).
+    pub value: Option<String>,
+    /// The text mentions the key where it was not read (see [`read_key`]): it may
+    /// hold the only copy of a live key, so a copy of it is never dropped nor cut
+    /// down.
     pub unreadable: bool,
 }
 
 /// The name of the key's line in config.toml.
 const KEY_NAME: &str = "encryption_secret";
 
-/// Scan a text that does not parse (a duplicate key, a broken line) for its
-/// top-level `encryption_secret`, line by line: a duplicate key makes the whole
-/// text invalid TOML, and each of its values may be the only copy of a live key.
+/// The most a damaged text is read for its key: lines, and bytes. The file is
+/// small (Kronn writes the key near its top); the cap bounds the re-parsing.
+const PREFIX_MAX_LINES: usize = 2_000;
+const PREFIX_MAX_BYTES: usize = 256 * 1024;
+
+/// The top-level `encryption_secret` of `content`, decided by toml itself:
+/// 1. a text that parses: its top-level string value (a number, an array or a
+///    value under a table is not the key);
+/// 2. else the longest prefix of WHOLE lines that parses (the growing prefix is
+///    re-parsed line by line and read down to the first line where it stops
+///    parsing): its top-level `encryption_secret`, when it is a real key
+///    ([`crypto::canonical_secret`]);
+/// 3. else nothing is read: `value` is `None`.
 ///
-/// Only the top level is read, and what is mentioned elsewhere is told from what
-/// is merely unreadable:
-/// - the scan ends at the first line that opens a table (`[` or `[[`, a leading
-///   byte-order mark ignored) reached with no string or array open: a mention
-///   below it belongs to that table (`[tokens]`, an MCP env table), not to the
-///   key;
-/// - a mention in a comment, or with a blank or non-string value, holds no key;
-/// - any other mention is `unreadable`: a line that does not parse (missing
-///   quote, trailing text), a multi-line opener, a line inside a multi-line
-///   string or inside an array still open (a `[` there is an element, not a
-///   table);
-/// - a line is read by its decoded key, not its spelling: `"encryption_secret"`
-///   and the same name with a Unicode escape for one letter are the key, and a
-///   line that does not parse with a quoted or escaped key part before ANY of
-///   its `=` (two assignments joined on one line) is `unreadable` too, and so
-///   is, inside an open string or array, a line that spells the name or is an
-///   assignment with such a key part ([`bury`]); that line, when it parses on
-///   its own as the key's assignment, also offers its value as `buried` (never
-///   read as the key by a copy, only by [`salvage_key_line`]). A buried value is
-///   offered only while its region is still open at the end of the text (a
-///   string or array that closes again held a note, not a swallowed line), and
-///   only up to a table header (indented or not) inside an open array or an
-///   unclosed multi-line string ([`is_table_header`]: what follows is that
-///   table's). A region that closes and another that opens on the same line are
-///   two regions: the first offers nothing. Every region is tracked at its own
-///   depth: an array or inline table that closes inside an open outer array takes
-///   back what it held, as a string does;
-/// - a table header swallowed that way stays swallowed after the region closes:
-///   the lines that follow are that table's (or the file is too damaged to say),
-///   so none is ever offered as the key, top level or buried, and a mention of the
-///   name there is `unreadable`.
-pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
-    let mut scan = KeyScan::default();
-    // The delimiter of the multi-line string the scan is inside, if any, and where
-    // `buried` stood when it opened.
-    let mut open_string: Option<&str> = None;
-    let mut string_start = 0usize;
-    // One entry per array or inline table still open (its depth is the length):
-    // where `buried` stood when it opened. A region that closes, at any depth,
-    // takes back what was buried inside it.
-    // (Each entry also records whether it is an array `[` or an inline table `{`.)
-    let mut open: Vec<(usize, char)> = Vec::new();
-    // A table header was swallowed by an open region. What follows it, even once
-    // the region closed, is that table's, or the file is too damaged to say: it is
-    // never offered as the key (a mention is `unreadable`) for the rest of the text.
-    let mut swallowed = false;
-    for raw in content.lines() {
-        // A byte-order mark is stripped at the start of EVERY line, not only the
-        // first (a file pasted together keeps the marks of its parts): it would
-        // otherwise hide a table header from the tests below.
-        let line = raw.strip_prefix('\u{FEFF}').unwrap_or(raw);
-        let mut rest = line;
-        // The last significant character before `rest`, for the glued-header test
-        // of `line_state`: a closing `"""` just ended a value.
-        let mut before: Option<char> = None;
-        if let Some(delimiter) = open_string {
-            // An unclosed string swallowing what looks like a table header: the
-            // lines after it belong to that table, not to the key.
-            swallowed |= is_table_header(line);
-            bury(&mut scan, line, !swallowed);
-            match string_end(line, delimiter) {
-                Some(after) => {
-                    // The string closed: a note, even when an array around it
-                    // stays open. What it held is not offered.
-                    scan.buried.truncate(string_start);
-                    rest = after;
-                    before = Some('"');
-                }
-                None => continue,
-            }
-        } else if !open.is_empty() {
-            // An open array or inline table swallowing what looks like a table
-            // header (`[mcp.env]`): the lines after it belong to that table,
-            // not to the key, so none is offered from there on.
-            swallowed |= is_table_header_before_closers(line, open.len());
-            bury(&mut scan, line, !swallowed);
-        } else {
-            let top = trim_lead(line);
-            if top.starts_with('[') {
-                break;
-            }
-            if !top.is_empty() && !top.starts_with('#') {
-                if swallowed {
-                    bury(&mut scan, line, false);
-                } else {
-                    // Every top-level line is read, not only those that spell the
-                    // name: a quoted or escaped spelling of it decodes to the same
-                    // key.
-                    match key_value_of(line) {
-                        Some(Some(value)) => scan.values.push(value),
-                        Some(None) => {}
-                        // A line that does not parse: harmless only when its key
-                        // part is a plain name that is not ours.
-                        // (Any assignment of the line counts: two joined on one
-                        // line hide a quoted key behind a plain one.)
-                        None => scan.unreadable |= top.contains(KEY_NAME) || quoted_key_part(top),
-                    }
-                }
-            }
-        }
-        // A region that closes (an array or inline table at any depth, a string)
-        // was no swallowing: what it held is not offered (the mention stays
-        // `unreadable`). One that closes and another that opens on the same line
-        // (`""" ; x = """`, `], b = [`) are two regions.
-        let mut glued = false;
-        open_string = line_state(rest, before, &mut open, &mut scan.buried, &mut glued);
-        // A header glued onto the end of a line (`port = 1 [mcp.env]`,
-        // `] [mcp.env]`, `""" [mcp.env]`): the text after it is that table's.
-        swallowed |= glued;
-        if open_string.is_some() {
-            string_start = scan.buried.len();
-        }
+/// Nothing else is ever offered (no line is read on its own, no region or table
+/// header is guessed at): a key that sits after the first damaged line is not
+/// recovered here, it stays in the copy that is kept. `unreadable` says so: the
+/// part of the text that was not read (all of it when no key was read) spells the
+/// name `encryption_secret`, or an escape (`\u`, `\U`, `\x`) that could spell it
+/// another way, so the text may hold a key it could not read. A text that parses
+/// has no such part.
+pub(crate) fn read_key(content: &str) -> KeyRead {
+    if let Ok(table) = content.parse::<toml::Table>() {
+        return KeyRead {
+            value: top_level_key(&table),
+            unreadable: false,
+        };
     }
-    scan
-}
-
-/// A line that is a table header (`[a.b]`, `[[a]]`; indented or not, TOML allows
-/// both) when read on its own; an array element (`[1, 2],`) is not.
-///
-/// The test is made on the line alone, so a nested array that is the last
-/// element of an open array and quotes its inside (`["x"]`, `['mcp']`, `[1]`) is
-/// also a valid header and is read as one: what follows is then not offered as a
-/// key. The ambiguity resolves to the safe side on purpose (a key the scan does
-/// not offer stays in the kept copy, reported; one it offered wrongly could be
-/// adopted as the live key).
-fn is_table_header(line: &str) -> bool {
-    let line = trim_lead(line);
-    line.starts_with('[') && line.parse::<toml::Table>().is_ok()
-}
-
-/// `line` without its leading whitespace and byte-order marks (TOML allows an
-/// indented header; a mark pasted mid-file is not whitespace for Rust).
-fn trim_lead(line: &str) -> &str {
-    line.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}')
-}
-
-/// [`is_table_header`] on the line as it is, or with closers of the open array
-/// (`]`, `}`) after it: inside an open array `[mcp.env]]` and `[mcp.env] ]` are a
-/// header-shaped text that also closes the array, and what follows the close
-/// would otherwise be read as top level.
-///
-/// With closers after it, a text that is also a valid array element (`[3]]`,
-/// `["ls"] ]`: the last element of an array of arrays, the closers closing the
-/// enclosing arrays) is a value, not a header, when the closers are no more than
-/// the `depth` regions that are open; `mcp.env` is not a TOML value, so
-/// `[mcp.env]]` stays a header. Without closers the ambiguity resolves to
-/// "header" ([`is_table_header`]).
-fn is_table_header_before_closers(line: &str, depth: usize) -> bool {
-    let mut text = line.trim_end();
-    let mut closers = 0usize;
-    loop {
-        if is_table_header(text) {
-            return closers == 0 || closers > depth || !is_array_value(trim_lead(text));
-        }
-        match text.strip_suffix([']', '}']) {
-            Some(shorter) => {
-                text = shorter.trim_end();
-                closers += 1;
-            }
-            None => return false,
-        }
+    let (prefix, rest) = longest_parsing_prefix(content);
+    let key = prefix
+        .as_ref()
+        .and_then(top_level_key)
+        .filter(|k| super::crypto::canonical_secret(k).is_ok());
+    match key {
+        Some(key) => KeyRead {
+            value: Some(key),
+            unreadable: may_spell_key(rest),
+        },
+        None => KeyRead {
+            value: None,
+            unreadable: may_spell_key(content),
+        },
     }
 }
 
-/// Whether `text` is a valid TOML array value (`[3]`, `["ls"]`, `[[1], [2]]`).
-fn is_array_value(text: &str) -> bool {
-    text.starts_with('[')
-        && format!("x = {}", text.trim())
-            .parse::<toml::Table>()
-            .is_ok()
+/// The top-level `encryption_secret` of `table`, when it is a string that is not
+/// blank.
+fn top_level_key(table: &toml::Table) -> Option<String> {
+    table
+        .get(KEY_NAME)
+        .and_then(|v| v.as_str())
+        .filter(|k| !k.trim().is_empty())
+        .map(str::to_string)
 }
 
-/// A line inside a string or an array that is still open. It could be the key's
-/// line: it spells the name, or it is an assignment (it has a `=`) whose key part
-/// is quoted or escaped (`"encryption_secret" = …` decodes to the name whatever
-/// its spelling). A line without a `=` cannot be a key, so a quoted array
-/// element is not flagged. The scan cannot tell such a line from a key line of
-/// the top level, so it is never proven harmless; and when the line parses on
-/// its own as the key's assignment, its value is kept in `buried` so a key the
-/// broken file swallowed can still be recovered.
-fn bury(scan: &mut KeyScan, line: &str, offering: bool) {
-    if !(line.contains(KEY_NAME) || (line.contains('=') && quoted_key_part(line))) {
-        return;
-    }
-    scan.unreadable = true;
-    if offering {
-        if let Some(Some(value)) = key_value_of(line) {
-            scan.buried.push(value);
-        }
-    }
-}
-
-/// Whether `line` has an assignment whose key part is written with a quote or an
-/// escape: such a key may decode to `encryption_secret` whatever its spelling, so
-/// a line like that which does not parse cannot be proven harmless. Every `=` of
-/// the line is looked at, not only the first: two assignments joined on one line
-/// (`port = 8080 "encryption_secret" = "…"`, a hand-edit or merge accident)
-/// hide a quoted key behind a plain one. A key part is quoted when the text
-/// before a `=` ends with a quote; an escape (`\u`, `\"`) can only sit in a
-/// quoted key, which ends with one.
-fn quoted_key_part(line: &str) -> bool {
-    // The text before the first `=` (the key of a plain line): any quote or
-    // escape in it.
-    if line
-        .split('=')
-        .next()
-        .is_some_and(|key| key.contains(['"', '\'', '\\']))
-    {
-        return true;
-    }
-    // Before every `=`: a quote right before it closes a quoted key.
-    line.match_indices('=')
-        .any(|(at, _)| line[..at].trim_end().ends_with(['"', '\'']))
-}
-
-/// `line` read on its own as one `key = value` line: `None` when it does not
-/// parse, else the value of the `encryption_secret` assignment it holds, when
-/// that is a string that is not blank (a number, an array or a value of another
-/// key can never be a key). The decoded key decides, not the spelling.
-fn key_value_of(line: &str) -> Option<Option<String>> {
-    let table = line.trim().parse::<toml::Table>().ok()?;
-    Some(
-        table
-            .get(KEY_NAME)
-            .and_then(|v| v.as_str())
-            .filter(|k| !k.trim().is_empty())
-            .map(str::to_string),
-    )
-}
-
-/// What follows the end of a multi-line string (`delimiter` is `"""` or `'''`)
-/// in `line`, when it ends there; basic strings honour `\` escapes.
-fn string_end<'a>(line: &'a str, delimiter: &str) -> Option<&'a str> {
-    let mut at = 0;
-    while at < line.len() {
-        let tail = &line[at..];
-        if delimiter == "\"\"\"" && tail.starts_with('\\') {
-            // An escape takes the next character with it.
-            at += tail.chars().take(2).map(char::len_utf8).sum::<usize>();
-        } else if let Some(after) = tail.strip_prefix(delimiter) {
-            return Some(after);
-        } else {
-            at += tail.chars().next().map_or(1, char::len_utf8);
-        }
-    }
-    None
-}
-
-/// The text from the `[` that starts `text` through its matching `]`, when that
-/// `]` is on the same line (single-line strings skipped over); `None` when the
-/// array goes on over the next lines.
-fn bracket_text(text: &str) -> Option<&str> {
-    let mut depth = 0usize;
-    let mut chars = text.char_indices();
-    while let Some((at, c)) = chars.next() {
-        match c {
-            '"' | '\'' => {
-                while let Some((_, d)) = chars.next() {
-                    if c == '"' && d == '\\' {
-                        chars.next();
-                    } else if d == c {
-                        break;
-                    }
-                }
-            }
-            '#' => return None,
-            '[' => depth += 1,
-            ']' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(&text[..at + 1]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// What `line` leaves open after it: the delimiter of the multi-line string it
-/// opens and does not close. `open` is the stack of the arrays and inline tables
-/// open before the line (each entry: where `buried` stood when it opened); it is
-/// updated, and a bracket that closes pops its level and takes back what was
-/// buried since it opened. Single-line strings and comments are skipped over.
-fn line_state(
-    line: &str,
-    before: Option<char>,
-    open: &mut Vec<(usize, char)>,
-    buried: &mut Vec<String>,
-    glued: &mut bool,
-) -> Option<&'static str> {
-    let mut rest = line;
-    // The last significant character seen. A `[` that starts a value follows `=`,
-    // or, inside an array, `,` or `[` (when what it opens is a valid element) or
-    // the start of a line; one that follows the end of a value (`1 [`, `"a" [`,
-    // `] [`), a `,` at the top level or inside an inline table, or that opens text
-    // that is no TOML value (`[mcp.env]`) is a table header glued onto it.
-    let mut last = before;
-    while let Some(c) = rest.chars().next() {
-        if c == '#' {
+/// The longest prefix of whole lines of `content` that parses (a byte-order mark
+/// on its first line ignored), read until the growing prefix first stops parsing,
+/// with the table it gives and the text after it. No prefix parses (or the cap is
+/// reached at once): no table, and all of `content` is the rest.
+fn longest_parsing_prefix(content: &str) -> (Option<toml::Table>, &str) {
+    let text = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+    let mut best: Option<(toml::Table, usize)> = None;
+    let mut end = 0;
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        end += line.len();
+        if n >= PREFIX_MAX_LINES || end > PREFIX_MAX_BYTES {
             break;
         }
-        let delimiter = if rest.starts_with("\"\"\"") {
-            Some("\"\"\"")
-        } else if rest.starts_with("'''") {
-            Some("'''")
-        } else {
-            None
-        };
-        if let Some(delimiter) = delimiter {
-            match string_end(&rest[3..], delimiter) {
-                Some(after) => {
-                    rest = after;
-                    last = Some('"');
-                }
-                None => return Some(delimiter),
-            }
-        } else if c == '"' || c == '\'' {
-            // A single-line string: up to its closing quote (or the end of the line).
-            let mut chars = rest.char_indices().skip(1);
-            let mut end = rest.len();
-            while let Some((i, d)) = chars.next() {
-                if c == '"' && d == '\\' {
-                    chars.next();
-                } else if d == c {
-                    end = i + 1;
-                    break;
-                }
-            }
-            rest = &rest[end..];
-            last = Some('"');
-        } else {
-            match c {
-                '[' | '{' => {
-                    if c == '[' {
-                        if let Some(l) = last {
-                            let value_starts = match (l, open.last()) {
-                                ('=', _) => true,
-                                // At the top level, or in an inline table, a `[`
-                                // starts a value only right after `=`.
-                                (_, None) | (_, Some((_, '{'))) => false,
-                                // In an array: after `,` or `[`, when what it opens
-                                // is a valid element (a nested array the line does
-                                // not close is taken for one).
-                                (',' | '[', Some((_, '['))) => {
-                                    bracket_text(rest).is_none_or(is_array_value)
-                                }
-                                _ => false,
-                            };
-                            if !value_starts {
-                                *glued = true;
-                            }
-                        }
-                    }
-                    open.push((buried.len(), c));
-                }
-                ']' | '}' => {
-                    if let Some((start, _)) = open.pop() {
-                        buried.truncate(start);
-                    }
-                }
-                _ => {}
-            }
-            if !c.is_whitespace() && c != '\u{FEFF}' {
-                last = Some(c);
-            }
-            rest = &rest[c.len_utf8()..];
+        match text[..end].parse::<toml::Table>() {
+            Ok(table) => best = Some((table, end)),
+            Err(_) => break,
         }
     }
-    None
+    match best {
+        Some((table, end)) => (Some(table), &text[end..]),
+        None => (None, content),
+    }
+}
+
+/// Whether `text` could spell the key's name: it contains it, or an escape that a
+/// quoted key can spell it with.
+fn may_spell_key(text: &str) -> bool {
+    text.contains(KEY_NAME) || ["\\u", "\\U", "\\x"].iter().any(|e| text.contains(e))
 }
 
 /// `default_config()` without a key: a missing config.toml must not offer a

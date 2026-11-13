@@ -29,25 +29,24 @@
 //! [`protect_copies`]; a copy that cannot be written is cut down to its key
 //! line (the one value that exists nowhere else) and sealed at the next start.
 //! Three kinds are left exactly as they are and listed in `failures` instead:
-//! a copy that mentions `encryption_secret` where it may be the only trace of a
-//! key it cannot read (a top-level non-blank string that is no key, a damaged
-//! line, a multi-line opener, a line inside a string or an array left open), or
-//! that holds several different keys (never dropped nor deferred nor cut down to
-//! one); a `corrupt` copy whose seal failed (a config.toml that could never be
+//! a copy that holds an `encryption_secret` it cannot read as a key (a
+//! top-level non-blank string that is no key) or mentions the name in the part
+//! of a damaged text that was not read (never dropped nor deferred nor cut down);
+//! a `corrupt` copy whose seal failed (a config.toml that could never be
 //! read may hold credentials that reached no encrypted store); and a link
 //! (symbolic link, Windows reparse point), a non-regular file (a FIFO would block
 //! the pass) or a file with several hard links. What is proven harmless does not
-//! keep a copy in clear: an empty value, a number, a comment, a value under a
-//! table.
+//! keep a copy in clear: an empty value, a number, a value under a table, or a
+//! damaged text that never spells the name.
 //!
-//! The key is the top-level `encryption_secret` ([`key_of`]): a text that parses
-//! is decided by that value alone, and a text that does not is scanned for it
-//! line by line down to its first table ([`config::salvage_key_scan`], which also
-//! tells a damaged key line from a harmless mention), so an `encryption_secret`
-//! under `[tokens]` or inside a string is never taken for the key. An unreadable
+//! The key is the top-level `encryption_secret` ([`key_of`]), decided by toml
+//! itself ([`config::read_key`]): the parsed value of a text that parses, else
+//! the one of the longest prefix of whole lines that parses. No line of a damaged
+//! text is read on its own, so a key that sits after the first damaged line is
+//! not recovered: it stays in the copy that is kept, reported. An unreadable
 //! `config.toml` set aside while no key exists follows the same policy
-//! ([`set_aside_content`]): several keys or a key line it cannot read keep the
-//! whole content, owner-only.
+//! ([`set_aside_content`]): a mention the read could not use keeps the whole
+//! content, owner-only.
 //!
 //! The pass reads a copy, then writes and renames: a single pass at start, in
 //! the one process that owns the data directory, so a copy swapped between the
@@ -291,52 +290,42 @@ pub fn stamp() -> String {
 
 /// What the top level of a copy says about its `encryption_secret`.
 struct KeyLines {
-    /// Every distinct real key held by a top-level line.
-    keys: Vec<String>,
-    /// The copy mentions `encryption_secret` where it may be the only trace of a
-    /// key it cannot read: a non-blank string that is no key, a line that does
-    /// not parse, a multi-line opener, a line inside a string or an array that is
-    /// still open. (An empty value, a number, a comment or a value under a table
-    /// is not.)
+    /// The real key read from the copy ([`config::read_key`]).
+    key: Option<String>,
+    /// The copy holds an `encryption_secret` it could not read as a key (a
+    /// non-blank string that is no key), or mentions the name in the part of a
+    /// damaged text that was not read: it may be the only trace of a key.
     unreadable: bool,
 }
 
-/// The top-level `encryption_secret` lines of `text`. A text that parses is
-/// decided by its top-level value alone (an `encryption_secret` under a table is
-/// a credential of something else); only a text that does not parse is scanned
-/// line by line, and then only its top level ([`config::salvage_key_scan`]).
+/// What `text` says about its top-level `encryption_secret`, decided by toml
+/// itself ([`config::read_key`]): the parsed value of a text that parses, else
+/// the one of the longest prefix of whole lines that parses.
 fn key_lines(text: &str) -> KeyLines {
-    let (values, mut unreadable) = match text.parse::<toml::Table>() {
-        // Only a string can be a key: a number or an array holds nothing to keep.
-        Ok(table) => (
-            table
-                .get("encryption_secret")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .into_iter()
-                .collect(),
-            false,
-        ),
-        Err(_) => {
-            let scan = config::salvage_key_scan(text);
-            (scan.values, scan.unreadable)
-        }
-    };
-    let mut keys = Vec::new();
-    for value in values.iter().filter(|v| !v.trim().is_empty()) {
-        match crypto::canonical_secret(value) {
-            Ok(key) if !keys.contains(&key) => keys.push(key),
-            Ok(_) => {}
-            Err(_) => unreadable = true,
-        }
+    let read = config::read_key(text);
+    match read.value {
+        Some(value) => match crypto::canonical_secret(&value) {
+            Ok(key) => KeyLines {
+                key: Some(key),
+                unreadable: read.unreadable,
+            },
+            // A string that is no key: kept, never cut away.
+            Err(_) => KeyLines {
+                key: None,
+                unreadable: true,
+            },
+        },
+        None => KeyLines {
+            key: None,
+            unreadable: read.unreadable,
+        },
     }
-    KeyLines { keys, unreadable }
 }
 
-/// The top-level `encryption_secret` of `text`, when it is a real key (the first
-/// one when a damaged copy holds several, see [`key_lines`]).
+/// The top-level `encryption_secret` of `text`, when it is a real key
+/// ([`key_lines`]).
 pub fn key_of(text: &str) -> Option<String> {
-    key_lines(text).keys.into_iter().next()
+    key_lines(text).key
 }
 
 /// The only content kept of a copy that cannot be sealed.
@@ -573,17 +562,16 @@ fn seal_and_remove(dir: &Path, copy: &ConfigCopy, bytes: &[u8], key: &str) -> Re
 fn reduce(dir: &Path, copy: &ConfigCopy, text: &str) -> Result<Done> {
     let lines = key_lines(text);
     // An `encryption_secret` the copy cannot read may be the only trace of a key
-    // (a damaged line, a second value beside a readable key): never dropped, cut
-    // away or deferred, reported instead. An empty value, a comment or a value
-    // under a table holds no key and does not count.
+    // (a string that is no key, a mention past the first damaged line): never
+    // dropped, cut away or deferred, reported instead.
     if lines.unreadable {
         anyhow::bail!(
-            "it holds an encryption_secret that is not a readable key (or a line of it \
-             cannot be read); left as it is"
+            "it holds an encryption_secret that is not a readable key (or a damaged part of \
+             it mentions one); left as it is"
         );
     }
-    match lines.keys.as_slice() {
-        [key] => {
+    match lines.key.as_deref() {
+        Some(key) => {
             let only = key_only(key);
             if text == only {
                 return Ok(Done::Untouched);
@@ -593,19 +581,12 @@ fn reduce(dir: &Path, copy: &ConfigCopy, text: &str) -> Result<Done> {
                 .context("cut down to its key line")?;
             Ok(Done::Reduced)
         }
-        // Each of them may be the only copy of a live key, and a key-only copy
-        // holds one line: never cut down, reported instead.
-        [_, _, ..] => anyhow::bail!(
-            "it holds {} different encryption_secret keys, a key-only copy keeps one; \
-             left as it is",
-            lines.keys.len()
-        ),
         // A retired-key file holds a value that sat in config.toml, a key or
         // not: it is sealed whole once a key exists, never dropped (only a file
         // proven empty goes).
-        [] if copy.kind == Kind::RetiredKey && !text.trim().is_empty() => Ok(Done::Deferred),
+        None if copy.kind == Kind::RetiredKey && !text.trim().is_empty() => Ok(Done::Deferred),
         // Nothing in it a later start needs: dropped rather than kept in clear.
-        [] => {
+        None => {
             remove(&copy.path)?;
             Ok(Done::Dropped)
         }
@@ -761,12 +742,12 @@ pub fn set_aside_content(dir: &Path, content: &[u8], key_hex: Option<&str>) -> R
     let text = String::from_utf8_lossy(content);
     let lines = key_lines(&text);
     // Same policy as a copy cut down ([`reduce`]): a key line may be the only
-    // copy of a live key, so several different keys or a line that cannot be read
-    // are never cut down to one nor dropped: the content is kept as it is,
-    // owner-only, and reported at every start until a key encrypts it.
-    let key_line = match lines.keys.as_slice() {
-        [key] if !lines.unreadable => key_only(key),
-        [] if !lines.unreadable => return Ok(Aside::Nothing),
+    // copy of a live key, so a mention of it the read could not use is never cut
+    // away nor dropped: the content is kept as it is, owner-only, and reported at
+    // every start until a key encrypts it.
+    let key_line = match (&lines.key, lines.unreadable) {
+        (Some(key), false) => key_only(key),
+        (None, false) => return Ok(Aside::Nothing),
         _ => {
             let name = free_name(dir, &base, "");
             let tmp = dir.join(format!(".{name}.tmp"));

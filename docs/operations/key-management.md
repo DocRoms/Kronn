@@ -264,53 +264,31 @@ Safe to interrupt at any point; a rerun converges:
    left as it is and logged once. A `config.toml.corrupt.<timestamp>` whose
    encryption fails is not cut down: a config.toml that could never be read may
    hold credentials that reached no encrypted store, so it is left whole and
-   reported until the encryption succeeds. A copy that mentions
-   `encryption_secret` where it may be the only trace of a key it cannot read is
-   never dropped, cut down or deferred: it is left as it is and reported. That is
-   a top-level non-blank string that is not a readable key (a `retired-key` file
-   included), a damaged key line (missing quote, trailing text), a multi-line
-   opener, a line inside a multi-line string or an array left open, or two
-   different keys (a key-only copy keeps one line); a readable key beside such a
-   value is not cut down either. What is proven harmless does not keep a copy: an
-   empty value, a number, a commented line, or a mention under a table the scan
-   reached with no string or array open (a byte-order mark before the table
-   header does not hide it). The key is read by its decoded name, not its
-   spelling: `"encryption_secret"`, `'encryption_secret'` and
-   `"encryption\u005fsecret"` are the key line, and a line that does not parse
-   with a quote or an escape before ANY of its `=` (two assignments joined on one
-   line, a hand-edit or merge accident, hide a quoted key behind a plain one) is
-   treated as a possible key line, inside an open array or multi-line string as
-   well: there, any line that spells the name, or is an assignment whose key part
-   is quoted or escaped, is never proven harmless (a quoted array element, with
-   no `=`, is). Such a line that parses on its own as the key's assignment is
-   also offered to the recovery at boot (`config::salvage_key_line`), so a key
-   swallowed by a broken file is not lost; a copy never reads, encrypts under or
-   cuts down to it, and stays whole and reported. That offer is only for a
-   region still open at the end of the text: when the text parses, its
-   top-level value alone is the answer, and a string or array that closes again
-   (a note holding a key line) offers nothing; an open array or unclosed multi-line
-   string that swallowed a table header (`[mcp.env]`, indented or not) offers
-   nothing after it, since what follows is that table's (a nested array that
-   quotes its inside, `["x"]`, reads as a header too: the ambiguity resolves to
-   not offering). A region that closes and another that opens on the same line
-   (`""" ; x = """`, `], b = [`) are two regions, and the first offers nothing;
-   an array or inline table that closes inside an open outer array takes back
-   what it held, at any depth. A table header swallowed by an open region stays
-   swallowed after the region closes: the lines after it are that table's (or the
-   file is too damaged to say), so none is read as the key, a mention of the name
-   there is unreadable, and the copy is kept whole and reported. A header glued
-   onto the end of a line is a header too: a `[` that follows the end of a value
-   (`port = 1 [mcp.env]`, `] [mcp.env]`, `""" [mcp.env]`, `} [mcp.env]`), or a
-   comma at the top level or in an inline table (`port = 1, [mcp.env]`,
-   `x = { [mcp.env]`), instead of `=` (a `[` starts a value only right after `=`
-   there), or, inside an array, after `,` or `[` when what it opens is no TOML
-   value (`[1, [mcp.env]`), and inside an open array a header-shaped text that
-   closes the array with it (`[mcp.env]]`, `[mcp.env] ]`), swallows what follows,
-   like a header on its own line. The last element of an array of arrays that
-   closes the enclosing arrays on its own line (`[3]]`, `["ls"] ]`) is a value,
-   not a header, as long as the closers are no more than the regions open: the
-   key line below it is still read. A
-   byte-order mark is ignored at the start of every line, not only the first.
+   reported until the encryption succeeds. The key of a copy is decided by toml
+   itself (`config::read_key`), with one rule and no guessing at a damaged file:
+   (1) a text that parses gives its top-level `encryption_secret` (a string; a
+   number, an array or a value under a table is not the key, and a closed
+   multi-line string that spells the name is a note); (2) otherwise the longest
+   prefix of whole lines that parses is taken (the growing prefix is re-parsed
+   line by line down to the first line where it stops parsing, a byte-order mark
+   on line 1 ignored, capped at 2 000 lines and 256 KiB) and its top-level
+   `encryption_secret` is the key when it is a real key; (3) every other case
+   gives no key. No line of a damaged text is read on its own, and no region,
+   table header or glued header is guessed at. The key may be spelled `"encryption_secret"`
+   or with an escape: toml decodes it. A copy with no key read is kept whole,
+   byte-identical, and reported (never dropped, cut down or deferred) when the
+   part of the text that was not read (all of it when no key was read) spells
+   `encryption_secret` or an escape (`\u`, `\U`, `\x`) that could spell it another
+   way, and so does a copy whose top-level `encryption_secret` is a non-blank
+   string that is no key (a `retired-key` file included). A damaged text that
+   never spells the name holds no key and is dropped (or, with a key, sealed); a
+   readable key with such a text after it is cut down to its key line. The
+   consequence to accept: a key placed after the first damaged line (or past the
+   cap) is not recovered at boot; it stays in the kept copy, reported. Kronn
+   writes `encryption_secret` near the top of `config.toml` (after `language`,
+   `ui_language`, `stt_model`, `disabled_agents`), so the usual damaged file still
+   recovers its key. Two keys, or the same key written twice (a duplicate key
+   makes the text invalid TOML), keep the copy whole, reported.
    A key name that is, or holds, a secret is never printed in a notice, like a
    vendor-shaped secret: an instance key, a run of 24 or more hex digits or of 32
    or more base64 characters mixing capitals, lower case and digits, anywhere in
@@ -321,19 +299,13 @@ Safe to interrupt at any point; a rerun converges:
    authorization header (`bearer …`) used as a name. It is also a credential on
    the save path: its entry is sheltered and not written back to `config.toml`,
    so the name does not stay in clear there.
-   Such a copy is cut down or removed like any other. A
-   symbolic link or Windows reparse point is reported too, as is a file that is
+   A symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard
-   links, which the pass never reads through, renames over or removes. The key is
-   the top-level `encryption_secret`: a text that parses is decided by that value
-   alone, a text that does not (a duplicate key, say) is scanned line by line
-   down to its first table, so a valid key line is still found past a value that
-   is not a key, and an `encryption_secret` under `[tokens]`, in an MCP env table
-   or inside a multi-line string is never taken for the key. An unreadable
-   `config.toml` set aside while no key exists follows the same policy: several
-   different keys, or a key line that cannot be read, keep the whole content as
-   `config.toml.corrupt.<timestamp>` (`0600`, reported at every start, encrypted
-   once a key exists); the key-only copy is for one readable key. A TOML parse
+   links, which the pass never reads through, renames over or removes. An
+   unreadable `config.toml` set aside while no key exists follows the same
+   policy: when the key read leaves a mention it could not use, the whole content
+   is kept as `config.toml.corrupt.<timestamp>` (`0600`, reported at every start,
+   encrypted once a key exists); the key-only copy is for a readable key. A TOML parse
    error of any config file is logged by kind and position only (`invalid TOML
    at line 3, column 9`), never with the offending line, which would put a key
    or a credential in the log (`redact::toml_error_summary`); that holds for
