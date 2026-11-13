@@ -61,7 +61,7 @@ that may be hosted by a third party.
 
 ## What they have
 
-The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_workspace_tools.rs:1244-1258#TOOL_NAMES]:
+The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_workspace_tools.rs:1290-1304#TOOL_NAMES]:
 
 | Tool | Purpose |
 |---|---|
@@ -187,12 +187,12 @@ implementation detail:
   file tools was the original bug — the path was reachable all along.
 - **Network**: `web_fetch` refuses private and loopback addresses before any request
   [src: file: backend/src/api/agent_workspace_tools.rs:268-296#check_fetch_url], times out at 20s
-  [src: file: backend/src/api/agent_workspace_tools.rs:42-44#FETCH_TIMEOUT_SECS], and caps the body at 256 KB
-  [src: file: backend/src/api/agent_workspace_tools.rs:38-40#MAX_BYTES].
+  [src: file: backend/src/api/agent_workspace_tools.rs:44-46#FETCH_TIMEOUT_SECS], and caps the body at 256 KB
+  [src: file: backend/src/api/agent_workspace_tools.rs:40-42#MAX_BYTES].
 - **Truncation is always announced.** A bounded read that returns part of a document sets a
   `truncated` flag, so a model can say it is reasoning from a partial view instead of
   concluding from one. Walks are capped at 20 000 entries and say so
-  [src: file: backend/src/api/agent_workspace_tools.rs:52-57#MAX_WALK_ENTRIES].
+  [src: file: backend/src/api/agent_workspace_tools.rs:54-59#MAX_WALK_ENTRIES].
 - **Git is read-only, with one narrow exception.** Status, diff and log read the repository;
   `git_commit` commits explicitly named files, and only for the exact active native worker in
   its managed task worktree. Nothing amends, checks out or pushes.
@@ -461,7 +461,7 @@ shipping it. Three things changed:
   example before anything is sent. The declaration says why: a large response is
   shortened and cannot be re-read whole
   [src: file: backend/src/api/agent_tools.rs:955-983#extract]
-  [src: file: backend/src/api/agent_tools.rs:4914-4938#api_call_extract].
+  [src: file: backend/src/api/agent_tools.rs:4924-4948#api_call_extract].
 - **A shortened API result says what it holds.** Its `shape` lists the response's
   keys (small flat objects such as `meta` and `links` by value, so the paging is
   visible), the path and length of the main list, and the keys of one element down

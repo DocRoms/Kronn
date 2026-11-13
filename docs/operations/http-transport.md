@@ -314,7 +314,7 @@ without a project. This exception grants no directory listing or writing rights;
 attachments are refused. Unrelated files outside the workspace keep the existing
 refusal. Images are never returned as lossy text by `read_file`.
 [src: file: backend/src/api/agent_tools.rs:3615-3647#read_attached_file]
-[src: file: backend/src/api/agent_workspace_tools.rs:1405-1449#read_attachment_payload]
+[src: file: backend/src/api/agent_workspace_tools.rs:1451-1495#read_attachment_payload]
 
 CLI agents retain the existing attachment prompt: an image's path and an
 instruction to inspect it with their own image/file tools before describing it.

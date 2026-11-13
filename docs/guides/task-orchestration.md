@@ -206,10 +206,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:11263-11267#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:11269-11318#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:9506-9530#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:40827-40928#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:11305-11309#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:11311-11360#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:9548-9572#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:40875-40976#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -286,9 +286,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:2423-2451#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:2995-3015#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:2940-2993#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2429-2457#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:3055-3075#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:3000-3053#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -302,7 +302,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2762-2769#integration_target]
+[src: file: backend/src/core/worktree.rs:2822-2829#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -351,8 +351,8 @@ integration branch stays green on the strict `docs_citations_resolve_in_the_repo
 test without a release-time sweep. A citation the lane breaks for good (symbol
 removed or renamed) is the lane's to fix; the worker brief says so. The merge a
 worker finishes with `task_exec_commit` runs the same settlement.
-[src: file: backend/src/core/worktree.rs:2378-2482#build_candidate_detailed]
-[src: file: backend/src/core/worktree.rs:2639-2702#settle_branch_docs]
+[src: file: backend/src/core/worktree.rs:2472-2576#build_candidate_detailed]
+[src: file: backend/src/core/worktree.rs:2678-2741#settle_branch_docs]
 [src: file: backend/src/core/docs_citations/merge.rs:306-322#resolve_anchor_only_conflicts]
 [src: file: backend/src/core/docs_citations/merge.rs:734-794#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]
@@ -382,7 +382,7 @@ A doc or a cited file with unstaged changes defers the re-anchoring
 (`doc_citations.reanchor_deferred`) rather than sweeping work in progress; the
 next commit re-anchors. A commit that finishes a merge keeps the merge's own
 settlement above.
-[src: file: backend/src/api/agent_workspace_tools.rs:697-724#git_commit_payload_reanchoring_docs]
+[src: file: backend/src/api/agent_workspace_tools.rs:720-747#git_commit_payload_reanchoring_docs]
 [src: file: backend/src/core/docs_citations/merge.rs:638-650#reanchor_branch_leaving_unplaced]
 
 ### A DoD item the principal checks live, after integration
