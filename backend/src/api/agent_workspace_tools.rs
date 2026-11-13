@@ -691,6 +691,131 @@ pub fn git_commit_payload_with_data_dir_lock(
     Ok(payload)
 }
 
+/// Citations listed in a commit's answer; the count says how many there are.
+const LISTED_UNRESOLVED: usize = 40;
+
+/// [`git_commit_payload_with_data_dir_lock`] for a spawned task worker, which
+/// then settles the doc citations its code shift moved (KT-1721).
+///
+/// A worker that adds lines to a cited file shifts anchors in docs it never
+/// opened, and it does not run the strict docs gate. So after a plain commit,
+/// every doc of the corpus (not only those in the commit) whose citation now
+/// points at the wrong lines of a file this branch changed since `base` is
+/// re-anchored under the integration's rules and committed on its own. What the
+/// evidence cannot place, and what the branch newly left unresolved, is listed
+/// in the answer under `doc_citations` for the worker to fix before delivering.
+/// A merge-finishing commit is left alone: the merge settles its own docs and
+/// a citation the target moved is not the worker's.
+pub fn git_commit_payload_reanchoring_docs(
+    root: &Path,
+    files: &[String],
+    message: &str,
+    data_dir_lock: Option<&std::fs::File>,
+    base: Option<&str>,
+) -> Result<Value, String> {
+    let mut payload = git_commit_payload_with_data_dir_lock(root, files, message, data_dir_lock)?;
+    let base = base.map(str::trim).filter(|base| !base.is_empty());
+    if let (Some(base), None) = (base, payload.get("merge_commit")) {
+        if let Some(report) = reanchor_docs_after_commit(root, base, data_dir_lock) {
+            payload["doc_citations"] = report;
+        }
+    }
+    Ok(payload)
+}
+
+/// The doc step of [`git_commit_payload_reanchoring_docs`]. The commit it follows
+/// is made and stays made whatever happens here: a failure is reported, never
+/// raised. `None` when there is nothing to say.
+fn reanchor_docs_after_commit(
+    root: &Path,
+    base: &str,
+    data_dir_lock: Option<&std::fs::File>,
+) -> Option<Value> {
+    use crate::core::docs_citations::merge::{self, SettleError};
+    let mut report = serde_json::Map::new();
+    match merge::reanchor_branch_leaving_unplaced(root, base) {
+        Ok(docs) => {
+            let touched: Vec<String> = docs
+                .touched()
+                .iter()
+                .map(|doc| doc.to_string_lossy().into_owned())
+                .collect();
+            if !touched.is_empty() {
+                let note = docs.summary().unwrap_or_default();
+                let subject = "Re-anchor doc citations moved by the worker's code";
+                match crate::api::git_ops::run_git_commit_with_child_lock(
+                    root,
+                    &touched,
+                    &format!("{subject}\n\n{note}"),
+                    false,
+                    false,
+                    data_dir_lock,
+                ) {
+                    Ok(committed) => {
+                        report.insert(
+                            "reanchored".into(),
+                            json!({
+                                "citations": docs.outcome.rewritten.len(),
+                                "docs": touched,
+                                "commit": committed.hash,
+                            }),
+                        );
+                    }
+                    Err(error) => {
+                        if let Err(restore) = merge::undo_staged(root, &docs) {
+                            tracing::warn!("re-anchored docs not restored: {restore}");
+                        }
+                        report.insert(
+                            "reanchor_error".into(),
+                            json!(format!("the re-anchored docs were not committed: {error}")),
+                        );
+                    }
+                }
+            }
+        }
+        Err(SettleError::Refused { paths, .. }) => {
+            report.insert(
+                "reanchor_deferred".into(),
+                json!(format!(
+                    "doc citations were not re-anchored because {} carry unstaged changes; \
+                     commit or stash that work and the next task_exec_commit re-anchors them",
+                    paths.join(", ")
+                )),
+            );
+        }
+        Err(error) => {
+            tracing::warn!("doc citations not re-anchored after a worker commit: {error}");
+            report.insert("reanchor_error".into(), json!(error.to_string()));
+        }
+    }
+    match merge::newly_unresolved(root, base) {
+        Ok(newly) if !newly.is_empty() => {
+            let count = newly.len();
+            let listed: Vec<String> = newly
+                .into_iter()
+                .map(|(_, line)| line)
+                .take(LISTED_UNRESOLVED)
+                .collect();
+            report.insert("unresolved_count".into(), json!(count));
+            report.insert("unresolved".into(), json!(listed));
+            report.insert(
+                "action".into(),
+                json!(
+                    "these citations resolved on the base and do not now, and the evidence cannot \
+                     place them (the symbol is defined on several lines, or was removed or renamed). \
+                     Point each at its new lines in its doc, call task_exec_commit with that doc, and \
+                     only then task_exec_deliver: the integration sends back what is left."
+                ),
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!("doc citations not compared with the base: {error}");
+        }
+    }
+    (!report.is_empty()).then_some(Value::Object(report))
+}
+
 /// Built once, like the general catalogue: static declarations (KT-1161).
 static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<Value>> =
     std::sync::LazyLock::new(build_tool_definitions);
@@ -3746,6 +3871,265 @@ mod tests {
         );
         let m = git_read(repo.path(), &["show", "HEAD:m.txt"]).unwrap();
         assert_eq!(m, "m\n", "the unstaged hand edit stayed out of the commit");
+    }
+
+    // ---- doc citations settled by the worker commit (KT-1721) ----
+
+    const ALPHA: &str = "pub fn alpha() {}";
+    const BETA: &str = "pub fn beta() {}";
+    const GAMMA: &str = "pub fn gamma() {}";
+
+    /// `count` lines `let vN = N;`, with the `special` lines replaced.
+    fn numbered(count: usize, special: &[(usize, &str)]) -> Vec<String> {
+        (1..=count)
+            .map(|n| match special.iter().find(|(at, _)| *at == n) {
+                Some((_, text)) => (*text).to_string(),
+                None => format!("let v{n} = {n};"),
+            })
+            .collect()
+    }
+
+    fn write_source(root: &Path, lines: &[String]) {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), lines.join("\n") + "\n").unwrap();
+    }
+
+    fn write_doc(root: &Path, rel: &str, body: &str) {
+        std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(root.join(rel), body).unwrap();
+    }
+
+    fn api_doc(alpha: usize, beta: usize) -> String {
+        format!(
+            "# API\n\nAlpha: [src: file: src/lib.rs:{alpha}-{}#alpha]\nBeta: [src: file: src/lib.rs:{beta}-{}#beta]\n",
+            alpha + 1,
+            beta + 1
+        )
+    }
+
+    /// A repository where `src/lib.rs` defines `alpha` (10), `beta` (30) and
+    /// `gamma` (40), and three docs cite them; returns it with the base commit.
+    /// `docs/api.md` and `docs/guide.md` cite alpha and beta, `docs/gamma.md` gamma.
+    fn cited_repo() -> (tempfile::TempDir, String) {
+        let repo = tiny_repo();
+        let root = repo.path();
+        write_source(
+            root,
+            &numbered(200, &[(10, ALPHA), (30, BETA), (40, GAMMA)]),
+        );
+        write_doc(root, "docs/api.md", &api_doc(10, 30));
+        write_doc(root, "docs/guide.md", &api_doc(10, 30));
+        write_doc(
+            root,
+            "docs/gamma.md",
+            "Gamma: [src: file: src/lib.rs:40-41#gamma]\n",
+        );
+        git_read(root, &["add", "-A"]).unwrap();
+        git_read(root, &["commit", "-q", "-m", "base"]).unwrap();
+        let base = git_read(root, &["rev-parse", "HEAD"]).unwrap();
+        assert!(crate::core::docs_citations::check_corpus(root).is_empty());
+        (repo, base.trim().to_string())
+    }
+
+    /// What the worker does: 5 lines above the cited functions, and `gamma`
+    /// moved far away in two copies, so no evidence says which one is meant.
+    fn shift_the_source(root: &Path) {
+        let mut lines = numbered(200, &[(10, ALPHA), (30, BETA), (40, "let gamma_gone = 0;")]);
+        lines[119] = GAMMA.to_string();
+        lines[179] = GAMMA.to_string();
+        for k in 0..5 {
+            lines.insert(5 + k, format!("let added{k} = 0;"));
+        }
+        write_source(root, &lines);
+    }
+
+    #[test]
+    fn a_worker_commit_re_anchors_every_doc_it_shifted_and_lists_the_ambiguous_rest() {
+        let (repo, base) = cited_repo();
+        let root = repo.path();
+        shift_the_source(root);
+
+        let committed = git_commit_payload_reanchoring_docs(
+            root,
+            &["src/lib.rs".into()],
+            "feat: shift the source",
+            None,
+            Some(&base),
+        )
+        .unwrap();
+
+        // The worker's commit is its own; the re-anchoring is a second one.
+        assert_eq!(committed["files"], json!(["src/lib.rs"]));
+        let commits = git_read(root, &["log", "--format=%s", &format!("{base}..HEAD")]).unwrap();
+        assert_eq!(
+            commits.lines().collect::<Vec<_>>(),
+            [
+                "Re-anchor doc citations moved by the worker's code",
+                "feat: shift the source"
+            ]
+        );
+        // Neither doc was named in `files`, both are re-pointed.
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/api.md")).unwrap(),
+            api_doc(15, 35)
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/guide.md")).unwrap(),
+            api_doc(15, 35)
+        );
+        let report = &committed["doc_citations"];
+        assert_eq!(report["reanchored"]["citations"], json!(4));
+        assert_eq!(
+            report["reanchored"]["docs"],
+            json!(["docs/api.md", "docs/guide.md"])
+        );
+        // The ambiguous one is left as it is and named for the worker.
+        assert_eq!(report["unresolved_count"], json!(1));
+        let listed = report["unresolved"].as_array().unwrap();
+        assert!(
+            listed[0]
+                .as_str()
+                .unwrap()
+                .starts_with("docs/gamma.md:1 [src: file: src/lib.rs:40-41#gamma]"),
+            "{listed:?}"
+        );
+        assert!(report["action"]
+            .as_str()
+            .unwrap()
+            .contains("task_exec_deliver"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/gamma.md")).unwrap(),
+            "Gamma: [src: file: src/lib.rs:40-41#gamma]\n"
+        );
+        let body = git_read(root, &["log", "-1", "--format=%B"]).unwrap();
+        assert!(body.contains("4 citation(s) re-anchored"), "{body}");
+        assert!(body.contains("Signed-off-by: T <t@t.t>"), "{body}");
+        assert_eq!(git_read(root, &["status", "--porcelain"]).unwrap(), "");
+    }
+
+    #[test]
+    fn a_worker_commit_that_shifts_nothing_cited_answers_exactly_as_before() {
+        let (repo, base) = cited_repo();
+        let root = repo.path();
+        write_doc(root, "notes.txt", "notes\n");
+
+        let committed = git_commit_payload_reanchoring_docs(
+            root,
+            &["notes.txt".into()],
+            "chore: notes",
+            None,
+            Some(&base),
+        )
+        .unwrap();
+
+        assert!(committed.get("doc_citations").is_none(), "{committed}");
+        let count = git_read(root, &["rev-list", "--count", &format!("{base}..HEAD")]).unwrap();
+        assert_eq!(count.trim(), "1");
+    }
+
+    #[test]
+    fn a_doc_with_unstaged_work_defers_the_re_anchoring_and_rewrites_nothing() {
+        let (repo, base) = cited_repo();
+        let root = repo.path();
+        shift_the_source(root);
+        // Work in progress in a doc the settling would rewrite, nobody named it.
+        write_doc(
+            root,
+            "docs/api.md",
+            &(api_doc(10, 30) + "\nDraft paragraph.\n"),
+        );
+
+        let committed = git_commit_payload_reanchoring_docs(
+            root,
+            &["src/lib.rs".into()],
+            "feat: shift the source",
+            None,
+            Some(&base),
+        )
+        .unwrap();
+
+        let deferred = committed["doc_citations"]["reanchor_deferred"]
+            .as_str()
+            .unwrap();
+        assert!(deferred.contains("docs/api.md"), "{deferred}");
+        let count = git_read(root, &["rev-list", "--count", &format!("{base}..HEAD")]).unwrap();
+        assert_eq!(count.trim(), "1", "no second commit");
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/api.md")).unwrap(),
+            api_doc(10, 30) + "\nDraft paragraph.\n",
+            "the worker's own edit is untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/guide.md")).unwrap(),
+            api_doc(10, 30),
+            "nothing was written at all"
+        );
+    }
+
+    #[test]
+    fn a_second_worker_commit_re_anchors_again_from_the_docs_the_first_one_fixed() {
+        let (repo, base) = cited_repo();
+        let root = repo.path();
+        shift_the_source(root);
+        git_commit_payload_reanchoring_docs(
+            root,
+            &["src/lib.rs".into()],
+            "feat: shift once",
+            None,
+            Some(&base),
+        )
+        .unwrap();
+        let mut lines: Vec<String> = std::fs::read_to_string(root.join("src/lib.rs"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        for k in 0..3 {
+            lines.insert(1 + k, format!("let again{k} = 0;"));
+        }
+        write_source(root, &lines);
+
+        let committed = git_commit_payload_reanchoring_docs(
+            root,
+            &["src/lib.rs".into()],
+            "feat: shift twice",
+            None,
+            Some(&base),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/api.md")).unwrap(),
+            api_doc(18, 38)
+        );
+        assert_eq!(
+            committed["doc_citations"]["reanchored"]["citations"],
+            json!(4)
+        );
+        // The ambiguous citation is still the only one the worker owes.
+        assert_eq!(committed["doc_citations"]["unresolved_count"], json!(1));
+    }
+
+    #[test]
+    fn without_a_pinned_base_a_worker_commit_does_not_touch_the_docs() {
+        let (repo, _) = cited_repo();
+        let root = repo.path();
+        shift_the_source(root);
+
+        let committed = git_commit_payload_reanchoring_docs(
+            root,
+            &["src/lib.rs".into()],
+            "feat: shift the source",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(committed.get("doc_citations").is_none(), "{committed}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/api.md")).unwrap(),
+            api_doc(10, 30)
+        );
     }
 
     #[test]

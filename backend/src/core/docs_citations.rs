@@ -18,7 +18,7 @@ mod merge_tests;
 use crate::core::anti_halluc::{
     anchor_miss, anchor_miss_detail, file_citation_anchored, is_binary_file, line_bounds_status,
     markers_at, partition_inline_code, resolve_in_root, scan_fences, secret_line_refusal,
-    strip_inline_code, Jailed, SourceStatus,
+    strip_inline_code, AnchorMiss, Jailed, SourceStatus,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -109,39 +109,77 @@ fn check_reference(
             (SourceStatus::Verified, _) => {
                 let symbol = anchor?;
                 let miss = anchor_miss(&found, span, symbol)?;
-                let detail = anchor_miss_detail(span, symbol, &miss);
-                let total = std::fs::read_to_string(&found).map_or(0, |t| t.lines().count());
-                let moved = (!miss.lines.is_empty()).then(|| MovedAnchor {
-                    span,
-                    occurrences: miss.starts.clone(),
-                    lines: miss.lines.clone(),
-                    total,
-                });
-                let reason = match miss.lines.as_slice() {
-                    [] => format!("{detail} — rewrite the claim or cite where it lives"),
-                    [_] => match moved.as_ref().and_then(MovedAnchor::placement) {
-                        Some((start, end)) => {
-                            format!(
-                                "{detail} — try `{path}:{}#{symbol}`",
-                                span_label(start, end)
-                            )
-                        }
-                        None => detail,
-                    },
-                    // The nearest occurrence is often the wrong one: no suggestion.
-                    lines => {
-                        let lines: Vec<String> = lines.iter().map(usize::to_string).collect();
-                        format!(
-                            "{detail} — ambiguous: pick by hand among lines {}",
-                            lines.join(", ")
-                        )
-                    }
-                };
-                Some((reason, moved))
+                Some(moved_anchor_failure(&found, path, span, symbol, miss, None))
+            }
+            // A range past the end of the file is the same drift taken further:
+            // the symbol it names is still placed by the file (KT-1684). The
+            // secret and binary refusals carry no `beyond file length` and
+            // stay refusals.
+            (SourceStatus::OutOfBounds, bounds)
+                if bounds.contains("beyond file length") && anchor.is_some() =>
+            {
+                let symbol = anchor?;
+                match anchor_miss(&found, span, symbol) {
+                    Some(miss) => Some(moved_anchor_failure(
+                        &found,
+                        path,
+                        span,
+                        symbol,
+                        miss,
+                        Some(&bounds),
+                    )),
+                    None => Some((bounds, None)),
+                }
             }
             (_, detail) => Some((detail, None)),
         },
     }
+}
+
+/// The failure of a citation whose `#symbol` is not where its range says, with
+/// the `moved` evidence that lets a re-anchor place it. `bounds` is the reason
+/// the range itself is wrong (past the end of the file), when it is.
+fn moved_anchor_failure(
+    found: &Path,
+    path: &str,
+    span: (usize, usize),
+    symbol: &str,
+    miss: AnchorMiss,
+    bounds: Option<&str>,
+) -> (String, Option<MovedAnchor>) {
+    let detail = anchor_miss_detail(span, symbol, &miss);
+    let detail = match bounds {
+        Some(bounds) => format!("{bounds}; {detail}"),
+        None => detail,
+    };
+    let total = std::fs::read_to_string(found).map_or(0, |t| t.lines().count());
+    let moved = (!miss.lines.is_empty()).then(|| MovedAnchor {
+        span,
+        occurrences: miss.starts.clone(),
+        lines: miss.lines.clone(),
+        total,
+    });
+    let reason = match miss.lines.as_slice() {
+        [] => format!("{detail} — rewrite the claim or cite where it lives"),
+        [_] => match moved.as_ref().and_then(MovedAnchor::placement) {
+            Some((start, end)) => {
+                format!(
+                    "{detail} — try `{path}:{}#{symbol}`",
+                    span_label(start, end)
+                )
+            }
+            None => detail,
+        },
+        // The nearest occurrence is often the wrong one: no suggestion.
+        lines => {
+            let lines: Vec<String> = lines.iter().map(usize::to_string).collect();
+            format!(
+                "{detail} — ambiguous: pick by hand among lines {}",
+                lines.join(", ")
+            )
+        }
+    };
+    (reason, moved)
 }
 
 /// The span a citation of `span`'s length takes for the symbol found at `line`,
@@ -1085,6 +1123,80 @@ mod tests {
         assert!(check_corpus(root).is_empty());
     }
 
+    /// KT-1684: `Dashboard.tsx` shrank to 1223 lines and `<Outlet` sits once at
+    /// 1214, while the doc still cites 1241-1244: past the end of the file.
+    fn shrunk_dashboard(root: &Path, outlets: &[usize]) {
+        let mut lines: Vec<String> = (1..=1223).map(|n| format!("const v{n} = {n};")).collect();
+        for at in outlets {
+            lines[at - 1] = "      <Outlet />".to_string();
+        }
+        std::fs::write(root.join("src/Dashboard.tsx"), lines.join("\n") + "\n").unwrap();
+    }
+
+    const OUTLET_DOC: &str = "[src: file: src/Dashboard.tsx:1241-1244#Outlet]\n";
+
+    #[test]
+    fn a_range_beyond_the_file_is_placed_by_the_symbol_defined_once() {
+        let tmp = repo();
+        let root = tmp.path();
+        shrunk_dashboard(root, &[1214]);
+        let failures = check_doc(OUTLET_DOC, root);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].reason,
+            "line 1241 beyond file length 1223; symbol `Outlet` not in lines 1241-1244; \
+             it appears at line 1214 — try `src/Dashboard.tsx:1214-1217#Outlet`"
+        );
+        assert_eq!(
+            failures[0].moved.as_ref().and_then(MovedAnchor::placement),
+            Some((1214, 1217))
+        );
+        let (new, outcome) = reanchor(root, "docs/ui.md", OUTLET_DOC);
+        assert_eq!(new, "[src: file: src/Dashboard.tsx:1214-1217#Outlet]\n");
+        assert_eq!(outcome.rewritten.len(), 1);
+        assert!(check_corpus(root).is_empty());
+    }
+
+    #[test]
+    fn a_range_beyond_the_file_with_the_symbol_on_several_lines_is_not_guessed() {
+        let tmp = repo();
+        let root = tmp.path();
+        shrunk_dashboard(root, &[1214, 1220]);
+        let failures = check_doc(OUTLET_DOC, root);
+        assert!(
+            failures[0]
+                .reason
+                .ends_with("ambiguous: pick by hand among lines 1214, 1220"),
+            "{}",
+            failures[0].reason
+        );
+        let (new, outcome) = reanchor(root, "docs/ui.md", OUTLET_DOC);
+        assert_eq!(new, OUTLET_DOC);
+        assert!(outcome.rewritten.is_empty());
+        assert_eq!(outcome.ambiguous.len(), 1);
+    }
+
+    #[test]
+    fn a_range_beyond_the_file_without_the_symbol_stays_a_plain_failure() {
+        let tmp = repo();
+        let root = tmp.path();
+        shrunk_dashboard(root, &[]);
+        let failures = check_doc(OUTLET_DOC, root);
+        assert!(failures[0].moved.is_none());
+        assert!(
+            failures[0]
+                .reason
+                .starts_with("line 1241 beyond file length 1223; symbol `Outlet`"),
+            "{}",
+            failures[0].reason
+        );
+        // Without an anchor the bounds message is untouched.
+        assert_eq!(
+            reasons("[src: file: src/Dashboard.tsx:1241-1244]", root),
+            ["line 1241 beyond file length 1223"]
+        );
+    }
+
     #[test]
     fn two_definitions_are_ambiguous_and_both_lines_are_listed() {
         let tmp = repo();
@@ -1564,10 +1676,45 @@ mod tests {
     }
 
     #[test]
+    fn reanchoring_places_a_range_beyond_the_file_end_by_its_unique_symbol() {
+        let tmp = moved_repo();
+        let root = tmp.path();
+        // `once` is defined on line 6 only; the cited lines are past the
+        // 9-line file. A single line and a range both land on the definition.
+        let text = "[src: file: src/m.rs:20#once] `[src: file: src/m.rs:20-22#once]`\n";
+        let (new, outcome) = reanchor(root, "docs/a.md", text);
+        assert_eq!(
+            new,
+            "[src: file: src/m.rs:6#once] `[src: file: src/m.rs:6-8#once]`\n"
+        );
+        assert_eq!(outcome.rewritten.len(), 2);
+        assert!(outcome.ambiguous.is_empty());
+        assert!(check_corpus(root).is_empty());
+    }
+
+    #[test]
+    fn reanchoring_lists_a_range_beyond_the_file_end_whose_symbol_is_repeated() {
+        let tmp = moved_repo();
+        let root = tmp.path();
+        // `twice` is defined on lines 2 and 9: no guess, listed, text kept.
+        let text = "[src: file: src/m.rs:20#twice]\n";
+        let (new, outcome) = reanchor(root, "docs/a.md", text);
+        assert_eq!(new, text);
+        assert!(outcome.rewritten.is_empty());
+        assert_eq!(outcome.ambiguous.len(), 1);
+        assert_eq!(outcome.ambiguous[0].3, vec![2, 9]);
+        assert_eq!(check_corpus(root).len(), 1);
+    }
+
+    #[test]
     fn reanchoring_never_touches_other_failures_or_files_outside_the_docs() {
         let tmp = moved_repo();
         let root = tmp.path();
-        let text = "[src: file: src/m.rs:20#once] [src: file: src/gone.rs:1#once]\n\
+        // Past the end of the 9-line file: only a symbol defined once places it
+        // (see the positive test above), so an absent one and a line-only
+        // range stay untouched and unlisted.
+        let text = "[src: file: src/gone.rs:1#once]\n\
+                    [src: file: src/m.rs:20#vanished] [src: file: src/m.rs:20-22]\n\
                     [src: file: src/m.rs] [src: file: src/m.rs:1#vanished] [src: file: src/m.rs:1-2]\n";
         let (new, outcome) = reanchor(root, "docs/a.md", text);
         assert_eq!(new, text);

@@ -346,8 +346,36 @@ worker finishes with `task_exec_commit` runs the same settlement.
 [src: file: backend/src/core/worktree.rs:2378-2482#build_candidate_detailed]
 [src: file: backend/src/core/worktree.rs:2639-2702#settle_branch_docs]
 [src: file: backend/src/core/docs_citations/merge.rs:306-322#resolve_anchor_only_conflicts]
-[src: file: backend/src/core/docs_citations/merge.rs:695-755#newly_unresolved]
+[src: file: backend/src/core/docs_citations/merge.rs:734-794#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]
+
+### The worker's own commit settles the citations its code shifted
+
+A worker that adds lines to a file many docs cite (`backend/src/api/orchestration.rs`
+is the usual one) moves anchors in docs it never opened, and it does not run the
+strict gate. Waiting for the integration to bounce those citations cost a whole
+review round (KT-1721: 79 and 105 unresolved on two lanes). So every plain
+`task_exec_commit` (and `git_commit` for an HTTP agent) is followed, in the same
+call, by the repo-wide re-anchoring against the execution's pinned base:
+
+1. every citation of every doc whose cited file the branch changed since the base,
+   not only the docs in the commit, is re-pointed under the integration's rules (a
+   `#symbol` the file defines once is placed whatever the distance, also when the
+   cited range now lies past the end of a file that shrank (KT-1684); the history
+   of the base, the previous commit and the branch settles the rest);
+2. the re-pointed docs are committed on their own (`Re-anchor doc citations moved
+   by the worker's code`) and listed under `doc_citations.reanchored`;
+3. a citation the evidence cannot place, or whose symbol was removed, stays as it
+   is and is listed under `doc_citations.unresolved` (with `unresolved_count`),
+   limited to what resolved on the base and no longer does. The worker points
+   those by hand, commits the doc, and only then delivers.
+
+A doc or a cited file with unstaged changes defers the re-anchoring
+(`doc_citations.reanchor_deferred`) rather than sweeping work in progress; the
+next commit re-anchors. A commit that finishes a merge keeps the merge's own
+settlement above.
+[src: file: backend/src/api/agent_workspace_tools.rs:697-724#git_commit_payload_reanchoring_docs]
+[src: file: backend/src/core/docs_citations/merge.rs:638-650#reanchor_branch_leaving_unplaced]
 
 ### A DoD item the principal checks live, after integration
 
