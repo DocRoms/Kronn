@@ -293,9 +293,19 @@ Safe to interrupt at any point; a rerun converges:
    nothing after it, since what follows is that table's (a nested array that
    quotes its inside, `["x"]`, reads as a header too: the ambiguity resolves to
    not offering). A region that closes and another that opens on the same line
-   (`""" ; x = """`, `], b = [`) are two regions, and the first offers nothing.
-   A key name that is an opaque token (an instance key, a long hex or base64
-   run) is never printed in a notice, like a vendor-shaped secret.
+   (`""" ; x = """`, `], b = [`) are two regions, and the first offers nothing;
+   an array or inline table that closes inside an open outer array takes back
+   what it held, at any depth. A table header swallowed by an open region stays
+   swallowed after the region closes: the lines after it are that table's (or the
+   file is too damaged to say), so none is read as the key, a mention of the name
+   there is unreadable, and the copy is kept whole and reported.
+   A key name that is, or holds, a secret is never printed in a notice, like a
+   vendor-shaped secret: an instance key, a run of 24 or more hex digits or of 32
+   or more base64 characters mixing capitals, lower case and digits, anywhere in
+   the name (`<64 hex>.old`, `key <64 hex>`, `<32 hex>:<32 hex>`), or an
+   authorization header (`bearer …`) used as a name. It is also a credential on
+   the save path: its entry is sheltered and not written back to `config.toml`,
+   so the name does not stay in clear there.
    Such a copy is cut down or removed like any other. A
    symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard

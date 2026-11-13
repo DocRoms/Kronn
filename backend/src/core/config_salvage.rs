@@ -143,29 +143,49 @@ enum Seg {
 /// and digits. `looks_like_secret` only knows vendor prefixes (`sk-`, `AIza`…),
 /// so a Kronn key pasted as a key name needs this. A heuristic that errs toward
 /// hiding: a setting's name is short and made of words.
+///
+/// The token may sit anywhere in the name, not only be all of it
+/// (`<64 hex>.old`, `encryption_secret: <64 hex>`, `key <64 hex>`,
+/// `<32 hex>:<32 hex>`): the name is cut into runs of key characters, and any run
+/// that is an instance key, a hex run of 24 or more, or a base64 run of 32 or more
+/// mixing upper case, lower case and digits (a snake_case setting has no capital
+/// letters) makes it one. A hex run is looked for on its own too, since a letter
+/// of a neighbouring word (`key`, `old`) may stick to it in a base64 run.
 fn is_opaque_token(name: &str) -> bool {
     if super::crypto::canonical_secret(name).is_ok() {
         return true;
     }
-    let name = name.trim();
-    if name.len() < 24 || !name.is_ascii() {
-        return false;
-    }
-    if name.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return true;
-    }
-    name.len() >= 32
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
-        && name.bytes().any(|b| b.is_ascii_digit())
-        && name.bytes().any(|b| b.is_ascii_alphabetic())
+    let key_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_');
+    name.split(|c: char| !key_char(c)).any(|run| {
+        if run.len() < 24 {
+            return false;
+        }
+        let digits = run.bytes().any(|b| b.is_ascii_digit());
+        let hex_run = run
+            .as_bytes()
+            .split(|b| !b.is_ascii_hexdigit())
+            .any(|h| h.len() >= 24);
+        hex_run
+            || super::crypto::canonical_secret(run).is_ok()
+            || (run.len() >= 32
+                && digits
+                && run.bytes().any(|b| b.is_ascii_uppercase())
+                && run.bytes().any(|b| b.is_ascii_lowercase()))
+    })
+}
+
+/// A key name that is itself a secret: a vendor-shaped token, an opaque token
+/// ([`is_opaque_token`]), or an authorization header value (`Bearer …`) used as a
+/// name. It is printed as a placeholder and treated as a credential on save, like
+/// a credential's value.
+fn secret_name(name: &str) -> bool {
+    super::redact::looks_like_secret(name) || is_opaque_token(name) || secret_string(name)
 }
 
 /// A key name as notices and logs may print it: itself, unless it looks like a
 /// secret (a token pasted as a key name), then a placeholder for its position.
 fn shown_key(name: &str, position: usize) -> String {
-    if super::redact::looks_like_secret(name) || is_opaque_token(name) {
+    if secret_name(name) {
         format!("<key #{}>", position + 1)
     } else {
         name.to_string()
@@ -559,6 +579,13 @@ fn credential_name(name: &str) -> bool {
     .any(|word| name == *word || name.ends_with(&format!("_{word}")))
 }
 
+/// A key that holds a credential by its name ([`credential_name`]), or that IS a
+/// secret (a token pasted as a key name, [`secret_name`]): its entry is kept out
+/// of the clear file like a credential's value, and the name is never printed.
+fn credential_key(name: &str) -> bool {
+    credential_name(name) || secret_name(name)
+}
+
 /// A string that is an authorization header value, whatever key holds it.
 fn secret_string(text: &str) -> bool {
     let text = text.trim_start().to_ascii_lowercase();
@@ -591,7 +618,7 @@ fn whole_credential(path: &[String], value: &Value) -> bool {
         || path
             .iter()
             .enumerate()
-            .any(|(at, name)| !(at == 0 && name == "tokens") && credential_name(name))
+            .any(|(at, name)| !(at == 0 && name == "tokens") && credential_key(name))
         || matches!(value, Value::String(text) if secret_string(text))
 }
 
@@ -603,7 +630,7 @@ fn scrub(value: &Value) -> Value {
             table
                 .iter()
                 .filter(|(k, v)| {
-                    !credential_name(k) && !matches!(v, Value::String(t) if secret_string(t))
+                    !credential_key(k) && !matches!(v, Value::String(t) if secret_string(t))
                 })
                 .map(|(k, v)| (k.clone(), scrub(v)))
                 .collect(),
@@ -1196,6 +1223,97 @@ mod tests {
             "deadbeef",
         ] {
             assert_eq!(shown_key(name, 0), name);
+        }
+    }
+
+    /// KT-1528 — a token embedded in a longer key name (a suffix, a label, a
+    /// neighbour, two halves) is as much a token as one that is the whole name.
+    #[test]
+    fn a_token_inside_a_longer_key_name_is_not_printed() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let half = "0123456789abcdef0123456789abcdef";
+        let names = [
+            format!("{hex}.old"),
+            format!("encryption_secret: {hex}"),
+            format!("key {hex}"),
+            format!("{half}:{half}"),
+            format!("backup-of-{hex}"),
+            "label q83vEjRWeJq83vEjRWeJq83vEjRWeJq83vEjRWeJ+/8= copy".to_string(),
+        ];
+        for name in &names {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"\"\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            assert!(!notice.contains(half), "{name}: {notice}");
+            assert!(!notice.contains("q83vEjRWeJ"), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+            assert_eq!(
+                show_keys(&["tokens".to_string(), name.clone()]),
+                "tokens.<key #2>"
+            );
+        }
+    }
+
+    /// KT-1528 — an authorization header value used as a key name is masked in
+    /// a notice, whatever its case or length, like the value `secret_string` knows.
+    #[test]
+    fn an_authorization_header_used_as_a_key_name_is_not_printed() {
+        for name in ["bearer my-secret-token", "Bearer abc", "BASIC dXNlcjpwYXNz"] {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"v\"\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            let secret = name.split(' ').nth(1).unwrap();
+            assert!(!notice.contains(secret), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+        }
+    }
+
+    /// KT-1528 — a secret used as a key name is a credential on the save path
+    /// too: the entry is flagged, sheltered and never written back to
+    /// config.toml with that name in clear.
+    #[test]
+    fn a_secret_key_name_is_a_credential_on_save() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for name in [
+            "sk-clear-abcdefghijklmnopqrstuvwxyz0123456789".to_string(),
+            "bearer my-secret-token".to_string(),
+            hex.to_string(),
+            format!("{hex}.old"),
+        ] {
+            assert!(credential_key(&name), "{name}");
+            assert!(whole_credential(
+                &["server".into(), name.clone()],
+                &Value::Integer(1)
+            ));
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"v\"\n");
+            let reading = read(&table(&text)).expect("reads");
+            assert!(reading.credential_left, "{name}");
+            let entry = reading
+                .kept
+                .entries
+                .iter()
+                .find(|e| e.path().contains(&name))
+                .unwrap_or_else(|| panic!("{name}: an entry is kept"));
+            // Nothing of it is written to config.toml once the store holds the
+            // credentials, and the name is scrubbed from a table that holds it.
+            assert!(written(entry, true).is_none(), "{name}");
+            let holder: Value = Value::Table(table(&text));
+            let scrubbed = scrub(&holder);
+            assert!(
+                !toml::to_string(&scrubbed).unwrap().contains(&name),
+                "{name}"
+            );
+        }
+        // A setting's name, however long, is not one.
+        for name in [
+            "future_flag",
+            "a_rather_long_setting_name_made_of_words_only",
+        ] {
+            assert!(!credential_key(name), "{name}");
         }
     }
 

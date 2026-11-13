@@ -1347,6 +1347,65 @@ fn a_quoted_nested_array_at_the_start_of_a_line_is_read_as_a_header() {
     assert_kept_whole_and_reported(&texts);
 }
 
+/// A table header swallowed by an open region stays swallowed when the region
+/// closes: every line after it is that table's (or the file is too damaged to
+/// say), so a top-level-looking `encryption_secret` after the close is never the
+/// key. The scan reads it as unreadable, offers nothing, and the copy (and a
+/// config.toml set aside) is kept whole and reported, never cut to that one line.
+#[test]
+fn a_header_swallowed_before_a_close_leaves_the_lines_after_it_unread() {
+    let k = crypto::generate_secret();
+    let mut texts = Vec::new();
+    for (swallowing, tail) in [
+        ("x = [\n[mcp.env]\n]\n", "[broken\n"),
+        ("x = [\n  [mcp.env]\n]\n", "[broken\n"),
+        ("x = [\n\t[mcp.env]\n]\n", "[broken\n"),
+        ("x = [\n[mcp.env]\nfoo = 1\n]\n", ""),
+        ("notes = \"\"\"\n[mcp.env]\n\"\"\"\n", "[broken\n"),
+        ("notes = '''\n  [[mcp]]\n'''\n", "[broken\n"),
+    ] {
+        let text = format!("{swallowing}encryption_secret = \"{k}\"\n{tail}");
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        let scan = config::salvage_key_scan(&text);
+        assert!(scan.values.is_empty(), "{text:?}: {scan:?}");
+        assert!(scan.buried.is_empty(), "{text:?}: {scan:?}");
+        assert!(scan.unreadable, "{text:?}");
+        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
+        assert_eq!(key_of(&text), None, "{text:?}");
+        texts.push(format!("{text}{LEAKY}"));
+    }
+    // The copy is kept byte-identical and reported (it may hold the only key).
+    assert_kept_whole_and_reported(&texts);
+}
+
+/// An array or inline table that closes INSIDE an open outer array takes back
+/// what it held, as a string does: it was a nested value, not a swallowed line.
+/// Nothing is offered for recovery at boot, the copy stays kept and reported.
+#[test]
+fn a_nested_region_that_closes_inside_an_open_array_offers_nothing() {
+    let k = crypto::generate_secret();
+    let mut texts = Vec::new();
+    for text in [
+        format!("x = [\n[\nencryption_secret = \"{k}\"\n],\n"),
+        format!("x = [\n{{\nencryption_secret = \"{k}\"\n}},\n"),
+        format!("x = [[\n[\nencryption_secret = \"{k}\"\n],\n"),
+        format!("x = [\n[\n[\nencryption_secret = \"{k}\"\n]\n],\n"),
+    ] {
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        let scan = config::salvage_key_scan(&text);
+        assert!(scan.buried.is_empty(), "{text:?}: {scan:?}");
+        assert!(scan.unreadable, "{text:?}");
+        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
+        assert_eq!(key_of(&text), None, "{text:?}");
+        texts.push(format!("{text}{LEAKY}"));
+    }
+    // A region still open at the end keeps offering what it holds, whatever
+    // closed inside it before.
+    let open = format!("x = [\n[\nencryption_secret = \"junk\"\n],\nencryption_secret = \"{k}\"\n");
+    assert_eq!(config::salvage_key_line(&open), Some(k.clone()), "{open:?}");
+    assert_kept_whole_and_reported(&texts);
+}
+
 /// Two assignments joined on one line (a hand-edit or merge accident) hide a
 /// quoted or escaped key part behind a plain one: whichever the spelling, the line
 /// may hold the live key, so the copy is kept whole and reported, never dropped.

@@ -978,6 +978,95 @@ fn the_process_runner_reports_success_failure_and_a_missing_program() {
     assert!(missing.detail.contains("cannot start"), "{missing:?}");
 }
 
+/// KT-1736 — the warm-up's first build failed with a reason that was the last 300
+/// bytes of cargo's output (`… -c aes-xts-enc.S warning: build failed`): the
+/// compiler's own message, printed far above, was lost. The first error lines of
+/// the output are kept beside the tail.
+#[cfg(unix)]
+#[test]
+fn a_failed_probe_keeps_its_first_error_lines_beside_the_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = "echo 'warning: unused import: `std::error::Error`' >&2; \
+                  echo 'warning: aws-lc-sys@0.44.0: clang: error: unable to make temporary file' >&2; \
+                  i=0; while [ $i -lt 200 ]; do echo \"   Compiling filler-$i v0.1.0 with a long enough line\" >&2; i=$((i+1)); done; \
+                  echo 'warning: build failed, waiting for other jobs to finish...' >&2; exit 101";
+    let outcome = ProcessProbeRunner.run(&ProbeCommand {
+        program: "sh".into(),
+        args: vec!["-c".into(), script.into()],
+        cwd: dir.path().to_path_buf(),
+        env: Vec::new(),
+        timeout: Duration::from_secs(20),
+        priority: crate::core::background_priority::Priority::Normal,
+        clean_env: false,
+    });
+    assert!(!outcome.success, "{outcome:?}");
+    assert!(outcome.detail.contains("101"), "{outcome:?}");
+    assert!(
+        outcome
+            .detail
+            .contains("clang: error: unable to make temporary file"),
+        "the compiler's message is kept: {outcome:?}"
+    );
+    assert!(
+        !outcome.detail.contains("unused import"),
+        "a warning that merely names `error` is not an error line: {outcome:?}"
+    );
+    assert!(
+        outcome.detail.contains("build failed"),
+        "the tail is still there: {outcome:?}"
+    );
+}
+
+#[test]
+fn an_error_line_is_told_from_a_line_that_names_the_word() {
+    for error in [
+        "error: failed to run custom build command for `aws-lc-sys v0.44.0`",
+        "error[E0432]: unresolved import",
+        "warning: aws-lc-sys@0.44.0: clang: error: no such file",
+        "fatal error: 'openssl/base.h' file not found",
+        "  error occurred in cc-rs: command did not execute successfully",
+        "thread 'main' panicked at build.rs:3:5:",
+    ] {
+        assert!(is_error_line(error), "{error}");
+    }
+    for fine in [
+        "warning: unused import: `std::error::Error`",
+        "   Compiling thiserror v2.0.0",
+        "warning: failed to parse serde attribute",
+    ] {
+        assert!(!is_error_line(fine), "{fine}");
+    }
+}
+
+#[test]
+fn a_long_error_line_keeps_its_start_and_its_end() {
+    let line = format!(
+        "error occurred: \"cc\" {} \"-c\" \"aes-xts-enc.S\"",
+        "-O0 ".repeat(400)
+    );
+    let clipped = clip_error_line(&line);
+    assert!(
+        clipped.chars().count() <= PROBE_ERROR_LINE_CHARS + 3,
+        "{clipped}"
+    );
+    assert!(clipped.starts_with("error occurred"), "{clipped}");
+    assert!(clipped.ends_with("\"-c\" \"aes-xts-enc.S\""), "{clipped}");
+}
+
+#[test]
+fn the_failure_reason_does_not_repeat_what_the_tail_already_shows() {
+    let first = vec!["error: boom".to_string(), "error: other".to_string()];
+    assert_eq!(
+        failure_detail(&first, "error: boom then the end"),
+        "first errors: error: other | last output: error: boom then the end"
+    );
+    assert_eq!(failure_detail(&[], "just a tail"), "just a tail");
+    assert_eq!(
+        failure_detail(&["error: boom".to_string()], "error: boom"),
+        "error: boom"
+    );
+}
+
 /// KT-1718 — Claude Code caps a shell command at 10 minutes unless
 /// `BASH_MAX_TIMEOUT_MS` says otherwise, and a cold test-profile build outlasts
 /// that. Kronn sets both variables itself, the default never above the maximum.

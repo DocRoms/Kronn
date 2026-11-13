@@ -256,6 +256,7 @@ fn the_first_build_runs_with_the_jobs_cap_and_the_lane_target() {
     let calls = runner.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].program, "cargo");
+    // The fixture's manifest has no library target: the whole package is built.
     assert_eq!(calls[0].args, ["test", "--no-run", "--locked", "--offline"]);
     assert_eq!(calls[0].cwd, lane.worktree.join("backend"));
     let env = |name: &str| {
@@ -270,6 +271,71 @@ fn the_first_build_runs_with_the_jobs_cap_and_the_lane_target() {
         env("CARGO_TARGET_DIR"),
         Some(lane.cargo_target_dir.clone().into_os_string())
     );
+}
+
+/// KT-1736: a worker's first command is `cargo test --lib <filter>`, so the
+/// warm-up builds the lib test binary only — not every `tests/*.rs` binary,
+/// which did not fit the 30-minute bound on a loaded host.
+#[test]
+fn the_first_build_of_a_crate_with_a_library_builds_the_lib_test_binary_only() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1736-lib", LOCK_A);
+    let backend = lane.worktree.join("backend");
+    std::fs::create_dir_all(backend.join("src")).unwrap();
+    std::fs::write(backend.join("src").join("lib.rs"), "").unwrap();
+    let runner = ScriptedBuild::ok();
+    warm(&lane, &runner, &RecordingClone::new(), &BuildGate::new());
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].args,
+        ["test", "--lib", "--no-run", "--locked", "--offline"]
+    );
+}
+
+/// KT-1736: a library at a custom path (`[lib] path = …`) is still a library.
+#[test]
+fn a_lib_table_in_the_manifest_is_a_library_target() {
+    let fx = fixture();
+    let lane = fx.lane("kt-1736-lib-table", LOCK_A);
+    std::fs::write(
+        lane.worktree.join("backend").join("Cargo.toml"),
+        "[package]\nname = \"x\"\n\n[lib]\npath = \"core/mod.rs\"\n",
+    )
+    .unwrap();
+    let runner = ScriptedBuild::ok();
+    warm(&lane, &runner, &RecordingClone::new(), &BuildGate::new());
+
+    assert!(runner.calls()[0].args.iter().any(|arg| arg == "--lib"));
+}
+
+/// KT-1736: on macOS the lane's builds keep clang's intermediate files beside the
+/// object file (the OS sandbox grants no per-user temp dir), and every other
+/// host's `CFLAGS` is left alone.
+#[test]
+fn the_lane_keeps_clang_temp_files_in_the_object_dir_on_macos_only() {
+    use crate::core::task_worker_env::{compiler_temp_env_for, CFLAGS_ENV};
+
+    assert_eq!(
+        compiler_temp_env_for(true),
+        vec![(CFLAGS_ENV, OsString::from("-save-temps=obj"))]
+    );
+    assert!(compiler_temp_env_for(false).is_empty());
+
+    // …and the first build gets it through the lane environment, like the worker.
+    let fx = fixture();
+    let lane = fx.lane("kt-1736-cflags", LOCK_A);
+    let env = lane.env(&provisioned());
+    let cflags = env.iter().find(|(name, _)| *name == CFLAGS_ENV);
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            cflags.map(|(_, v)| v.clone()),
+            Some("-save-temps=obj".into())
+        );
+    } else {
+        assert!(cflags.is_none());
+    }
 }
 
 /// KT-1633: the lane's first build (a `cargo test --no-run` of the whole

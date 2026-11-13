@@ -869,10 +869,7 @@ pub fn warm_lane_cancellable(
     let outcome = runner.run_cancellable(
         &ProbeCommand {
             program: "cargo".into(),
-            args: ["test", "--no-run", "--locked", "--offline"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            args: first_build_args(&manifest_dir),
             cwd: manifest_dir,
             env,
             timeout: settings.first_build_timeout,
@@ -911,6 +908,35 @@ pub fn warm_lane_cancellable(
         provision_ms: None,
         seed_ms: Some(seed_ms),
     }
+}
+
+/// KT-1736 — the arguments of the lane's first build in `manifest_dir`.
+///
+/// A worker's first command is a targeted `cargo test --lib <filter>`, so the
+/// warm-up builds what that needs: the dependency graph (dev profile, which the
+/// test profile inherits) and the crate's own **lib test binary**. It no longer
+/// builds every `tests/*.rs` integration binary: each one links the whole crate
+/// again, and on a loaded host that did not fit the 30-minute bound (the
+/// warm-ups of 2026-11-12 ended `timed_out`). The integration binaries are built
+/// by the validations that run them.
+///
+/// A manifest with no library target has no lib test binary to name (`--lib`
+/// would be an error), so it keeps the whole-package build.
+fn first_build_args(manifest_dir: &Path) -> Vec<String> {
+    let mut args = vec!["test".to_string()];
+    if has_lib_target(manifest_dir) {
+        args.push("--lib".into());
+    }
+    args.extend(["--no-run", "--locked", "--offline"].map(String::from));
+    args
+}
+
+/// Does the package at `manifest_dir` have a library target: the default
+/// `src/lib.rs`, or a `[lib]` table (a custom `path`).
+fn has_lib_target(manifest_dir: &Path) -> bool {
+    manifest_dir.join("src").join("lib.rs").is_file()
+        || std::fs::read_to_string(manifest_dir.join("Cargo.toml"))
+            .is_ok_and(|manifest| manifest.lines().any(|line| line.trim() == "[lib]"))
 }
 
 /// Will warming this worktree's lane run a first build? Side-effect free: the

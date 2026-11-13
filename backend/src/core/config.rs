@@ -1299,17 +1299,27 @@ const KEY_NAME: &str = "encryption_secret";
 ///   only up to a table header (indented or not) inside an open array or an
 ///   unclosed multi-line string ([`is_table_header`]: what follows is that
 ///   table's). A region that closes and another that opens on the same line are
-///   two regions: the first offers nothing.
+///   two regions: the first offers nothing. Every region is tracked at its own
+///   depth: an array or inline table that closes inside an open outer array takes
+///   back what it held, as a string does;
+/// - a table header swallowed that way stays swallowed after the region closes:
+///   the lines that follow are that table's (or the file is too damaged to say),
+///   so none is ever offered as the key, top level or buried, and a mention of the
+///   name there is `unreadable`.
 pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     let mut scan = KeyScan::default();
-    // The delimiter of the multi-line string the scan is inside, if any, and the
-    // depth of the arrays and inline tables it is inside.
+    // The delimiter of the multi-line string the scan is inside, if any, and where
+    // `buried` stood when it opened.
     let mut open_string: Option<&str> = None;
-    let mut depth = 0usize;
-    // Where `buried` stood when the region now open began, and whether a table
-    // header reached the region (what follows it is that table's).
-    let mut region_start: Option<usize> = None;
-    let mut offering = true;
+    let mut string_start = 0usize;
+    // One entry per array or inline table still open (its depth is the length):
+    // where `buried` stood when it opened. A region that closes, at any depth,
+    // takes back what was buried inside it.
+    let mut open: Vec<usize> = Vec::new();
+    // A table header was swallowed by an open region. What follows it, even once
+    // the region closed, is that table's, or the file is too damaged to say: it is
+    // never offered as the key (a mention is `unreadable`) for the rest of the text.
+    let mut swallowed = false;
     for (n, raw) in content.lines().enumerate() {
         let line = if n == 0 {
             raw.strip_prefix('\u{FEFF}').unwrap_or(raw)
@@ -1317,74 +1327,57 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
             raw
         };
         let mut rest = line;
-        // The region that was open when the line began closed on it (at some
-        // point nothing was open any more).
-        let mut closed = false;
         if let Some(delimiter) = open_string {
             // An unclosed string swallowing what looks like a table header: the
             // lines after it belong to that table, not to the key.
-            if is_table_header(line) {
-                offering = false;
-            }
-            bury(&mut scan, line, offering);
+            swallowed |= is_table_header(line);
+            bury(&mut scan, line, !swallowed);
             match string_end(line, delimiter) {
                 Some(after) => {
                     // The string closed: a note, even when an array around it
-                    // stays open.
+                    // stays open. What it held is not offered.
+                    scan.buried.truncate(string_start);
                     rest = after;
-                    closed = true;
                 }
                 None => continue,
             }
-        } else if depth > 0 {
+        } else if !open.is_empty() {
             // An open array or inline table swallowing what looks like a table
             // header (`[mcp.env]`): the lines after it belong to that table,
             // not to the key, so none is offered from there on.
-            if is_table_header(line) {
-                offering = false;
-            }
-            bury(&mut scan, line, offering);
+            swallowed |= is_table_header(line);
+            bury(&mut scan, line, !swallowed);
         } else {
             let top = line.trim_start();
             if top.starts_with('[') {
                 break;
             }
-            // Every top-level line is read, not only those that spell the name:
-            // a quoted or escaped spelling of it decodes to the same key.
             if !top.is_empty() && !top.starts_with('#') {
-                match key_value_of(line) {
-                    Some(Some(value)) => scan.values.push(value),
-                    Some(None) => {}
-                    // A line that does not parse: harmless only when its key
-                    // part is a plain name that is not ours.
-                    // (Any assignment of the line counts: two joined on one
-                    // line hide a quoted key behind a plain one.)
-                    None => scan.unreadable |= top.contains(KEY_NAME) || quoted_key_part(top),
+                if swallowed {
+                    bury(&mut scan, line, false);
+                } else {
+                    // Every top-level line is read, not only those that spell the
+                    // name: a quoted or escaped spelling of it decodes to the same
+                    // key.
+                    match key_value_of(line) {
+                        Some(Some(value)) => scan.values.push(value),
+                        Some(None) => {}
+                        // A line that does not parse: harmless only when its key
+                        // part is a plain name that is not ours.
+                        // (Any assignment of the line counts: two joined on one
+                        // line hide a quoted key behind a plain one.)
+                        None => scan.unreadable |= top.contains(KEY_NAME) || quoted_key_part(top),
+                    }
                 }
             }
         }
-        let was_open = region_start.is_some();
-        let reached_zero;
-        (open_string, depth, reached_zero) = line_state(rest, depth);
-        closed |= was_open && reached_zero;
-        // A region that closed again was no swallowing: what it held is not
-        // offered (the mention stays `unreadable`). One that closes and another
-        // that opens on the same line (`""" ; x = """`, `], b = [`) are two
-        // regions: the first is dropped, the second starts at the close.
-        let open = open_string.is_some() || depth > 0;
-        match (region_start, open) {
-            (None, true) => region_start = Some(scan.buried.len()),
-            (Some(start), false) => {
-                scan.buried.truncate(start);
-                region_start = None;
-                offering = true;
-            }
-            (Some(start), true) if closed => {
-                scan.buried.truncate(start);
-                region_start = Some(scan.buried.len());
-                offering = true;
-            }
-            _ => {}
+        // A region that closes (an array or inline table at any depth, a string)
+        // was no swallowing: what it held is not offered (the mention stays
+        // `unreadable`). One that closes and another that opens on the same line
+        // (`""" ; x = """`, `], b = [`) are two regions.
+        open_string = line_state(rest, &mut open, &mut scan.buried);
+        if open_string.is_some() {
+            string_start = scan.buried.len();
         }
     }
     scan
@@ -1481,12 +1474,11 @@ fn string_end<'a>(line: &'a str, delimiter: &str) -> Option<&'a str> {
 }
 
 /// What `line` leaves open after it: the delimiter of the multi-line string it
-/// opens and does not close, and the depth of the arrays and inline tables
-/// (`depth` is the one before the line), and whether the depth went from above
-/// zero back to zero somewhere in it. Single-line strings and comments are
-/// skipped over.
-fn line_state(line: &str, mut depth: usize) -> (Option<&'static str>, usize, bool) {
-    let mut reached_zero = false;
+/// opens and does not close. `open` is the stack of the arrays and inline tables
+/// open before the line (each entry: where `buried` stood when it opened); it is
+/// updated, and a bracket that closes pops its level and takes back what was
+/// buried since it opened. Single-line strings and comments are skipped over.
+fn line_state(line: &str, open: &mut Vec<usize>, buried: &mut Vec<String>) -> Option<&'static str> {
     let mut rest = line;
     while let Some(c) = rest.chars().next() {
         if c == '#' {
@@ -1502,7 +1494,7 @@ fn line_state(line: &str, mut depth: usize) -> (Option<&'static str>, usize, boo
         if let Some(delimiter) = delimiter {
             match string_end(&rest[3..], delimiter) {
                 Some(after) => rest = after,
-                None => return (Some(delimiter), depth, reached_zero),
+                None => return Some(delimiter),
             }
         } else if c == '"' || c == '\'' {
             // A single-line string: up to its closing quote (or the end of the line).
@@ -1519,17 +1511,18 @@ fn line_state(line: &str, mut depth: usize) -> (Option<&'static str>, usize, boo
             rest = &rest[end..];
         } else {
             match c {
-                '[' | '{' => depth += 1,
+                '[' | '{' => open.push(buried.len()),
                 ']' | '}' => {
-                    depth = depth.saturating_sub(1);
-                    reached_zero |= depth == 0;
+                    if let Some(start) = open.pop() {
+                        buried.truncate(start);
+                    }
                 }
                 _ => {}
             }
             rest = &rest[c.len_utf8()..];
         }
     }
-    (None, depth, reached_zero)
+    None
 }
 
 /// `default_config()` without a key: a missing config.toml must not offer a
