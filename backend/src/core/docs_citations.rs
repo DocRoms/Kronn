@@ -1676,10 +1676,45 @@ mod tests {
     }
 
     #[test]
+    fn reanchoring_places_a_range_beyond_the_file_end_by_its_unique_symbol() {
+        let tmp = moved_repo();
+        let root = tmp.path();
+        // `once` is defined on line 6 only; the cited lines are past the
+        // 9-line file. A single line and a range both land on the definition.
+        let text = "[src: file: src/m.rs:20#once] `[src: file: src/m.rs:20-22#once]`\n";
+        let (new, outcome) = reanchor(root, "docs/a.md", text);
+        assert_eq!(
+            new,
+            "[src: file: src/m.rs:6#once] `[src: file: src/m.rs:6-8#once]`\n"
+        );
+        assert_eq!(outcome.rewritten.len(), 2);
+        assert!(outcome.ambiguous.is_empty());
+        assert!(check_corpus(root).is_empty());
+    }
+
+    #[test]
+    fn reanchoring_lists_a_range_beyond_the_file_end_whose_symbol_is_repeated() {
+        let tmp = moved_repo();
+        let root = tmp.path();
+        // `twice` is defined on lines 2 and 9: no guess, listed, text kept.
+        let text = "[src: file: src/m.rs:20#twice]\n";
+        let (new, outcome) = reanchor(root, "docs/a.md", text);
+        assert_eq!(new, text);
+        assert!(outcome.rewritten.is_empty());
+        assert_eq!(outcome.ambiguous.len(), 1);
+        assert_eq!(outcome.ambiguous[0].3, vec![2, 9]);
+        assert_eq!(check_corpus(root).len(), 1);
+    }
+
+    #[test]
     fn reanchoring_never_touches_other_failures_or_files_outside_the_docs() {
         let tmp = moved_repo();
         let root = tmp.path();
-        let text = "[src: file: src/m.rs:20#once] [src: file: src/gone.rs:1#once]\n\
+        // Past the end of the 9-line file: only a symbol defined once places it
+        // (see the positive test above), so an absent one and a line-only
+        // range stay untouched and unlisted.
+        let text = "[src: file: src/gone.rs:1#once]\n\
+                    [src: file: src/m.rs:20#vanished] [src: file: src/m.rs:20-22]\n\
                     [src: file: src/m.rs] [src: file: src/m.rs:1#vanished] [src: file: src/m.rs:1-2]\n";
         let (new, outcome) = reanchor(root, "docs/a.md", text);
         assert_eq!(new, text);
