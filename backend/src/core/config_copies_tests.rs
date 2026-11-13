@@ -1116,6 +1116,96 @@ fn a_key_buried_in_an_open_region_is_recovered_but_never_read_by_a_copy() {
     assert_eq!(key_of(&both), Some(top));
 }
 
+/// A key line written inside a string or an array that CLOSES again is a note or
+/// an element, not a key a broken file swallowed: the boot recovery never offers
+/// it, whether the file parses (the parsed top level decides alone) or not (only
+/// a region still open at the end of the text offers its lines).
+#[test]
+fn a_key_in_a_closed_region_is_never_recovered() {
+    let k = crypto::generate_secret();
+    // The text parses: its top-level value (not a string) is the answer, None.
+    let parsed = format!(
+        "encryption_secret = 5\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\"\n\
+         [server]\nport = 1\n"
+    );
+    assert!(parsed.parse::<toml::Table>().is_ok());
+    assert_eq!(config::salvage_key_line(&parsed), None);
+    // ... and so do a literal string, an array and a table value of a parsed text.
+    for region in [
+        format!("notes = '''\nencryption_secret = \"{k}\"\n'''\n"),
+        format!("x = [\n  \"a\",\n]\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\"\n"),
+    ] {
+        let text = format!("language = \"fr\"\n{region}");
+        assert!(text.parse::<toml::Table>().is_ok(), "{text}");
+        assert_eq!(config::salvage_key_line(&text), None, "{text}");
+    }
+    // The text parses with a junk top-level value: that value, never a section's.
+    let junk = format!("encryption_secret = \"junk\"\n[tokens]\nencryption_secret = \"{k}\"\n");
+    assert_eq!(config::salvage_key_line(&junk).as_deref(), Some("junk"));
+
+    // The text does not parse (a duplicate key): a region that closed offers
+    // nothing, the mention stays unreadable (the copy is kept, reported).
+    let closed = [
+        format!(
+            "encryption_secret = \"junk\"\nencryption_secret = \"junk2\"\n\
+             notes = \"\"\"\nencryption_secret = \"{k}\"\n\"\"\"\n"
+        ),
+        format!(
+            "encryption_secret = \"junk\"\nencryption_secret = \"junk2\"\n\
+             x = [\n\"a\",\nencryption_secret = \"{k}\"\n]\n"
+        ),
+    ];
+    for text in &closed {
+        assert!(text.parse::<toml::Table>().is_err(), "{text}");
+        let scan = config::salvage_key_scan(text);
+        assert!(scan.buried.is_empty(), "{text}");
+        assert!(scan.unreadable, "{text}");
+        assert_eq!(
+            config::salvage_key_line(text).as_deref(),
+            Some("junk"),
+            "{text}"
+        );
+    }
+    assert_kept_whole_and_reported(&closed.map(|c| format!("{c}{LEAKY}")));
+}
+
+/// An array a broken file left open swallows the table header after it: the
+/// `encryption_secret` of that table (an MCP env table, `[tokens]`) is that
+/// table's, never offered as the live key. A line before the header, and one
+/// after an array element that is not a header, still are.
+#[test]
+fn an_open_array_never_offers_the_key_of_a_table_it_swallowed() {
+    let (k1, k2) = (crypto::generate_secret(), crypto::generate_secret());
+    for header in ["[mcp.env]", "[[mcp]]", "[tokens] # a note"] {
+        let swallowed = format!("x = [\n{header}\nencryption_secret = \"{k1}\"\n");
+        assert!(swallowed.parse::<toml::Table>().is_err(), "{swallowed}");
+        let scan = config::salvage_key_scan(&swallowed);
+        assert!(scan.buried.is_empty(), "{swallowed}");
+        assert!(scan.unreadable, "{swallowed}");
+        assert_eq!(config::salvage_key_line(&swallowed), None, "{swallowed}");
+        assert_eq!(key_of(&swallowed), None, "{swallowed}");
+
+        // What the open array held before the header is still offered.
+        let before = format!(
+            "x = [\nencryption_secret = \"{k2}\"\n{header}\nencryption_secret = \"{k1}\"\n"
+        );
+        assert_eq!(
+            config::salvage_key_line(&before),
+            Some(k2.clone()),
+            "{before}"
+        );
+    }
+    // An array element is not a header, even at column 0 or like `[1]`'s cousin.
+    let element = format!("x = [\n[1, 2],\nencryption_secret = \"{k1}\"\n");
+    assert_eq!(config::salvage_key_line(&element), Some(k1.clone()));
+
+    // The copy is kept whole and reported, never dropped nor cut down.
+    assert_kept_whole_and_reported(&[
+        format!("x = [\n[mcp.env]\nencryption_secret = \"{k1}\"\n{LEAKY}"),
+        format!("x = [\n[[mcp]]\nencryption_secret = \"{k1}\"\n{LEAKY}"),
+    ]);
+}
+
 /// Two assignments joined on one line (a hand-edit or merge accident) hide a
 /// quoted or escaped key part behind a plain one: whichever the spelling, the line
 /// may hold the live key, so the copy is kept whole and reported, never dropped.

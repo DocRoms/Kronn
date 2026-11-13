@@ -285,7 +285,12 @@ Safe to interrupt at any point; a rerun converges:
    no `=`, is). Such a line that parses on its own as the key's assignment is
    also offered to the recovery at boot (`config::salvage_key_line`), so a key
    swallowed by a broken file is not lost; a copy never reads, encrypts under or
-   cuts down to it, and stays whole and reported.
+   cuts down to it, and stays whole and reported. That offer is only for a
+   region still open at the end of the text: when the text parses, its
+   top-level value alone is the answer, and a string or array that closes again
+   (a note holding a key line) offers nothing; an open array that swallowed a
+   table header at column 0 (`[mcp.env]`) offers nothing after it, since what
+   follows is that table's.
    Such a copy is cut down or removed like any other. A
    symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard
@@ -308,7 +313,10 @@ Safe to interrupt at any point; a rerun converges:
    cannot read name the field and the type that was expected, never the value
    (`server.port (expected u16)`), whatever the field: a secret pasted into a
    field that is not a credential is a secret all the same
-   (`config_salvage::describe_failure`). The pass reads
+   (`config_salvage::describe_failure`). Only a known type name is kept after
+   `expected` (a value containing `, expected …` echoes nothing, and a refused
+   enum value says only that it is not one of the allowed values), and a key
+   name that looks like a secret is shown as `<key #N>` in those notices. The pass reads
    a copy then renames over it, once at start in the single process that owns
    the data directory; a copy swapped in between is out of scope. One failure
    does not stop the others. The key lookup tells three cases apart. A key is found:

@@ -1223,6 +1223,16 @@ fn set_aside_unreadable_config(
 /// is not a key never hides a valid key line further down). See
 /// [`salvage_key_scan`] for what counts as a top-level line.
 pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
+    // A text that parses says by itself what its top-level `encryption_secret`
+    // is: nothing else is a candidate, whatever a string or an array of it
+    // spells out (`notes = """\nencryption_secret = "…"\n"""` is a note).
+    if let Ok(table) = content.parse::<toml::Table>() {
+        return table
+            .get(KEY_NAME)
+            .and_then(|v| v.as_str())
+            .filter(|k| !k.trim().is_empty())
+            .map(str::to_string);
+    }
     let KeyScan { values, buried, .. } = salvage_key_scan(content);
     let is_key = |v: &&String| super::crypto::canonical_secret(v).is_ok();
     // A top-level key first; then one a broken file buried in a region that
@@ -1243,8 +1253,10 @@ pub(crate) struct KeyScan {
     /// on its own, in order.
     pub values: Vec<String>,
     /// Every non-blank string of an `encryption_secret` assignment that parses on
-    /// its own but sits inside a string or an array the scan found still open: a
-    /// broken file swallowed it, so it is not proven to be the key. Only
+    /// its own but sits inside a string or an array that is STILL open at the end
+    /// of the text (a region that closes again was a note, an array, not a
+    /// swallowed line; one that a table header at column 0 reaches stops
+    /// offering): a broken file swallowed it, so it is not proven to be the key. Only
     /// [`salvage_key_line`] offers it (to recover a key at boot); a copy never
     /// reads, seals under or cuts down to it, and the mention also sets
     /// `unreadable`.
@@ -1281,13 +1293,21 @@ const KEY_NAME: &str = "encryption_secret";
 ///   is, inside an open string or array, a line that spells the name or is an
 ///   assignment with such a key part ([`bury`]); that line, when it parses on
 ///   its own as the key's assignment, also offers its value as `buried` (never
-///   read as the key by a copy, only by [`salvage_key_line`]).
+///   read as the key by a copy, only by [`salvage_key_line`]). A buried value is
+///   offered only while its region is still open at the end of the text (a
+///   string or array that closes again held a note, not a swallowed line), and
+///   only up to a table header at column 0 inside an open array
+///   ([`is_table_header`]: what follows is that table's).
 pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     let mut scan = KeyScan::default();
     // The delimiter of the multi-line string the scan is inside, if any, and the
     // depth of the arrays and inline tables it is inside.
     let mut open_string: Option<&str> = None;
     let mut depth = 0usize;
+    // Where `buried` stood when the region now open began, and whether a table
+    // header reached the region (what follows it is that table's).
+    let mut region_start: Option<usize> = None;
+    let mut offering = true;
     for (n, raw) in content.lines().enumerate() {
         let line = if n == 0 {
             raw.strip_prefix('\u{FEFF}').unwrap_or(raw)
@@ -1296,13 +1316,19 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
         };
         let mut rest = line;
         if let Some(delimiter) = open_string {
-            bury(&mut scan, line);
+            bury(&mut scan, line, offering);
             match string_end(line, delimiter) {
                 Some(after) => rest = after,
                 None => continue,
             }
         } else if depth > 0 {
-            bury(&mut scan, line);
+            // An open array or inline table swallowing what looks like a table
+            // header at column 0 (`[mcp.env]`): the lines after it belong to
+            // that table, not to the key, so none is offered from there on.
+            if is_table_header(line) {
+                offering = false;
+            }
+            bury(&mut scan, line, offering);
         } else {
             let top = line.trim_start();
             if top.starts_with('[') {
@@ -1323,8 +1349,25 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
             }
         }
         (open_string, depth) = line_state(rest, depth);
+        // A region that closed again was no swallowing: what it held is not
+        // offered (the mention stays `unreadable`).
+        match (region_start, open_string.is_some() || depth > 0) {
+            (None, true) => region_start = Some(scan.buried.len()),
+            (Some(start), false) => {
+                scan.buried.truncate(start);
+                region_start = None;
+                offering = true;
+            }
+            _ => {}
+        }
     }
     scan
+}
+
+/// A line at column 0 that is a table header (`[a.b]`, `[[a]]`) when read on its
+/// own; an array element (`[1, 2],`) is not.
+fn is_table_header(line: &str) -> bool {
+    line.starts_with('[') && line.parse::<toml::Table>().is_ok()
 }
 
 /// A line inside a string or an array that is still open. It could be the key's
@@ -1335,13 +1378,15 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
 /// the top level, so it is never proven harmless; and when the line parses on
 /// its own as the key's assignment, its value is kept in `buried` so a key the
 /// broken file swallowed can still be recovered.
-fn bury(scan: &mut KeyScan, line: &str) {
+fn bury(scan: &mut KeyScan, line: &str, offering: bool) {
     if !(line.contains(KEY_NAME) || (line.contains('=') && quoted_key_part(line))) {
         return;
     }
     scan.unreadable = true;
-    if let Some(Some(value)) = key_value_of(line) {
-        scan.buried.push(value);
+    if offering {
+        if let Some(Some(value)) = key_value_of(line) {
+            scan.buried.push(value);
+        }
     }
 }
 
@@ -2863,6 +2908,32 @@ image_family = "flux9_future"
             None
         );
         assert_eq!(key_only_file("language = \"fr\"\n").unwrap(), None);
+    }
+
+    /// KT-1528 — the errors of `key_only_file` and `read_disk_key` never carry the
+    /// source line of a damaged file, however they are formatted (`{:#}`, `{:?}`):
+    /// that line is the key or a token.
+    #[test]
+    fn a_damaged_file_errors_without_its_source_line() {
+        let key = "0123456789abcdef".repeat(4);
+        let damaged = [
+            format!("encryption_secret = \"{key}\nlanguage = \"fr\"\n"),
+            "[tokens]\nanthropic = \"sk-clear-d\n".to_string(),
+        ];
+        let tmp = scratch_dir("damaged-errors");
+        for text in &damaged {
+            let shown = |e: anyhow::Error| format!("{e:#} {e:?}");
+            let err = key_only_file(text).unwrap_err();
+            let shown_key_only = shown(err);
+            std::fs::write(tmp.join(CONFIG_FILE), text).unwrap();
+            let shown_disk = shown(read_disk_key(&tmp).unwrap_err());
+            for shown in [&shown_key_only, &shown_disk] {
+                assert!(!shown.contains(&key), "{shown}");
+                assert!(!shown.contains("sk-clear"), "{shown}");
+                assert!(shown.contains("line"), "kept the position: {shown}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

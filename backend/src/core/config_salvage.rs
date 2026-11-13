@@ -137,19 +137,38 @@ enum Seg {
     Idx(usize),
 }
 
+/// A key name as notices and logs may print it: itself, unless it looks like a
+/// secret (a token pasted as a key name), then a placeholder for its position.
+fn shown_key(name: &str, position: usize) -> String {
+    if super::redact::looks_like_secret(name) {
+        format!("<key #{}>", position + 1)
+    } else {
+        name.to_string()
+    }
+}
+
 fn show(path: &[Seg]) -> String {
     let mut out = String::new();
-    for seg in path {
+    for (at, seg) in path.iter().enumerate() {
         match seg {
-            Seg::Key(k) if out.is_empty() => out.push_str(k),
+            Seg::Key(k) if out.is_empty() => out.push_str(&shown_key(k, at)),
             Seg::Key(k) => {
                 out.push('.');
-                out.push_str(k);
+                out.push_str(&shown_key(k, at));
             }
             Seg::Idx(i) => out.push_str(&format!("[{i}]")),
         }
     }
     out
+}
+
+/// [`show`] for a path of key names.
+fn show_keys(keys: &[String]) -> String {
+    keys.iter()
+        .enumerate()
+        .map(|(at, k)| shown_key(k, at))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn get_at<'a>(root: &'a Value, path: &[Seg]) -> Option<&'a Value> {
@@ -234,13 +253,55 @@ fn describe_failure(message: &str) -> Option<String> {
         // Names a field of the schema, quotes no value.
         return Some(message.lines().next()?.to_string());
     }
-    // The LAST ", expected ": a value that itself contains that text (and
-    // spans lines) must not leak its tail.
+    // An enum field: the message quotes the offending variant, and the list that
+    // follows is not told from a value written to look like one, so neither is
+    // kept.
+    if message.starts_with("unknown variant ") {
+        return Some("not one of the allowed values".to_string());
+    }
+    // The text after the LAST ", expected " is kept only when it is a known type
+    // name: a value that itself contains that text (a custom error quotes it
+    // after the real one, or the message ends with it) must not be echoed.
     Some(match message.rsplit_once(", expected ") {
-        Some((_, expected)) => format!("expected {}", expected.lines().next()?),
-        None => "unreadable value".to_string(),
+        Some((_, expected)) if EXPECTED_TYPES.contains(&expected) => {
+            format!("expected {expected}")
+        }
+        _ => "unreadable value".to_string(),
     })
 }
+
+/// What serde names as the expected type of a refused value: the whole text
+/// after `, expected `, none of it a value.
+const EXPECTED_TYPES: &[&str] = &[
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "f32",
+    "f64",
+    "a boolean",
+    "a string",
+    "a borrowed string",
+    "a character",
+    "a sequence",
+    "a map",
+    "a table",
+    "an array",
+    "an integer",
+    "a float",
+    "a unit value",
+    "unit",
+    "a nonnegative integer",
+    "a positive integer",
+];
 
 /// Read `table` as an `AppConfig`, dropping every value this build cannot
 /// read. `None` when nothing in it is a Kronn setting, or when a value cannot
@@ -346,7 +407,7 @@ pub fn read(table: &toml::Table) -> Option<Reading> {
         }
         if ignores_every_value(&root, &path, &baseline) {
             let value = get_at(&root, &path)?.clone();
-            unknown.push(keys.join("."));
+            unknown.push(show_keys(&keys));
             credential_left |= holds_credential(&keys, &value);
             preserved.push(Preserved::Value(keys, value));
         }
@@ -1011,6 +1072,74 @@ mod tests {
         assert_eq!(
             describe_failure("some message quoting \"sk-x\"").as_deref(),
             Some("unreadable value")
+        );
+    }
+
+    /// KT-1528 — only a known type name is kept after `, expected `: a message
+    /// that ends with the value's own `, expected …` text, or that quotes a
+    /// variant, says nothing of the value.
+    #[test]
+    fn only_a_known_type_name_is_kept_after_expected() {
+        for (message, shown) in [
+            ("invalid type: string \"x\", expected u16", "expected u16"),
+            (
+                "invalid type: string \"x\", expected a boolean",
+                "expected a boolean",
+            ),
+            // The value itself ends the message with a believable expectation.
+            (
+                "custom: sk-clear-i, expected sk-clear-j",
+                "unreadable value",
+            ),
+            (
+                "custom: sk-clear-k, expected u16 sk-clear-l",
+                "unreadable value",
+            ),
+            (
+                "custom: sk-clear-m, expected `sk-clear-n`",
+                "unreadable value",
+            ),
+            (
+                "unknown variant `sk-clear-o`, expected one of `a`, `b`",
+                "not one of the allowed values",
+            ),
+            ("custom: sk-clear-p", "unreadable value"),
+        ] {
+            let why = describe_failure(message).unwrap();
+            assert_eq!(why, shown, "{message}");
+            assert!(!why.contains("sk-clear"), "{why}");
+        }
+    }
+
+    /// KT-1528 — a secret used as a key name (pasted as one) reaches neither the
+    /// ignored nor the unknown list of a notice; an ordinary name still does.
+    #[test]
+    fn a_secret_used_as_a_key_name_is_not_printed() {
+        let secret = "sk-clear-abcdefghijklmnopqrstuvwxyz0123456789";
+        // Unknown: a key this build has no field for.
+        let text = format!("[server]\nport = 3140\n\"{secret}\" = \"v\"\nfuture_flag = true\n");
+        let reading = read(&table(&text)).expect("reads");
+        let notice = reading.notice().expect("something is unknown");
+        assert!(!notice.contains(secret), "{notice}");
+        assert!(!notice.contains("sk-clear"), "{notice}");
+        assert!(notice.contains("server.<key #2>"), "{notice}");
+        assert!(notice.contains("server.future_flag"), "{notice}");
+
+        // Ignored: a value of the wrong type under such a key.
+        let shown = show(&[
+            Seg::Key("server".into()),
+            Seg::Key(secret.into()),
+            Seg::Idx(3),
+        ]);
+        assert_eq!(shown, "server.<key #2>[3]");
+        assert_eq!(
+            show(&[Seg::Key(secret.into()), Seg::Key("port".into())]),
+            "<key #1>.port"
+        );
+        assert_eq!(show_keys(&path("server.port")), "server.port");
+        assert_eq!(
+            show_keys(&["tokens".to_string(), secret.to_string()]),
+            "tokens.<key #2>"
         );
     }
 
