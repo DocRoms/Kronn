@@ -14,15 +14,23 @@ first build under a host-wide cap, then dispatches the worker.
    `lane_warming`. `task_exec_status` reports `progress.phase = "warming"` and
    `queued_since`. The silent-worker watchdog only covers `Working`, so this
    phase is the visibility for a lane that is stuck in `Provisioning`.
-3. A background task then seeds the lane target, runs `cargo test --no-run
-   --locked --offline` through the host gate, smoke-checks the toolchain,
+3. A background task then seeds the lane target, runs `cargo test --lib
+   --no-run --locked --offline` (KT-1736: the lib test binary a worker's first
+   `cargo test --lib <filter>` needs, not every `tests/*.rs` binary; a crate with
+   no library target keeps the whole-package `cargo test --no-run`) through the
+   host gate, smoke-checks the toolchain,
    writes the brief and takes the `Provisioning -> Working` checkpoint that
    dispatches the worker.
 
 Failure modes, all ending in a (cold) dispatch:
 
-- a failed or timed-out first build is journalled in `lane_warm_start` and the
-  worker still starts;
+- a failed or timed-out first build is journalled in `lane_warm_start` (with the
+  first error lines of the build, KT-1736), announced in the worker's room
+  (`⚠️ préchauffage échoué : <cause>`) and the worker still starts;
+- on macOS a `.S` source (`aws-lc-sys`) fails under the lane's sandbox with
+  `unable to make temporary file: Operation not permitted` unless clang keeps its
+  temp files in the lane: the lane environment sets `CFLAGS=-save-temps=obj`
+  (see `docs/operations/worktree-build-artifacts.md`, KT-1736);
 - a queue that does not drain is given up after
   `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 30 min) and the worker
   starts with the target it has;
@@ -253,7 +261,7 @@ phase, so the breakdown outlives the warming phase.
 | `lane_provision` | `prepare_launch` (Cargo home, shared caches) | `lane_warm_start.provision_ms` |
 | `seed_clone` | seeding the lane `debug/` (`clone_ms` is the clone alone); absent when there was no warm target to clone from | `lane_warm_start.seed_ms` |
 | `gate_wait` | waiting for a first-build slot | `lane_warm_start.queued_ms` |
-| `first_build` | `cargo test --no-run`; absent when skipped or cancelled in the queue | `lane_warm_start` |
+| `first_build` | `cargo test --lib --no-run`; absent when skipped or cancelled in the queue | `lane_warm_start` |
 | `smoke_check` | the toolchain smoke check that follows the build | `lane_warming_step` |
 
 A step that did not run is absent, never reported as `0`: `provision_ms` and

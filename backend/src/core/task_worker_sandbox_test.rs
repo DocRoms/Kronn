@@ -133,6 +133,30 @@ fn the_writable_set_is_the_lanes_roots_and_its_temp_dir_and_no_global_temp() {
     }
 }
 
+/// KT-1736: Apple clang puts a `.S` source's preprocess temp in the per-user
+/// Darwin temp dir (`/private/var/folders/…/T`), whatever `TMPDIR` says. The fix
+/// keeps that file in the lane (`CFLAGS=-save-temps=obj`), it does not open the
+/// directory: no profile of a lane ever grants a `/var/folders` path outside the
+/// lane's own roots.
+#[test]
+fn the_profile_never_opens_the_per_user_darwin_temp_dir() {
+    let layout = layout();
+    let policy = policy_of(&layout);
+    let profile = seatbelt_profile(&policy.writable());
+    let outside_lane = |path: &str| {
+        (path.starts_with("/var/folders") || path.starts_with("/private/var/folders"))
+            && !path.contains("task-kt-1255-sandbox")
+    };
+    for line in profile.lines().filter(|line| line.contains("(subpath")) {
+        let quoted = line.split('"').nth(1).unwrap_or("");
+        assert!(!outside_lane(quoted), "{line}");
+    }
+    // The lane's own temp dir stays the only scratch: TMPDIR points into a root.
+    let writable = policy.writable();
+    let tmp = real_path(&policy.temp_dir);
+    assert!(writable.iter().any(|root| tmp.starts_with(root)));
+}
+
 /// The text of the `(allow <operation> …)` forms of `profile`.
 fn allow_forms<'a>(profile: &'a str, operation: &str) -> Vec<&'a str> {
     let opener = format!("(allow {operation}");

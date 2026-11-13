@@ -270,7 +270,7 @@ behind it.
 
 - A **task worker**'s CLI agent, on its first dispatch and on every re-dispatch
   after a reviewer's `request_changes` (a fix is the same worker again).
-- The lane's **first build** (`cargo test --no-run`, the warm-up), including
+- The lane's **first build** (`cargo test --lib --no-run`, the warm-up), including
   under the OS sandbox: the priority travels on the probe command and the
   process runner applies it beneath the sandbox's own launcher.
 - Every **validation** command of a task, confined or not.
@@ -347,20 +347,62 @@ What was established, and what was not:
 - The later lanes of the day end `timed_out`, not `failed`: the lane of this very
   task was seeded in 522 ms and its first build then ran 1 800 043 ms — the
   `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` bound — without an `aws-lc-sys` error.
-  `cargo test --no-run` rebuilds the worktree's own crate (a workspace crate is
+  `cargo test --no-run` rebuilt the worktree's own crate (a workspace crate is
   fingerprinted by its path, so a seed never covers it) for the lib test binary
-  and for every `tests/*.rs` binary, which does not fit in 30 minutes on a loaded
-  host. A targeted `cargo test --lib <filter>` needs the first of them only;
-  whether the warm-up should build `--lib` alone is a product trade-off (what
-  "warm" promises the worker) left to the owner.
-- The failing file is an assembly source. Apple clang compiles a `.S` as two jobs
-  (`clang -cc1 -E … -o $TMPDIR/aes-xts-enc-XXXXXX.s`, then `clang -cc1as`), so —
-  unlike a `.c` file — it needs a writable `TMPDIR` and a second process of the
-  driver under the Seatbelt profile (`deny default`, four Mach services, writes
-  limited to the lane). That is the only thing distinguishing the failing source
-  from the ones that compile; it is a **hypothesis, not a measurement**: a
-  worker cannot nest `sandbox-exec`, so the exact profile could not be replayed
-  from inside a worker's sandbox.
+  **and for every `tests/*.rs` binary**, which does not fit in 30 minutes on a
+  loaded host. A targeted `cargo test --lib <filter>` needs the first of them
+  only — see "What the warm-up builds" below.
+- The failing file is an assembly source, and the cause is measured (13/11,
+  unsandboxed shell, the worker's Seatbelt rules from `seatbelt_profile_with`,
+  writable = one lane directory `W`, `TMPDIR=W/tmp`):
+
+  | Replay of `cc -c …/arm/aes/aes-xts-enc.S -o W/b.o` | Result |
+  |---|---|
+  | worker profile, unchanged | `clang: error: unable to make temporary file: Operation not permitted` |
+  | + `(subpath "/private/var/folders/<u>/T")` — the real path of `getconf DARWIN_USER_TEMP_DIR` | passes the temp stage (`/var/folders/…` without `/private` does **not** match) |
+  | + `/private/tmp` | still fails |
+  | worker profile, unchanged, `-save-temps=obj` | passes the temp stage |
+
+  Apple clang compiles a `.S` as two jobs (preprocess to a temporary `.s`, then
+  `-cc1as`). The first job's temporary file is created in the per-user Darwin temp
+  directory, which the worker profile does not grant — a `.c` source has no such
+  file, hence only the assembly sources fail. A first error line that names
+  `unable to make temporary file` is therefore the signature of this cause.
+
+**The fix: the temporary file stays in the lane.** The lane environment
+(`WorkerLane::env`, so the warm-up, the sandboxed validations *and* the worker's
+own shell) carries `CFLAGS=-save-temps=obj` on macOS: clang then writes its
+intermediate files next to the object file, inside the lane's own target, and the
+profile is **not** widened. The alternative — granting the real
+`DARWIN_USER_TEMP_DIR` to the profile — would let worker-written code (a
+`build.rs`, a test) write into a directory shared with every other process of the
+owner's session, and was not taken.
+
+- Checked with `aws-lc-sys` 0.44.0 and `libsqlite3-sys` rebuilt from an empty
+  target with the flag (`CFLAGS=-save-temps=obj cargo build --offline --locked
+  -p aws-lc-sys -p libsqlite3-sys`): exit 0 in 1 min 38 s, 629 saved `.s`/`.i`
+  temps (`aes-xts-enc.s` among them) next to the objects. The crate's own probes
+  (`is_flag_supported`, the `memcmp` check) are unaffected, so the flag is safe for
+  the build scripts of the graph. That run was in a worker's sandbox, which does
+  not reproduce the refusal, so it proves the flag breaks no build — not the
+  refusal's absence; the refusal's absence under the profile is the replay row
+  above.
+- A lane whose seed was built without the flag recompiles its `cc` build scripts
+  once (the `cc` crate tracks `CFLAGS` with `rerun-if-env-changed`): `aws-lc-sys`,
+  `libsqlite3-sys`. That is the cost of the fix; `aws-lc-sys` was already being
+  recompiled on the lanes that failed. Linux hosts are untouched: bubblewrap gives
+  a private `/tmp`, so the variable is not set there.
+- `CFLAGS` is a default: a command that sets its own (`probe.env`) wins.
+
+**What the warm-up builds (decided by the owner, KT-1736).** The first build is
+`cargo test --lib --no-run --locked --offline` — the dependency graph (the test
+profile inherits `dev`, so its dependencies are the `dev` ones) and the crate's
+own **lib test binary**: exactly what a worker's first targeted
+`cargo test --lib <filter>` needs. It no longer builds every `tests/*.rs`
+integration binary (each links the whole crate again; with them the warm-up ended
+`timed_out` at the 30-minute bound on 12/11); the validations that run them build
+them. A manifest with no library target (no `src/lib.rs`, no `[lib]`) keeps the
+whole-package `cargo test --no-run`, since `--lib` would be an error there.
 
 So the failure now explains itself the next time it happens:
 
@@ -380,10 +422,13 @@ So the failure now explains itself the next time it happens:
 
 **Reproducing a warm-up by hand.** Replay the same command in the lane, under the
 OS sandbox the warm-up uses
-(`sandbox-exec -p <profile> cargo test --no-run --locked --offline` from the
-manifest directory, `TMPDIR=<lane target>/.kronn-tmp`, the lane's `CARGO_*`
-variables), then read the first error lines of the execution's
-`lane_warm_start` event.
+(`sandbox-exec -p <profile> cargo test --lib --no-run --locked --offline` from the
+manifest directory, `TMPDIR=<lane target>/.kronn-tmp`, the lane's `CARGO_*` and
+`CFLAGS` variables), then read the first error lines of the execution's
+`lane_warm_start` event. A worker cannot do this itself: `sandbox-exec` does not
+nest, so the replay has to come from an unsandboxed shell (the principal's, or the
+owner's terminal). To test one compile alone, run the `cc` command of the failing
+file under the profile with `-save-temps=obj` added or removed.
 
 **Measuring.** The number that matters is *lane start → first targeted test
 result*: the `lane_warm_start` event's `seed_ms`, `queued_ms` and
@@ -396,20 +441,34 @@ Measured on 2026-11-12 on the lane of KT-1736 itself (host load 15–25):
 | Step | Duration |
 |---|---|
 | worktree creation / lane provision / seed clone | 2.8 s / 0.1 s / 0.5 s |
-| first build (`cargo test --no-run`) | 1 800.0 s — the bound, `timed_out`, no marker |
+| first build (`cargo test --no-run`, before) | 1 800.0 s — the bound, `timed_out`, no marker |
 | smoke check | 1.3 s |
 | worker's own `cargo test --lib` build of the `kronn` lib test target, same seeded lane, afterwards | 22 min 19 s, then 8 s for 43 tests |
 
 So on a seeded lane the first targeted result costs about 22 minutes of
-compilation of the worktree's own crate, whichever process pays it; the warm-up
-only helps when it finishes inside its bound. This change makes a failure
-visible and diagnosable; it does not shorten that compile, so no "after" figure
-is claimed here. The before/after of a warm-up that now succeeds is to be
-measured on the owner's Mac once the first error lines of a failing lane are
-known.
+compilation of the worktree's own crate, whichever process pays it. Before this
+change that compile came *after* a warm-up that had either failed in 90 s
+(`aws-lc-sys`, KT-1718: 41 min 43 s to the first test on a fully cold lane) or
+spent its whole 30 minutes also building every integration binary. After it, the
+warm-up is that same lib-test compile: the figure to expect is the ~22 minutes
+above moved from the worker's turn into the warm-up, a worker whose first
+`cargo test --lib <filter>` then takes seconds, and a `.kronn-warm.json` in the
+target.
 
-[src: file: backend/src/core/task_worker_env.rs:1062-1103#drain_output]
-[src: file: backend/src/core/task_worker_lane_warm.rs:729-914#warm_lane_cancellable]
+**Not measured here:** a fresh lane's warm-up *under the Seatbelt profile* ending
+`succeeded` with the marker written, and the resulting lane start → first test
+result. A worker cannot run the profile (see above) and the lane of this task was
+seeded before the change; the owner's Mac is where it is read: launch a task on a
+project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
+(`first_build.outcome`, `duration_ms`) and check the lane target for
+`.kronn-warm.json`.
+
+[src: file: backend/src/core/task_worker_env.rs:1097-1138#drain_output]
+[src: file: backend/src/core/task_worker_env.rs:79#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
+[src: file: backend/src/core/task_worker_env.rs:148-154#compiler_temp_env_for]
+[src: file: backend/src/core/task_worker_lane_warm.rs:729-911#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:925-932#first_build_args]
+[src: file: backend/src/core/task_worker_lane_warm.rs:936-940#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
 

@@ -1,6 +1,6 @@
 //! KT-1255 — run Kronn's own builds of a worker lane under the worker's sandbox.
 //!
-//! The lane's first build (`cargo test --no-run`, KT-1250) and the toolchain
+//! The lane's first build (`cargo test --lib --no-run`, KT-1250/KT-1736) and the toolchain
 //! smoke check (KT-1246) are started by Kronn, not by the worker, so they do
 //! not inherit the worker's Claude sandbox. They used to run as the host user:
 //! harmless while a lane is provisioned at `HEAD == base`, but any later

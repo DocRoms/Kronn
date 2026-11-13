@@ -62,6 +62,21 @@ pub const VITE_DEV_PORT_ENV: &str = "VITE_DEV_PORT";
 pub const VITE_CACHE_DIR_ENV: &str = "VITE_CACHE_DIR";
 /// Playwright's Chromium runs single-process: the sandbox denies its rendezvous.
 pub const E2E_CHROMIUM_SINGLE_PROCESS_ENV: &str = "KRONN_E2E_CHROMIUM_SINGLE_PROCESS";
+/// The C compiler flags the `cc` crate (and so `aws-lc-sys`, `ring`, …) reads.
+pub const CFLAGS_ENV: &str = "CFLAGS";
+/// KT-1736 — keep Apple clang's intermediate files next to the object file.
+///
+/// A `.S` source is compiled in two jobs (preprocess, then assemble) and the
+/// driver hands the first one a temporary file in the per-user Darwin temp
+/// directory (`confstr(_CS_DARWIN_USER_TEMP_DIR)`, `/private/var/folders/…/T`),
+/// not in `TMPDIR`. The OS sandbox of a lane grants no such directory, so the
+/// driver dies with `unable to make temporary file: Operation not permitted`
+/// and `aws-lc-sys` (its aarch64 assembly sources are `.S` files) cannot be
+/// built — which is what failed every lane warm-up of 2026-11-12. With
+/// `-save-temps=obj` the
+/// intermediate file is written beside the `.o`, inside the lane's own target,
+/// and the profile stays as narrow as it was.
+pub const CLANG_KEEP_TEMPS_IN_OBJ_DIR: &str = "-save-temps=obj";
 /// Lane ports live in `[LANE_PORT_BASE, LANE_PORT_BASE + 2 * LANE_PORT_SLOTS)`,
 /// away from the host's Kronn (3140) and Vite (5173).
 const LANE_PORT_BASE: u16 = 20_000;
@@ -126,6 +141,16 @@ pub fn build_budget_env(jobs: u32) -> Vec<(&'static str, OsString)> {
         (NEXTEST_TEST_THREADS_ENV, OsString::from(&jobs)),
         (VITEST_MAX_WORKERS_ENV, OsString::from(&jobs)),
     ]
+}
+
+/// The `CFLAGS` of a lane build on a host of the given family (KT-1736): the
+/// flag of [`CLANG_KEEP_TEMPS_IN_OBJ_DIR`] on macOS, nothing elsewhere.
+pub(crate) fn compiler_temp_env_for(macos: bool) -> Vec<(&'static str, OsString)> {
+    if macos {
+        vec![(CFLAGS_ENV, OsString::from(CLANG_KEEP_TEMPS_IN_OBJ_DIR))]
+    } else {
+        Vec::new()
+    }
 }
 
 /// [`build_budget_env`] with the host's budget
@@ -343,10 +368,20 @@ impl WorkerLane {
             self.data_dir.join("vite-cache").into_os_string(),
         ));
         env.push((E2E_CHROMIUM_SINGLE_PROCESS_ENV, OsString::from("1")));
+        env.extend(self.compiler_temp_env());
         if let Some(home) = self.effective_cargo_home(provisioned) {
             env.push((CARGO_HOME_ENV, home.into_os_string()));
         }
         env
+    }
+
+    /// KT-1736 — what keeps the C compiler's temporary files inside the lane
+    /// ([`CLANG_KEEP_TEMPS_IN_OBJ_DIR`]). macOS only: it is Apple clang's driver
+    /// that ignores `TMPDIR` for a `.S` source, and the only host whose sandbox
+    /// refuses the directory it picks instead; elsewhere `CFLAGS` is left alone,
+    /// so no cached build script is invalidated for nothing.
+    fn compiler_temp_env(&self) -> Vec<(&'static str, OsString)> {
+        compiler_temp_env_for(cfg!(target_os = "macos"))
     }
 
     /// The `CARGO_HOME` this lane's Cargo runs with, when one is set at all: the
