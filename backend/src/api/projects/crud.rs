@@ -1687,3 +1687,7 @@ mod bidirectional_link_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "lane_warm_workspace_test.rs"]
+mod lane_warm_workspace_test;

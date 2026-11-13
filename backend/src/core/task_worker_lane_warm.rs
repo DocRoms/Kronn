@@ -1170,23 +1170,23 @@ pub fn warm_lane_cancellable(
         } else {
             None
         };
-        for index in 0..states.len() {
-            let Some(target) = states[index].seed_target.clone() else {
-                let why = states[index]
+        for state in &mut states {
+            let Some(target) = state.seed_target.clone() else {
+                let why = state
                     .unresolved
                     .clone()
                     .unwrap_or_else(|| "no seed target".into());
-                states[index].alignment = SeedAlignment::skipped(format!("no seed: {why}"));
+                state.alignment = SeedAlignment::skipped(format!("no seed: {why}"));
                 continue;
             };
             if let Some(reason) = skip_reason {
-                states[index].alignment = SeedAlignment::skipped(reason);
+                state.alignment = SeedAlignment::skipped(reason);
                 continue;
             }
             let Some(main) = lane.main_checkout.as_ref() else {
                 continue;
             };
-            let main_dir = states[index].root.in_checkout(main);
+            let main_dir = state.root.in_checkout(main);
             let request = AlignRequest {
                 main_crate_dir: &main_dir,
                 target: &target,
@@ -1196,7 +1196,7 @@ pub fn warm_lane_cancellable(
                 timeout: settings.first_build_timeout / 2,
                 lock_wait: host.lock_wait,
             };
-            states[index].alignment = match task_worker_seed_align::assess(&request) {
+            state.alignment = match task_worker_seed_align::assess(&request) {
                 Assessment::Settled(alignment) => alignment,
                 Assessment::NeedsBuild(stale) => match slot.take() {
                     Ok(()) => task_worker_seed_align::build_aligned(
