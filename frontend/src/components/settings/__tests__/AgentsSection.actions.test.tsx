@@ -1174,35 +1174,35 @@ describe('AgentsSection — CLI / Local / External zones', () => {
     expect(names).toEqual([['ClaudeCode', 'OpenCode'], ['Codex']]);
   });
 
-  /// The three tiers, as an external connection shows them: what runs, without
-  /// opening anything. The fold is where they change.
-  it('previews the three tiers on the card itself', async () => {
+  /// KT-1706 — the three tiers live in the card's one « Models and fallbacks » block, as the
+  /// model picker of each mode row: no separate preview block repeats them.
+  const modelOf = (agent: string, tier: string) =>
+    document.querySelector<HTMLInputElement>(`[data-model-tier-agent="${agent}"][data-model-tier="${tier}"]`);
+
+  it('shows the three tiers as the model pickers of the one models-and-fallbacks block', async () => {
     renderSection({
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
     });
     // The tiers arrive from configApi.getModelTiers, not from the props.
     await act(async () => { await Promise.resolve(); });
 
-    const preview = screen.getByTestId('agent-tier-preview-ClaudeCode');
-    const tiers = [...preview.querySelectorAll('.set-ext-api-conn-tier')].map(tier => ({
-      tier: tier.getAttribute('data-tier'),
-      model: tier.querySelector('code')?.textContent,
-    }));
-    // The built-in defaults, so the line never claims a model that is not the
-    // one the backend will run.
-    expect(tiers).toEqual([
-      { tier: 'economy', model: 'haiku' },
-      { tier: 'default', model: 'sonnet' },
-      { tier: 'reasoning', model: 'opus' },
-    ]);
-    // Same markup as a connection card: one object shown in two places.
-    expect(preview).toHaveClass('set-ext-api-conn-tiers');
+    const block = screen.getByTestId('agent-models-ClaudeCode');
+    expect(within(block).getAllByText('agents.modelsAndFallbacks')).toHaveLength(1);
+    expect(screen.queryByTestId('agent-tier-preview-ClaudeCode')).not.toBeInTheDocument();
+    for (const [mode, tier, model] of [['eco', 'economy', 'haiku'], ['standard', 'default', 'sonnet'], ['advanced', 'reasoning', 'opus']]) {
+      const row = within(block).getByTestId(`agent-fallback-ClaudeCode-${mode}`);
+      // The picker IS the model of the row, in the row.
+      expect(row.contains(modelOf('ClaudeCode', tier))).toBe(true);
+      expect(modelOf('ClaudeCode', tier)).toHaveValue(model);
+    }
+    // No second block on the card repeats them.
+    expect(document.querySelectorAll('[data-model-tier-agent="ClaudeCode"][data-model-tier="economy"]')).toHaveLength(1);
   });
 
-  it('shows an override in the preview rather than the built-in default', async () => {
+  it('shows an override in its row rather than the built-in default', async () => {
     const blankTier = { economy: null, default: null, reasoning: null };
     getModelTiersMock.mockResolvedValue({
-      claude_code: { economy: 'fable', default: null, reasoning: null },
+      claude_code: { economy: 'fable', default: null, reasoning: 'opus' },
       codex: blankTier, gemini_cli: blankTier, kiro: blankTier,
       vibe: blankTier, copilot_cli: blankTier, ollama: blankTier,
       lite_llm: blankTier, nvidia: blankTier,
@@ -1212,10 +1212,8 @@ describe('AgentsSection — CLI / Local / External zones', () => {
     });
     await act(async () => { await Promise.resolve(); });
 
-    const preview = screen.getByTestId('agent-tier-preview-ClaudeCode');
-    expect(preview.querySelector('[data-tier="economy"] code')?.textContent).toBe('fable');
-    // Untouched tiers still name the model that will actually run.
-    expect(preview.querySelector('[data-tier="reasoning"] code')?.textContent).toBe('opus');
+    expect(modelOf('ClaudeCode', 'economy')).toHaveValue('fable');
+    expect(modelOf('ClaudeCode', 'reasoning')).toHaveValue('opus');
   });
 
   /// An agent available through npx is not "installed", but it has settings —
@@ -1331,7 +1329,7 @@ describe('AgentsSection — per-mode fallback rows', () => {
     for (const mode of ['eco', 'standard', 'advanced']) {
       expect(await screen.findByTestId(row('ClaudeCode', mode))).toBeInTheDocument();
     }
-    expect(screen.getByTestId(`${row('ClaudeCode', 'standard')}-current`)).toHaveTextContent('sonnet');
+    expect(within(screen.getByTestId(`${row('ClaudeCode', 'standard')}-model`)).getByRole('combobox')).toHaveValue('sonnet');
     fireEvent.click(screen.getByTestId(`${row('ClaudeCode', 'standard')}-add`));
     const menu = screen.getByTestId(`${row('ClaudeCode', 'standard')}-menu`);
     expect(within(menu).getAllByRole('group').map(group => group.getAttribute('aria-label'))).toEqual(['Codex']);

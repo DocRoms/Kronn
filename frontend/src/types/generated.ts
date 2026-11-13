@@ -635,7 +635,13 @@ export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_
 /**
  * Per-agent model tier overrides (Economy/Reasoning model names).
  */
-model_tiers: ModelTiersConfig, };
+model_tiers: ModelTiersConfig,
+/**
+ * KT-1706 — what takes over a mode of a named HTTP connection (or the image or
+ * video mode of ComfyUI) when its provider cannot serve a request. Kept apart
+ * from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
+ */
+connection_fallbacks?: Array<ConnectionFallback>, };
 
 export type AgentSettings = {
 /**
@@ -4862,7 +4868,11 @@ export type FallbackMode = "eco" | "standard" | "advanced" | "decision" | "image
  * What Settings > Agents shows: every mode row that has a fallback, and who is
  * on cooldown.
  */
-export type FallbackOverview = { chains: Array<ChainView>, cooldowns: Array<Cooldown>, };
+export type FallbackOverview = { chains: Array<ChainView>, cooldowns: Array<Cooldown>,
+/**
+ * KT-1706 — the rows of the named HTTP connections and the image and video rows of ComfyUI.
+ */
+media: Array<ConnectionChainView>, };
 
 /**
  * How an agent is reached; shown as a badge on every fallback pill.
@@ -6448,6 +6458,12 @@ rate_limited: boolean, };
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
 /**
+ * The fallback of one media row, for display: its own link, the links inherited
+ * through the rows of the fallbacks, or why it is refused.
+ */
+export type ConnectionChainView = { owner: string, mode: FallbackMode, links: Array<ConnectionLinkView>, inherited: Array<ConnectionLinkView>, error?: string, };
+
+/**
  * Cost of one generation, as the provider declared it.
  */
 export type MediaCost = {
@@ -6463,12 +6479,30 @@ cost_usd: number,
 is_byok: boolean, };
 
 /**
+ * KT-1706 — the fallback of one mode of an owner (a connection id, or
+ * `local:comfyui` for `image` and `video`).
+ */
+export type ConnectionFallback = { owner: string, row: FallbackMode, fallback: ConnectionFallbackTarget, };
+
+/**
+ * KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
+ * id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
+ * model; without one, the model that target has in its own slot of the mode.
+ */
+export type ConnectionFallbackTarget = { connection: string, model?: string | null, };
+
+/**
  * Where a still image can be pinned in a generated clip. Only what the model
  * advertises; nothing is offered by default.
  */
 export type MediaFramePosition = "first_frame" | "last_frame";
 
 export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
+
+/**
+ * One link as Settings shows it.
+ */
+export type ConnectionLinkView = { connection: string, model?: string, transport: FallbackTransport, };
 
 /**
  * What the model outputs. The execution family is the same for both, so this
@@ -6526,7 +6560,13 @@ reference_asset_id?: string | null,
 /**
  * What those images are for. Meaningless — and refused — without an asset.
  */
-reference_mode?: MediaReferenceMode | null, comfyui_reference_context?: ComfyReferenceContext, };
+reference_mode?: MediaReferenceMode | null, comfyui_reference_context?: ComfyReferenceContext,
+/**
+ * KT-1706 — the sources (ComfyUI, connection ids) this generation was already
+ * handed over from because they could not serve it, so a fallback never
+ * comes back to one of them. Written by the runner only.
+ */
+fallback_from?: Array<string>, };
 
 /**
  * Coarse provider phase, for progress reporting.
@@ -10310,6 +10350,12 @@ mode: FallbackMode,
  */
 chain_override?: Array<AgentFallback> | null, };
 
+export type SetConnectionFallbackRequest = { owner: string, mode: FallbackMode,
+/**
+ * The fallback of this media row; `None` removes it.
+ */
+fallback?: ConnectionFallbackTarget | null, };
+
 export type SetMediaReferenceLimitRequest = { connection_id: string, model: string, modality: MediaModality, max_input_references?: number | null, };
 
 export type SetOllamaContextOverrideRequest = { model: string,
@@ -12922,7 +12968,20 @@ max_concurrent_task_workers: number,
  * « heavy output » warning in the run view and on the workflow card.
  * The run itself is never refused.
  */
-heavy_output_kb: number, };
+heavy_output_kb: number,
+/**
+ * KT-1718 — the time, in minutes, a Claude task worker's shell command may
+ * run when it names no limit of its own (`BASH_DEFAULT_TIMEOUT_MS`).
+ */
+bash_default_timeout_min: number,
+/**
+ * KT-1718 — the longest a Claude task worker's shell command may run, even
+ * when it asks for more (`BASH_MAX_TIMEOUT_MS`). Claude Code's own cap is
+ * 10 minutes: a cold test-profile build outlasts it, and the worker loses
+ * the turn. Keep it below the generation limit (`agent_global_timeout_min`),
+ * which cuts the whole turn whatever a command is allowed.
+ */
+bash_max_timeout_min: number, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

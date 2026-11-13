@@ -18,18 +18,22 @@ import { ollama as ollamaApi, config as configApi, modelCatalogApi, type OllamaP
 import { useApi } from '../../hooks/useApi';
 import { usePersistentFold } from '../../hooks/usePersistentFold';
 import { catalogModelOptions, catalogTierEntry, modelRuntimeTargetId } from '../../lib/modelCatalogSelection';
-import type { OllamaHealthResponse, OllamaModel, OllamaRegistryResponse, OllamaUpdateStatus, ModelTiersConfig } from '../../types/generated';
+import type { FallbackMode, OllamaHealthResponse, OllamaModel, OllamaRegistryResponse, OllamaUpdateStatus, ModelTiersConfig } from '../../types/generated';
 import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2, Save, RotateCcw, ChevronRight } from 'lucide-react';
 import { suggestedModelsFor } from './ollamaModels';
 import { SearchableSelect } from '../SearchableSelect';
+import { CatalogHint } from './CatalogHint';
+import './FallbackRow.css';
 import '../../pages/SettingsPage.css';
 
 interface OllamaCardProps {
   t: (key: string, ...args: (string | number)[]) => string;
   modelCostSuffix?: (model: string) => string;
   headerAccessory?: ReactNode;
-  /** KT-1693 — the fallback rows of the card (one per mode Ollama has), under the header. */
-  fallbackRows?: ReactNode;
+  /** KT-1706 — the card's one « Models and fallbacks » block, drawn under the header: given the model
+   *  picker of each mode (eco, standard, advanced, decision) it returns the rows with their fallbacks.
+   *  Without it the pickers are listed alone. */
+  modelsBlock?: (pickers: Partial<Record<FallbackMode, ReactNode>>, hint: ReactNode) => ReactNode;
   /** The "Can act in Kronn" switch, printed with its help inside the card (KT-1687). */
   toolsControl?: ReactNode;
   /** KT-586 — lets the settings page pass the name-as-mention-colour control,
@@ -134,7 +138,7 @@ function PullProgressRow({ model, state, active, onCancel, t }: {
   );
 }
 
-export function OllamaCard({ t, modelCostSuffix, headerAccessory, fallbackRows, toolsControl, title }: OllamaCardProps) {
+export function OllamaCard({ t, modelCostSuffix, headerAccessory, modelsBlock, toolsControl, title }: OllamaCardProps) {
   const [health, setHealth] = useState<OllamaHealthResponse | null>(null);
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -462,6 +466,64 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, fallbackRows, 
   const target = savedTarget && (!savedTarget.live_refresh_ok || catalog.error || catalog.loading || health?.status !== 'online')
     ? { ...savedTarget, stale: true, live_refresh_ok: false } : savedTarget;
 
+  // KT-1706 — the model of each mode is picked in the « Models and fallbacks » block, one picker per
+  // row. An unset mode shows the model the catalogue resolves for it (« qwen3:8b »), not « automatic ».
+  const sizeOfInstalled = (name: string) => models.find(model => model.name === name)?.size;
+  const withSizes = (options: ReturnType<typeof catalogModelOptions>) => options
+    .map(option => ({ ...option, description: [option.description, sizeOfInstalled(option.value)].filter(Boolean).join(' · ') }));
+  const pickerLocked = !tiers || savingTier !== null || catalog.loading;
+  const catalogHint = (
+    <CatalogHint
+      t={t}
+      loading={catalog.loading}
+      failed={Boolean(catalog.error)}
+      empty={!catalog.loading && !catalog.error && !target?.models.length}
+      stale={Boolean(target?.stale) && !catalog.error && !catalog.loading}
+      reason={target?.last_error_reason}
+      reloading={catalog.loading}
+      onReload={reloadCatalog}
+    />
+  );
+  const pickers: Partial<Record<FallbackMode, ReactNode>> = {};
+  for (const [mode, tier] of [['eco', 'economy'], ['standard', 'default'], ['advanced', 'reasoning']] as const) {
+    const configuredDefault = tier === 'default' ? '' : tiers?.ollama.default || '';
+    const resolved = catalogTierEntry(target, tier, configuredDefault, true);
+    const resolvedId = configuredDefault || resolved?.model_id;
+    const resolvedDetail = resolved?.availability === 'unavailable' ? ` — ${t('modelCatalog.unavailable')}` : '';
+    const autoLabel = resolvedId ? t('agents.modelAuto', resolvedId) : t('ollama.tierAuto');
+    pickers[mode] = (
+      <SearchableSelect
+        className="searchable-select--compact"
+        value={tiers?.ollama?.[tier] ?? ''}
+        options={withSizes(catalogModelOptions(target, tiers?.ollama[tier] ?? '', t, model => modelCostSuffix?.(model) ?? ''))}
+        disabled={pickerLocked}
+        onChange={value => void pickTierModel(tier, value || null)}
+        label={t(`disc.tier.${tier}`)}
+        placeholder={tiers?.ollama[tier] ? t('config.searchModel') : autoLabel}
+        emptyLabel={t('modelCatalog.empty')}
+        clearLabel={`${autoLabel}${resolvedDetail}`}
+        dataModelTierAgent="Ollama"
+        dataModelTier={tier}
+      />
+    );
+  }
+  // KT-1366 — the Decision slot: same picker, decision models only.
+  pickers.decision = (
+    <SearchableSelect
+      className="searchable-select--compact"
+      value={tiers?.ollama?.decision ?? ''}
+      options={withSizes(catalogModelOptions(target, tiers?.ollama.decision ?? '', t, () => '', 'decision'))}
+      disabled={pickerLocked}
+      onChange={value => void pickTierModel('decision', value || null)}
+      label={t('ollama.decisionSlot')}
+      placeholder={t('ollama.decisionNone')}
+      emptyLabel={t('ollama.decisionEmpty')}
+      clearLabel={t('ollama.decisionNone')}
+      dataModelTierAgent="Ollama"
+      dataModelTier="decision"
+    />
+  );
+
   return (
     <div className="set-ollama-card">
       {/* Header with status pill */}
@@ -479,8 +541,19 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, fallbackRows, 
             </button>
           </div>
         </div>
-        {fallbackRows}
       </div>
+
+      {modelsBlock ? modelsBlock(pickers, catalogHint) : (
+        <div className="set-agent-fallback" data-testid="ollama-models">
+          {catalogHint}
+          {(['eco', 'standard', 'advanced', 'decision'] as const).map(mode => (
+            <div className="fbr" data-with-model="true" data-mode={mode} key={mode}>
+              <span className="fbr-mode">{t(`fallback.mode.${mode}`)}</span>
+              <div className="fbr-track"><span className="fbr-model">{pickers[mode]}</span></div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* canirun.ai info box — visible right under the title in EVERY
        *  state including `not_installed`. User report 2026-05-11: the
@@ -640,72 +713,8 @@ export function OllamaCard({ t, modelCostSuffix, headerAccessory, fallbackRows, 
           {/* Catalogue choices remain visible offline; installed inventory is
               used only for local context/download controls and size hints. */}
           <div className="set-ollama-models">
-            <div className="text-xs text-muted mb-2">{t('ollama.tierPickerTitle')}</div>
             {tiersLoadError && <p className="set-ollama-context-error" role="alert">{t('common.error')} — {t('ollama.tierPickerTitle')}</p>}
             {tierError && <p className="set-ollama-context-error" role="alert">{tierError}</p>}
-            {catalog.error && <p className="set-hint" role="alert">
-              {t('modelCatalog.loadError')}{' '}
-              <button type="button" className="set-icon-btn" disabled={catalog.loading} onClick={reloadCatalog}>{t('modelCatalog.reload')}</button>
-            </p>}
-            {catalog.loading && <p className="set-hint" role="status">{t('common.loading')}</p>}
-            {!catalog.loading && !catalog.error && !target?.models.length && <p className="set-hint">{t('modelCatalog.empty')}</p>}
-            {target?.stale && <p className="set-hint">{t('modelCatalog.stale')}{target.last_error_reason ? ` — ${target.last_error_reason}` : ''}</p>}
-            <div className="set-ollama-tier-grid">
-              {(['economy', 'default', 'reasoning'] as const).map(tier => {
-                const configuredDefault = tier === 'default' ? '' : tiers?.ollama.default || '';
-                const fallback = catalogTierEntry(target, tier, configuredDefault, true);
-                const fallbackId = configuredDefault || fallback?.model_id;
-                const fallbackDetail = fallback?.availability === 'unavailable' ? ` — ${t('modelCatalog.unavailable')}` : '';
-                const clearLabel = `${t('ollama.tierAuto')}${fallbackId ? ` (${fallbackId}${fallbackDetail})` : ''}`;
-                const options = catalogModelOptions(target, tiers?.ollama[tier] ?? '', t, model => modelCostSuffix?.(model) ?? '')
-                  .map(option => ({ ...option, description: [option.description, models.find(model => model.name === option.value)?.size].filter(Boolean).join(' · ') }));
-                return (
-                  <div key={tier} className="set-ollama-tier-row">
-                    {/* Same tier emotes as every other agent (AgentsSection). */}
-                    <span className="set-ollama-tier-label">
-                      <span aria-hidden="true" style={{ marginRight: 4 }}>
-                        {tier === 'economy' ? '⚡' : tier === 'reasoning' ? '🧠' : '🎯'}
-                      </span>
-                      {t(`disc.tier.${tier}`)}
-                    </span>
-                    <SearchableSelect
-                      className="searchable-select--compact"
-                      value={tiers?.ollama?.[tier] ?? ''}
-                      options={options}
-                      disabled={!tiers || savingTier !== null || catalog.loading}
-                      onChange={value => void pickTierModel(tier, value || null)}
-                      label={t(`disc.tier.${tier}`)}
-                      placeholder={tiers?.ollama[tier] ? t('config.searchModel') : clearLabel}
-                      emptyLabel={t('modelCatalog.empty')}
-                      clearLabel={clearLabel}
-                      dataModelTierAgent="Ollama"
-                      dataModelTier={tier}
-                    />
-                  </div>
-                );
-              })}
-              {/* KT-1366 — the Decision slot: same picker, decision models only. */}
-              <div className="set-ollama-tier-row">
-                <span className="set-ollama-tier-label">
-                  <span aria-hidden="true" style={{ marginRight: 4 }}>🧭</span>
-                  {t('ollama.decisionSlot')}
-                </span>
-                <SearchableSelect
-                  className="searchable-select--compact"
-                  value={tiers?.ollama?.decision ?? ''}
-                  options={catalogModelOptions(target, tiers?.ollama.decision ?? '', t, () => '', 'decision')
-                    .map(option => ({ ...option, description: [option.description, models.find(model => model.name === option.value)?.size].filter(Boolean).join(' · ') }))}
-                  disabled={!tiers || savingTier !== null || catalog.loading}
-                  onChange={value => void pickTierModel('decision', value || null)}
-                  label={t('ollama.decisionSlot')}
-                  placeholder={t('ollama.decisionNone')}
-                  emptyLabel={t('ollama.decisionEmpty')}
-                  clearLabel={t('ollama.decisionNone')}
-                  dataModelTierAgent="Ollama"
-                  dataModelTier="decision"
-                />
-              </div>
-            </div>
             {/* Bench-based guidance (2026-07) — which local model fits which
                 job, so users don't put a weak model on a demanding step. */}
             <div className="set-ollama-tier-guidance">💡 {t('ollama.tierGuidance')}</div>

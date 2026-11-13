@@ -316,3 +316,52 @@ fn the_heavy_output_threshold_defaults_and_is_bounded() {
         assert_eq!(candidate.validate().is_ok(), valid, "{kb} KB");
     }
 }
+
+/// KT-1718 — a Claude task worker's shell limits: 15 minutes by default and 60 at
+/// most (Claude Code's own cap is 10), an older `[workers]` table keeps them, the
+/// Settings form cannot persist a default above the maximum or a maximum above
+/// the largest generation limit, and a hand-edited value is clamped at spawn.
+#[test]
+fn the_bash_timeouts_default_are_bounded_and_clamped_at_spawn() {
+    let defaults = WorkersConfig::default();
+    assert_eq!(defaults.bash_default_timeout_min, 15);
+    assert_eq!(defaults.bash_max_timeout_min, 60);
+    assert_eq!(defaults.effective_bash_timeouts_ms(), (900_000, 3_600_000));
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert_eq!(partial.bash_default_timeout_min, 15);
+    assert_eq!(partial.bash_max_timeout_min, 60);
+    for (default, max, valid) in [
+        (15, 60, true),
+        (1, 1, true),
+        (240, 240, true),
+        (0, 60, false),
+        (61, 60, false),
+        (15, 0, false),
+        (15, 241, false),
+    ] {
+        let candidate = WorkersConfig {
+            bash_default_timeout_min: default,
+            bash_max_timeout_min: max,
+            ..Default::default()
+        };
+        assert_eq!(candidate.validate().is_ok(), valid, "{default}/{max} min");
+    }
+    let hand_edited = WorkersConfig {
+        bash_default_timeout_min: 500,
+        bash_max_timeout_min: 999,
+        ..Default::default()
+    };
+    assert_eq!(
+        hand_edited.effective_bash_timeouts_ms(),
+        (240 * 60_000, 240 * 60_000)
+    );
+    let inverted = WorkersConfig {
+        bash_default_timeout_min: 90,
+        bash_max_timeout_min: 30,
+        ..Default::default()
+    };
+    assert_eq!(
+        inverted.effective_bash_timeouts_ms(),
+        (30 * 60_000, 30 * 60_000)
+    );
+}

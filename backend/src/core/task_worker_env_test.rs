@@ -1066,3 +1066,37 @@ fn the_failure_reason_does_not_repeat_what_the_tail_already_shows() {
         "error: boom"
     );
 }
+
+/// KT-1718 — Claude Code caps a shell command at 10 minutes unless
+/// `BASH_MAX_TIMEOUT_MS` says otherwise, and a cold test-profile build outlasts
+/// that. Kronn sets both variables itself, the default never above the maximum.
+#[test]
+fn a_claude_task_worker_gets_the_shell_limits_of_the_settings() {
+    assert_eq!(
+        bash_timeout_env(900_000, 3_600_000),
+        [
+            ("BASH_DEFAULT_TIMEOUT_MS", "900000".to_string()),
+            ("BASH_MAX_TIMEOUT_MS", "3600000".to_string()),
+        ]
+    );
+    assert_eq!(
+        bash_timeout_env(7_200_000, 3_600_000)[0].1,
+        "3600000",
+        "a default above the maximum is lowered to it"
+    );
+
+    // They win over what the backend was started with.
+    let mut command = std::process::Command::new("true");
+    command.env("BASH_MAX_TIMEOUT_MS", "1000");
+    apply_bash_timeouts(&mut command);
+    let env: std::collections::HashMap<_, _> = command
+        .get_envs()
+        .filter_map(|(name, value)| {
+            Some((name.to_str()?.to_string(), value?.to_str()?.to_string()))
+        })
+        .collect();
+    let default_ms: u64 = env["BASH_DEFAULT_TIMEOUT_MS"].parse().unwrap();
+    let max_ms: u64 = env["BASH_MAX_TIMEOUT_MS"].parse().unwrap();
+    assert!(max_ms > 600_000, "above Claude Code's own 10 minute cap");
+    assert!(default_ms <= max_ms);
+}

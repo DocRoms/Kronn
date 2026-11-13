@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:3086-3154#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:3205-3262#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:3102-3170#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:3221-3278#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -662,7 +662,7 @@ default itself is never written, so someone who never touched it keeps the
 automatic behaviour. Folded, its summary line counts the suggestions and the
 downloads in progress. A download or an update in flight is drawn above the
 block, outside the fold, with its progress and its Cancel, so folding the block
-back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:161-163#usePersistentFold]
+back does not hide it. [src: file: frontend/src/components/settings/OllamaCard.tsx:164-166#usePersistentFold]
 [src: file: frontend/src/hooks/usePersistentFold.ts:13-31#usePersistentFold]
 
 ### The suggestions, and what "verified" means here

@@ -335,6 +335,7 @@ pub async fn generate(
         comfyui_reference_context: references
             .as_ref()
             .and_then(|(_, _, context)| context.clone()),
+        fallback_from: Vec::new(),
     };
     if idempotency_key.is_some() {
         let existing_lookup = job_id.clone();

@@ -14,8 +14,10 @@ import {
   modeKind,
   optionsFor,
   placeMenu,
+  sourceOf,
   toLink,
   transportOf,
+  transportOfOption,
   type FallbackOption,
   type InheritedLink,
   type MenuPlacement,
@@ -36,6 +38,8 @@ export function TransportBadge({ transport }: { transport: FallbackTransport }) 
 interface PillProps {
   testId: string;
   agent: AgentType;
+  /** The name shown in place of the agent's: a media source that is a named connection. */
+  name?: string;
   model: string | null | undefined;
   transport: FallbackTransport;
   /** « eco », « advanced »…: shown when the model serves another mode than its row. */
@@ -53,12 +57,12 @@ interface PillProps {
 /** `Agent · model` and its transport badge. A pill that can be clicked changes
  *  it (or, for an inherited one, opens the card that holds it); ✕ removes it. */
 export function FallbackPill({
-  testId, agent, model, transport, mode, gaps = [], tone, title, disabled, onClick, onRemove, removeLabel,
+  testId, agent, name, model, transport, mode, gaps = [], tone, title, disabled, onClick, onRemove, removeLabel,
 }: PillProps) {
   const { t } = useT();
   const body = (
     <>
-      <span className="fbp-agent">{label(agent)}</span>
+      <span className="fbp-agent">{name ?? label(agent)}</span>
       <span className="fbp-model">{model ?? t('fallback.modelDefault')}</span>
       {mode && <span className="fbp-mode">{t(`fallback.mode.${mode}`)}</span>}
       <TransportBadge transport={transport} />
@@ -93,26 +97,27 @@ export function FallbackPill({
   );
 }
 
-interface MenuProps {
+export interface MenuProps {
   testId: string;
   options: FallbackOption[];
   /** The element the menu hangs from: the menu is drawn in the page body, so no card clips it. */
   anchor: HTMLElement | null;
-  /** Agents the walk already goes through: never offered again (a chain never has an agent twice). */
-  taken: AgentType[];
+  /** Sources the walk already goes through: never offered again (a chain never has a source twice). */
+  taken: string[];
   /** The target being changed, if any: marked, not disabled. */
-  selected?: AgentFallback;
+  selected?: { agent: AgentType; connection?: string; model?: string | null; mode?: FallbackMode | null };
   replaced: FallbackMode;
   onPick: (option: FallbackOption) => void;
   onClose: () => void;
 }
 
-const keyOf = (option: FallbackOption) => `${option.agent}|${option.model ?? ''}|${option.mode}`;
+const keyOf = (option: FallbackOption) => `${sourceOf(option)}|${option.model ?? ''}|${option.mode}`;
+const nameOf = (option: FallbackOption) => option.name ?? label(option.agent);
 
 /** The options of a row grouped by agent, each with its model, its mode and its
  *  transport. A search field filters by agent and model; the arrows, Enter and
  *  Escape drive it from the keyboard. */
-function FallbackMenu({ testId, options, anchor, taken, selected, replaced, onPick, onClose }: MenuProps) {
+export function FallbackMenu({ testId, options, anchor, taken, selected, replaced, onPick, onClose }: MenuProps) {
   const { t } = useT();
   const ref = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState('');
@@ -137,21 +142,21 @@ function FallbackMenu({ testId, options, anchor, taken, selected, replaced, onPi
 
   const needle = query.trim().toLowerCase();
   const shown = needle
-    ? options.filter((option) => `${label(option.agent)} ${option.agent} ${option.model ?? ''}`.toLowerCase().includes(needle))
+    ? options.filter((option) => `${nameOf(option)} ${option.agent} ${option.model ?? ''}`.toLowerCase().includes(needle))
     : options;
-  const groups: { agent: AgentType; items: FallbackOption[] }[] = [];
+  const groups: { source: string; name: string; items: FallbackOption[] }[] = [];
   for (const option of shown) {
-    const group = groups.find((entry) => entry.agent === option.agent);
+    const group = groups.find((entry) => entry.source === sourceOf(option));
     if (group) group.items.push(option);
-    else groups.push({ agent: option.agent, items: [option] });
+    else groups.push({ source: sourceOf(option), name: nameOf(option), items: [option] });
   }
 
   const isSelected = (option: FallbackOption) => selected !== undefined
-    && selected.agent === option.agent
+    && sourceOf(selected) === sourceOf(option)
     && (selected.model ?? null) === option.model
     && linkMode(selected, replaced) === option.mode;
   const isTaken = (option: FallbackOption) => !isSelected(option)
-    && taken.includes(option.agent) && selected?.agent !== option.agent;
+    && taken.includes(sourceOf(option)) && (selected ? sourceOf(selected) : undefined) !== sourceOf(option);
   // The keyboard walks the options that can be picked, in the order they are drawn.
   const pickable = groups.flatMap((group) => group.items).filter((option) => !isTaken(option));
   const current = Math.min(active, Math.max(pickable.length - 1, 0));
@@ -227,8 +232,8 @@ function FallbackMenu({ testId, options, anchor, taken, selected, replaced, onPi
           <div className="fbm-empty" data-testid={`${testId}-nomatch`}>{t('fallback.menuNoMatch')}</div>
         )}
         {groups.map((group) => (
-          <div key={group.agent} className="fbm-group" role="group" aria-label={label(group.agent)}>
-            <div className="fbm-agent">{label(group.agent)}</div>
+          <div key={group.source} className="fbm-group" role="group" aria-label={group.name}>
+            <div className="fbm-agent">{group.name}</div>
             {group.items.map((option) => {
               const inChain = isTaken(option);
               return (
@@ -243,7 +248,7 @@ function FallbackMenu({ testId, options, anchor, taken, selected, replaced, onPi
                   aria-current={isSelected(option) ? 'true' : undefined}
                   data-active={activeKey === keyOf(option) ? 'true' : undefined}
                   title={inChain ? t('fallback.inChain') : undefined}
-                  data-testid={`${testId}-${option.agent}-${option.mode}${option.model ? `-${option.model}` : ''}`}
+                  data-testid={`${testId}-${sourceOf(option)}-${option.mode}${option.model ? `-${option.model}` : ''}`}
                   onMouseMove={() => {
                     const at = pickable.findIndex((entry) => keyOf(entry) === keyOf(option));
                     if (at >= 0 && at !== current) setActive(at);
@@ -252,7 +257,7 @@ function FallbackMenu({ testId, options, anchor, taken, selected, replaced, onPi
                 >
                   <span className="fbm-model">{option.model ?? t('fallback.modelDefault')}</span>
                   <span className="fbp-mode">{t(`fallback.mode.${option.mode}`)}</span>
-                  <TransportBadge transport={transportOf(option.agent)} />
+                  <TransportBadge transport={transportOfOption(option)} />
                 </button>
               );
             })}
@@ -272,6 +277,9 @@ interface RowProps {
   origin: AgentType | null;
   /** The model this mode runs on today: the first pill of the row. */
   current?: { agent: AgentType; model: string | null } | null;
+  /** KT-1706 — the model picker of the mode: when given it IS the first element of the row,
+   *  in place of the read-only `current` pill (« Mode · [model ▾] → fallback »). */
+  model?: ReactNode;
   /** The fallbacks set here, in order (one per row; an override may carry more). */
   links: AgentFallback[];
   /** What the backend resolved for them (gaps of each link, its own refusal). */
@@ -296,7 +304,7 @@ interface RowProps {
  *  Clicking a pill changes it, ✕ removes it; the menu is filtered by kind of
  *  mode, grouped by agent, and a model already in the chain is disabled. */
 export function FallbackRow({
-  testId, mode, origin, current, links, view, inherited = [], options, disabled, empty, actions, onChange, onOpenAgent,
+  testId, mode, origin, current, model, links, view, inherited = [], options, disabled, empty, actions, onChange, onOpenAgent,
 }: RowProps) {
   const { t } = useT();
   const [menu, setMenu] = useState<null | { index: number }>(null);
@@ -342,10 +350,17 @@ export function FallbackRow({
   };
 
   return (
-    <div className="fbr" data-testid={testId} data-mode={mode} data-kind={modeKind(mode)}>
+    <div
+      className="fbr"
+      data-testid={testId}
+      data-mode={mode}
+      data-kind={modeKind(mode)}
+      data-with-model={model !== undefined ? 'true' : undefined}
+    >
       <span className="fbr-mode">{modeLabel}</span>
       <div className="fbr-track">
-        {current && (
+        {model !== undefined && <span className="fbr-model" data-testid={`${testId}-model`}>{model}</span>}
+        {model === undefined && current && (
           <FallbackPill
             testId={`${testId}-current`}
             tone="current"

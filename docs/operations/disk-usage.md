@@ -36,7 +36,7 @@ no workspace row names, and the build dirs of executions Blocked or Interrupted 
 A lane's env is set in `WorkerLane::for_worktree`: a managed worktree gets `<repo>/target/wt-<lane>`, and the
 worker runs with it as `CARGO_TARGET_DIR`. The scratch dir, the private `CARGO_HOME` and the Vite cache live
 inside the lane or the worktree, so they go with it.
-[src: file: backend/src/core/task_worker_env.rs:221-276#for_worktree]
+[src: file: backend/src/core/task_worker_env.rs:256-311#for_worktree]
 
 **Ownership is a manifest, not a name.** `wt-*` proves nothing: humans and other tooling build in
 `target/wt-0151-integration`. Kronn writes `.kronn-lane.json` (execution id, lane, worktree) when it
@@ -201,8 +201,8 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 (`reassign_execution_worker_keeping_origin` and `extend_review_rounds` refuse a terminal one), so there is no
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
-[src: file: backend/src/api/orchestration.rs:4675-4687#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:14211-14222#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:4691-4703#cleanup_integrated_execution]
+[src: file: backend/src/api/orchestration.rs:14310-14321#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -266,7 +266,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:1132-1200#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:10497-10520#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:10513-10536#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.

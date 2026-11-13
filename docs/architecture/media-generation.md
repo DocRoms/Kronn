@@ -244,7 +244,7 @@ trimmed and case-insensitively, so a caller is never refused over `720P`.
 
 The same read serves both surfaces. `agent_list` sweeps every configured media
 slot concurrently, each under its own 8 s window, and attaches what came back
-[src: file: backend/src/api/orchestration.rs:16222-16275#bounded_media_capabilities]; the catalogue builder
+[src: file: backend/src/api/orchestration.rs:16321-16374#bounded_media_capabilities]; the catalogue builder
 itself stays pure and is handed the result, like the reachability and quota
 preflights beside it. An envelope is attached only when the model it was read
 for is still the configured one — a connection whose model changed between the
@@ -439,7 +439,7 @@ credential, no text tier), and every media path resolves it: generation and
 its preflights, `/api/media/models`, the estimate, the worker, the bridge
 guard and the `agent_list` catalogue.
 [src: file: backend/src/api/comfyui.rs:1283-1307#local_connection]
-[src: file: backend/src/api/orchestration.rs:16277-16283#with_local_media_source]
+[src: file: backend/src/api/orchestration.rs:16376-16382#with_local_media_source]
 
 ComfyUI runs a node graph, so a model is usable only when Kronn has a
 compatible integrated workflow for its family (FLUX.1 schnell, SDXL such as
@@ -501,7 +501,7 @@ file at a time, and disk space is checked first. From Docker those folders
 are the host's, and Windows has no such handle here, so there the card only
 links to Hugging Face.
 [src: file: backend/src/agents/media_codec.rs:703-716#ComfyUiMediaCodec]
-[src: file: backend/src/agents/media_runner.rs:778-945#advance_local_comfyui]
+[src: file: backend/src/agents/media_runner.rs:933-1100#advance_local_comfyui]
 
 
 ## Configurable source-image limits (KT-1403)
@@ -564,8 +564,8 @@ ComfyUI browser does not alter Kronn's submitted graph. New reference jobs keep
 the accepted endpoint, family and generation settings across queueing and
 retries. The original source ids and mode remain the result provenance.
 [src: file: backend/src/models/media.rs:54-58#ComfyReferenceContext]
-[src: file: backend/src/agents/media_runner.rs:778-945#advance_local_comfyui]
-[src: file: backend/src/agents/media_runner.rs:947-987#upload_comfyui_references]
+[src: file: backend/src/agents/media_runner.rs:933-1100#advance_local_comfyui]
+[src: file: backend/src/agents/media_runner.rs:1105-1145#upload_comfyui_references]
 
 The official [Redux examples](https://comfyanonymous.github.io/ComfyUI_examples/flux/#redux)
 show the model files and conditioning nodes; the [Wan VACE examples](https://comfyanonymous.github.io/ComfyUI_examples/wan/#vace-reference-image-to-video)

@@ -8,7 +8,7 @@ workflow steps, stored IDs and sandbox event names keep their established
 contracts. An Artifact is the same persisted resource; renaming its product
 label does not migrate or duplicate it. Historical code and documentation use
 “Page” for that domain model.
-[src: file: frontend/src/lib/i18n/locales/en.ts:203-204#nav.pages]
+[src: file: frontend/src/lib/i18n/locales/en.ts:213-214#nav.pages]
 [src: file: frontend/src/lib/live-page-navigation.ts:50-55#standaloneLivePageUrl]
 
 ## Portable JSON bundles
@@ -617,10 +617,10 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1230-1253#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:14868-15057#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:16177-16219#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:16414-16456#task_worker_catalogue]
-[src: file: backend/src/api/orchestration.rs:16458-16528#task_exec_prepare]
+[src: file: backend/src/api/orchestration.rs:14967-15156#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:16276-16318#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:16513-16555#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:16467-16537#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
 opens, `POST /api/live-page-actions/{id}/prefill` resolves it server-side for
