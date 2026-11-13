@@ -155,12 +155,21 @@ fn is_opaque_token(name: &str) -> bool {
     if super::crypto::canonical_secret(name).is_ok() {
         return true;
     }
-    // A canonical dashed UUID (8-4-4-4-12), alone or after a `<prefix>_`, is an
-    // identifier, not a key: only its prefix can still be a token. Nothing else
-    // escapes the squeeze below (two UUIDs side by side, groups of 16, a key
-    // with a UUID's shape plus more).
+    // A name that is exactly one canonical dashed UUID (8-4-4-4-12), alone or after
+    // a `<prefix>_`, is an identifier, not a key: only its prefix can still be a
+    // token. The prefix must be a plain label: one that holds a hex run of 8 or
+    // more (`<uuid>_<uuid>`, `<16 hex>_<uuid>`, `<16 hex>-<15 hex>_<uuid>`) is
+    // hex that adds up to a key, so it takes the squeeze below like everything
+    // else (two UUIDs side by side, groups of 16, a key with a UUID's shape plus
+    // more).
     if let Some(prefix) = uuid_prefix(name) {
-        return !prefix.is_empty() && is_opaque_token(prefix);
+        let hex_in_prefix = prefix
+            .as_bytes()
+            .split(|b| !b.is_ascii_hexdigit())
+            .any(|h| h.len() >= 8);
+        if !hex_in_prefix {
+            return !prefix.is_empty() && is_opaque_token(prefix);
+        }
     }
     // A key written in groups (`<16 hex> <16 hex> …`, dashes, colons): with the
     // separators removed, any run of 32 hex digits or more is a key, or a hash
@@ -216,7 +225,27 @@ fn uuid_prefix(name: &str) -> Option<&str> {
 /// name. It is printed as a placeholder and treated as a credential on save, like
 /// a credential's value.
 fn secret_name(name: &str) -> bool {
-    super::redact::looks_like_secret(name) || is_opaque_token(name) || secret_string(name)
+    super::redact::looks_like_secret(name)
+        || is_opaque_token(name)
+        || secret_string(name)
+        || labelled_secret(name)
+}
+
+/// A secret that follows a label in a key name (`old_sk-…`, `my_AKIA…`,
+/// `bot_xoxb-…`, `hdr: bearer …`): `looks_like_secret` anchors its vendor prefixes
+/// on a word boundary and `_` is a word character, and [`secret_string`] only
+/// reads a header value at the start. Every suffix that starts at a separator (a
+/// character that is not a letter or a digit) is tested as a whole name, so a
+/// token is found wherever a separator puts it at the start. Free text is not
+/// concerned: only key names go through here, and a setting's name (`port`,
+/// `max_tokens`, `model_id`, `skip_tls`, `task_basic_info`) holds none of these
+/// shapes.
+fn labelled_secret(name: &str) -> bool {
+    name.char_indices()
+        .filter(|(_, c)| !c.is_ascii_alphanumeric())
+        .map(|(at, c)| &name[at + c.len_utf8()..])
+        .filter(|suffix| !suffix.is_empty())
+        .any(|suffix| super::redact::looks_like_secret(suffix) || secret_string(suffix))
 }
 
 /// A key name as notices and logs may print it: itself, unless it looks like a
@@ -1363,6 +1392,84 @@ mod tests {
         for name in [format!("{hex}_{uuid}"), format!("{uuid}.{uuid}")] {
             assert!(is_opaque_token(&name), "{name}");
             assert!(!shown_key(&name, 0).contains("550e"), "{name}");
+        }
+    }
+
+    /// KT-1528 — the UUID exemption is for a name that is exactly one canonical
+    /// UUID or `<label>_<uuid>`: hex before the UUID (another UUID, 16 or 15 digits)
+    /// adds up to a key, so those names take the squeeze and are masked, shown
+    /// nowhere and a credential on save.
+    #[test]
+    fn a_uuid_after_hex_is_not_an_identifier() {
+        let uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        for name in [
+            format!("{uuid}_{uuid}"),
+            format!("0123456789abcdef_{uuid}"),
+            format!("0123456789abcdef-0123456789abcde_{uuid}"),
+            format!("a1b2c3d4_{uuid}"),
+        ] {
+            assert!(is_opaque_token(&name), "{name}");
+            assert!(credential_key(&name), "{name}");
+            let text = format!("[server]\nport = 3140\n\"{name}\" = 1\n");
+            let reading = read(&table(&text)).expect("reads");
+            assert!(reading.credential_left, "{name}");
+            let notice = reading.notice().expect("something is unknown");
+            assert!(!notice.contains("0123"), "{name}: {notice}");
+            assert!(!notice.contains("89ab"), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+        }
+        // A label with no hex run of 8 is still an identifier's prefix.
+        for name in [
+            format!("proj_{uuid}"),
+            format!("dead_{uuid}"),
+            uuid.to_string(),
+        ] {
+            assert!(!secret_name(&name), "{name}");
+        }
+    }
+
+    /// KT-1528 — a vendor token or authorization header that follows a label in a
+    /// key name (`_` is a word character, so `\b` does not see it) is masked and a
+    /// credential on save; ordinary setting names are not.
+    #[test]
+    fn a_token_after_a_label_in_a_key_name_is_not_printed() {
+        let names = [
+            "old_sk-clear-abcdefghijklmnopqrstuvwxyz0123456789",
+            "my_AKIAIOSFODNN7EXAMPLE",
+            "bot_xoxb-123456789012-123456789012",
+            "hdr: bearer my-secret-token",
+            "x-Basic dXNlcjpwYXNz",
+        ];
+        for name in names {
+            assert!(secret_name(name), "{name}");
+            assert!(credential_key(name), "{name}");
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"v\"\n");
+            let reading = read(&table(&text)).expect("reads");
+            assert!(reading.credential_left, "{name}");
+            let notice = reading.notice().expect("something is unknown");
+            for secret in [
+                "sk-clear",
+                "AKIAIOSFODNN7",
+                "xoxb-1234",
+                "my-secret-token",
+                "dXNlcjpwYXNz",
+            ] {
+                assert!(!notice.contains(secret), "{name}: {notice}");
+            }
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+        }
+        for plain in [
+            "port",
+            "max_tokens",
+            "model_id",
+            "skip_tls",
+            "task_basic_info",
+            "bearer_policy",
+            "old_basic_auth_mode",
+            "sk_rate",
+        ] {
+            assert!(!secret_name(plain), "{plain}");
+            assert_eq!(shown_key(plain, 0), plain);
         }
     }
 

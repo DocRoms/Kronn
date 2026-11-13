@@ -1238,27 +1238,33 @@ pub(crate) struct KeyRead {
 /// The name of the key's line in config.toml.
 const KEY_NAME: &str = "encryption_secret";
 
-/// The most a damaged text is read for its key: lines, and bytes. The file is
-/// small (Kronn writes the key near its top); the cap bounds the re-parsing.
-const PREFIX_MAX_LINES: usize = 2_000;
-const PREFIX_MAX_BYTES: usize = 256 * 1024;
+/// The most a damaged text is read for its key: lines, and bytes. Kronn's own
+/// config is far smaller and writes the key near its top; every damaged file
+/// reaches the cap, and each line re-parses the growing prefix, so it is kept low
+/// (a few tens of milliseconds at the cap in release). Past the cap nothing is
+/// read: the text after it is the rest.
+const PREFIX_MAX_LINES: usize = 500;
+const PREFIX_MAX_BYTES: usize = 64 * 1024;
 
 /// The top-level `encryption_secret` of `content`, decided by toml itself:
 /// 1. a text that parses: its top-level string value (a number, an array or a
 ///    value under a table is not the key);
-/// 2. else the longest prefix of WHOLE lines that parses (the growing prefix is
-///    re-parsed line by line and read down to the first line where it stops
-///    parsing): its top-level `encryption_secret`, when it is a real key
+/// 2. else the LONGEST prefix of WHOLE lines that parses (every prefix up to the
+///    cap is tried and the last one that parses is kept: a multi-line array, string
+///    or inline table before the key does not hide it, though the prefixes inside
+///    it do not parse): its top-level `encryption_secret`, when it is a real key
 ///    ([`crypto::canonical_secret`]);
 /// 3. else nothing is read: `value` is `None`.
 ///
 /// Nothing else is ever offered (no line is read on its own, no region or table
-/// header is guessed at): a key that sits after the first damaged line is not
-/// recovered here, it stays in the copy that is kept. `unreadable` says so: the
-/// part of the text that was not read (all of it when no key was read) spells the
-/// name `encryption_secret`, or an escape (`\u`, `\U`, `\x`) that could spell it
-/// another way, so the text may hold a key it could not read. A text that parses
-/// has no such part.
+/// header is guessed at): a key that sits after that prefix is not recovered
+/// here, it stays in the copy that is kept. `unreadable` says so: the part of the
+/// text that was not read (all of it when no prefix parses) spells the name
+/// `encryption_secret`, or an escape (`\u`, `\U`, `\x`) that could spell it another
+/// way, so the text may hold a key it could not read; or the prefix's own
+/// top-level `encryption_secret` is a non-blank string that is no key. A name
+/// that only sits in the prefix (blank, a number, a comment, under a table) is
+/// read by toml and holds no key. A text that parses has no unread part.
 pub(crate) fn read_key(content: &str) -> KeyRead {
     if let Ok(table) = content.parse::<toml::Table>() {
         return KeyRead {
@@ -1267,18 +1273,26 @@ pub(crate) fn read_key(content: &str) -> KeyRead {
         };
     }
     let (prefix, rest) = longest_parsing_prefix(content);
-    let key = prefix
-        .as_ref()
-        .and_then(top_level_key)
-        .filter(|k| super::crypto::canonical_secret(k).is_ok());
-    match key {
+    let Some(prefix) = prefix else {
+        // Nothing parses: all of the text is unread.
+        return KeyRead {
+            value: None,
+            unreadable: may_spell_key(content),
+        };
+    };
+    let own = top_level_key(&prefix);
+    match own
+        .clone()
+        .filter(|k| super::crypto::canonical_secret(k).is_ok())
+    {
         Some(key) => KeyRead {
             value: Some(key),
             unreadable: may_spell_key(rest),
         },
         None => KeyRead {
             value: None,
-            unreadable: may_spell_key(content),
+            // A string that is no key is kept and reported, never cut away.
+            unreadable: own.is_some() || may_spell_key(rest),
         },
     }
 }
@@ -1294,9 +1308,11 @@ fn top_level_key(table: &toml::Table) -> Option<String> {
 }
 
 /// The longest prefix of whole lines of `content` that parses (a byte-order mark
-/// on its first line ignored), read until the growing prefix first stops parsing,
-/// with the table it gives and the text after it. No prefix parses (or the cap is
-/// reached at once): no table, and all of `content` is the rest.
+/// on its first line ignored), with the table it gives and the text after it.
+/// Every prefix up to the cap is tried, and a prefix that does not parse (it ends
+/// inside an array, a string or an inline table) does not end the search: the
+/// last one that parses wins. No prefix parses (or the cap is reached at once): no
+/// table, and all of `content` is the rest.
 fn longest_parsing_prefix(content: &str) -> (Option<toml::Table>, &str) {
     let text = content.strip_prefix('\u{FEFF}').unwrap_or(content);
     let mut best: Option<(toml::Table, usize)> = None;
@@ -1306,9 +1322,8 @@ fn longest_parsing_prefix(content: &str) -> (Option<toml::Table>, &str) {
         if n >= PREFIX_MAX_LINES || end > PREFIX_MAX_BYTES {
             break;
         }
-        match text[..end].parse::<toml::Table>() {
-            Ok(table) => best = Some((table, end)),
-            Err(_) => break,
+        if let Ok(table) = text[..end].parse::<toml::Table>() {
+            best = Some((table, end));
         }
     }
     match best {

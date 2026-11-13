@@ -319,6 +319,12 @@ fn only_a_top_level_non_blank_string_keeps_a_copy_without_a_key() {
             "config.toml.corrupt.20261005T000000Z",
             format!("note = '''\nencryption_secret = \"{k}\"\n'''\n{LEAKY}"),
         ),
+        // Does not parse, but the name only sits under a table of the part toml
+        // read, and the unread part never spells it: no key, nothing to keep.
+        (
+            "config.toml.backup.20261007T000000Z",
+            format!("{LEAKY}encryption_secret = \"{k}\"\n[broken\n"),
+        ),
     ];
     for (name, text) in &droppable {
         std::fs::write(d.join(name), text).unwrap();
@@ -343,12 +349,11 @@ fn only_a_top_level_non_blank_string_keeps_a_copy_without_a_key() {
             "config.toml.backup.20261002T000000Z",
             format!("encryption_secret = \"junk\"\nencryption_secret = \"\"\n{LEAKY}[broken\n"),
         ),
-        // Does not parse, and the key line sits under a table: no key is read,
-        // and the damaged text spells the name, so it is kept (it may be the
-        // only trace of one).
+        // Does not parse, no key is read, and the part toml did not read spells
+        // the name: it is kept (it may be the only trace of one).
         (
             "config.toml.backup.20261004T000000Z",
-            format!("{LEAKY}encryption_secret = \"{k}\"\n[broken\n"),
+            format!("{LEAKY}[broken\nencryption_secret = \"{k}\"\n"),
         ),
     ];
     for (name, text) in &kept {
@@ -712,11 +717,85 @@ fn the_key_is_read_by_toml_from_the_longest_parsing_prefix() {
             Some(k.clone()),
             Fate::Cut,
         ),
-        // The cap (2 000 lines) ends the read, not the key found before it.
+        // The cap (500 lines) ends the read, not the key found before it.
         (
             format!("encryption_secret = \"{k}\"\n{long_valid}[broken\n"),
             Some(k.clone()),
             Fate::Cut,
+        ),
+        // R1: the last element of an array of arrays closes it: the key line after
+        // it is top level, read by the longest prefix.
+        (
+            format!("x = [\n  [1, 2],\n  [3]]\nencryption_secret = \"{k}\"\n[broken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        // A multi-line array, string or inline table before the key (the prefixes
+        // inside them do not parse, the longer one does): Kronn before 0.14.3
+        // wrote `disabled_agents` this way, then the key.
+        (
+            format!("disabled_agents = [\n    \"Codex\",\n]\nencryption_secret = \"{k}\"\n[broken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        (
+            format!("notes = \"\"\"\nline\n\"\"\"\nencryption_secret = \"{k}\"\n[broken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        (
+            format!("x = {{\n  a = 1,\n  b = [1,\n 2],\n}}\nencryption_secret = \"{k}\"\n[broken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        (
+            format!(
+                "disabled_agents = [\r\n    \"Codex\",\r\n]\r\nencryption_secret = \"{k}\"\r\n[broken\r\n"
+            ),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        // The key itself written as a multi-line string.
+        (
+            format!("encryption_secret = \"\"\"\n{k}\"\"\"\nbroken\n"),
+            Some(k.clone()),
+            Fate::Cut,
+        ),
+        // The name only sits in the prefix toml read (blank, a number, a comment,
+        // under a table) and not in the rest: it holds no key, the copy follows the
+        // normal no-key path.
+        (
+            "encryption_secret = \"\"\n[tokens]\nanthropic = \"sk-clear-token\"\n[broken\n".to_string(),
+            None,
+            Fate::Dropped,
+        ),
+        (
+            "encryption_secret = 5\n[tokens]\nanthropic = \"sk-clear-token\"\n[broken\n".to_string(),
+            None,
+            Fate::Dropped,
+        ),
+        (
+            "# encryption_secret = \"x\"\n[tokens]\nanthropic = \"sk-clear-token\"\n[broken\n".to_string(),
+            None,
+            Fate::Dropped,
+        ),
+        (
+            format!("[tokens]\nencryption_secret = \"{k}\"\n[broken\n"),
+            None,
+            Fate::Dropped,
+        ),
+        // A non-blank string that is no key in that prefix: kept whole, reported.
+        (
+            "encryption_secret = \"junk\"\n[tokens]\nanthropic = \"sk-clear-token\"\n[broken\n"
+                .to_string(),
+            None,
+            Fate::Whole,
+        ),
+        // The name in the rest, after the prefix: kept whole, reported.
+        (
+            format!("encryption_secret = \"\"\n[broken\nencryption_secret = \"{k}\"\n"),
+            None,
+            Fate::Whole,
         ),
         // ---- Accepted: nothing is read, the copy is kept whole and reported.
         // A key after the cap, or after the first damaged line.
@@ -804,12 +883,6 @@ fn the_key_is_read_by_toml_from_the_longest_parsing_prefix() {
             None,
             Fate::Whole,
         ),
-        // R1: the last element of an array of arrays (accepted: kept whole).
-        (
-            format!("x = [\n  [1, 2],\n  [3]]\nencryption_secret = \"{k}\"\n[broken\n"),
-            None,
-            Fate::Whole,
-        ),
         // R2: a header glued after a comma, or onto a value.
         (
             format!("port = 1, [mcp.env]\nencryption_secret = \"{f}\"\n"),
@@ -843,12 +916,6 @@ fn the_key_is_read_by_toml_from_the_longest_parsing_prefix() {
             None,
             Fate::Whole,
         ),
-        // A prefix that parses, but the name sits under a table.
-        (
-            format!("[tokens]\nencryption_secret = \"{k}\"\n[broken\n"),
-            None,
-            Fate::Whole,
-        ),
         // A damaged key line (missing quote, trailing text, multi-line string).
         (
             format!("encryption_secret = \"{k}\nlanguage = \"fr\"\n[tokens]\nanthropic = \"sk-x\"\n"),
@@ -857,11 +924,6 @@ fn the_key_is_read_by_toml_from_the_longest_parsing_prefix() {
         ),
         (
             format!("encryption_secret = \"{k}\" x\nlanguage = \"fr\"\n"),
-            None,
-            Fate::Whole,
-        ),
-        (
-            format!("encryption_secret = \"\"\"\n{k}\"\"\"\nbroken\n"),
             None,
             Fate::Whole,
         ),

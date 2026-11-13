@@ -268,35 +268,42 @@ Safe to interrupt at any point; a rerun converges:
    itself (`config::read_key`), with one rule and no guessing at a damaged file:
    (1) a text that parses gives its top-level `encryption_secret` (a string; a
    number, an array or a value under a table is not the key, and a closed
-   multi-line string that spells the name is a note); (2) otherwise the longest
-   prefix of whole lines that parses is taken (the growing prefix is re-parsed
-   line by line down to the first line where it stops parsing, a byte-order mark
-   on line 1 ignored, capped at 2 000 lines and 256 KiB) and its top-level
-   `encryption_secret` is the key when it is a real key; (3) every other case
-   gives no key. No line of a damaged text is read on its own, and no region,
-   table header or glued header is guessed at. The key may be spelled `"encryption_secret"`
+   multi-line string that spells the name is a note); (2) otherwise the LONGEST
+   prefix of whole lines that parses is taken (every prefix up to the cap is
+   tried and the last one that parses wins, so a multi-line array, string or
+   inline table before the key, such as the `disabled_agents = [ … ]` older
+   builds wrote, does not hide it; a byte-order mark on line 1 is ignored; the
+   cap is 500 lines and 64 KiB, Kronn's own file being far smaller) and its
+   top-level `encryption_secret` is the key when it is a real key; (3) every
+   other case gives no key. No line of a damaged text is read on its own, and no
+   region, table header or glued header is guessed at. The key may be spelled `"encryption_secret"`
    or with an escape: toml decodes it. A copy with no key read is kept whole,
    byte-identical, and reported (never dropped, cut down or deferred) when the
-   part of the text that was not read (all of it when no key was read) spells
-   `encryption_secret` or an escape (`\u`, `\U`, `\x`) that could spell it another
-   way, and so does a copy whose top-level `encryption_secret` is a non-blank
-   string that is no key (a `retired-key` file included). A damaged text that
-   never spells the name holds no key and is dropped (or, with a key, sealed); a
-   readable key with such a text after it is cut down to its key line. The
-   consequence to accept: a key placed after the first damaged line (or past the
-   cap) is not recovered at boot; it stays in the kept copy, reported. Kronn
-   writes `encryption_secret` near the top of `config.toml` (after `language`,
-   `ui_language`, `stt_model`, `disabled_agents`), so the usual damaged file still
-   recovers its key. Two keys, or the same key written twice (a duplicate key
-   makes the text invalid TOML), keep the copy whole, reported.
+   part of the text that was not read (the text after the parsed prefix, or all of
+   it when no prefix parses) spells `encryption_secret` or an escape (`\u`, `\U`,
+   `\x`) that could spell it another way, and so does a copy whose top-level
+   `encryption_secret` is a non-blank string that is no key (a `retired-key` file
+   included). A name that only sits in the parsed prefix (blank, a number, a
+   comment, under a table) holds no key and keeps nothing. A damaged text that
+   never spells the name in its unread part holds no key and is dropped (or, with
+   a key, sealed); a readable key with such a text after it is cut down to its key
+   line. The consequence to accept: a key placed after the first damaged line (or
+   past the cap) is not recovered at boot; it stays in the kept copy, reported.
+   Kronn writes `encryption_secret` near the top of `config.toml` (after
+   `language`, `ui_language`, `stt_model`, `disabled_agents`), so the usual damaged
+   file still recovers its key. Two keys, or the same key written twice (a
+   duplicate key makes the text invalid TOML), keep the copy whole, reported.
    A key name that is, or holds, a secret is never printed in a notice, like a
    vendor-shaped secret: an instance key, a run of 24 or more hex digits or of 32
    or more base64 characters mixing capitals, lower case and digits, anywhere in
    the name (`<64 hex>.old`, `key <64 hex>`, `<32 hex>:<32 hex>`), a key written
    in groups (with the separators removed, any run of 32 hex digits or more: a
-   dashless UUID and a SHA-1 are hidden too, on the safe side; a canonical dashed
-   UUID, alone or after a `<prefix>_`, is an identifier and is shown), or an
-   authorization header (`bearer …`) used as a name. It is also a credential on
+   dashless UUID and a SHA-1 are hidden too, on the safe side; a name that is
+   exactly one canonical dashed UUID, alone or after a `<label>_` that holds no hex
+   run of 8 or more, is an identifier and is shown, while `<uuid>_<uuid>` or
+   `<16 hex>_<uuid>` are hidden), a vendor token or an authorization header
+   (`bearer …`) used as a name, including one that follows a label
+   (`old_sk-…`, `my_AKIA…`, `bot_xoxb-…`, `hdr: bearer …`). It is also a credential on
    the save path: its entry is sheltered and not written back to `config.toml`,
    so the name does not stay in clear there.
    A symbolic link or Windows reparse point is reported too, as is a file that is
