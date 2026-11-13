@@ -544,7 +544,7 @@ pass (a frequent schedule adds no fire during the repeated hour).
   [src: file: backend/src/workflows/quota_wait.rs:306-340#park]
   [src: file: backend/src/workflows/quota_wait.rs:342-382#wake_due_runs]
   [src: file: backend/src/workflows/quota_wait.rs:356-399#wake_one]
-  [src: file: backend/src/workflows/runner.rs:4820-4870#check_resume_preconditions]
+  [src: file: backend/src/workflows/runner.rs:4875-4925#check_resume_preconditions]
   [src: file: backend/src/workflows/runner.rs:216-261#WorkflowTimeoutClock]
   [src: file: backend/src/workflows/runner.rs:267-283#checkpoint]
   [src: file: backend/src/workflows/quota_wait.rs:392-435#reschedule_after_deadline]

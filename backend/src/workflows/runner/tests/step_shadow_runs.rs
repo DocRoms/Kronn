@@ -536,6 +536,103 @@ async fn a_stalled_shadow_is_stopped_by_its_time_budget_and_never_delays_the_mai
     assert!(rows[0].duration_ms.unwrap_or_default() >= 3000);
 }
 
+/// Waits until `prompts` holds a prompt: the model is mid-step.
+async fn until_asked(prompts: &Prompts) {
+    for _ in 0..400 {
+        if !prompts_of(prompts).is_empty() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the model was never asked");
+}
+
+/// A shadow that is answering in 2 s, on a model of its own.
+fn answering_late(fx: &mut Fixture) -> (StepShadow, Prompts) {
+    let mut slow = scripted("too late");
+    slow.delay = Some(std::time::Duration::from_secs(2));
+    let asked = fx.model_for(AgentType::Codex, slow);
+    let mut local = shadow_of("local");
+    local.agent = on(AgentType::Codex, "qwen");
+    (local, asked)
+}
+
+fn shadow_keys(state: &crate::AppState) -> Vec<String> {
+    state
+        .cancel_registry
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|key| key.starts_with("shadow:"))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn cancelling_the_run_tree_stops_the_shadows_that_outlive_the_runner_and_they_write_nothing_after(
+) {
+    let mut fx = fixture("proj-shadow-tree-cancel", scripted("quick")).await;
+    let (local, asked) = answering_late(&mut fx);
+    let wf = fx.workflow(vec![local]);
+    let run = fx.run(&wf, "run-tree-cancel").await;
+    // The main step is done and its runner gone; the shadow still answers.
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+    until_asked(&asked).await;
+    assert_eq!(shadow_keys(&fx.state).len(), 1, "the shadow is registered");
+
+    crate::workflows::cancellation::cancel_run_tree(
+        &fx.state,
+        "run-tree-cancel",
+        crate::workflows::cancellation::CancellationScope::RunTree,
+        "operator stop",
+    )
+    .await
+    .unwrap();
+
+    let rows = fx.settled("run-tree-cancel", 1).await;
+    assert_eq!(rows[0].status, ShadowStatus::Interrupted, "{:?}", rows[0]);
+    assert!(rows[0].output.is_empty());
+    // Well past the 2 s the model needed: the row has not been written again.
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    let later = fx.settled("run-tree-cancel", 1).await;
+    assert_eq!(later[0].status, ShadowStatus::Interrupted, "{:?}", later[0]);
+    assert!(later[0].output.is_empty(), "{:?}", later[0]);
+    assert_eq!(later[0].finished_at, rows[0].finished_at);
+    assert!(shadow_keys(&fx.state).is_empty(), "the registry is clean");
+}
+
+#[tokio::test]
+async fn cancelling_the_run_mid_step_stops_its_shadows_with_the_runs_token() {
+    let mut slow_main = scripted("main answer");
+    slow_main.delay = Some(std::time::Duration::from_secs(2));
+    let mut fx = fixture("proj-shadow-run-cancel", slow_main).await;
+    let (local, asked) = answering_late(&mut fx);
+    let wf = fx.workflow(vec![local]);
+    let state = fx.state.clone();
+    let canceller = async {
+        until_asked(&asked).await;
+        let token = state
+            .cancel_registry
+            .lock()
+            .unwrap()
+            .get("run-mid-cancel")
+            .cloned()
+            .expect("the run is registered");
+        token.cancel();
+    };
+    let (run, ()) = tokio::join!(fx.run(&wf, "run-mid-cancel"), canceller);
+    assert_eq!(run.status, RunStatus::Cancelled, "{:?}", run.step_results);
+
+    let rows = fx.settled("run-mid-cancel", 1).await;
+    assert_eq!(rows[0].status, ShadowStatus::Interrupted, "{:?}", rows[0]);
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+    let later = fx.settled("run-mid-cancel", 1).await;
+    assert_eq!(later[0].status, ShadowStatus::Interrupted, "{:?}", later[0]);
+    assert!(later[0].output.is_empty(), "{:?}", later[0]);
+    assert_eq!(later[0].finished_at, rows[0].finished_at);
+    assert!(shadow_keys(&fx.state).is_empty(), "the registry is clean");
+}
+
 #[tokio::test]
 async fn a_shadow_over_its_token_budget_is_marked_and_the_run_is_untouched() {
     // Every execution of the step answers with the same usage: the main one
