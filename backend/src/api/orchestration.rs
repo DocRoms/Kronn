@@ -9905,7 +9905,9 @@ pub(crate) fn resolve_launch_target(
         Ok(branch) => branch,
         Err(reason) => return Ok(Err(reason)),
     };
-    match worktree::integration_target_ownership(repo_path, &branch) {
+    match worktree::integration_target_ownership(repo_path, &branch, &|path| {
+        crate::db::discussion_workspaces::is_registered_managed_checkout(conn, path)
+    }) {
         Ok(Ok(())) => Ok(Ok(branch)),
         Ok(Err(refusal)) => Ok(Err(refusal.message())),
         Err(reason) => Ok(Err(reason)),
@@ -13106,7 +13108,11 @@ pub(crate) fn execution_detail(
             .ok()
             .flatten()?;
         let repo = scanner::resolve_host_path(&project.path);
-        Some(worktree::describe_integration_target(&repo, branch))
+        Some(worktree::describe_integration_target(
+            &repo,
+            branch,
+            &|path| crate::db::discussion_workspaces::is_registered_managed_checkout(conn, path),
+        ))
     });
     Ok(crate::models::TaskExecutionDetail {
         lineage,

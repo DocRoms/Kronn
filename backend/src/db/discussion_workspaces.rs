@@ -416,6 +416,24 @@ pub fn list_attached_managed_with_path(conn: &Connection) -> Result<Vec<Discussi
     Ok(rows)
 }
 
+/// Whether Kronn's workspace registry records `path` as one of its own
+/// checkouts (KT-1748): a managed discussion workspace, or the workspace of a
+/// workflow run. Only the exact path counts; an `external` workspace a user
+/// declared stays foreign. A database error answers `false`, never "managed".
+pub fn is_registered_managed_checkout(conn: &Connection, path: &std::path::Path) -> bool {
+    let path = path.to_string_lossy();
+    let known = |sql: &str| {
+        conn.query_row(sql, params![path.as_ref()], |_| Ok(()))
+            .optional()
+            .map(|row| row.is_some())
+            .unwrap_or(false)
+    };
+    known(
+        "SELECT 1 FROM discussion_workspaces WHERE ownership = 'managed' \
+         AND (canonical_path = ?1 OR workspace_path = ?1) LIMIT 1",
+    ) || known("SELECT 1 FROM workflow_runs WHERE workspace_path = ?1 LIMIT 1")
+}
+
 /// Retire a successfully removed managed checkout without erasing its lineage.
 ///
 /// `canonical_path` is cleared so the historical row cannot claim ownership of
@@ -648,6 +666,70 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(second.branch, "feature/two");
         assert_eq!(list_for_discussion(&conn, "d1").unwrap().len(), 1);
+    }
+
+    /// KT-1748 — the registry vouches for managed workspaces and workflow runs,
+    /// never for a workspace a user merely declared, nor for an unknown path.
+    #[test]
+    fn registry_vouches_for_managed_and_workflow_checkouts_only() {
+        let conn = fixture();
+        let path = std::path::Path::new;
+        upsert_external(
+            &conn,
+            "d1",
+            7,
+            None,
+            "p1",
+            "/elsewhere/declared",
+            "/elsewhere/declared",
+            "feature/one",
+            "abc",
+        )
+        .unwrap();
+        assert!(!is_registered_managed_checkout(
+            &conn,
+            path("/elsewhere/declared")
+        ));
+        assert!(!is_registered_managed_checkout(&conn, path("/unknown")));
+
+        let exec = seed_execution(&conn, "task-reg", 3);
+        upsert_managed(
+            &conn,
+            &exec,
+            "d1",
+            "d-parent",
+            Some("task-reg"),
+            "p1",
+            "/repo/.kronn/worktrees/lane",
+            "/repo/.kronn/worktrees/lane",
+            "kronn/task/KT-3-lane",
+            "head",
+            "base",
+        )
+        .unwrap();
+        assert!(is_registered_managed_checkout(
+            &conn,
+            path("/repo/.kronn/worktrees/lane")
+        ));
+
+        conn.execute(
+            "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, \
+             actions_json, safety_json, workspace_config_json, concurrency_limit, enabled, \
+             created_at, updated_at) VALUES ('w1', 'wf', NULL, '{}', '[]', '[]', '{}', NULL, \
+             NULL, 1, 'now', 'now')",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, workspace_path, started_at) \
+             VALUES ('r1', 'w1', '/wf/run/worktree', 'now')",
+            [],
+        )
+        .unwrap();
+        assert!(is_registered_managed_checkout(
+            &conn,
+            path("/wf/run/worktree")
+        ));
     }
 
     #[test]
