@@ -2091,7 +2091,7 @@ pub(crate) async fn run_partial_pipeline(
                 // A trusted ADR settles its sheets before the scope is read.
                 let trust = baseline.trust();
                 let docs = crate::core::docs_location::DocsRoot::of(&pp).dir(&pp);
-                if let Err(e) = crate::core::adr::settle_covered_sheets(&docs, trust) {
+                if let Err(e) = crate::core::adr::settle_covered_sheets(&pp, &docs, trust) {
                     tracing::warn!("ADR check after the refresh failed: {e}");
                 }
                 super::reconciliation::td_validation_scope(&pp, &idx).undecided

@@ -371,8 +371,15 @@ pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, 
             continue;
         }
         let path = project_path.join(&section.doc);
-        let before = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Cannot read {}: {e}", section.doc))?;
+        // Read and written through the rooted primitive (KT-1595): the docs
+        // folder may have been swapped for a link since the agent ran.
+        let before = crate::core::fs_guard::guarded_read(project_path, &path)
+            .map_err(|e| format!("Cannot read {}: {e}", section.doc))?
+            .ok_or_else(|| format!("Cannot read {}: no such file", section.doc))
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| format!("Cannot read {}: not valid UTF-8 text", section.doc))
+            })?;
         let moves = reanchors_to_apply(project_path, &before, &section.doc, &section.reanchor);
         if moves.is_empty() {
             continue;
@@ -381,7 +388,7 @@ pub(crate) fn apply_reanchors(project_path: &FsPath) -> Result<Vec<Reanchored>, 
         if count == 0 {
             continue;
         }
-        crate::core::mcp_scanner::atomic_write(&path, &after)?;
+        crate::core::fs_guard::guarded_replace(project_path, &path, after.as_bytes())?;
         citation_drift::record_reanchored(project_path, &section.doc, &before, &after, &moves)?;
         if let Err(e) = crate::core::doc_provenance::note_write(
             project_path,

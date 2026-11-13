@@ -90,7 +90,7 @@ this degrades and continues.
   recovery snapshots the same way). The copy has every such marker replaced by
   the placeholder (`scrub_secret_markers`), so no secret text survives under
   the docs root or the audit state.
-  [src: file: backend/src/api/audit/document_repair.rs:765#preserve_original]
+  [src: file: backend/src/api/audit/document_repair.rs:767#preserve_original]
 - **The step is done with a warning**, not failed and without a partial banner:
   `cli_success` stays true and `step_warning` lists every demoted reference
   (document, path part of the marker). The step emits `documentary_demoted` and its
@@ -148,7 +148,7 @@ this degrades and continues.
   bring it, so the blocker stays pre-existing. Only a step *handed* the blocker
   to fix is charged with it afterwards (`release`), and is then retried and
   redone like any other.
-  [src: file: backend/src/api/audit/document_repair.rs:178#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:247#release] [src: file: backend/src/api/audit/full.rs:3373#split_preexisting]
+  [src: file: backend/src/api/audit/document_repair.rs:178#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:247#release] [src: file: backend/src/api/audit/full.rs:3372#split_preexisting]
 - **The exemption is the run's, not the ledger's** (KT-1353). The ledger stores
   the content hash of each pre-existing blocker's document as the run last left
   it (`seal`, after every step and after the final gate's own write). The
@@ -188,7 +188,7 @@ this degrades and continues.
   plan queues its owning step (or lists it as manual when no step owns it)
   and the badge stays raised, even when relevance sees nothing wrong with its
   citations. Accepting the step or a successful run clears the banner.
-  [src: file: backend/src/api/audit/revalidate.rs:199-230#partial_docs] [src: file: backend/src/core/citation_drift.rs:525-545#partial_docs]
+  [src: file: backend/src/api/audit/revalidate.rs:199-230#partial_docs] [src: file: backend/src/core/citation_drift.rs:532-552#partial_docs]
 
 ## Leases and agents that could block a project
 
@@ -331,7 +331,7 @@ timeline and a stale document's viewer. It has no lifecycle of its own.
 Sources:
 
 - The plan and the re-anchoring. [src: file: backend/src/api/audit/revalidate.rs:90-156#plan] [src: file: backend/src/api/audit/revalidate.rs:363-403#apply_reanchors]
-- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/revalidate.rs:753-766#run_partial_pipeline]
+- The partial pipeline the agent part reuses. [src: file: backend/src/api/audit/revalidate.rs:769-782#run_partial_pipeline]
 
 ## Refreshing stale sections (KT-1207)
 
@@ -365,7 +365,7 @@ sections.
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:2054-2057#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
+  [src: file: backend/src/lib.rs:2054-2057#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:823-854#acknowledge_sections]
 
 ## The action offered in each state
 
@@ -446,7 +446,7 @@ Historical runs without fingerprints require a new audit before signoff.
 The explicit re-anchor action sends `deterministic_only: true`. It returns the
 remaining plan without launching an agent, even when other sections still need
 agent work; retry retains this mode. A later general fix is a separate choice.
-[src: file: backend/src/api/audit/revalidate.rs:745-747#deterministic_only]
+[src: file: backend/src/api/audit/revalidate.rs:752-754#deterministic_only]
 [src: file: frontend/src/components/RevalidateAudit.tsx:157-168#deterministicOnlyRef] [src: file: frontend/src/components/RevalidateAudit.tsx:216-223#deterministicOnlyRef]
 
 Local TD decisions and deterministic citation repairs advance this proof only

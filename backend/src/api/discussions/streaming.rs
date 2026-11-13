@@ -5226,6 +5226,7 @@ pub(super) async fn make_agent_stream_inner(
                         crate::api::audit::briefing::complete_reviewed_briefing(
                             &state,
                             pid.clone(),
+                            resolved,
                             file,
                         )
                         .await

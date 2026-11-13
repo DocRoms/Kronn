@@ -271,11 +271,11 @@ impl Blame {
                     .flatten(),
             })
             .collect();
-        let written = crate::core::audit_state::state_dir(project).and_then(|dir| {
-            let text = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
-            crate::core::mcp_scanner::atomic_write(&dir.join(BLAME_FILE), &text)
-                .map_err(|e| e.to_string())
-        });
+        let written = serde_json::to_string(&entries)
+            .map_err(|e| e.to_string())
+            .and_then(|text| {
+                crate::core::audit_state::write_state_file(project, BLAME_FILE, &text)
+            });
         if let Err(e) = written {
             tracing::warn!("Documentary blame of the run not recorded: {e}");
         }
@@ -698,8 +698,10 @@ pub(super) fn demote_last_attempt(
         writes.push((path, original, demotion.content));
     }
     let write = |path: &str, from: &str, to: &str| -> Result<(), String> {
-        crate::core::mcp_scanner::atomic_write(&project.join(path), to)
-            .map_err(|e| e.to_string())?;
+        // Rooted (KT-1595): the canonicalize check above is only a refusal,
+        // true at one instant; a folder swapped for a link after it must not
+        // take the write outside the project.
+        crate::core::fs_guard::guarded_replace(project, &project.join(path), to.as_bytes())?;
         if let Err(e) = crate::core::doc_provenance::note_write(
             project,
             path,
@@ -977,8 +979,11 @@ pub(super) fn check_attempt(
                 return Err(format!("repair target escapes project: {path}"));
             }
             preserve_original(project, content)?;
-            crate::core::mcp_scanner::atomic_write(&project.join(path), &corrected)
-                .map_err(|e| e.to_string())?;
+            crate::core::fs_guard::guarded_replace(
+                project,
+                &project.join(path),
+                corrected.as_bytes(),
+            )?;
             if let Err(e) = crate::core::doc_provenance::note_write(
                 project,
                 path,
@@ -2014,6 +2019,7 @@ mod tests {
             "# Tech debt (index)\n\n## Current list\n\n| ID | Problem | Area | Severity |\n|----|---------|------|----------|\n| TD-20261001-a | Finding A | Backend | High |\n",
         );
         let outcome = crate::core::td_index::resync(
+            root,
             &root.join("docs"),
             crate::core::adr::Trust::RunBaseline {
                 decisions: "",
@@ -2276,6 +2282,37 @@ mod tests {
         assert!(demoted.is_empty());
         let written = std::fs::read_to_string(dir.path().join("docs/tech-debt.md")).unwrap();
         assert_eq!(written, text);
+    }
+
+    /// KT-1595: the demotion runs right after an agent; a docs folder swapped
+    /// for a link between the walk and the write never takes the document out.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_demotion() {
+        use crate::core::fs_guard::swap_probe;
+        let text = "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] in prod.\n";
+        let (dir, blocking) = docroms(text);
+        let external = tempfile::tempdir().unwrap();
+        swap_probe::arm(&dir.path().join("docs"), external.path());
+        let result = demote_last_attempt(dir.path(), &blocking, None, &|| true);
+        assert!(swap_probe::fired(), "the swap really happened");
+        // The write goes to the folder it held (moved, still inside the
+        // project), never through the link that took its name.
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+        // The demotion really was written there: the document no longer
+        // carries the marker it started with.
+        let held = std::fs::read_to_string(dir.path().join("docs.moved/tech-debt.md")).unwrap();
+        assert_ne!(held, text, "the demotion landed in the folder it held");
+        assert!(
+            !held.contains("[src: file: config/packages/prod/monolog.yaml]"),
+            "{held}"
+        );
+        // The check after the write reads `docs/` through the link, where the
+        // blockers are no longer seen cleared, so no demotion is reported (the
+        // step fails as before); the rooted undo refuses the link too, so it
+        // cannot write the original back outside either.
+        let demoted = result.expect("a swapped folder is not an error of the demotion");
+        assert!(demoted.is_empty(), "{demoted:?}");
     }
 
     #[test]

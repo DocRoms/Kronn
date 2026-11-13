@@ -135,27 +135,22 @@ fn refuse_symlink_chain(project_path: &Path, path: &Path) -> Result<(), String> 
 /// uses compare-before-rename so a concurrent edit is never silently clobbered.
 fn sanitize_file(project_path: &Path, path: &Path, boundary: &str) -> Result<usize, String> {
     refuse_symlink_chain(project_path, path)?;
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
+    // The chain check above is only a message and a fast refusal. The read and
+    // the write below go through directory handles opened `O_NOFOLLOW` under
+    // the project root (KT-1595), so a folder swapped for a link after it, while
+    // the agent that just ran is still able to act, is never read nor written
+    // through.
+    let original = match crate::core::fs_guard::guarded_read(project_path, path) {
+        Ok(Some(bytes)) => bytes,
         // A target that doesn't exist yet (a step hasn't written it) is clean.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(format!("{}: cannot stat: {e}", path.display())),
+        Ok(None) => return Ok(0),
+        Err(e) => {
+            return Err(format!(
+                "{}: managed audit artifact cannot be read (a link or a non-regular file is refused): {e}",
+                path.display()
+            ))
+        }
     };
-    if meta.file_type().is_symlink() {
-        return Err(format!(
-            "{}: audit artifact is a symlink — refusing to follow (fail-closed)",
-            path.display()
-        ));
-    }
-    if !meta.is_file() {
-        return Err(format!(
-            "{}: managed audit artifact is not a regular file",
-            path.display()
-        ));
-    }
-
-    let original =
-        std::fs::read(path).map_err(|e| format!("{}: read failed: {e}", path.display()))?;
     let content = std::str::from_utf8(&original).map_err(|_| {
         format!(
             "{}: managed audit artifact is not valid UTF-8",
@@ -173,8 +168,11 @@ fn sanitize_file(project_path: &Path, path: &Path, boundary: &str) -> Result<usi
     let count = count.max(1);
 
     // Compare-before-rename: only replace if still byte-identical to what we read.
-    crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
-        path, &redacted, &original,
+    crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+        project_path,
+        path,
+        &redacted,
+        &original,
     )
     .map_err(|e| format!("{}: atomic write failed: {e}", path.display()))?;
 
@@ -478,5 +476,43 @@ mod tests {
         // not just masked-on-read).
         let again = sanitize_all(proj, &targets, "per-step").expect("ok");
         assert!(again.is_empty(), "re-sweep must be a no-op: {again:?}");
+    }
+
+    /// KT-1595: the sweep runs right after an agent; a folder swapped for a
+    /// link between the path walk and the write must never take the redacted
+    /// copy (nor a read) outside the project.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_redacted_copy() {
+        use crate::core::fs_guard::swap_probe;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let proj = tmp.path().join("repo");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let file = proj.join("docs/AGENTS.md");
+        write_mode(&file, "apikey=Ab3xZ9Qw7Lm2Ns5Pt8Rv\n", 0o644);
+        std::fs::write(external.join("AGENTS.md"), "OUTSIDE\n").unwrap();
+
+        swap_probe::arm(&proj.join("docs"), &external);
+        let result = sanitize_files(&proj, &[file], "test");
+        assert!(swap_probe::fired(), "the swap really happened");
+
+        assert_eq!(
+            std::fs::read_to_string(external.join("AGENTS.md")).unwrap(),
+            "OUTSIDE\n",
+            "the outside file is never rewritten"
+        );
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        // Either the write was refused (fail-closed, the caller aborts the
+        // run) or it landed in the folder that was moved, inside the project.
+        match result {
+            Err(_) => {}
+            Ok(report) => {
+                assert_eq!(report.len(), 1, "{report:?}");
+                assert!(!std::fs::read_to_string(proj.join("docs.moved/AGENTS.md"))
+                    .unwrap()
+                    .contains("Ab3xZ9Qw7Lm2Ns5Pt8Rv"));
+            }
+        }
     }
 }

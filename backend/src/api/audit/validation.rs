@@ -626,12 +626,15 @@ pub fn settle_unaddressed_signals(
         return None;
     }
     let index = DocsRoot::of(project_path).file(project_path, "inconsistencies-tech-debt.md");
-    let content = std::fs::read_to_string(&index).ok()?;
+    // Read and written through the rooted primitive: this runs right after the
+    // agent, which may have left a link where the index or its folder was.
+    let content =
+        String::from_utf8(crate::core::fs_guard::guarded_read(project_path, &index).ok()??).ok()?;
     let kept = crate::core::audit_detectors::without_unaddressed_section(&content);
     let section = crate::core::audit_detectors::render_unaddressed_section(&undisposed);
     let written = format!("{}\n\n{section}", kept.trim_end());
     if written != content {
-        crate::core::mcp_scanner::atomic_write(&index, &written).ok()?;
+        crate::core::fs_guard::guarded_replace(project_path, &index, written.as_bytes()).ok()?;
     }
     // The listing must actually dispose of them, or the failure stands.
     unaddressed_in_output(project_path, signals, true)
@@ -1040,13 +1043,16 @@ pub(crate) fn repair_coverage_rows(project_path: &Path, target_file: &str) -> bo
         return false;
     }
     let path = project_path.join(target_file);
-    let Ok(content) = std::fs::read_to_string(&path) else {
+    let Ok(Some(bytes)) = crate::core::fs_guard::guarded_read(project_path, &path) else {
+        return false;
+    };
+    let Ok(content) = String::from_utf8(bytes) else {
         return false;
     };
     let Some(repaired) = repaired_coverage_matrix(&content) else {
         return false;
     };
-    match crate::core::mcp_scanner::atomic_write(&path, &repaired) {
+    match crate::core::fs_guard::guarded_replace(project_path, &path, repaired.as_bytes()) {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(target_file, %error, "could not repair the coverage matrix rows");
@@ -1763,6 +1769,25 @@ mod tests {
         assert!(warning.is_none_or(|w| !w.reason.contains("coverage")));
         assert!(!repair_coverage_rows(&project, target));
         assert!(!repair_coverage_rows(&project, "docs/decisions.md"));
+    }
+
+    /// KT-1595 — the repair runs right after the agent; an index folder swapped
+    /// for a link between the walk and the write never receives the rewrite.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_repaired_index() {
+        use crate::core::fs_guard::swap_probe;
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        std::fs::write(project.join(target), node_service_matrix()).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        swap_probe::arm(&project.join("docs"), external.path());
+        let repaired = repair_coverage_rows(&project, target);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(!repaired, "a write refused is not reported as done");
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
     }
 
     /// KT-1295 — the retry feedback carries the accepted forms.

@@ -126,7 +126,8 @@ pub(crate) mod swap_probe {
 
     #[derive(Default)]
     struct Probe {
-        armed: HashMap<PathBuf, PathBuf>,
+        /// `(external, guarded calls still to let through)` per folder.
+        armed: HashMap<PathBuf, (PathBuf, usize)>,
         fired: HashSet<PathBuf>,
     }
 
@@ -145,11 +146,18 @@ pub(crate) mod swap_probe {
     /// The next guarded call whose parent folder is `dir` finds it renamed to
     /// `<dir>.moved` and replaced by a symlink to `external`.
     pub(crate) fn arm(dir: &Path, external: &Path) {
+        arm_after(dir, external, 0);
+    }
+
+    /// [`arm`], but the swap waits for the guarded call after `skip` others
+    /// under `dir`: for a caller that reads a file (a guarded call) before it
+    /// writes it, so the swap lands on the write.
+    pub(crate) fn arm_after(dir: &Path, external: &Path, skip: usize) {
         with(|probe| {
             probe.fired.remove(dir);
             probe
                 .armed
-                .insert(dir.to_path_buf(), external.to_path_buf());
+                .insert(dir.to_path_buf(), (external.to_path_buf(), skip));
         });
         MINE.with(|mine| *mine.borrow_mut() = Some(dir.to_path_buf()));
     }
@@ -167,7 +175,14 @@ pub(crate) mod swap_probe {
 
     pub(super) fn after_walk(parent: Option<&Path>) {
         let Some(parent) = parent else { return };
-        let external = with(|probe| probe.armed.remove(parent));
+        let external = with(|probe| match probe.armed.get_mut(parent) {
+            Some((_, skip)) if *skip > 0 => {
+                *skip -= 1;
+                None
+            }
+            Some(_) => probe.armed.remove(parent).map(|(external, _)| external),
+            None => None,
+        });
         if let Some(external) = external {
             let mut moved = parent.to_path_buf().into_os_string();
             moved.push(".moved");
