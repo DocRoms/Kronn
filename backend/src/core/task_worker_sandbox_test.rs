@@ -142,17 +142,29 @@ fn the_writable_set_is_the_lanes_roots_and_its_temp_dir_and_no_global_temp() {
 fn the_profile_never_opens_the_per_user_darwin_temp_dir() {
     let layout = layout();
     let policy = policy_of(&layout);
-    let profile = seatbelt_profile(&policy.writable());
+    let writable = policy.writable();
+    let profile = seatbelt_profile(&writable);
+    // The fixture's layout lives in `tempfile::tempdir()`, i.e. under
+    // `/private/var/folders` on a normal macOS host: a path is "outside the
+    // lane" only when it is not below one of the policy's own writable roots.
     let outside_lane = |path: &str| {
         (path.starts_with("/var/folders") || path.starts_with("/private/var/folders"))
-            && !path.contains("task-kt-1255-sandbox")
+            && !writable
+                .iter()
+                .any(|root| Path::new(path).starts_with(root))
     };
     for line in profile.lines().filter(|line| line.contains("(subpath")) {
         let quoted = line.split('"').nth(1).unwrap_or("");
         assert!(!outside_lane(quoted), "{line}");
     }
+    // The host's own temp dir (the real `DARWIN_USER_TEMP_DIR` when TMPDIR is
+    // unset) is never granted, unless it is itself under a lane root.
+    let host_temp = real_path(&std::env::temp_dir());
+    if !writable.iter().any(|root| host_temp.starts_with(root)) {
+        let grant = format!("(subpath \"{}\")", host_temp.display());
+        assert!(!profile.contains(&grant), "{grant} in {profile}");
+    }
     // The lane's own temp dir stays the only scratch: TMPDIR points into a root.
-    let writable = policy.writable();
     let tmp = real_path(&policy.temp_dir);
     assert!(writable.iter().any(|root| tmp.starts_with(root)));
 }

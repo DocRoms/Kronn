@@ -455,6 +455,13 @@ above moved from the worker's turn into the warm-up, a worker whose first
 `cargo test --lib <filter>` then takes seconds, and a `.kronn-warm.json` in the
 target.
 
+The principal confirmed the cause and the fix outside the worker sandbox:
+`sandbox-exec` with a worker-like profile and `cargo build --offline --locked -p
+aws-lc-sys` on a fresh target fails without `CFLAGS` (`clang: error: unable to
+make temporary file: Operation not permitted`, exit 101) and succeeds with
+`CFLAGS=-save-temps=obj` (exit 0, 20.81 s). The end-to-end measurement below is
+a post-integration live check, run once the restarted Kronn carries this change.
+
 **Not measured here:** a fresh lane's warm-up *under the Seatbelt profile* ending
 `succeeded` with the marker written, and the resulting lane start → first test
 result. A worker cannot run the profile (see above) and the lane of this task was
