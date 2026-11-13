@@ -28,7 +28,7 @@ fn faithful_condense() -> String {
         serde_json::json!({"points": [
             {"id": "p1", "summary": "SQL injection", "text": "SQL injection in login.rs:12",
              "found_by": ["main", "shadow:local"], "verdict": "kept", "verified": true,
-             "evidence": "login.rs:12 concatenates the id"},
+             "evidence": "login.rs:12"},
             {"id": "p2", "summary": "cache leaks tenants",
              "text": "the cache layer leaks tenants", "found_by": ["shadow:local"],
              "verdict": "dropped_unverified", "verified": false,
@@ -36,7 +36,7 @@ fn faithful_condense() -> String {
             {"id": "p3", "summary": "Surrogate-Capability",
              "text": "Surrogate-Capability poisoning in edge.rs:7",
              "found_by": ["shadow:other"], "verdict": "kept", "verified": true,
-             "evidence": "edge.rs:7 trusts the header"}
+             "evidence": "edge.rs:7"}
         ]})
     )
 }
@@ -70,7 +70,15 @@ async fn merged_fixture(project: &str, condense_answer: String) -> Fixture {
     ];
     let mut fx = fixture(project, main).await;
     fx.model_for(AgentType::Codex, scripted(LOCAL_REVIEW));
+    cite_files(&fx);
     fx
+}
+
+/// The files the condense pass cites: a citation counts only if it opens.
+fn cite_files(fx: &Fixture) {
+    for (name, lines) in [("login.rs", 30), ("edge.rs", 20)] {
+        std::fs::write(fx.work_dir.join(name), "fn line() {}\n".repeat(lines)).unwrap();
+    }
 }
 
 /// `local`: another agent; `other`: the main agent asked another way.
@@ -225,6 +233,82 @@ async fn a_shadow_only_point_kept_without_verification_is_refused() {
     assert_eq!(report.status, MergeStatus::Rejected, "{report:?}");
 }
 
+/// A condense pass whose provenance is `provenance` (raw JSON) over the merged review.
+fn condense_with(provenance: &str) -> String {
+    format!("{PROVENANCE_BEGIN}\n{provenance}\n{PROVENANCE_END}\n{MERGED_REVIEW}")
+}
+
+#[tokio::test]
+async fn a_fabricated_verdict_is_refused_and_the_principals_output_stands() {
+    // KT-1731: no point, an empty claim, an unsupported point, or a verified one
+    // on a citation that does not exist each leave the main review as the step's
+    // output and say why.
+    let cases = [
+        ("empty-list", r#"{"points":[]}"#, "listed no point"),
+        ("empty-object", "{}", "listed no point"),
+        (
+            "fabricated",
+            r#"{"points":[{"id":"p1","summary":"x","found_by":["main","shadow:local"],"verdict":"kept","verified":true,"evidence":"nonexistent.rs:999999"}]}"#,
+            "does not resolve",
+        ),
+        (
+            "unsupported",
+            r#"{"points":[{"id":"p1","summary":"x","found_by":["main"],"verdict":"kept"}]}"#,
+            "gives no evidence",
+        ),
+    ];
+    for (name, provenance, why) in cases {
+        let project = format!("proj-merge-fabricated-{name}");
+        let run_id = format!("run-merge-fabricated-{name}");
+        let fx = merged_fixture(&project, condense_with(provenance)).await;
+        let wf = merged_workflow(&fx, Some(merge()));
+        let run = fx.run(&wf, &run_id).await;
+        assert_eq!(
+            run.status,
+            RunStatus::Success,
+            "{name}: {:?}",
+            run.step_results
+        );
+
+        // The principal's output is the step's output; the next step never sees the merge.
+        assert_eq!(result_of(&run, "review").output, MAIN_REVIEW, "{name}");
+        assert!(
+            !summary_prompt(&fx).contains("Surrogate-Capability"),
+            "{name}: the refused result reached the next step"
+        );
+
+        // The step says why, and the refused result is not kept as a merged one.
+        let report = comparison(&fx, &run_id).await.merge.unwrap();
+        assert_eq!(report.status, MergeStatus::Rejected, "{name}: {report:?}");
+        let note = report.note.as_deref().unwrap();
+        assert!(note.contains(why), "{name}: {note}");
+        assert!(
+            note.contains("main execution's output stands"),
+            "{name}: {note}"
+        );
+        assert!(report.merged_output.is_empty(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn an_agreement_with_no_point_is_a_valid_merge_when_stated() {
+    let provenance = r#"{"points":[],"agreement":"every execution reports nothing to fix"}"#;
+    let fx = merged_fixture("proj-merge-agreed", condense_with(provenance)).await;
+    let wf = merged_workflow(&fx, Some(merge()));
+    let run = fx.run(&wf, "run-merge-agreed").await;
+    assert_eq!(result_of(&run, "review").output, MERGED_REVIEW);
+    let report = comparison(&fx, "run-merge-agreed").await.merge.unwrap();
+    assert_eq!(report.status, MergeStatus::Merged, "{report:?}");
+    assert!(
+        report
+            .note
+            .as_deref()
+            .unwrap()
+            .contains("every execution reports nothing to fix"),
+        "{report:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_dead_shadow_never_hangs_the_merge_or_the_run() {
     let mut fx = merged_fixture("proj-merge-dead", faithful_condense()).await;
@@ -367,6 +451,7 @@ async fn the_condense_passes_tokens_are_reported_and_counted_in_the_step() {
     main.usage = Some((700, 300));
     let mut fx = fixture("proj-merge-tokens", main).await;
     fx.model_for(AgentType::Codex, scripted(LOCAL_REVIEW));
+    cite_files(&fx);
     let wf = merged_workflow(&fx, Some(merge()));
     let run = fx.run(&wf, "run-merge-tokens").await;
     let review = comparison(&fx, "run-merge-tokens").await;

@@ -14,6 +14,7 @@
 //! own output stays the step's output, and the report says why. A point the
 //! condense pass could not verify is never published.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,7 @@ use crate::AppState;
 
 use super::shadow::{ShadowInput, ShadowStatus};
 use super::steps::StepOutcome;
+use super::template::TemplateContext;
 
 /// Opens the provenance block the condense pass writes before its result.
 pub const PROVENANCE_BEGIN: &str = "<<<KRONN_MERGE_PROVENANCE";
@@ -310,12 +312,14 @@ PROVENANCE
 Before the result, write exactly one block, in this form, listing EVERY point of every execution:
 
 <<<KRONN_MERGE_PROVENANCE
-{"points": [{"id": "p1", "summary": "one line", "text": "the point in the words of the execution that raised it", "found_by": ["main", "shadow:<id>"], "verdict": "kept", "verified": true, "evidence": "path:line or what you read", "reason": ""}]}
+{"points": [{"id": "p1", "summary": "one line", "text": "the point in the words of the execution that raised it", "found_by": ["main", "shadow:<id>"], "verdict": "kept", "verified": true, "evidence": "path:line", "reason": ""}], "agreement": ""}
 KRONN_MERGE_PROVENANCE>>>
 
 - `verdict` is `kept`, `duplicate` (with `duplicate_of`, the id of the kept point) or `dropped_unverified` (with `reason`).
 - `found_by` uses only the execution names given above.
-- A `kept` point that no `main` execution raised needs `"verified": true` and a non-empty `evidence`.
+- Every `kept` point needs an `evidence` that can be resolved: a `path:line` that exists in your working directory (relative to it, the line inside the file), or a step-output reference (`steps.<step>.output`). A point of the `main` execution may also cite an execution name (`main`). An `evidence` that points to nothing, or prose alone, gets the merge refused.
+- A `kept` point that no `main` execution raised needs `"verified": true` and an `evidence` of that kind. Never write `"verified": true` for an evidence you did not open.
+- The list of points is never empty by omission. When no point is kept (the executions agree there is nothing to report, or every point was dropped), say so in `agreement`, in one sentence; otherwise leave it empty.
 - `text` of a dropped point must not appear in your result.
 Then write the result, and nothing else after it."#;
 
@@ -381,6 +385,11 @@ fn condense_step(step: &WorkflowStep, merge: &ShadowMerge) -> WorkflowStep {
 struct Provenance {
     #[serde(default)]
     points: Vec<MergePoint>,
+    /// Stated when no point is kept: the executions agree there is nothing to
+    /// report, or every point was dropped. Without it, a list with no kept
+    /// point is not a verdict.
+    #[serde(default)]
+    agreement: Option<String>,
 }
 
 fn normalized(text: &str) -> String {
@@ -445,18 +454,147 @@ fn contributions(tokens: &[String], points: &[MergePoint]) -> Vec<ExecutionContr
         .collect()
 }
 
+/// Where a citation is looked up: the working tree the condense pass read, the
+/// step outputs of the run, and the executions it was given.
+struct EvidenceScope<'a> {
+    work_dir: &'a Path,
+    ctx: &'a TemplateContext,
+    tokens: &'a [String],
+}
+
+/// What the resolvable citations of one evidence are.
+#[derive(Default)]
+struct Citations {
+    /// A `path:line` that exists, or a step output that exists: something a
+    /// reader can open.
+    grounded: usize,
+    /// An execution of the merge named as the source (`main`).
+    executions: usize,
+}
+
+fn citation_words(evidence: &str) -> impl Iterator<Item = &str> {
+    evidence
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | ';'))
+        .map(|word| {
+            word.trim_start_matches(['`', '"', '\'', '(', '[', '<', '{'])
+                .trim_end_matches(['`', '"', '\'', ')', ']', '>', '}', '.', ':'])
+        })
+        .filter(|word| !word.is_empty())
+}
+
+/// `path:line`, `path:line-line` or `path:line:column` (and a `#symbol` tail).
+fn file_citation(word: &str) -> Option<(&str, usize, Option<usize>)> {
+    let word = word.split('#').next().unwrap_or(word);
+    for (colon, _) in word.match_indices(':') {
+        let (path, rest) = (&word[..colon], &word[colon + 1..]);
+        if path.is_empty() {
+            continue;
+        }
+        let (first, tail) = match rest.find(['-', ':']) {
+            Some(at) => (&rest[..at], Some((rest.as_bytes()[at], &rest[at + 1..]))),
+            None => (rest, None),
+        };
+        let Ok(line) = first.parse::<usize>() else {
+            continue;
+        };
+        match tail {
+            None => return Some((path, line, None)),
+            Some((b'-', end)) => {
+                if let Ok(end) = end.parse::<usize>() {
+                    return Some((path, line, Some(end)));
+                }
+            }
+            Some((_, column)) => {
+                if column.parse::<usize>().is_ok() {
+                    return Some((path, line, None));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn check_file_line(
+    work_dir: &Path,
+    path: &str,
+    line: usize,
+    end: Option<usize>,
+) -> Result<(), String> {
+    let root = work_dir
+        .canonicalize()
+        .map_err(|_| "the working directory cannot be read".to_string())?;
+    let file = root
+        .join(path)
+        .canonicalize()
+        .map_err(|_| format!("`{path}` does not exist"))?;
+    if !file.starts_with(&root) {
+        return Err(format!("`{path}` is outside the working directory"));
+    }
+    if !file.is_file() {
+        return Err(format!("`{path}` is not a file"));
+    }
+    let bytes = std::fs::read(&file).map_err(|_| format!("`{path}` cannot be read"))?;
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    let lines = newlines + usize::from(bytes.last().is_some_and(|byte| *byte != b'\n'));
+    let last = end.unwrap_or(line);
+    if line == 0 || last < line || last > lines {
+        return Err(format!(
+            "`{path}:{line}` is not inside the file ({lines} lines)"
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves what an evidence cites. Every `path:line` and every step-output
+/// reference it carries must exist; prose around them is not checked, and prose
+/// alone resolves to nothing.
+fn resolve_evidence(evidence: &str, scope: &EvidenceScope) -> Result<Citations, String> {
+    let mut found = Citations::default();
+    for word in citation_words(evidence) {
+        if scope.tokens.iter().any(|token| token == word) {
+            found.executions += 1;
+        } else if word.starts_with("steps.") || word.starts_with("previous_step.") {
+            let present = scope.ctx.resolve_value(word).is_some_and(|value| {
+                !value.is_null() && value.as_str().is_none_or(|text| !text.trim().is_empty())
+            });
+            if !present {
+                return Err(format!("the step output `{word}` does not exist"));
+            }
+            found.grounded += 1;
+        } else if let Some((path, line, end)) = file_citation(word) {
+            check_file_line(scope.work_dir, path, line, end)?;
+            found.grounded += 1;
+        }
+    }
+    if found.grounded + found.executions == 0 {
+        return Err(
+            "it cites no `path:line` and no step output (prose alone proves nothing)".to_string(),
+        );
+    }
+    Ok(found)
+}
+
+/// The checked answer: the points, the result and the agreement stated when no
+/// point is kept; or the points read and why the answer is refused.
+type Checked = Result<(Vec<MergePoint>, String, Option<String>), (Vec<MergePoint>, String)>;
+
 /// What the condense pass answered, held to its contract: the provenance names
-/// only the executions it was given, a point that only a shadow raised is kept
-/// only with its verification, and no dropped point appears in the result.
-/// A breach returns the points read (for the report) and the reason.
-fn check_answer(
-    output: &str,
-    tokens: &[String],
-) -> Result<(Vec<MergePoint>, String), (Vec<MergePoint>, String)> {
+/// only the executions it was given; every kept point cites an evidence that
+/// resolves (a `path:line` that exists, a step output that exists); a point
+/// only a shadow raised, and any point marked verified, rests on such an
+/// evidence found in the tree or the run, never on an execution's own word; a
+/// verdict that keeps no point states why (`agreement`); and no dropped point
+/// appears in the result. A breach returns the points read (for the report)
+/// and the reason. On success, the agreement stated when no point is kept.
+fn check_answer(output: &str, tokens: &[String], scope: &EvidenceScope) -> Checked {
     let (provenance, merged) = match split_answer(output) {
         Ok(parts) => parts,
         Err(reason) => return Err((Vec::new(), reason)),
     };
+    let agreement = provenance
+        .agreement
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
     let mut points = provenance.points;
     for point in &mut points {
         point.found_by.retain(|token| tokens.contains(token));
@@ -471,22 +609,60 @@ fn check_answer(
     }
     let merged_text = normalized(&merged);
     for point in &points {
-        match point.verdict {
-            PointVerdict::Kept => {
-                // What is published is traced to the executions that raised it.
-                if point.found_by.is_empty() {
+        // What is published is traced to the executions that raised it.
+        if point.verdict == PointVerdict::Kept && point.found_by.is_empty() {
+            return Err((
+                points.clone(),
+                format!("point `{}` names no execution that found it", point.id),
+            ));
+        }
+        let evidence = point.evidence.as_deref().unwrap_or("").trim();
+        // Verified is a claim about the evidence: it holds only if it opens.
+        let resolved = if evidence.is_empty() {
+            Err("it gives no evidence".to_string())
+        } else {
+            resolve_evidence(evidence, scope)
+        };
+        if point.verified {
+            match &resolved {
+                Ok(found) if found.grounded > 0 => {}
+                Ok(_) => {
                     return Err((
                         points.clone(),
-                        format!("point `{}` names no execution that found it", point.id),
-                    ));
+                        format!(
+                            "point `{}` is marked verified but its evidence cites only an execution, not the code or a step output",
+                            point.id
+                        ),
+                    ))
                 }
+                Err(why) => {
+                    return Err((
+                        points.clone(),
+                        format!(
+                            "point `{}` is marked verified but its evidence does not resolve: {why}",
+                            point.id
+                        ),
+                    ))
+                }
+            }
+        }
+        match point.verdict {
+            PointVerdict::Kept => {
                 let by_main = point.found_by.iter().any(|token| token == MAIN_TOKEN);
-                let evidence = point.evidence.as_deref().unwrap_or("").trim();
                 if !by_main && (!point.verified || evidence.is_empty()) {
                     return Err((
                         points.clone(),
                         format!(
                             "point `{}` comes only from a shadow and is kept without a verification",
+                            point.id
+                        ),
+                    ));
+                }
+                if let Err(why) = resolved {
+                    return Err((
+                        points.clone(),
+                        format!(
+                            "point `{}` is kept on an evidence that does not resolve: {why}",
                             point.id
                         ),
                     ));
@@ -507,7 +683,27 @@ fn check_answer(
             PointVerdict::Duplicate => {}
         }
     }
-    Ok((points, merged))
+    let kept = points
+        .iter()
+        .any(|point| point.verdict == PointVerdict::Kept);
+    if kept {
+        return Ok((points, merged, None));
+    }
+    // Nothing is kept: a result with no point behind it is a claim, unless the
+    // condense pass states that the executions agree there is nothing to report.
+    match agreement {
+        Some(statement) => Ok((points, merged, Some(statement))),
+        None if points.is_empty() => Err((
+            points,
+            "the condense pass listed no point and did not state that the executions agree"
+                .to_string(),
+        )),
+        None => Err((
+            points,
+            "the condense pass kept no point and did not state that the executions agree"
+                .to_string(),
+        )),
+    }
 }
 
 // ─── Running the merge ──────────────────────────────────────────────────────
@@ -725,7 +921,12 @@ pub async fn merge_step(
         return;
     }
 
-    match check_answer(&condensed.result.output, &tokens) {
+    let scope = EvidenceScope {
+        work_dir: Path::new(&input.work_dir),
+        ctx: &input.ctx,
+        tokens: &tokens,
+    };
+    match check_answer(&condensed.result.output, &tokens, &scope) {
         Err((points, reason)) => {
             report.contributions = contributions(&tokens, &points);
             report.points = points;
@@ -736,7 +937,7 @@ pub async fn merge_step(
             outcome.result.tokens_used =
                 Some(outcome.result.tokens_used.unwrap_or(0) + spent_tokens);
         }
-        Ok((points, merged)) => {
+        Ok((points, merged, agreement)) => {
             // The main execution's own output and metrics stay readable beside
             // the merged result: its comparison row keeps them.
             let (main_tokens, main_cost, main_model) = super::shadow::spent(&outcome.result);
@@ -763,6 +964,9 @@ pub async fn merge_step(
             report.points = points;
             report.status = MergeStatus::Merged;
             report.merged_output = merged.clone();
+            report.note = agreement.map(|statement| {
+                format!("No point is kept; the condense pass states that the executions agree: {statement}")
+            });
             // The merged result is what the rest of the workflow reads, and the
             // signals of the step are read from it.
             outcome.result.output = merged;
@@ -800,21 +1004,52 @@ mod tests {
         format!("{PROVENANCE_BEGIN}\n{{\"points\": {points}}}\n{PROVENANCE_END}\n{result}")
     }
 
+    /// A working tree with `src/a.rs` (20 lines) and a run that has a step `fetch`.
+    struct Env {
+        dir: tempfile::TempDir,
+        ctx: TemplateContext,
+        tokens: Vec<String>,
+    }
+
+    fn env() -> Env {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "line\n".repeat(20)).unwrap();
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("fetch", "the fetched rows");
+        Env {
+            dir,
+            ctx,
+            tokens: tokens(),
+        }
+    }
+
+    impl Env {
+        fn check(&self, output: &str) -> Checked {
+            let scope = EvidenceScope {
+                work_dir: self.dir.path(),
+                ctx: &self.ctx,
+                tokens: &self.tokens,
+            };
+            check_answer(output, &self.tokens, &scope)
+        }
+    }
+
+    const GOOD_POINT: &str = r#"[{"id":"p1","summary":"s","found_by":["main"],"verdict":"kept","verified":true,"evidence":"src/a.rs:10"}]"#;
+
     #[test]
     fn the_provenance_block_is_split_from_the_result() {
-        let text = answer(
-            r#"[{"id":"p1","summary":"s","found_by":["main"],"verdict":"kept"}]"#,
-            "## Review\nOne finding.",
-        );
-        let (points, merged) = check_answer(&text, &tokens()).expect("a valid answer");
+        let text = answer(GOOD_POINT, "## Review\nOne finding.");
+        let (points, merged, agreement) = env().check(&text).expect("a valid answer");
         assert_eq!(points.len(), 1);
         assert_eq!(merged, "## Review\nOne finding.");
         assert!(!merged.contains("KRONN_MERGE"));
+        assert!(agreement.is_none());
     }
 
     #[test]
     fn an_answer_without_provenance_is_refused() {
-        let (points, reason) = check_answer("## Review only", &tokens()).unwrap_err();
+        let (points, reason) = env().check("## Review only").unwrap_err();
         assert!(points.is_empty());
         assert!(reason.contains("no provenance block"), "{reason}");
     }
@@ -825,13 +1060,13 @@ mod tests {
             r#"[{"id":"p1","summary":"s","found_by":["shadow:qwen"],"verdict":"kept","verified":false}]"#,
             "Invented bug.",
         );
-        let (_, reason) = check_answer(&unverified, &tokens()).unwrap_err();
+        let (_, reason) = env().check(&unverified).unwrap_err();
         assert!(reason.contains("without a verification"), "{reason}");
         let verified = answer(
             r#"[{"id":"p1","summary":"s","found_by":["shadow:qwen"],"verdict":"kept","verified":true,"evidence":"src/a.rs:10"}]"#,
             "Real bug.",
         );
-        assert!(check_answer(&verified, &tokens()).is_ok());
+        assert!(env().check(&verified).is_ok());
     }
 
     #[test]
@@ -840,7 +1075,7 @@ mod tests {
             r#"[{"id":"p1","summary":"s","text":"The cache key ignores the tenant","found_by":["shadow:qwen"],"verdict":"dropped_unverified","reason":"no such code"}]"#,
             "- the cache key   ignores the TENANT\n",
         );
-        let (points, reason) = check_answer(&leaked, &tokens()).unwrap_err();
+        let (points, reason) = env().check(&leaked).unwrap_err();
         assert_eq!(points.len(), 1);
         assert!(reason.contains("appears in the result"), "{reason}");
     }
@@ -848,11 +1083,136 @@ mod tests {
     #[test]
     fn unknown_executions_are_ignored_and_a_point_left_with_none_is_refused() {
         let text = answer(
-            r#"[{"id":"p1","summary":"s","found_by":["shadow:ghost"],"verdict":"kept","verified":true,"evidence":"x"}]"#,
+            r#"[{"id":"p1","summary":"s","found_by":["shadow:ghost"],"verdict":"kept","verified":true,"evidence":"src/a.rs:1"}]"#,
             "Result.",
         );
-        let (_, reason) = check_answer(&text, &tokens()).unwrap_err();
+        let (_, reason) = env().check(&text).unwrap_err();
         assert!(reason.contains("names no execution"), "{reason}");
+    }
+
+    // ─── KT-1731 — a verdict that proves nothing is not a merge ──────────────
+
+    #[test]
+    fn an_empty_list_of_points_is_refused_unless_the_agreement_is_stated() {
+        let env = env();
+        for text in [
+            answer("[]", "Everything is fine."),
+            format!("{PROVENANCE_BEGIN}\n{{}}\n{PROVENANCE_END}\nEverything is fine."),
+            format!(
+                "{PROVENANCE_BEGIN}\n{{\"points\":[],\"agreement\":\"  \"}}\n{PROVENANCE_END}\nEverything is fine."
+            ),
+        ] {
+            let (points, reason) = env.check(&text).unwrap_err();
+            assert!(points.is_empty());
+            assert!(reason.contains("listed no point"), "{reason}");
+        }
+        let stated = format!(
+            "{PROVENANCE_BEGIN}\n{{\"points\":[],\"agreement\":\"All three executions report nothing to fix\"}}\n{PROVENANCE_END}\nNothing to fix."
+        );
+        let (points, merged, agreement) = env.check(&stated).expect("a stated agreement");
+        assert!(points.is_empty());
+        assert_eq!(merged, "Nothing to fix.");
+        assert_eq!(
+            agreement.as_deref(),
+            Some("All three executions report nothing to fix")
+        );
+    }
+
+    #[test]
+    fn a_result_with_no_kept_point_needs_the_agreement_too() {
+        let dropped = r#"[{"id":"p1","summary":"s","text":"The cache key ignores the tenant","found_by":["shadow:qwen"],"verdict":"dropped_unverified","reason":"no such code"}]"#;
+        let (points, reason) = env()
+            .check(&answer(dropped, "Whatever the pass claims."))
+            .unwrap_err();
+        assert_eq!(points.len(), 1, "the points read stay in the report");
+        assert!(reason.contains("kept no point"), "{reason}");
+        let stated = format!(
+            "{PROVENANCE_BEGIN}\n{{\"points\":{dropped},\"agreement\":\"The only shadow point was invented; main reports nothing\"}}\n{PROVENANCE_END}\nNothing to fix."
+        );
+        assert!(env().check(&stated).is_ok());
+    }
+
+    #[test]
+    fn a_kept_point_without_a_resolvable_evidence_is_refused() {
+        let env = env();
+        for (evidence, why) in [
+            (r#","evidence":"""#, "gives no evidence"),
+            ("", "gives no evidence"),
+            (r#","evidence":"I read the code""#, "prose alone"),
+            (r#","evidence":"nonexistent.rs:999999""#, "does not exist"),
+            (
+                r#","evidence":"src/a.rs:999999""#,
+                "not inside the file (20 lines)",
+            ),
+            (r#","evidence":"src/a.rs:0""#, "not inside the file"),
+            (r#","evidence":"src/a.rs:15-30""#, "not inside the file"),
+            (r#","evidence":"src/a.rs:12-3""#, "not inside the file"),
+            (r#","evidence":"../../etc/hosts:1""#, "does not exist"),
+            (r#","evidence":"src:1""#, "not a file"),
+            (r#","evidence":"steps.ghost.output""#, "does not exist"),
+            (
+                r#","evidence":"src/a.rs:10 and nonexistent.rs:1""#,
+                "does not exist",
+            ),
+        ] {
+            let points = format!(
+                r#"[{{"id":"p1","summary":"s","found_by":["main"],"verdict":"kept"{evidence}}}]"#
+            );
+            let (read, reason) = env.check(&answer(&points, "Result.")).unwrap_err();
+            assert_eq!(read.len(), 1, "{evidence}");
+            assert!(reason.contains(why), "{evidence}: {reason}");
+        }
+    }
+
+    #[test]
+    fn an_evidence_that_resolves_is_accepted_in_each_of_its_forms() {
+        let env = env();
+        for (found_by, evidence) in [
+            ("main", "src/a.rs:20"),
+            ("main", "src/a.rs:3-9 (the loop)"),
+            ("main", "`src/a.rs:4:7`, then src/a.rs:5."),
+            ("main", "src/a.rs:4#some_symbol"),
+            ("main", "steps.fetch.output"),
+            ("shadow:qwen", "steps.fetch.output and src/a.rs:1"),
+        ] {
+            let points = format!(
+                r#"[{{"id":"p1","summary":"s","found_by":["{found_by}"],"verdict":"kept","verified":true,"evidence":"{evidence}"}}]"#
+            );
+            assert!(
+                env.check(&answer(&points, "Result.")).is_ok(),
+                "{found_by} / {evidence}"
+            );
+        }
+        // A point of the main execution may cite the execution itself, unverified.
+        let own = answer(
+            r#"[{"id":"p1","summary":"s","found_by":["main"],"verdict":"kept","verified":false,"evidence":"main"}]"#,
+            "Result.",
+        );
+        assert!(env.check(&own).is_ok());
+    }
+
+    #[test]
+    fn verified_is_never_true_on_an_unresolved_citation() {
+        let env = env();
+        // Whatever the verdict, a verified mark holds only if its evidence opens.
+        for verdict in ["kept", "duplicate", "dropped_unverified"] {
+            let points = format!(
+                r#"[{{"id":"p1","summary":"s","found_by":["main"],"verdict":"{verdict}","verified":true,"evidence":"nonexistent.rs:999999"}},{{"id":"p2","summary":"s","found_by":["main"],"verdict":"kept","verified":true,"evidence":"src/a.rs:1"}}]"#
+            );
+            let (read, reason) = env.check(&answer(&points, "Result.")).unwrap_err();
+            assert_eq!(read.len(), 2);
+            assert!(
+                reason.contains("marked verified") && reason.contains("does not resolve"),
+                "{verdict}: {reason}"
+            );
+        }
+        // An execution's own word does not verify anything.
+        let circular = answer(
+            r#"[{"id":"p1","summary":"s","found_by":["shadow:qwen"],"verdict":"kept","verified":true,"evidence":"shadow:qwen"}]"#,
+            "Result.",
+        );
+        let (_, reason) = env.check(&circular).unwrap_err();
+        assert!(reason.contains("cites only an execution"), "{reason}");
     }
 
     #[test]
