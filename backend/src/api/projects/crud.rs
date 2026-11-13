@@ -701,15 +701,40 @@ pub async fn set_project_workspace(
             }
         }
     }
-    let stored = payload.filter(|workspace| !workspace.hooks.is_empty());
+    // KT-1742 — the project's lane warm-up settings are refused or stored whole,
+    // like the hooks: a first-build command runs on the host.
+    if let Some(workspace) = payload.as_ref() {
+        if let Err(reason) = workspace.lane_warm.validate() {
+            return Json(ApiResponse::err(reason));
+        }
+    }
+    let stored = payload
+        .map(|mut workspace| {
+            workspace.lane_warm = workspace.lane_warm.normalized();
+            workspace
+        })
+        .filter(|workspace| !workspace.hooks.is_empty() || !workspace.lane_warm.is_empty());
+    let lane_warm = stored.as_ref().map(|workspace| workspace.lane_warm.clone());
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::projects::update_project_workspace(conn, &id, stored.as_ref())
+            let project_path =
+                crate::db::projects::get_project(conn, &id)?.map(|project| project.path);
+            crate::db::projects::update_project_workspace(conn, &id, stored.as_ref())?;
+            Ok(project_path)
         })
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(true)),
+        Ok(project_path) => {
+            // Published at once: the next lane of this project reads it.
+            if let Some(path) = project_path {
+                crate::core::task_worker_lane_settings::set_project(
+                    std::path::Path::new(&path),
+                    lane_warm.as_ref(),
+                );
+            }
+            Json(ApiResponse::ok(true))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
     }
 }

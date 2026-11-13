@@ -771,8 +771,10 @@ pub async fn get_workers_config(State(state): State<AppState>) -> Json<ApiRespon
 /// leaves the saved value alone.
 pub async fn save_workers_config(
     State(state): State<AppState>,
-    Json(value): Json<WorkersConfig>,
+    Json(mut value): Json<WorkersConfig>,
 ) -> Response {
+    // KT-1742 — a blank first-build command or compiler entry is none.
+    value.lane_warm = value.lane_warm.normalized();
     if let Err(reason) = value.validate() {
         return (
             StatusCode::BAD_REQUEST,

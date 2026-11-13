@@ -26,14 +26,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::background_priority::Priority;
+use crate::core::project_toolchains::{self, CargoMetadata, RustRoot};
 use crate::core::seed_prune::{self, PruneReport};
 use crate::core::task_worker_env::{
-    prepare_launch, ProbeCommand, ProbeRunner, Provisioned, WorkerLane,
+    prepare_launch, ProbeCommand, ProbeRunner, ProcessProbeRunner, Provisioned, WorkerLane,
 };
+use crate::core::task_worker_lane_settings;
+pub use crate::core::task_worker_seed_align::SeedAlignment;
+use crate::core::task_worker_seed_align::{self, AlignRequest, Assessment};
 use crate::models::WarmingStepKind;
 
 /// Overrides the `CARGO_BUILD_JOBS` a worker gets.
@@ -88,6 +91,41 @@ impl WarmStartSettings {
             var(FIRST_BUILD_TIMEOUT_ENV).as_deref(),
             performance_cores(),
         )
+    }
+
+    /// [`WarmStartSettings::from_host`] for a project whose own setting (or the
+    /// global one) gives the first build's bound: the operator's
+    /// `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, when set to a positive integer,
+    /// still wins over it.
+    pub fn from_host_with_timeout(setting: Duration) -> Self {
+        let mut settings = Self::from_host();
+        let operator = crate::core::child_env::var_os(FIRST_BUILD_TIMEOUT_ENV)
+            .and_then(|value| value.into_string().ok())
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|secs| *secs > 0);
+        if operator.is_none() {
+            settings.first_build_timeout = setting;
+        }
+        settings
+    }
+
+    /// The settings of the lane of `work_dir`: the host's, with the first
+    /// build's bound of its project (Settings > Workers, then the project's own).
+    pub fn for_worktree(work_dir: &Path) -> Self {
+        let lane = work_dir
+            .canonicalize()
+            .ok()
+            .and_then(|worktree| WorkerLane::for_worktree(&worktree).ok());
+        match lane {
+            Some(lane) => {
+                let effective = crate::core::task_worker_lane_settings::effective_for(
+                    &lane.worktree,
+                    lane.main_checkout.as_deref(),
+                );
+                Self::from_host_with_timeout(effective.first_build_timeout)
+            }
+            None => Self::from_host(),
+        }
     }
 
     /// Pure resolution. Default jobs: half of the performance cores, so two
@@ -299,6 +337,12 @@ pub enum SeedOutcome {
         /// was not pruned).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pruned: Option<PruneReport>,
+        /// KT-1742 — whether the seed was built with the lane's compiler
+        /// environment before this clone (`aligned: true`), could not be
+        /// (`false`, with why) or was not attempted (`skipped(<reason>)`). The
+        /// first Rust root's; every root's is in `WarmStartRecord::crates`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        aligned: Option<SeedAlignment>,
     },
     /// The lane target already had a `debug/`; left untouched.
     AlreadyPresent,
@@ -358,6 +402,26 @@ pub struct WarmStartRecord {
     /// was attempted or the row predates the timing.
     #[serde(default)]
     pub seed_ms: Option<u64>,
+    /// KT-1742 — what each Rust root of the repository (or the project's
+    /// declared first-build command) did: where its seed was, whether it was
+    /// aligned, how its build ended. `first_build` is their aggregate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crates: Vec<WarmedCrate>,
+}
+
+/// One Rust root (a workspace root or a standalone crate, found from the
+/// manifests) or the declared first-build command, as warmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarmedCrate {
+    /// The root's directory relative to the repository (`.` for the root
+    /// itself), or `command` for a declared first-build command.
+    pub path: String,
+    /// Its seed: the target directory `cargo metadata` gave for the root in the
+    /// main checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_target: Option<PathBuf>,
+    pub seed_aligned: SeedAlignment,
+    pub build: FirstBuild,
 }
 
 impl WarmStartRecord {
@@ -411,6 +475,7 @@ impl WarmStartRecord {
             queued_ms: 0,
             provision_ms: None,
             seed_ms: None,
+            crates: Vec::new(),
         }
     }
 }
@@ -522,89 +587,103 @@ struct SeedCandidate {
     kind: SeedSourceKind,
 }
 
-/// The `Cargo.lock` hash of the worktree's crate and the crate directory.
-fn manifest_and_lock_hash(lane: &WorkerLane) -> Option<(PathBuf, Option<String>)> {
-    let manifest_dir = [lane.worktree.clone(), lane.worktree.join("backend")]
-        .into_iter()
-        .find(|dir| dir.join("Cargo.toml").is_file())?;
-    let hash = std::fs::read(manifest_dir.join("Cargo.lock"))
-        .ok()
-        .map(|bytes| {
-            Sha256::digest(&bytes)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        });
-    Some((manifest_dir, hash))
-}
-
 fn read_marker(target: &Path) -> Option<WarmMarker> {
     serde_json::from_slice(&std::fs::read(target.join(WARM_MARKER)).ok()?).ok()
 }
 
-/// The sources a lane may be seeded from: the main checkout's `target/` when it
-/// holds a `debug/` built under a Cargo home this lane shares.
+/// The sources a lane may be seeded from: the main checkout's own targets (one
+/// per Rust root, each resolved by `cargo metadata` in the MAIN checkout) that
+/// hold a `debug/` built under a Cargo home this lane shares.
 ///
 /// **Never another lane's target.** Each worker's sandbox may write its own
 /// lane target (and the marker in it); Kronn then builds the seeded lane
 /// OUTSIDE that sandbox. A worker that planted a proc-macro or a build artifact
 /// with a newer mtime in its `debug/` (Cargo trusts mtimes, not contents) would
-/// get it loaded by that build and run as the host user. The main checkout's
-/// `target/` is outside every worker's write roots (its worktree and its own
-/// lane target), so it is the one source a worker cannot have touched.
-fn seed_candidates(lane: &WorkerLane, home: &HomeKey) -> Vec<SeedCandidate> {
-    let Some(target_root) = lane
-        .main_checkout
-        .as_ref()
-        .and_then(|_| lane.cargo_target_dir.parent())
-    else {
-        return Vec::new();
-    };
-    let source = target_root.join(DEBUG_DIR);
-    // Belt and braces for the layout: whatever the worker may write is never a source.
-    let writable_by_the_worker = lane
-        .write_roots()
-        .iter()
-        .any(|root| source.starts_with(root));
-    if writable_by_the_worker || !home.main_checkout_reusable || !source.is_dir() {
+/// get it loaded by that build and run as the host user. A main checkout's
+/// target is outside every worker's write roots (its worktree and its own lane
+/// target), and the target is asked of Cargo in the main checkout, where only the
+/// owner's `.cargo/config.toml` speaks: a worker's edit of its own worktree's
+/// configuration cannot point the seed anywhere.
+fn seed_candidates(lane: &WorkerLane, home: &HomeKey, targets: &[PathBuf]) -> Vec<SeedCandidate> {
+    if lane.main_checkout.is_none() {
         return Vec::new();
     }
-    vec![SeedCandidate {
-        target: target_root.to_path_buf(),
-        kind: SeedSourceKind::MainCheckout,
-    }]
+    let mut candidates: Vec<SeedCandidate> = Vec::new();
+    for target in targets {
+        let source = target.join(DEBUG_DIR);
+        // Belt and braces for the layout: whatever the worker may write is never a source.
+        let writable_by_the_worker = lane
+            .write_roots()
+            .iter()
+            .any(|root| source.starts_with(root));
+        let known = candidates
+            .iter()
+            .any(|candidate| candidate.target == *target);
+        if writable_by_the_worker || !home.main_checkout_reusable || !source.is_dir() || known {
+            continue;
+        }
+        candidates.push(SeedCandidate {
+            target: target.clone(),
+            kind: SeedSourceKind::MainCheckout,
+        });
+    }
+    candidates
 }
 
-/// The package names the main checkout's `Cargo.lock` files list (its root and
-/// each first-level directory: a repository may hold several workspaces over one
-/// `target/`), or `None` when none could be read.
+/// The package names the main checkout's `Cargo.lock` files list (one per Rust
+/// root, wherever it is in the repository: a checkout may hold several
+/// workspaces), or `None` when none could be read.
 fn main_checkout_locked_packages(lane: &WorkerLane) -> Option<std::collections::HashSet<String>> {
     let main = lane.main_checkout.as_ref()?;
-    let mut texts: Vec<String> = Vec::new();
-    let mut read = |dir: &Path| {
-        if let Ok(text) = std::fs::read_to_string(dir.join("Cargo.lock")) {
-            texts.push(text);
-        }
-    };
-    read(main);
-    for entry in std::fs::read_dir(main).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let skip = name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules");
-        if !skip && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            read(&entry.path());
-        }
-    }
+    let texts: Vec<String> = project_toolchains::rust_roots(main)
+        .iter()
+        .filter_map(|root| std::fs::read_to_string(root.manifest_dir.join("Cargo.lock")).ok())
+        .collect();
     seed_prune::locked_package_names(texts.iter().map(String::as_str))
 }
 
-/// Seed `lane`'s `debug/` from the best warm source. Never raises: the outcome
-/// says what happened and an unseedable lane just starts empty.
-fn seed_lane(lane: &WorkerLane, home: &HomeKey, clone: CloneTree<'_>) -> SeedOutcome {
+/// Merge a further seed's `debug/` into the lane's, entry by entry: what a
+/// repository with several workspaces, each with its own target, needs, since
+/// the lane has one `debug/`. Cargo names every unit's files by a hash, so two
+/// seeds' entries do not collide; what the lane already holds is kept.
+fn merge_seed(source: &Path, destination: &Path, clone: CloneTree<'_>) -> io::Result<usize> {
+    let mut cloned = 0;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_name() == seed_prune::CARGO_BUILD_LOCK {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if target.symlink_metadata().is_err() {
+            clone(&entry.path(), &target)?;
+            cloned += 1;
+        } else if entry.file_type()?.is_dir() && target.is_dir() {
+            for child in std::fs::read_dir(entry.path())? {
+                let child = child?;
+                let child_target = target.join(child.file_name());
+                if child_target.symlink_metadata().is_err() {
+                    clone(&child.path(), &child_target)?;
+                    cloned += 1;
+                }
+            }
+        }
+    }
+    Ok(cloned)
+}
+
+/// Seed `lane`'s `debug/` from the best warm source of `targets`. Never raises:
+/// the outcome says what happened and an unseedable lane just starts empty.
+fn seed_lane(
+    lane: &WorkerLane,
+    home: &HomeKey,
+    targets: &[PathBuf],
+    clone: CloneTree<'_>,
+) -> SeedOutcome {
     let destination = lane.cargo_target_dir.join(DEBUG_DIR);
     if destination.exists() {
         return SeedOutcome::AlreadyPresent;
     }
-    let candidates = seed_candidates(lane, home);
+    let candidates = seed_candidates(lane, home, targets);
     if candidates.is_empty() {
         let reason = if home.main_checkout_reusable {
             "the main checkout has no target/debug (lane targets are never a seed source)"
@@ -621,6 +700,7 @@ fn seed_lane(lane: &WorkerLane, home: &HomeKey, clone: CloneTree<'_>) -> SeedOut
         .join(format!(".{DEBUG_DIR}-seeding-{}", std::process::id()));
     let mut skipped: Vec<String> = Vec::new();
     let mut unsupported: Option<String> = None;
+    let mut seeded: Option<SeedOutcome> = None;
     for candidate in candidates {
         let source = candidate.target.join(DEBUG_DIR);
         // KT-1691 — prune the seed to its latest build first: Cargo never removes
@@ -647,6 +727,18 @@ fn seed_lane(lane: &WorkerLane, home: &HomeKey, clone: CloneTree<'_>) -> SeedOut
                 "pruned stale artifacts from the seed build dir before cloning it"
             );
         }
+        if seeded.is_some() {
+            // KT-1742 — a further workspace's target: its units join the lane's.
+            let merged = merge_seed(&source, &destination, clone);
+            let _ = FileExt::unlock(&lock);
+            if let Err(error) = merged {
+                tracing::warn!(
+                    seed = %source.display(),
+                    "a further seed target could not be merged into the lane: {error}"
+                );
+            }
+            continue;
+        }
         let _ = std::fs::remove_dir_all(&staging);
         let started = Instant::now();
         let cloned =
@@ -654,12 +746,13 @@ fn seed_lane(lane: &WorkerLane, home: &HomeKey, clone: CloneTree<'_>) -> SeedOut
         let _ = FileExt::unlock(&lock);
         match cloned {
             Ok(()) => {
-                return SeedOutcome::Cloned {
+                seeded = Some(SeedOutcome::Cloned {
                     source: candidate.target,
                     kind: candidate.kind,
                     clone_ms: started.elapsed().as_millis() as u64,
                     pruned,
-                };
+                    aligned: None,
+                });
             }
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&staging);
@@ -671,6 +764,9 @@ fn seed_lane(lane: &WorkerLane, home: &HomeKey, clone: CloneTree<'_>) -> SeedOut
                 break;
             }
         }
+    }
+    if let Some(seeded) = seeded {
+        return seeded;
     }
     match unsupported {
         Some(reason) => SeedOutcome::Unsupported { reason },
@@ -700,15 +796,238 @@ fn write_marker(lane: &WorkerLane, lock_hash: &str, home: &HomeKey) -> io::Resul
     std::fs::rename(&staging, path)
 }
 
+/// What a warm-up needs besides the lane itself: the project's settings, the way
+/// to ask Cargo where a crate builds, and the runner of the seed's own build.
+/// Everything here is injectable, so the warm-up is testable without Cargo.
+pub struct WarmHost<'a> {
+    /// Build each Rust root's seed with `compiler_env` before cloning it.
+    pub seed_alignment: bool,
+    /// The lane's C compiler environment (the owner's settings, or detected).
+    pub compiler_env: Vec<(String, String)>,
+    /// A shell command that replaces the detected first build.
+    pub first_build_command: Option<String>,
+    /// Resolves a crate directory of the MAIN checkout to its target directory.
+    pub metadata: project_toolchains::MetadataResolver<'a>,
+    /// Runs the seed's alignment build. The seed is the owner's own target,
+    /// which no worker's sandbox may write: this runner must not be confined.
+    pub seed_runner: &'a dyn ProbeRunner,
+    /// How long that build waits for Cargo's lock on the seed.
+    pub lock_wait: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SlotFailure {
+    Cancelled,
+    TimedOut,
+}
+
+/// The lane's place in the host's build gate, taken at most once and only when
+/// something is about to build (the seed's alignment, or the first build).
+struct Slot<'a, F: FnOnce(usize)> {
+    gate: &'a BuildGate,
+    limit: usize,
+    max_wait: Duration,
+    cancel: &'a CancellationToken,
+    on_wait: Option<F>,
+    permit: Option<BuildPermit<'a>>,
+    failure: Option<SlotFailure>,
+    queued_ms: u64,
+    held_since: Option<Instant>,
+}
+
+impl<'a, F: FnOnce(usize)> Slot<'a, F> {
+    fn take(&mut self) -> Result<(), SlotFailure> {
+        if self.permit.is_some() {
+            return Ok(());
+        }
+        if let Some(failure) = self.failure {
+            return Err(failure);
+        }
+        let queued = Instant::now();
+        let mut waited = false;
+        let on_wait = self.on_wait.take();
+        let acquired = self
+            .gate
+            .acquire_within(self.limit, self.max_wait, self.cancel, |ahead| {
+                waited = true;
+                if let Some(on_wait) = on_wait {
+                    on_wait(ahead);
+                }
+            });
+        let waited_ms = queued.elapsed().as_millis() as u64;
+        match acquired {
+            GateWait::Acquired(permit) => {
+                self.permit = Some(permit);
+                self.held_since = Some(Instant::now());
+                self.queued_ms = if waited { waited_ms } else { 0 };
+                Ok(())
+            }
+            GateWait::Cancelled => {
+                self.queued_ms = waited_ms;
+                self.failure = Some(SlotFailure::Cancelled);
+                Err(SlotFailure::Cancelled)
+            }
+            GateWait::TimedOut => {
+                self.queued_ms = waited_ms;
+                self.failure = Some(SlotFailure::TimedOut);
+                Err(SlotFailure::TimedOut)
+            }
+        }
+    }
+}
+
+/// One Rust root of the worktree while it is warmed.
+struct CrateState {
+    root: RustRoot,
+    seed_target: Option<PathBuf>,
+    /// Why the root has no seed target (Cargo could not say where it builds).
+    unresolved: Option<String>,
+    alignment: SeedAlignment,
+}
+
+impl CrateState {
+    fn new(root: &RustRoot, reason: &str) -> Self {
+        Self {
+            root: root.clone(),
+            seed_target: None,
+            unresolved: None,
+            alignment: SeedAlignment::skipped(reason),
+        }
+    }
+
+    fn warmed(&self, build: FirstBuild) -> WarmedCrate {
+        WarmedCrate {
+            path: self.root.label(),
+            seed_target: self.seed_target.clone(),
+            seed_aligned: self.alignment.clone(),
+            build,
+        }
+    }
+}
+
+/// The marker's key: the roots' lock hash; with a declared first-build command,
+/// a hash over the command and the locks, so changing either re-warms the lane.
+fn warm_key(roots: &[RustRoot], command: Option<&str>) -> Option<String> {
+    let locks = project_toolchains::combined_lock_hash(roots);
+    match command {
+        None => locks,
+        Some(command) => Some(project_toolchains::text_hash(&format!(
+            "{command}\n{}",
+            locks.unwrap_or_default()
+        ))),
+    }
+}
+
+/// The environment of a lane's own builds: the lane's, with the compiler
+/// environment the seed was aligned to, so the two agree by construction.
+fn lane_build_env(
+    lane: &WorkerLane,
+    provisioned: &Provisioned,
+    host: &WarmHost<'_>,
+) -> Vec<(String, OsString)> {
+    let mut env: Vec<(String, OsString)> = lane
+        .env(provisioned)
+        .into_iter()
+        .filter(|(name, _)| {
+            !host
+                .compiler_env
+                .iter()
+                .any(|(own, _)| own.as_str() == *name)
+        })
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    env.extend(
+        host.compiler_env
+            .iter()
+            .map(|(name, value)| (name.clone(), OsString::from(value))),
+    );
+    env
+}
+
+/// The environment of a seed's alignment build: what changes a build script's
+/// fingerprint (the compiler environment, the Cargo home) and what keeps it
+/// offline and as light as a lane's, aimed at the seed's own target. Nothing of
+/// the lane's ports, data directory or tooling.
+fn seed_build_env(
+    lane: &WorkerLane,
+    provisioned: &Provisioned,
+    host: &WarmHost<'_>,
+    target: &Path,
+) -> Vec<(String, OsString)> {
+    const KEPT: [&str; 3] = ["CARGO_HOME", "CARGO_NET_OFFLINE", CARGO_BUILD_JOBS_NAME];
+    let mut env: Vec<(String, OsString)> = lane
+        .env(provisioned)
+        .into_iter()
+        .filter(|(name, _)| KEPT.contains(name))
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    env.extend(
+        host.compiler_env
+            .iter()
+            .map(|(name, value)| (name.clone(), OsString::from(value))),
+    );
+    env.push((
+        "CARGO_TARGET_DIR".to_string(),
+        target.as_os_str().to_os_string(),
+    ));
+    env
+}
+
+const CARGO_BUILD_JOBS_NAME: &str = "CARGO_BUILD_JOBS";
+
+#[allow(clippy::too_many_arguments)]
+fn record_of(
+    lock_hash: Option<String>,
+    seed: SeedOutcome,
+    jobs: u32,
+    first_build: FirstBuild,
+    queued_ms: u64,
+    seed_ms: Option<u64>,
+    crates: Vec<WarmedCrate>,
+) -> WarmStartRecord {
+    WarmStartRecord {
+        lock_hash,
+        seed,
+        build_jobs: jobs,
+        first_build,
+        queued_ms,
+        provision_ms: None,
+        seed_ms,
+        crates,
+    }
+}
+
+fn classify(
+    outcome: crate::core::task_worker_env::ProbeOutcome,
+    started: Instant,
+    cancel: &CancellationToken,
+) -> FirstBuild {
+    let duration_ms = started.elapsed().as_millis() as u64;
+    if !outcome.success && cancel.is_cancelled() {
+        FirstBuild::Cancelled { duration_ms }
+    } else if outcome.success {
+        FirstBuild::Succeeded { duration_ms }
+    } else if outcome.detail.starts_with(TIMED_OUT_DETAIL_PREFIX) {
+        FirstBuild::TimedOut { duration_ms }
+    } else {
+        FirstBuild::Failed {
+            duration_ms,
+            detail: outcome.detail,
+        }
+    }
+}
+
 /// Seed the lane target, then run its first build under the host gate.
 ///
 /// `on_wait` is called once, with the number of builds ahead, when the gate is
 /// full — before blocking. A build that fails or times out is recorded and
 /// leaves no marker; the worker is launched regardless.
+#[allow(clippy::too_many_arguments)]
 pub fn warm_lane(
     lane: &WorkerLane,
     provisioned: &Provisioned,
     settings: &WarmStartSettings,
+    host: &WarmHost<'_>,
     gate: &BuildGate,
     runner: &dyn ProbeRunner,
     clone: CloneTree<'_>,
@@ -718,6 +1037,7 @@ pub fn warm_lane(
         lane,
         provisioned,
         settings,
+        host,
         gate,
         runner,
         clone,
@@ -729,11 +1049,20 @@ pub fn warm_lane(
 /// [`warm_lane`] that stops when `cancel` fires: a queued first build leaves
 /// the gate without taking a slot, a running one is killed (the runner owns
 /// that) and its slot is freed. Nothing is marked warm.
+///
+/// The steps, for a repository that is not Kronn's: every Rust workspace root
+/// found from the manifests is a unit of warm-up (`cargo metadata` says where its
+/// seed is); its seed is built once with the lane's compiler environment when it
+/// was not ([`task_worker_seed_align`]); the lane is cloned from the seeds; each
+/// root is built (or the project's declared command is run), under one time
+/// bound. A project with no Rust root and no declared command is not warmed, and
+/// the record says why.
 #[allow(clippy::too_many_arguments)]
 pub fn warm_lane_cancellable(
     lane: &WorkerLane,
     provisioned: &Provisioned,
     settings: &WarmStartSettings,
+    host: &WarmHost<'_>,
     gate: &BuildGate,
     runner: &dyn ProbeRunner,
     clone: CloneTree<'_>,
@@ -742,12 +1071,17 @@ pub fn warm_lane_cancellable(
 ) -> WarmStartRecord {
     let jobs = settings.build_jobs;
     let home = HomeKey::of(lane, provisioned);
-    let Some((manifest_dir, lock_hash)) = manifest_and_lock_hash(lane) else {
+    let roots = project_toolchains::rust_roots(&lane.worktree);
+    let command = host.first_build_command.clone();
+    if roots.is_empty() && command.is_none() {
         return WarmStartRecord::not_applicable(
-            "no Cargo.toml at the worktree root or in backend/",
+            "no Cargo.toml in the repository and no first-build command declared for this \
+             project: nothing to warm",
             jobs,
         );
-    };
+    }
+    let cargo_lock = project_toolchains::combined_lock_hash(&roots);
+    let lock_hash = warm_key(&roots, command.as_deref());
     if let Err(error) = std::fs::create_dir_all(&lane.cargo_target_dir) {
         return WarmStartRecord::not_applicable(
             &format!(
@@ -758,159 +1092,368 @@ pub fn warm_lane_cancellable(
         );
     }
     if cancel.is_cancelled() {
-        return WarmStartRecord {
+        return record_of(
             lock_hash,
-            seed: SeedOutcome::NotApplicable {
+            SeedOutcome::NotApplicable {
                 reason: "cancelled before the lane was seeded".into(),
             },
-            build_jobs: jobs,
-            first_build: FirstBuild::Cancelled { duration_ms: 0 },
-            queued_ms: 0,
-            provision_ms: None,
-            seed_ms: None,
-        };
+            jobs,
+            FirstBuild::Cancelled { duration_ms: 0 },
+            0,
+            None,
+            Vec::new(),
+        );
     }
-    let seeding = Instant::now();
-    let seed = match &lock_hash {
-        Some(_) => seed_lane(lane, &home, clone),
-        None => SeedOutcome::NoSource {
-            reason: "the worktree has no Cargo.lock to match a warm target against".into(),
-        },
+    let mut slot = Slot {
+        gate,
+        limit: settings.max_concurrent_builds,
+        max_wait: settings.first_build_timeout,
+        cancel,
+        on_wait: Some(on_wait),
+        permit: None,
+        failure: None,
+        queued_ms: 0,
+        held_since: None,
     };
+
+    let seeding = Instant::now();
+    let destination_present = lane.cargo_target_dir.join(DEBUG_DIR).exists();
+    let mut states: Vec<CrateState> = Vec::new();
+    let mut seed;
+    if roots.is_empty() {
+        seed = SeedOutcome::NotApplicable {
+            reason: "the project has no Cargo workspace: there is no target to seed".into(),
+        };
+    } else if destination_present {
+        states.extend(
+            roots
+                .iter()
+                .map(|root| CrateState::new(root, "the lane target already has a debug/")),
+        );
+        seed = SeedOutcome::AlreadyPresent;
+    } else if cargo_lock.is_none() {
+        states.extend(roots.iter().map(|root| {
+            CrateState::new(
+                root,
+                "the worktree has no Cargo.lock to match a warm target",
+            )
+        }));
+        seed = SeedOutcome::NoSource {
+            reason: "the worktree has no Cargo.lock to match a warm target against".into(),
+        };
+    } else {
+        states.extend(roots.iter().map(|root| CrateState::new(root, "")));
+        // Where each root builds in the MAIN checkout: asked of Cargo there.
+        for state in &mut states {
+            match lane.main_checkout.as_ref() {
+                None => {
+                    state.unresolved =
+                        Some("the worktree is not a managed one: there is no main checkout".into());
+                }
+                Some(main) => match (host.metadata)(&state.root.in_checkout(main)) {
+                    Ok(CargoMetadata {
+                        target_directory, ..
+                    }) => state.seed_target = Some(target_directory),
+                    Err(error) => {
+                        state.unresolved = Some(format!("{}: {error}", state.root.label()));
+                    }
+                },
+            }
+        }
+        // Align every seed with the lane's compiler environment, when due.
+        let skip_reason = if !host.seed_alignment {
+            Some("seed alignment is off for this project")
+        } else if host.compiler_env.is_empty() {
+            Some("the lane sets no compiler environment: nothing to align")
+        } else if !home.main_checkout_reusable {
+            Some("the lane does not use the host's Cargo home: the seed is not reusable")
+        } else {
+            None
+        };
+        for index in 0..states.len() {
+            let Some(target) = states[index].seed_target.clone() else {
+                let why = states[index]
+                    .unresolved
+                    .clone()
+                    .unwrap_or_else(|| "no seed target".into());
+                states[index].alignment = SeedAlignment::skipped(format!("no seed: {why}"));
+                continue;
+            };
+            if let Some(reason) = skip_reason {
+                states[index].alignment = SeedAlignment::skipped(reason);
+                continue;
+            }
+            let Some(main) = lane.main_checkout.as_ref() else {
+                continue;
+            };
+            let main_dir = states[index].root.in_checkout(main);
+            let request = AlignRequest {
+                main_crate_dir: &main_dir,
+                target: &target,
+                lock_hash: project_toolchains::file_hash(&main_dir.join("Cargo.lock")),
+                compiler_env: &host.compiler_env,
+                build_env: seed_build_env(lane, provisioned, host, &target),
+                timeout: settings.first_build_timeout / 2,
+                lock_wait: host.lock_wait,
+            };
+            states[index].alignment = match task_worker_seed_align::assess(&request) {
+                Assessment::Settled(alignment) => alignment,
+                Assessment::NeedsBuild(stale) => match slot.take() {
+                    Ok(()) => task_worker_seed_align::build_aligned(
+                        &request,
+                        &stale,
+                        host.seed_runner,
+                        cancel,
+                    ),
+                    Err(SlotFailure::Cancelled) => {
+                        return record_of(
+                            lock_hash,
+                            SeedOutcome::NotApplicable {
+                                reason: "cancelled while the seed was aligned".into(),
+                            },
+                            jobs,
+                            FirstBuild::Cancelled { duration_ms: 0 },
+                            slot.queued_ms,
+                            Some(seeding.elapsed().as_millis() as u64),
+                            Vec::new(),
+                        );
+                    }
+                    Err(SlotFailure::TimedOut) => SeedAlignment::NotAligned {
+                        reason: format!(
+                            "no build slot freed within {}s: the seed is cloned as it is",
+                            settings.first_build_timeout.as_secs()
+                        ),
+                    },
+                },
+            };
+        }
+        let targets: Vec<PathBuf> = states
+            .iter()
+            .filter_map(|state| state.seed_target.clone())
+            .collect();
+        seed = if targets.is_empty() {
+            let unresolved: Vec<String> = states
+                .iter()
+                .filter_map(|state| state.unresolved.clone())
+                .collect();
+            SeedOutcome::NoSource {
+                reason: format!(
+                    "no seed target could be resolved: {}",
+                    unresolved.join("; ")
+                ),
+            }
+        } else {
+            seed_lane(lane, &home, &targets, clone)
+        };
+        if let SeedOutcome::Cloned {
+            source, aligned, ..
+        } = &mut seed
+        {
+            *aligned = states
+                .iter()
+                .find(|state| state.seed_target.as_deref() == Some(source.as_path()))
+                .map(|state| state.alignment.clone());
+        }
+    }
     let seed_ms = seeding.elapsed().as_millis() as u64;
+    let skipped_crates = |states: &[CrateState], reason: &str| -> Vec<WarmedCrate> {
+        states
+            .iter()
+            .map(|state| {
+                state.warmed(FirstBuild::Skipped {
+                    reason: reason.to_string(),
+                })
+            })
+            .collect()
+    };
 
     // `--locked` cannot build without a lock file, and a build with no lock hash
     // could not be marked warm: nothing to run, nothing to wait for.
-    if lock_hash.is_none() {
-        return WarmStartRecord {
+    if cargo_lock.is_none() && command.is_none() {
+        let reason = "the worktree has no Cargo.lock: a locked first build is not possible";
+        return record_of(
             lock_hash,
             seed,
-            build_jobs: jobs,
-            first_build: FirstBuild::Skipped {
-                reason: "the worktree has no Cargo.lock: a locked first build is not possible"
-                    .into(),
+            jobs,
+            FirstBuild::Skipped {
+                reason: reason.into(),
             },
-            queued_ms: 0,
-            provision_ms: None,
-            seed_ms: Some(seed_ms),
-        };
+            0,
+            Some(seed_ms),
+            skipped_crates(&states, reason),
+        );
     }
 
-    // A lane already built for this exact Cargo.lock (a relaunch) is warm.
+    // A lane already built for this exact key (a relaunch) is warm.
     let already_built = lock_hash.as_ref().is_some_and(|hash| {
-        lane.cargo_target_dir.join(DEBUG_DIR).is_dir()
+        (roots.is_empty() || lane.cargo_target_dir.join(DEBUG_DIR).is_dir())
             && read_marker(&lane.cargo_target_dir).is_some_and(|marker| marker.lock_hash == *hash)
     });
     if already_built {
-        return WarmStartRecord {
+        let reason = "the lane target was already built for this Cargo.lock";
+        return record_of(
             lock_hash,
             seed,
-            build_jobs: jobs,
-            first_build: FirstBuild::Skipped {
-                reason: "the lane target was already built for this Cargo.lock".into(),
+            jobs,
+            FirstBuild::Skipped {
+                reason: reason.into(),
             },
-            queued_ms: 0,
-            provision_ms: None,
-            seed_ms: Some(seed_ms),
-        };
+            0,
+            Some(seed_ms),
+            skipped_crates(&states, reason),
+        );
     }
 
-    let queued = Instant::now();
-    let mut waited = false;
-    let permit = match gate.acquire_within(
-        settings.max_concurrent_builds,
-        settings.first_build_timeout,
-        cancel,
-        |ahead| {
-            waited = true;
-            on_wait(ahead);
-        },
-    ) {
-        GateWait::Acquired(permit) => permit,
-        GateWait::Cancelled => {
-            return WarmStartRecord {
+    if let Err(failure) = slot.take() {
+        return match failure {
+            SlotFailure::Cancelled => record_of(
                 lock_hash,
                 seed,
-                build_jobs: jobs,
-                first_build: FirstBuild::Cancelled { duration_ms: 0 },
-                queued_ms: queued.elapsed().as_millis() as u64,
-                provision_ms: None,
-                seed_ms: Some(seed_ms),
-            };
-        }
-        // Never stall a worker behind a queue that does not drain: it starts
-        // with the target it has, as before KT-1250.
-        GateWait::TimedOut => {
-            return WarmStartRecord {
-                lock_hash,
-                seed,
-                build_jobs: jobs,
-                first_build: FirstBuild::Skipped {
-                    reason: format!(
-                        "no build slot freed within {}s: the worker starts with the target it \
-                         has",
-                        settings.first_build_timeout.as_secs()
-                    ),
-                },
-                queued_ms: queued.elapsed().as_millis() as u64,
-                provision_ms: None,
-                seed_ms: Some(seed_ms),
-            };
-        }
-    };
-    let queued_ms = if waited {
-        queued.elapsed().as_millis() as u64
-    } else {
-        0
-    };
+                jobs,
+                FirstBuild::Cancelled { duration_ms: 0 },
+                slot.queued_ms,
+                Some(seed_ms),
+                Vec::new(),
+            ),
+            // Never stall a worker behind a queue that does not drain: it starts
+            // with the target it has, as before KT-1250.
+            SlotFailure::TimedOut => {
+                let reason = format!(
+                    "no build slot freed within {}s: the worker starts with the target it has",
+                    settings.first_build_timeout.as_secs()
+                );
+                record_of(
+                    lock_hash,
+                    seed,
+                    jobs,
+                    FirstBuild::Skipped {
+                        reason: reason.clone(),
+                    },
+                    slot.queued_ms,
+                    Some(seed_ms),
+                    skipped_crates(&states, &reason),
+                )
+            }
+        };
+    }
+    let queued_ms = slot.queued_ms;
+    let deadline = slot.held_since.unwrap_or_else(Instant::now) + settings.first_build_timeout;
+    let env = lane_build_env(lane, provisioned, host);
 
-    let env: Vec<(String, OsString)> = lane
-        .env(provisioned)
-        .into_iter()
-        .map(|(name, value)| (name.to_string(), value))
-        .collect();
-    let started = Instant::now();
-    let outcome = runner.run_cancellable(
-        &ProbeCommand {
-            program: "cargo".into(),
-            args: first_build_args(&manifest_dir),
-            cwd: manifest_dir,
-            env,
+    // What to run: the declared command, or one `cargo test` per Rust root.
+    let mut warmed: Vec<WarmedCrate> = Vec::new();
+    let mut builds: Vec<FirstBuild> = Vec::new();
+    let mut run = |label: String, probe: ProbeCommand, state: Option<&CrateState>| -> bool {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let started = Instant::now();
+        let build = if remaining.is_zero() {
+            FirstBuild::TimedOut { duration_ms: 0 }
+        } else {
+            let outcome = runner.run_cancellable(
+                &ProbeCommand {
+                    timeout: remaining,
+                    ..probe
+                },
+                cancel,
+            );
+            classify(outcome, started, cancel)
+        };
+        let stop = matches!(
+            build,
+            FirstBuild::TimedOut { .. } | FirstBuild::Cancelled { .. }
+        );
+        warmed.push(match state {
+            Some(state) => state.warmed(build.clone()),
+            None => WarmedCrate {
+                path: label,
+                seed_target: None,
+                seed_aligned: SeedAlignment::skipped("a declared command builds no seed"),
+                build: build.clone(),
+            },
+        });
+        builds.push(build);
+        stop
+    };
+    if let Some(command) = &command {
+        let (program, args) = shell_for(command);
+        let probe = ProbeCommand {
+            program,
+            args,
+            cwd: lane.worktree.clone(),
+            env: env.clone(),
             timeout: settings.first_build_timeout,
-            // The lane's first build compiles the whole dependency graph.
             priority: Priority::Background,
             clean_env: false,
-        },
-        cancel,
-    );
-    let duration_ms = started.elapsed().as_millis() as u64;
-    drop(permit);
+        };
+        run("command".into(), probe, None);
+    } else {
+        for state in &states {
+            let probe = ProbeCommand {
+                program: "cargo".into(),
+                args: first_build_args(&state.root.manifest_dir),
+                cwd: state.root.manifest_dir.clone(),
+                env: env.clone(),
+                timeout: settings.first_build_timeout,
+                // The lane's first build compiles the whole dependency graph.
+                priority: Priority::Background,
+                clean_env: false,
+            };
+            if run(state.root.label(), probe, Some(state)) {
+                break;
+            }
+        }
+    }
+    drop(slot);
 
-    let first_build = if !outcome.success && cancel.is_cancelled() {
-        FirstBuild::Cancelled { duration_ms }
-    } else if outcome.success {
+    // The aggregate: the first build that did not succeed, else the total.
+    let total_ms: u64 = builds
+        .iter()
+        .map(|build| match build {
+            FirstBuild::Succeeded { duration_ms }
+            | FirstBuild::Failed { duration_ms, .. }
+            | FirstBuild::TimedOut { duration_ms }
+            | FirstBuild::Cancelled { duration_ms } => *duration_ms,
+            FirstBuild::Skipped { .. } => 0,
+        })
+        .sum();
+    let first_build = builds
+        .iter()
+        .find(|build| !matches!(build, FirstBuild::Succeeded { .. }))
+        .cloned()
+        .unwrap_or(FirstBuild::Succeeded {
+            duration_ms: total_ms,
+        });
+    if matches!(first_build, FirstBuild::Succeeded { .. }) {
         if let Some(hash) = &lock_hash {
             if let Err(error) = write_marker(lane, hash, &home) {
                 tracing::warn!(lane = %lane.name, "warm marker not written: {error}");
             }
         }
-        FirstBuild::Succeeded { duration_ms }
-    } else if outcome.detail.starts_with(TIMED_OUT_DETAIL_PREFIX) {
-        FirstBuild::TimedOut { duration_ms }
-    } else {
-        FirstBuild::Failed {
-            duration_ms,
-            detail: outcome.detail,
-        }
-    };
-    WarmStartRecord {
+    }
+    if command.is_some() {
+        // The declared command replaced the roots' builds; their seeds still count.
+        let replaced = "replaced by the project's declared first-build command";
+        let mut all = skipped_crates(&states, replaced);
+        all.extend(warmed);
+        warmed = all;
+    }
+    record_of(
         lock_hash,
         seed,
-        build_jobs: jobs,
+        jobs,
         first_build,
         queued_ms,
-        provision_ms: None,
-        seed_ms: Some(seed_ms),
+        Some(seed_ms),
+        warmed,
+    )
+}
+
+/// The program and arguments that run a declared command through the host's shell.
+fn shell_for(command: &str) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        ("cmd".into(), vec!["/C".into(), command.into()])
+    } else {
+        ("sh".into(), vec!["-c".into(), command.into()])
     }
 }
 
@@ -920,27 +1463,19 @@ pub fn warm_lane_cancellable(
 /// warm-up builds what that needs: the dependency graph (dev profile, which the
 /// test profile inherits) and the crate's own **lib test binary**. It no longer
 /// builds every `tests/*.rs` integration binary: each one links the whole crate
-/// again, and on a loaded host that did not fit the 30-minute bound (the
-/// warm-ups of 2026-11-12 ended `timed_out`). The integration binaries are built
-/// by the validations that run them.
+/// again, and on a loaded host that did not fit the bound (the warm-ups of
+/// 2026-11-12 ended `timed_out`). The integration binaries are built by the
+/// validations that run them.
 ///
 /// A manifest with no library target has no lib test binary to name (`--lib`
 /// would be an error), so it keeps the whole-package build.
 fn first_build_args(manifest_dir: &Path) -> Vec<String> {
     let mut args = vec!["test".to_string()];
-    if has_lib_target(manifest_dir) {
+    if project_toolchains::has_lib_target(manifest_dir) {
         args.push("--lib".into());
     }
     args.extend(["--no-run", "--locked", "--offline"].map(String::from));
     args
-}
-
-/// Does the package at `manifest_dir` have a library target: the default
-/// `src/lib.rs`, or a `[lib]` table (a custom `path`).
-fn has_lib_target(manifest_dir: &Path) -> bool {
-    manifest_dir.join("src").join("lib.rs").is_file()
-        || std::fs::read_to_string(manifest_dir.join("Cargo.toml"))
-            .is_ok_and(|manifest| manifest.lines().any(|line| line.trim() == "[lib]"))
 }
 
 /// Will warming this worktree's lane run a first build? Side-effect free: the
@@ -953,10 +1488,13 @@ pub fn first_build_pending(work_dir: &Path) -> bool {
     let Ok(lane) = WorkerLane::for_worktree(&worktree) else {
         return false;
     };
-    let Some((_, Some(hash))) = manifest_and_lock_hash(&lane) else {
+    let effective =
+        task_worker_lane_settings::effective_for(&lane.worktree, lane.main_checkout.as_deref());
+    let roots = project_toolchains::rust_roots(&lane.worktree);
+    let Some(hash) = warm_key(&roots, effective.first_build_command.as_deref()) else {
         return false;
     };
-    !(lane.cargo_target_dir.join(DEBUG_DIR).is_dir()
+    !((roots.is_empty() || lane.cargo_target_dir.join(DEBUG_DIR).is_dir())
         && read_marker(&lane.cargo_target_dir).is_some_and(|marker| marker.lock_hash == hash))
 }
 
@@ -969,17 +1507,30 @@ pub fn warm_worktree(
     cancel: &CancellationToken,
     on_wait: impl FnOnce(usize),
 ) -> WarmStartRecord {
-    let settings = WarmStartSettings::from_host();
     let provisioning = Instant::now();
     match prepare_launch(work_dir) {
         Ok((lane, provisioned)) => {
             let provision_ms = provisioning.elapsed().as_millis() as u64;
+            let effective = task_worker_lane_settings::effective_for(
+                &lane.worktree,
+                lane.main_checkout.as_deref(),
+            );
+            let settings = WarmStartSettings::from_host_with_timeout(effective.first_build_timeout);
+            let host = WarmHost {
+                seed_alignment: effective.seed_alignment,
+                compiler_env: effective.compiler_env,
+                first_build_command: effective.first_build_command,
+                metadata: &project_toolchains::host_cargo_metadata,
+                seed_runner: &ProcessProbeRunner,
+                lock_wait: task_worker_seed_align::DEFAULT_LOCK_WAIT,
+            };
             WarmStartRecord {
                 provision_ms: Some(provision_ms),
                 ..warm_lane_cancellable(
                     &lane,
                     &provisioned,
                     &settings,
+                    &host,
                     host_build_gate(),
                     runner,
                     &clone_tree,
@@ -990,7 +1541,7 @@ pub fn warm_worktree(
         }
         Err(error) => WarmStartRecord::not_applicable(
             &format!("the worker lane could not be prepared: {error}"),
-            settings.build_jobs,
+            WarmStartSettings::from_host().build_jobs,
         ),
     }
 }

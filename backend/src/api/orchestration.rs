@@ -2742,9 +2742,10 @@ async fn defer_native_provisioning(
             .await
             .map_err(|e| ProvisionError::Internal(e.to_string()));
     };
-    let bound = crate::core::task_worker_lane_warm::WarmStartSettings::from_host()
-        .first_build_timeout
-        .as_secs();
+    let bound =
+        crate::core::task_worker_lane_warm::WarmStartSettings::for_worktree(&launch.worktree_path)
+            .first_build_timeout
+            .as_secs();
     let journal_id = exec_id.clone();
     db.with_conn(move |conn| {
         crate::db::orchestration::record_lane_warming(conn, &journal_id, bound, &backend_actor())

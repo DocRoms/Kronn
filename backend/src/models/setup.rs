@@ -143,6 +143,10 @@ pub struct WorkersConfig {
     /// which cuts the whole turn whatever a command is allowed.
     #[serde(default = "default_workers_bash_max_timeout_min")]
     pub bash_max_timeout_min: u32,
+    /// KT-1742 — how every project's lane is warmed unless the project says
+    /// otherwise. Last field: a TOML table goes after the plain values.
+    #[serde(default)]
+    pub lane_warm: LaneWarmConfig,
 }
 
 impl Default for WorkersConfig {
@@ -155,6 +159,7 @@ impl Default for WorkersConfig {
             heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
             bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
             bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
+            lane_warm: LaneWarmConfig::default(),
         }
     }
 }
@@ -238,8 +243,160 @@ impl WorkersConfig {
                 "default_max_review_rounds must be between 1 and {MAX_REVIEW_ROUNDS_INTEGER}"
             ));
         }
+        self.lane_warm.validate()
+    }
+}
+
+/// KT-1742 — how a worker lane is warmed: its compiler environment, whether the
+/// seed it is cloned from is aligned with that environment, the command that
+/// builds it, and the time that build may take.
+///
+/// Set once globally (`[workers.lane_warm]`, Settings > Workers) and optionally
+/// per project (`ProjectWorkspace::lane_warm`, stored with the project). A field
+/// left `None` inherits: the project from the global entry, the global entry
+/// from what Kronn detects in the repository. Nothing here is specific to one
+/// language or repository.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LaneWarmConfig {
+    /// Build the seed (the project's own main-checkout target) once with the
+    /// lane's compiler environment, so a lane cloned from it reuses it. Default:
+    /// on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub seed_alignment: Option<bool>,
+    /// The environment the lane's builds run with for the C compiler, one
+    /// `NAME=value` per entry. `None` = detected (on macOS, the target-scoped
+    /// `CFLAGS_<triple>=-save-temps=obj` when the project builds C through the
+    /// `cc` crate, nothing otherwise); an empty list = none at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compiler_env: Option<Vec<String>>,
+    /// A shell command that replaces the detected first build (run in the
+    /// worktree root, same bound, same event). The way to warm a project that is
+    /// not a Cargo one: `composer install`, `npm ci`. `None` = detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_build_command: Option<String>,
+    /// The first build's time limit, in minutes. `None` = 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_build_timeout_min: Option<u32>,
+}
+
+/// KT-1742 — default bound of a lane's first build, in minutes (measured: the
+/// `kronn` crate's own two compiles take 33 min at host load 14).
+pub const DEFAULT_LANE_FIRST_BUILD_TIMEOUT_MIN: u32 = 60;
+/// Largest first-build bound the settings accept (a day).
+pub const MAX_LANE_FIRST_BUILD_TIMEOUT_MIN: u32 = 1_440;
+const MAX_LANE_ENV_ENTRIES: usize = 32;
+const MAX_LANE_ENV_BYTES: usize = 2_000;
+const MAX_LANE_COMMAND_BYTES: usize = 4_000;
+/// Variables a lane owns: letting a setting move them would break its sandbox,
+/// its target or its isolation.
+const LANE_OWNED_ENV: [&str; 6] = [
+    "CARGO_TARGET_DIR",
+    "CARGO_HOME",
+    "CARGO_BUILD_JOBS",
+    "CARGO_NET_OFFLINE",
+    "TMPDIR",
+    "PATH",
+];
+
+impl LaneWarmConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `compiler_env` as `(name, value)` pairs, `None` when it is left to
+    /// detection. An entry that is not `NAME=value` is skipped (validation
+    /// refuses it before it is stored).
+    pub fn compiler_env_pairs(&self) -> Option<Vec<(String, String)>> {
+        self.compiler_env.as_ref().map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| parse_lane_env_entry(entry).ok())
+                .collect()
+        })
+    }
+
+    /// The stored shape: a blank command is no command, a blank entry no entry.
+    pub fn normalized(mut self) -> Self {
+        self.first_build_command = self
+            .first_build_command
+            .map(|command| command.trim().to_string())
+            .filter(|command| !command.is_empty());
+        self.compiler_env = self.compiler_env.map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect()
+        });
+        self
+    }
+
+    /// Refuse what the settings forms must never persist.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(minutes) = self.first_build_timeout_min {
+            if !(1..=MAX_LANE_FIRST_BUILD_TIMEOUT_MIN).contains(&minutes) {
+                return Err(format!(
+                    "first_build_timeout_min must be between 1 and \
+                     {MAX_LANE_FIRST_BUILD_TIMEOUT_MIN}"
+                ));
+            }
+        }
+        if let Some(command) = &self.first_build_command {
+            if command.len() > MAX_LANE_COMMAND_BYTES || command.contains('\0') {
+                return Err(format!(
+                    "first_build_command is limited to {MAX_LANE_COMMAND_BYTES} characters \
+                     and cannot hold a NUL byte; put a long recipe in a script it calls"
+                ));
+            }
+        }
+        if let Some(entries) = &self.compiler_env {
+            if entries.len() > MAX_LANE_ENV_ENTRIES {
+                return Err(format!(
+                    "compiler_env is limited to {MAX_LANE_ENV_ENTRIES} entries"
+                ));
+            }
+            for entry in entries.iter().filter(|entry| !entry.trim().is_empty()) {
+                parse_lane_env_entry(entry)?;
+            }
+        }
         Ok(())
     }
+}
+
+/// `NAME=value` → `(NAME, value)`: a portable variable name, a value without a
+/// NUL byte, and not one of the variables a lane owns.
+pub fn parse_lane_env_entry(entry: &str) -> Result<(String, String), String> {
+    let (name, value) = entry
+        .trim()
+        .split_once('=')
+        .ok_or_else(|| format!("compiler_env entry `{entry}` is not NAME=value"))?;
+    let name = name.trim();
+    let portable = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !portable {
+        return Err(format!(
+            "compiler_env name `{name}` must be letters, digits and underscores"
+        ));
+    }
+    if name.starts_with("KRONN_") || LANE_OWNED_ENV.contains(&name) {
+        return Err(format!(
+            "compiler_env cannot set `{name}`: the lane owns it"
+        ));
+    }
+    if value.len() > MAX_LANE_ENV_BYTES || value.contains('\0') {
+        return Err(format!(
+            "compiler_env value of `{name}` is too long or holds a NUL byte"
+        ));
+    }
+    Ok((name.to_string(), value.to_string()))
 }
 
 /// KT-1525 — default size (KB) above which a step output is flagged heavy.

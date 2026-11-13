@@ -32,13 +32,28 @@ Failure modes, all ending in a (cold) dispatch:
   temp files in the lane: the lane environment sets
   `CFLAGS_aarch64_apple_darwin` / `CFLAGS_x86_64_apple_darwin` to
   `-save-temps=obj` (see `docs/operations/worktree-build-artifacts.md`, KT-1736);
-- **the seed must carry the same value**: `cc` fingerprints the C flags it read,
-  so a main-checkout target built without them is invalid for `aws-lc-sys`,
-  `libsqlite3-sys` and their ~12 dependents and the warm-up runs into its bound
-  (KT-1742). The repository's `.cargo/config.toml` `[env]` table sets the same two
-  variables for every `cargo` run, and a unit test compares it with the lane's;
-  even then the `kronn` crate's two compiles take ~33 min at load 14 (measured in
-  the same document), which is why the default bound is 60 min (KT-1742), not 30;
+- **the seed must carry the same value** (KT-1742): `cc` fingerprints the C flags
+  it read, so a main-checkout target built without them is invalid for
+  `aws-lc-sys`, `libsqlite3-sys` and their ~12 dependents and the warm-up runs into
+  its bound. This holds for any project that builds C through `cc`, so Kronn does
+  not rely on a file of the project: before cloning, it checks a stamp beside the
+  project's own seed (`<target>/.kronn-seed-env.json`: the lane's compiler
+  environment, the main checkout's `Cargo.lock` hash) and, when it is missing or
+  differs, runs ONE `cargo build --locked --offline` in the seed's own target with
+  that environment (outside the sandbox, behind the gate), writes the stamp, then
+  clones. A held Cargo lock (the owner is building) is waited for, bounded, and then
+  reported as `aligned: false` — the lane falls back to the current behaviour. Every
+  such outcome is in `lane_warm_start` (`seed.aligned`, per-crate `crates[]`). The
+  environment, the alignment switch, the first-build command and its bound are
+  settings with detected defaults: Settings > Workers (global) and the project card
+  (override). Even with an aligned seed the `kronn` crate's two compiles take ~33 min
+  at load 14 (measured in `docs/operations/worktree-build-artifacts.md`), which is
+  why the default bound is 60 min, not 30;
+- the warm-up is not Kronn-specific: every Rust workspace root found from the
+  manifests (any depth up to four, e.g. `redis-flush/Cargo.toml`) is warmed, seeded
+  from its own target directory (`cargo metadata`, run in the main checkout) and
+  aligned; a project with no Rust root is not warmed by Cargo (the record says why)
+  and may declare a first-build command instead (`composer install`, `npm ci`);
 - a queue that does not drain is given up after
   `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 60 min) and the worker
   starts with the target it has;
@@ -50,9 +65,12 @@ Failure modes, all ending in a (cold) dispatch:
 
 ## Seeding rules
 
-The only source is the main checkout's `target/debug`, and only when the lane
-uses the host's `CARGO_HOME`. **A lane target (`target/wt-*`) is never a
-source.** Each worker's sandbox may write its own lane target (and the
+The only sources are the main checkout's own targets — one per Rust root, the
+`target_directory` that `cargo metadata` gives for the root's directory **in the
+main checkout** (KT-1742; not a hard-coded `<repo>/target`) — and only when the
+lane uses the host's `CARGO_HOME`. The lane has one `debug/`: the first source is
+cloned whole, further ones are merged into it entry by entry. **A lane target
+(`target/wt-*`) is never a source.** Each worker's sandbox may write its own lane target (and the
 `.kronn-warm.json` marker in it), and Kronn runs the seeded lane's first build
 OUTSIDE the sandbox: a worker that planted a proc-macro `.dylib` with a newer
 mtime in its `debug/` (Cargo trusts mtimes, not contents) would have it loaded

@@ -5586,6 +5586,42 @@ export type LaneSeedsLastRun = { execution_id: string, at: string, seeds: Array<
  */
 export type LaneSeedsSource = "project" | "adopted" | "none";
 
+/**
+ * KT-1742 — how a worker lane is warmed: its compiler environment, whether the
+ * seed it is cloned from is aligned with that environment, the command that
+ * builds it, and the time that build may take.
+ *
+ * Set once globally (`[workers.lane_warm]`, Settings > Workers) and optionally
+ * per project (`ProjectWorkspace::lane_warm`, stored with the project). A field
+ * left `None` inherits: the project from the global entry, the global entry
+ * from what Kronn detects in the repository. Nothing here is specific to one
+ * language or repository.
+ */
+export type LaneWarmConfig = {
+/**
+ * Build the seed (the project's own main-checkout target) once with the
+ * lane's compiler environment, so a lane cloned from it reuses it. Default:
+ * on.
+ */
+seed_alignment?: boolean,
+/**
+ * The environment the lane's builds run with for the C compiler, one
+ * `NAME=value` per entry. `None` = detected (on macOS, the target-scoped
+ * `CFLAGS_<triple>=-save-temps=obj` when the project builds C through the
+ * `cc` crate, nothing otherwise); an empty list = none at all.
+ */
+compiler_env?: Array<string>,
+/**
+ * A shell command that replaces the detected first build (run in the
+ * worktree root, same bound, same event). The way to warm a project that is
+ * not a Cargo one: `composer install`, `npm ci`. `None` = detected.
+ */
+first_build_command?: string,
+/**
+ * The first build's time limit, in minutes. `None` = 60.
+ */
+first_build_timeout_min?: number, };
+
 export type LaunchAuditRequest = { agent: AgentType,
 /**
  * KT-980 — the named external API connection an HTTP agent uses. Required
@@ -8321,7 +8357,12 @@ docker_error?: string, };
  * Project defaults for worktree preparation hooks. Workflow hooks override them
  * field by field; omitted fields inherit the project value.
  */
-export type ProjectWorkspace = { hooks: WorkspaceHooks, };
+export type ProjectWorkspace = { hooks: WorkspaceHooks,
+/**
+ * KT-1742 — this project's lane warm-up settings; a field left unset
+ * inherits the global `[workers.lane_warm]` entry.
+ */
+lane_warm: LaneWarmConfig, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -12981,7 +13022,12 @@ bash_default_timeout_min: number,
  * the turn. Keep it below the generation limit (`agent_global_timeout_min`),
  * which cuts the whole turn whatever a command is allowed.
  */
-bash_max_timeout_min: number, };
+bash_max_timeout_min: number,
+/**
+ * KT-1742 — how every project's lane is warmed unless the project says
+ * otherwise. Last field: a TOML table goes after the plain values.
+ */
+lane_warm: LaneWarmConfig, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

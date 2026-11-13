@@ -1,7 +1,28 @@
 use super::*;
 use crate::core::background_priority::Priority;
+use crate::core::project_toolchains::CargoMetadata;
+use crate::core::task_worker_env::ProcessProbeRunner;
 use crate::core::task_worker_env::Provisioned;
-use crate::core::task_worker_lane_warm::{warm_lane, BuildGate, FirstBuild, WarmStartSettings};
+use crate::core::task_worker_lane_warm::{
+    warm_lane, BuildGate, FirstBuild, WarmHost, WarmStartSettings,
+};
+
+fn no_metadata(_: &Path) -> Result<CargoMetadata, String> {
+    Err("no cargo metadata in a sandbox test".into())
+}
+
+/// A warm host that aligns nothing and resolves nothing: these tests are about
+/// what the confined runner does with the first build.
+fn warm_host() -> WarmHost<'static> {
+    WarmHost {
+        seed_alignment: false,
+        compiler_env: Vec::new(),
+        first_build_command: None,
+        metadata: &no_metadata,
+        seed_runner: &ProcessProbeRunner,
+        lock_wait: Duration::from_millis(10),
+    }
+}
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -605,6 +626,7 @@ fn the_lane_first_build_on_a_host_whose_launcher_is_missing_is_refused_with_its_
         &lane,
         &provisioned(),
         &settings,
+        &warm_host(),
         &BuildGate::new(),
         &runner,
         &|_, _| Ok(()),
@@ -698,6 +720,7 @@ fn a_relaunch_after_the_worker_changed_its_build_never_reaches_a_process_unconfi
             &lane,
             &provisioned(),
             &settings,
+            &warm_host(),
             &BuildGate::new(),
             &runner,
             &|_, _| Ok(()),

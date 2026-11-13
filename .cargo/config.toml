@@ -4,20 +4,3 @@
 # Reduces local build cache size by ~40-50%.
 [build]
 target-dir = "target"
-
-# KT-1742 — the C flags of a worker lane, on macOS, from the very first build.
-# A lane keeps Apple clang's temporary files beside the object file
-# (`-save-temps=obj`, KT-1736: the lane's OS sandbox grants no per-user temp dir
-# and aws-lc-sys' `.S` sources need one). `cc` records the C flags it reads in the
-# build script's fingerprint, so a lane cloned from THIS checkout's `target/debug`
-# is reusable only if this checkout built it with the very same value; otherwise
-# aws-lc-sys, libsqlite3-sys and everything that depends on them (rustls, reqwest,
-# axum, tungstenite…) rebuild in the lane and the warm-up times out.
-# The variables are target-scoped on purpose: they reach no Linux or Windows build,
-# and `cc` reads them before a plain `CFLAGS`. Cargo's `[env]` never overrides a
-# variable already set, so the lane's own (identical) environment wins harmlessly.
-# Keep this in step with `task_worker_env::compiler_temp_env_for` (a unit test
-# compares the two).
-[env]
-CFLAGS_aarch64_apple_darwin = "-save-temps=obj"
-CFLAGS_x86_64_apple_darwin = "-save-temps=obj"

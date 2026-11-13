@@ -21,6 +21,10 @@ use super::AgentType;
 pub struct ProjectWorkspace {
     #[serde(default)]
     pub hooks: crate::models::WorkspaceHooks,
+    /// KT-1742 — this project's lane warm-up settings; a field left unset
+    /// inherits the global `[workers.lane_warm]` entry.
+    #[serde(default)]
+    pub lane_warm: crate::models::LaneWarmConfig,
 }
 
 /// Where Kronn writes a project's agent files (KT-971).

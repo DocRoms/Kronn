@@ -15,7 +15,7 @@
 // (default 2): builds, not agent processes, load the machine, so a launch beyond
 // the cap waits `Queued` and starts when a slot frees.
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Bot } from 'lucide-react';
+import { AlertTriangle, Bot, Flame } from 'lucide-react';
 import { config as configApi } from '../../lib/api';
 import type { WorkersConfig } from '../../types/generated';
 import { userError } from '../../lib/userError';
@@ -30,6 +30,11 @@ import {
   MAX_BASH_TIMEOUT_MIN,
   MIN_BASH_TIMEOUT_MIN,
 } from '../../lib/workerShellTimeouts';
+import { LaneWarmFields } from '../LaneWarmFields';
+import {
+  EMPTY_LANE_WARM_DRAFT, configOf, draftOf, draftProblem, sameDraft,
+  type LaneWarmDraft,
+} from '../../lib/laneWarm';
 import '../../pages/SettingsPage.css';
 
 interface Props {
@@ -45,6 +50,8 @@ export function WorkersSection({ t }: Props) {
   const [heavyKb, setHeavyKb] = useState(String(DEFAULT_HEAVY_OUTPUT_KB));
   const [bashDefault, setBashDefault] = useState(String(DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
   const [bashMax, setBashMax] = useState(String(DEFAULT_BASH_MAX_TIMEOUT_MIN));
+  // KT-1742 — how every project's lane is warmed (a project may override it).
+  const [laneWarm, setLaneWarm] = useState<LaneWarmDraft>(EMPTY_LANE_WARM_DRAFT);
   // The generation limit (Settings > Server) cuts the whole turn whatever a command is
   // allowed, so it is shown next to the per-command cap. Read-only here.
   const [generationMin, setGenerationMin] = useState<number | null>(null);
@@ -74,6 +81,7 @@ export function WorkersSection({ t }: Props) {
         setHeavyKb(String(value.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
         setBashDefault(String(value.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
         setBashMax(String(value.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+        setLaneWarm(draftOf(value.lane_warm));
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -95,7 +103,8 @@ export function WorkersSection({ t }: Props) {
   const validBashDefault = Number.isInteger(bashDefaultMin)
     && bashDefaultMin >= MIN_BASH_TIMEOUT_MIN && validBashMax && bashDefaultMin <= bashMaxMin;
   const validBash = validBashMax && validBashDefault;
-  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash;
+  const validLaneWarm = draftProblem(laneWarm) === null;
+  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validLaneWarm;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
@@ -104,7 +113,8 @@ export function WorkersSection({ t }: Props) {
     && saved !== null && workerCap === saved.max_concurrent_task_workers
     && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)
     && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
-    && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN);
+    && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN)
+    && sameDraft(laneWarm, draftOf(saved.lane_warm));
 
   const save = useAsyncGuard(async () => {
     if (!saved || !valid) return;
@@ -118,6 +128,7 @@ export function WorkersSection({ t }: Props) {
         heavy_output_kb: heavy,
         bash_default_timeout_min: bashDefaultMin,
         bash_max_timeout_min: bashMaxMin,
+        lane_warm: configOf(laneWarm),
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
@@ -127,6 +138,7 @@ export function WorkersSection({ t }: Props) {
       setHeavyKb(String(next.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
       setBashDefault(String(next.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
       setBashMax(String(next.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+      setLaneWarm(draftOf(next.lane_warm));
     } catch (cause) {
       setError(userError(cause));
     }
@@ -331,6 +343,19 @@ export function WorkersSection({ t }: Props) {
             <span>{t('config.workers.shellTimeoutsOutlive')}</span>
           </div>
         )}
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }} data-testid="workers-lane-warm">
+          <Flame size={14} className="text-accent" />
+          <span className="label">{t('laneWarm.title')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4">{t('laneWarm.help')}</p>
+        <LaneWarmFields
+          draft={laneWarm}
+          onChange={setLaneWarm}
+          scope="global"
+          disabled={saved === null}
+          idPrefix="workers-lane-warm"
+          t={t}
+        />
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}
       </div>
     </div>

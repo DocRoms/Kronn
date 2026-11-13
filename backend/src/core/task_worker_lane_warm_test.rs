@@ -1,11 +1,15 @@
 use super::*;
+use crate::core::project_toolchains::CargoMetadata;
 use crate::core::task_worker_env::ProbeOutcome;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 const LOCK_A: &str = "[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n";
 const LOCK_B: &str = "[[package]]\nname = \"b\"\nversion = \"2.0.0\"\n";
+/// A lock that lists the `cc` crate: the project builds C from a build script.
+const LOCK_CC: &str = "[[package]]\nname = \"cc\"\nversion = \"1.0.0\"\n";
 
 fn hash_of(lock: &str) -> String {
     Sha256::digest(lock.as_bytes())
@@ -79,6 +83,42 @@ fn settings() -> WarmStartSettings {
     WarmStartSettings::resolve(Some("3"), Some("2"), Some("60"), 8)
 }
 
+/// Where a crate of the fixture builds in the main checkout: `<repo>/target`,
+/// the default of a repository whose crate is in `backend/` and whose
+/// `.cargo/config.toml` says `target-dir = "target"` (Cargo itself is not run).
+fn fixture_metadata(manifest_dir: &Path) -> Result<CargoMetadata, String> {
+    let repo = manifest_dir
+        .parent()
+        .ok_or_else(|| "no parent".to_string())?;
+    Ok(CargoMetadata {
+        target_directory: repo.join("target"),
+        workspace_root: manifest_dir.to_path_buf(),
+    })
+}
+
+/// A seed-build runner that must not be reached: the host of `host()` aligns
+/// nothing.
+struct NeverRuns;
+
+impl ProbeRunner for NeverRuns {
+    fn run(&self, probe: &ProbeCommand) -> ProbeOutcome {
+        panic!("no seed build expected, got {probe:?}");
+    }
+}
+
+/// The warm host of a fixture project: no seed alignment, no compiler
+/// environment, no declared command, Cargo's answer stubbed.
+fn host() -> WarmHost<'static> {
+    WarmHost {
+        seed_alignment: false,
+        compiler_env: Vec::new(),
+        first_build_command: None,
+        metadata: &fixture_metadata,
+        seed_runner: &NeverRuns,
+        lock_wait: Duration::from_millis(50),
+    }
+}
+
 /// A clone that records its calls and copies (the test's stand-in for APFS).
 struct RecordingClone {
     calls: Mutex<Vec<(PathBuf, PathBuf)>>,
@@ -105,6 +145,9 @@ impl RecordingClone {
 }
 
 fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
+    if source.is_file() {
+        return std::fs::copy(source, destination).map(|_| ());
+    }
     std::fs::create_dir_all(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -178,6 +221,7 @@ fn warm_under(
         lane,
         provisioned,
         &settings(),
+        &host(),
         &BuildGate::new(),
         runner,
         &|source, destination| clone.call(source, destination),
@@ -195,6 +239,7 @@ fn warm(
         lane,
         &provisioned(),
         &settings(),
+        &host(),
         gate,
         runner,
         &|source, destination| clone.call(source, destination),
@@ -326,10 +371,11 @@ fn a_lib_table_in_the_manifest_is_a_library_target() {
 /// host's C flags are left alone.
 ///
 /// KT-1742: under the target-scoped names, never a plain `CFLAGS` (a plain one
-/// would reach every target and could not match a seed built by the main
-/// checkout's `.cargo/config.toml`).
+/// would reach every target), and only for a project that builds C through the
+/// `cc` crate: a project whose `Cargo.lock` does not list it keeps its build
+/// scripts' fingerprints untouched.
 #[test]
-fn the_lane_keeps_clang_temp_files_in_the_object_dir_on_macos_only() {
+fn the_lane_keeps_clang_temp_files_in_the_object_dir_on_macos_for_a_cc_project_only() {
     use crate::core::task_worker_env::{compiler_temp_env_for, MACOS_TARGET_CFLAGS_ENV};
 
     let expected: Vec<(&str, OsString)> = vec![
@@ -346,9 +392,10 @@ fn the_lane_keeps_clang_temp_files_in_the_object_dir_on_macos_only() {
     assert_eq!(MACOS_TARGET_CFLAGS_ENV.len(), expected.len());
     assert!(compiler_temp_env_for(false).is_empty());
 
-    // …and the first build gets it through the lane environment, like the worker.
+    // …and the first build gets it through the lane environment, like the worker,
+    // when the project's lock lists `cc`.
     let fx = fixture();
-    let lane = fx.lane("kt-1736-cflags", LOCK_A);
+    let lane = fx.lane("kt-1736-cflags", LOCK_CC);
     let env = lane.env(&provisioned());
     assert!(
         !env.iter().any(|(name, _)| *name == "CFLAGS"),
@@ -362,54 +409,14 @@ fn the_lane_keeps_clang_temp_files_in_the_object_dir_on_macos_only() {
             assert!(got.is_none(), "{name}");
         }
     }
-}
 
-/// KT-1742: the main checkout's builds seed every lane, and `cc` fingerprints the
-/// C flags it read. The repository's `.cargo/config.toml` `[env]` table (which
-/// the dev backend build, the owner's `cargo` and the lane all read) must carry
-/// exactly the macOS flags the lane sets, or a lane cloned from `target/debug`
-/// rebuilds `aws-lc-sys`, `libsqlite3-sys` and every dependent (measured: the
-/// 30-minute warm-up bound, no marker). It must stay scoped to macOS targets:
-/// a plain `CFLAGS` would reach the Linux and Windows builds too.
-#[test]
-fn the_cargo_config_env_matches_the_lane_c_flags_the_seed_is_built_with() {
-    use crate::core::task_worker_env::compiler_temp_env_for;
-
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(".cargo")
-        .join("config.toml");
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
-    let config: toml::Table = text.parse().expect("the cargo config is valid TOML");
-    let env_table = config
-        .get("env")
-        .and_then(|value| value.as_table())
-        .expect("`.cargo/config.toml` has an [env] table for the seed's C flags");
-
-    for (name, value) in compiler_temp_env_for(true) {
-        let configured = env_table
-            .get(name)
-            .and_then(|v| v.as_str())
-            .unwrap_or_else(|| panic!("`[env]` lacks {name}"));
-        assert_eq!(
-            OsString::from(configured),
-            value,
-            "{name} differs between .cargo/config.toml and the lane environment"
-        );
-    }
-    // Nothing else of the C toolchain is set for every target.
-    let lane_names: Vec<&str> = compiler_temp_env_for(true)
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
-    for key in env_table.keys() {
-        if key.starts_with("CFLAGS") || key.starts_with("CC") || key.starts_with("CXXFLAGS") {
-            assert!(
-                lane_names.contains(&key.as_str()),
-                "`[env]` sets {key}, which the lane does not set: the seed and the lane would disagree"
-            );
-        }
-    }
+    // A project that does not build C through `cc` gets nothing, on any host.
+    let plain = fx.lane("kt-1742-no-cc", LOCK_A);
+    let env = plain.env(&provisioned());
+    assert!(
+        !env.iter().any(|(name, _)| name.starts_with("CFLAGS")),
+        "{env:?}"
+    );
 }
 
 /// KT-1633: the lane's first build (a `cargo test --no-run` of the whole
@@ -547,7 +554,7 @@ fn the_seed_source_is_outside_every_path_the_worker_may_write() {
         lane.write_roots()
     );
     let home = HomeKey::of(&lane, &provisioned());
-    let candidates = seed_candidates(&lane, &home);
+    let candidates = seed_candidates(&lane, &home, &[fx.target_root()]);
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].target, main);
     assert_eq!(candidates[0].kind, SeedSourceKind::MainCheckout);
@@ -641,7 +648,7 @@ fn a_source_cannot_start_a_build_while_it_is_being_cloned() {
     let lock_path = source.join(DEBUG_DIR).join(CARGO_BUILD_LOCK);
 
     let home = HomeKey::of(&lane, &provisioned());
-    let outcome = seed_lane(&lane, &home, &|from, to| {
+    let outcome = seed_lane(&lane, &home, &[fx.target_root()], &|from, to| {
         let cargo = std::fs::File::open(&lock_path).unwrap();
         *observed.lock().unwrap() = Some(FileExt::try_lock_exclusive(&cargo).is_ok());
         copy_dir(from, to)
@@ -696,7 +703,7 @@ fn a_lane_never_clones_stale_seed_artifacts() {
     let seen = seen_by_the_clone.clone();
 
     let home = HomeKey::of(&lane, &provisioned());
-    let outcome = seed_lane(&lane, &home, &|from, to| {
+    let outcome = seed_lane(&lane, &home, &[fx.target_root()], &|from, to| {
         // What the clone is about to take, listed at the moment it takes it.
         let mut names: Vec<String> = std::fs::read_dir(from.join("deps"))
             .unwrap()
@@ -771,6 +778,7 @@ fn an_unsupported_clone_leaves_the_target_empty_and_still_builds() {
         &lane,
         &provisioned(),
         &settings(),
+        &host(),
         &BuildGate::new(),
         &runner,
         &|_, destination| {
@@ -1001,6 +1009,7 @@ fn the_warm_start_record_roundtrips_as_json() {
             kind: SeedSourceKind::MainCheckout,
             clone_ms: 12,
             pruned: None,
+            aligned: None,
         },
         build_jobs: 4,
         first_build: FirstBuild::Succeeded {
@@ -1009,6 +1018,7 @@ fn the_warm_start_record_roundtrips_as_json() {
         queued_ms: 5,
         provision_ms: Some(7),
         seed_ms: Some(13),
+        crates: Vec::new(),
     };
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["seed"]["outcome"], "cloned");
@@ -1051,12 +1061,14 @@ fn timed(first_build: FirstBuild, queued_ms: u64) -> WarmStartRecord {
             kind: SeedSourceKind::MainCheckout,
             clone_ms: 30,
             pruned: None,
+            aligned: None,
         },
         build_jobs: 4,
         first_build,
         queued_ms,
         provision_ms: Some(11),
         seed_ms: Some(35),
+        crates: Vec::new(),
     }
 }
 
@@ -1241,6 +1253,7 @@ fn a_second_lane_waits_for_the_first_build_and_reports_the_queue() {
                 &first_lane,
                 &provisioned(),
                 &settings,
+                &host(),
                 &gate,
                 runner.as_ref(),
                 &|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
@@ -1261,6 +1274,7 @@ fn a_second_lane_waits_for_the_first_build_and_reports_the_queue() {
                 &second_lane,
                 &provisioned(),
                 &settings,
+                &host(),
                 &gate,
                 runner.as_ref(),
                 &|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
@@ -1417,6 +1431,7 @@ fn cancelling_a_queued_first_build_leaves_the_gate_without_taking_a_slot() {
                 &lane,
                 &provisioned(),
                 &settings,
+                &host(),
                 &gate,
                 runner.as_ref(),
                 &|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
@@ -1485,6 +1500,7 @@ fn cancelling_a_running_first_build_stops_it_and_frees_its_slot() {
                 &lane,
                 &provisioned(),
                 &settings,
+                &host(),
                 &gate,
                 runner.as_ref(),
                 &|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
@@ -1581,6 +1597,7 @@ fn a_worker_stuck_behind_a_full_gate_starts_with_the_target_it_has() {
         &lane,
         &provisioned(),
         &settings,
+        &host(),
         &gate,
         &runner,
         &|_, _| Err(io::Error::from(io::ErrorKind::Unsupported)),
@@ -1621,4 +1638,486 @@ fn a_first_build_is_pending_only_for_a_lock_that_is_not_already_built() {
     let none = fx.repo.join("no-crate");
     std::fs::create_dir_all(&none).unwrap();
     assert!(!first_build_pending(&none), "no crate, no first build");
+}
+
+// ── KT-1742: seed alignment, nested crates, projects that are not Cargo ones ──
+
+use crate::core::task_worker_seed_align::SEED_STAMP;
+
+const CC_ENV: &str = "CFLAGS_test_target";
+const CC_FLAG: &str = "-save-temps=obj";
+
+fn cc_env() -> Vec<(String, String)> {
+    vec![(CC_ENV.to_string(), CC_FLAG.to_string())]
+}
+
+/// Where a crate builds in a main checkout whose crate has no `.cargo/config.toml`:
+/// its own `target/` (what `cargo metadata` answers; Cargo itself is not run).
+fn main_metadata(manifest_dir: &Path) -> Result<CargoMetadata, String> {
+    Ok(CargoMetadata {
+        target_directory: manifest_dir.join("target"),
+        workspace_root: manifest_dir.to_path_buf(),
+    })
+}
+
+fn aligned_host(seed_runner: &dyn ProbeRunner) -> WarmHost<'_> {
+    WarmHost {
+        seed_alignment: true,
+        compiler_env: cc_env(),
+        first_build_command: None,
+        metadata: &main_metadata,
+        seed_runner,
+        lock_wait: Duration::from_millis(150),
+    }
+}
+
+impl Fixture {
+    /// A lane whose worktree holds a Rust crate at each `(dir, lock)`.
+    fn crate_lane(&self, name: &str, crates: &[(&str, &str)]) -> WorkerLane {
+        let worktree = self
+            .repo
+            .join(".kronn")
+            .join("worktrees")
+            .join(format!("task-{name}"));
+        for (rel, lock) in crates {
+            let dir = worktree.join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+            std::fs::write(dir.join("Cargo.lock"), lock).unwrap();
+        }
+        WorkerLane::for_worktree(&worktree).unwrap()
+    }
+
+    /// The same crate in the main checkout, with a build in the crate's own
+    /// `target/`. Returns that target.
+    fn main_crate(&self, rel: &str, lock: &str) -> PathBuf {
+        let dir = self.repo.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+        std::fs::write(dir.join("Cargo.lock"), lock).unwrap();
+        let target = dir.join("target");
+        self.write_build(&target, "main");
+        target
+    }
+
+    /// A worktree with no Cargo workspace at all (a PHP / JavaScript project).
+    fn plain_lane(&self, name: &str) -> WorkerLane {
+        let worktree = self
+            .repo
+            .join(".kronn")
+            .join("worktrees")
+            .join(format!("task-{name}"));
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join("package.json"), "{}").unwrap();
+        WorkerLane::for_worktree(&worktree).unwrap()
+    }
+}
+
+fn warm_with(
+    lane: &WorkerLane,
+    host: &WarmHost<'_>,
+    runner: &dyn ProbeRunner,
+    clone: &RecordingClone,
+) -> WarmStartRecord {
+    warm_lane(
+        lane,
+        &provisioned(),
+        &settings(),
+        host,
+        &BuildGate::new(),
+        runner,
+        &|source, destination| clone.call(source, destination),
+        |_| {},
+    )
+}
+
+fn env_of(call: &ProbeCommand, name: &str) -> Option<OsString> {
+    call.env
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, value)| value.clone())
+}
+
+/// KT-1742: a project that is NOT Kronn (a crate in `redis-flush/`, its own
+/// `target/`, no repository-level Cargo config) gets its seed built once with the
+/// lane's C-flag environment, then cloned; the next lane finds the stamp and
+/// rebuilds nothing; a changed `Cargo.lock` of the main checkout aligns it again.
+#[test]
+fn a_project_that_is_not_kronn_gets_its_seed_aligned_once_and_the_next_lane_reuses_it() {
+    let fx = fixture();
+    let target = fx.main_crate("redis-flush", LOCK_CC);
+    let seed_build = ScriptedBuild::ok();
+    let host = aligned_host(&seed_build);
+    let first_build = ScriptedBuild::ok();
+
+    let first = fx.crate_lane("kt-1742-a", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&first, &host, &first_build, &RecordingClone::new());
+
+    let SeedOutcome::Cloned {
+        source, aligned, ..
+    } = &record.seed
+    else {
+        panic!("expected a clone, got {record:?}");
+    };
+    assert_eq!(source, &target, "the seed is the crate's own target");
+    assert!(
+        matches!(aligned, Some(SeedAlignment::Aligned { rebuilt: true, .. })),
+        "{aligned:?}"
+    );
+    let calls = seed_build.calls();
+    assert_eq!(calls.len(), 1, "one seed build");
+    assert_eq!(calls[0].program, "cargo");
+    assert_eq!(calls[0].args, ["build", "--locked", "--offline"]);
+    assert_eq!(calls[0].cwd, fx.repo.join("redis-flush"));
+    assert_eq!(env_of(&calls[0], CC_ENV), Some(OsString::from(CC_FLAG)));
+    assert_eq!(
+        env_of(&calls[0], "CARGO_TARGET_DIR"),
+        Some(target.clone().into_os_string()),
+        "the build writes the seed's own target, not the lane's"
+    );
+    assert!(
+        env_of(&calls[0], "KRONN_PORT").is_none(),
+        "nothing of the lane's ports or data reaches the owner's build"
+    );
+    assert!(
+        target.join(SEED_STAMP).is_file(),
+        "the stamp beside the seed"
+    );
+    // The lane's own build agrees with the seed's environment by construction.
+    let lane_calls = first_build.calls();
+    assert_eq!(lane_calls.len(), 1);
+    assert_eq!(
+        env_of(&lane_calls[0], CC_ENV),
+        Some(OsString::from(CC_FLAG)),
+        "the first build runs with the seed's compiler environment"
+    );
+    assert_eq!(lane_calls[0].cwd, first.worktree.join("redis-flush"));
+
+    // A second lane of the project reuses the aligned seed: no build.
+    let second = fx.crate_lane("kt-1742-b", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&second, &host, &ScriptedBuild::ok(), &RecordingClone::new());
+    assert_eq!(
+        record.crates[0].seed_aligned,
+        SeedAlignment::Aligned {
+            rebuilt: false,
+            build_ms: 0
+        }
+    );
+    assert_eq!(seed_build.calls().len(), 1, "the stamp matched: no rebuild");
+
+    // The main checkout moved on to another Cargo.lock: aligned again.
+    std::fs::write(
+        fx.repo.join("redis-flush").join("Cargo.lock"),
+        format!("{LOCK_CC}\n[[package]]\nname = \"extra\"\nversion = \"1.0.0\"\n"),
+    )
+    .unwrap();
+    let third = fx.crate_lane("kt-1742-c", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&third, &host, &ScriptedBuild::ok(), &RecordingClone::new());
+    assert!(
+        matches!(
+            record.crates[0].seed_aligned,
+            SeedAlignment::Aligned { rebuilt: true, .. }
+        ),
+        "{:?}",
+        record.crates[0].seed_aligned
+    );
+    assert_eq!(
+        seed_build.calls().len(),
+        2,
+        "a changed lock aligns once more"
+    );
+}
+
+/// KT-1742: the seed is the owner's own target; while a build of theirs holds
+/// Cargo's lock on it Kronn builds nothing in it, says so in the record, and the
+/// lane falls back to what it did before (a seed being written is not cloned).
+#[test]
+fn a_seed_the_owner_is_building_is_left_alone_and_the_fallback_is_reported() {
+    let fx = fixture();
+    let target = fx.main_crate("redis-flush", LOCK_CC);
+    let seed_build = ScriptedBuild::ok();
+    let host = aligned_host(&seed_build);
+
+    let owner_build = std::fs::File::open(target.join(DEBUG_DIR).join(CARGO_BUILD_LOCK)).unwrap();
+    FileExt::try_lock_exclusive(&owner_build).unwrap();
+    let lane = fx.crate_lane("kt-1742-held", &[("redis-flush", LOCK_CC)]);
+    let started = Instant::now();
+    let record = warm_with(&lane, &host, &ScriptedBuild::ok(), &RecordingClone::new());
+
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the wait for the lock is bounded"
+    );
+    let SeedAlignment::NotAligned { reason } = &record.crates[0].seed_aligned else {
+        panic!("expected a reported fallback, got {record:?}");
+    };
+    assert!(reason.contains("holds the seed's Cargo lock"), "{reason}");
+    assert!(
+        seed_build.calls().is_empty(),
+        "nothing built in their target"
+    );
+    assert!(
+        matches!(record.seed, SeedOutcome::NoSource { .. }),
+        "a seed a build is writing is not cloned: {record:?}"
+    );
+    assert!(!lane.cargo_target_dir.join(DEBUG_DIR).exists());
+
+    // Their build over, the next lane aligns and clones.
+    FileExt::unlock(&owner_build).unwrap();
+    let next = fx.crate_lane("kt-1742-free", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&next, &host, &ScriptedBuild::ok(), &RecordingClone::new());
+    assert!(
+        matches!(
+            record.crates[0].seed_aligned,
+            SeedAlignment::Aligned { rebuilt: true, .. }
+        ),
+        "{record:?}"
+    );
+    assert!(matches!(record.seed, SeedOutcome::Cloned { .. }));
+}
+
+/// KT-1742: a failed seed build is reported and never blocks the lane.
+#[test]
+fn a_failed_seed_build_is_reported_and_the_seed_is_cloned_as_it_is() {
+    let fx = fixture();
+    fx.main_crate("redis-flush", LOCK_CC);
+    let seed_build = ScriptedBuild::with(false, "error: linker `cc` not found");
+    let host = aligned_host(&seed_build);
+    let lane = fx.crate_lane("kt-1742-failed", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&lane, &host, &ScriptedBuild::ok(), &RecordingClone::new());
+
+    let SeedAlignment::NotAligned { reason } = &record.crates[0].seed_aligned else {
+        panic!("{record:?}");
+    };
+    assert!(reason.contains("linker `cc` not found"), "{reason}");
+    assert!(
+        matches!(record.seed, SeedOutcome::Cloned { .. }),
+        "{record:?}"
+    );
+    assert!(
+        !fx.repo
+            .join("redis-flush")
+            .join("target")
+            .join(SEED_STAMP)
+            .exists(),
+        "no stamp for a build that did not finish"
+    );
+}
+
+/// KT-1742: the warm-up does not assume Kronn's layout. Every Rust workspace
+/// root found from the manifests is built, seeded from its own target and
+/// aligned; the lane has one `debug/`, so the seeds are merged into it.
+#[test]
+fn every_rust_root_of_the_repository_is_warmed_seeded_and_aligned_wherever_it_is() {
+    let fx = fixture();
+    let redis = fx.main_crate("redis-flush", LOCK_CC);
+    let exporter = fx.main_crate("tools/exporter", LOCK_B);
+    std::fs::write(
+        exporter
+            .join(DEBUG_DIR)
+            .join("deps")
+            .join("libexporter.rlib"),
+        "exporter",
+    )
+    .unwrap();
+    let seed_build = ScriptedBuild::ok();
+    let host = aligned_host(&seed_build);
+    let runner = ScriptedBuild::ok();
+    let lane = fx.crate_lane(
+        "kt-1742-roots",
+        &[("redis-flush", LOCK_CC), ("tools/exporter", LOCK_B)],
+    );
+
+    let record = warm_with(&lane, &host, &runner, &RecordingClone::new());
+
+    let paths: Vec<&str> = record.crates.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["redis-flush", "tools/exporter"], "{record:?}");
+    assert_eq!(record.crates[0].seed_target.as_ref(), Some(&redis));
+    assert_eq!(record.crates[1].seed_target.as_ref(), Some(&exporter));
+    assert!(record
+        .crates
+        .iter()
+        .all(|c| matches!(c.seed_aligned, SeedAlignment::Aligned { rebuilt: true, .. })));
+    let builds = runner.calls();
+    assert_eq!(builds.len(), 2, "one build per root");
+    assert_eq!(builds[0].cwd, lane.worktree.join("redis-flush"));
+    assert_eq!(builds[1].cwd, lane.worktree.join("tools/exporter"));
+    assert_eq!(seed_build.calls().len(), 2, "one seed build per root");
+    assert!(matches!(record.first_build, FirstBuild::Succeeded { .. }));
+    let deps = lane.cargo_target_dir.join(DEBUG_DIR).join("deps");
+    assert!(deps.join("libdep.rlib").is_file(), "the first seed's units");
+    assert!(
+        deps.join("libexporter.rlib").is_file(),
+        "the second workspace's units are merged into the lane"
+    );
+    let roots = project_toolchains::rust_roots(&lane.worktree);
+    assert_eq!(
+        read_marker(&lane.cargo_target_dir).map(|m| m.lock_hash),
+        project_toolchains::combined_lock_hash(&roots),
+        "the marker covers every root's lock"
+    );
+}
+
+/// KT-1742: where a crate builds is asked of Cargo, in the main checkout; when
+/// it cannot say, the lane has no seed and the record names the crate.
+#[test]
+fn a_crate_whose_target_cannot_be_resolved_has_no_seed_and_the_record_says_which() {
+    fn unresolved(_: &Path) -> Result<CargoMetadata, String> {
+        Err("cargo metadata failed (exit status: 101)".into())
+    }
+    let fx = fixture();
+    fx.main_crate("redis-flush", LOCK_CC);
+    let seed_build = ScriptedBuild::ok();
+    let mut host = aligned_host(&seed_build);
+    host.metadata = &unresolved;
+    let lane = fx.crate_lane("kt-1742-unresolved", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&lane, &host, &ScriptedBuild::ok(), &RecordingClone::new());
+
+    let SeedOutcome::NoSource { reason } = &record.seed else {
+        panic!("{record:?}");
+    };
+    assert!(
+        reason.contains("no seed target could be resolved"),
+        "{reason}"
+    );
+    assert!(reason.contains("redis-flush"), "{reason}");
+    assert!(seed_build.calls().is_empty());
+    assert!(matches!(
+        record.crates[0].seed_aligned,
+        SeedAlignment::Skipped { .. }
+    ));
+}
+
+#[test]
+fn seed_alignment_can_be_turned_off_and_has_nothing_to_align_without_a_compiler_environment() {
+    let fx = fixture();
+    fx.main_crate("redis-flush", LOCK_CC);
+    let seed_build = ScriptedBuild::ok();
+
+    let mut off = aligned_host(&seed_build);
+    off.seed_alignment = false;
+    let lane = fx.crate_lane("kt-1742-off", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&lane, &off, &ScriptedBuild::ok(), &RecordingClone::new());
+    let SeedAlignment::Skipped { reason } = &record.crates[0].seed_aligned else {
+        panic!("{record:?}");
+    };
+    assert!(reason.contains("off for this project"), "{reason}");
+    assert!(matches!(record.seed, SeedOutcome::Cloned { .. }));
+
+    let mut bare = aligned_host(&seed_build);
+    bare.compiler_env = Vec::new();
+    let lane = fx.crate_lane("kt-1742-bare", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&lane, &bare, &ScriptedBuild::ok(), &RecordingClone::new());
+    let SeedAlignment::Skipped { reason } = &record.crates[0].seed_aligned else {
+        panic!("{record:?}");
+    };
+    assert!(reason.contains("no compiler environment"), "{reason}");
+    assert!(
+        seed_build.calls().is_empty(),
+        "nothing was ever built in the seed"
+    );
+}
+
+/// KT-1742: a project with no Cargo workspace gets no cargo stub and no Cargo
+/// warm-up, and the record says why.
+#[test]
+fn a_project_with_no_cargo_workspace_is_not_warmed_and_the_record_says_why() {
+    fn no_cargo(_: &Path) -> Result<CargoMetadata, String> {
+        panic!("cargo must not be asked about a project that has no Cargo workspace");
+    }
+    let fx = fixture();
+    let lane = fx.plain_lane("kt-1742-js");
+    let runner = ScriptedBuild::ok();
+    let seed_build = ScriptedBuild::ok();
+    let mut host = aligned_host(&seed_build);
+    host.metadata = &no_cargo;
+    let record = warm_with(&lane, &host, &runner, &RecordingClone::new());
+
+    let FirstBuild::Skipped { reason } = &record.first_build else {
+        panic!("{record:?}");
+    };
+    assert!(reason.contains("nothing to warm"), "{reason}");
+    assert!(matches!(record.seed, SeedOutcome::NotApplicable { .. }));
+    assert!(runner.calls().is_empty(), "no cargo");
+    assert!(seed_build.calls().is_empty());
+    assert!(!first_build_pending(&lane.worktree));
+}
+
+/// KT-1742: the owner declares the warm-up of a project that is not a Cargo one
+/// (a composer or npm install): same bound, same record, same marker.
+#[test]
+fn a_declared_first_build_command_warms_a_project_that_is_not_a_cargo_one() {
+    let fx = fixture();
+    let lane = fx.plain_lane("kt-1742-composer");
+    let runner = ScriptedBuild::ok();
+    let seed_build = ScriptedBuild::ok();
+    let mut host = aligned_host(&seed_build);
+    host.first_build_command = Some("composer install --no-interaction".into());
+    let record = warm_with(&lane, &host, &runner, &RecordingClone::new());
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 1);
+    let (program, shell_flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    assert_eq!(calls[0].program, program);
+    assert_eq!(
+        calls[0].args,
+        [shell_flag, "composer install --no-interaction"]
+    );
+    assert_eq!(calls[0].cwd, lane.worktree, "run in the worktree root");
+    // The same bound as a cargo warm-up (what is left of it, a moment later).
+    assert!(calls[0].timeout <= settings().first_build_timeout);
+    assert!(calls[0].timeout > settings().first_build_timeout - Duration::from_secs(30));
+    assert_eq!(
+        calls[0].priority,
+        crate::core::background_priority::Priority::Background
+    );
+    assert!(matches!(record.first_build, FirstBuild::Succeeded { .. }));
+    assert_eq!(record.crates.len(), 1);
+    assert_eq!(record.crates[0].path, "command");
+    assert!(matches!(record.seed, SeedOutcome::NotApplicable { .. }));
+    assert!(read_marker(&lane.cargo_target_dir).is_some(), "marked warm");
+    assert!(seed_build.calls().is_empty(), "a command builds no seed");
+
+    // Warm for this command: a relaunch builds nothing; another command re-warms.
+    let again = warm_with(&lane, &host, &runner, &RecordingClone::new());
+    assert!(matches!(again.first_build, FirstBuild::Skipped { .. }));
+    assert_eq!(runner.calls().len(), 1);
+    host.first_build_command = Some("npm ci".into());
+    let changed = warm_with(&lane, &host, &runner, &RecordingClone::new());
+    assert!(matches!(changed.first_build, FirstBuild::Succeeded { .. }));
+    assert_eq!(runner.calls().len(), 2);
+}
+
+/// KT-1742: the record's shape the journal and the UI read: `seed.aligned` and
+/// each crate's own alignment, as tagged JSON.
+#[test]
+fn the_alignment_is_journalled_as_tagged_json() {
+    let fx = fixture();
+    fx.main_crate("redis-flush", LOCK_CC);
+    let seed_build = ScriptedBuild::ok();
+    let host = aligned_host(&seed_build);
+    let lane = fx.crate_lane("kt-1742-json", &[("redis-flush", LOCK_CC)]);
+    let record = warm_with(&lane, &host, &ScriptedBuild::ok(), &RecordingClone::new());
+
+    let json = serde_json::to_value(&record).unwrap();
+    assert_eq!(json["seed"]["aligned"]["state"], "aligned");
+    assert_eq!(json["seed"]["aligned"]["rebuilt"], true);
+    assert_eq!(json["crates"][0]["path"], "redis-flush");
+    assert_eq!(json["crates"][0]["seed_aligned"]["state"], "aligned");
+    assert_eq!(
+        serde_json::from_value::<WarmStartRecord>(json).unwrap(),
+        record
+    );
+    let skipped = serde_json::to_value(SeedAlignment::skipped("why")).unwrap();
+    assert_eq!(skipped["state"], "skipped");
+    assert_eq!(skipped["reason"], "why");
+    let refused = serde_json::to_value(SeedAlignment::NotAligned {
+        reason: "held".into(),
+    })
+    .unwrap();
+    assert_eq!(refused["state"], "not_aligned");
 }
