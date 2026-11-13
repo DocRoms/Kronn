@@ -55,7 +55,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
   `[src: file: backend/src/workflows/steps.rs:2083-2117#evaluate_conditions]`
   `[src: file: backend/src/models/workflows.rs:1238-1242#room_id]`
-  `[src: file: backend/src/workflows/sub_workflow_step.rs:982-999#record_foreach_done]`
+  `[src: file: backend/src/workflows/sub_workflow_step.rs:1047-1064#record_foreach_done]`
 
 So the step does not need a new orchestration engine: it needs a **mechanical
 principal** for a campaign, plus a **reviewer** that is not a long-lived room
