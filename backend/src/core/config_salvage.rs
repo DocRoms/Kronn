@@ -155,6 +155,18 @@ fn is_opaque_token(name: &str) -> bool {
     if super::crypto::canonical_secret(name).is_ok() {
         return true;
     }
+    // A key written in groups (`<16 hex> <16 hex> …`, dashes, colons): with the
+    // separators removed, any run of 32 hex digits or more is a key, or a hash
+    // or an identifier no setting is named after (a dashless or dashed UUID is
+    // one, and is hidden too: the safe side).
+    let squeezed: String = name.chars().filter(char::is_ascii_alphanumeric).collect();
+    if squeezed
+        .as_bytes()
+        .split(|b| !b.is_ascii_hexdigit())
+        .any(|h| h.len() >= 32)
+    {
+        return true;
+    }
     let key_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_');
     name.split(|c: char| !key_char(c)).any(|run| {
         if run.len() < 24 {
@@ -1253,6 +1265,45 @@ mod tests {
                 show_keys(&["tokens".to_string(), name.clone()]),
                 "tokens.<key #2>"
             );
+        }
+    }
+
+    /// KT-1528 — an instance key written in groups of fewer than 24 digits (spaces,
+    /// dashes, colons between groups of 16 or 8) is masked too, and a 32-hex or
+    /// 40-hex name (a dashless UUID, a SHA) is hidden on the safe side. An ordinary
+    /// setting name is not.
+    #[test]
+    fn a_key_name_written_in_short_groups_is_not_printed() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let groups = |sep: &str, n: usize| {
+            hex.as_bytes()
+                .chunks(n)
+                .map(|c| std::str::from_utf8(c).unwrap())
+                .collect::<Vec<_>>()
+                .join(sep)
+        };
+        let names = [
+            groups(" ", 16),
+            groups("-", 16),
+            groups(":", 8),
+            groups("_", 4),
+            format!("key {}", groups(" ", 16)),
+            "0123456789abcdef0123456789abcdef".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+            "01234567-89ab-cdef-0123-456789abcdef".to_string(),
+        ];
+        for name in &names {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"\"\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            assert!(!notice.contains("0123"), "{name}: {notice}");
+            assert!(!notice.contains("89ab"), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+        }
+        for plain in ["theme", "default_agent_timeout_seconds", "acbd-fade-cafe"] {
+            assert!(!is_opaque_token(plain), "{plain}");
         }
     }
 

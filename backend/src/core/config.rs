@@ -1320,13 +1320,15 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     // the region closed, is that table's, or the file is too damaged to say: it is
     // never offered as the key (a mention is `unreadable`) for the rest of the text.
     let mut swallowed = false;
-    for (n, raw) in content.lines().enumerate() {
-        let line = if n == 0 {
-            raw.strip_prefix('\u{FEFF}').unwrap_or(raw)
-        } else {
-            raw
-        };
+    for raw in content.lines() {
+        // A byte-order mark is stripped at the start of EVERY line, not only the
+        // first (a file pasted together keeps the marks of its parts): it would
+        // otherwise hide a table header from the tests below.
+        let line = raw.strip_prefix('\u{FEFF}').unwrap_or(raw);
         let mut rest = line;
+        // The last significant character before `rest`, for the glued-header test
+        // of `line_state`: a closing `"""` just ended a value.
+        let mut before: Option<char> = None;
         if let Some(delimiter) = open_string {
             // An unclosed string swallowing what looks like a table header: the
             // lines after it belong to that table, not to the key.
@@ -1338,6 +1340,7 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
                     // stays open. What it held is not offered.
                     scan.buried.truncate(string_start);
                     rest = after;
+                    before = Some('"');
                 }
                 None => continue,
             }
@@ -1345,10 +1348,10 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
             // An open array or inline table swallowing what looks like a table
             // header (`[mcp.env]`): the lines after it belong to that table,
             // not to the key, so none is offered from there on.
-            swallowed |= is_table_header(line);
+            swallowed |= is_table_header_before_closers(line);
             bury(&mut scan, line, !swallowed);
         } else {
-            let top = line.trim_start();
+            let top = trim_lead(line);
             if top.starts_with('[') {
                 break;
             }
@@ -1375,7 +1378,11 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
         // was no swallowing: what it held is not offered (the mention stays
         // `unreadable`). One that closes and another that opens on the same line
         // (`""" ; x = """`, `], b = [`) are two regions.
-        open_string = line_state(rest, &mut open, &mut scan.buried);
+        let mut glued = false;
+        open_string = line_state(rest, before, &mut open, &mut scan.buried, &mut glued);
+        // A header glued onto the end of a line (`port = 1 [mcp.env]`,
+        // `] [mcp.env]`, `""" [mcp.env]`): the text after it is that table's.
+        swallowed |= glued;
         if open_string.is_some() {
             string_start = scan.buried.len();
         }
@@ -1393,8 +1400,31 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
 /// not offer stays in the kept copy, reported; one it offered wrongly could be
 /// adopted as the live key).
 fn is_table_header(line: &str) -> bool {
-    let line = line.trim_start();
+    let line = trim_lead(line);
     line.starts_with('[') && line.parse::<toml::Table>().is_ok()
+}
+
+/// `line` without its leading whitespace and byte-order marks (TOML allows an
+/// indented header; a mark pasted mid-file is not whitespace for Rust).
+fn trim_lead(line: &str) -> &str {
+    line.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}')
+}
+
+/// [`is_table_header`] on the line as it is, or with closers of the open array
+/// (`]`, `}`) after it: inside an open array `[mcp.env]]` and `[mcp.env] ]` are a
+/// header-shaped text that also closes the array, and what follows the close
+/// would otherwise be read as top level.
+fn is_table_header_before_closers(line: &str) -> bool {
+    let mut text = line.trim_end();
+    loop {
+        if is_table_header(text) {
+            return true;
+        }
+        match text.strip_suffix([']', '}']) {
+            Some(shorter) => text = shorter.trim_end(),
+            None => return false,
+        }
+    }
 }
 
 /// A line inside a string or an array that is still open. It could be the key's
@@ -1478,8 +1508,18 @@ fn string_end<'a>(line: &'a str, delimiter: &str) -> Option<&'a str> {
 /// open before the line (each entry: where `buried` stood when it opened); it is
 /// updated, and a bracket that closes pops its level and takes back what was
 /// buried since it opened. Single-line strings and comments are skipped over.
-fn line_state(line: &str, open: &mut Vec<usize>, buried: &mut Vec<String>) -> Option<&'static str> {
+fn line_state(
+    line: &str,
+    before: Option<char>,
+    open: &mut Vec<usize>,
+    buried: &mut Vec<String>,
+    glued: &mut bool,
+) -> Option<&'static str> {
     let mut rest = line;
+    // The last significant character seen. A `[` that starts a value follows `=`,
+    // `,`, `[`, `{` or the start of a line; one that follows the end of a value
+    // (`1 [`, `"a" [`, `] [`) is a table header glued onto it.
+    let mut last = before;
     while let Some(c) = rest.chars().next() {
         if c == '#' {
             break;
@@ -1493,7 +1533,10 @@ fn line_state(line: &str, open: &mut Vec<usize>, buried: &mut Vec<String>) -> Op
         };
         if let Some(delimiter) = delimiter {
             match string_end(&rest[3..], delimiter) {
-                Some(after) => rest = after,
+                Some(after) => {
+                    rest = after;
+                    last = Some('"');
+                }
                 None => return Some(delimiter),
             }
         } else if c == '"' || c == '\'' {
@@ -1509,15 +1552,24 @@ fn line_state(line: &str, open: &mut Vec<usize>, buried: &mut Vec<String>) -> Op
                 }
             }
             rest = &rest[end..];
+            last = Some('"');
         } else {
             match c {
-                '[' | '{' => open.push(buried.len()),
+                '[' | '{' => {
+                    if c == '[' && last.is_some_and(|l| !matches!(l, '=' | ',' | '[' | '{')) {
+                        *glued = true;
+                    }
+                    open.push(buried.len());
+                }
                 ']' | '}' => {
                     if let Some(start) = open.pop() {
                         buried.truncate(start);
                     }
                 }
                 _ => {}
+            }
+            if !c.is_whitespace() && c != '\u{FEFF}' {
+                last = Some(c);
             }
             rest = &rest[c.len_utf8()..];
         }

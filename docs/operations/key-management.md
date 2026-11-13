@@ -298,11 +298,19 @@ Safe to interrupt at any point; a rerun converges:
    what it held, at any depth. A table header swallowed by an open region stays
    swallowed after the region closes: the lines after it are that table's (or the
    file is too damaged to say), so none is read as the key, a mention of the name
-   there is unreadable, and the copy is kept whole and reported.
+   there is unreadable, and the copy is kept whole and reported. A header glued
+   onto the end of a line is a header too: a `[` that follows the end of a value
+   (`port = 1 [mcp.env]`, `] [mcp.env]`, `""" [mcp.env]`, `} [mcp.env]`) instead
+   of `=`, `,`, `[`, `{` or the start of a line, and inside an open array a
+   header-shaped text that closes the array with it (`[mcp.env]]`,
+   `[mcp.env] ]`), swallows what follows, like a header on its own line. A
+   byte-order mark is ignored at the start of every line, not only the first.
    A key name that is, or holds, a secret is never printed in a notice, like a
    vendor-shaped secret: an instance key, a run of 24 or more hex digits or of 32
    or more base64 characters mixing capitals, lower case and digits, anywhere in
-   the name (`<64 hex>.old`, `key <64 hex>`, `<32 hex>:<32 hex>`), or an
+   the name (`<64 hex>.old`, `key <64 hex>`, `<32 hex>:<32 hex>`), a key written
+   in groups (with the separators removed, any run of 32 hex digits or more: a
+   dashless or dashed UUID and a SHA-1 are hidden too, on the safe side), or an
    authorization header (`bearer …`) used as a name. It is also a credential on
    the save path: its entry is sheltered and not written back to `config.toml`,
    so the name does not stay in clear there.

@@ -1406,6 +1406,58 @@ fn a_nested_region_that_closes_inside_an_open_array_offers_nothing() {
     assert_kept_whole_and_reported(&texts);
 }
 
+/// A table header glued onto the end of a line (after a value, after a region
+/// that closes, after a closing string, or closing the open array with it) is a
+/// header like any other: what follows is that table's, so a later
+/// `encryption_secret` is never the key, and the copy is kept whole and reported,
+/// never cut to that line. A byte-order mark pasted mid-file before a header does
+/// not hide it either.
+#[test]
+fn a_header_glued_onto_a_line_is_seen_and_what_follows_is_never_the_key() {
+    let other = crypto::generate_secret();
+    let mut texts = Vec::new();
+    for head in [
+        "x = [\n] [mcp.env]\n",
+        "x = [\n][mcp.env]\n",
+        "x = {\n} [mcp.env]\n",
+        "x = \"\"\"\nfoo\"\"\" [mcp.env]\n",
+        "x = '''\nfoo''' [mcp.env]\n",
+        "x = [\n[mcp.env] ]\n",
+        "x = [\n[mcp.env]]\n",
+        "port = 1 [mcp.env]\n",
+        "x = \"a\" [mcp.env]\n",
+        "x = [1] [mcp.env]\n",
+        "x = [\n\u{FEFF}[mcp.env]\n]\n",
+        "x = [\n  \u{FEFF}[mcp.env]\n]\n",
+    ] {
+        let text = format!("{head}encryption_secret = \"{other}\"\n[b\n");
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        let scan = config::salvage_key_scan(&text);
+        assert!(scan.values.is_empty(), "{text:?}: {scan:?}");
+        assert!(scan.buried.is_empty(), "{text:?}: {scan:?}");
+        assert!(scan.unreadable, "{text:?}");
+        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
+        assert_eq!(key_of(&text), None, "{text:?}");
+        texts.push(format!("{text}{LEAKY}"));
+    }
+    assert_kept_whole_and_reported(&texts);
+
+    // A `[` that starts a value (after `=`, `,`, `[`, `{`, or at the start of a
+    // line inside an array) is no header: the live key line is still read.
+    for ok in [
+        "x = [1, 2]\n",
+        "x = [[1], [2]]\n",
+        "x = { a = [1] }\n",
+        "x = [\n  1,\n  [2, 3],\n  { a = [4] }\n]\n",
+        "x = \"\"\"\nfoo\"\"\"\n",
+    ] {
+        let k = crypto::generate_secret();
+        let text = format!("{ok}encryption_secret = \"{k}\"\nbroken\n");
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        assert_eq!(config::salvage_key_line(&text), Some(k), "{text:?}");
+    }
+}
+
 /// Two assignments joined on one line (a hand-edit or merge accident) hide a
 /// quoted or escaped key part behind a plain one: whichever the spelling, the line
 /// may hold the live key, so the copy is kept whole and reported, never dropped.
