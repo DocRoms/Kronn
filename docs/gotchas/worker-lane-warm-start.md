@@ -29,8 +29,16 @@ Failure modes, all ending in a (cold) dispatch:
   (`⚠️ préchauffage échoué : <cause>`) and the worker still starts;
 - on macOS a `.S` source (`aws-lc-sys`) fails under the lane's sandbox with
   `unable to make temporary file: Operation not permitted` unless clang keeps its
-  temp files in the lane: the lane environment sets `CFLAGS=-save-temps=obj`
-  (see `docs/operations/worktree-build-artifacts.md`, KT-1736);
+  temp files in the lane: the lane environment sets
+  `CFLAGS_aarch64_apple_darwin` / `CFLAGS_x86_64_apple_darwin` to
+  `-save-temps=obj` (see `docs/operations/worktree-build-artifacts.md`, KT-1736);
+- **the seed must carry the same value**: `cc` fingerprints the C flags it read,
+  so a main-checkout target built without them is invalid for `aws-lc-sys`,
+  `libsqlite3-sys` and their ~12 dependents and the warm-up runs into its bound
+  (KT-1742). The repository's `.cargo/config.toml` `[env]` table sets the same two
+  variables for every `cargo` run, and a unit test compares it with the lane's;
+  even then the `kronn` crate's two compiles take ~33 min at load 14 (measured in
+  the same document), so the 30-min bound can still be too tight;
 - a queue that does not drain is given up after
   `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 30 min) and the worker
   starts with the target it has;

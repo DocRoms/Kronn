@@ -63,8 +63,14 @@ pub const VITE_DEV_PORT_ENV: &str = "VITE_DEV_PORT";
 pub const VITE_CACHE_DIR_ENV: &str = "VITE_CACHE_DIR";
 /// Playwright's Chromium runs single-process: the sandbox denies its rendezvous.
 pub const E2E_CHROMIUM_SINGLE_PROCESS_ENV: &str = "KRONN_E2E_CHROMIUM_SINGLE_PROCESS";
-/// The C compiler flags the `cc` crate (and so `aws-lc-sys`, `ring`, …) reads.
-pub const CFLAGS_ENV: &str = "CFLAGS";
+/// KT-1742 — the C compiler flags the `cc` crate (and so `aws-lc-sys`,
+/// `libsqlite3-sys`, …) reads for a macOS target, one variable per Apple
+/// architecture. They are target-scoped, never a plain `CFLAGS`: `cc` reads them
+/// first, they reach no Linux or Windows build, and the repository's
+/// `.cargo/config.toml` `[env]` table can carry the very same names so the main
+/// checkout's own builds (the lanes' seed) fingerprint identically.
+pub const MACOS_TARGET_CFLAGS_ENV: [&str; 2] =
+    ["CFLAGS_aarch64_apple_darwin", "CFLAGS_x86_64_apple_darwin"];
 /// KT-1736 — keep Apple clang's intermediate files next to the object file.
 ///
 /// A `.S` source is compiled in two jobs (preprocess, then assemble) and the
@@ -144,11 +150,23 @@ pub fn build_budget_env(jobs: u32) -> Vec<(&'static str, OsString)> {
     ]
 }
 
-/// The `CFLAGS` of a lane build on a host of the given family (KT-1736): the
-/// flag of [`CLANG_KEEP_TEMPS_IN_OBJ_DIR`] on macOS, nothing elsewhere.
+/// The C flags of a lane build on a host of the given family (KT-1736): the flag
+/// of [`CLANG_KEEP_TEMPS_IN_OBJ_DIR`] on macOS, nothing elsewhere.
+///
+/// KT-1742 — set under the target-scoped names of [`MACOS_TARGET_CFLAGS_ENV`],
+/// and in step with the `[env]` table of the repository's `.cargo/config.toml`
+/// (a unit test compares the two). `cc` puts the value it read into the build
+/// script's fingerprint, so a lane seeded from the main checkout's `target/debug`
+/// reuses the seed's `aws-lc-sys`, `libsqlite3-sys` and their dependents only if
+/// that seed was built with the same value. With a plain `CFLAGS` set by the lane
+/// alone, every `cc` crate of a seed built without it was rebuilt, the warm-up
+/// ran into its 30-minute bound and left no marker.
 pub(crate) fn compiler_temp_env_for(macos: bool) -> Vec<(&'static str, OsString)> {
     if macos {
-        vec![(CFLAGS_ENV, OsString::from(CLANG_KEEP_TEMPS_IN_OBJ_DIR))]
+        MACOS_TARGET_CFLAGS_ENV
+            .into_iter()
+            .map(|name| (name, OsString::from(CLANG_KEEP_TEMPS_IN_OBJ_DIR)))
+            .collect()
     } else {
         Vec::new()
     }
@@ -379,8 +397,8 @@ impl WorkerLane {
     /// KT-1736 — what keeps the C compiler's temporary files inside the lane
     /// ([`CLANG_KEEP_TEMPS_IN_OBJ_DIR`]). macOS only: it is Apple clang's driver
     /// that ignores `TMPDIR` for a `.S` source, and the only host whose sandbox
-    /// refuses the directory it picks instead; elsewhere `CFLAGS` is left alone,
-    /// so no cached build script is invalidated for nothing.
+    /// refuses the directory it picks instead; elsewhere the C flags are left
+    /// alone, so no cached build script is invalidated for nothing.
     fn compiler_temp_env(&self) -> Vec<(&'static str, OsString)> {
         compiler_temp_env_for(cfg!(target_os = "macos"))
     }

@@ -135,7 +135,7 @@ fn the_writable_set_is_the_lanes_roots_and_its_temp_dir_and_no_global_temp() {
 
 /// KT-1736: Apple clang puts a `.S` source's preprocess temp in the per-user
 /// Darwin temp dir (`/private/var/folders/…/T`), whatever `TMPDIR` says. The fix
-/// keeps that file in the lane (`CFLAGS=-save-temps=obj`), it does not open the
+/// keeps that file in the lane (`CFLAGS_<target>=-save-temps=obj`, KT-1742), it does not open the
 /// directory: no profile of a lane ever grants a `/var/folders` path outside the
 /// lane's own roots.
 #[test]

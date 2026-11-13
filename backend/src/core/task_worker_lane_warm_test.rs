@@ -312,29 +312,92 @@ fn a_lib_table_in_the_manifest_is_a_library_target() {
 
 /// KT-1736: on macOS the lane's builds keep clang's intermediate files beside the
 /// object file (the OS sandbox grants no per-user temp dir), and every other
-/// host's `CFLAGS` is left alone.
+/// host's C flags are left alone.
+///
+/// KT-1742: under the target-scoped names, never a plain `CFLAGS` (a plain one
+/// would reach every target and could not match a seed built by the main
+/// checkout's `.cargo/config.toml`).
 #[test]
 fn the_lane_keeps_clang_temp_files_in_the_object_dir_on_macos_only() {
-    use crate::core::task_worker_env::{compiler_temp_env_for, CFLAGS_ENV};
+    use crate::core::task_worker_env::{compiler_temp_env_for, MACOS_TARGET_CFLAGS_ENV};
 
-    assert_eq!(
-        compiler_temp_env_for(true),
-        vec![(CFLAGS_ENV, OsString::from("-save-temps=obj"))]
-    );
+    let expected: Vec<(&str, OsString)> = vec![
+        (
+            "CFLAGS_aarch64_apple_darwin",
+            OsString::from("-save-temps=obj"),
+        ),
+        (
+            "CFLAGS_x86_64_apple_darwin",
+            OsString::from("-save-temps=obj"),
+        ),
+    ];
+    assert_eq!(compiler_temp_env_for(true), expected);
+    assert_eq!(MACOS_TARGET_CFLAGS_ENV.len(), expected.len());
     assert!(compiler_temp_env_for(false).is_empty());
 
     // …and the first build gets it through the lane environment, like the worker.
     let fx = fixture();
     let lane = fx.lane("kt-1736-cflags", LOCK_A);
     let env = lane.env(&provisioned());
-    let cflags = env.iter().find(|(name, _)| *name == CFLAGS_ENV);
-    if cfg!(target_os = "macos") {
+    assert!(
+        !env.iter().any(|(name, _)| *name == "CFLAGS"),
+        "a plain CFLAGS reaches every target and cannot match the seed's"
+    );
+    for (name, value) in &expected {
+        let got = env.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone());
+        if cfg!(target_os = "macos") {
+            assert_eq!(got.as_ref(), Some(value), "{name}");
+        } else {
+            assert!(got.is_none(), "{name}");
+        }
+    }
+}
+
+/// KT-1742: the main checkout's builds seed every lane, and `cc` fingerprints the
+/// C flags it read. The repository's `.cargo/config.toml` `[env]` table (which
+/// the dev backend build, the owner's `cargo` and the lane all read) must carry
+/// exactly the macOS flags the lane sets, or a lane cloned from `target/debug`
+/// rebuilds `aws-lc-sys`, `libsqlite3-sys` and every dependent (measured: the
+/// 30-minute warm-up bound, no marker). It must stay scoped to macOS targets:
+/// a plain `CFLAGS` would reach the Linux and Windows builds too.
+#[test]
+fn the_cargo_config_env_matches_the_lane_c_flags_the_seed_is_built_with() {
+    use crate::core::task_worker_env::compiler_temp_env_for;
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(".cargo")
+        .join("config.toml");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let config: toml::Table = text.parse().expect("the cargo config is valid TOML");
+    let env_table = config
+        .get("env")
+        .and_then(|value| value.as_table())
+        .expect("`.cargo/config.toml` has an [env] table for the seed's C flags");
+
+    for (name, value) in compiler_temp_env_for(true) {
+        let configured = env_table
+            .get(name)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("`[env]` lacks {name}"));
         assert_eq!(
-            cflags.map(|(_, v)| v.clone()),
-            Some("-save-temps=obj".into())
+            OsString::from(configured),
+            value,
+            "{name} differs between .cargo/config.toml and the lane environment"
         );
-    } else {
-        assert!(cflags.is_none());
+    }
+    // Nothing else of the C toolchain is set for every target.
+    let lane_names: Vec<&str> = compiler_temp_env_for(true)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    for key in env_table.keys() {
+        if key.starts_with("CFLAGS") || key.starts_with("CC") || key.starts_with("CXXFLAGS") {
+            assert!(
+                lane_names.contains(&key.as_str()),
+                "`[env]` sets {key}, which the lane does not set: the seed and the lane would disagree"
+            );
+        }
     }
 }
 

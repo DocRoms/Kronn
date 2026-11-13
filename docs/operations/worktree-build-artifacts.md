@@ -371,9 +371,11 @@ What was established, and what was not:
 
 **The fix: the temporary file stays in the lane.** The lane environment
 (`WorkerLane::env`, so the warm-up, the sandboxed validations *and* the worker's
-own shell) carries `CFLAGS=-save-temps=obj` on macOS: clang then writes its
-intermediate files next to the object file, inside the lane's own target, and the
-profile is **not** widened. The alternative — granting the real
+own shell) carries `-save-temps=obj` on macOS — under the target-scoped
+`CFLAGS_aarch64_apple_darwin` / `CFLAGS_x86_64_apple_darwin` since KT-1742 (it was
+a plain `CFLAGS` in KT-1736; see "Seed and lane agree on the C flags" below): clang
+then writes its intermediate files next to the object file, inside the lane's own
+target, and the profile is **not** widened. The alternative — granting the real
 `DARWIN_USER_TEMP_DIR` to the profile — would let worker-written code (a
 `build.rs`, a test) write into a directory shared with every other process of the
 owner's session, and was not taken.
@@ -388,11 +390,15 @@ owner's session, and was not taken.
   refusal's absence; the refusal's absence under the profile is the replay row
   above.
 - A lane whose seed was built without the flag recompiles its `cc` build scripts
-  once (the `cc` crate tracks `CFLAGS` with `rerun-if-env-changed`): `aws-lc-sys`,
-  `libsqlite3-sys`. That is the cost of the fix; `aws-lc-sys` was already being
-  recompiled on the lanes that failed. Linux hosts are untouched: bubblewrap gives
+  (the `cc` crate tracks `CFLAGS` with `rerun-if-env-changed`) **and everything
+  that depends on them**. KT-1736 called that "the cost of the fix"; on 13/11 it
+  was the cause of the next timeout, and KT-1742 removes it by making the seed
+  carry the same flag (next section). Linux hosts are untouched: bubblewrap gives
   a private `/tmp`, so the variable is not set there.
-- `CFLAGS` is a default: a command that sets its own (`probe.env`) wins.
+- The lane sets the flag as a default: a command that sets its own
+  (`probe.env`) wins over the lane's variable, but a plain `CFLAGS` of a project is
+  shadowed by it in `cc`-based builds, since `cc` reads `CFLAGS_<target>` before
+  `CFLAGS` (KT-1742).
 
 **What the warm-up builds (decided by the owner, KT-1736).** The first build is
 `cargo test --lib --no-run --locked --offline` — the dependency graph (the test
@@ -470,14 +476,120 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 (`first_build.outcome`, `duration_ms`) and check the lane target for
 `.kronn-warm.json`.
 
-[src: file: backend/src/core/task_worker_env.rs:1141-1182#drain_output]
-[src: file: backend/src/core/task_worker_env.rs:68-80#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
-[src: file: backend/src/core/task_worker_env.rs:148-154#compiler_temp_env_for]
+[src: file: backend/src/core/task_worker_env.rs:1161-1203#drain_output]
+[src: file: backend/src/core/task_worker_env.rs:86-86#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
+[src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
 [src: file: backend/src/core/task_worker_lane_warm.rs:729-911#warm_lane_cancellable]
 [src: file: backend/src/core/task_worker_lane_warm.rs:925-932#first_build_args]
 [src: file: backend/src/core/task_worker_lane_warm.rs:936-940#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
+
+## Seed and lane agree on the C flags (KT-1742)
+
+**What happened.** After KT-1736 the two first lanes of 13/11 (KT-1595, KT-1731)
+and this task's own lane ended `first_build: timed_out` at 1 800 026 / 1 800 037 /
+1 800 030 ms (`build_jobs` 3, seed `main_checkout`, clone under 1 s, host load
+8–11), with no `.kronn-warm.json`. `aws-lc-sys` itself now built (its `.i`/`.s`
+temps sat beside the `.o`); the time went elsewhere.
+
+**Cause, measured** (13/11, a shell with the lane's environment, outside the OS
+sandbox; the seed is the main checkout's `target/debug`, cloned with
+`cp -cR` in 7 s):
+
+- `CARGO_LOG=cargo::core::compiler::fingerprint=info cargo test --lib --no-run
+  --locked --offline -v` on that clone with the lane's `CFLAGS=-save-temps=obj`
+  logs, for the two `cc` build scripts of the graph,
+  `dirty: EnvVarChanged { name: "CFLAGS", old_value: None, new_value:
+  Some("-save-temps=obj") }` (`aws-lc-sys` `build-script-main`, `libsqlite3-sys`
+  `build-script-build`), and then `dirty: UnitDependencyInfoChanged` /
+  `StaleDepFingerprint` on everything that depends on them: `aws-lc-sys` (lib),
+  `aws-lc-rs` (lib and build script), `rustls`, `rustls-webpki`, `tungstenite`,
+  `libsqlite3-sys` (lib), `utoipa-swagger-ui`… (the log was cut at 45 s; the
+  complete list is the `Dirty` list of the probe seed below).
+- The seed's `run-build-script-*.json` fingerprints record `CFLAGS: None`; this
+  task's lane, after its own timed-out warm-up, records
+  `CFLAGS: '-save-temps=obj'`. The `cc` crate reads (and so fingerprints)
+  `AWS_LC_SYS_CFLAGS[_<target>]`, `CFLAGS_<target>` and `CFLAGS`; the lane set the
+  last one and the seed never did.
+- Rebuilt by the flag alone: `aws-lc-sys` and `libsqlite3-sys`, then their
+  dependents `aws-lc-rs`, `rustls`, `rustls-webpki`, `tokio-rustls`, `tungstenite`,
+  `hyper-rustls`, `rustls-platform-verifier`, `tokio-tungstenite`, `axum`,
+  `reqwest`, `utoipa-swagger-ui`, `rusqlite` (`cargo build -v` `Dirty …: the env
+  variable CFLAGS… changed` / `info of dependency … changed`).
+
+**The fix: the seed is built with the lane's flag.** The repository's
+`.cargo/config.toml` now has an `[env]` table with
+`CFLAGS_aarch64_apple_darwin` and `CFLAGS_x86_64_apple_darwin` set to
+`-save-temps=obj`; the lane environment sets the same two variables instead of a
+plain `CFLAGS`. Every `cargo` run in the repository reads that file — the dev
+backend build (`scripts/dev-backend-supervisor.sh` `build_backend`, the watch
+command), the owner's own `cargo build` / `test` / `clippy`, the desktop shell —
+so the main checkout's `target/debug`, the lanes' only seed, is fingerprinted with
+the value a lane will use, whoever built it last. Why this shape, among the
+options of the task:
+
+| Option | Verdict |
+|---|---|
+| Set a plain `CFLAGS` in `[env]` | rejected: reaches the Linux and Windows builds too (a clang flag handed to MSVC; not tried) |
+| Set it in the dev supervisor scripts only | rejected: any other `cargo` of the owner (clippy, tests, the desktop shell) flips the shared target's fingerprint back and forth, each flip rebuilding the `cc` crates and their dependents |
+| Scope it to `aws-lc-sys` (`AWS_LC_SYS_CFLAGS`) | rejected: `aws-lc-sys` and the 11 crates above it still differ from a seed without it; only `libsqlite3-sys` would be spared. The seed must match anyway, and then nothing needs scoping |
+| `CFLAGS_<apple triple>` in `[env]` and in the lane | **taken**: no effect off macOS, read by `cc` first, identical value on both sides |
+
+`[env]` never overrides a variable that is already set, so a lane (same value)
+and the owner's shell are unaffected by the table. Checked with a probe seed: the
+clone of the main target, built with `[env]` and no `CFLAGS` in the shell
+(`cargo build -v`, the dev supervisor's command), records
+`CFLAGS_aarch64_apple_darwin: '-save-temps=obj'` in `aws-lc-sys` and
+`libsqlite3-sys`, and `aws-lc-sys/out` holds the saved `aes-xts-enc.s` beside the
+objects: the target-scoped name does reach the assembly compile. A project other
+than Kronn has no such `[env]`: its lanes still rebuild the `cc` crates of a seed
+built without the flag (once; the cost KT-1736 documented).
+
+**Pinned.** `the_cargo_config_env_matches_the_lane_c_flags_the_seed_is_built_with`
+(`task_worker_lane_warm_test.rs`) parses `.cargo/config.toml` and fails if its
+`[env]` lacks a variable `compiler_temp_env_for(true)` sets, differs in value, or
+sets another `CFLAGS*`/`CC*`/`CXXFLAGS*` name the lane does not.
+`the_lane_keeps_clang_temp_files_in_the_object_dir_on_macos_only` pins the lane
+side (the two target-scoped names on macOS, no plain `CFLAGS`, nothing elsewhere).
+
+**What a fresh lane from a fresh seed costs now** (13/11, load average 14, 3
+jobs, one lane at a time, outside the OS sandbox):
+
+| Step | Measured |
+|---|---|
+| seed refreshed with the new `[env]` (`cargo build -v` of the clone, stopped before the `kronn` crate): `aws-lc-sys`, `libsqlite3-sys`, their 12 dependents above, and 10 units unrelated to the flag (`icu_normalizer`, `idna_adapter`, `idna`, `url`, `zopfli`, `zip`, `regex` rebuilt with no `Dirty` reason, i.e. no usable fingerprint in the main target, and `tower-http`, `calamine`, `serde_json_path` above them) | 3 min 41 s, 24 units |
+| lane cloned from that seed, `cargo test --lib --no-run`: no `EnvVarChanged`; 24 test-profile units absent from a `cargo build` seed (dev-dependencies such as `wiremock`/`serial_test` unify more features into `futures-util`, `hyper-util`, `reqwest`, `axum`, `image`, `lopdf`…) | 1 min 56 s |
+| `kronn` lib **with `test-support`** (the package is its own dev-dependency, `backend/Cargo.toml`: every test build compiles the lib twice) | 8 min 25 s (rustc front end 291 s, codegen 214 s) |
+| `kronn` lib **test** binary | 24 min 27 s (1 467 s) |
+| **whole `cargo test --lib --timings`** | **32 min 56 s** |
+
+The `cc` crates are no longer in the list; what is left is the worktree's own
+crate, which no seed can cover (a path crate is fingerprinted by its path). Cargo's
+timings report has no codegen/link split for a test unit, so the share of the final
+link in the 24 min was **not** separated (the linker prints `ld: __eh_frame
+section too large (max 16MB)`; the dev profile keeps no incremental objects here to
+date the link by). Two warm-ups at once were **not** run here.
+
+**Consequence, said plainly: the 30-minute bound is still too tight for this
+crate on a loaded host.** With the seed fixed the warm-up no longer rebuilds the
+dependency graph, but the two compiles of `kronn` alone took 33 min at load 14
+with 3 jobs (KT-1736 measured 22 min 19 s for a worker's own `cargo test --lib`
+build). At that load a warm-up would end `timed_out` a few minutes before the last
+`rustc` finishes, throw that work away (a killed `rustc` leaves no artifact) and
+the worker would pay it again. Three levers, none of
+them taken here because each is the owner's call: raise
+`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 1800); stop compiling the lib
+twice for `cargo test --lib` (the self dev-dependency exists for the `it`
+integration binary, KT-1189); lower the gate's concurrency under load. To read the
+real outcome on the owner's Mac after integration: launch two tasks at once on a
+project seeded from a main target built with this `.cargo/config.toml`, read each
+`lane_warm_start` (`first_build.outcome`, `duration_ms`, build_jobs, host load) and
+look for `.kronn-warm.json` in the lane target.
+
+[src: file: backend/src/core/task_worker_env.rs:86-86#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
+[src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
+[src: file: backend/src/core/task_worker_lane_warm_test.rs:364-402#the_cargo_config_env_matches_the_lane_c_flags_the_seed_is_built_with]
 
 ## Long builds in a task worker (KT-1718)
 
@@ -547,7 +659,7 @@ load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:204-211#effective_bash_timeouts_ms]
-[src: file: backend/src/core/task_worker_env.rs:859-869#apply_bash_timeouts]
+[src: file: backend/src/core/task_worker_env.rs:877-887#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15176-15178#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:678-679#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
