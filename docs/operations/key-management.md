@@ -288,9 +288,14 @@ Safe to interrupt at any point; a rerun converges:
    cuts down to it, and stays whole and reported. That offer is only for a
    region still open at the end of the text: when the text parses, its
    top-level value alone is the answer, and a string or array that closes again
-   (a note holding a key line) offers nothing; an open array that swallowed a
-   table header at column 0 (`[mcp.env]`) offers nothing after it, since what
-   follows is that table's.
+   (a note holding a key line) offers nothing; an open array or unclosed multi-line
+   string that swallowed a table header (`[mcp.env]`, indented or not) offers
+   nothing after it, since what follows is that table's (a nested array that
+   quotes its inside, `["x"]`, reads as a header too: the ambiguity resolves to
+   not offering). A region that closes and another that opens on the same line
+   (`""" ; x = """`, `], b = [`) are two regions, and the first offers nothing.
+   A key name that is an opaque token (an instance key, a long hex or base64
+   run) is never printed in a notice, like a vendor-shaped secret.
    Such a copy is cut down or removed like any other. A
    symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard

@@ -17966,17 +17966,20 @@ pub async fn commit_spawned_worker(
     let files = request.files;
     let message = request.message;
     let data_dir_lock = state.data_dir_lock.clone();
+    // The pinned base the doc citations are compared with (KT-1721).
+    let base_sha = execution.base_sha.clone();
     let supervisor = spawn_spawned_commit_supervisor(
         state.db.clone(),
         execution.id,
         dispatch_job_id.to_string(),
         lease_id,
         move || {
-            crate::api::agent_workspace_tools::git_commit_payload_with_data_dir_lock(
+            crate::api::agent_workspace_tools::git_commit_payload_reanchoring_docs(
                 &root,
                 &files,
                 &message,
                 data_dir_lock.as_deref(),
+                base_sha.as_deref(),
             )
         },
     );

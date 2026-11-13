@@ -1206,6 +1206,147 @@ fn an_open_array_never_offers_the_key_of_a_table_it_swallowed() {
     ]);
 }
 
+/// A table header swallowed by an open array or an unclosed multi-line string
+/// ends what is offered, indented (TOML allows it, with spaces or a tab) or not,
+/// whichever the quotes of the string: the `encryption_secret` after it is that
+/// table's, never the live key. What the region held before the header still is
+/// offered.
+#[test]
+fn a_header_swallowed_by_an_open_array_or_string_offers_nothing_after_it() {
+    let (k1, k2) = (crypto::generate_secret(), crypto::generate_secret());
+    let mut swallowed_texts = Vec::new();
+    for (open, indent) in [
+        ("x = [", "  "),
+        ("x = [", "\t"),
+        ("x = [", ""),
+        ("notes = \"\"\"", ""),
+        ("notes = \"\"\"", "  "),
+        ("notes = '''", ""),
+        ("notes = '''", "\t"),
+    ] {
+        for header in ["[mcp.env]", "[[mcp]]"] {
+            let swallowed =
+                format!("{open}\n{indent}{header}\n{indent}encryption_secret = \"{k1}\"\n");
+            assert!(swallowed.parse::<toml::Table>().is_err(), "{swallowed}");
+            let scan = config::salvage_key_scan(&swallowed);
+            assert!(scan.buried.is_empty(), "{swallowed:?}");
+            assert!(scan.values.is_empty(), "{swallowed:?}");
+            assert!(scan.unreadable, "{swallowed:?}");
+            assert_eq!(config::salvage_key_line(&swallowed), None, "{swallowed:?}");
+            assert_eq!(key_of(&swallowed), None, "{swallowed:?}");
+
+            // What the region held before the header is still offered.
+            let before = format!(
+                "{open}\n{indent}encryption_secret = \"{k2}\"\n{indent}{header}\n\
+                 {indent}encryption_secret = \"{k1}\"\n"
+            );
+            assert_eq!(
+                config::salvage_key_line(&before),
+                Some(k2.clone()),
+                "{before:?}"
+            );
+            swallowed_texts.push(format!("{swallowed}{LEAKY}"));
+        }
+    }
+    // The copy is kept whole and reported, never dropped nor cut down.
+    assert_kept_whole_and_reported(&swallowed_texts);
+}
+
+/// A region that closes and another that opens on the same line are two regions:
+/// what the first held is a note or an element, not a swallowed line, and is not
+/// offered; what the second holds, still open at the end, is.
+#[test]
+fn a_region_that_closes_and_another_that_opens_on_one_line_are_two_regions() {
+    let (k, k2) = (crypto::generate_secret(), crypto::generate_secret());
+    // (text, what the recovery offers)
+    let cases = [
+        // A: a string closes, another opens.
+        (
+            format!(
+                "encryption_secret = 5\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\
+                 \"\"\" ; x = \"\"\"\nmore\n"
+            ),
+            None,
+        ),
+        // B: an array closes, another opens.
+        (
+            format!("encryption_secret = 5\na = [\nencryption_secret = \"{k}\"\n], b = [\n"),
+            None,
+        ),
+        // C: a string closes, a literal string opens; the junk top-level value
+        // stays the answer.
+        (
+            format!(
+                "encryption_secret = \"junk\"\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\
+                 \"\"\"x = '''\n"
+            ),
+            Some("junk".to_string()),
+        ),
+        // D: a string inside an array closes (the array stays open).
+        (
+            format!(
+                "encryption_secret = 5\na = [\"\"\"\nencryption_secret = \"{k}\"\n\"\"\", \"\"\"\n"
+            ),
+            None,
+        ),
+        // The second region's own key line is still offered.
+        (
+            format!(
+                "encryption_secret = 5\nnotes = \"\"\"\nencryption_secret = \"{k}\"\n\
+                 \"\"\" ; x = \"\"\"\nencryption_secret = \"{k2}\"\n"
+            ),
+            Some(k2.clone()),
+        ),
+        (
+            format!(
+                "encryption_secret = 5\na = [\nencryption_secret = \"{k}\"\n], b = [\n\
+                 encryption_secret = \"{k2}\"\n"
+            ),
+            Some(k2.clone()),
+        ),
+    ];
+    for (text, offered) in &cases {
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        assert_eq!(
+            config::salvage_key_line(text),
+            *offered,
+            "{text:?}: {:?}",
+            config::salvage_key_scan(text)
+        );
+        // A copy never reads, seals under or cuts down to a buried value.
+        assert_eq!(key_of(text), None, "{text:?}");
+        assert!(config::salvage_key_scan(text).unreadable, "{text:?}");
+    }
+    assert_kept_whole_and_reported(
+        &cases
+            .iter()
+            .map(|(text, _)| format!("{text}{LEAKY}"))
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// A nested array that quotes its inside and is the last element of an open array
+/// (`["x"]`, `['mcp']`, `[1]`) is also a valid table header read on its own. The
+/// ambiguity resolves to the safe side and this test pins it: such a line is read
+/// as a header, so the `encryption_secret` after it is not offered (the copy is
+/// kept whole and reported, only the recovery at boot misses it) rather than a
+/// table's key being adopted as the live one.
+#[test]
+fn a_quoted_nested_array_at_the_start_of_a_line_is_read_as_a_header() {
+    let k = crypto::generate_secret();
+    let mut texts = Vec::new();
+    for element in ["[\"x\"]", "['mcp']", "[1]"] {
+        let text = format!("a = [\n{element}\nencryption_secret = \"{k}\"\n");
+        assert!(text.parse::<toml::Table>().is_err(), "{text:?}");
+        let scan = config::salvage_key_scan(&text);
+        assert!(scan.buried.is_empty(), "{text:?}");
+        assert!(scan.unreadable, "{text:?}");
+        assert_eq!(config::salvage_key_line(&text), None, "{text:?}");
+        texts.push(format!("{text}{LEAKY}"));
+    }
+    assert_kept_whole_and_reported(&texts);
+}
+
 /// Two assignments joined on one line (a hand-edit or merge accident) hide a
 /// quoted or escaped key part behind a plain one: whichever the spelling, the line
 /// may hold the live key, so the copy is kept whole and reported, never dropped.

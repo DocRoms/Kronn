@@ -1255,7 +1255,7 @@ pub(crate) struct KeyScan {
     /// Every non-blank string of an `encryption_secret` assignment that parses on
     /// its own but sits inside a string or an array that is STILL open at the end
     /// of the text (a region that closes again was a note, an array, not a
-    /// swallowed line; one that a table header at column 0 reaches stops
+    /// swallowed line; one that a table header reaches stops
     /// offering): a broken file swallowed it, so it is not proven to be the key. Only
     /// [`salvage_key_line`] offers it (to recover a key at boot); a copy never
     /// reads, seals under or cuts down to it, and the mention also sets
@@ -1296,8 +1296,10 @@ const KEY_NAME: &str = "encryption_secret";
 ///   read as the key by a copy, only by [`salvage_key_line`]). A buried value is
 ///   offered only while its region is still open at the end of the text (a
 ///   string or array that closes again held a note, not a swallowed line), and
-///   only up to a table header at column 0 inside an open array
-///   ([`is_table_header`]: what follows is that table's).
+///   only up to a table header (indented or not) inside an open array or an
+///   unclosed multi-line string ([`is_table_header`]: what follows is that
+///   table's). A region that closes and another that opens on the same line are
+///   two regions: the first offers nothing.
 pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     let mut scan = KeyScan::default();
     // The delimiter of the multi-line string the scan is inside, if any, and the
@@ -1315,16 +1317,29 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
             raw
         };
         let mut rest = line;
+        // The region that was open when the line began closed on it (at some
+        // point nothing was open any more).
+        let mut closed = false;
         if let Some(delimiter) = open_string {
+            // An unclosed string swallowing what looks like a table header: the
+            // lines after it belong to that table, not to the key.
+            if is_table_header(line) {
+                offering = false;
+            }
             bury(&mut scan, line, offering);
             match string_end(line, delimiter) {
-                Some(after) => rest = after,
+                Some(after) => {
+                    // The string closed: a note, even when an array around it
+                    // stays open.
+                    rest = after;
+                    closed = true;
+                }
                 None => continue,
             }
         } else if depth > 0 {
             // An open array or inline table swallowing what looks like a table
-            // header at column 0 (`[mcp.env]`): the lines after it belong to
-            // that table, not to the key, so none is offered from there on.
+            // header (`[mcp.env]`): the lines after it belong to that table,
+            // not to the key, so none is offered from there on.
             if is_table_header(line) {
                 offering = false;
             }
@@ -1348,14 +1363,25 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
                 }
             }
         }
-        (open_string, depth) = line_state(rest, depth);
+        let was_open = region_start.is_some();
+        let reached_zero;
+        (open_string, depth, reached_zero) = line_state(rest, depth);
+        closed |= was_open && reached_zero;
         // A region that closed again was no swallowing: what it held is not
-        // offered (the mention stays `unreadable`).
-        match (region_start, open_string.is_some() || depth > 0) {
+        // offered (the mention stays `unreadable`). One that closes and another
+        // that opens on the same line (`""" ; x = """`, `], b = [`) are two
+        // regions: the first is dropped, the second starts at the close.
+        let open = open_string.is_some() || depth > 0;
+        match (region_start, open) {
             (None, true) => region_start = Some(scan.buried.len()),
             (Some(start), false) => {
                 scan.buried.truncate(start);
                 region_start = None;
+                offering = true;
+            }
+            (Some(start), true) if closed => {
+                scan.buried.truncate(start);
+                region_start = Some(scan.buried.len());
                 offering = true;
             }
             _ => {}
@@ -1364,9 +1390,17 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     scan
 }
 
-/// A line at column 0 that is a table header (`[a.b]`, `[[a]]`) when read on its
-/// own; an array element (`[1, 2],`) is not.
+/// A line that is a table header (`[a.b]`, `[[a]]`; indented or not, TOML allows
+/// both) when read on its own; an array element (`[1, 2],`) is not.
+///
+/// The test is made on the line alone, so a nested array that is the last
+/// element of an open array and quotes its inside (`["x"]`, `['mcp']`, `[1]`) is
+/// also a valid header and is read as one: what follows is then not offered as a
+/// key. The ambiguity resolves to the safe side on purpose (a key the scan does
+/// not offer stays in the kept copy, reported; one it offered wrongly could be
+/// adopted as the live key).
 fn is_table_header(line: &str) -> bool {
+    let line = line.trim_start();
     line.starts_with('[') && line.parse::<toml::Table>().is_ok()
 }
 
@@ -1448,9 +1482,11 @@ fn string_end<'a>(line: &'a str, delimiter: &str) -> Option<&'a str> {
 
 /// What `line` leaves open after it: the delimiter of the multi-line string it
 /// opens and does not close, and the depth of the arrays and inline tables
-/// (`depth` is the one before the line). Single-line strings and comments are
+/// (`depth` is the one before the line), and whether the depth went from above
+/// zero back to zero somewhere in it. Single-line strings and comments are
 /// skipped over.
-fn line_state(line: &str, mut depth: usize) -> (Option<&'static str>, usize) {
+fn line_state(line: &str, mut depth: usize) -> (Option<&'static str>, usize, bool) {
+    let mut reached_zero = false;
     let mut rest = line;
     while let Some(c) = rest.chars().next() {
         if c == '#' {
@@ -1466,7 +1502,7 @@ fn line_state(line: &str, mut depth: usize) -> (Option<&'static str>, usize) {
         if let Some(delimiter) = delimiter {
             match string_end(&rest[3..], delimiter) {
                 Some(after) => rest = after,
-                None => return (Some(delimiter), depth),
+                None => return (Some(delimiter), depth, reached_zero),
             }
         } else if c == '"' || c == '\'' {
             // A single-line string: up to its closing quote (or the end of the line).
@@ -1484,13 +1520,16 @@ fn line_state(line: &str, mut depth: usize) -> (Option<&'static str>, usize) {
         } else {
             match c {
                 '[' | '{' => depth += 1,
-                ']' | '}' => depth = depth.saturating_sub(1),
+                ']' | '}' => {
+                    depth = depth.saturating_sub(1);
+                    reached_zero |= depth == 0;
+                }
                 _ => {}
             }
             rest = &rest[c.len_utf8()..];
         }
     }
-    (None, depth)
+    (None, depth, reached_zero)
 }
 
 /// `default_config()` without a key: a missing config.toml must not offer a

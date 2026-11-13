@@ -137,10 +137,35 @@ enum Seg {
     Idx(usize),
 }
 
+/// Whether a key name is an opaque token rather than a setting's name: an
+/// instance key (what `canonical_secret` accepts, whatever its case or padding),
+/// a long run of hex digits, or a long base64 / base64url run mixing letters
+/// and digits. `looks_like_secret` only knows vendor prefixes (`sk-`, `AIza`…),
+/// so a Kronn key pasted as a key name needs this. A heuristic that errs toward
+/// hiding: a setting's name is short and made of words.
+fn is_opaque_token(name: &str) -> bool {
+    if super::crypto::canonical_secret(name).is_ok() {
+        return true;
+    }
+    let name = name.trim();
+    if name.len() < 24 || !name.is_ascii() {
+        return false;
+    }
+    if name.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
+    name.len() >= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+        && name.bytes().any(|b| b.is_ascii_digit())
+        && name.bytes().any(|b| b.is_ascii_alphabetic())
+}
+
 /// A key name as notices and logs may print it: itself, unless it looks like a
 /// secret (a token pasted as a key name), then a placeholder for its position.
 fn shown_key(name: &str, position: usize) -> String {
-    if super::redact::looks_like_secret(name) {
+    if super::redact::looks_like_secret(name) || is_opaque_token(name) {
         format!("<key #{}>", position + 1)
     } else {
         name.to_string()
@@ -1141,6 +1166,37 @@ mod tests {
             show_keys(&["tokens".to_string(), secret.to_string()]),
             "tokens.<key #2>"
         );
+    }
+
+    /// KT-1528 — an opaque token with no vendor prefix used as a key name (a
+    /// Kronn instance key, any case, or a long hex / base64 run) is not printed
+    /// either; a setting's name, however long, still is.
+    #[test]
+    fn a_kronn_key_used_as_a_key_name_is_not_printed() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let upper = hex.to_uppercase();
+        let short_hex = "0123456789abcdef01234567";
+        let b64 = "q83vEjRWeJq83vEjRWeJq83vEjRWeJq83vEjRWeJ+/8=";
+        for name in [hex, upper.as_str(), short_hex, b64] {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = 1\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            assert!(!notice.contains(name), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+            assert_eq!(
+                show_keys(&["tokens".to_string(), name.to_string()]),
+                "tokens.<key #2>"
+            );
+        }
+        for name in [
+            "future_flag",
+            "a_rather_long_setting_name_made_of_words_only",
+            "deadbeef",
+        ] {
+            assert_eq!(shown_key(name, 0), name);
+        }
     }
 
     /// A header that lost its closing bracket keeps its lines: they belong to

@@ -478,13 +478,16 @@ fn path_set(root: &Path, args: &[&str]) -> Result<BTreeSet<String>, String> {
 /// target's, or a merge base) to the merged file, and only a citation whose
 /// cited file the merge changed is considered.
 fn plan_reanchor(root: &Path) -> Result<Plan, String> {
-    plan_reanchor_against(root, "MERGE_HEAD")
+    plan_reanchor_against(root, "MERGE_HEAD", false)
 }
 
 /// [`plan_reanchor`] with `theirs` the revision the branch is compared with: the
 /// merge in progress's `MERGE_HEAD`, or the target tip a branch already
 /// descends from (no merge, and the branch's own code shift is the evidence).
-fn plan_reanchor_against(root: &Path, theirs: &str) -> Result<Plan, String> {
+/// With `with_parent`, the parent of `HEAD` is one more revision a citation may
+/// have been written against: the docs a worker's previous commit re-anchored
+/// hold there, and at neither the base nor `HEAD` itself (KT-1721).
+fn plan_reanchor_against(root: &Path, theirs: &str, with_parent: bool) -> Result<Plan, String> {
     let theirs = git_lines(root, &["rev-parse", &format!("{theirs}^{{commit}}")])?
         .into_iter()
         .next()
@@ -497,6 +500,16 @@ fn plan_reanchor_against(root: &Path, theirs: &str) -> Result<Plan, String> {
     for base in git_lines(root, &["merge-base", "--all", "HEAD", &theirs]).unwrap_or_default() {
         if !revs.contains(&base) {
             revs.push(base);
+        }
+    }
+    if with_parent {
+        if let Some(parent) = git_lines(root, &["rev-parse", "-q", "--verify", "HEAD^"])
+            .ok()
+            .and_then(|lines| lines.into_iter().next())
+        {
+            if !revs.contains(&parent) {
+                revs.push(parent);
+            }
         }
     }
     let unmerged = path_set(root, &["diff", "--name-only", "-z", "--diff-filter=U"])?;
@@ -615,7 +628,25 @@ pub fn reanchor_and_stage(root: &Path, resolved: Vec<PathBuf>) -> Result<MergeDo
 /// there is no merge to finish: the citations its own code shift moved are
 /// re-anchored and staged, the caller commits them.
 pub fn reanchor_branch_and_stage(root: &Path, target: &str) -> Result<MergeDocs, SettleError> {
-    stage_plan(root, plan_reanchor_against(root, target)?, Vec::new())
+    stage_plan(
+        root,
+        plan_reanchor_against(root, target, false)?,
+        Vec::new(),
+    )
+}
+
+/// [`reanchor_branch_and_stage`] for the commit a worker just made (KT-1721):
+/// every citation the evidence places is re-anchored and staged, in any doc, and
+/// a citation it cannot place is left as it is instead of failing the step (the
+/// caller lists what [`newly_unresolved`] still reports). Still refuses, writing
+/// nothing, when a doc to rewrite or a file it cites has unstaged changes.
+pub fn reanchor_branch_leaving_unplaced(
+    root: &Path,
+    target: &str,
+) -> Result<MergeDocs, SettleError> {
+    let plan = plan_reanchor_against(root, target, true)?;
+    refuse_unclean(&plan)?;
+    write_and_stage(root, plan, Vec::new())
 }
 
 fn stage_plan(root: &Path, plan: Plan, resolved: Vec<PathBuf>) -> Result<MergeDocs, SettleError> {
@@ -649,6 +680,14 @@ fn stage_plan(root: &Path, plan: Plan, resolved: Vec<PathBuf>) -> Result<MergeDo
             ),
         });
     }
+    write_and_stage(root, plan, resolved)
+}
+
+fn write_and_stage(
+    root: &Path,
+    plan: Plan,
+    resolved: Vec<PathBuf>,
+) -> Result<MergeDocs, SettleError> {
     write_plan(root, &plan)?;
     let docs = MergeDocs {
         resolved,
