@@ -168,7 +168,7 @@ rest of the workflow. Measured on the pull-request review above, two different
 first passes merged find more than either alone; but a shadow on a small local
 model may invent a finding, so the merge **verifies every point before it keeps
 it**.
-[src: file: backend/src/workflows/shadow_merge.rs:551#merge_step]
+[src: file: backend/src/workflows/shadow_merge.rs:747#merge_step]
 
 - **Which shadows merge**: one, several or all of the step's shadows
   (`shadows`, empty means all). The others still run and are compared.
@@ -187,6 +187,15 @@ it**.
   where a dropped point's text still appears; the main output then stays the
   step's output and the run view says why. The same goes when no selected
   shadow finished or the condense pass fails.
+- **A verdict has to prove itself** (KT-1731). Every kept point cites an
+  evidence the engine can open: a `path:line` that exists in the working
+  directory (the line inside the file) or a step output (`steps.<step>.output`).
+  A point marked `verified` whose citation does not resolve, or that cites only
+  an execution's own word, is refused, whatever its verdict. A verdict that keeps
+  no point (an empty list, `{}`) is refused unless the condense pass states in
+  `agreement` that the executions agree there is nothing to report; the
+  statement is then shown as the note of the merge. The statement is the pass's
+  word: the engine does not check that the executions really agree.
 - **The merged result becomes the step's output**; the main and shadow outputs
   stay visible for comparison.
 
