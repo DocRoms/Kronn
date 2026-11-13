@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, Download, ExternalLink, Loader2, RefreshCw, Save, X } from 'lucide-react';
 import { comfyui, type ComfyUiPullProgress } from '../../lib/api';
 import type { ComfyFamily, ComfyGenSettings, ComfyUiModel, ComfyUiStatus, ComfyUiSuggestion, MediaModality } from '../../types/generated';
 import { SearchableSelect } from '../SearchableSelect';
 import { comfyUiSlotOptions } from '../../lib/comfyUi';
 import { MediaReferenceSettings } from './MediaReferenceSettings';
+import './FallbackRow.css';
+import './AgentFallbackControl.css';
 
 interface ComfyUiCardProps {
   t: (key: string, ...args: (string | number)[]) => string;
+  /** KT-1706 — the card's one « Models and fallbacks » block, drawn under the header: given the model
+   *  picker of the image and video modes it returns the rows with their fallbacks. Without it the
+   *  pickers are listed alone. */
+  modelsBlock?: (pickers: Record<MediaModality, ReactNode>) => ReactNode;
 }
 
 const SLOTS: { modality: MediaModality; icon: string; field: 'image_model' | 'video_model' }[] = [
@@ -75,7 +81,7 @@ function formatGigabytes(bytes: number): string {
 }
 
 /** KT-1381 — ComfyUI as a local media source, laid out like the Ollama card. */
-export function ComfyUiCard({ t }: ComfyUiCardProps) {
+export function ComfyUiCard({ t, modelsBlock }: ComfyUiCardProps) {
   const [status, setStatus] = useState<ComfyUiStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -218,9 +224,37 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
   }, [refresh]);
 
   const online = status?.state === 'online';
+  const renderSlotPicker = (current: ComfyUiStatus, modality: MediaModality) => {
+    const field = modality === 'image' ? 'image_model' : 'video_model';
+    const value = current[field] ?? '';
+    const options = comfyUiSlotOptions(current.models, modality, t);
+    if (value && !options.some(option => option.value === value)) {
+      options.push({ value, label: `${value} — ${t('modelCatalog.notInCatalog')}`, keywords: value, disabled: true });
+    }
+    return (
+      <SearchableSelect
+        className="searchable-select--compact"
+        value={value}
+        options={options}
+        disabled={saving !== null || !online}
+        onChange={next => void pick(modality, next || null)}
+        label={t(`comfyui.slot.${modality}`)}
+        placeholder={online ? t('comfyui.none') : t('comfyui.offlineModels')}
+        emptyLabel={online ? t('comfyui.noModel') : t('comfyui.offlineModels')}
+        clearLabel={t('comfyui.none')}
+        testId={`comfyui-slot-${modality}`}
+      />
+    );
+  };
   const statusLabel = loading ? null
     : online ? t('comfyui.online', status?.version ?? '')
     : status?.state === 'offline' ? t('comfyui.offline') : t('comfyui.notFound');
+
+  // KT-1706 — the model of each mode is picked in the « Models and fallbacks » block, one picker per row.
+  const pickers: Record<MediaModality, ReactNode> | null = status && {
+    image: renderSlotPicker(status, 'image'),
+    video: renderSlotPicker(status, 'video'),
+  };
 
   return (
     <div className="set-ollama-card" data-testid="comfyui-card">
@@ -238,6 +272,17 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
           </div>
         </div>
       </div>
+
+      {pickers && (modelsBlock ? modelsBlock(pickers) : (
+        <div className="set-agent-fallback" data-testid="comfyui-models">
+          {(['image', 'video'] as const).map(modality => (
+            <div className="fbr" data-with-model="true" data-mode={modality} key={modality}>
+              <span className="fbr-mode">{t(`fallback.mode.${modality}`)}</span>
+              <div className="fbr-track"><span className="fbr-model">{pickers[modality]}</span></div>
+            </div>
+          ))}
+        </div>
+      ))}
 
       {error && <p className="set-ollama-context-error" role="alert">{error}</p>}
 
@@ -276,36 +321,6 @@ export function ComfyUiCard({ t }: ComfyUiCardProps) {
           {/* The slots stay visible offline, like the Ollama tiers: a saved
               choice is never hidden because the server is down. */}
           <div className="set-ollama-models">
-            <div className="text-xs text-muted mb-2">{t('comfyui.slotsTitle')}</div>
-            <div className="set-ollama-tier-grid">
-              {SLOTS.map(({ modality, icon, field }) => {
-                const value = status[field] ?? '';
-                const options = comfyUiSlotOptions(status.models, modality, t);
-                if (value && !options.some(option => option.value === value)) {
-                  options.push({ value, label: `${value} — ${t('modelCatalog.notInCatalog')}`, keywords: value, disabled: true });
-                }
-                return (
-                  <div key={modality} className="set-ollama-tier-row">
-                    <span className="set-ollama-tier-label">
-                      <span aria-hidden="true" style={{ marginRight: 4 }}>{icon}</span>
-                      {t(`comfyui.slot.${modality}`)}
-                    </span>
-                    <SearchableSelect
-                      className="searchable-select--compact"
-                      value={value}
-                      options={options}
-                      disabled={saving !== null || !online}
-                      onChange={next => void pick(modality, next || null)}
-                      label={t(`comfyui.slot.${modality}`)}
-                      placeholder={online ? t('comfyui.none') : t('comfyui.offlineModels')}
-                      emptyLabel={online ? t('comfyui.noModel') : t('comfyui.offlineModels')}
-                      clearLabel={t('comfyui.none')}
-                      testId={`comfyui-slot-${modality}`}
-                    />
-                  </div>
-                );
-              })}
-            </div>
             {status.video_model && status.video_blocker && (
               <p className="set-ollama-context-error" role="alert">{status.video_blocker}</p>
             )}

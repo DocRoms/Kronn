@@ -231,6 +231,11 @@ pub struct MediaParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub comfyui_reference_context: Option<ComfyReferenceContext>,
+    /// KT-1706 — the sources (ComfyUI, connection ids) this generation was already
+    /// handed over from because they could not serve it, so a fallback never
+    /// comes back to one of them. Written by the runner only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_from: Vec<String>,
 }
 
 impl MediaParams {

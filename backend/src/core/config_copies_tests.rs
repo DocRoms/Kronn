@@ -1036,6 +1036,120 @@ fn a_quoted_or_escaped_key_line_inside_an_open_region_keeps_the_copy_whole() {
     }
 }
 
+/// Every text is a copy that is kept whole and reported when no key exists, and a
+/// config.toml set aside whole (owner-only): none is dropped or cut down.
+fn assert_kept_whole_and_reported(texts: &[String]) {
+    let dir = tempfile::tempdir().unwrap();
+    for (i, text) in texts.iter().enumerate() {
+        assert!(text.parse::<toml::Table>().is_err(), "{text}");
+        assert!(config::salvage_key_scan(text).unreadable, "{text}");
+        assert!(key_lines(text).unreadable, "{text}");
+        std::fs::write(
+            dir.path()
+                .join(format!("config.toml.backup.2026100{i}T000000Z")),
+            text,
+        )
+        .unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(
+                set_aside_content(bare.path(), text.as_bytes(), None).unwrap(),
+                Aside::KeptAsIs(_)
+            ),
+            "{text}"
+        );
+    }
+    for _ in 0..2 {
+        let report = protect_clear_copies(dir.path(), None);
+        assert_eq!(
+            (report.reduced, report.failures.len()),
+            (0, texts.len()),
+            "{report:?}"
+        );
+        for (i, text) in texts.iter().enumerate() {
+            let copy = format!("config.toml.backup.2026100{i}T000000Z");
+            assert_eq!(
+                &std::fs::read_to_string(dir.path().join(copy)).unwrap(),
+                text
+            );
+        }
+    }
+}
+
+/// An `encryption_secret` line that parses on its own but sits in a region a
+/// broken file left open (an array or a multi-line string that never closes) is
+/// offered to the boot recovery ([`config::salvage_key_line`]), so a key the
+/// breakage swallowed is not lost; a copy never reads, seals under or cuts down
+/// to it, and keeps the whole text, reported.
+#[test]
+fn a_key_buried_in_an_open_region_is_recovered_but_never_read_by_a_copy() {
+    let k = crypto::generate_secret();
+    let buried = [
+        format!("x = [\nencryption_secret = \"{k}\"\n"),
+        format!("x = [\n  encryption_secret = '{k}'\n"),
+        format!("x = \"\"\"\nencryption_secret = \"{k}\"\n"),
+        format!("x = '''\nencryption_secret = \"{k}\"\n"),
+        format!("x = [\n\"encryption_secret\" = \"{k}\"\n"),
+        format!("x = [\n\"encryption\\u005fsecret\" = \"{k}\"\n"),
+        format!("x = \"\"\"\n\"\\u0065ncryption_secret\" = \"{k}\"\n"),
+    ];
+    let texts: Vec<String> = buried
+        .iter()
+        .map(|b| format!("pat = \"pat-clear\"\ncookie = \"cookie-clear\"\n{b}"))
+        .collect();
+    for text in &texts {
+        assert!(text.parse::<toml::Table>().is_err(), "{text}");
+        let scan = config::salvage_key_scan(text);
+        assert!(scan.unreadable, "{text}");
+        assert!(scan.values.is_empty(), "not a top-level key: {text}");
+        assert_eq!(scan.buried, vec![k.clone()], "{text}");
+        // The boot recovery offers it; a copy never reads it as its key.
+        assert_eq!(config::salvage_key_line(text), Some(k.clone()), "{text}");
+        assert_eq!(key_of(text), None, "{text}");
+    }
+    assert_kept_whole_and_reported(&texts);
+
+    // A top-level key wins over a buried one.
+    let top = crypto::generate_secret();
+    let both = format!("encryption_secret = \"{top}\"\nx = [\nencryption_secret = \"{k}\"\n");
+    assert_eq!(config::salvage_key_line(&both), Some(top.clone()));
+    assert_eq!(key_of(&both), Some(top));
+}
+
+/// Two assignments joined on one line (a hand-edit or merge accident) hide a
+/// quoted or escaped key part behind a plain one: whichever the spelling, the line
+/// may hold the live key, so the copy is kept whole and reported, never dropped.
+#[test]
+fn a_key_joined_to_another_assignment_on_one_line_is_never_dropped() {
+    let k = crypto::generate_secret();
+    let joined = [
+        format!("port = 8080 \"encryption_secret\" = \"{k}\"\n{LEAKY}"),
+        format!("port = 8080 \"encryption\\u005fsecret\" = \"{k}\"\n{LEAKY}"),
+        format!("port = 8080 'encryption_secret' = '{k}'\n{LEAKY}"),
+        format!("language = \"fr\" \"\\u0065ncryption_secret\" = \"{k}\"\n{LEAKY}"),
+        format!("a = 1 b = 2 \"enc\\u0072yption_secret\" = \"{k}\"\n{LEAKY}"),
+        format!("port = 8080 encryption_secret = \"{k}\"\n{LEAKY}"),
+    ];
+    assert_kept_whole_and_reported(&joined);
+
+    // The same joined shape with no key part of ours stays harmless: a copy of it
+    // is dropped when no key exists, so a damaged credential line is no reason to
+    // keep a clear copy.
+    for harmless in [
+        "port = 8080 language = \"fr\"\n",
+        "anthropic = \"sk-x\" # a = b\n",
+        "a = 1 b = \"v=w\"\n",
+    ] {
+        assert!(!config::salvage_key_scan(harmless).unreadable, "{harmless}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("config.toml.backup.20261001T000000Z");
+    std::fs::write(&copy, format!("port = 8080 language = \"fr\"\n{LEAKY}")).unwrap();
+    let report = protect_clear_copies(dir.path(), None);
+    assert_eq!(report.failures.len(), 0, "{report:?}");
+    assert!(!copy.exists());
+}
+
 /// An unreadable config.toml set aside with no key: several different keys, or a
 /// key line that cannot be read, keep the whole content (owner-only) and say so,
 /// never one key line or nothing; one readable key is still the only thing kept.

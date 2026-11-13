@@ -6872,6 +6872,98 @@ pub async fn get_agent_fallback(
     )))
 }
 
+/// POST /api/config/connection-fallback
+/// KT-1706 — sets (or, with `fallback: null`, removes) the fallback of one mode of
+/// a named HTTP connection (its id) or, for image and video, of ComfyUI
+/// (`local:comfyui`): what takes a request over when that source cannot serve it.
+/// A text mode on ComfyUI, a source that does not exist, a loop or a chain past
+/// the depth limit is refused with the reason; nothing is stored then. Applies to
+/// the next request, no restart.
+pub async fn set_connection_fallback(
+    State(state): State<AppState>,
+    Json(req): Json<SetConnectionFallbackRequest>,
+) -> Json<ApiResponse<crate::core::agent_fallback::FallbackOverview>> {
+    use crate::core::connection_fallback as media;
+    let fallback = req.fallback.map(|mut target| {
+        target.model = target
+            .model
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty());
+        target
+    });
+    // Both ends must be something that exists: ComfyUI, or a stored connection.
+    let mut named = vec![req.owner.clone()];
+    if let Some(target) = &fallback {
+        named.push(target.connection.clone());
+    }
+    for id in named.into_iter().filter(|id| id != media::COMFYUI_OWNER) {
+        let lookup = id.clone();
+        let known = state
+            .db
+            .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &lookup))
+            .await;
+        if !matches!(known, Ok(Some(_))) {
+            return Json(ApiResponse::err(format!(
+                "Unknown connection {id}: a media fallback is set between ComfyUI and named connections."
+            )));
+        }
+    }
+    if let Some(target) = &fallback {
+        let compatible = if target.connection == media::COMFYUI_OWNER {
+            let config = state.config.read().await;
+            let slot = match req.mode {
+                FallbackMode::Image => config.comfyui.image_model.as_deref(),
+                FallbackMode::Video => config.comfyui.video_model.as_deref(),
+                _ => None,
+            };
+            slot.is_some_and(|model| target.model.as_deref().is_none_or(|chosen| chosen == model))
+        } else {
+            let id = target.connection.clone();
+            state
+                .db
+                .with_read_conn(move |conn| crate::db::external_api_connections::get(conn, &id))
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|connection| {
+                    media::configured_model(&connection, req.mode, target.model.as_deref())
+                        .is_some()
+                })
+        };
+        if !compatible {
+            return Json(ApiResponse::err(
+                "The fallback must name a configured model of the same mode kind.",
+            ));
+        }
+    }
+    let mut config = state.config.write().await;
+    if let Some(target) = &fallback {
+        if let Err(error) = media::validate_row(&config.agents, &req.owner, req.mode, target) {
+            return Json(ApiResponse::err(error.to_string()));
+        }
+    } else if req.owner == media::COMFYUI_OWNER && media::modality_of(req.mode).is_none() {
+        return Json(ApiResponse::err(
+            media::ConnectionChainError::NotMedia(req.mode).to_string(),
+        ));
+    }
+    let previous = config.agents.clone();
+    media::set_row(&mut config.agents, &req.owner, req.mode, fallback);
+    if let Err(error) = config::save(&config).await {
+        config.agents = previous;
+        return Json(ApiResponse::err(format!("Failed to save: {error}")));
+    }
+    let agents = config.agents.clone();
+    drop(config);
+    let cooldowns = state
+        .db
+        .with_read_conn(|conn| crate::core::agent_fallback::list_cooldowns(conn, Utc::now()))
+        .await
+        .unwrap_or_default();
+    Json(ApiResponse::ok(crate::core::agent_fallback::overview(
+        &agents, cooldowns,
+    )))
+}
+
 /// POST /api/config/agent-fallback
 /// Sets (or, with `fallback: null`, removes) the fallback of one mode row of an
 /// agent: what takes over when this agent is unavailable on the provider side

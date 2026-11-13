@@ -501,7 +501,7 @@ file at a time, and disk space is checked first. From Docker those folders
 are the host's, and Windows has no such handle here, so there the card only
 links to Hugging Face.
 [src: file: backend/src/agents/media_codec.rs:703-716#ComfyUiMediaCodec]
-[src: file: backend/src/agents/media_runner.rs:778-945#advance_local_comfyui]
+[src: file: backend/src/agents/media_runner.rs:933-1100#advance_local_comfyui]
 
 
 ## Configurable source-image limits (KT-1403)
@@ -564,8 +564,8 @@ ComfyUI browser does not alter Kronn's submitted graph. New reference jobs keep
 the accepted endpoint, family and generation settings across queueing and
 retries. The original source ids and mode remain the result provenance.
 [src: file: backend/src/models/media.rs:54-58#ComfyReferenceContext]
-[src: file: backend/src/agents/media_runner.rs:778-945#advance_local_comfyui]
-[src: file: backend/src/agents/media_runner.rs:947-987#upload_comfyui_references]
+[src: file: backend/src/agents/media_runner.rs:933-1100#advance_local_comfyui]
+[src: file: backend/src/agents/media_runner.rs:1105-1145#upload_comfyui_references]
 
 The official [Redux examples](https://comfyanonymous.github.io/ComfyUI_examples/flux/#redux)
 show the model files and conditioning nodes; the [Wan VACE examples](https://comfyanonymous.github.io/ComfyUI_examples/wan/#vace-reference-image-to-video)

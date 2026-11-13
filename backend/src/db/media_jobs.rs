@@ -360,6 +360,41 @@ pub fn fail(
     Ok(())
 }
 
+/// KT-1706 — hands a generation that the provider refused BEFORE accepting it
+/// (no provider handle) to another source: the new connection and model, the
+/// params carrying the sources it already left, back to `pending` with a fresh
+/// submission mark and attempt count. Only a job that is running, or failed with
+/// no handle, moves: a job the provider may be generating is never touched, which
+/// is what keeps the billable POST from being sent twice.
+pub fn retarget(
+    conn: &Connection,
+    id: &str,
+    connection_id: &str,
+    model: &str,
+    params: &MediaParams,
+    note: &str,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let params_json = serde_json::to_string(params)?;
+    let changed = conn.execute(
+        "UPDATE media_jobs
+         SET connection_id = ?2, model = ?3, params_json = ?4, last_error = ?5,
+             status = 'pending', scheduled_at = ?6, submit_attempted_at = NULL,
+             completed_at = NULL, attempts = 0, updated_at = ?6
+         WHERE id = ?1 AND status IN ('running', 'failed')
+           AND (provider_job_id IS NULL OR provider_job_id = '')",
+        params![
+            id,
+            connection_id,
+            model,
+            params_json,
+            note,
+            now.to_rfc3339()
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
 /// Adds what happened after a job settled (its status stays).
 pub fn note_error(conn: &Connection, id: &str, note: &str) -> Result<()> {
     conn.execute(

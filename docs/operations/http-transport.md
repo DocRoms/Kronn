@@ -267,8 +267,8 @@ behaviour is the same as for a joined CLI; see
   [src: file: backend/src/api/external_api_connections.rs:677-679#ChatProbe]
   [src: file: backend/src/api/external_api_connections.rs:708-728#failure_response]
   [src: file: backend/src/api/external_api_connections.rs:822-833#assemble_tier_report]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:387-388#billing_error]
-  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1086#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:391-392#billing_error]
+  [src: file: frontend/src/components/settings/ExternalApiSection.tsx:1173#billing_error]
   Xiaomi MiMo returns HTTP 402 (`insufficient_balance`) when generation lacks
   credit, even when the key can load `/v1/models`. Previously the generic
   fallback could hide this behind a later HTTP 400 from a TTS model.

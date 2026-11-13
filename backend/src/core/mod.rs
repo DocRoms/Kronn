@@ -35,6 +35,7 @@ pub mod commit_facts;
 pub mod config;
 pub mod config_copies;
 pub mod config_salvage;
+pub mod connection_fallback;
 pub mod content_memo;
 pub mod context_audit;
 pub mod context_files;

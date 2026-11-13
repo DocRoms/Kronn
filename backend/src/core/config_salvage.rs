@@ -224,6 +224,24 @@ fn key_names(path: &[Seg]) -> Option<Vec<String>> {
         .collect()
 }
 
+/// Why a value was refused, from a deserialisation message, without the value:
+/// serde quotes it (`invalid type: string "sk-…", expected u16`), and whatever
+/// sits in a field may be a secret. Only what the message says is expected is
+/// kept (a type, a variant list), or a missing field's name; anything else is
+/// `unreadable value`.
+fn describe_failure(message: &str) -> Option<String> {
+    if message.starts_with("missing field ") {
+        // Names a field of the schema, quotes no value.
+        return Some(message.lines().next()?.to_string());
+    }
+    // The LAST ", expected ": a value that itself contains that text (and
+    // spans lines) must not leak its tail.
+    Some(match message.rsplit_once(", expected ") {
+        Some((_, expected)) => format!("expected {}", expected.lines().next()?),
+        None => "unreadable value".to_string(),
+    })
+}
+
 /// Read `table` as an `AppConfig`, dropping every value this build cannot
 /// read. `None` when nothing in it is a Kronn setting, or when a value cannot
 /// be dropped without guessing.
@@ -281,19 +299,10 @@ pub fn read(table: &toml::Table) -> Option<Reading> {
         if path == [Seg::Key("encryption_secret".into())] {
             key_unreadable = true;
         }
-        // The message quotes the offending value: never when it may be a secret.
-        let owner = match path.last()? {
-            Seg::Idx(_) => &path[..path.len() - 1],
-            Seg::Key(_) => path,
-        };
-        let why = if holds_credential(&key_names(owner).unwrap_or_default(), &original) {
-            match message.split(", expected ").nth(1) {
-                Some(expected) => format!("expected {}", expected.lines().next()?),
-                None => "unreadable value".to_string(),
-            }
-        } else {
-            message.lines().next()?.to_string()
-        };
+        // The message quotes the offending value, and a secret pasted into the
+        // wrong field (a token in `server.port`) is as much a secret as one in
+        // a credential field: the value is never quoted, for any path.
+        let why = describe_failure(&message)?;
         ignored.push(format!("{} ({why})", show(path)));
         match (path.last()?, get_at(&defaults, path)) {
             (Seg::Key(_), Some(default)) => {
@@ -964,6 +973,46 @@ pub fn write_shelter(dir: &Path, key_hex: &str, entries: &[Preserved]) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// KT-1528 — a value refused by the schema is never quoted, whatever the
+    /// field: a secret pasted into `server.port` is a secret all the same.
+    #[test]
+    fn a_refused_value_is_never_quoted_for_any_path() {
+        let text = "encryption_secret = 5\n[server]\nport = \"sk-clear-d\"\n\
+                    [tokens]\nanthropic = \"sk-clear-e\"\n";
+        let table: toml::Table = text.parse().unwrap();
+        let reading = read(&table).expect("the sections still read");
+        let notice = reading.notice().expect("something was ignored");
+        assert!(notice.contains("server.port (expected u16)"), "{notice}");
+        assert!(!notice.contains("sk-clear"), "{notice}");
+
+        // The value holds the separator serde puts before the expected type, and
+        // spans lines: nothing of it survives, only the real expectation.
+        for value in [
+            "sk-clear-f, expected u16",
+            "sk-clear-g\\n, expected a\\nsk-clear-h",
+        ] {
+            let text = format!("[server]\nport = \"{value}\"\n");
+            let table: toml::Table = text.parse().unwrap();
+            let reading = read(&table).expect("reads");
+            let notice = reading.notice().unwrap();
+            assert!(notice.contains("server.port (expected u16)"), "{notice}");
+            assert!(!notice.contains("sk-clear"), "{notice}");
+        }
+
+        assert_eq!(
+            describe_failure("missing field `name`").as_deref(),
+            Some("missing field `name`")
+        );
+        assert_eq!(
+            describe_failure("invalid type: string \"sk-x\", expected u16").as_deref(),
+            Some("expected u16")
+        );
+        assert_eq!(
+            describe_failure("some message quoting \"sk-x\"").as_deref(),
+            Some("unreadable value")
+        );
+    }
 
     /// A header that lost its closing bracket keeps its lines: they belong to
     /// the table it names.

@@ -1081,6 +1081,7 @@ pub fn default_config() -> AppConfig {
             lite_llm: AgentConfig::default(),
             nvidia: AgentConfig::default(),
             model_tiers: Default::default(),
+            connection_fallbacks: Vec::new(),
         },
         language: "fr".into(),
         ui_language: "fr".into(),
@@ -1222,10 +1223,14 @@ fn set_aside_unreadable_config(
 /// is not a key never hides a valid key line further down). See
 /// [`salvage_key_scan`] for what counts as a top-level line.
 pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
-    let values = salvage_key_scan(content).values;
+    let KeyScan { values, buried, .. } = salvage_key_scan(content);
+    let is_key = |v: &&String| super::crypto::canonical_secret(v).is_ok();
+    // A top-level key first; then one a broken file buried in a region that
+    // swallowed it (an unclosed string or array): better recovered than lost.
     values
         .iter()
-        .find(|v| super::crypto::canonical_secret(v).is_ok())
+        .find(is_key)
+        .or_else(|| buried.iter().find(is_key))
         .or(values.first())
         .cloned()
 }
@@ -1237,6 +1242,13 @@ pub(crate) struct KeyScan {
     /// Every non-blank string of a top-level `encryption_secret` line that parses
     /// on its own, in order.
     pub values: Vec<String>,
+    /// Every non-blank string of an `encryption_secret` assignment that parses on
+    /// its own but sits inside a string or an array the scan found still open: a
+    /// broken file swallowed it, so it is not proven to be the key. Only
+    /// [`salvage_key_line`] offers it (to recover a key at boot); a copy never
+    /// reads, seals under or cuts down to it, and the mention also sets
+    /// `unreadable`.
+    pub buried: Vec<String>,
     /// The text mentions `encryption_secret` somewhere the scan cannot tell it is
     /// harmless (a line that does not parse, the opener of a multi-line string, a
     /// line inside a string or an array that is still open): it may hold the only
@@ -1264,10 +1276,12 @@ const KEY_NAME: &str = "encryption_secret";
 ///   table);
 /// - a line is read by its decoded key, not its spelling: `"encryption_secret"`
 ///   and the same name with a Unicode escape for one letter are the key, and a
-///   line that does not parse
-///   with a quote or an escape before its `=` is `unreadable` too, and so is,
-///   inside an open string or array, a line that spells the name or is an
-///   assignment with such a key part (`may_spell_key`).
+///   line that does not parse with a quoted or escaped key part before ANY of
+///   its `=` (two assignments joined on one line) is `unreadable` too, and so
+///   is, inside an open string or array, a line that spells the name or is an
+///   assignment with such a key part ([`bury`]); that line, when it parses on
+///   its own as the key's assignment, also offers its value as `buried` (never
+///   read as the key by a copy, only by [`salvage_key_line`]).
 pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     let mut scan = KeyScan::default();
     // The delimiter of the multi-line string the scan is inside, if any, and the
@@ -1282,13 +1296,13 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
         };
         let mut rest = line;
         if let Some(delimiter) = open_string {
-            scan.unreadable |= may_spell_key(line);
+            bury(&mut scan, line);
             match string_end(line, delimiter) {
                 Some(after) => rest = after,
                 None => continue,
             }
         } else if depth > 0 {
-            scan.unreadable |= may_spell_key(line);
+            bury(&mut scan, line);
         } else {
             let top = line.trim_start();
             if top.starts_with('[') {
@@ -1302,6 +1316,8 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
                     Some(None) => {}
                     // A line that does not parse: harmless only when its key
                     // part is a plain name that is not ours.
+                    // (Any assignment of the line counts: two joined on one
+                    // line hide a quoted key behind a plain one.)
                     None => scan.unreadable |= top.contains(KEY_NAME) || quoted_key_part(top),
                 }
             }
@@ -1311,23 +1327,45 @@ pub(crate) fn salvage_key_scan(content: &str) -> KeyScan {
     scan
 }
 
-/// Whether a line inside a string or an array that is still open could be the
-/// key's line: it spells the name, or it is an assignment (it has a `=`) whose
-/// key part is quoted or escaped (`"encryption_secret" = …` decodes to the
-/// name whatever its spelling). A line without a `=` cannot be a key, so a
-/// quoted array element is not flagged. The scan cannot tell such a line from a
-/// key line of the top level, so it is never proven harmless.
-fn may_spell_key(line: &str) -> bool {
-    line.contains(KEY_NAME) || (line.contains('=') && quoted_key_part(line))
+/// A line inside a string or an array that is still open. It could be the key's
+/// line: it spells the name, or it is an assignment (it has a `=`) whose key part
+/// is quoted or escaped (`"encryption_secret" = …` decodes to the name whatever
+/// its spelling). A line without a `=` cannot be a key, so a quoted array
+/// element is not flagged. The scan cannot tell such a line from a key line of
+/// the top level, so it is never proven harmless; and when the line parses on
+/// its own as the key's assignment, its value is kept in `buried` so a key the
+/// broken file swallowed can still be recovered.
+fn bury(scan: &mut KeyScan, line: &str) {
+    if !(line.contains(KEY_NAME) || (line.contains('=') && quoted_key_part(line))) {
+        return;
+    }
+    scan.unreadable = true;
+    if let Some(Some(value)) = key_value_of(line) {
+        scan.buried.push(value);
+    }
 }
 
-/// Whether the part of `line` before its first `=` is written with a quote or
-/// an escape: such a key may decode to `encryption_secret` whatever its
-/// spelling, so a line like that which does not parse cannot be proven harmless.
+/// Whether `line` has an assignment whose key part is written with a quote or an
+/// escape: such a key may decode to `encryption_secret` whatever its spelling, so
+/// a line like that which does not parse cannot be proven harmless. Every `=` of
+/// the line is looked at, not only the first: two assignments joined on one line
+/// (`port = 8080 "encryption_secret" = "…"`, a hand-edit or merge accident)
+/// hide a quoted key behind a plain one. A key part is quoted when the text
+/// before a `=` ends with a quote; an escape (`\u`, `\"`) can only sit in a
+/// quoted key, which ends with one.
 fn quoted_key_part(line: &str) -> bool {
-    line.split('=')
+    // The text before the first `=` (the key of a plain line): any quote or
+    // escape in it.
+    if line
+        .split('=')
         .next()
         .is_some_and(|key| key.contains(['"', '\'', '\\']))
+    {
+        return true;
+    }
+    // Before every `=`: a quote right before it closes a quoted key.
+    line.match_indices('=')
+        .any(|(at, _)| line[..at].trim_end().ends_with(['"', '\'']))
 }
 
 /// `line` read on its own as one `key = value` line: `None` when it does not
@@ -1421,7 +1459,13 @@ pub fn default_config_without_key() -> AppConfig {
 /// `Some(key)` when `content` holds no settings, only (optionally) the key:
 /// the file a reset writes when config.toml carries a needed copy of the key.
 fn key_only_file(content: &str) -> Result<Option<Option<String>>> {
-    let table: toml::Table = content.parse().context("Failed to parse config file")?;
+    // The summary, not the error: its message quotes the offending source line.
+    let table: toml::Table = content.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse config file: {}",
+            super::redact::toml_error_summary(content, &e)
+        )
+    })?;
     // Only an empty file or one holding just the key: anything else (a
     // `[tokens]` table, say) is a real config whose content must not be dropped.
     if !table.keys().all(|k| k == "encryption_secret") {
@@ -1460,7 +1504,12 @@ pub fn write_key_copy_now(dir: &std::path::Path, config: &AppConfig) -> Result<(
 /// The `encryption_secret` config.toml in `dir` holds, if any.
 pub fn read_disk_key(dir: &std::path::Path) -> Result<Option<String>> {
     let text = std::fs::read_to_string(dir.join(CONFIG_FILE)).context("read config.toml")?;
-    let table: toml::Table = text.parse().context("parse config.toml")?;
+    let table: toml::Table = text.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "parse config.toml: {}",
+            super::redact::toml_error_summary(&text, &e)
+        )
+    })?;
     Ok(table
         .get("encryption_secret")
         .and_then(|v| v.as_str())
@@ -2480,6 +2529,14 @@ image_family = "flux9_future"
             "language = \"fr\"\n[tokens]\nanthropic = \"sk-clear-three\n".to_string(),
             // An unreadable key next to a credential line.
             format!("encryption_secret = 5\n[tokens]\nanthropic = \"sk-clear-four\"\n# {key}\n"),
+            // A secret pasted into a field that is not a credential: serde quotes
+            // the value in its message, so the notice and the log must not.
+            // (The parse path: the file reads, minus that value.)
+            "[server]\nport = \"sk-clear-five\"\n".to_string(),
+            // (The schema-error path: an unreadable key sets the file aside.)
+            "encryption_secret = 5\n[server]\nport = \"sk-clear-six\"\n".to_string(),
+            // A value holding the separator serde puts before the expected type.
+            "[server]\nport = \"sk-clear-seven, expected u16\"\n".to_string(),
         ];
         for (i, text) in texts.iter().enumerate() {
             let tmp = scratch_dir(&format!("log-leak-{i}"));
@@ -2498,6 +2555,10 @@ image_family = "flux9_future"
             let log = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
             let notice = set_aside_notice(&tmp).expect("recorded");
             assert!(log.contains("config.toml"), "{i}: {log}");
+            if text.contains("[server]") {
+                // The case really went through the salvage that names the field.
+                assert!(notice.contains("server.port"), "{i}: {notice}");
+            }
             for shown in [&log, &notice] {
                 assert!(!shown.contains(&key), "{i}: {shown}");
                 assert!(!shown.contains("sk-clear"), "{i}: {shown}");

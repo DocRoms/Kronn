@@ -178,6 +178,8 @@ export function SearchableSelect({
             : undefined}
           autoComplete="off"
           disabled={disabled}
+          // The full label when the field is too narrow to show it (a model id).
+          title={open ? undefined : (selected?.label || placeholder || undefined)}
           data-testid={testId}
           data-model-tier-agent={dataModelTierAgent}
           data-model-tier={dataModelTier}
