@@ -289,6 +289,86 @@ mod swapped_folder {
         assert!(held.contains(DUPLICATE_FIELD), "{held}");
     }
 
+    /// A link pre-planted at a decided sheet's name is refused by the walk
+    /// (not ELOOP): it is skipped and reported, and the decisions of the other
+    /// sheets are still put back.
+    #[test]
+    fn a_link_at_a_decided_sheet_name_is_skipped_and_the_other_decisions_still_come_back() {
+        let (_dir, docs) = setup();
+        write(
+            &docs,
+            "TD-1-rej",
+            &sheet("Rejected", "src/a.rs", "Unsafe call"),
+        );
+        write(
+            &docs,
+            "TD-2-rej",
+            &sheet("Rejected", "src/b.rs", "Another call"),
+        );
+        let snap = snapshot(&docs);
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("elsewhere.md"), "OUT").unwrap();
+        std::fs::remove_file(docs.join("tech-debt/TD-1-rej.md")).unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("elsewhere.md"),
+            docs.join("tech-debt/TD-1-rej.md"),
+        )
+        .unwrap();
+        write(
+            &docs,
+            "TD-2-rej",
+            &sheet("Verified in source", "src/b.rs", "Another call"),
+        );
+
+        let outcome = restore(docs.parent().unwrap(), &docs, &snap).unwrap();
+
+        let refused: Vec<&str> = outcome.refused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(refused, vec!["TD-1-rej"]);
+        assert_eq!(outcome.reverted, vec!["TD-2-rej"]);
+        assert_eq!(
+            td_decision(&read(&docs, "TD-2-rej")),
+            Some(TdDecision::Rejected)
+        );
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("elsewhere.md")).unwrap(),
+            "OUT"
+        );
+        assert!(
+            std::fs::symlink_metadata(docs.join("tech-debt/TD-1-rej.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted link is left as it is"
+        );
+        assert!(!outcome.is_empty(), "a refusal is reported");
+    }
+
+    /// The missing-sheet branch is create-only: a file that appears at the
+    /// name between the read and the write is never overwritten.
+    #[test]
+    fn a_deleted_sheet_is_written_back_create_only() {
+        let (_dir, docs) = setup();
+        write(
+            &docs,
+            "TD-1-rej",
+            &sheet("Rejected", "src/a.rs", "Unsafe call"),
+        );
+        let snap = snapshot(&docs);
+        std::fs::remove_file(docs.join("tech-debt/TD-1-rej.md")).unwrap();
+        // The read finds nothing (call 1); the human's newer file lands before
+        // the write (call 2) looks at the name.
+        swap_probe::arm_hook(&docs.join("tech-debt"), 1, |dir| {
+            std::fs::write(dir.join("TD-1-rej.md"), "HUMAN NEWER").unwrap();
+        });
+
+        let outcome = restore(docs.parent().unwrap(), &docs, &snap).unwrap();
+
+        assert!(swap_probe::fired(), "the race really happened");
+        assert!(outcome.restored.is_empty(), "{outcome:?}");
+        assert_eq!(outcome.refused.len(), 1, "{outcome:?}");
+        assert_eq!(read(&docs, "TD-1-rej"), "HUMAN NEWER");
+    }
+
     #[test]
     fn a_folder_already_swapped_creates_nothing_outside_the_project() {
         // The reported attack: the agent left `sleep; mv docs/tech-debt x; ln -s

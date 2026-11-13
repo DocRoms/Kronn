@@ -97,15 +97,12 @@ pub fn new_template_backup_dir(project: &Path, stamp: &str) -> Result<PathBuf, S
             format!("{stamp}-{attempt}")
         };
         let dir = parent.join(name);
-        // The rooted primitive creates folders idempotently: an existing one
-        // (a link included) is skipped by this lstat, so one run never writes
-        // into another's folder. The check only picks a name; containment
-        // never depends on it.
-        if fs::symlink_metadata(&dir).is_ok() {
-            continue;
+        // Atomic create (`mkdirat` fails on EEXIST, a link included): a folder
+        // another run made, or one that appears between a check and the
+        // create, is never adopted. The suffix advances instead.
+        if crate::core::fs_guard::guarded_create_new_dir(&root, &dir)? {
+            return Ok(dir);
         }
-        crate::core::fs_guard::guarded_create_dir_all(&root, &dir)?;
-        return Ok(dir);
     }
     Err("no free template backup folder".into())
 }
@@ -371,7 +368,47 @@ mod tests {
             swap_probe::arm(&parent, external.path());
             let result = new_template_backup_dir(&root, "20261011");
             assert!(swap_probe::fired(), "the swap really happened");
-            assert!(result.is_err(), "{result:?}");
+            // The create goes to the folder it held (moved, still in the
+            // project); nothing is created behind the link.
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+            assert!(root
+                .join(STATE_DIR)
+                .join("template-backups.moved/20261011")
+                .is_dir());
+        }
+
+        /// A folder another run (or an agent) creates under the stamp between
+        /// the name being picked and the create is never adopted: the create is
+        /// atomic and the suffix advances.
+        #[test]
+        fn a_backup_folder_that_appears_meanwhile_is_not_adopted() {
+            let (_tmp, root, _external) = project();
+            let parent = root.join(STATE_DIR).join(TEMPLATE_BACKUPS);
+            fs::create_dir_all(&parent).unwrap();
+            swap_probe::arm_hook(&parent, 0, |dir| {
+                fs::create_dir(dir.join("20261011")).unwrap();
+                fs::write(dir.join("20261011/theirs.txt"), "other run").unwrap();
+            });
+            let result = new_template_backup_dir(&root, "20261011").unwrap();
+            assert!(swap_probe::fired(), "the race really happened");
+            assert_eq!(result, parent.join("20261011-1"));
+            assert!(result.is_dir());
+            assert_eq!(fs::read_dir(&result).unwrap().count(), 0);
+            assert_eq!(
+                fs::read_to_string(parent.join("20261011/theirs.txt")).unwrap(),
+                "other run"
+            );
+        }
+
+        #[test]
+        fn a_link_at_the_stamp_name_is_skipped_not_adopted() {
+            let (_tmp, root, external) = project();
+            let parent = root.join(STATE_DIR).join(TEMPLATE_BACKUPS);
+            fs::create_dir_all(&parent).unwrap();
+            std::os::unix::fs::symlink(external.path(), parent.join("20261011")).unwrap();
+            let result = new_template_backup_dir(&root, "20261011").unwrap();
+            assert_eq!(result, parent.join("20261011-1"));
             assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
         }
 

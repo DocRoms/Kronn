@@ -56,17 +56,31 @@
 //!   write; other reads in the code base are not covered (below);
 //! - a failure before publication leaves NO destination (the temp is removed
 //!   by best-effort RAII); durability is `fs::write` parity (no fsync),
-//!   except `guarded_replace_like`, which syncs.
+//!   except `guarded_replace_like`, which syncs;
+//! - `guarded_list` lists a folder through the same held fds (a link at the
+//!   folder or in a parent is refused, never listed as empty) and
+//!   `guarded_create_new_dir` is an atomic `mkdirat` that reports an occupied
+//!   name instead of adopting it. [`is_link_refusal`] tells a refusal of a link
+//!   from a real permission error, so a caller can skip one planted entry
+//!   without swallowing an I/O failure.
 //!
 //! Not covered, on any platform: a caller that obtains a path from
 //! `assert_contained_no_symlink` / `docs_location::contained_dir` /
 //! `docs_location::guard_write` and writes it by itself (the read-only ones
-//! are fine); READS (`resolve_contained_read` canonicalizes, a swap after it
-//! can still be read through); the files a spawned `git` or an agent process
-//! writes by path; and other by-path writers that never call this module
-//! (`root_agent_files::inject_or_update`, `td_decisions`, `adr`, `skills`,
-//! `profiles`, and in `worktree` the copy of the untracked files into a new
-//! checkout, the `info/exclude` append and the submodule parent folders).
+//! are fine); READS by path (`resolve_contained_read` canonicalizes, a swap
+//! after it can still be read through; the read-only views of `td_index`
+//! (`read_sheets_in`, `debt_entries`, `docs_index_rows`), the `td_decisions`
+//! snapshot taken BEFORE an agent runs and `adr::read_decisions` are by path,
+//! because nothing is written from them); the files a spawned `git` or an
+//! agent process writes by path (the `git checkout` that `step_remit` runs to
+//! put a file back from HEAD is one); and by-path writers that never call this
+//! module: `root_agent_files::inject_or_update`, `skills`, `profiles`, the
+//! audit-cancel cleanup of `full.rs` (`remove_dir_all` of an empty docs folder,
+//! removal of an `ai` link), `learning_doc`, `context_files` and `mcp_scanner`
+//! (the last three are routes, not run after an agent), and in `worktree` the
+//! copy of the untracked files into a new checkout and the submodule parent
+//! folders. The `info/exclude` append of `worktree::ensure_local_git_exclude`
+//! IS rooted now (at the git directory git names).
 //!
 //! Windows (residual risk, owner decision amending the KT-1595 DoD): there
 //! is no directory-fd API in use here, so every `guarded_*` write keeps the
@@ -85,6 +99,36 @@
 //! and never auto-deleted here.
 
 use std::path::{Component, Path, PathBuf};
+
+/// The payload of the `PermissionDenied` error a read-like `guarded_*` call
+/// returns when the lstat walk refuses the path (a link at the name or in a
+/// parent, or a path that leaves the root). It lets a caller tell "refused
+/// because of a link" from a genuine permission error (KT-1595).
+#[derive(Debug)]
+struct Refusal(String);
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// The error of a path the walk refused.
+fn refusal(message: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::PermissionDenied, Refusal(message))
+}
+
+/// Whether `error` is the refusal of a link (or of a path leaving the root) by
+/// a `guarded_*` call: either the lstat walk's [`Refusal`], or the `O_NOFOLLOW`
+/// open's ELOOP. A real permission error is not one.
+pub fn is_link_refusal(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.downcast_ref::<Refusal>().is_some())
+        || crate::core::rooted_fd::Dir::is_link_refusal(error)
+}
 
 /// Verify `path` is lexically under `root` and that no component from
 /// `root` (exclusive) down to `path` (inclusive) is a symlink. Missing
@@ -124,10 +168,18 @@ pub(crate) mod swap_probe {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
+    /// What fires when the armed folder is held.
+    enum Action {
+        /// The folder is renamed `<dir>.moved` and replaced by a link to this.
+        Swap(PathBuf),
+        /// Anything else a test wants to happen right then (a file planted).
+        Hook(Box<dyn FnOnce(&Path) + Send>),
+    }
+
     #[derive(Default)]
     struct Probe {
-        /// `(external, guarded calls still to let through)` per folder.
-        armed: HashMap<PathBuf, (PathBuf, usize)>,
+        /// `(what to do, guarded calls still to let through)` per folder.
+        armed: HashMap<PathBuf, (Action, usize)>,
         fired: HashSet<PathBuf>,
     }
 
@@ -153,16 +205,25 @@ pub(crate) mod swap_probe {
     /// under `dir`: for a caller that reads a file (a guarded call) before it
     /// writes it, so the swap lands on the write.
     pub(crate) fn arm_after(dir: &Path, external: &Path, skip: usize) {
+        arm_action(dir, Action::Swap(external.to_path_buf()), skip);
+    }
+
+    /// Runs `hook(dir)` once the guarded call after `skip` others under `dir`
+    /// holds the folder: a deterministic race for a test (an entry appearing
+    /// between the caller's read and its write).
+    pub(crate) fn arm_hook(dir: &Path, skip: usize, hook: impl FnOnce(&Path) + Send + 'static) {
+        arm_action(dir, Action::Hook(Box::new(hook)), skip);
+    }
+
+    fn arm_action(dir: &Path, action: Action, skip: usize) {
         with(|probe| {
             probe.fired.remove(dir);
-            probe
-                .armed
-                .insert(dir.to_path_buf(), (external.to_path_buf(), skip));
+            probe.armed.insert(dir.to_path_buf(), (action, skip));
         });
         MINE.with(|mine| *mine.borrow_mut() = Some(dir.to_path_buf()));
     }
 
-    /// Whether the swap happened (and disarms the probe).
+    /// Whether the swap (or hook) happened (and disarms the probe).
     pub(crate) fn fired() -> bool {
         let Some(dir) = MINE.with(|mine| mine.borrow().clone()) else {
             return false;
@@ -175,20 +236,27 @@ pub(crate) mod swap_probe {
 
     pub(super) fn after_walk(parent: Option<&Path>) {
         let Some(parent) = parent else { return };
-        let external = with(|probe| match probe.armed.get_mut(parent) {
+        let action = with(|probe| match probe.armed.get_mut(parent) {
             Some((_, skip)) if *skip > 0 => {
                 *skip -= 1;
                 None
             }
-            Some(_) => probe.armed.remove(parent).map(|(external, _)| external),
+            Some(_) => probe.armed.remove(parent).map(|(action, _)| action),
             None => None,
         });
-        if let Some(external) = external {
-            let mut moved = parent.to_path_buf().into_os_string();
-            moved.push(".moved");
-            std::fs::rename(parent, PathBuf::from(moved)).unwrap();
-            std::os::unix::fs::symlink(external, parent).unwrap();
-            with(|probe| probe.fired.insert(parent.to_path_buf()));
+        match action {
+            Some(Action::Swap(external)) => {
+                let mut moved = parent.to_path_buf().into_os_string();
+                moved.push(".moved");
+                std::fs::rename(parent, PathBuf::from(moved)).unwrap();
+                std::os::unix::fs::symlink(external, parent).unwrap();
+                with(|probe| probe.fired.insert(parent.to_path_buf()));
+            }
+            Some(Action::Hook(hook)) => {
+                hook(parent);
+                with(|probe| probe.fired.insert(parent.to_path_buf()));
+            }
+            None => {}
         }
     }
 }
@@ -196,10 +264,11 @@ pub(crate) mod swap_probe {
 #[cfg(unix)]
 pub use imp::guarded_set_mode;
 pub use imp::{
-    guarded_copy_new, guarded_create_dir_all, guarded_move_new, guarded_read, guarded_remove_dir,
-    guarded_remove_file, guarded_remove_file_if_ours, guarded_remove_tree, guarded_rename,
-    guarded_replace, guarded_replace_if_unchanged_keeping_mode, guarded_replace_like,
-    guarded_write_new, guarded_write_new_identified, FileId,
+    guarded_copy_new, guarded_create_dir_all, guarded_create_new_dir, guarded_list,
+    guarded_move_new, guarded_read, guarded_remove_dir, guarded_remove_file,
+    guarded_remove_file_if_ours, guarded_remove_tree, guarded_rename, guarded_replace,
+    guarded_replace_if_unchanged_keeping_mode, guarded_replace_like, guarded_write_new,
+    guarded_write_new_identified, FileId,
 };
 
 #[cfg(unix)]
@@ -304,6 +373,23 @@ mod imp {
         Dir::open_path(root, rel, true)
             .map(|_| ())
             .map_err(|e| format!("mkdir {}: {e}", dir.display()))
+    }
+
+    /// Creates the folder `dir` ONLY if nothing is there (`mkdirat` fails on an
+    /// existing entry, a link included, which is never adopted nor followed):
+    /// `Ok(true)` when it was created, `Ok(false)` when an entry already
+    /// occupies the name. The missing parents are created like
+    /// [`guarded_create_dir_all`]. Atomic where [`guarded_create_dir_all`] is
+    /// idempotent: for a caller that must not write into a folder another run
+    /// made.
+    pub fn guarded_create_new_dir(root: &Path, dir: &Path) -> Result<bool, String> {
+        let (parent, name) = parent_of_entry(root, dir, true)?
+            .ok_or_else(|| format!("{}: its folder cannot be created", dir.display()))?;
+        match parent.create_new_child(name) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(format!("mkdir {}: {e}", dir.display())),
+        }
     }
 
     /// Best-effort RAII cleanup for the temp sibling on non-publish exit
@@ -713,7 +799,31 @@ mod imp {
     }
 
     fn refused(message: String) -> io::Error {
-        io::Error::new(io::ErrorKind::PermissionDenied, message)
+        super::refusal(message)
+    }
+
+    /// The names of the entries directly under the folder `dir` (`.` and `..`
+    /// left out), listed through a handle opened `O_NOFOLLOW` against the held
+    /// fds: a link at `dir` or in a parent is refused, never listed. `None`
+    /// when the folder is missing. A read error is an error, never the end of
+    /// the listing. What each name is (file, link, folder) is not said: read
+    /// it with [`guarded_read`], which refuses what is not a plain file.
+    pub fn guarded_list(root: &Path, dir: &Path) -> io::Result<Option<Vec<OsString>>> {
+        assert_contained_no_symlink(root, dir).map_err(refused)?;
+        let rel = dir.strip_prefix(root).map_err(|_| {
+            refused(format!(
+                "{} escapes the root {}",
+                dir.display(),
+                root.display()
+            ))
+        })?;
+        let held = Dir::open_path(root, rel, false)?;
+        #[cfg(test)]
+        super::swap_probe::after_walk(dir.parent());
+        match held {
+            Some(held) => held.names().map(Some),
+            None => Ok(None),
+        }
     }
 
     /// `unlinkat` of the file (or link) at `path`; a missing one is `NotFound`.
@@ -876,6 +986,9 @@ mod imp {
     pub fn guarded_create_dir_all(_: &Path, _: &Path) -> Result<(), String> {
         refused()
     }
+    pub fn guarded_create_new_dir(_: &Path, _: &Path) -> Result<bool, String> {
+        refused()
+    }
     pub fn guarded_write_new(_: &Path, _: &Path, _: &[u8]) -> Result<bool, String> {
         refused()
     }
@@ -890,6 +1003,9 @@ mod imp {
         refused_io()
     }
     pub fn guarded_read(_: &Path, _: &Path) -> io::Result<Option<Vec<u8>>> {
+        refused_io()
+    }
+    pub fn guarded_list(_: &Path, _: &Path) -> io::Result<Option<Vec<std::ffi::OsString>>> {
         refused_io()
     }
     pub fn guarded_copy_new(_: &Path, _: &Path, _: &Path) -> Result<bool, String> {
@@ -956,7 +1072,31 @@ mod imp {
     pub struct FileId;
 
     fn refused(message: String) -> io::Error {
-        io::Error::new(io::ErrorKind::PermissionDenied, message)
+        super::refusal(message)
+    }
+
+    pub fn guarded_create_new_dir(root: &Path, dir: &Path) -> Result<bool, String> {
+        assert_contained_no_symlink(root, dir.parent().unwrap_or(root))?;
+        if let Some(parent) = dir.parent() {
+            guarded_create_dir_all(root, parent)?;
+        }
+        match std::fs::create_dir(dir) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(format!("mkdir {}: {e}", dir.display())),
+        }
+    }
+
+    pub fn guarded_list(root: &Path, dir: &Path) -> io::Result<Option<Vec<std::ffi::OsString>>> {
+        assert_contained_no_symlink(root, dir).map_err(refused)?;
+        match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|e| e.file_name()))
+                .collect::<io::Result<Vec<_>>>()
+                .map(Some),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn guarded_create_dir_all(root: &Path, dir: &Path) -> Result<(), String> {
@@ -2199,6 +2339,76 @@ mod tests {
         let read = guarded_read(&proj, &proj.join("docs/a.md")).unwrap();
         assert!(swap_probe::fired(), "the swap really happened");
         assert_eq!(read.as_deref(), Some(b"inside".as_slice()));
+    }
+
+    /// KT-1595 — a refusal of the walk is told apart from a real permission
+    /// error: callers skip a planted link, they do not swallow an EACCES.
+    #[cfg(unix)] // creates symlinks through std::os::unix
+    #[test]
+    fn a_link_refusal_is_told_apart_from_a_permission_error() {
+        let (_tmp, proj, external) = project_and_external();
+        std::fs::write(external.join("secret"), "OUT").unwrap();
+        std::os::unix::fs::symlink(external.join("secret"), proj.join("docs/l.md")).unwrap();
+        let by_name = guarded_read(&proj, &proj.join("docs/l.md")).unwrap_err();
+        assert_eq!(by_name.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(is_link_refusal(&by_name), "{by_name}");
+        std::os::unix::fs::symlink(&external, proj.join("docs/dir")).unwrap();
+        let by_parent = guarded_read(&proj, &proj.join("docs/dir/secret")).unwrap_err();
+        assert!(is_link_refusal(&by_parent), "{by_parent}");
+        let plain = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_link_refusal(&plain));
+        assert!(!is_link_refusal(&std::io::Error::other("boom")));
+    }
+
+    /// KT-1595 — the listing of a folder is rooted: a link is refused (never
+    /// listed as "no entries"), a missing folder is `None`, a swap after the
+    /// folder is held lists the original.
+    #[cfg(unix)] // creates symlinks through std::os::unix
+    #[test]
+    fn guarded_list_refuses_a_link_and_lists_the_held_folder() {
+        let (_tmp, proj, external) = project_and_external();
+        std::fs::write(proj.join("docs/a.md"), "inside").unwrap();
+        std::fs::write(proj.join("docs/b.md"), "inside").unwrap();
+        let mut names = guarded_list(&proj, &proj.join("docs")).unwrap().unwrap();
+        names.sort();
+        assert_eq!(names, ["a.md", "b.md"]);
+        assert!(guarded_list(&proj, &proj.join("docs/none"))
+            .unwrap()
+            .is_none());
+        std::fs::write(external.join("out.md"), "OUT").unwrap();
+        std::os::unix::fs::symlink(&external, proj.join("linked")).unwrap();
+        let refused = guarded_list(&proj, &proj.join("linked")).unwrap_err();
+        assert!(is_link_refusal(&refused), "{refused}");
+        let below = guarded_list(&proj, &proj.join("linked/x")).unwrap_err();
+        assert!(is_link_refusal(&below), "{below}");
+        // Swapped for a link once held: the original folder is listed.
+        std::fs::create_dir_all(proj.join("docs/sub")).unwrap();
+        std::fs::write(proj.join("docs/sub/in.md"), "inside").unwrap();
+        std::fs::write(external.join("sub-out.md"), "OUT").unwrap();
+        swap_probe::arm(&proj.join("docs"), &external);
+        let listed = guarded_list(&proj, &proj.join("docs/sub"))
+            .unwrap()
+            .unwrap();
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(listed, ["in.md"]);
+    }
+
+    /// KT-1595 — the atomic folder create: an occupied name (folder, file or
+    /// link) is `false`, never adopted; the missing parents are created.
+    #[cfg(unix)] // creates symlinks through std::os::unix
+    #[test]
+    fn guarded_create_new_dir_never_adopts_an_existing_entry() {
+        let (_tmp, proj, external) = project_and_external();
+        assert!(guarded_create_new_dir(&proj, &proj.join("docs/deep/er/new")).unwrap());
+        assert!(proj.join("docs/deep/er/new").is_dir());
+        assert!(!guarded_create_new_dir(&proj, &proj.join("docs/deep/er/new")).unwrap());
+        std::fs::write(proj.join("docs/file"), "x").unwrap();
+        assert!(!guarded_create_new_dir(&proj, &proj.join("docs/file")).unwrap());
+        std::os::unix::fs::symlink(&external, proj.join("docs/link")).unwrap();
+        assert!(!guarded_create_new_dir(&proj, &proj.join("docs/link")).unwrap());
+        // A link in a parent is refused.
+        assert!(guarded_create_new_dir(&proj, &proj.join("docs/link/inside")).is_err());
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 0);
     }
 
     #[cfg(unix)] // creates symlinks through std::os::unix

@@ -1780,32 +1780,19 @@ pub(crate) async fn run_partial_pipeline(
                                 // — the partial dispatcher shows it, never
                                 // swallows it.
                                 if enforce_mode {
-                                    match std::fs::read_to_string(&target_path) {
-                                        Ok(written) => {
-                                            let today = Utc::now().format("%Y-%m-%d").to_string();
-                                            if let Some(stamped) =
-                                                super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
-                                            {
-                                                if let Err(e) = std::fs::write(&target_path, &stamped) {
-                                                    yield Event::default().event("warning").data(
-                                                        serde_json::json!({
-                                                            "message": format!(
-                                                                "Step {step} ({file_label}): audit-date stamp failed: {e}"
-                                                            ),
-                                                        }).to_string()
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            yield Event::default().event("warning").data(
-                                                serde_json::json!({
-                                                    "message": format!(
-                                                        "Step {step} ({file_label}): audit-date stamp skipped, target unreadable: {e}"
-                                                    ),
-                                                }).to_string()
-                                            );
-                                        }
+                                    // KT-1595: read + replace through the
+                                    // rooted primitive, a link is refused.
+                                    let today = Utc::now().format("%Y-%m-%d").to_string();
+                                    if let Err(e) = super::anti_hallu_enforce::stamp_target_audit_dates(
+                                        &project_path, &target_path, &today,
+                                    ) {
+                                        yield Event::default().event("warning").data(
+                                            serde_json::json!({
+                                                "message": format!(
+                                                    "Step {step} ({file_label}): audit-date stamp failed: {e}"
+                                                ),
+                                            }).to_string()
+                                        );
                                     }
                                 }
                                 "succeeded"

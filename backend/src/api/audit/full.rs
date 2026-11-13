@@ -2840,17 +2840,15 @@ pub async fn full_audit(
                                 // drift.rs: stamping an unproven rewrite would
                                 // mask a no-op step as freshly audited).
                                 if enforce_mode {
-                                    if let Ok(written) = std::fs::read_to_string(&target_path) {
-                                        if let Some(stamped) =
-                                            super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
-                                        {
-                                            if let Err(e) = std::fs::write(&target_path, &stamped) {
-                                                tracing::warn!(
-                                                    "Audit step {} ({}): failed to stamp audit dates: {}",
-                                                    step, file_label, e
-                                                );
-                                            }
-                                        }
+                                    // KT-1595: read + replace through the
+                                    // rooted primitive, a link is refused.
+                                    if let Err(e) = super::anti_hallu_enforce::stamp_target_audit_dates(
+                                        &project_path, &target_path, &today,
+                                    ) {
+                                        tracing::warn!(
+                                            "Audit step {} ({}): failed to stamp audit dates: {}",
+                                            step, file_label, e
+                                        );
                                     }
                                 }
                             }
@@ -3297,7 +3295,7 @@ pub async fn full_audit(
             if let Ok((report_path, report, candidates, updated)) = recon_outcome {
                 // Through the rooted primitive (KT-1595): the report lands in a
                 // folder an agent's leftover process may have swapped for a link.
-                match crate::core::fs_guard::guarded_replace(&project_path, &report_path, report.as_bytes()) {
+                match write_reconciliation_report(&project_path, &report_path, &report) {
                     Ok(()) => {
                         tracing::info!(
                             "Reconciliation report: {} candidates, {} updated. Written to {}",
@@ -5221,6 +5219,80 @@ pub(crate) fn compute_cluster_recommendations(
             .then_with(|| a.kind.cmp(&b.kind))
     });
     recs
+}
+
+/// Writes the reconciliation report of a full audit (KT-1595): through the
+/// rooted primitive under the project, because it lands in `tech-debt/` right
+/// after the agents ran, in a folder a leftover process may have swapped for a
+/// link. A link at the report name or in a parent is replaced or refused,
+/// never written through.
+fn write_reconciliation_report(
+    project_path: &std::path::Path,
+    report_path: &std::path::Path,
+    report: &str,
+) -> Result<(), String> {
+    crate::core::fs_guard::guarded_replace(project_path, report_path, report.as_bytes())
+}
+
+/// The reconciliation report is written by the audit pipeline itself, so these
+/// tests are not behind `full-tests`: they are the caller-level swap guarantee.
+#[cfg(all(test, unix))]
+mod reconciliation_report_tests {
+    use super::write_reconciliation_report;
+    use crate::core::fs_guard::swap_probe;
+
+    const REPORT: &str = "# Reconciliation\n";
+
+    fn project() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("docs/tech-debt")).unwrap();
+        (tmp, root)
+    }
+
+    #[test]
+    fn a_tech_debt_folder_swapped_before_the_report_write_never_receives_it() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        let report = root.join("docs/tech-debt/_reconciliation-2026-11-13.md");
+        swap_probe::arm(&root.join("docs/tech-debt"), external.path());
+
+        let outcome = write_reconciliation_report(&root, &report, REPORT);
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+        // The write went to the folder it held (moved, still in the project).
+        let held = root.join("docs/tech-debt.moved/_reconciliation-2026-11-13.md");
+        assert_eq!(std::fs::read_to_string(held).unwrap(), REPORT);
+    }
+
+    #[test]
+    fn a_link_at_the_report_name_is_refused_not_written_through() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        let victim = external.path().join("victim.md");
+        std::fs::write(&victim, "victim").unwrap();
+        let report = root.join("docs/tech-debt/_reconciliation-2026-11-13.md");
+        std::os::unix::fs::symlink(&victim, &report).unwrap();
+
+        let outcome = write_reconciliation_report(&root, &report, REPORT);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "victim");
+    }
+
+    #[test]
+    fn a_tech_debt_folder_that_is_a_link_is_refused() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::remove_dir_all(root.join("docs/tech-debt")).unwrap();
+        std::os::unix::fs::symlink(external.path(), root.join("docs/tech-debt")).unwrap();
+        let report = root.join("docs/tech-debt/_reconciliation-2026-11-13.md");
+
+        assert!(write_reconciliation_report(&root, &report, REPORT).is_err());
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+    }
 }
 
 #[cfg(all(test, feature = "full-tests"))]

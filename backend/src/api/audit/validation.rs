@@ -742,25 +742,44 @@ pub(crate) fn fill_kronn_owned_placeholders(content: &str, today: &str) -> Strin
 }
 
 /// Apply [`fill_kronn_owned_placeholders`] to this step's own target file.
+///
+/// Runs right after the agent, which can leave a swap behind (KT-1595): the
+/// read and the replace go through the rooted primitive under the project, so
+/// a link at the name or in a parent (swapped in or pre-planted) is refused,
+/// never read nor written through. The replace is optimistic on the bytes read.
 pub(crate) fn fill_step_owned_placeholders(project_path: &Path, target_file: &str, today: &str) {
     if !DocsRoot::of(project_path).contains(target_file) {
         return;
     }
     let path = project_path.join(target_file);
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        // Only a document the agent otherwise finished: filling the date of an
-        // untouched template would pass it off as rewritten.
-        if raw_placeholder_names(&content)
-            .iter()
-            .any(|name| name != "DATE")
-        {
+    let bytes = match crate::core::fs_guard::guarded_read(project_path, &path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(target_file, %error, "could not read the document to fill Kronn-owned placeholders");
             return;
         }
-        let filled = fill_kronn_owned_placeholders(&content, today);
-        if filled != content {
-            if let Err(error) = std::fs::write(&path, filled) {
-                tracing::warn!(target_file, %error, "could not fill Kronn-owned placeholders");
-            }
+    };
+    let Ok(content) = std::str::from_utf8(&bytes) else {
+        return;
+    };
+    // Only a document the agent otherwise finished: filling the date of an
+    // untouched template would pass it off as rewritten.
+    if raw_placeholder_names(content)
+        .iter()
+        .any(|name| name != "DATE")
+    {
+        return;
+    }
+    let filled = fill_kronn_owned_placeholders(content, today);
+    if filled != content {
+        if let Err(error) = crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+            project_path,
+            &path,
+            &filled,
+            &bytes,
+        ) {
+            tracing::warn!(target_file, %error, "could not fill Kronn-owned placeholders");
         }
     }
 }
@@ -2066,6 +2085,47 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(docs.join("b.md")).unwrap(),
             "{{TASK_1}} reviewed {{DATE}}"
+        );
+    }
+
+    /// KT-1595 — the date fill runs right after the agent: a docs folder
+    /// swapped for a link between the read and the write never receives it.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_docs_folder_swapped_after_the_read_never_receives_the_filled_date() {
+        use crate::core::fs_guard::swap_probe;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "done, reviewed {{DATE}}").unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), "outside {{DATE}}").unwrap();
+        swap_probe::arm_after(&docs, external.path(), 1);
+        fill_step_owned_placeholders(tmp.path(), "docs/a.md", "2026-10-03");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("a.md")).unwrap(),
+            "outside {{DATE}}",
+            "the file behind the link is untouched"
+        );
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+
+    /// KT-1595 — no race needed: a link already at the target name is not
+    /// read through nor rewritten.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_target_name_is_not_filled_through() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), "outside {{DATE}}").unwrap();
+        std::os::unix::fs::symlink(external.path().join("a.md"), docs.join("a.md")).unwrap();
+        fill_step_owned_placeholders(tmp.path(), "docs/a.md", "2026-10-03");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("a.md")).unwrap(),
+            "outside {{DATE}}"
         );
     }
 

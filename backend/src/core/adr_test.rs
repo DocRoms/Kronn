@@ -628,6 +628,30 @@ mod swapped_folder {
         );
     }
 
+    /// KT-1595 (Argon D): no check by path comes before the guarded read of
+    /// `decisions.md` — a link there fails closed, it does not read as "no
+    /// decisions" (which a swapped `docs` folder would also look like).
+    #[test]
+    fn a_link_at_decisions_md_fails_closed() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        fs::write(external.path().join("decisions.md"), CI_LABEL_ADR).unwrap();
+        fs::remove_file(docs.join(DECISIONS_FILE)).unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("decisions.md"),
+            docs.join(DECISIONS_FILE),
+        )
+        .unwrap();
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(outcome.is_err(), "{outcome:?}");
+        let untouched = fs::read_to_string(docs.join("tech-debt").join(SHEET)).unwrap();
+        assert_ne!(td_decision(&untouched), Some(TdDecision::AcceptedDecision));
+        assert_eq!(
+            fs::read_to_string(external.path().join("decisions.md")).unwrap(),
+            CI_LABEL_ADR
+        );
+    }
+
     #[test]
     fn a_docs_folder_outside_the_root_is_refused() {
         let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");

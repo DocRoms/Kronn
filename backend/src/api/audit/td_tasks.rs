@@ -88,11 +88,15 @@ pub(crate) async fn guard_decisions(
     match outcome {
         Ok(Ok(outcome)) if !outcome.is_empty() => {
             tracing::info!(
-                "Tech-debt decisions guarded: {} restored, {} reverted, {} new sheet(s) repeat a settled one",
+                "Tech-debt decisions guarded: {} restored, {} reverted, {} new sheet(s) repeat a settled one, {} left alone (link or foreign entry)",
                 outcome.restored.len(),
                 outcome.reverted.len(),
-                outcome.settled_duplicates.len()
+                outcome.settled_duplicates.len(),
+                outcome.refused.len()
             );
+            for (id, why) in &outcome.refused {
+                tracing::warn!("Tech-debt decision of {id} not restored: {why}");
+            }
             Some(
                 axum::response::sse::Event::default()
                     .event("td_decisions")
@@ -101,6 +105,7 @@ pub(crate) async fn guard_decisions(
                             "restored": outcome.restored,
                             "reverted": outcome.reverted,
                             "settled_duplicates": outcome.settled_duplicates,
+                            "refused": outcome.refused,
                         })
                         .to_string(),
                     ),

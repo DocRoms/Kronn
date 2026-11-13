@@ -88,12 +88,19 @@ common ways a Kronn deployment ends up exposed.
 ## Known residual risks
 
 - **Windows desktop build — project writes are check-then-write.** On
-  macOS and Linux every write Kronn makes inside a project (docs, native
-  agent files, templates, seeds, the audit state folder and the writers
-  that run right after an agent) goes through directory file descriptors
-  opened with `O_NOFOLLOW`, so a folder swapped for a symlink while Kronn
-  works is never written through (the few by-path exceptions are listed in
-  the document below). Windows has no such primitive in use:
+  macOS and Linux the writes Kronn makes inside a project through its
+  rooted primitive (docs, native agent files, templates, seeds, the audit
+  state folder, and the writers that run right after an agent: the
+  placeholder and audit-date fills, the remit guard, the anti-hallucination
+  section, the tech-debt index and decisions, the ADR settlement, the local
+  git exclude, the reconciliation report) go through directory file
+  descriptors opened with `O_NOFOLLOW`, so a folder swapped for a symlink
+  while Kronn works is never written through. This is not every write:
+  the by-path exceptions are listed in the document below (among them the
+  files a spawned `git` or an agent writes, the root agent pointers, skills
+  and profiles, the audit-cancel cleanup, the copy of untracked files into a
+  new worktree, and the settings and context-file routes, which do not run
+  right after an agent). Windows has no such primitive in use:
   Kronn checks the path for links, then writes it. A folder swapped for a
   link in that window is not excluded. Creating a symlink on Windows needs
   elevated rights or developer mode, so Kronn accepts this rather than

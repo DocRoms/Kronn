@@ -28,6 +28,10 @@ the write.
 | `guarded_move_new` | opens the source `O_NOFOLLOW`, `linkat` no-clobber, then `unlinkat` of the source only while its name still is the opened file (device and inode) |
 | `guarded_write_new_identified`, `guarded_remove_file_if_ours` | a create that returns the file's identity, and a removal that checks the name still is that file; a stat then an `unlinkat`, not an atomic compare-and-unlink |
 | `guarded_read` | reads a regular file through a handle opened `O_NOFOLLOW` against the held parent; a link is refused |
+| `guarded_list` | lists a folder through the held descriptors (`fdopendir` on a duplicate); a link at the folder or in a parent is refused (an error), never listed as empty; a missing folder is `None`; a read error is an error |
+| `guarded_create_new_dir` | `mkdirat` that fails on an existing entry (a folder, a file or a link): `false` when the name is occupied, never adopted. The idempotent `guarded_create_dir_all` stays for callers that want that |
+
+A read-like refusal of the walk (a link at the name or in a parent) is a `PermissionDenied` error carrying a typed payload: `fs_guard::is_link_refusal(&error)` recognizes it (and the `ELOOP` of the `O_NOFOLLOW` open), so a caller can skip one planted entry without swallowing a real `EACCES`.
 
 Written content carries the `rwx` bits only (`0o777`): setuid, setgid and sticky
 are never kept from an existing file nor copied from a template.
@@ -94,6 +98,55 @@ its rollback is exact: it only claims the files it really put back, removes a
 created file only while its name still is the file it created, and decides what
 to restore from a rooted read, never a path read.
 
+The third pass of KT-1595 (post-agent writers that still wrote project documents
+by path, found by the round-3 review and the Argon addendum):
+
+- `validation::fill_step_owned_placeholders` (the `{{DATE}}` fill, run right after a
+  CLI succeeds by the Full audit and the drift refresh): `guarded_read`, then
+  `guarded_replace_if_unchanged_keeping_mode` under the project root. A link at the
+  target name or in a parent is refused and logged.
+- `anti_hallu_enforce::stamp_target_audit_dates` (the audit-date stamp of enforce
+  mode, in `full.rs` and `drift.rs`): the same read and optimistic replace.
+- `step_remit` (the remit guard of KT-1360, `settle` after every attempt): the
+  capture of a dirty file, the "unchanged" comparison, the blob kept before a restore
+  (the bytes are read through the primitive and handed to `git hash-object --stdin`,
+  git never reads the path) and the restore itself (`guarded_replace`,
+  `guarded_write_new` when the file is gone, `guarded_remove_file` for a file that was
+  absent before the step). An AI-doc folder swapped for a link, or a link planted at
+  the tracked name, is refused and reported as a warning ("could not be restored");
+  nothing is written or deleted through it. A file that could not be read at capture
+  (a link) is never restored.
+- `anti_hallu_step::apply` (step 0 of every audit, resumes included, and the inject
+  route): `guarded_read`, then an optimistic replace. A link at `AGENTS.md` or in a
+  parent is an error, not "file missing".
+- `td_index::resync` (the central index rebuilt from the sheets): the index, the
+  listing of `tech-debt/`, every sheet and the dimension indexes are read through
+  `guarded_list` / `guarded_read` under the project, and the central index and the
+  dimension indexes are read once, so the rows and the rendering come from the same
+  bytes. A refused listing or read (a link at `tech-debt/`, at one sheet, at the
+  index, or in a parent) is an ERROR that skips the resync; it is never "zero
+  sheets", which used to rewrite a real index as if every sheet had been removed. The
+  read-only views of the same module (cards, reviews) stay by path.
+- `td_decisions::restore`: a link planted at a decided sheet's name (the walk refuses
+  it with `PermissionDenied`, not `ELOOP`) skips that sheet and is reported
+  (`RestoreOutcome::refused`, the `td_decisions` event), and the other decisions are
+  still put back; a `tech-debt/` folder that is itself a link still aborts. A deleted
+  sheet is written back create-only (`guarded_write_new`): an entry that appeared
+  since the read is left alone and reported. The listing is `guarded_list`.
+- `adr::settle_covered_sheets`: no check by path before the read of `decisions.md`;
+  the guarded read decides (missing is no decision, a link or an escape is an error).
+- `worktree::ensure_local_git_exclude` (reached from `audit_state::state_dir` on every
+  state write): rooted at the git directory git names (`<git dir>/info/exclude`); the
+  read and the write (create-only when the file is missing, an optimistic replace
+  otherwise) refuse a link at `exclude`, at `info` or in a parent. The write is a
+  replace by rename, no longer an append: a line another process appends in that
+  instant is refused, not lost silently.
+- `audit_state::new_template_backup_dir`: `guarded_create_new_dir` per candidate name,
+  the suffix advances on an occupied name; a folder that appears between the check and
+  the create is never adopted.
+- The reconciliation report of the Full audit (`write_reconciliation_report` in
+  `full.rs`), covered by a caller-level swap test.
+
 Checked and read-only (the check is only a refusal, nothing is written by path
 afterwards): `ci_facts`, `stack_consistency`, `doc_commands`, `audit_baseline`,
 `briefing_docs`, `approved_scripts`, `git_ops`, `docs_folder` (its move goes
@@ -110,19 +163,32 @@ outside the root.
 - `assert_contained_no_symlink` alone is an lstat check, true at one instant. A
   caller that checks and then writes the path itself is not covered: use a
   `guarded_*` write.
-- Reads (`resolve_contained_read` canonicalizes; a swap after it can be read
-  through).
-- Files a spawned `git` or an agent writes by path (the `git mv` of
-  `docs_migration` is one: its paths are checked first and its fallback is rooted).
+- Reads by path. `resolve_contained_read` canonicalizes, and a swap after it can be
+  read through. The read-only views of `td_index` (`read_sheets`, `read_sheets_in`,
+  `debt_entries`, `docs_index_rows`: cards, reviews, the cross-audit), the
+  `td_decisions::snapshot` taken BEFORE the agent runs, `adr::read_decisions`, the
+  `td_sheets` listing of `adr`, and the reconciliation snapshot reads of the Full
+  audit are by path: nothing is written from them. Whatever is written from a
+  listing or a read goes through the primitive (the resync, `restore`, the ADR
+  settlement and the report), where a refusal is an error or a reported skip.
+- Files a spawned `git` or an agent writes by path. The `git mv` of `docs_migration`
+  is one (its paths are checked first and its fallback is rooted). So is the
+  `git checkout <head> -- <file>` of `step_remit::restore_from_head`, which puts a
+  tracked file of another AI-doc folder back: the bytes it replaces are read through
+  the primitive first (a linked parent makes that read fail and no checkout runs),
+  but git's own write is git's; git itself refuses to write beyond a symlink in the
+  leading path.
 - Other by-path writers that never call `fs_guard`: `root_agent_files::inject_or_update`,
-  `skills`, `profiles`, and in `worktree` the copy of the
-  untracked files into a new checkout, the `info/exclude` append (which
-  `audit_state::state_dir` calls, so the local exclude of `.kronn/` is still
-  written by path) and the submodule parent folders.
-- A `tech-debt/` folder that is itself a link is never listed nor rewritten by the
-  sheet listings (`adr`, `td_index`, `td_decisions`): they refuse it with an lstat,
-  like the sweep does. That is a refusal for readability; the containment of the
-  writes never depends on it.
+  `skills`, `profiles`; in `full.rs` the audit-cancel cleanup (`remove_dir_all` of an
+  empty docs folder after `classify_docs_dir_for_cancel`, and the removal of a leftover
+  `ai` link); in `worktree` the copy of the untracked files into a new checkout and the
+  submodule parent folders. `learning_doc.rs`, `context_files.rs` and `mcp_scanner.rs`
+  also write by path; they are routes and settings writers, not run right after an
+  agent, so they are outside this round's scope, not covered either.
+- A `tech-debt/` folder that is itself a link: the resync and the ADR settlement
+  refuse it (`guarded_list` / `guarded_read` error), `td_decisions::restore` aborts
+  on it; the by-path read-only views treat it as empty. The containment of every
+  write never depends on those readings.
 - `template_reinstall` applies the template's file renames before it writes
   (`apply_renames_in`); a later failure rolls back the files it wrote, not those
   renames.
@@ -138,6 +204,8 @@ rights or developer mode, which is why this is accepted rather than failing
 closed: worktree creation, template installs, native files and seeding must keep
 working on the desktop build. The owner decided this and amended DoD item 3 of
 KT-1595 accordingly (item 3 as written asked every target to fail closed).
+
+The same holds for `guarded_list`, `guarded_read` and `guarded_create_new_dir` and for every third-pass caller above (the placeholder fill, the date stamp, `step_remit`, `anti_hallu_step`, the resync, `restore`, the git exclude, the backup folders and the report): on Windows each is the lstat walk followed by the operation by path, and the swap tests of those callers run on unix only.
 
 Closing it needs handle-rooted file operations on Windows. That is the follow-up
 ticket **KT-1609** (Windows rooted primitive), planned for 0.15.4; not done in 0.15.3.

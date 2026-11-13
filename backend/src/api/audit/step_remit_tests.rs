@@ -299,6 +299,107 @@ fn a_deleted_tracked_file_outside_the_root_comes_back() {
     assert_eq!(paths(&report), vec!["docs/tech-debt/TD-1.md"]);
 }
 
+/// The agent swaps an AI-doc folder for a link to a folder of another project
+/// and leaves the real one aside. Returns the victim folder.
+#[cfg(unix)]
+fn swap_docs_for_a_link(dir: &Path) -> tempfile::TempDir {
+    let victim = tempfile::tempdir().unwrap();
+    write(victim.path(), "tech-debt/TD-1.md", "victim content\n");
+    std::fs::rename(dir.join("docs"), dir.join("docs.aside")).unwrap();
+    std::os::unix::fs::symlink(victim.path(), dir.join("docs")).unwrap();
+    victim
+}
+
+/// KT-1595 — the restore of a file the user had dirty never WRITES through an
+/// AI-doc folder the agent swapped for a link.
+#[cfg(unix)]
+#[test]
+fn a_restore_never_writes_through_an_ai_folder_swapped_for_a_link() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, user wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    let victim = swap_docs_for_a_link(dir.path());
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(
+        read(victim.path(), "tech-debt/TD-1.md"),
+        "victim content\n",
+        "the folder behind the link is untouched"
+    );
+    assert!(report.reverted.is_empty(), "{report:?}");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("docs/tech-debt/TD-1.md") && w.contains("could not be restored")),
+        "the refusal is reported: {report:?}"
+    );
+}
+
+/// KT-1595 — a pre-step "deleted" state must not delete the file of the folder
+/// behind the swapped link.
+#[cfg(unix)]
+#[test]
+fn a_restore_never_deletes_through_an_ai_folder_swapped_for_a_link() {
+    let dir = repo();
+    std::fs::remove_file(dir.path().join("docs/tech-debt/TD-1.md")).unwrap();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    let victim = swap_docs_for_a_link(dir.path());
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(
+        read(victim.path(), "tech-debt/TD-1.md"),
+        "victim content\n",
+        "the file behind the link is still there"
+    );
+    assert!(report.reverted.is_empty(), "{report:?}");
+}
+
+/// KT-1595 — the swap lands between the checks and the write itself: the
+/// restore goes to the folder it holds, never to the link's target.
+#[cfg(unix)]
+#[test]
+fn a_folder_swapped_right_before_the_restore_write_never_receives_it() {
+    use crate::core::fs_guard::swap_probe;
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, user wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    let victim = tempfile::tempdir().unwrap();
+    // The read and the keep come first; the swap fires on the write.
+    swap_probe::arm_after(&dir.path().join("docs/tech-debt"), victim.path(), 2);
+
+    let _ = remit.settle_blocking();
+
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert_eq!(std::fs::read_dir(victim.path()).unwrap().count(), 0);
+}
+
+/// KT-1595 — a link at the tracked name itself is not read, kept nor
+/// overwritten either.
+#[cfg(unix)]
+#[test]
+fn a_link_planted_at_the_tracked_name_is_left_alone() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, user wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    write(victim.path(), "secret.md", "victim content\n");
+    std::fs::remove_file(dir.path().join("docs/tech-debt/TD-1.md")).unwrap();
+    std::os::unix::fs::symlink(
+        victim.path().join("secret.md"),
+        dir.path().join("docs/tech-debt/TD-1.md"),
+    )
+    .unwrap();
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(read(victim.path(), "secret.md"), "victim content\n");
+    assert!(report.reverted.is_empty(), "{report:?}");
+}
+
 #[test]
 fn a_users_uncommitted_edit_in_another_ai_folder_is_restored_to_what_it_was() {
     let dir = repo();

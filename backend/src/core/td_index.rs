@@ -103,69 +103,137 @@ pub fn read_sheets(docs_dir: &Path) -> Vec<TdSheet> {
     read_sheets_in(&docs_dir.join("tech-debt"))
 }
 
-/// [`read_sheets`] of a `tech-debt/` directory itself.
+/// [`read_sheets`] of a `tech-debt/` directory itself. A read-only view by
+/// path (cards, reviews): the resync reads through [`Rooted`] instead.
 pub fn read_sheets_in(td_dir: &Path) -> Vec<TdSheet> {
     if !is_real_dir(td_dir) {
         return Vec::new();
     }
-    let Ok(entries) = std::fs::read_dir(td_dir) else {
-        return Vec::new();
+    sheets_via(&ByPath, td_dir).unwrap_or_default()
+}
+
+/// How the sheet and index readers see the filesystem (KT-1595).
+///
+/// [`ByPath`] is the lenient read-only view the cards and reviews use: what
+/// cannot be read is simply absent. [`Rooted`] is the one the resync uses,
+/// because what it reads becomes the content of the project's index: every
+/// listing and read goes through the rooted primitive under the project, and
+/// a refusal (a link at the name or in a parent, a swap) is an ERROR, never
+/// "no sheet" — an index must not be rebuilt from a view that was refused.
+trait SheetFs {
+    /// The entry names directly under `dir`; `Ok(None)` when it is missing.
+    fn list(&self, dir: &Path) -> Result<Option<Vec<String>>, String>;
+    /// The text of the regular file at `path`; `Ok(None)` when it is missing,
+    /// is not a plain file, or is not UTF-8.
+    fn read(&self, path: &Path) -> Result<Option<String>, String>;
+}
+
+struct ByPath;
+
+impl SheetFs for ByPath {
+    fn list(&self, dir: &Path) -> Result<Option<Vec<String>>, String> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .collect(),
+        ))
+    }
+
+    fn read(&self, path: &Path) -> Result<Option<String>, String> {
+        Ok(std::fs::read_to_string(path).ok())
+    }
+}
+
+/// Reads under the project root `.0` through the rooted primitive.
+struct Rooted<'a>(&'a Path);
+
+impl SheetFs for Rooted<'_> {
+    fn list(&self, dir: &Path) -> Result<Option<Vec<String>>, String> {
+        crate::core::fs_guard::guarded_list(self.0, dir)
+            .map(|names| {
+                names.map(|names| {
+                    names
+                        .into_iter()
+                        .filter_map(|n| n.to_str().map(str::to_string))
+                        .collect()
+                })
+            })
+            .map_err(|e| format!("list {}: {e}", dir.display()))
+    }
+
+    fn read(&self, path: &Path) -> Result<Option<String>, String> {
+        match crate::core::fs_guard::guarded_read(self.0, path) {
+            Ok(bytes) => Ok(bytes.and_then(|b| String::from_utf8(b).ok())),
+            // A folder or another entry that is not a plain file: not a sheet.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Ok(None),
+            Err(e) => Err(format!("read {}: {e}", path.display())),
+        }
+    }
+}
+
+/// The `TD-*.md` sheets directly under `td_dir`, sorted by id.
+fn sheets_via(fs: &dyn SheetFs, td_dir: &Path) -> Result<Vec<TdSheet>, String> {
+    let Some(names) = fs.list(td_dir)? else {
+        return Ok(Vec::new());
     };
-    let mut sheets: Vec<TdSheet> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            let id = name.strip_suffix(".md")?;
-            if !is_td_id(id) {
-                return None;
-            }
-            let content = std::fs::read_to_string(e.path()).ok()?;
-            Some(parse_sheet(id, &content))
-        })
-        .collect();
+    let mut sheets = Vec::new();
+    for name in names {
+        let Some(id) = name.strip_suffix(".md").filter(|id| is_td_id(id)) else {
+            continue;
+        };
+        if let Some(content) = fs.read(&td_dir.join(&name))? {
+            sheets.push(parse_sheet(id, &content));
+        }
+    }
     sheets.sort_by(|a, b| a.id.cmp(&b.id));
-    sheets
+    Ok(sheets)
 }
 
 /// The counted sheets that are not `TD-*`: the `CQ-*` / `PERF-*` detail files
 /// of the dimension audits, parsed like any sheet. What a file leaves unsaid
 /// comes from its index row, so the generated table keeps the severity the
 /// dimension audit gave once it replaces that row (KT-1309).
-fn read_detail_sheets(docs_dir: &Path) -> Vec<TdSheet> {
-    if !is_real_dir(&docs_dir.join("tech-debt")) {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
-        return Vec::new();
+fn detail_sheets_via(
+    fs: &dyn SheetFs,
+    docs_dir: &Path,
+    rows: &BTreeMap<String, IndexRow>,
+) -> Result<Vec<TdSheet>, String> {
+    let td_dir = docs_dir.join("tech-debt");
+    let Some(names) = fs.list(&td_dir)? else {
+        return Ok(Vec::new());
     };
-    let rows = docs_index_rows(docs_dir);
-    entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            let id = counted_sheet_stem(&name).filter(|id| !is_td_id(id))?;
-            let content = std::fs::read_to_string(e.path()).ok()?;
-            let mut sheet = parse_sheet(id, &content);
-            if let Some(row) = rows.get(id) {
-                let unknown = |v: &str| v.eq_ignore_ascii_case(UNKNOWN);
-                if sheet.title == sheet.id {
-                    sheet.title = row.title.clone().unwrap_or(sheet.title);
-                }
-                if unknown(&sheet.area) {
-                    sheet.area = row.area.clone().unwrap_or(sheet.area);
-                }
-                if unknown(&sheet.severity) {
-                    sheet.severity = row.severity.clone().unwrap_or(sheet.severity);
-                }
-                if unknown(&sheet.status) {
-                    sheet.status = row.status.clone().unwrap_or(sheet.status);
-                }
+    let mut out = Vec::new();
+    for name in names {
+        let Some(id) = counted_sheet_stem(&name).filter(|id| !is_td_id(id)) else {
+            continue;
+        };
+        let Some(content) = fs.read(&td_dir.join(&name))? else {
+            continue;
+        };
+        let mut sheet = parse_sheet(id, &content);
+        if let Some(row) = rows.get(id) {
+            let unknown = |v: &str| v.eq_ignore_ascii_case(UNKNOWN);
+            if sheet.title == sheet.id {
+                sheet.title = row.title.clone().unwrap_or(sheet.title);
             }
-            Some(sheet)
-        })
-        .collect()
+            if unknown(&sheet.area) {
+                sheet.area = row.area.clone().unwrap_or(sheet.area);
+            }
+            if unknown(&sheet.severity) {
+                sheet.severity = row.severity.clone().unwrap_or(sheet.severity);
+            }
+            if unknown(&sheet.status) {
+                sheet.status = row.status.clone().unwrap_or(sheet.status);
+            }
+        }
+        out.push(sheet);
+    }
+    Ok(out)
 }
 
 pub fn parse_sheet(id: &str, content: &str) -> TdSheet {
@@ -421,14 +489,23 @@ pub fn index_rows(content: &str) -> BTreeMap<String, IndexRow> {
 /// [`index_rows`] of the central index, then of the dimension indexes: the
 /// first file that gives a field wins.
 pub fn docs_index_rows(docs_dir: &Path) -> BTreeMap<String, IndexRow> {
-    let mut files: Vec<String> = Vec::new();
-    if let Ok(central) = std::fs::read_to_string(docs_dir.join(CENTRAL_INDEX)) {
-        files.push(central);
-    }
-    files.extend(dimension_indexes(docs_dir).into_values());
+    let central = std::fs::read_to_string(docs_dir.join(CENTRAL_INDEX)).ok();
+    let indexes = dimension_indexes_via(&ByPath, docs_dir).unwrap_or_default();
+    merged_rows(central.as_deref(), &indexes)
+}
+
+/// [`docs_index_rows`] from the text of the central index and the dimension
+/// indexes already read: one snapshot serves the rows and the rendering.
+fn merged_rows(
+    central: Option<&str>,
+    indexes: &BTreeMap<String, String>,
+) -> BTreeMap<String, IndexRow> {
     let mut merged: BTreeMap<String, IndexRow> = BTreeMap::new();
-    for content in files {
-        for (id, row) in index_rows(&content) {
+    for content in central
+        .into_iter()
+        .chain(indexes.values().map(String::as_str))
+    {
+        for (id, row) in index_rows(content) {
             let slot = merged.entry(id).or_default();
             slot.title = slot.title.take().or(row.title);
             slot.area = slot.area.take().or(row.area);
@@ -536,23 +613,24 @@ pub fn listed_ids(content: &str) -> BTreeSet<String> {
 }
 
 /// `docs/inconsistencies-*.md` files other than the central index, by name.
-fn dimension_indexes(docs_dir: &Path) -> BTreeMap<String, String> {
-    let Ok(entries) = std::fs::read_dir(docs_dir) else {
-        return BTreeMap::new();
+fn dimension_indexes_via(
+    fs: &dyn SheetFs,
+    docs_dir: &Path,
+) -> Result<BTreeMap<String, String>, String> {
+    let Some(names) = fs.list(docs_dir)? else {
+        return Ok(BTreeMap::new());
     };
-    entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            (name.starts_with("inconsistencies-") && name.ends_with(".md") && name != CENTRAL_INDEX)
-                .then_some(name)
-        })
-        .filter_map(|name| {
-            let content = std::fs::read_to_string(docs_dir.join(&name)).ok()?;
-            Some((name, content))
-        })
-        .collect()
+    let mut out = BTreeMap::new();
+    for name in names {
+        if !(name.starts_with("inconsistencies-") && name.ends_with(".md") && name != CENTRAL_INDEX)
+        {
+            continue;
+        }
+        if let Some(content) = fs.read(&docs_dir.join(&name))? {
+            out.insert(name, content);
+        }
+    }
+    Ok(out)
 }
 
 /// Coverage dimension a sub-audit index reports into.
@@ -910,8 +988,14 @@ pub fn resync(
 }
 
 /// Resync `<docs>/inconsistencies-tech-debt.md` from `<docs>/tech-debt/`.
-/// Leaves the file alone when it is absent or a symlink; the `unindexed_td`
-/// diagnostic then reports the gap. A human-validated index is rewritten and
+/// Leaves the file alone when it is absent (the `unindexed_td` diagnostic then
+/// reports the gap). Nothing is checked by path first (KT-1595): the guarded
+/// read decides, so a `docs` folder swapped for a link fails closed with an
+/// error instead of looking like "no index". The sheets and the dimension
+/// indexes are read through the same primitive, and a refused read or listing
+/// (a link at `tech-debt/`, at a sheet or in a parent) is an ERROR that skips
+/// the resync: never "zero sheets", which would rewrite the real index as if
+/// every sheet had been removed. A human-validated index is rewritten and
 /// marked to reconfirm (KT-1079).
 fn resync_index(root: &Path, docs_dir: &Path) -> Result<ResyncOutcome, String> {
     let index = docs_dir.join(CENTRAL_INDEX);
@@ -921,22 +1005,22 @@ fn resync_index(root: &Path, docs_dir: &Path) -> Result<ResyncOutcome, String> {
             ..ResyncOutcome::default()
         })
     };
-    match std::fs::symlink_metadata(&index) {
-        Err(_) => return skip("no central index"),
-        Ok(m) if m.file_type().is_symlink() || !m.is_file() => {
-            return skip("central index is not a regular file")
-        }
-        Ok(_) => {}
-    }
     let content = match crate::core::fs_guard::guarded_read(root, &index) {
         Ok(Some(bytes)) => {
             String::from_utf8(bytes).map_err(|e| format!("read {}: {e}", index.display()))?
         }
         Ok(None) => return skip("no central index"),
+        // A folder in the index's place: nothing to rebuild.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            return skip("central index is not a regular file")
+        }
         Err(e) => return Err(format!("read {}: {e}", index.display())),
     };
-    let mut sheets = read_sheets(docs_dir);
-    sheets.extend(read_detail_sheets(docs_dir));
+    let fs = Rooted(root);
+    let mut sheets = sheets_via(&fs, &docs_dir.join("tech-debt"))?;
+    let indexes = dimension_indexes_via(&fs, docs_dir)?;
+    let rows = merged_rows(Some(&content), &indexes);
+    sheets.extend(detail_sheets_via(&fs, docs_dir, &rows)?);
     sheets.sort_by(|a, b| a.id.cmp(&b.id));
     let has_block = content
         .lines()
@@ -944,7 +1028,6 @@ fn resync_index(root: &Path, docs_dir: &Path) -> Result<ResyncOutcome, String> {
     if sheets.is_empty() && !has_block {
         return skip("no tech-debt sheet");
     }
-    let indexes = dimension_indexes(docs_dir);
     let (text, outcome) = resync_content(&content, &sheets, &indexes);
     if outcome.changed {
         crate::core::fs_guard::guarded_replace(root, &index, text.as_bytes())?;

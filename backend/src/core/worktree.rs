@@ -1485,33 +1485,58 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
             repo_path.join(path)
         }
     };
-    if std::fs::symlink_metadata(&exclude).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(format!(
-            "{} is a symlink — refusing to update the local Git exclude",
-            exclude.display()
-        ));
-    }
-    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == pattern) {
+    // KT-1595: this is reached from every audit-state write, seconds after an
+    // agent ran. The read and the write go through the rooted primitive under
+    // the git directory git itself named (`<git dir>/info/exclude`): a link at
+    // `exclude`, at `info`, or swapped in for either after the walk, is
+    // refused — nothing is read, created nor appended outside the git dir.
+    let git_dir = exclude
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("{} is not inside a git directory", exclude.display()))?;
+    let existing = match crate::core::fs_guard::guarded_read(git_dir, &exclude) {
+        Ok(existing) => existing,
+        Err(error) => {
+            return Err(format!(
+                "refusing to update the local Git exclude {}: {error}",
+                exclude.display()
+            ))
+        }
+    };
+    let Some(existing) = existing else {
+        // No exclude yet: create-only, so a file that appears meanwhile is
+        // never overwritten.
+        let created = crate::core::fs_guard::guarded_write_new(
+            git_dir,
+            &exclude,
+            format!("{pattern}\n").as_bytes(),
+        )
+        .map_err(|error| format!("cannot create {}: {error}", exclude.display()))?;
+        return if created {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} appeared while it was being created; left as it is",
+                exclude.display()
+            ))
+        };
+    };
+    let text = String::from_utf8(existing.clone())
+        .map_err(|_| format!("{} is not UTF-8; left as it is", exclude.display()))?;
+    if text.lines().any(|line| line.trim() == pattern) {
         return Ok(());
     }
-    let parent = exclude
-        .parent()
-        .ok_or_else(|| format!("{} has no parent", exclude.display()))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&exclude)
-        .map_err(|error| format!("cannot open {}: {error}", exclude.display()))?;
-    if !existing.is_empty() && !existing.ends_with('\n') {
-        writeln!(file).map_err(|error| format!("cannot update {}: {error}", exclude.display()))?;
+    let mut updated = text;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
     }
-    writeln!(file, "{pattern}")
-        .map_err(|error| format!("cannot update {}: {error}", exclude.display()))?;
-    Ok(())
+    updated.push_str(pattern);
+    updated.push('\n');
+    // Optimistic on the bytes read: a concurrent change is refused, not lost.
+    crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+        git_dir, &exclude, &updated, &existing,
+    )
+    .map_err(|error| format!("cannot update {}: {error}", exclude.display()))
 }
 
 /// Maximum length of a single slug component (project / discussion).
@@ -6183,6 +6208,71 @@ mod tests {
         assert!(!repo.path().join(".gitignore").exists());
         let exclude = fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
         assert!(exclude.lines().any(|line| line.trim() == ".kronn/"));
+    }
+
+    /// KT-1595 — `ensure_local_git_exclude` is reached from every audit-state
+    /// write, right after an agent. A `.git/info` folder or an `exclude` file
+    /// swapped for a link never makes Kronn create or append outside the
+    /// git directory.
+    #[cfg(unix)]
+    #[test]
+    fn the_local_exclude_is_never_updated_through_a_swapped_info_folder() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("exclude-swap");
+        let info = repo.path().join(".git/info");
+        let external = tempfile::tempdir().unwrap();
+        fs::write(external.path().join("exclude"), "outside\n").unwrap();
+
+        // The swap lands between the read of `exclude` and the write.
+        swap_probe::arm_after(&info, external.path(), 1);
+        let outcome = ensure_local_git_exclude(repo.path(), ".kronn/");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(external.path().join("exclude")).unwrap(),
+            "outside\n",
+            "the file behind the link is untouched"
+        );
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_local_exclude_refuses_a_linked_info_folder_and_a_linked_exclude_file() {
+        let repo = make_test_repo("exclude-link");
+        let info = repo.path().join(".git/info");
+        let external = tempfile::tempdir().unwrap();
+
+        // A folder link: nothing is created in the folder it points at.
+        fs::rename(&info, repo.path().join(".git/info.aside")).unwrap();
+        std::os::unix::fs::symlink(external.path(), &info).unwrap();
+        let outcome = ensure_local_git_exclude(repo.path(), ".kronn/");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+
+        // A file link: the file it points at is not appended to.
+        fs::remove_file(&info).unwrap();
+        fs::rename(repo.path().join(".git/info.aside"), &info).unwrap();
+        fs::remove_file(info.join("exclude")).unwrap();
+        let victim = external.path().join("victim");
+        fs::write(&victim, "victim\n").unwrap();
+        std::os::unix::fs::symlink(&victim, info.join("exclude")).unwrap();
+        let outcome = ensure_local_git_exclude(repo.path(), ".kronn/");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "victim\n");
+    }
+
+    #[test]
+    fn the_local_exclude_keeps_its_lines_and_adds_the_pattern_once() {
+        let repo = make_test_repo("exclude-append");
+        let exclude = repo.path().join(".git/info/exclude");
+        fs::write(&exclude, "# mine\n*.log").unwrap();
+        ensure_local_git_exclude(repo.path(), ".kronn/").unwrap();
+        ensure_local_git_exclude(repo.path(), ".kronn/").unwrap();
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            "# mine\n*.log\n.kronn/\n"
+        );
     }
 
     #[test]

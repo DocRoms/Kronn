@@ -588,8 +588,10 @@ mod swapped_folder {
     fn the_index_is_never_rewritten_through_a_swapped_docs_folder() {
         let f = fixture();
         let external = tempfile::tempdir().unwrap();
-        // The index is read first (one guarded call), the swap lands on its write.
-        swap_probe::arm_after(&f.docs, external.path(), 1);
+        // Seven guarded calls under `docs` precede the write: `decisions.md`,
+        // the index, the two listings of `tech-debt/`... counted below; the swap
+        // lands on the write itself.
+        swap_probe::arm_after(&f.docs, external.path(), WRITE_AFTER_READS);
         let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
         assert!(swap_probe::fired(), "the swap really happened");
         assert!(outcome.changed, "{outcome:?}");
@@ -599,20 +601,129 @@ mod swapped_folder {
         assert!(held.contains("TD-20261001-full-b"), "{held}");
     }
 
+    /// Guarded calls under `docs/` that come before the index write of a
+    /// resync of the fixture: `decisions.md` (ADR check), the index, the
+    /// listing of `tech-debt/`, the three dimension indexes, the second
+    /// listing of `tech-debt/` for the detail sheets.
+    const WRITE_AFTER_READS: usize = 7;
+
+    const POISON: &str = "POISONED-FROM-OUTSIDE";
+
+    fn poisoned_sheet(id: &str) -> String {
+        sheet(id, POISON, "Backend", "High", "Verified in source", "")
+    }
+
+    fn resynced(f: &Fixture) -> String {
+        resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
+        index(f)
+    }
+
+    /// KT-1595 (Argon A, fail-open): a `tech-debt/` folder that is a link at
+    /// resync time is a refused listing — an ERROR that skips the resync,
+    /// never "zero sheets" rewriting the real index as if all were removed.
     #[test]
-    fn a_linked_tech_debt_folder_is_not_listed() {
+    fn a_refused_tech_debt_listing_is_an_error_and_never_zero_sheets() {
         let f = fixture();
+        let before = resynced(&f);
+        assert!(before.contains(BLOCK_START_PREFIX), "the block exists");
         let external = tempfile::tempdir().unwrap();
         fs::write(
             external.path().join("TD-20269999-foreign.md"),
-            "# T\n- **Status**: Inferred\n",
+            poisoned_sheet("TD-20269999-foreign"),
         )
         .unwrap();
-        fs::remove_dir_all(f.docs.join("tech-debt")).unwrap();
+        fs::rename(f.docs.join("tech-debt"), f.docs.join("tech-debt.aside")).unwrap();
         std::os::unix::fs::symlink(external.path(), f.docs.join("tech-debt")).unwrap();
-        resync(f.docs.parent().unwrap(), &f.docs, NO_ADR).unwrap();
-        let index = fs::read_to_string(f.docs.join(CENTRAL_INDEX)).unwrap();
-        assert!(!index.contains("TD-20269999-foreign"), "{index}");
+
+        let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(index(&f), before, "the index is left exactly as it was");
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+
+    /// KT-1595 (Argon A, swap): the folder swapped for a link right after the
+    /// first sheet is read — the next read is refused, nothing foreign is
+    /// parsed into the index.
+    #[test]
+    fn a_tech_debt_folder_swapped_during_the_reads_never_feeds_the_index() {
+        let f = fixture();
+        let before = resynced(&f);
+        let external = tempfile::tempdir().unwrap();
+        for id in [
+            "TD-20261001-full-a",
+            "TD-20261001-full-b",
+            "TD-20261002-sec-a",
+        ] {
+            fs::write(external.path().join(format!("{id}.md")), poisoned_sheet(id)).unwrap();
+        }
+        swap_probe::arm(&f.docs.join("tech-debt"), external.path());
+
+        let outcome = resync_index(f.docs.parent().unwrap(), &f.docs);
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(index(&f), before);
+        assert!(!index(&f).contains(POISON));
+    }
+
+    /// KT-1595 (Argon A): one sheet that is a link (pre-planted, or swapped in
+    /// after the listing) is read through nothing: the resync is an error and
+    /// the outside file is not parsed into the index.
+    #[test]
+    fn a_sheet_that_is_a_link_is_refused_not_parsed() {
+        let f = fixture();
+        let before = resynced(&f);
+        let external = tempfile::tempdir().unwrap();
+        let outside = external.path().join("outside.md");
+        fs::write(&outside, poisoned_sheet("TD-20261001-full-a")).unwrap();
+        let sheet_path = f.docs.join("tech-debt/TD-20261001-full-a.md");
+        fs::remove_file(&sheet_path).unwrap();
+        std::os::unix::fs::symlink(&outside, &sheet_path).unwrap();
+
+        let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(index(&f), before);
+        assert!(!index(&f).contains(POISON));
+    }
+
+    /// KT-1595 (Argon D): no check by path comes before the guarded read — a
+    /// link at the central index fails closed instead of reading as "no index".
+    #[test]
+    fn a_link_at_the_central_index_fails_closed() {
+        let f = fixture();
+        let external = tempfile::tempdir().unwrap();
+        fs::write(external.path().join("index.md"), CENTRAL).unwrap();
+        fs::remove_file(f.docs.join(CENTRAL_INDEX)).unwrap();
+        std::os::unix::fs::symlink(external.path().join("index.md"), f.docs.join(CENTRAL_INDEX))
+            .unwrap();
+
+        let outcome = resync(f.docs.parent().unwrap(), &f.docs, NO_ADR);
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(external.path().join("index.md")).unwrap(),
+            CENTRAL
+        );
+    }
+
+    /// KT-1595 (Argon D): a `docs` folder swapped for a link reads as ENOENT by
+    /// path (an empty target); the guarded reads refuse it instead of the
+    /// resync reporting "skipped".
+    #[test]
+    fn a_docs_folder_swapped_before_the_index_read_fails_closed() {
+        let f = fixture();
+        let external = tempfile::tempdir().unwrap();
+        // The index is read from the folder held; every later read or
+        // listing walks the link and is refused.
+        swap_probe::arm(&f.docs, external.path());
+
+        let outcome = resync_index(f.docs.parent().unwrap(), &f.docs);
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
     }
 
     #[test]

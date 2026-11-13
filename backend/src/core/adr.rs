@@ -712,6 +712,8 @@ fn read_guarded(root: &Path, path: &Path) -> Result<Option<String>, String> {
             .map(Some)
             .map_err(|e| format!("read {}: {e}", path.display())),
         Ok(None) => Ok(None),
+        // A folder (or another non-plain entry) is no file: nothing to read.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Ok(None),
         Err(e) => Err(format!("read {}: {e}", path.display())),
     }
 }
@@ -729,11 +731,10 @@ pub fn settle_covered_sheets(
 ) -> Result<AdrSettleOutcome, String> {
     crate::core::fs_guard::assert_contained_no_symlink(root, docs_dir)?;
     let decisions_path = docs_dir.join(DECISIONS_FILE);
-    let decisions = if regular_file(&decisions_path) {
-        read_guarded(root, &decisions_path)?.unwrap_or_default()
-    } else {
-        String::new()
-    };
+    // No check by path first (KT-1595): the guarded read decides. A missing
+    // file is no decision; a link at the name or in a parent (a swapped `docs`
+    // folder reads as ENOENT by path) fails closed with an error.
+    let decisions = read_guarded(root, &decisions_path)?.unwrap_or_default();
     let current = parse(&decisions);
     let (adrs, late) = trusted(&current, trust);
     let (records, ignored) = match trust {

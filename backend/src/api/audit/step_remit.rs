@@ -145,6 +145,9 @@ pub(crate) struct StepRemit {
     /// Tracked files outside the root that were already modified or staged:
     /// their content at that moment (`None` = absent).
     dirty_outside: HashMap<String, Option<Vec<u8>>>,
+    /// Tracked files outside the root that were already modified and could
+    /// not be read safely at that moment (a link): never restored.
+    refused_before: HashSet<String>,
     /// Project-relative folders outside the root that hold AI docs.
     ai_folders: Vec<String>,
 }
@@ -254,12 +257,22 @@ impl StepRemit {
         let prefix = git_text(project, &["rev-parse", "--show-prefix"]).unwrap_or_default();
         let branch = git_text(project, &["symbolic-ref", "-q", "HEAD"]);
         let mut dirty_outside = HashMap::new();
+        let mut refused_before = HashSet::new();
         for rel in tracked_changes(project, &prefix)? {
             if docs_root.contains(&rel) || kronn_owned(&rel) {
                 continue;
             }
-            let content = std::fs::read(project.join(&rel)).ok();
-            dirty_outside.insert(rel, content);
+            // KT-1595: read through the rooted primitive. A link (or anything
+            // that is not a readable regular file) is recorded as refused, not
+            // as an absent file: settle never rewrites or deletes through it.
+            match crate::core::fs_guard::guarded_read(project, &project.join(&rel)) {
+                Ok(content) => {
+                    dirty_outside.insert(rel, content);
+                }
+                Err(_) => {
+                    refused_before.insert(rel);
+                }
+            }
         }
         Some(Self {
             project: project.to_path_buf(),
@@ -270,6 +283,7 @@ impl StepRemit {
             refs: local_refs(project),
             started: chrono::Utc::now().timestamp(),
             dirty_outside,
+            refused_before,
             ai_folders: ai_doc_folders(project, docs_root),
         })
     }
@@ -463,11 +477,21 @@ impl StepRemit {
             let before = self.dirty_outside.get(&rel);
             if !self.in_ai_folder(&rel) {
                 // Source, config, anything else: the user works here too.
-                let unchanged =
-                    before.is_some_and(|b| *b == std::fs::read(self.project.join(&rel)).ok());
+                // KT-1595: read through the rooted primitive; a refused read
+                // (link) counts as changed, never as the content it points at.
+                let unchanged = before.is_some_and(|b| {
+                    crate::core::fs_guard::guarded_read(&self.project, &self.project.join(&rel))
+                        .is_ok_and(|now| *b == now)
+                });
                 if !unchanged {
                     left_alone.push(rel);
                 }
+                continue;
+            }
+            if self.refused_before.contains(&rel) {
+                report.warnings.push(format!(
+                    "`{rel}` could not be read safely before the step (a link?) and was left as it is"
+                ));
                 continue;
             }
             let restored = match before {
@@ -495,20 +519,51 @@ impl StepRemit {
 
     /// Keep the bytes about to be overwritten as a git blob. `None` when the
     /// file is absent (nothing to keep); an error means do NOT overwrite.
+    ///
+    /// KT-1595: the bytes are read through the rooted primitive (a link at the
+    /// name or in a parent is refused, never followed) and handed to git on
+    /// stdin, so git never reads the path itself.
     fn keep_current(&self, rel: &str) -> Result<Option<String>, String> {
-        if !self.project.join(rel).is_file() {
-            return Ok(None);
-        }
-        git_text(
-            &self.project,
-            &["hash-object", "-w", "--no-filters", "--", rel],
-        )
-        .filter(|sha| !sha.is_empty())
-        .map(Some)
-        .ok_or_else(|| {
+        let path = self.project.join(rel);
+        let bytes = match crate::core::fs_guard::guarded_read(&self.project, &path) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            // A folder or another non-regular entry: not content to keep.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => return Ok(None),
+            Err(e) => {
+                return Err(format!(
+                    "the current content could not be read safely ({e}), so it was not overwritten"
+                ))
+            }
+        };
+        self.hash_object(&bytes).map(Some).ok_or_else(|| {
             "the current content could not be kept as a git blob, so it was not overwritten"
                 .to_string()
         })
+    }
+
+    /// `git hash-object -w --stdin`: the blob id of `bytes`, written.
+    fn hash_object(&self, bytes: &[u8]) -> Option<String> {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = crate::core::cmd::git_cmd()
+            .arg("--literal-pathspecs")
+            .arg("-C")
+            .arg(&self.project)
+            .args(["hash-object", "-w", "--no-filters", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        let payload = bytes.to_vec();
+        // A writer thread: a large file must not deadlock against git's pipe.
+        let writer = std::thread::spawn(move || stdin.write_all(&payload));
+        let output = child.wait_with_output().ok()?;
+        writer.join().ok()?.ok()?;
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (output.status.success() && !sha.is_empty()).then_some(sha)
     }
 
     /// `Some(blob)` when the file was restored, the blob being what it held.
@@ -530,15 +585,32 @@ impl StepRemit {
         rel: &str,
         before: Option<&[u8]>,
     ) -> Result<Option<Option<String>>, String> {
+        // KT-1595: every step goes through the rooted primitive under the
+        // project. A link at the name or in a parent folder (the agent may
+        // have swapped an AI-doc folder for a link) is refused: nothing is
+        // read, written nor deleted through it.
+        use crate::core::fs_guard::{
+            guarded_read, guarded_remove_file, guarded_replace, guarded_write_new,
+        };
         let path = self.project.join(rel);
-        let now = std::fs::read(&path).ok();
+        let now = guarded_read(&self.project, &path)
+            .map_err(|e| format!("refused, left as it is ({e})"))?;
         if now.as_deref() == before {
             return Ok(None);
         }
         let blob = self.keep_current(rel)?;
-        match before {
-            Some(bytes) => std::fs::write(&path, bytes).map_err(|e| e.to_string())?,
-            None => std::fs::remove_file(&path).map_err(|e| e.to_string())?,
+        match (before, now.is_some()) {
+            (Some(bytes), true) => guarded_replace(&self.project, &path, bytes)?,
+            (Some(bytes), false) => {
+                if !guarded_write_new(&self.project, &path, bytes)? {
+                    return Err("an entry appeared at the name meanwhile; left as it is".into());
+                }
+            }
+            (None, _) => match guarded_remove_file(&self.project, &path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            },
         }
         Ok(Some(blob))
     }
