@@ -596,8 +596,8 @@ pass (a frequent schedule adds no fire during the repeated hour).
   prunable entries under `<repo>/.kronn/`. Boot repeats that prune for every
   project. It never runs a blanket `git worktree prune`: that would also drop
   a user's own worktree on an unmounted drive.
-  [src: file: backend/src/core/worktree.rs:1980-1988#remove_nested_worktrees]
-  [src: file: backend/src/core/worktree.rs:2001-2011#prune_kronn_worktrees]
+  [src: file: backend/src/core/worktree.rs:1956-1964#remove_nested_worktrees]
+  [src: file: backend/src/core/worktree.rs:1977-1987#prune_kronn_worktrees]
   [src: file: backend/src/workflows/workspace.rs:710-728#prune_orphan_worktrees]
   Removal uses `git worktree remove` without `--force`; the run's own
   `kronn/…` branch is deleted only when fully integrated, by compare-and-swap

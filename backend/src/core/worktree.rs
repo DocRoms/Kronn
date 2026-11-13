@@ -1658,26 +1658,8 @@ pub fn create_discussion_worktree(
     ensure_local_git_exclude(repo_path, ".kronn/")?;
 
     // Mark repo as safe directory (needed in Docker where mount owner differs)
-    if crate::core::env::is_docker() {
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &repo_path.to_string_lossy(),
-            ])
-            .output();
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &worktree_path.to_string_lossy(),
-            ])
-            .output();
-    }
+    crate::core::git_global_config::ensure_safe_directory(repo_path);
+    crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
     // Create the worktree with a new branch based on base_branch
     let output = crate::core::cmd::project_git_cmd()
@@ -1767,14 +1749,8 @@ pub fn create_review_worktree(
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
     ensure_local_git_exclude(repo_path, ".kronn/")?;
 
-    if crate::core::env::is_docker() {
-        for path in [repo_path, worktree_path.as_path()] {
-            let _ = crate::core::cmd::git_cmd()
-                .args(["config", "--global", "--add", "safe.directory"])
-                .arg(path)
-                .output();
-        }
-    }
+    crate::core::git_global_config::ensure_safe_directory(repo_path);
+    crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
     let output = crate::core::cmd::project_git_cmd()
         .args(["worktree", "add", "--detach"])
@@ -2076,26 +2052,8 @@ pub fn reattach_worktree(
 
     ensure_local_git_exclude(repo_path, ".kronn/")?;
 
-    if crate::core::env::is_docker() {
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &repo_path.to_string_lossy(),
-            ])
-            .output();
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &worktree_path.to_string_lossy(),
-            ])
-            .output();
-    }
+    crate::core::git_global_config::ensure_safe_directory(repo_path);
+    crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
     // Prune stale worktree entries first (old /data/workspaces/ refs)
     let _ = crate::core::cmd::git_cmd()
@@ -3438,26 +3396,8 @@ pub fn create_task_worktree(
     crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))?;
     assert_managed_task_worktree_path(repo_path, &worktree_path)?;
     ensure_local_git_exclude(repo_path, ".kronn/")?;
-    if crate::core::env::is_docker() {
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &repo_path.to_string_lossy(),
-            ])
-            .output();
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &worktree_path.to_string_lossy(),
-            ])
-            .output();
-    }
+    crate::core::git_global_config::ensure_safe_directory(repo_path);
+    crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
     // Create from the EXACT pinned commit (a SHA, not a branch name).
     let output = crate::core::cmd::project_git_cmd()
