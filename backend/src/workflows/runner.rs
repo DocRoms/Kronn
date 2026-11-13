@@ -2662,6 +2662,7 @@ async fn execute_run_body(
                                     ollama_context_overrides: ollama_context_overrides.clone(),
                                     ctx: ctx.clone(),
                                     run_state: run.state.clone(),
+                                    cancel: cancel_token.clone(),
                                 });
                         if let (Some(shadow_run), Some(input)) = (&shadow_snapshot, &shadow_input) {
                             super::shadow::start_for_step(
