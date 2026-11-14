@@ -21,6 +21,17 @@ use super::AgentType;
 pub struct ProjectWorkspace {
     #[serde(default)]
     pub hooks: crate::models::WorkspaceHooks,
+    /// KT-1748 — absolute directories whose worktrees Kronn manages for this
+    /// project, added to the global Settings > Workers list and the built-in roots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_worktree_roots: Vec<String>,
+}
+
+impl ProjectWorkspace {
+    /// Nothing to store: no hook and no managed root.
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty() && self.managed_worktree_roots.is_empty()
+    }
 }
 
 /// Where Kronn writes a project's agent files (KT-971).
