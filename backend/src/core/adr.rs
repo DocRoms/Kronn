@@ -708,10 +708,19 @@ pub fn downgrade(content: &str, ids: &[String], date: &str) -> String {
 /// The text of `<docs>/decisions.md`, empty when absent or not a regular file.
 pub fn read_decisions(docs_dir: &Path) -> String {
     let path = docs_dir.join(DECISIONS_FILE);
-    if regular_file(&path) {
-        std::fs::read_to_string(&path).unwrap_or_default()
-    } else {
-        String::new()
+    // KT-1595: the text ends up in a step prompt, so it is read through the
+    // rooted primitive from the folder ABOVE the docs folder (a link at the docs
+    // folder, at `decisions.md` or in a parent is refused: empty, never an
+    // outside file). Only a docs folder with no parent to root at (a bare
+    // relative name) keeps the by-path read.
+    match docs_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(root) => crate::core::fs_guard::guarded_read(root, &path)
+            .ok()
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default(),
+        None if regular_file(&path) => std::fs::read_to_string(&path).unwrap_or_default(),
+        None => String::new(),
     }
 }
 

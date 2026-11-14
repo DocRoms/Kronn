@@ -89,7 +89,11 @@ struct BlameEntry {
 }
 
 fn content_hash(project: &Path, relative: &str) -> Option<String> {
-    let bytes = std::fs::read(project.join(relative)).ok()?;
+    // KT-1595: through the rooted primitive, so a link planted by an agent is
+    // no oracle for the hash of a file outside the project.
+    let bytes = crate::core::fs_guard::guarded_read(project, &project.join(relative))
+        .ok()
+        .flatten()?;
     Some(crate::core::docs_merge::sha256_hex(&bytes))
 }
 
@@ -105,7 +109,13 @@ impl Blame {
     /// The attribution an earlier launch of the run left; none when absent or
     /// unreadable (recovery then falls back to the target-file mapping).
     pub(super) fn load(project: &Path) -> Self {
-        let Ok(raw) = std::fs::read_to_string(Self::file(project)) else {
+        // KT-1595: rooted read; a link at the ledger (or in a parent) is an
+        // absent ledger, never parsed and re-saved.
+        let Some(raw) = crate::core::fs_guard::guarded_read(project, &Self::file(project))
+            .ok()
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        else {
             return Self::default();
         };
         let entries: Vec<BlameEntry> = serde_json::from_str(&raw).unwrap_or_default();
@@ -767,8 +777,12 @@ pub(super) fn changed_recovery_paths(
     recovery
         .iter()
         .filter(|d| {
-            std::fs::read_to_string(project.join(&d.path))
-                .is_ok_and(|after| before.get(&d.path).is_some_and(|prior| prior != &after))
+            // KT-1595: rooted read; a linked path is "not rewritten".
+            crate::core::fs_guard::guarded_read(project, &project.join(&d.path))
+                .ok()
+                .flatten()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .is_some_and(|after| before.get(&d.path).is_some_and(|prior| prior != &after))
         })
         .map(|d| d.path.clone())
         .collect()
@@ -884,7 +898,15 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
                 if !resolved.starts_with(root) {
                     return false;
                 }
-                let Ok(source) = std::fs::read_to_string(resolved) else {
+                // KT-1595: the canonical path above only decides containment;
+                // the bytes are read through the rooted primitive from the
+                // project path, so a link swapped in meanwhile is refused.
+                let Some(source) =
+                    crate::core::fs_guard::guarded_read(project, &project.join(path.trim()))
+                        .ok()
+                        .flatten()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                else {
                     return false;
                 };
                 crate::core::anti_halluc::parse_line_bounds(range).is_some_and(|(a, b)| {
@@ -2381,6 +2403,73 @@ mod tests {
             Ok(map) => assert!(map.values().all(|c| !c.contains("OUTSIDE SECRET"))),
             Err(e) => assert!(!e.contains("OUTSIDE SECRET")),
         }
+    }
+
+    /// KT-1595 round 5 (NEW-3): the read-only helpers that run after an agent
+    /// are no oracle on a file a planted link points at.
+    #[cfg(unix)]
+    fn project_with_a_planted_link() -> (tempfile::TempDir, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("secret.md"), "OUTSIDE SECRET\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("secret.md"),
+            dir.path().join("docs/linked.md"),
+        )
+        .unwrap();
+        (dir, external)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_content_hash_of_a_linked_document_is_not_computed() {
+        let (dir, _external) = project_with_a_planted_link();
+        std::fs::write(dir.path().join("docs/plain.md"), "plain\n").unwrap();
+        assert!(content_hash(dir.path(), "docs/plain.md").is_some());
+        assert_eq!(content_hash(dir.path(), "docs/linked.md"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_blame_ledger_is_not_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let outside = external.path().join("ledger.json");
+        std::fs::write(
+            &outside,
+            r#"[{"code":"c","path":"docs/a.md","message":"OUTSIDE SECRET","step":1}]"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(Blame::file(dir.path()).parent().unwrap()).unwrap();
+        // Control: the same ledger as a plain file is parsed.
+        std::fs::copy(&outside, Blame::file(dir.path())).unwrap();
+        assert!(
+            format!("{:?}", Blame::load(dir.path())).contains("OUTSIDE SECRET"),
+            "the fixture ledger is valid"
+        );
+        std::fs::remove_file(Blame::file(dir.path())).unwrap();
+        std::os::unix::fs::symlink(&outside, Blame::file(dir.path())).unwrap();
+        let blame = Blame::load(dir.path());
+        assert!(
+            format!("{blame:?}").find("OUTSIDE SECRET").is_none(),
+            "a linked ledger is an absent one"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_recovery_document_is_not_reported_as_rewritten() {
+        let (dir, _external) = project_with_a_planted_link();
+        let recovery = vec![Diagnostic {
+            code: "x".into(),
+            path: "docs/linked.md".into(),
+            message: String::new(),
+            blocking: true,
+        }];
+        let mut before = Snapshot::new();
+        before.insert("docs/linked.md".into(), "before".into());
+        assert!(changed_recovery_paths(dir.path(), &before, &recovery).is_empty());
     }
 
     #[test]

@@ -733,6 +733,55 @@ fn the_lane_leaves_the_main_checkout_and_the_worktree_clean() {
     assert_eq!(git(&fx.repo, &["status", "--porcelain"]), "");
 }
 
+/// KT-1595 round 5 (NEW-2): provisioning runs on every worker launch, so after
+/// an agent. A worker that rewrote `<lane>/.git` to name another repository
+/// must not get Kronn's exclude rules appended there.
+#[cfg(unix)]
+#[test]
+fn a_lane_whose_git_pointer_was_moved_gets_no_exclude_written_elsewhere() {
+    let fx = fixture();
+    std::fs::write(fx.repo.join(".gitignore"), "node_modules/\n.kronn/\n").unwrap();
+    std::fs::create_dir_all(fx.repo.join("frontend")).unwrap();
+    std::fs::write(fx.repo.join("frontend").join("package.json"), "{}").unwrap();
+    git(&fx.repo, &["init", "-q", "-b", "main"]);
+    git(&fx.repo, &["add", "-A"]);
+    git(&fx.repo, &["commit", "-q", "-m", "init"]);
+    std::fs::remove_dir_all(&fx.worktree).unwrap();
+    git(
+        &fx.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "kt-1246",
+            fx.worktree.to_str().unwrap(),
+        ],
+    );
+    fx.with_main_node_modules();
+    let victim = tempfile::tempdir().unwrap();
+    let victim = victim.path().canonicalize().unwrap();
+    git(&victim, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        fx.worktree.join(".git"),
+        format!("gitdir: {}\n", victim.join(".git").display()),
+    )
+    .unwrap();
+    let home = fake_cargo_home(true);
+
+    fx.lane().provision(&caches_of(&home, &fx));
+
+    let exclude = std::fs::read_to_string(victim.join(".git/info/exclude")).unwrap_or_default();
+    assert!(
+        !exclude.contains("node_modules") && !exclude.contains("target"),
+        "another repository's exclude was written: {exclude}"
+    );
+    // The registered checkout's own rule is still written, from the registry
+    // and not from what the lane's pointer says.
+    let main_exclude = std::fs::read_to_string(fx.repo.join(".git/info/exclude")).unwrap();
+    assert!(main_exclude.contains("/target/wt-*/"), "{main_exclude}");
+}
+
 #[test]
 fn shared_caches_keep_only_what_exists() {
     let fx = fixture();

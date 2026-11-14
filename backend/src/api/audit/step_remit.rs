@@ -579,7 +579,7 @@ impl StepRemit {
         // name or in a parent is replaced or refused, never written through),
         // as the pre-step content is in `restore_content`. A link or a
         // submodule at HEAD is not bytes to write: refused, left as it is.
-        let mode = self.head_file_mode(rel)?;
+        let (mode, index_mode, blob_id) = self.head_file_entry(rel)?;
         let bytes = git(&self.project, &["cat-file", "blob", &spec]).ok_or_else(|| {
             format!("the content of `{rel}` at the recorded commit is unreadable")
         })?;
@@ -590,22 +590,47 @@ impl StepRemit {
         crate::core::fs_guard::guarded_set_mode(&self.project, &path, mode)?;
         #[cfg(not(unix))]
         let _ = mode;
+        // The working tree is back; so must the index be. After the
+        // `reset --soft` of a committed step (and after a `git add` by the
+        // agent) the index still holds the agent's version, and the user's
+        // next commit would re-commit the reverted edit. `update-index
+        // --cacheinfo` sets the entry from the recorded blob WITHOUT touching
+        // the path (it takes a top-relative path, hence the prefix).
+        let entry = format!("{index_mode},{blob_id},{}{rel}", self.prefix);
+        if git(
+            &self.project,
+            &["update-index", "--add", "--cacheinfo", &entry],
+        )
+        .is_none()
+        {
+            return Err(format!(
+                "the file was restored but its index entry could not be put back to the recorded commit (git update-index failed); run `git restore --staged -- {rel}`"
+            ));
+        }
         Ok(Some(blob))
     }
 
-    /// The permission bits git records for `rel` at the recorded commit
-    /// (`0o755` or `0o644`); an error for a link, a submodule or anything else
-    /// that is not a plain file.
-    fn head_file_mode(&self, rel: &str) -> Result<u32, String> {
+    /// What git records for `rel` at the recorded commit: the permission bits
+    /// (`0o755` or `0o644`), the index mode string and the blob id; an error
+    /// for a link, a submodule or anything else that is not a plain file.
+    fn head_file_entry(&self, rel: &str) -> Result<(u32, &'static str, String), String> {
         let listing = git(&self.project, &["ls-tree", "-z", &self.head, "--", rel])
             .ok_or_else(|| format!("`{rel}` could not be looked up at the recorded commit"))?;
         let listing = String::from_utf8_lossy(&listing);
-        match listing.split_whitespace().next() {
-            Some("100644") => Ok(0o644),
-            Some("100755") => Ok(0o755),
-            other => Err(format!(
+        // `<mode> SP <type> SP <blob> TAB <path>`
+        let mut fields = listing.split(['\t', ' ']);
+        let (mode, kind, id) = (fields.next(), fields.next(), fields.next());
+        let valid_id = |id: &str| id.len() >= 40 && id.bytes().all(|b| b.is_ascii_hexdigit());
+        match (mode, kind, id) {
+            (Some("100644"), Some("blob"), Some(id)) if valid_id(id) => {
+                Ok((0o644, "100644", id.to_string()))
+            }
+            (Some("100755"), Some("blob"), Some(id)) if valid_id(id) => {
+                Ok((0o755, "100755", id.to_string()))
+            }
+            _ => Err(format!(
                 "`{rel}` is not a plain file at the recorded commit (mode {}); left as it is",
-                other.unwrap_or("unknown")
+                mode.unwrap_or("unknown")
             )),
         }
     }

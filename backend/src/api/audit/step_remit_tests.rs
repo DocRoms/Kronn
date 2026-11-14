@@ -695,6 +695,62 @@ fn an_outside_edit_the_agent_committed_is_restored_after_the_soft_reset() {
 }
 
 #[test]
+fn a_restored_outside_edit_leaves_no_staged_version_behind() {
+    // KT-1595 round 5 (NEW-1): after `reset --soft` the index still holds the
+    // agent's committed version; the put-back must restore the index entry too,
+    // or the user's next commit re-commits the reverted edit.
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one\nagent edit\n");
+    write(dir.path(), ".ai/a.md", "a\n");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "everything"]);
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    assert!(report.warnings.is_empty(), "{report:?}");
+    let staged = git(dir.path(), &["diff", "--cached", "--name-only"]);
+    assert!(
+        !staged.contains("docs/tech-debt/TD-1.md"),
+        "the agent's version is still staged: {staged}"
+    );
+    // (`git()` trims its output)
+    assert_eq!(
+        git(dir.path(), &["show", ":docs/tech-debt/TD-1.md"]),
+        "td one"
+    );
+}
+
+#[test]
+fn a_staged_outside_edit_below_the_repository_top_is_put_back_in_the_index() {
+    // The index path is top-relative: a project below the top needs its prefix.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    write(dir.path(), "app/docs/a.md", "a\n");
+    write(dir.path(), "app/docs/.kronn.json", "{}\n");
+    write(dir.path(), "app/.ai/b.md", "b\n");
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "initial"]);
+    let project = dir.path().join("app");
+    let remit = StepRemit::capture_blocking(&project, &root(".ai")).unwrap();
+    write(dir.path(), "app/docs/a.md", "a changed\n");
+    git(dir.path(), &["add", "app/docs/a.md"]);
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(paths(&report), vec!["docs/a.md"]);
+    assert_eq!(read(&project, "docs/a.md"), "a\n");
+    assert_eq!(git(dir.path(), &["show", ":app/docs/a.md"]), "a");
+    assert!(
+        git(dir.path(), &["diff", "--cached", "--name-only"])
+            .trim()
+            .is_empty(),
+        "nothing may stay staged"
+    );
+}
+
+#[test]
 fn with_a_moved_head_the_files_are_not_restored_from_a_stale_commit() {
     let dir = repo();
     let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();

@@ -98,16 +98,20 @@ common ways a Kronn deployment ends up exposed.
   file descriptors opened with `O_NOFOLLOW`; the files they read back into
   the project are read the same way, so a folder swapped for a symlink while
   Kronn works is never written through nor copied from. The local git
-  exclude written after an agent does not follow git's `commondir` / `gitdir:`
-  pointers (it only writes a plain `<repo>/.git/info/exclude`); the exclude
-  written before an agent touches a checkout (worktree provisioning, the
-  worker environment) does follow git's answer. This is not every write nor
-  every read: the by-path exceptions are listed in the document below (among
-  them the files a spawned `git` or an agent writes, the root agent pointers,
-  skills and profiles, the audit-cancel cleanup, the copy of untracked files
-  into a new worktree, a few read-only views and decisions that read by path
-  and write nothing from it, and the settings and context-file routes, which
-  do not run right after an agent). Windows has no such primitive in use:
+  exclude and the lane seed marker, written after an agent, do not follow
+  git's `commondir` / `gitdir:` pointers nor a task lane's `.git` file: the
+  exclude is a plain `<repo>/.git/info/exclude` of the registered checkout,
+  and the lane's git directory is the one the registered checkout recorded
+  (a lane whose pointer was moved is refused). Only the `.kronn/` rule of
+  worktree creation and the MCP settings route still follow git's answer;
+  neither runs after an agent. This is not every write nor every read: the
+  by-path exceptions are listed in the document below (among them the files a
+  spawned `git` or an agent writes, the root agent pointers, skills and
+  profiles, the audit-cancel cleanup, the copy of untracked files into a new
+  worktree, a few read-only views, counters and a file size that read by path
+  and write nothing from it, and the settings and context-file routes
+  (`learning_doc`, `context_files`, `mcp_scanner`), which do not run right
+  after an agent). Windows has no such primitive in use:
   Kronn checks the path for links, then writes it. A folder swapped for a
   link in that window is not excluded. Creating a symlink on Windows needs
   elevated rights or developer mode, so Kronn accepts this rather than

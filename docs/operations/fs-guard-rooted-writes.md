@@ -117,7 +117,13 @@ by path, found by the round-3 review and the Argon addendum):
   <head>:./<file>` gives the bytes, `git ls-tree` the recorded mode (`100644` or
   `100755`; a link or a submodule at that commit is refused and reported), and the
   bytes are written with `guarded_replace` (then `guarded_set_mode`). The blob is
-  raw, with no smudge or end-of-line filter, unlike `git checkout`. An AI-doc folder
+  raw, with no smudge or end-of-line filter, unlike `git checkout`. The INDEX entry is
+  put back too (round 5): after the `reset --soft` of a committed step, or an agent's
+  `git add`, the index still holds the agent's version and the next commit would
+  re-commit the reverted edit, so `git update-index --add --cacheinfo
+  <mode>,<blob>,<prefix><file>` sets the entry from the recorded blob without touching
+  the path (the index path is top-relative, hence the project's `--show-prefix`). A
+  failure of that command is reported as a warning. An AI-doc folder
   swapped for a link, or a link planted at the tracked name, is refused and reported
   as a warning ("could not be restored"); nothing is written or deleted through it.
   A file that could not be read at capture (a link) is never restored.
@@ -183,15 +189,36 @@ by path, found by the round-3 review and the Argon addendum):
   and only when `.git` is a plain directory with no `commondir`. A `.git` file (a
   linked worktree or a submodule), a link, or a `commondir` is an error and nothing is
   written; the exclude of a linked worktree is the main repository's, written when the
-  worktree was provisioned. The write is create-only when the file is missing, an
+  worktree was provisioned. The callers that concern a LINKED worktree after an agent
+  (round 5, below) use `ensure_local_git_exclude_pinned_for(judge, registered_checkout,
+  ...)`: the rule goes to the REGISTERED checkout's `<main>/.git/info/exclude`, the file
+  a linked worktree shares, and the lane is only where git is asked whether the rule is
+  already there, so a wrong answer skips a write, it never moves one. The write is create-only when the file is missing, an
   optimistic replace by rename otherwise (no longer an append: a line another process
   appends in that instant is refused, not lost silently). The original
   `ensure_local_git_exclude`, which does follow git's answer (rooted at the git
-  directory git names, same refusals below it), stays for callers that run BEFORE an
-  agent touches the checkout: worktree provisioning, the worker environment and lane
-  seeds, the MCP settings route. A residual: an agent that rewrote `commondir` or
-  `gitdir:` before such a provisioning call would be followed; those callers do not run
-  after an agent.
+  directory git names, same refusals below it), stays for the callers that run before an
+  agent works in the checkout: the `.kronn/` rule of `worktree` creation and the MCP
+  settings route (`mcp_scanner`, not run after an agent). A residual: an agent that
+  rewrote `commondir` or `gitdir:` of a repository before such a call would be followed.
+- Lane provisioning and seeding (round 5, `core::task_worker_env`,
+  `core::task_worker_lane_seeds`): both run AFTER an agent (the validations re-seed in
+  `validate_and_apply`, a resume seeds again, and every worker launch provisions,
+  correction rounds included), and a worker can rewrite `<lane>/.git` to
+  `gitdir: /other/repo/.git`. The lane's git directory is therefore found by
+  `worktree::registered_worktree_git_dir(main_checkout, worktree)`: from the registered
+  checkout's own record (`<main>/.git/worktrees/<id>/gitdir` names the lane's `.git`
+  file, read with `guarded_list` / `guarded_read` from the checkout), never from the
+  lane's pointer. Git's answer (`rev-parse --absolute-git-dir`) is still asked for and a
+  mismatch refuses everything (every seed is skipped with that reason). The seed marker
+  is read with `guarded_read` and written with `guarded_replace`, rooted at the checkout,
+  so a link planted at the marker, or the admin folder swapped for a link, is never
+  written through. The exclude rules (`/.kronn-seeding-*`, `/.kronn-seeded-old-*`, the
+  lane `target` rule, the `node_modules` link) go through the pinned variants above; a
+  project whose registered checkout is itself a linked worktree (a `.git` file) or has a
+  `commondir` gets a warning and no rule. An agent can still write its OWN admin folder
+  (for instance its `gitdir` back-pointer): that makes the lane unregistered, which is a
+  refusal, never a fallback to git's answer.
 - `audit_state::new_template_backup_dir`: `guarded_create_new_dir` per candidate name,
   the suffix advances on an occupied name; a folder that appears between the check and
   the create is never adopted.
@@ -218,12 +245,17 @@ outside the root.
   read through. These reads stay by path: the read-only views of `td_index`
   (`read_sheets`, `read_sheets_in`, `debt_entries`, `docs_index_rows`: cards, reviews),
   the `td_decisions::snapshot` and `adr::capture_records` / `adr::td_sheets` taken
-  BEFORE the agent runs, `adr::read_decisions`, `cross_audit::assign_td_ids` (it lists
+  BEFORE the agent runs, `cross_audit::assign_td_ids` (it lists
   the sheets by path to choose or reuse an id: a sheet's text is not copied anywhere,
   but a swapped folder can change which id is chosen), `step_guard`'s
-  `target_snapshot` (a comparison with the pre-step state), `document_optimization::
-  kronn_owns` and `citation_drift::doc_files` (a decision, a listing that skips links).
-  None of them writes what it read; the claim of this document is only about the
+  `target_snapshot` (a comparison with the pre-step state) and `citation_drift::
+  doc_files` (a listing that skips links), the TD counters of `full.rs`
+  (`count_td_severities`, `compute_reconciliation_counts`,
+  `compute_cluster_recommendations`: they only count, and take the sheet folder without
+  the project root), the size heuristic of the step validation (`std::fs::metadata` of
+  the target: a size) and the reads of Kronn's own templates. None of them writes what
+  it read, and none puts more than a number or a boolean in a message; the claim of this
+  document is only about the
   families listed under "Callers", not that no read in the code base is by path.
 - Files a spawned `git` or an agent writes by path. The `git mv` of `docs_migration`
   is one (its paths are checked first and its fallback is rooted). The put-back of a
@@ -242,6 +274,15 @@ outside the root.
   depends on those readings.
 - The pre-agent callers of `ensure_local_git_exclude` (see its entry above) follow git's
   answer; they never run after an agent.
+- Round 5 moved to the primitive the read-only oracles of the post-agent code that were
+  by path: `document_repair` (`content_hash`, `Blame::load`, `changed_recovery_paths`,
+  the strict multi-citation read), `document_optimization` (`read` and `line_count`,
+  rooted at the project), `validation` (`target_snapshot`, `unfilled_companion`, the
+  leak check and the step-8 surface with its sheet listing), `adr::read_decisions`
+  (rooted at the folder above the docs folder, because the text goes into a step
+  prompt: a docs folder with no parent keeps the by-path read) and the quote read of
+  `cross_audit::verify_citation`. A link there reads as absent or is an error, never as
+  the content it points at.
 - `template_reinstall` applies the template's file renames before it writes
   (`apply_renames_in`); a later failure rolls back the files it wrote, not those
   renames.
@@ -258,7 +299,7 @@ closed: worktree creation, template installs, native files and seeding must keep
 working on the desktop build. The owner decided this and amended DoD item 3 of
 KT-1595 accordingly (item 3 as written asked every target to fail closed).
 
-The same holds for `guarded_list`, `guarded_read` and `guarded_create_new_dir` and for every third-pass caller above (the placeholder fill, the date stamp, `step_remit`, `anti_hallu_step`, the resync, `restore`, the git exclude, the backup folders and the report): on Windows each is the lstat walk followed by the operation by path, and the swap tests of those callers run on unix only.
+The same holds for `guarded_list`, `guarded_read` and `guarded_create_new_dir` and for every third-pass caller above (the placeholder fill, the date stamp, `step_remit`, `anti_hallu_step`, the resync, `restore`, the git exclude, the lane seed marker, the backup folders and the report): on Windows each is the lstat walk followed by the operation by path, and the swap tests of those callers run on unix only.
 
 Closing it needs handle-rooted file operations on Windows. That is the follow-up
 ticket **KT-1609** (Windows rooted primitive), planned for 0.15.4; not done in 0.15.3.

@@ -572,6 +572,34 @@ fn a_card_ignores_a_record_line_naming_the_adr_it_creates() {
     );
 }
 
+/// KT-1595 round 5 (NEW-3): `decisions.md` ends up in a step prompt, so a link
+/// at it (or at the docs folder) must not bring an outside file into the prompt.
+#[cfg(unix)]
+#[test]
+fn a_linked_decisions_file_or_docs_folder_reads_as_empty() {
+    let project = tempfile::tempdir().unwrap();
+    let docs = project.path().join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let external = tempfile::tempdir().unwrap();
+    fs::write(external.path().join("decisions.md"), CI_LABEL_ADR).unwrap();
+    // Control: a plain file is read.
+    fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
+    assert!(read_decisions(&docs).contains("ADR-0001"));
+    // A link at the file.
+    fs::remove_file(docs.join(DECISIONS_FILE)).unwrap();
+    std::os::unix::fs::symlink(
+        external.path().join("decisions.md"),
+        docs.join(DECISIONS_FILE),
+    )
+    .unwrap();
+    assert_eq!(read_decisions(&docs), "");
+    assert!(in_force_prompt_block(&docs, CI_LABEL_ADR).is_empty());
+    // A link at the docs folder itself.
+    fs::remove_dir_all(&docs).unwrap();
+    std::os::unix::fs::symlink(external.path(), &docs).unwrap();
+    assert_eq!(read_decisions(&docs), "");
+}
+
 /// KT-1595: the settlement runs after an agent, so a folder swapped for a link
 /// between the walk and the write never takes a sheet or `decisions.md` out of
 /// the project.

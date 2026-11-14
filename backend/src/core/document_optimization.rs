@@ -129,7 +129,7 @@ pub fn analyze_with(
 
     for adapter in &adapters {
         let adapter_rel = relative(project, adapter);
-        let content = read(adapter)?;
+        let content = read(project, adapter)?;
         let adapter_measure = measure(&adapter_rel, &content);
         if contains_placeholder(&content) {
             diagnostics.push(diag(
@@ -172,11 +172,11 @@ pub fn analyze_with(
         }
         routed.dedup();
         let mut measures = vec![adapter_measure];
-        measures.extend(
-            routed
-                .iter()
-                .filter_map(|p| read(p).ok().map(|s| measure(&relative(project, p), &s))),
-        );
+        measures.extend(routed.iter().filter_map(|p| {
+            read(project, p)
+                .ok()
+                .map(|s| measure(&relative(project, p), &s))
+        }));
         let words = measures.iter().map(|m| m.words).sum();
         if words > budgets.mandatory_path_max_words {
             diagnostics.push(diag(
@@ -267,7 +267,7 @@ pub fn kronn_owns(project: &Path, rel: &str) -> bool {
     if docs_root(project).contains(rel) {
         return true;
     }
-    read(&project.join(rel)).is_ok_and(|content| {
+    read(project, &project.join(rel)).is_ok_and(|content| {
         !crate::core::root_agent_files::has_content_outside_managed_block(&content)
     })
 }
@@ -286,8 +286,8 @@ fn load_budgets(project: &Path) -> Result<DocumentBudgets, String> {
     if !path.exists() {
         return Ok(DocumentBudgets::default());
     }
-    let budgets: DocumentBudgets =
-        serde_json::from_str(&read(&path)?).map_err(|e| format!("invalid {CONFIG_FILE}: {e}"))?;
+    let budgets: DocumentBudgets = serde_json::from_str(&read(project, &path)?)
+        .map_err(|e| format!("invalid {CONFIG_FILE}: {e}"))?;
     validate_budgets(&budgets)?;
     Ok(budgets)
 }
@@ -342,7 +342,7 @@ fn inspect_docs(
     let mut titles: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut linked = BTreeSet::new();
     for adapter in adapters {
-        if let Ok(content) = read(adapter) {
+        if let Ok(content) = read(project, adapter) {
             let rel = relative(project, adapter);
             let (owned, human) =
                 crate::api::audit::anti_hallu_enforce::split_human_owned_sections(&content);
@@ -355,7 +355,9 @@ fn inspect_docs(
         }
     }
     for path in docs {
-        let Ok(content) = read(path) else { continue };
+        let Ok(content) = read(project, path) else {
+            continue;
+        };
         let rel = relative(project, path);
         if rel == under_root(project, "docs/AGENTS.md")
             && word_count(&content) > budgets.agents_md_max_words
@@ -451,7 +453,7 @@ fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
         .dir(project)
         .join(crate::core::td_index::CENTRAL_INDEX);
     let mut linked = BTreeSet::new();
-    if let Ok(content) = read(&central) {
+    if let Ok(content) = read(project, &central) {
         collect_valid_links(project, &central, &content, &mut linked, None);
     }
     let dimension_indexes: Vec<PathBuf> = linked
@@ -464,7 +466,7 @@ fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
         .cloned()
         .collect();
     for index in dimension_indexes {
-        if let Ok(content) = read(&index) {
+        if let Ok(content) = read(project, &index) {
             collect_valid_links(project, &index, &content, &mut linked, None);
         }
     }
@@ -477,7 +479,7 @@ fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
         else {
             continue;
         };
-        let active = read(path)
+        let active = read(project, path)
             .is_ok_and(|content| crate::core::td_index::parse_sheet(id, &content).is_active());
         if active && !linked.contains(&normalize(path)) {
             out.push(diag(
@@ -580,7 +582,9 @@ fn inspect_commands(
         if describes_defects(project, &rel) {
             continue;
         }
-        let Ok(content) = read(path) else { continue };
+        let Ok(content) = read(project, path) else {
+            continue;
+        };
         let (owned, human) =
             crate::api::audit::anti_hallu_enforce::split_human_owned_sections(&content);
         let defined = defined
@@ -618,7 +622,9 @@ fn inspect_run_provenance(
     paths.sort();
     paths.dedup();
     for path in paths {
-        let Ok(content) = read(path) else { continue };
+        let Ok(content) = read(project, path) else {
+            continue;
+        };
         let rel = relative(project, path);
         let (owned, human) =
             crate::api::audit::anti_hallu_enforce::split_human_owned_sections(&content);
@@ -765,7 +771,7 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
                  and do not quote its content; otherwise name it in backticks outside any \
                  [src:] marker"
             ),
-            Some(path) => match line_count(&path) {
+            Some(path) => match line_count(project, &path) {
                 0 => format!(
                     "malformed file citation `{raw}`: the file is empty, so it has no line to \
                      cite. Say it is empty and name it in backticks outside any [src:] marker"
@@ -836,7 +842,7 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
              [src: file: {path_part}] and name the page or section outside the brackets"
         ));
     }
-    let max_line = line_count(&path);
+    let max_line = line_count(project, &path);
     // An editor shows a newline-terminated file with one more, empty, line.
     let last_line = last_line_of(&path);
     match parse_line_bounds(without_anchor(line_part)) {
@@ -910,8 +916,8 @@ fn without_anchor(line_part: &str) -> &str {
     }
 }
 
-fn line_count(path: &Path) -> usize {
-    read(path).map(|s| s.lines().count()).unwrap_or(0)
+fn line_count(project: &Path, path: &Path) -> usize {
+    read(project, path).map(|s| s.lines().count()).unwrap_or(0)
 }
 
 /// The last line a citation may end on: one past [`line_count`] for a
@@ -980,7 +986,7 @@ fn did_you_mean_candidates(
                 Some(Some((start, end))) => {
                     !crate::core::anti_halluc::is_binary_file(&full)
                         && crate::core::anti_halluc::range_is_citable(
-                            line_count(&full),
+                            line_count(project, &full),
                             last_line_of(&full),
                             start,
                             end,
@@ -1003,7 +1009,7 @@ fn bare_path_form(project: &Path, path: &str) -> String {
     if crate::core::anti_halluc::is_binary_file(&full) {
         return format!("did you mean `{path}`?");
     }
-    match line_count(&full) {
+    match line_count(project, &full) {
         0 => format!(
             "`{path}` is empty, so it has no line to cite: say so and name it in backticks \
              outside any [src:] marker"
@@ -1424,8 +1430,17 @@ fn search_first(s: &str) -> bool {
     let l = s.to_lowercase();
     l.contains("search-first") || l.contains("search first") || l.contains("use `rg`")
 }
-fn read(p: &Path) -> Result<String, String> {
-    fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))
+/// KT-1595: read through the rooted primitive from `project`, so a link planted
+/// at the file or in a parent (an agent can leave one) is refused instead of
+/// feeding an outside file into the measurements, the fragments the blame ledger
+/// persists or the diagnostics.
+fn read(project: &Path, p: &Path) -> Result<String, String> {
+    match crate::core::fs_guard::guarded_read(project, p) {
+        Ok(Some(bytes)) => String::from_utf8(bytes)
+            .map_err(|_| format!("read {}: stream did not contain valid UTF-8", p.display())),
+        Ok(None) => Err(format!("read {}: not found", p.display())),
+        Err(e) => Err(format!("read {}: {e}", p.display())),
+    }
 }
 fn relative(root: &Path, p: &Path) -> String {
     p.strip_prefix(root)
@@ -1469,7 +1484,7 @@ pub const STACK_CURRENCY: &str = "stack_currency";
 /// writes `not verified: no source` and that passes.
 fn inspect_stack_currency(project: &Path, diagnostics: &mut Vec<Diagnostic>) {
     let rel = under_root(project, "docs/AGENTS.md");
-    let Ok(content) = read(&project.join(rel)) else {
+    let Ok(content) = read(project, &project.join(rel)) else {
         return;
     };
     for problem in stack_currency_problems(&content) {
@@ -1497,7 +1512,11 @@ fn stack_documents(project: &Path, docs: &[PathBuf]) -> Vec<(String, String)> {
             root.strip(rel)
                 .is_some_and(crate::core::stack_consistency::is_scanned)
         })
-        .filter_map(|rel| read(&project.join(&rel)).ok().map(|content| (rel, content)))
+        .filter_map(|rel| {
+            read(project, &project.join(&rel))
+                .ok()
+                .map(|content| (rel, content))
+        })
         .collect();
     out.sort_by_key(|(rel, _)| rel != entry);
     out
@@ -1547,7 +1566,7 @@ fn inspect_unproven_resolutions(project: &Path, docs: &[PathBuf], out: &mut Vec<
         let Some(within) = root.strip(&rel) else {
             continue;
         };
-        let Ok(content) = read(path) else {
+        let Ok(content) = read(project, path) else {
             continue;
         };
         if let Some(stem) = within
@@ -2016,6 +2035,32 @@ mod tests {
         assert!(out[1]
             .message
             .contains("one [src: file: path:line] marker per reference"));
+    }
+
+    /// KT-1595 round 5 (NEW-3): a document that is a planted link is not read
+    /// (no measurement, no fragment of an outside file in a diagnostic).
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_document_is_refused_by_the_analyzer_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("s.md"), "OUTSIDE SECRET\n").unwrap();
+        std::fs::write(dir.path().join("docs/plain.md"), "plain\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("s.md"),
+            dir.path().join("docs/linked.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            read(dir.path(), &dir.path().join("docs/plain.md")).unwrap(),
+            "plain\n"
+        );
+        assert!(read(dir.path(), &dir.path().join("docs/linked.md")).is_err());
+        assert_eq!(
+            line_count(dir.path(), &dir.path().join("docs/linked.md")),
+            0
+        );
     }
 
     #[test]

@@ -73,9 +73,10 @@
 //! `guarded_list`; the ones that stay by path write nothing from what they
 //! read: the read-only views of `td_index` (`read_sheets_in`, `debt_entries`,
 //! `docs_index_rows`), the `td_decisions` snapshot and `adr::capture_records`
-//! taken BEFORE an agent runs, `adr::read_decisions`, the sheet listing of
-//! `cross_audit::assign_td_ids` (it picks an id), `step_guard::target_snapshot`
-//! and `citation_drift::doc_files`. Also not covered: the files a spawned `git`
+//! taken BEFORE an agent runs, the sheet listing of `cross_audit::assign_td_ids`
+//! (it picks an id), `step_guard::target_snapshot`, `citation_drift::doc_files`,
+//! the TD counters of `full.rs` (they only count) and the size of the step
+//! target in the step validation. Also not covered: the files a spawned `git`
 //! or an agent process writes by path (the `git mv` of `docs_migration`); and
 //! by-path writers that never call this module: `root_agent_files::inject_or_update`,
 //! `skills`, `profiles`, the audit-cancel cleanup of `full.rs` (`remove_dir_all`
@@ -85,7 +86,12 @@
 //! checkout and the submodule parent folders. The `info/exclude` write is
 //! rooted: `worktree::ensure_local_git_exclude_pinned` (after an agent) writes
 //! only `<repo>/.git/info/exclude` and refuses a `.git` file, a link or a
-//! `commondir`; `worktree::ensure_local_git_exclude` (before an agent) follows
+//! `commondir`, and `ensure_local_git_exclude_pinned_for` writes a linked
+//! worktree's rule to the REGISTERED checkout's exclude; the lane seed marker
+//! lives in the git directory the registered checkout recorded for the lane
+//! (`worktree::registered_worktree_git_dir`, a moved `.git` pointer is
+//! refused). `worktree::ensure_local_git_exclude` (the `.kronn/` rule of
+//! worktree creation and the MCP settings route, never after an agent) follows
 //! the git directory git names, rooted there.
 //!
 //! Windows (residual risk, owner decision amending the KT-1595 DoD): there

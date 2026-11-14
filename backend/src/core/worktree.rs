@@ -1517,7 +1517,23 @@ pub(crate) fn ensure_local_git_exclude_pinned(
     repo_path: &Path,
     pattern: &str,
 ) -> Result<(), String> {
-    if already_ignored(repo_path, pattern) {
+    ensure_local_git_exclude_pinned_for(repo_path, repo_path, pattern)
+}
+
+/// [`ensure_local_git_exclude_pinned`] for a rule that concerns a LINKED
+/// worktree (a task lane): whether git already ignores `pattern` is judged
+/// from `judge` (the lane, where the file or link the rule hides exists), but
+/// the rule is written to the REGISTERED checkout `repo_path` — the
+/// `info/exclude` a linked worktree shares is the main repository's, so that
+/// is the file git would have named, reached without asking git (the lane's
+/// own `.git` pointer is agent-writable). `judge` only decides whether to
+/// write at all: a wrong answer from it skips a rule, it never moves one.
+pub(crate) fn ensure_local_git_exclude_pinned_for(
+    judge: &Path,
+    repo_path: &Path,
+    pattern: &str,
+) -> Result<(), String> {
+    if already_ignored(judge, pattern) {
         return Ok(());
     }
     let git_dir = repo_path.join(".git");
@@ -1548,6 +1564,80 @@ pub(crate) fn ensure_local_git_exclude_pinned(
         }
     }
     write_local_exclude(repo_path, &git_dir.join("info").join("exclude"), pattern)
+}
+
+/// The git administrative directory (`<main>/.git/worktrees/<id>`) the REGISTERED
+/// checkout `main_checkout` recorded for the linked worktree `worktree`, for
+/// code that writes into it after an agent ran (KT-1595).
+///
+/// The directory is found from the main repository's own record — the `gitdir`
+/// file of each `worktrees/<id>` entry names the worktree's `.git` file — and
+/// NOT from the worktree's `.git` pointer or from `git rev-parse`, both of
+/// which an agent can rewrite (`gitdir: /other/repo/.git`). Git's answer is
+/// still asked for, and a mismatch is refused: a worktree whose pointer was
+/// moved is never written for. Every read goes through the rooted primitive
+/// from `main_checkout`, so a link at `.git`, `worktrees` or an entry is
+/// refused. The returned path is under `main_checkout`: pass `main_checkout` as
+/// the root of the `guarded_*` calls that use it.
+pub(crate) fn registered_worktree_git_dir(
+    main_checkout: &Path,
+    worktree: &Path,
+) -> Result<PathBuf, String> {
+    use crate::core::fs_guard::{guarded_list, guarded_read};
+    let wanted = worktree
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve {}: {error}", worktree.display()))?;
+    let registry = main_checkout.join(".git").join("worktrees");
+    let entries = guarded_list(main_checkout, &registry)
+        .map_err(|error| format!("cannot read the worktree registry of the checkout: {error}"))?
+        .ok_or_else(|| "the checkout registers no linked worktree".to_string())?;
+    let mut found: Vec<PathBuf> = Vec::new();
+    for name in entries {
+        let entry = registry.join(&name);
+        let Ok(Some(raw)) = guarded_read(main_checkout, &entry.join("gitdir")) else {
+            continue;
+        };
+        let recorded = PathBuf::from(String::from_utf8_lossy(&raw).trim().to_string());
+        let is_ours = recorded.file_name().is_some_and(|n| n == ".git")
+            && recorded
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .is_some_and(|parent| parent == wanted);
+        if is_ours {
+            found.push(entry);
+        }
+    }
+    let [registered] = found.as_slice() else {
+        return Err(if found.is_empty() {
+            "the checkout has no registered worktree entry for this lane".to_string()
+        } else {
+            "the checkout registers this lane more than once".to_string()
+        });
+    };
+    let answer = crate::core::cmd::git_cmd()
+        .args(["rev-parse", "--absolute-git-dir"])
+        .current_dir(worktree)
+        .output()
+        .map_err(|error| format!("cannot ask git for the worktree's git directory: {error}"))?;
+    if !answer.status.success() {
+        return Err(format!(
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&answer.stderr).trim()
+        ));
+    }
+    let answered = PathBuf::from(String::from_utf8_lossy(&answer.stdout).trim().to_string());
+    let same = match (answered.canonicalize(), registered.canonicalize()) {
+        (Ok(answered), Ok(registered)) => answered == registered,
+        _ => false,
+    };
+    if !same {
+        return Err(format!(
+            "git names {} for this worktree but the checkout registered {}: its `.git` pointer was moved, so nothing is written for it",
+            answered.display(),
+            registered.display()
+        ));
+    }
+    Ok(registered.clone())
 }
 
 /// Appends `pattern` to the exclude file `exclude` (created when missing)

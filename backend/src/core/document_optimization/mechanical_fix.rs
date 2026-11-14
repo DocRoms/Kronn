@@ -233,7 +233,7 @@ fn empty_file_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
     let path = cited_file(project, raw)?;
     if crate::core::anti_halluc::is_binary_file(&path)
         || crate::acp::secret_files::is_secret_path(&path)
-        || line_count(&path) > 0
+        || line_count(project, &path) > 0
         || last_line_of(&path) > 0
     {
         return None;
@@ -326,7 +326,7 @@ fn marker_fix(project: &Path, rel: &str, raw: &str) -> Option<(&'static str, Str
         return None;
     }
     let (start, end) = crate::core::anti_halluc::parse_line_bounds(line_part)?;
-    let lines = line_count(&path);
+    let lines = line_count(project, &path);
     if crate::core::anti_halluc::range_is_citable(lines, last_line_of(&path), start, end) {
         return None;
     }
@@ -357,7 +357,7 @@ fn bare_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
     if crate::acp::secret_files::is_secret_path(&path) {
         return Some(("secret_presence", format!("{raw}:exists")));
     }
-    (is_td_sheet(project, raw) && line_count(&path) > 0)
+    (is_td_sheet(project, raw) && line_count(project, &path) > 0)
         .then(|| ("td_sheet_presence", format!("{raw}:exists")))
 }
 
