@@ -198,10 +198,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:11432-11436#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:11438-11487#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:9675-9699#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:41560-41661#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:11441-11445#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:11447-11496#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:9684-9708#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:42018-42119#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating

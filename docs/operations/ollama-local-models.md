@@ -212,8 +212,8 @@ range. When anything outside the range changed, the range was deleted
 entirely, or it grew past 200 lines, the rework is refused with
 `stale range: …; relaunch with a new worker_scope`, naming the launch range
 and the observed change.
-`[src: file: backend/src/api/orchestration.rs:3271-3339#reanchor_worker_scope]`
-`[src: file: backend/src/api/orchestration.rs:3390-3447#reanchor_execution_scope]`
+`[src: file: backend/src/api/orchestration.rs:3280-3348#reanchor_worker_scope]`
+`[src: file: backend/src/api/orchestration.rs:3399-3456#reanchor_execution_scope]`
 `task_exec_status` now exposes `usage.http` — cumulative HTTP traffic, context peak, and per-phase detail — without prompts or arguments.
 
 Native HTTP delivery — and delivery from a spawned host CLI worker that uses
@@ -294,7 +294,7 @@ migration; no runner fallback revives them after deletion. Unit tests use the
 same resolver as production; the historical expectation helper itself is
 test-only and is not called by the resolver.
 [src: file: backend/src/agents/runner.rs:3925-3927#missing_ollama_model_error]
-[src: file: backend/src/agents/runner.rs:4506-4508#missing_ollama_model_error]
+[src: file: backend/src/agents/runner.rs:3925-3927#missing_ollama_model_error]
 [src: file: backend/src/core/model_catalog/mod.rs:200-320#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:151-154#migrated_default]
 
@@ -304,8 +304,8 @@ like the other HTTP families; it cannot choose or invoke an embedded model.
 This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3614-3619#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4539-4560#start_ollama_http_with_idle]
-[src: file: backend/src/agents/runner.rs:4764-4777#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:14284-14293#Ollama]
+[src: file: backend/src/agents/runner.rs:13935-13948#agent_command_with_task_worker_policy]
+[src: file: backend/src/agents/runner.rs:14288-14297#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's
@@ -475,7 +475,7 @@ the model has been loaded at two different windows, the cache cost measured on
 the server replaces the computed one in the formula of KT-943 (and, off Apple
 Silicon, the 70 %-of-memory rule: what is left of 70 % of memory after the
 weights, over that cost)
-[src: file: backend/src/agents/runner.rs:6939-6959#kv_bytes_per_token_from_samples] [src: file: backend/src/agents/runner.rs:6964-6980#RAM_SHARE_FOR_MODEL].
+[src: file: backend/src/agents/runner.rs:6946-6966#kv_bytes_per_token_from_samples] [src: file: backend/src/agents/runner.rs:6964-6980#RAM_SHARE_FOR_MODEL].
 
 So the 32K ceiling is a worker's and not a discussion's, and a discussion on this
 Mac is at the ceiling resolved above — the model's whole 262,144 when its
@@ -808,7 +808,7 @@ where Ollama runs. [src: file: backend/src/api/ollama.rs:62-84#fetch_server_vers
    9428 of 9500 prompt tokens on a second turn). Older MLX servers lack
    prompt-prefix reuse (ollama/ollama#17829), which is not what a suggestion
    should steer a user to.
-   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:7282-7286#mlx_prefix_cache_reused]
+   An unreadable version is not capable. [src: file: backend/src/agents/runner.rs:7286-7290#mlx_prefix_cache_reused]
 
 When it is, the `-mlx` builds are listed first with an "Optimized for Mac" mark,
 then the portable list. Everywhere else the list is exactly the portable one.
