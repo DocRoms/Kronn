@@ -2569,7 +2569,11 @@ async fn execute_run_body(
                     )
                     .await
                 }
-                StepType::Agent => {
+                // KT-1755 — boxed: inlined, this arm's temporaries sit in the
+                // poll frame of the step future, which every nested run pays
+                // again whatever its step type (a debug build gives each one
+                // its own stack slot). Behind the box only an Agent step pays.
+                StepType::Agent => Box::pin(async {
                     // 0.7+ — hydrate optional QuickPrompt reference. Le helper
                     // est no-op si `step.quick_prompt_id` est None. Sinon il
                     // injecte prompt_template / tier / skill_ids depuis le QP
@@ -2887,7 +2891,8 @@ async fn execute_run_body(
                         }
                         outcome
                     }
-                }
+                })
+                .await,
                 StepType::Gate => {
                     // 0.7.0 Phase 4 — human-in-the-loop pause. Zero tokens —
                     // the engine builds a `WaitingApproval` outcome with the
@@ -10444,6 +10449,96 @@ mod tests {
         );
     }
 
+    /// KT-1755 — every nested run keeps its poll frames on the worker's stack
+    /// until it ends, in production as in tests. The chain runs on the
+    /// production runtime (`runtime_builder`, its worker stack size), never on
+    /// a thread this test sizes: a run that outgrows that stack aborts the
+    /// whole process. The root and three nested sub-workflows run to the end.
+    #[test]
+    fn a_three_level_sub_workflow_chain_runs_on_a_production_worker_stack() {
+        const LEVELS: usize = 3;
+        let runtime = crate::runtime_builder()
+            .worker_threads(1)
+            .build()
+            .expect("production-shaped runtime");
+        let chain = runtime.block_on(async {
+            tokio::spawn(async {
+                let (state, tokens, agents) = test_state_and_configs();
+                // The leaf first: each level calls the one inserted before it.
+                let mut called: Option<String> = None;
+                let mut root: Option<Workflow> = None;
+                for level in (0..=LEVELS).rev() {
+                    let mut workflow = make_workflow_with_artifacts(Default::default());
+                    workflow.id = format!("wf-chain-{level}");
+                    workflow.name = format!("chain-{level}");
+                    workflow.project_id = None;
+                    workflow.steps = vec![match called.take() {
+                        Some(target) => {
+                            let mut call = fake_step("call_next");
+                            call.step_type = StepType::SubWorkflow;
+                            call.sub_workflow_id = Some(target);
+                            call
+                        }
+                        None => json_data_step("leaf", serde_json::json!({ "level": level })),
+                    }];
+                    called = Some(workflow.id.clone());
+                    if level == 0 {
+                        root = Some(workflow);
+                    } else {
+                        let nested = workflow.clone();
+                        state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::workflows::insert_workflow(conn, &nested)
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+                let root = root.expect("root workflow");
+                let mut run = pending_run("run-chain-0", &root.id);
+                insert_wf_and_run(&state, &root, &run).await;
+                execute_run(
+                    state.clone(),
+                    &root,
+                    &mut run,
+                    &tokens,
+                    &agents,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("root run");
+
+                // Follow the child run ids down the chain: every level ran.
+                let mut statuses = vec![run.status.clone()];
+                let mut next = run.step_results[0].child_run_id.clone();
+                while let Some(child_run_id) = next {
+                    let child = state
+                        .db
+                        .with_conn(move |conn| crate::db::workflows::get_run(conn, &child_run_id))
+                        .await
+                        .unwrap()
+                        .expect("child run row");
+                    statuses.push(child.status.clone());
+                    next = child
+                        .step_results
+                        .first()
+                        .and_then(|result| result.child_run_id.clone());
+                }
+                statuses
+            })
+            .await
+            .expect("the chain finished on the worker")
+        });
+        assert_eq!(
+            chain,
+            vec![RunStatus::Success; LEVELS + 1],
+            "root + {LEVELS} nested runs all succeed"
+        );
+    }
+
     // ─── KT-1018 — run lifecycle holes ───────────────────────────────────
 
     async fn isolated_repo_fixture(
@@ -10845,11 +10940,23 @@ mod tests {
     async fn a_cancelled_run_removes_its_worktree_and_keeps_its_commits() {
         let (state, tokens, agents) = test_state_and_configs();
         let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-cancel").await;
-        workflow.exec_allowlist = vec!["git".into(), "sleep".into()];
+        // The step announces that it is running by creating `marker`, then
+        // becomes `sleep`. The marker is the observable state the canceller
+        // awaits: it exists only once the commit step has finished and the
+        // long step is in flight, whatever the load (KT-1756). A bounded
+        // poll of the run row plus a fixed sleep used to cancel before the
+        // commit under load, leaving no branch to keep.
+        let marker_dir = tempfile::TempDir::new().unwrap();
+        let marker = marker_dir.path().join("sleeping");
+        workflow.exec_allowlist = vec!["git".into(), "sh".into()];
         let mut wait = fake_step("wait");
         wait.step_type = StepType::Exec;
-        wait.exec_command = Some("sleep".into());
-        wait.exec_args = vec!["20".into()];
+        wait.exec_command = Some("sh".into());
+        wait.exec_args = vec![
+            "-c".into(),
+            "touch \"$0\" && exec sleep 60".into(),
+            marker.to_string_lossy().to_string(),
+        ];
         workflow.steps = vec![commit_step("commit"), wait];
         let mut run = pending_run("run-end-cancel", &workflow.id);
         run.project_id = workflow.project_id.clone();
@@ -10857,20 +10964,19 @@ mod tests {
 
         let canceller = {
             let state = state.clone();
+            let marker = marker.clone();
             async move {
-                for _ in 0..500 {
-                    let committed = state
-                        .db
-                        .with_conn(|conn| crate::db::workflows::get_run(conn, "run-end-cancel"))
-                        .await
-                        .unwrap()
-                        .is_some_and(|run| !run.step_results.is_empty());
-                    if committed {
-                        break;
+                // No wall-clock assumption: the loop ends on the marker. The
+                // timeout only turns a run that never reaches the step into
+                // a failure instead of a hung suite.
+                tokio::time::timeout(std::time::Duration::from_secs(300), async {
+                    while !marker.exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                })
+                .await
+                .expect("the long step never started");
+                let cancelled_at = std::time::Instant::now();
                 crate::workflows::cancellation::cancel_run_tree(
                     &state,
                     "run-end-cancel",
@@ -10879,10 +10985,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                cancelled_at
             }
         };
-        let started = std::time::Instant::now();
-        let (result, ()) = tokio::join!(
+        let (result, cancelled_at) = tokio::join!(
             execute_run(
                 state.clone(),
                 &workflow,
@@ -10896,9 +11002,11 @@ mod tests {
             canceller,
         );
         result.expect("run");
+        // Measured from the cancel, not from the start, so a slow start under
+        // load does not count: the 60 s sleep must have been cut short.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(15),
-            "the sleep was cut short"
+            cancelled_at.elapsed() < std::time::Duration::from_secs(45),
+            "the sleep ran to its end instead of being cut short"
         );
         assert_eq!(run.status, RunStatus::Cancelled, "{:?}", run.step_results);
         assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
