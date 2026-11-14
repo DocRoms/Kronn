@@ -891,6 +891,88 @@ pub fn task_worker_queue_position(conn: &Connection, id: &str) -> Result<Option<
     Ok(Some(ahead.max(0) as u32 + 1))
 }
 
+/// KT-1758 — a quota fallback's dispatch that has been `Pending` for a while,
+/// with what the room needs to say why. Read, never written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingFallbackDispatch {
+    pub dispatch_id: String,
+    pub execution_id: String,
+    pub parent_discussion_id: String,
+    /// The provider the fallback moved to, in the `agent_type_to_db` form.
+    pub provider: String,
+    pub waiting_since: DateTime<Utc>,
+    /// A backoff in the future: the dispatch is deliberately not due yet.
+    pub available_at: DateTime<Utc>,
+    pub progress_detail: Option<String>,
+    pub last_error: Option<String>,
+    /// `Running` dispatches of that same provider (its per-agent cap counts them).
+    pub provider_running: i64,
+    /// Local task workers `Running` (the `__task_workers` cap counts them).
+    pub task_workers_running: i64,
+    /// Local task workers waiting ahead of this one, in launch order.
+    pub waiting_ahead: i64,
+}
+
+/// Dispatches of an execution a quota fallback moved to another provider that
+/// have been `Pending` since before `waiting_since`, oldest first. These are the
+/// ones that were supposed to start within seconds: the room is told why they
+/// did not (see `api::orchestration::notify_waiting_fallback_dispatches`).
+pub fn list_waiting_fallback_dispatches(
+    conn: &Connection,
+    waiting_since: DateTime<Utc>,
+) -> Result<Vec<WaitingFallbackDispatch>> {
+    let provider = effective_agent("job");
+    let family = effective_agent("family");
+    let task_worker = local_task_worker_job("running");
+    let waiting = waiting_task_worker("ahead");
+    let mut statement = conn.prepare(&format!(
+        "SELECT job.id, execution.id, execution.parent_discussion_id,
+                execution.worker_agent_type, job.created_at, job.available_at,
+                job.progress_detail, job.last_error,
+                (SELECT COUNT(*) FROM agent_dispatch_jobs AS family
+                 WHERE family.status = 'Running' AND ({family}) = ({provider})),
+                (SELECT COUNT(*) FROM agent_dispatch_jobs AS running
+                 WHERE running.status = 'Running' AND {task_worker}),
+                (SELECT COUNT(*) FROM agent_dispatch_jobs AS ahead
+                 WHERE ahead.id <> job.id
+                   AND (ahead.created_at, ahead.rowid) < (job.created_at, job.rowid)
+                   AND {waiting})
+         FROM agent_dispatch_jobs AS job
+         JOIN task_executions AS execution ON execution.dispatch_job_id = job.id
+         JOIN task_execution_quota_origin AS origin
+              ON origin.task_execution_id = execution.id
+         WHERE job.status = 'Pending'
+           AND job.created_at <= ?1
+           AND execution.status = 'Working'
+           AND COALESCE(execution.worker_target_kind, '') <> 'cli'
+         ORDER BY job.created_at, job.rowid"
+    ))?;
+    let rows = statement.query_map(
+        params![
+            waiting_since.to_rfc3339(),
+            Utc::now().to_rfc3339(),
+            i64::from(MAX_DISPATCH_ATTEMPTS)
+        ],
+        |row| {
+            Ok(WaitingFallbackDispatch {
+                dispatch_id: row.get(0)?,
+                execution_id: row.get(1)?,
+                parent_discussion_id: row.get(2)?,
+                provider: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                waiting_since: parse_dt(row.get(4)?),
+                available_at: parse_dt(row.get(5)?),
+                progress_detail: row.get(6)?,
+                last_error: row.get(7)?,
+                provider_running: row.get(8)?,
+                task_workers_running: row.get(9)?,
+                waiting_ahead: row.get(10)?,
+            })
+        },
+    )?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
     claim_with_limits(conn, id, None)
 }

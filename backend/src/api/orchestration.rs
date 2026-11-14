@@ -792,6 +792,174 @@ pub(crate) async fn return_quota_escalations_past_reset(state: &AppState) -> Vec
     returned
 }
 
+/// KT-1758 — how long a quota fallback's dispatch may stay `Pending` before the
+/// room is told why. A free slot starts it within seconds, so five minutes is
+/// already a dispatch that something is holding.
+pub(crate) const FALLBACK_DISPATCH_WAIT_NOTICE_AFTER_SECONDS: i64 = 300;
+
+/// KT-1758 — the room line of a fallback dispatch that is still waiting.
+pub(crate) fn fallback_dispatch_waiting_message_id(dispatch_id: &str) -> String {
+    format!("fallback-dispatch-waiting:{dispatch_id}")
+}
+
+/// KT-1758 — why a fallback dispatch is not running, from what the queue holds
+/// against it, most specific first. Never a guess: when nothing explains the
+/// wait, it says so, which is itself the finding.
+pub(crate) fn fallback_dispatch_wait_reason(
+    wait: &crate::db::agent_dispatch::WaitingFallbackDispatch,
+    limits: &serde_json::Value,
+    now: chrono::DateTime<chrono::Utc>,
+    lang: RoomLang,
+) -> String {
+    let provider = wait.provider.as_str();
+    let last_error = wait.last_error.as_deref().unwrap_or_default();
+    if let Some(detail) = last_error.strip_prefix("runtime_unavailable:") {
+        let detail: String = detail.trim().chars().take(240).collect();
+        return match lang {
+            RoomLang::Fr => format!(
+                "le runtime `{provider}` n'a pas pu démarrer ({detail}) ; Kronn réessaie toutes les 30 s"
+            ),
+            RoomLang::En => format!(
+                "the `{provider}` runtime could not start ({detail}); Kronn retries every 30 s"
+            ),
+        };
+    }
+    if last_error.starts_with("audit_running") {
+        return lang
+            .pick(
+                "un audit du projet écrit dans docs/ : le worker démarre à la fin de l'audit",
+                "an audit of the project is writing docs/: the worker starts when it ends",
+            )
+            .to_string();
+    }
+    if wait.progress_detail.as_deref().is_some_and(|detail| {
+        detail.starts_with(crate::db::agent_dispatch::TASK_WORKER_QUEUED_DETAIL_PREFIX)
+    }) {
+        let cap = limits
+            .get(crate::db::agent_dispatch::TASK_WORKER_LIMIT_KEY)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(wait.task_workers_running);
+        let running = wait.task_workers_running;
+        return match lang {
+            RoomLang::Fr => format!(
+                "tous les emplacements de workers locaux sont pris ({running}/{cap}) ; il démarre dès qu'un se libère"
+            ),
+            RoomLang::En => format!(
+                "every local task-worker slot is taken ({running}/{cap}); it starts as soon as one frees"
+            ),
+        };
+    }
+    if let Some(cap) = limits.get(provider).and_then(serde_json::Value::as_i64) {
+        if wait.provider_running >= cap {
+            let running = wait.provider_running;
+            return match lang {
+                RoomLang::Fr => format!(
+                    "`{provider}` fait déjà tourner {running} dispatch(es) sur {cap} autorisé(s) ; il démarre à la fin de l'un d'eux"
+                ),
+                RoomLang::En => format!(
+                    "`{provider}` already runs {running} dispatch(es) of {cap} allowed; it starts when one ends"
+                ),
+            };
+        }
+    }
+    if wait.available_at > now {
+        return lang
+            .pick(
+                "il attend la fin d'un délai de reprise",
+                "it is waiting out a retry delay",
+            )
+            .to_string();
+    }
+    if wait.waiting_ahead > 0 {
+        let ahead = wait.waiting_ahead;
+        return match lang {
+            RoomLang::Fr => format!("{ahead} worker(s) plus ancien(s) attendent devant lui"),
+            RoomLang::En => format!("{ahead} older task worker(s) are queued ahead of it"),
+        };
+    }
+    lang.pick(
+        "aucune cause enregistrée : le dispatcher ne l'a pas encore pris",
+        "no cause recorded: the dispatcher has not claimed it yet",
+    )
+    .to_string()
+}
+
+/// KT-1758 — tell the parent room, once per dispatch, that a quota fallback is
+/// still waiting to start after
+/// [`FALLBACK_DISPATCH_WAIT_NOTICE_AFTER_SECONDS`], and why. The fallback exists
+/// so work continues while the original provider is limited; a dispatch that
+/// sits `Pending` silently defeats that without anyone noticing. Returns the
+/// dispatches announced now.
+pub(crate) async fn notify_waiting_fallback_dispatches(state: &AppState) -> Vec<String> {
+    let now = chrono::Utc::now();
+    let since = now - chrono::Duration::seconds(FALLBACK_DISPATCH_WAIT_NOTICE_AFTER_SECONDS);
+    let waiting = match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::agent_dispatch::list_waiting_fallback_dispatches(conn, since)
+        })
+        .await
+    {
+        Ok(waiting) => waiting,
+        Err(error) => {
+            tracing::warn!("waiting fallback dispatch scan failed: {error}");
+            return Vec::new();
+        }
+    };
+    if waiting.is_empty() {
+        return Vec::new();
+    }
+    let limits: serde_json::Value = {
+        let config = state.config.read().await;
+        serde_json::from_str(&crate::agents::runner::dispatch_concurrency_limits(&config))
+            .unwrap_or_default()
+    };
+    let mut announced = Vec::new();
+    for wait in waiting {
+        let message_id = fallback_dispatch_waiting_message_id(&wait.dispatch_id);
+        let lang = room_lang(&state.db, &wait.parent_discussion_id).await;
+        let minutes = (now - wait.waiting_since).num_minutes().max(0);
+        let reason = fallback_dispatch_wait_reason(&wait, &limits, now, lang);
+        let content = match lang {
+            RoomLang::Fr => format!(
+                "**Repli quota — le worker n'a pas démarré**\n\nL'exécution `{}` a basculé sur `{}` mais son dispatch `{}` attend depuis {minutes} min sans avoir démarré : {reason}.",
+                wait.execution_id, wait.provider, wait.dispatch_id
+            ),
+            RoomLang::En => format!(
+                "**Quota fallback — the worker has not started**\n\nExecution `{}` moved to `{}` but its dispatch `{}` has been waiting {minutes} min without starting: {reason}.",
+                wait.execution_id, wait.provider, wait.dispatch_id
+            ),
+        };
+        let message = orchestrator_message(message_id.clone(), content);
+        let room = wait.parent_discussion_id.clone();
+        let posted = state
+            .db
+            .with_conn(move |conn| {
+                // One line per dispatch: a replay or the next tick posts nothing.
+                let already: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                    [&message_id],
+                    |row| row.get(0),
+                )?;
+                if already {
+                    return Ok(false);
+                }
+                crate::db::discussions::insert_message(conn, &room, &message)?;
+                Ok(true)
+            })
+            .await;
+        match posted {
+            Ok(true) => announced.push(wait.dispatch_id),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                dispatch_job_id = %wait.dispatch_id,
+                "waiting fallback dispatch notice could not be persisted: {error}"
+            ),
+        }
+    }
+    announced
+}
+
 /// KT-1664 — the room line that closes a quota escalation the provider
 /// re-check resolved. Its id carries the refused dispatch the escalation notice
 /// (`provider-quota-escalation:<dispatch>`) is keyed by, so the room shows that
@@ -874,6 +1042,7 @@ pub fn start_resilience_watchdog(state: AppState) {
         loop {
             interval.tick().await;
             return_quota_escalations_past_reset(&state).await;
+            notify_waiting_fallback_dispatches(&state).await;
             let expired = match state
                 .db
                 .with_conn(|conn| {
@@ -38099,6 +38268,419 @@ pub(crate) mod tests {
         assert!(
             origin_of(&db, &was.id).await.is_none(),
             "back on the original provider and tier: nothing left to return to"
+        );
+    }
+
+    /// KT-1758 — claim the dispatch of `exec_id`, start its agent and (when
+    /// `settle` is set) end it as the quota refusal does, so a worker looks like
+    /// the one the provider just refused. Returns whether it was claimed.
+    async fn run_then_refuse(db: &Database, limits: &str, dispatch: &str, settle: bool) -> bool {
+        let (dispatch, limits) = (dispatch.to_string(), limits.to_string());
+        db.with_conn(move |conn| {
+            let claimed =
+                crate::db::agent_dispatch::claim_with_limits(conn, &dispatch, Some(&limits))?;
+            if claimed.is_some() {
+                crate::db::agent_dispatch::mark_agent_started(conn, &dispatch)?;
+                if settle {
+                    crate::db::agent_dispatch::mark_failed_with_kind(
+                        conn,
+                        &dispatch,
+                        "quota_exhausted: You've hit your 5-hour limit",
+                        "quota_exhausted",
+                    )?;
+                }
+            }
+            Ok(claimed.is_some())
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn default_dispatch_limits(state: &AppState) -> String {
+        let config = state.config.read().await;
+        crate::agents::runner::dispatch_concurrency_limits(&config)
+    }
+
+    /// KT-1758 — the production order of a quota fallback: the refused dispatch
+    /// is claimed, started and settled `Failed`, then the execution moves to
+    /// another provider. While the original provider is limited, the fallback's
+    /// dispatch is claimable and its agent can start.
+    #[tokio::test]
+    async fn a_fallback_dispatch_is_claimed_and_started_while_the_original_provider_is_limited() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let old = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &old, true).await);
+
+        let on_codex = fall_back_to_codex(
+            &state,
+            &db,
+            &was,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await;
+        assert_eq!(
+            origin_of(&db, &was.id)
+                .await
+                .map(|origin| origin.provider)
+                .as_deref(),
+            Some("ClaudeCode"),
+            "the original provider is the one that refused: it stays refused while the fallback starts"
+        );
+        let fallback = on_codex.dispatch_job_id.clone().unwrap();
+        assert_ne!(fallback, old);
+
+        assert!(
+            run_then_refuse(&db, &limits, &fallback, false).await,
+            "the fallback dispatch is claimed with a free slot"
+        );
+        let job = dispatch_of(&db, fallback).await;
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Running
+        );
+        assert!(job.claimed_at.is_some(), "claimed");
+        assert!(job.agent_started_at.is_some(), "its agent started");
+    }
+
+    /// KT-1758 — the 14:36 shape: every worker of a run is refused at once and
+    /// falls back to the same provider, whose cap lets one run at a time. The
+    /// scanner hands the free slot to one fallback per pass until all have run:
+    /// none is left `Pending` for want of a claim.
+    #[tokio::test]
+    async fn every_fallback_dispatch_of_a_refused_run_gets_its_turn_in_launch_order() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let executions = economy_claude_executions(&db, repo.path(), 7).await;
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let mut fallbacks = Vec::new();
+        for was in &executions {
+            let old = was.dispatch_job_id.clone().unwrap();
+            run_then_refuse(&db, &limits, &old, true).await;
+            let moved = fall_back_to_codex(
+                &state,
+                &db,
+                was,
+                chrono::Utc::now() + chrono::Duration::hours(2),
+            )
+            .await;
+            fallbacks.push(moved.dispatch_job_id.unwrap());
+        }
+
+        let mut claimed_in_order = Vec::new();
+        for _pass in 0..fallbacks.len() {
+            let limits = limits.clone();
+            let claimed: Vec<String> = db
+                .with_conn(move |conn| {
+                    let mut claimed = Vec::new();
+                    for id in crate::db::agent_dispatch::list_runnable_ids(conn, 64)? {
+                        if crate::db::agent_dispatch::claim_with_limits(conn, &id, Some(&limits))?
+                            .is_some()
+                        {
+                            claimed.push(id);
+                        }
+                    }
+                    Ok(claimed)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                claimed.len(),
+                1,
+                "one slot, one claim per pass: {claimed:?}"
+            );
+            for id in claimed {
+                claimed_in_order.push(id.clone());
+                db.with_conn(move |conn| {
+                    assert!(crate::db::agent_dispatch::mark_agent_started(conn, &id)?);
+                    assert!(crate::db::agent_dispatch::mark_completed(conn, &id)?);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            }
+        }
+        assert_eq!(claimed_in_order, fallbacks, "launch order, none skipped");
+        let pending: i64 = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE status = 'Pending'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+    }
+
+    /// KT-1758 — the original provider's reset passes while the fallback worker
+    /// is mid-turn (claimed, agent started): the return waits. Cancelling that
+    /// turn would throw its work away unsaved. Once the turn has ended the
+    /// execution goes back.
+    #[tokio::test]
+    async fn the_return_to_the_original_provider_waits_for_a_fallback_that_is_mid_turn() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let old = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &old, true).await);
+        let on_codex = fall_back_to_codex(
+            &state,
+            &db,
+            &was,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await;
+        let fallback = on_codex.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &fallback, false).await);
+        pass_the_origin_reset(&db, &was.id).await;
+
+        let id = was.id.clone();
+        let (listed, in_progress) = db
+            .with_read_conn(move |conn| {
+                Ok((
+                    crate::db::orchestration::fallback_executions_past_origin_reset(
+                        conn,
+                        chrono::Utc::now(),
+                    )?,
+                    crate::db::orchestration::execution_turn_in_progress(conn, &id)?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert!(in_progress);
+        assert!(
+            listed.is_empty(),
+            "a mid-turn worker is not due: {listed:?}"
+        );
+
+        // Even a sweep that read it earlier is refused inside the transaction.
+        let refused = reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "back to the original provider",
+            ReassignCause::QuotaReturn,
+        )
+        .await
+        .err()
+        .expect("a mid-turn fallback is never replaced");
+        assert!(refused.to_string().contains("mid-turn"), "{refused}");
+
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+        let still = exec_of(&db, &was.id).await;
+        assert_eq!(still.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(still.dispatch_job_id.as_deref(), Some(fallback.as_str()));
+        assert_eq!(
+            dispatch_of(&db, fallback.clone()).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Running,
+            "the fallback keeps working"
+        );
+
+        // Its turn ends: the next sweep hands the execution back.
+        let ended = fallback.clone();
+        db.with_conn(move |conn| crate::db::agent_dispatch::mark_completed(conn, &ended))
+            .await
+            .unwrap();
+        assert_eq!(
+            return_quota_escalations_past_reset(&state).await,
+            vec![was.id.clone()]
+        );
+        assert_eq!(
+            exec_of(&db, &was.id).await.worker_agent_type.as_deref(),
+            Some("ClaudeCode")
+        );
+    }
+
+    /// KT-1758 — a fallback that has not started (its dispatch only queued, or
+    /// claimed with no agent running yet) loses nothing when the original
+    /// provider comes back: it is replaced, as before.
+    #[tokio::test]
+    async fn the_return_replaces_a_fallback_that_has_not_started() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let on_codex = fall_back_to_codex(
+            &state,
+            &db,
+            &was,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await;
+        let fallback = on_codex.dispatch_job_id.clone().unwrap();
+        pass_the_origin_reset(&db, &was.id).await;
+
+        assert_eq!(
+            return_quota_escalations_past_reset(&state).await,
+            vec![was.id.clone()]
+        );
+        assert_eq!(
+            dispatch_of(&db, fallback).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Cancelled
+        );
+        assert_eq!(
+            exec_of(&db, &was.id).await.worker_agent_type.as_deref(),
+            Some("ClaudeCode")
+        );
+    }
+
+    /// KT-1758 — a fallback dispatch that waits more than the notice delay is
+    /// announced once in the parent room, with the reason it is held.
+    #[tokio::test]
+    async fn a_fallback_dispatch_that_waits_is_announced_in_the_room_with_its_reason() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let executions = economy_claude_executions(&db, repo.path(), 2).await;
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let mut dispatches = Vec::new();
+        for was in &executions {
+            let old = was.dispatch_job_id.clone().unwrap();
+            run_then_refuse(&db, &limits, &old, true).await;
+            let moved = fall_back_to_codex(
+                &state,
+                &db,
+                was,
+                chrono::Utc::now() + chrono::Duration::hours(2),
+            )
+            .await;
+            dispatches.push(moved.dispatch_job_id.unwrap());
+        }
+        // The first fallback runs and holds Codex's only slot; the second waits.
+        assert!(run_then_refuse(&db, &limits, &dispatches[0], false).await);
+        assert!(!run_then_refuse(&db, &limits, &dispatches[1], false).await);
+
+        assert!(
+            notify_waiting_fallback_dispatches(&state).await.is_empty(),
+            "a dispatch that has only just queued is not announced"
+        );
+        let stale = (chrono::Utc::now() - chrono::Duration::minutes(12)).to_rfc3339();
+        let waiting = dispatches[1].clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![waiting, stale],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            notify_waiting_fallback_dispatches(&state).await,
+            vec![dispatches[1].clone()]
+        );
+        assert!(
+            notify_waiting_fallback_dispatches(&state).await.is_empty(),
+            "one line per dispatch"
+        );
+        let parent = executions[1].parent_discussion_id.clone();
+        let wanted = fallback_dispatch_waiting_message_id(&dispatches[1]);
+        let notice = db
+            .with_read_conn(move |conn| {
+                Ok(crate::db::discussions::list_messages(conn, &parent)?
+                    .into_iter()
+                    .find(|message| message.id == wanted))
+            })
+            .await
+            .unwrap()
+            .expect("the room says the fallback is waiting");
+        assert!(
+            notice.content.contains(&dispatches[1]),
+            "{}",
+            notice.content
+        );
+        assert!(notice.content.contains("Codex"), "{}", notice.content);
+        assert!(
+            notice
+                .content
+                .contains("already runs 1 dispatch(es) of 1 allowed")
+                || notice
+                    .content
+                    .contains("fait déjà tourner 1 dispatch(es) sur 1"),
+            "the reason names the held slot: {}",
+            notice.content
+        );
+    }
+
+    /// KT-1758 — the reason is the most specific thing the queue holds against
+    /// the dispatch, and says so plainly when nothing explains the wait.
+    #[test]
+    fn the_wait_reason_names_what_holds_the_dispatch() {
+        use crate::db::agent_dispatch::{
+            WaitingFallbackDispatch, TASK_WORKER_QUEUED_DETAIL_PREFIX,
+        };
+        let now = chrono::Utc::now();
+        let base = WaitingFallbackDispatch {
+            dispatch_id: "d".into(),
+            execution_id: "e".into(),
+            parent_discussion_id: "p".into(),
+            provider: "OpenCode".into(),
+            waiting_since: now - chrono::Duration::minutes(9),
+            available_at: now - chrono::Duration::minutes(9),
+            progress_detail: None,
+            last_error: None,
+            provider_running: 0,
+            task_workers_running: 0,
+            waiting_ahead: 0,
+        };
+        let limits = serde_json::json!({ "OpenCode": 1, "__task_workers": 3 });
+        let reason = |wait: &WaitingFallbackDispatch| {
+            fallback_dispatch_wait_reason(wait, &limits, now, RoomLang::En)
+        };
+
+        let runtime = WaitingFallbackDispatch {
+            last_error: Some("runtime_unavailable: OpenCode ACP spawn failed: x".into()),
+            ..base.clone()
+        };
+        assert!(
+            reason(&runtime).contains("runtime could not start"),
+            "{}",
+            reason(&runtime)
+        );
+        assert!(reason(&runtime).contains("OpenCode ACP spawn failed: x"));
+
+        let capped = WaitingFallbackDispatch {
+            progress_detail: Some(format!("{TASK_WORKER_QUEUED_DETAIL_PREFIX}3/3")),
+            task_workers_running: 3,
+            ..base.clone()
+        };
+        assert!(
+            reason(&capped).contains("task-worker slot is taken (3/3)"),
+            "{}",
+            reason(&capped)
+        );
+
+        let busy = WaitingFallbackDispatch {
+            provider_running: 1,
+            ..base.clone()
+        };
+        assert!(reason(&busy).contains("already runs 1 dispatch(es) of 1 allowed"));
+
+        let behind = WaitingFallbackDispatch {
+            waiting_ahead: 2,
+            ..base.clone()
+        };
+        assert!(reason(&behind).contains("2 older task worker(s)"));
+
+        assert!(
+            reason(&base).contains("no cause recorded"),
+            "{}",
+            reason(&base)
         );
     }
 
