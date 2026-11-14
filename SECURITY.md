@@ -90,17 +90,24 @@ common ways a Kronn deployment ends up exposed.
 - **Windows desktop build — project writes are check-then-write.** On
   macOS and Linux the writes Kronn makes inside a project through its
   rooted primitive (docs, native agent files, templates, seeds, the audit
-  state folder, and the writers that run right after an agent: the
-  placeholder and audit-date fills, the remit guard, the anti-hallucination
-  section, the tech-debt index and decisions, the ADR settlement, the local
-  git exclude, the reconciliation report) go through directory file
-  descriptors opened with `O_NOFOLLOW`, so a folder swapped for a symlink
-  while Kronn works is never written through. This is not every write:
-  the by-path exceptions are listed in the document below (among them the
-  files a spawned `git` or an agent writes, the root agent pointers, skills
-  and profiles, the audit-cancel cleanup, the copy of untracked files into a
-  new worktree, and the settings and context-file routes, which do not run
-  right after an agent). Windows has no such primitive in use:
+  state folder, and the writers that run right after an agent that the
+  document below lists: the placeholder and audit-date fills, the remit guard,
+  the step guard, the anti-hallucination section, the tech-debt index and
+  decisions, the ADR settlement, the cross-audit outputs, the document
+  repair, the provenance record, the reconciliation) go through directory
+  file descriptors opened with `O_NOFOLLOW`; the files they read back into
+  the project are read the same way, so a folder swapped for a symlink while
+  Kronn works is never written through nor copied from. The local git
+  exclude written after an agent does not follow git's `commondir` / `gitdir:`
+  pointers (it only writes a plain `<repo>/.git/info/exclude`); the exclude
+  written before an agent touches a checkout (worktree provisioning, the
+  worker environment) does follow git's answer. This is not every write nor
+  every read: the by-path exceptions are listed in the document below (among
+  them the files a spawned `git` or an agent writes, the root agent pointers,
+  skills and profiles, the audit-cancel cleanup, the copy of untracked files
+  into a new worktree, a few read-only views and decisions that read by path
+  and write nothing from it, and the settings and context-file routes, which
+  do not run right after an agent). Windows has no such primitive in use:
   Kronn checks the path for links, then writes it. A folder swapped for a
   link in that window is not excluded. Creating a symlink on Windows needs
   elevated rights or developer mode, so Kronn accepts this rather than

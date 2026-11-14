@@ -227,8 +227,17 @@ pub fn restore(
         let path = td_dir.join(format!("{}.md", entry.id));
         match crate::core::fs_guard::guarded_read(root, &path) {
             Ok(Some(bytes)) => {
-                let current = String::from_utf8(bytes)
-                    .map_err(|e| format!("read {}: {e}", path.display()))?;
+                // A sheet that is no longer text cannot be put back by a
+                // surgical edit, and replacing it with the old content would
+                // destroy what is there: skip it, report it, and carry on with
+                // the other decided sheets.
+                let Ok(current) = String::from_utf8(bytes) else {
+                    outcome.refused.push((
+                        entry.id.clone(),
+                        format!("{} is not UTF-8; left as it is", path.display()),
+                    ));
+                    continue;
+                };
                 if td_decision(&current) == Some(entry.decision) {
                     continue;
                 }
@@ -268,22 +277,39 @@ pub fn restore(
         }
     }
 
-    let read = |path: &Path| {
-        crate::core::fs_guard::guarded_read(root, path)
-            .ok()
-            .flatten()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
+    // Rooted listing and reads (KT-1595). A refused LISTING (a link at
+    // `tech-debt/` or in a parent) aborts: it is never "no sheets", which
+    // would let the pass below run on nothing. A link (or a non-file) at one
+    // sheet's name is skipped and reported, like a decided sheet's.
+    let ids = match crate::core::fs_guard::guarded_list(root, &td_dir) {
+        Ok(Some(names)) => sheet_ids(names),
+        Ok(None) => Vec::new(),
+        Err(e) => return Err(format!("list {}: {e}", td_dir.display())),
     };
-    // Rooted listing: a refused folder lists nothing (no duplicate is flagged),
-    // it never lists what a link points at.
-    let list = |dir: &Path| {
-        crate::core::fs_guard::guarded_list(root, dir)
-            .ok()
-            .flatten()
-            .map(sheet_ids)
-            .unwrap_or_default()
-    };
-    let files = sheet_files(&td_dir, list, read);
+    let mut files: Vec<(String, String)> = Vec::new();
+    for id in ids {
+        let path = td_dir.join(format!("{id}.md"));
+        match crate::core::fs_guard::guarded_read(root, &path) {
+            Ok(Some(bytes)) => {
+                // Not text: not a sheet this pass can read.
+                if let Ok(content) = String::from_utf8(bytes) {
+                    files.push((id, content));
+                }
+            }
+            Ok(None) => {}
+            Err(e)
+                if crate::core::fs_guard::is_link_refusal(&e)
+                    || e.kind() == std::io::ErrorKind::InvalidInput =>
+            {
+                // Already reported when it is a decided sheet.
+                if !outcome.refused.iter().any(|(refused, _)| *refused == id) {
+                    outcome.refused.push((id, e.to_string()));
+                }
+            }
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
+        }
+    }
+    files.sort();
     let sheets: Vec<TdSheet> = files.iter().map(|(id, c)| parse_sheet(id, c)).collect();
     for ((id, content), sheet) in files.iter().zip(&sheets) {
         if snap.known_ids.contains(id) || !sheet.is_active() {

@@ -70,8 +70,10 @@ pub fn state_dir(project: &Path) -> Result<PathBuf, String> {
         ensure_real_dir(&root, &dir)?;
     }
     // The local exclude, not the operator's `.gitignore`; a project outside
-    // Git has nothing to commit by mistake.
-    if let Err(e) = crate::core::worktree::ensure_local_git_exclude(&root, ".kronn/") {
+    // Git has nothing to commit by mistake. This runs on every state write,
+    // after agents: the pinned variant does not follow git's (agent-writable)
+    // `commondir` / `gitdir:` pointers (KT-1595).
+    if let Err(e) = crate::core::worktree::ensure_local_git_exclude_pinned(&root, ".kronn/") {
         tracing::debug!("no local Git exclude for {}: {e}", root.display());
     }
     if let Err(e) = migrate_legacy(&root, &dir) {

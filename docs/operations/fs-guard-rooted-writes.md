@@ -112,10 +112,43 @@ by path, found by the round-3 review and the Argon addendum):
   (the bytes are read through the primitive and handed to `git hash-object --stdin`,
   git never reads the path) and the restore itself (`guarded_replace`,
   `guarded_write_new` when the file is gone, `guarded_remove_file` for a file that was
-  absent before the step). An AI-doc folder swapped for a link, or a link planted at
-  the tracked name, is refused and reported as a warning ("could not be restored");
-  nothing is written or deleted through it. A file that could not be read at capture
-  (a link) is never restored.
+  absent before the step). A file that was clean before the step is put back from
+  the recorded commit WITHOUT `git checkout` (round 4): `git cat-file blob
+  <head>:./<file>` gives the bytes, `git ls-tree` the recorded mode (`100644` or
+  `100755`; a link or a submodule at that commit is refused and reported), and the
+  bytes are written with `guarded_replace` (then `guarded_set_mode`). The blob is
+  raw, with no smudge or end-of-line filter, unlike `git checkout`. An AI-doc folder
+  swapped for a link, or a link planted at the tracked name, is refused and reported
+  as a warning ("could not be restored"); nothing is written or deleted through it.
+  A file that could not be read at capture (a link) is never restored.
+- `step_guard` (KT-1211: `restore_target`, `mark_partial`, `clear_partial_marker`, the
+  keep-aside of `settle_killed`), run after a failed, cancelled or killed step: the
+  target is read with `guarded_read` (round 4) after the lstat walk, because the
+  content read is written back (the marker banner, the clean copy, the displaced copy).
+  A link at the target or in a parent is an error (`refused`), never a copy of what it
+  points at.
+- `cross_audit::write_outputs` (step 8 of the cross-agent audit): the previous index,
+  every existing `TD-<id>.md` (merge of the provenance block), the unchanged check of
+  `write_if_changed` and `carried_from_previous` (the rows and settled sheets carried
+  into the new index) all read with `guarded_read`. A link is an error and nothing is
+  written from it. `core::cross_audit::assign_td_ids` still lists the sheets by path
+  (see "What is not covered").
+- `document_repair::demote_last_attempt` and `document_repair::snapshot`: the document
+  is read with `guarded_read` before it is demoted, preserved in `.kronn/audit` or
+  written back by an undo.
+- `doc_provenance` (round 4): `read_doc` (every confirm, record and comparison),
+  `read_strict` (the record itself) and `snapshot_tracked` (listed and read with
+  `guarded_list` / `guarded_read`, no walk of a linked root) go through the primitive.
+  A doc that is a link, or sits behind one, reads as ABSENT: it is never recorded as
+  validated, never hashed, and never copied by `preserve_validated_original` into
+  `.kronn/audit/validated-originals`. `snapshot_tracked` and `read_strict` return an
+  error on a link.
+- The reconciliation of the Full audit (`full::build_reconciliation`,
+  `reconciliation::check_signature_in_source`, round 4): the indices written by the
+  run, the pre-audit sheets, each sheet being checked and the source file a pointer
+  names are read with `guarded_read`. A link at an index or a sheet stops the
+  reconciliation (logged, the audit carries on); a pointer that is a link or leaves
+  the project counts as unreadable.
 - `anti_hallu_step::apply` (step 0 of every audit, resumes included, and the inject
   route): `guarded_read`, then an optimistic replace. A link at `AGENTS.md` or in a
   parent is an error, not "file missing".
@@ -132,15 +165,33 @@ by path, found by the round-3 review and the Argon addendum):
   (`RestoreOutcome::refused`, the `td_decisions` event), and the other decisions are
   still put back; a `tech-debt/` folder that is itself a link still aborts. A deleted
   sheet is written back create-only (`guarded_write_new`): an entry that appeared
-  since the read is left alone and reported. The listing is `guarded_list`.
+  since the read is left alone and reported. The listing is `guarded_list`. A sheet that
+  is not UTF-8 is skipped and reported (`refused`) like a link, and the duplicate-flagging
+  pass (round 4) lists and reads through the primitive as well: a refused LISTING aborts
+  the call (an error), a link at one sheet's name is skipped and reported.
 - `adr::settle_covered_sheets`: no check by path before the read of `decisions.md`;
   the guarded read decides (missing is no decision, a link or an escape is an error).
-- `worktree::ensure_local_git_exclude` (reached from `audit_state::state_dir` on every
-  state write): rooted at the git directory git names (`<git dir>/info/exclude`); the
-  read and the write (create-only when the file is missing, an optimistic replace
-  otherwise) refuse a link at `exclude`, at `info` or in a parent. The write is a
-  replace by rename, no longer an append: a line another process appends in that
-  instant is refused, not lost silently.
+  The sheet listing is `adr::td_sheets_guarded` (round 4, `guarded_list`): a link at
+  `tech-debt/` or in a parent is an error, no longer "no sheets"; a sheet that is a
+  link, or unreadable, is an error too; a folder or a non-UTF-8 sheet is skipped.
+- `worktree::ensure_local_git_exclude_pinned` (round 4; reached from
+  `audit_state::state_dir` on every state write, and from `workflows::workspace::
+  work_to_keep`): git's own answer (`rev-parse --git-path info/exclude`) follows
+  `.git/commondir` and a `.git` file's `gitdir:`, both writable by an agent, so the
+  pinned variant does not use it. It writes `<repo>/.git/info/exclude` only, rooted at
+  the REPO (a link at `.git`, `info` or `exclude`, planted or swapped in, is refused),
+  and only when `.git` is a plain directory with no `commondir`. A `.git` file (a
+  linked worktree or a submodule), a link, or a `commondir` is an error and nothing is
+  written; the exclude of a linked worktree is the main repository's, written when the
+  worktree was provisioned. The write is create-only when the file is missing, an
+  optimistic replace by rename otherwise (no longer an append: a line another process
+  appends in that instant is refused, not lost silently). The original
+  `ensure_local_git_exclude`, which does follow git's answer (rooted at the git
+  directory git names, same refusals below it), stays for callers that run BEFORE an
+  agent touches the checkout: worktree provisioning, the worker environment and lane
+  seeds, the MCP settings route. A residual: an agent that rewrote `commondir` or
+  `gitdir:` before such a provisioning call would be followed; those callers do not run
+  after an agent.
 - `audit_state::new_template_backup_dir`: `guarded_create_new_dir` per candidate name,
   the suffix advances on an occupied name; a folder that appears between the check and
   the create is never adopted.
@@ -164,20 +215,20 @@ outside the root.
   caller that checks and then writes the path itself is not covered: use a
   `guarded_*` write.
 - Reads by path. `resolve_contained_read` canonicalizes, and a swap after it can be
-  read through. The read-only views of `td_index` (`read_sheets`, `read_sheets_in`,
-  `debt_entries`, `docs_index_rows`: cards, reviews, the cross-audit), the
-  `td_decisions::snapshot` taken BEFORE the agent runs, `adr::read_decisions`, the
-  `td_sheets` listing of `adr`, and the reconciliation snapshot reads of the Full
-  audit are by path: nothing is written from them. Whatever is written from a
-  listing or a read goes through the primitive (the resync, `restore`, the ADR
-  settlement and the report), where a refusal is an error or a reported skip.
+  read through. These reads stay by path: the read-only views of `td_index`
+  (`read_sheets`, `read_sheets_in`, `debt_entries`, `docs_index_rows`: cards, reviews),
+  the `td_decisions::snapshot` and `adr::capture_records` / `adr::td_sheets` taken
+  BEFORE the agent runs, `adr::read_decisions`, `cross_audit::assign_td_ids` (it lists
+  the sheets by path to choose or reuse an id: a sheet's text is not copied anywhere,
+  but a swapped folder can change which id is chosen), `step_guard`'s
+  `target_snapshot` (a comparison with the pre-step state), `document_optimization::
+  kronn_owns` and `citation_drift::doc_files` (a decision, a listing that skips links).
+  None of them writes what it read; the claim of this document is only about the
+  families listed under "Callers", not that no read in the code base is by path.
 - Files a spawned `git` or an agent writes by path. The `git mv` of `docs_migration`
-  is one (its paths are checked first and its fallback is rooted). So is the
-  `git checkout <head> -- <file>` of `step_remit::restore_from_head`, which puts a
-  tracked file of another AI-doc folder back: the bytes it replaces are read through
-  the primitive first (a linked parent makes that read fail and no checkout runs),
-  but git's own write is git's; git itself refuses to write beyond a symlink in the
-  leading path.
+  is one (its paths are checked first and its fallback is rooted). The put-back of a
+  file from HEAD in `step_remit` is no longer one (round 4: bytes from `cat-file`,
+  written through the primitive).
 - Other by-path writers that never call `fs_guard`: `root_agent_files::inject_or_update`,
   `skills`, `profiles`; in `full.rs` the audit-cancel cleanup (`remove_dir_all` of an
   empty docs folder after `classify_docs_dir_for_cancel`, and the removal of a leftover
@@ -185,10 +236,12 @@ outside the root.
   submodule parent folders. `learning_doc.rs`, `context_files.rs` and `mcp_scanner.rs`
   also write by path; they are routes and settings writers, not run right after an
   agent, so they are outside this round's scope, not covered either.
-- A `tech-debt/` folder that is itself a link: the resync and the ADR settlement
-  refuse it (`guarded_list` / `guarded_read` error), `td_decisions::restore` aborts
-  on it; the by-path read-only views treat it as empty. The containment of every
-  write never depends on those readings.
+- A `tech-debt/` folder that is itself a link: the resync, the ADR settlement and
+  `td_decisions::restore` refuse it (`guarded_list` / `guarded_read` error); the by-path
+  read-only views listed above treat it as empty. The containment of every write never
+  depends on those readings.
+- The pre-agent callers of `ensure_local_git_exclude` (see its entry above) follow git's
+  answer; they never run after an agent.
 - `template_reinstall` applies the template's file renames before it writes
   (`apply_renames_in`); a later failure rolls back the files it wrote, not those
   renames.

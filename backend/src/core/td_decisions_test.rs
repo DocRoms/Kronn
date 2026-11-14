@@ -231,7 +231,9 @@ mod swapped_folder {
         swap_probe::arm_after(&docs.join("tech-debt"), external.path(), 1);
         let outcome = restore(docs.parent().unwrap(), &docs, &snap);
         assert!(swap_probe::fired(), "the swap really happened");
-        assert!(outcome.is_ok(), "{outcome:?}");
+        // The pass after the write finds `tech-debt/` a link: its listing is
+        // refused (an error, never "no sheets"), the restore itself landed.
+        assert!(outcome.is_err(), "{outcome:?}");
         assert_nothing_outside(external.path());
         // The write went to the folder the call held (moved, still in the project).
         assert_eq!(
@@ -258,7 +260,8 @@ mod swapped_folder {
         swap_probe::arm_after(&docs.join("tech-debt"), external.path(), 1);
         let outcome = restore(docs.parent().unwrap(), &docs, &snap);
         assert!(swap_probe::fired(), "the swap really happened");
-        assert_eq!(outcome.unwrap().reverted, vec!["TD-1-rej"]);
+        // The duplicate pass that follows finds `tech-debt/` a link: refused.
+        assert!(outcome.is_err(), "{outcome:?}");
         assert_nothing_outside(external.path());
         let held = std::fs::read_to_string(docs.join("tech-debt.moved/TD-1-rej.md")).unwrap();
         assert_eq!(td_decision(&held), Some(TdDecision::Rejected));
@@ -413,13 +416,105 @@ mod swapped_folder {
         std::os::unix::fs::symlink(external.path(), docs.join("tech-debt")).unwrap();
         // The decided sheet is "missing" through the link: refused, not recreated.
         assert!(restore(docs.parent().unwrap(), &docs, &snap).is_err());
-        // With nothing decided only the listing runs: it sees no sheet in a link.
+        // With nothing decided only the listing runs: a refused listing is an
+        // error (KT-1595, Argon-3), not "no sheet".
         let outcome = restore(docs.parent().unwrap(), &docs, &DecisionSnapshot::default());
-        assert!(outcome.unwrap().is_empty());
+        assert!(outcome.is_err(), "{outcome:?}");
         for (name, text) in &foreign {
             let kept = std::fs::read_to_string(external.path().join(name)).unwrap();
             assert_eq!(&kept, text);
         }
+    }
+
+    /// KT-1595 (Argon-3): a refused listing aborts the duplicate-flagging pass;
+    /// it is never mapped to "no sheets".
+    #[test]
+    fn a_refused_listing_aborts_the_duplicate_pass() {
+        let (_dir, docs) = setup();
+        std::fs::remove_dir_all(docs.join("tech-debt")).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external.path().join("TD-9-dup.md"),
+            sheet("Verified in source", "src/a.rs", "Unsafe call"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(external.path(), docs.join("tech-debt")).unwrap();
+        let outcome = restore(docs.parent().unwrap(), &docs, &DecisionSnapshot::default());
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+
+    /// KT-1595 (Argon-3): a link at an UNDECIDED sheet's name is skipped and
+    /// reported by the duplicate pass; the file behind it is never rewritten.
+    #[test]
+    fn a_link_at_an_undecided_sheet_is_skipped_and_reported() {
+        let (_dir, docs) = setup();
+        write(
+            &docs,
+            "TD-1-rej",
+            &sheet("Rejected", "src/a.rs", "Unsafe call"),
+        );
+        let snap = snapshot(&docs);
+        let external = tempfile::tempdir().unwrap();
+        let victim = external.path().join("victim.md");
+        std::fs::write(
+            &victim,
+            sheet("Verified in source", "src/a.rs", "Unsafe call"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&victim, docs.join("tech-debt/TD-9-dup.md")).unwrap();
+        write(
+            &docs,
+            "TD-8-dup",
+            &sheet("Verified in source", "src/a.rs", "Unsafe call"),
+        );
+        let before = std::fs::read_to_string(&victim).unwrap();
+
+        let outcome = restore(docs.parent().unwrap(), &docs, &snap).unwrap();
+
+        let refused: Vec<&str> = outcome.refused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(refused, vec!["TD-9-dup"], "{outcome:?}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), before);
+        assert!(read(&docs, "TD-8-dup").contains(DUPLICATE_FIELD));
+    }
+
+    /// A decided sheet that is no longer text is skipped and reported: the
+    /// other reverted decisions are still put back.
+    #[test]
+    fn a_non_utf8_decided_sheet_is_skipped_and_the_others_still_come_back() {
+        let (_dir, docs) = setup();
+        write(
+            &docs,
+            "TD-1-rej",
+            &sheet("Rejected", "src/a.rs", "Unsafe call"),
+        );
+        write(
+            &docs,
+            "TD-2-rej",
+            &sheet("Rejected", "src/b.rs", "Another call"),
+        );
+        let snap = snapshot(&docs);
+        std::fs::write(docs.join("tech-debt/TD-1-rej.md"), [0xff, 0xfe, 0x00]).unwrap();
+        write(
+            &docs,
+            "TD-2-rej",
+            &sheet("Verified in source", "src/b.rs", "Another call"),
+        );
+
+        let outcome = restore(docs.parent().unwrap(), &docs, &snap).unwrap();
+
+        let refused: Vec<&str> = outcome.refused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(refused, vec!["TD-1-rej"], "{outcome:?}");
+        assert_eq!(outcome.reverted, vec!["TD-2-rej"]);
+        assert_eq!(
+            td_decision(&read(&docs, "TD-2-rej")),
+            Some(TdDecision::Rejected)
+        );
+        assert_eq!(
+            std::fs::read(docs.join("tech-debt/TD-1-rej.md")).unwrap(),
+            [0xff, 0xfe, 0x00],
+            "the non-text sheet is left as it is"
+        );
     }
 
     #[test]

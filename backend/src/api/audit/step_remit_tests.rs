@@ -337,6 +337,83 @@ fn a_restore_never_writes_through_an_ai_folder_swapped_for_a_link() {
     );
 }
 
+/// KT-1595 (Argon-2) — a file that was CLEAN before the step goes back from
+/// HEAD without git writing its path: an AI-doc folder swapped for a link never
+/// receives the HEAD content.
+#[cfg(unix)]
+#[test]
+fn a_put_back_from_head_never_writes_through_an_ai_folder_swapped_for_a_link() {
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    let victim = swap_docs_for_a_link(dir.path());
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(
+        read(victim.path(), "tech-debt/TD-1.md"),
+        "victim content\n",
+        "the folder behind the link is untouched"
+    );
+    assert!(report.reverted.is_empty(), "{report:?}");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("docs/tech-debt/TD-1.md") && w.contains("could not be restored")),
+        "the refusal is reported: {report:?}"
+    );
+}
+
+/// KT-1595 (Argon-2) — the swap lands between the read of the current bytes and
+/// the write of the HEAD blob: the content goes to the folder the call holds.
+#[cfg(unix)]
+#[test]
+fn a_folder_swapped_right_before_the_put_back_from_head_never_receives_it() {
+    use crate::core::fs_guard::swap_probe;
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    let victim = tempfile::tempdir().unwrap();
+    // The keep of the current bytes comes first; the swap fires on the write.
+    swap_probe::arm_after(&dir.path().join("docs/tech-debt"), victim.path(), 1);
+
+    let _ = remit.settle_blocking();
+
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert_eq!(std::fs::read_dir(victim.path()).unwrap().count(), 0);
+    assert_eq!(
+        read(dir.path(), "docs/tech-debt.moved/TD-1.md"),
+        "td one\n",
+        "the HEAD content went to the folder that was held"
+    );
+}
+
+/// KT-1595 (Argon-2) — the executable bit git records comes back with the
+/// content.
+#[cfg(unix)]
+#[test]
+fn a_put_back_from_head_restores_the_recorded_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = repo();
+    let path = dir.path().join("docs/tech-debt/TD-1.md");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "exec"]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let report = remit.settle_blocking();
+
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    assert_eq!(report.reverted.len(), 1, "{report:?}");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+}
+
 /// KT-1595 — a pre-step "deleted" state must not delete the file of the folder
 /// behind the swapped link.
 #[cfg(unix)]

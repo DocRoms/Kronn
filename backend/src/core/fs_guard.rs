@@ -68,19 +68,25 @@
 //! `assert_contained_no_symlink` / `docs_location::contained_dir` /
 //! `docs_location::guard_write` and writes it by itself (the read-only ones
 //! are fine); READS by path (`resolve_contained_read` canonicalizes, a swap
-//! after it can still be read through; the read-only views of `td_index`
-//! (`read_sheets_in`, `debt_entries`, `docs_index_rows`), the `td_decisions`
-//! snapshot taken BEFORE an agent runs and `adr::read_decisions` are by path,
-//! because nothing is written from them); the files a spawned `git` or an
-//! agent process writes by path (the `git checkout` that `step_remit` runs to
-//! put a file back from HEAD is one); and by-path writers that never call this
-//! module: `root_agent_files::inject_or_update`, `skills`, `profiles`, the
-//! audit-cancel cleanup of `full.rs` (`remove_dir_all` of an empty docs folder,
-//! removal of an `ai` link), `learning_doc`, `context_files` and `mcp_scanner`
-//! (the last three are routes, not run after an agent), and in `worktree` the
-//! copy of the untracked files into a new checkout and the submodule parent
-//! folders. The `info/exclude` append of `worktree::ensure_local_git_exclude`
-//! IS rooted now (at the git directory git names).
+//! after it can still be read through). The reads whose content is written
+//! back into a project after an agent ran go through `guarded_read` /
+//! `guarded_list`; the ones that stay by path write nothing from what they
+//! read: the read-only views of `td_index` (`read_sheets_in`, `debt_entries`,
+//! `docs_index_rows`), the `td_decisions` snapshot and `adr::capture_records`
+//! taken BEFORE an agent runs, `adr::read_decisions`, the sheet listing of
+//! `cross_audit::assign_td_ids` (it picks an id), `step_guard::target_snapshot`
+//! and `citation_drift::doc_files`. Also not covered: the files a spawned `git`
+//! or an agent process writes by path (the `git mv` of `docs_migration`); and
+//! by-path writers that never call this module: `root_agent_files::inject_or_update`,
+//! `skills`, `profiles`, the audit-cancel cleanup of `full.rs` (`remove_dir_all`
+//! of an empty docs folder, removal of an `ai` link), `learning_doc`,
+//! `context_files` and `mcp_scanner` (the last three are routes, not run after
+//! an agent), and in `worktree` the copy of the untracked files into a new
+//! checkout and the submodule parent folders. The `info/exclude` write is
+//! rooted: `worktree::ensure_local_git_exclude_pinned` (after an agent) writes
+//! only `<repo>/.git/info/exclude` and refuses a `.git` file, a link or a
+//! `commondir`; `worktree::ensure_local_git_exclude` (before an agent) follows
+//! the git directory git names, rooted there.
 //!
 //! Windows (residual risk, owner decision amending the KT-1595 DoD): there
 //! is no directory-fd API in use here, so every `guarded_*` write keeps the

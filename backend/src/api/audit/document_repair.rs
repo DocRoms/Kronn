@@ -20,7 +20,15 @@ pub(super) fn snapshot(project: &Path) -> Result<Snapshot, String> {
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .replace('\\', "/");
-            let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            // Through the project's fds (KT-1595): a snapshot is copied into
+            // `.kronn/audit` (`snapshot_for_recovery`), so a file swapped for a
+            // link after `document_paths` listed it is refused, never read.
+            let content = crate::core::fs_guard::guarded_read(project, &path)
+                .map_err(|e| format!("{relative}: {e}"))?
+                .ok_or_else(|| format!("{relative}: no such file"))
+                .and_then(|bytes| {
+                    String::from_utf8(bytes).map_err(|e| format!("{relative}: {e}"))
+                })?;
             Ok((relative, content))
         })
         .collect()
@@ -681,7 +689,13 @@ pub(super) fn demote_last_attempt(
         if !document_optimization::kronn_owns(project, path) {
             return Ok(Vec::new());
         }
-        let original = std::fs::read_to_string(project.join(path)).map_err(|e| e.to_string())?;
+        // Read through the project's fds (KT-1595): `original` is written back
+        // (the undo path, the preserved copy), so a doc planted or swapped as a
+        // link must be refused, never copied from outside the project.
+        let original = crate::core::fs_guard::guarded_read(project, &project.join(path))
+            .map_err(|e| format!("{path}: {e}"))?
+            .ok_or_else(|| format!("{path}: no such file"))
+            .and_then(|bytes| String::from_utf8(bytes).map_err(|e| format!("{path}: {e}")))?;
         let Some(demotion) = document_optimization::demote_unverifiable(project, path, &original)
         else {
             return Ok(Vec::new());
@@ -2293,7 +2307,9 @@ mod tests {
         let text = "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] in prod.\n";
         let (dir, blocking) = docroms(text);
         let external = tempfile::tempdir().unwrap();
-        swap_probe::arm(&dir.path().join("docs"), external.path());
+        // The document is read first (one guarded call under `docs`); the swap
+        // lands on the write.
+        swap_probe::arm_after(&dir.path().join("docs"), external.path(), 1);
         let result = demote_last_attempt(dir.path(), &blocking, None, &|| true);
         assert!(swap_probe::fired(), "the swap really happened");
         // The write goes to the folder it held (moved, still inside the
@@ -2313,6 +2329,58 @@ mod tests {
         // cannot write the original back outside either.
         let demoted = result.expect("a swapped folder is not an error of the demotion");
         assert!(demoted.is_empty(), "{demoted:?}");
+    }
+
+    /// KT-1595 (N1): the document is read through the project's fds. With the
+    /// docs folder swapped for a link when it is opened, the demotion fails
+    /// closed: nothing of what the link points at is read into the project.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_document_read_while_the_docs_folder_is_swapped_is_never_taken_from_outside() {
+        use crate::core::fs_guard::swap_probe;
+        let text = "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] in prod.\n";
+        let (dir, blocking) = docroms(text);
+        let external = tempfile::tempdir().unwrap();
+        let outside = "# OUTSIDE SECRET [src: file: nowhere/at/all.rs]\n";
+        std::fs::write(external.path().join("tech-debt.md"), outside).unwrap();
+        swap_probe::arm(&dir.path().join("docs"), external.path());
+        let result = demote_last_attempt(dir.path(), &blocking, None, &|| true);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("tech-debt.md")).unwrap(),
+            outside
+        );
+        // Nothing of it was preserved inside the project either.
+        let preserved = dir.path().join(".kronn");
+        let leaked = walkdir::WalkDir::new(&preserved)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|c| c.contains("OUTSIDE SECRET")));
+        assert!(!leaked, "no outside byte reached the project");
+    }
+
+    /// KT-1595 (N1): the recovery snapshot is copied into `.kronn/audit`; a
+    /// link planted at a document is refused, never read.
+    #[cfg(unix)]
+    #[test]
+    fn a_snapshot_never_reads_a_document_that_is_a_link() {
+        let (dir, _blocking) = docroms("# T\n\nplain\n");
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("secret.md"), "# OUTSIDE SECRET\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("secret.md"),
+            dir.path().join("docs/linked.md"),
+        )
+        .unwrap();
+        let snap = snapshot(dir.path());
+        // A link is not a document (the listing skips it), and a read through
+        // one is refused: either way no outside byte is in the snapshot.
+        match snap {
+            Ok(map) => assert!(map.values().all(|c| !c.contains("OUTSIDE SECRET"))),
+            Err(e) => assert!(!e.contains("OUTSIDE SECRET")),
+        }
     }
 
     #[test]

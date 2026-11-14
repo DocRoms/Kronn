@@ -3243,54 +3243,14 @@ pub async fn full_audit(
             // step left stale on disk never masquerades as freshly emitted.
             let recon_index_files: Vec<String> = freshly_written_indices.clone();
             let recon_outcome = tokio::task::spawn_blocking(move || {
-                use super::reconciliation::{
-                    check_signature_in_source, classify, compute_delta_with_index,
-                    parse_index_td_ids, render_report, DeltaKind,
-                };
-                // Index-aware delta (fix 2026-06-03): a prior whose id is still
-                // listed in a freshly-written index is `Carried` (re-emitted),
-                // NOT a `Missed` candidate. Without this, Step 8's anti-repetition
-                // (keep correct detail files verbatim) made every re-listed prior
-                // look "missed".
-                let still_listed: std::collections::HashSet<String> = recon_index_files
-                    .iter()
-                    .filter_map(|f| std::fs::read_to_string(project_path_for_recon.join(f)).ok())
-                    .flat_map(|c| parse_index_td_ids(&c))
-                    .collect();
-                // Rejected findings and accepted trade-offs leave the index on
-                // purpose: they are not reconciliation candidates.
-                let snapshot: Vec<_> = snapshot
-                    .into_iter()
-                    .filter(|snap| {
-                        std::fs::read_to_string(&snap.path)
-                            .ok()
-                            .and_then(|c| crate::core::audit_validation::td_decision(&c))
-                            .is_none_or(|decision| !decision.leaves_index())
-                    })
-                    .collect();
-                let deltas = compute_delta_with_index(&snapshot, &still_listed);
-                let project_path_for_check = project_path_for_recon.clone();
-                let entries = classify(
-                    &deltas,
-                    Utc::now(),
-                    90,
-                    |snap| check_signature_in_source(snap, &project_path_for_check),
-                );
-                let today = Utc::now().format("%Y-%m-%d").to_string();
-                let report = render_report(&entries, &today, "Full");
-                let report_path = crate::core::docs_location::DocsRoot::of(&project_path_for_recon)
-                    .file(&project_path_for_recon, "tech-debt")
-                    .join(format!("_reconciliation-{}.md", today));
-                // Re-emitted priors (Updated refreshed OR Carried re-listed) are
-                // healthy, not candidates.
-                let candidates = entries
-                    .iter()
-                    .filter(|e| !matches!(e.delta, DeltaKind::Updated | DeltaKind::Carried))
-                    .count();
-                let updated = entries.len() - candidates;
-                (report_path, report, candidates, updated)
+                build_reconciliation(&project_path_for_recon, &recon_index_files, snapshot)
             })
-            .await;
+            .await
+            .map_err(|e| format!("panicked: {e}"))
+            .and_then(|built| built);
+            if let Err(e) = &recon_outcome {
+                tracing::warn!("Reconciliation skipped: {e} — audit continues");
+            }
 
             if let Ok((report_path, report, candidates, updated)) = recon_outcome {
                 // Through the rooted primitive (KT-1595): the report lands in a
@@ -5226,6 +5186,62 @@ pub(crate) fn compute_cluster_recommendations(
 /// after the agents ran, in a folder a leftover process may have swapped for a
 /// link. A link at the report name or in a parent is replaced or refused,
 /// never written through.
+/// The reconciliation report of a complete full audit: `(report path, text,
+/// candidates, updated)`. Every file it reads — the indices the run wrote, the
+/// pre-audit sheets, the source a pointer names — is read AFTER the agents ran,
+/// through the project's directory fds (KT-1595): a link at one of them, or in
+/// a parent, is an ERROR (no report, the audit carries on), never a read of an
+/// outside file.
+fn build_reconciliation(
+    project_path: &std::path::Path,
+    index_files: &[String],
+    snapshot: Vec<super::reconciliation::TdSnapshot>,
+) -> Result<(std::path::PathBuf, String, usize, usize), String> {
+    use super::reconciliation::{
+        check_signature_in_source, classify, compute_delta_with_index, parse_index_td_ids,
+        read_text_strict, render_report, DeltaKind,
+    };
+    // Index-aware delta (fix 2026-06-03): a prior whose id is still
+    // listed in a freshly-written index is `Carried` (re-emitted),
+    // NOT a `Missed` candidate. Without this, Step 8's anti-repetition
+    // (keep correct detail files verbatim) made every re-listed prior
+    // look "missed".
+    let mut still_listed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for file in index_files {
+        if let Some(content) = read_text_strict(project_path, &project_path.join(file))? {
+            still_listed.extend(parse_index_td_ids(&content));
+        }
+    }
+    // Rejected findings and accepted trade-offs leave the index on
+    // purpose: they are not reconciliation candidates.
+    let mut kept = Vec::with_capacity(snapshot.len());
+    for snap in snapshot {
+        let settled = read_text_strict(project_path, &snap.path)?
+            .and_then(|c| crate::core::audit_validation::td_decision(&c))
+            .is_some_and(|decision| decision.leaves_index());
+        if !settled {
+            kept.push(snap);
+        }
+    }
+    let deltas = compute_delta_with_index(&kept, &still_listed);
+    let entries = classify(&deltas, Utc::now(), 90, |snap| {
+        check_signature_in_source(snap, project_path)
+    });
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    let report = render_report(&entries, &today, "Full");
+    let report_path = crate::core::docs_location::DocsRoot::of(project_path)
+        .file(project_path, "tech-debt")
+        .join(format!("_reconciliation-{}.md", today));
+    // Re-emitted priors (Updated refreshed OR Carried re-listed) are
+    // healthy, not candidates.
+    let candidates = entries
+        .iter()
+        .filter(|e| !matches!(e.delta, DeltaKind::Updated | DeltaKind::Carried))
+        .count();
+    let updated = entries.len() - candidates;
+    Ok((report_path, report, candidates, updated))
+}
+
 fn write_reconciliation_report(
     project_path: &std::path::Path,
     report_path: &std::path::Path,
@@ -5292,6 +5308,88 @@ mod reconciliation_report_tests {
 
         assert!(write_reconciliation_report(&root, &report, REPORT).is_err());
         assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+    }
+
+    // KT-1595 (N4): the reconciliation READS the indices, the pre-audit sheets
+    // and the sources after the agents ran: a link is an error, never a read.
+    use super::super::reconciliation::TdSnapshot;
+    use super::build_reconciliation;
+
+    fn snapshot_of(root: &std::path::Path, id: &str) -> TdSnapshot {
+        TdSnapshot {
+            path: root.join(format!("docs/tech-debt/{id}.md")),
+            id: id.to_string(),
+            content_hash: "h".into(),
+            mtime: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn an_index_that_is_a_link_stops_the_reconciliation() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("index.md"), "| TD-1-x | outside |\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("index.md"),
+            root.join("docs/inconsistencies-security.md"),
+        )
+        .unwrap();
+
+        let built = build_reconciliation(
+            &root,
+            &["docs/inconsistencies-security.md".to_string()],
+            Vec::new(),
+        );
+
+        assert!(built.is_err(), "{built:?}");
+    }
+
+    #[test]
+    fn a_pre_audit_sheet_that_is_a_link_stops_the_reconciliation() {
+        let (_tmp, root) = project();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("sheet.md"), "# outside\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("sheet.md"),
+            root.join("docs/tech-debt/TD-1-x.md"),
+        )
+        .unwrap();
+
+        let built = build_reconciliation(&root, &[], vec![snapshot_of(&root, "TD-1-x")]);
+
+        assert!(built.is_err(), "{built:?}");
+    }
+
+    #[test]
+    fn an_index_read_after_a_swap_of_docs_is_the_folder_that_was_held() {
+        use crate::core::fs_guard::swap_probe;
+        let (_tmp, root) = project();
+        std::fs::write(
+            root.join("docs/inconsistencies-security.md"),
+            "| ID | Problem |\n|---|---|\n| TD-1-x | real |\n",
+        )
+        .unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external.path().join("inconsistencies-security.md"),
+            "| TD-9-outside | OUTSIDE |\n",
+        )
+        .unwrap();
+        swap_probe::arm(&root.join("docs"), external.path());
+
+        let built = build_reconciliation(
+            &root,
+            &["docs/inconsistencies-security.md".to_string()],
+            Vec::new(),
+        );
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        // The read held the real folder; the rest of the pass finds `docs` a
+        // link and refuses or reads nothing — never the outside index.
+        if let Ok((_, report, _, _)) = built {
+            assert!(!report.contains("TD-9-outside"), "{report}");
+        }
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
     }
 }
 

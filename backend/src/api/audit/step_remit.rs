@@ -574,10 +574,40 @@ impl StepRemit {
             // Added by the step itself: not content the user had.
             return Ok(None);
         }
+        // KT-1595: git never writes the path. The blob's bytes are read with
+        // `cat-file` and written through the rooted primitive (a link at the
+        // name or in a parent is replaced or refused, never written through),
+        // as the pre-step content is in `restore_content`. A link or a
+        // submodule at HEAD is not bytes to write: refused, left as it is.
+        let mode = self.head_file_mode(rel)?;
+        let bytes = git(&self.project, &["cat-file", "blob", &spec]).ok_or_else(|| {
+            format!("the content of `{rel}` at the recorded commit is unreadable")
+        })?;
         let blob = self.keep_current(rel)?;
-        git(&self.project, &["checkout", &self.head, "--", rel])
-            .map(|_| Some(blob))
-            .ok_or_else(|| "git checkout failed".to_string())
+        let path = self.project.join(rel);
+        crate::core::fs_guard::guarded_replace(&self.project, &path, &bytes)?;
+        #[cfg(unix)]
+        crate::core::fs_guard::guarded_set_mode(&self.project, &path, mode)?;
+        #[cfg(not(unix))]
+        let _ = mode;
+        Ok(Some(blob))
+    }
+
+    /// The permission bits git records for `rel` at the recorded commit
+    /// (`0o755` or `0o644`); an error for a link, a submodule or anything else
+    /// that is not a plain file.
+    fn head_file_mode(&self, rel: &str) -> Result<u32, String> {
+        let listing = git(&self.project, &["ls-tree", "-z", &self.head, "--", rel])
+            .ok_or_else(|| format!("`{rel}` could not be looked up at the recorded commit"))?;
+        let listing = String::from_utf8_lossy(&listing);
+        match listing.split_whitespace().next() {
+            Some("100644") => Ok(0o644),
+            Some("100755") => Ok(0o755),
+            other => Err(format!(
+                "`{rel}` is not a plain file at the recorded commit (mode {}); left as it is",
+                other.unwrap_or("unknown")
+            )),
+        }
     }
 
     fn restore_content(

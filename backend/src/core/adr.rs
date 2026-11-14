@@ -405,8 +405,36 @@ pub fn decision_record(content: &str) -> Option<String> {
 /// run started.
 pub type Records = BTreeSet<(String, String)>;
 
-/// Every `<docs>/tech-debt/TD-*.md` sheet, sorted by id.
-/// Empty when `tech-debt/` is a link: a sheet must live in the repository.
+/// Every `<docs>/tech-debt/TD-*.md` sheet, sorted by id, listed through the
+/// project's directory fds (KT-1595): a link at `tech-debt/` or in a parent —
+/// planted, or swapped in after an agent ran — is an ERROR, never "no sheets"
+/// (a sheet must live in the repository, and a refusal must not read as a clean
+/// project). A missing folder lists nothing.
+fn td_sheets_guarded(
+    root: &Path,
+    docs_dir: &Path,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let td_dir = docs_dir.join("tech-debt");
+    let names = match crate::core::fs_guard::guarded_list(root, &td_dir) {
+        Ok(Some(names)) => names,
+        Ok(None) => return Ok(Vec::new()),
+        Err(e) => return Err(format!("list {}: {e}", td_dir.display())),
+    };
+    let mut sheets: Vec<(String, std::path::PathBuf)> = names
+        .iter()
+        .filter_map(|name| {
+            let id = name.to_str()?.strip_suffix(".md")?.to_string();
+            crate::core::td_index::is_td_id(&id).then(|| (id, td_dir.join(name)))
+        })
+        .collect();
+    sheets.sort();
+    Ok(sheets)
+}
+
+/// Every `<docs>/tech-debt/TD-*.md` sheet, sorted by id, by path: for the
+/// capture taken BEFORE an agent runs, which writes nothing. Empty when
+/// `tech-debt/` is a link: a sheet must live in the repository. After an agent
+/// use [`td_sheets_guarded`].
 fn td_sheets(docs_dir: &Path) -> Vec<(String, std::path::PathBuf)> {
     let td_dir = docs_dir.join("tech-debt");
     if !crate::core::td_index::is_real_dir(&td_dir) {
@@ -755,9 +783,17 @@ pub fn settle_covered_sheets(
             .map(Adr::reference)
             .collect();
     }
-    for (id, path) in td_sheets(docs_dir) {
-        let Ok(Some(content)) = read_guarded(root, &path) else {
-            continue;
+    for (id, path) in td_sheets_guarded(root, docs_dir)? {
+        // A link at a sheet (or a swapped folder) is an error; a sheet that is
+        // a folder, or not text, is skipped.
+        let content = match crate::core::fs_guard::guarded_read(root, &path) {
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(content) => content,
+                Err(_) => continue,
+            },
+            Ok(None) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => continue,
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
         match coverage(&id, &content, &adrs, Some(&records)) {
             Coverage::Covered(adr) => {

@@ -1447,19 +1447,14 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
 /// Ignore Kronn's machine-owned checkout directory without editing the user's
 /// tracked `.gitignore`. Provisioning must not make the target dirty itself — a
 /// dirty target is (correctly) refused later by the integration preflight.
+///
+/// The exclude file is the one git NAMES (`rev-parse --git-path`), which
+/// follows `.git/commondir` and a `.git` file's `gitdir:` — files an agent can
+/// write. Use this entry point only where no agent has touched the checkout yet
+/// (worktree provisioning, the worker environment). Code that runs after an
+/// agent uses [`ensure_local_git_exclude_pinned`].
 pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
-    // Already ignored (a committed rule, or a previous run): write nothing.
-    if crate::core::cmd::git_cmd()
-        .args([
-            "check-ignore",
-            "-q",
-            "--no-index",
-            pattern.trim_start_matches('/'),
-        ])
-        .current_dir(repo_path)
-        .status()
-        .is_ok_and(|status| status.success())
-    {
+    if already_ignored(repo_path, pattern) {
         return Ok(());
     }
     let output = crate::core::cmd::git_cmd()
@@ -1485,16 +1480,81 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
             repo_path.join(path)
         }
     };
-    // KT-1595: this is reached from every audit-state write, seconds after an
-    // agent ran. The read and the write go through the rooted primitive under
-    // the git directory git itself named (`<git dir>/info/exclude`): a link at
-    // `exclude`, at `info`, or swapped in for either after the walk, is
-    // refused — nothing is read, created nor appended outside the git dir.
+    // The git directory git itself named (`<git dir>/info/exclude`) is the
+    // root: a link at `exclude` or `info`, or swapped in for either, is refused.
     let git_dir = exclude
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| format!("{} is not inside a git directory", exclude.display()))?;
-    let existing = match crate::core::fs_guard::guarded_read(git_dir, &exclude) {
+    write_local_exclude(git_dir, &exclude, pattern)
+}
+
+/// Whether git already ignores `pattern` (a committed rule, or a previous run):
+/// then nothing is written.
+fn already_ignored(repo_path: &Path, pattern: &str) -> bool {
+    crate::core::cmd::git_cmd()
+        .args([
+            "check-ignore",
+            "-q",
+            "--no-index",
+            pattern.trim_start_matches('/'),
+        ])
+        .current_dir(repo_path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// [`ensure_local_git_exclude`] for code that runs AFTER an agent (every audit
+/// state write, the removal preflight): the agent can write `.git/commondir`
+/// and a `.git` file's `gitdir:`, so git's answer is not trusted. The exclude
+/// is `<repo>/.git/info/exclude` only, reached through the rooted primitive
+/// from the repo (a link at `.git`, `info` or `exclude`, planted or swapped in,
+/// is refused), and only when `.git` is a plain directory that holds no
+/// `commondir`. A linked worktree (a `.git` FILE) or a repo with a `commondir`
+/// is refused with an error, never followed: the exclude of a linked worktree
+/// is the main repository's, written when the worktree was provisioned.
+pub(crate) fn ensure_local_git_exclude_pinned(
+    repo_path: &Path,
+    pattern: &str,
+) -> Result<(), String> {
+    if already_ignored(repo_path, pattern) {
+        return Ok(());
+    }
+    let git_dir = repo_path.join(".git");
+    match std::fs::symlink_metadata(&git_dir) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(format!(
+                "{} is not a plain git directory (a link or a `gitdir:` file): its pointer is not trusted after an agent ran",
+                git_dir.display()
+            ))
+        }
+        Err(error) => return Err(format!("cannot inspect {}: {error}", git_dir.display())),
+    }
+    let commondir = git_dir.join("commondir");
+    match crate::core::fs_guard::guarded_read(repo_path, &commondir) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return Err(format!(
+                "{} exists: a main git directory has no `commondir`, its pointer is not trusted",
+                commondir.display()
+            ))
+        }
+        Err(error) => {
+            return Err(format!(
+                "refusing to inspect {}: {error}",
+                commondir.display()
+            ))
+        }
+    }
+    write_local_exclude(repo_path, &git_dir.join("info").join("exclude"), pattern)
+}
+
+/// Appends `pattern` to the exclude file `exclude` (created when missing)
+/// through the rooted primitive under `root` (KT-1595): nothing is read,
+/// created or appended outside `root`.
+fn write_local_exclude(root: &Path, exclude: &Path, pattern: &str) -> Result<(), String> {
+    let existing = match crate::core::fs_guard::guarded_read(root, exclude) {
         Ok(existing) => existing,
         Err(error) => {
             return Err(format!(
@@ -1507,8 +1567,8 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
         // No exclude yet: create-only, so a file that appears meanwhile is
         // never overwritten.
         let created = crate::core::fs_guard::guarded_write_new(
-            git_dir,
-            &exclude,
+            root,
+            exclude,
             format!("{pattern}\n").as_bytes(),
         )
         .map_err(|error| format!("cannot create {}: {error}", exclude.display()))?;
@@ -1534,7 +1594,7 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
     updated.push('\n');
     // Optimistic on the bytes read: a concurrent change is refused, not lost.
     crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
-        git_dir, &exclude, &updated, &existing,
+        root, exclude, &updated, &existing,
     )
     .map_err(|error| format!("cannot update {}: {error}", exclude.display()))
 }
@@ -6200,6 +6260,104 @@ mod tests {
         let outcome = ensure_local_git_exclude(repo.path(), ".kronn/");
         assert!(outcome.is_err(), "{outcome:?}");
         assert_eq!(fs::read_to_string(&victim).unwrap(), "victim\n");
+    }
+
+    /// KT-1595 (N3) — after an agent, git's answer is not trusted: a planted
+    /// `.git/commondir` that names another repository's git directory makes
+    /// `rev-parse --git-path info/exclude` point there. The pinned writer
+    /// refuses; nothing is created or appended in the other repository.
+    #[cfg(unix)]
+    #[test]
+    fn the_pinned_exclude_refuses_a_planted_commondir() {
+        let repo = make_test_repo("exclude-commondir");
+        let victim = make_test_repo("exclude-commondir-victim");
+        let victim_exclude = victim.path().join(".git/info/exclude");
+        let before = fs::read_to_string(&victim_exclude).unwrap_or_default();
+        let own_before = fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+        fs::write(
+            repo.path().join(".git/commondir"),
+            victim.path().join(".git").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let outcome = ensure_local_git_exclude_pinned(repo.path(), ".kronn/");
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(
+            outcome.unwrap_err().contains("commondir"),
+            "the refusal names the pointer"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim_exclude).unwrap_or_default(),
+            before,
+            "the other repository's exclude is untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap(),
+            own_before,
+            "nor is its own exclude touched"
+        );
+    }
+
+    /// KT-1595 (N3) — the same for a `.git` FILE whose `gitdir:` the agent
+    /// rewrote (the form of a linked worktree or a submodule).
+    #[cfg(unix)]
+    #[test]
+    fn the_pinned_exclude_refuses_a_gitdir_pointer_file() {
+        let repo = make_test_repo("exclude-gitdir");
+        let victim = make_test_repo("exclude-gitdir-victim");
+        let victim_exclude = victim.path().join(".git/info/exclude");
+        let before = fs::read_to_string(&victim_exclude).unwrap_or_default();
+        let aside = repo.path().join(".git.aside");
+        fs::rename(repo.path().join(".git"), &aside).unwrap();
+        fs::write(
+            repo.path().join(".git"),
+            format!("gitdir: {}\n", victim.path().join(".git").display()),
+        )
+        .unwrap();
+
+        let outcome = ensure_local_git_exclude_pinned(repo.path(), ".kronn/");
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(&victim_exclude).unwrap_or_default(),
+            before,
+            "the other repository's exclude is untouched"
+        );
+    }
+
+    /// KT-1595 (N3) — a `.git` that is itself a link to another repository is
+    /// refused (the rooted walk never follows it, and neither does the lstat).
+    #[cfg(unix)]
+    #[test]
+    fn the_pinned_exclude_refuses_a_git_directory_that_is_a_link() {
+        let repo = make_test_repo("exclude-gitlink");
+        let victim = make_test_repo("exclude-gitlink-victim");
+        let victim_exclude = victim.path().join(".git/info/exclude");
+        let before = fs::read_to_string(&victim_exclude).unwrap_or_default();
+        fs::rename(repo.path().join(".git"), repo.path().join(".git.aside")).unwrap();
+        std::os::unix::fs::symlink(victim.path().join(".git"), repo.path().join(".git")).unwrap();
+
+        let outcome = ensure_local_git_exclude_pinned(repo.path(), ".kronn/");
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(&victim_exclude).unwrap_or_default(),
+            before
+        );
+    }
+
+    #[test]
+    fn the_pinned_exclude_keeps_its_lines_and_adds_the_pattern_once() {
+        let repo = make_test_repo("exclude-pinned");
+        let exclude = repo.path().join(".git/info/exclude");
+        fs::write(&exclude, "# mine\n*.log").unwrap();
+        ensure_local_git_exclude_pinned(repo.path(), ".kronn/").unwrap();
+        ensure_local_git_exclude_pinned(repo.path(), ".kronn/").unwrap();
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            "# mine\n*.log\n.kronn/\n"
+        );
     }
 
     #[test]

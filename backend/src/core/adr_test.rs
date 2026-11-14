@@ -605,7 +605,10 @@ mod swapped_folder {
         swap_probe::arm_after(&docs, external.path(), 1);
         let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(baseline));
         assert!(swap_probe::fired(), "the swap really happened");
-        assert_eq!(outcome.unwrap().downgraded.len(), 1);
+        // The sheet listing that follows finds `docs` a link: refused (an
+        // error, never "no sheets"); the downgrade itself landed in the held
+        // folder.
+        assert!(outcome.is_err(), "{outcome:?}");
         assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
         let moved = docs.parent().unwrap().join("docs.moved");
         let held = fs::read_to_string(moved.join(DECISIONS_FILE)).unwrap();
@@ -621,11 +624,48 @@ mod swapped_folder {
         fs::remove_dir_all(docs.join("tech-debt")).unwrap();
         std::os::unix::fs::symlink(external.path(), docs.join("tech-debt")).unwrap();
         let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
-        assert!(outcome.unwrap().settled.is_empty());
+        // KT-1595 (Argon-1): a refused listing is an ERROR, never "no sheets".
+        assert!(outcome.is_err(), "{outcome:?}");
         assert_eq!(
             fs::read_to_string(external.path().join(SHEET)).unwrap(),
             foreign
         );
+    }
+
+    /// KT-1595 (Argon-1): the tech-debt folder swapped for a link right when
+    /// the listing opens it is refused too (the listing is rooted, not by path).
+    #[test]
+    fn a_tech_debt_folder_swapped_before_the_listing_is_an_error() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        let foreign = sheet("TD-20261011-quality-gate-not-enforced", "foreign", "");
+        fs::write(external.path().join(SHEET), &foreign).unwrap();
+        // `decisions.md` is read first (one call under `docs`), the swap lands
+        // on the listing of `tech-debt`.
+        swap_probe::arm_after(&docs, external.path(), 1);
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(external.path().join(SHEET)).unwrap(),
+            foreign
+        );
+    }
+
+    /// KT-1595 (Argon-1): a link planted at a sheet name is an error, not a
+    /// silent `continue` — and the file behind it is not rewritten.
+    #[test]
+    fn a_linked_sheet_is_an_error_not_a_skip() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        let victim = external.path().join("victim.md");
+        let foreign = sheet("TD-20261011-quality-gate-not-enforced", "foreign", "");
+        fs::write(&victim, &foreign).unwrap();
+        fs::remove_file(docs.join("tech-debt").join(SHEET)).unwrap();
+        std::os::unix::fs::symlink(&victim, docs.join("tech-debt").join(SHEET)).unwrap();
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), foreign);
     }
 
     /// KT-1595 (Argon D): no check by path comes before the guarded read of
