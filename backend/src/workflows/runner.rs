@@ -10845,11 +10845,23 @@ mod tests {
     async fn a_cancelled_run_removes_its_worktree_and_keeps_its_commits() {
         let (state, tokens, agents) = test_state_and_configs();
         let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-cancel").await;
-        workflow.exec_allowlist = vec!["git".into(), "sleep".into()];
+        // The step announces that it is running by creating `marker`, then
+        // becomes `sleep`. The marker is the observable state the canceller
+        // awaits: it exists only once the commit step has finished and the
+        // long step is in flight, whatever the load (KT-1756). A bounded
+        // poll of the run row plus a fixed sleep used to cancel before the
+        // commit under load, leaving no branch to keep.
+        let marker_dir = tempfile::TempDir::new().unwrap();
+        let marker = marker_dir.path().join("sleeping");
+        workflow.exec_allowlist = vec!["git".into(), "sh".into()];
         let mut wait = fake_step("wait");
         wait.step_type = StepType::Exec;
-        wait.exec_command = Some("sleep".into());
-        wait.exec_args = vec!["20".into()];
+        wait.exec_command = Some("sh".into());
+        wait.exec_args = vec![
+            "-c".into(),
+            "touch \"$0\" && exec sleep 60".into(),
+            marker.to_string_lossy().to_string(),
+        ];
         workflow.steps = vec![commit_step("commit"), wait];
         let mut run = pending_run("run-end-cancel", &workflow.id);
         run.project_id = workflow.project_id.clone();
@@ -10857,20 +10869,19 @@ mod tests {
 
         let canceller = {
             let state = state.clone();
+            let marker = marker.clone();
             async move {
-                for _ in 0..500 {
-                    let committed = state
-                        .db
-                        .with_conn(|conn| crate::db::workflows::get_run(conn, "run-end-cancel"))
-                        .await
-                        .unwrap()
-                        .is_some_and(|run| !run.step_results.is_empty());
-                    if committed {
-                        break;
+                // No wall-clock assumption: the loop ends on the marker. The
+                // timeout only turns a run that never reaches the step into
+                // a failure instead of a hung suite.
+                tokio::time::timeout(std::time::Duration::from_secs(300), async {
+                    while !marker.exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                })
+                .await
+                .expect("the long step never started");
+                let cancelled_at = std::time::Instant::now();
                 crate::workflows::cancellation::cancel_run_tree(
                     &state,
                     "run-end-cancel",
@@ -10879,10 +10890,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                cancelled_at
             }
         };
-        let started = std::time::Instant::now();
-        let (result, ()) = tokio::join!(
+        let (result, cancelled_at) = tokio::join!(
             execute_run(
                 state.clone(),
                 &workflow,
@@ -10896,9 +10907,11 @@ mod tests {
             canceller,
         );
         result.expect("run");
+        // Measured from the cancel, not from the start, so a slow start under
+        // load does not count: the 60 s sleep must have been cut short.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(15),
-            "the sleep was cut short"
+            cancelled_at.elapsed() < std::time::Duration::from_secs(45),
+            "the sleep ran to its end instead of being cut short"
         );
         assert_eq!(run.status, RunStatus::Cancelled, "{:?}", run.step_results);
         assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
