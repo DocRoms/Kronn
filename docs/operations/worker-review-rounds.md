@@ -11,11 +11,11 @@ escalates on the `N+1`-th (`new_rounds > max_review_rounds`).
 `[src: file: backend/src/db/orchestration.rs:5015-5111#commit_review_checkpoint]`
 
 - **Integer:** 1 to 1000. `0` is refused at every boundary.
-  `[src: file: backend/src/models/setup.rs:339-360#parse_review_rounds_arg]`
+  `[src: file: backend/src/models/setup.rs:354-375#parse_review_rounds_arg]`
 - **Unlimited:** no cap. It is stored in the existing `NOT NULL INTEGER` columns as a **sentinel**,
   `UNLIMITED_REVIEW_ROUNDS = u32::MAX` (4294967295) — never `0`, so the `> max` comparison simply never
   fires and no migration is needed. APIs and the UI show it as `unlimited` / `∞`.
-  `[src: file: backend/src/models/setup.rs:335-337#UNLIMITED_REVIEW_ROUNDS]`
+  `[src: file: backend/src/models/setup.rs:350-352#UNLIMITED_REVIEW_ROUNDS]`
 
 Unlimited removes the **round** cap only. The escalations for real stalls (no delivery, watchdog,
 quota, integration failures) are unchanged. What it does not bound is a worker looping on a review that

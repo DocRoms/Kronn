@@ -546,7 +546,7 @@ worker's own environment predates the setting), and on a warmed lane a filtered
 load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
-[src: file: backend/src/models/setup.rs:258-265#effective_bash_timeouts_ms]
+[src: file: backend/src/models/setup.rs:269-276#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:859-869#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15176-15178#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:678-679#set_bash_timeouts]

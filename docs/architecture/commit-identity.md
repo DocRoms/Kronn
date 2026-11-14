@@ -24,13 +24,13 @@ worktree hooks). [src: file: backend/src/models/projects.rs:55#ProjectCommitSett
 `GET /api/projects/{id}/commit-policy` returns what the card shows: the saved
 settings, what the repository says by itself (`detected`), what Kronn commits with
 (`effective`), where each answer comes from, and `global_identity`.
-[src: file: backend/src/api/projects/commit_policy.rs:73#get]
+[src: file: backend/src/api/projects/commit_policy.rs:74-75#get]
 
 ## How the policy is resolved
 
 `core::commit_policy` resolves the identity and the sign-off of the repository a
 path belongs to (a linked worktree answers for its repository).
-[src: file: backend/src/core/commit_policy.rs:126#for_repo]
+[src: file: backend/src/core/commit_policy.rs:131-134#for_repo]
 
 | | Order |
 | --- | --- |
@@ -43,7 +43,7 @@ The identity reaches git as `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
 
 The merge and worker-commit code has no database, so the card's settings are
 published to the process by `register_project` — at boot (`main.rs`) and each time
-a card saves them. [src: file: backend/src/core/commit_policy.rs:209#register_project]
+a card saves them. [src: file: backend/src/core/commit_policy.rs:257-259#register_project]
 
 ## The global identity is never silent
 
