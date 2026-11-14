@@ -39,8 +39,8 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   is spent. `[src: file: backend/src/models/orchestration.rs:2038-2044#ReviewVerdict]`
   `[src: file: backend/src/models/orchestration.rs:2081-2104#ReviewDecisionV1]`
   `[src: file: backend/src/api/orchestration.rs:8982-8989#decide_review]`
-  `[src: file: backend/src/db/orchestration.rs:4865-4874#ReviewCheckpoint]`
-  `[src: file: backend/src/db/orchestration.rs:4904-4916#ReviewCheckpointOutcome]`
+  `[src: file: backend/src/db/orchestration.rs:4896-4905#ReviewCheckpoint]`
+  `[src: file: backend/src/db/orchestration.rs:4935-4947#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
   decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:15158-15170#reassign_execution]`
   `[src: file: backend/src/api/orchestration.rs:18876-18885#human_review]`
@@ -81,7 +81,7 @@ branch. Checked against the code:
   `[src: file: backend/src/api/orchestration.rs:15648-15661#principal_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:15719-15761#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:7915-7922#deliver_worker_manifest]`
-  `[src: file: backend/src/db/orchestration.rs:4817-4824#EscalationDelivery]`
+  `[src: file: backend/src/db/orchestration.rs:4848-4855#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
   `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
 

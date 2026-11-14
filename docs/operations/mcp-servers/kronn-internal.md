@@ -541,7 +541,7 @@ the reason and the previous set); nothing is relaunched and earlier validation
 results stay as evidence. It is refused while the execution is Integrating,
 Validating or Applying, once it is Done, Failed or Cancelled, and for an
 execution of a campaign run, whose gates are the campaign's shared policy.
-`[src: file: backend/src/db/orchestration.rs:7753-7846#replace_execution_validations]`
+`[src: file: backend/src/db/orchestration.rs:7784-7877#replace_execution_validations]`
 The swap is a change of `task_exec_reassign` and not a tool of its own because
 every declaration is paid for on every session (`mcp_surface_budget.py`), and
 because that tool is already the principal's amendment of a live execution:
@@ -598,7 +598,7 @@ call is refused once the worker committed or left changes since the send-back,
 or delivered again (that delivery is reviewed instead). Attempts stay monotonic:
 the re-validation does not rewind the attempt the send-back opened.
 [src: file: backend/src/api/orchestration.rs:6354-6491#send_back] [src: file: backend/src/api/orchestration.rs:13985-14062#revalidate_sent_back_execution]
-[src: file: backend/src/db/orchestration.rs:5703-5776#reopen_approval_after_rework]
+[src: file: backend/src/db/orchestration.rs:5734-5807#reopen_approval_after_rework]
 
 `task_exec_status({view: "compact"})` returns id, task, status, attempt,
 review rounds, delivered `head_sha`, last error, the latest candidate's
@@ -630,7 +630,7 @@ address the joined CLI that last launched, reviewed, resumed or reassigned it
 while that session remains in the room, so its `disc_wait_for_peer` wakes on
 them; without such a session they address the room's configured agent.
 `[src: file: backend/src/api/orchestration.rs:16938-16990#EXEC_WAIT_DEFAULT_SECS]`
-`[src: file: backend/src/db/orchestration.rs:6586-6628#pin_principal_cli_session]`
+`[src: file: backend/src/db/orchestration.rs:6617-6659#pin_principal_cli_session]`
 
 When the worker identity is not already known, call `agent_list()` first and
 copy one returned `worker` object unchanged into `task_exec_prepare`. Native

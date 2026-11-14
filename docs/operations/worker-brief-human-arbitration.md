@@ -27,7 +27,7 @@ through their actually available output and to explicitly ask the principal to
 relay it toward the parent room — without promising automatic visibility,
 guaranteed delivery, or a publication tool the surface does not declare.
 [src: file: backend/src/api/orchestration.rs:11447-11500#parent_milestones]
-[src: file: backend/src/db/orchestration.rs:8074-8118#get_execution_lineage]
+[src: file: backend/src/db/orchestration.rs:8105-8149#get_execution_lineage]
 [src: file: backend/src/api/orchestration.rs:21376-21529#worker_briefs_make_human_arbitration_and_parent_milestones_transport_aware]
 [src: file: backend/src/models/orchestration.rs:1384-1397#TaskExecutionLineage]
 

@@ -16,7 +16,7 @@ of the child.
 The terminal return path remains compatibility code for offers accepted by older
 bridges. It emits return messages only when it actually moved legacy child-owned
 state; an execution-scoped worker already in its origin is a no-op.
-[src: file: backend/src/db/orchestration.rs:6757-6800#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:6788-6831#return_cli_worker_to_origin]
 
 ## Historical pre-KT-837 recovery contract
 
@@ -94,8 +94,8 @@ do not require a return because they never transfer the session.
 [src: file: backend/src/db/sql/171_cli_worker_bindings.sql:1-11#task_execution_cli_bindings]
 [src: file: backend/src/db/worker_offers.rs:523-533#pin]
 [src: file: backend/src/db/cli_worker_bindings.rs:33-73#pin]
-[src: file: backend/src/db/orchestration.rs:6757-6764#return_cli_worker_to_origin]
-[src: file: backend/src/db/orchestration.rs:9235-9259#restore_reassigned_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:6788-6795#return_cli_worker_to_origin]
+[src: file: backend/src/db/orchestration.rs:9266-9290#restore_reassigned_cli_worker_to_origin]
 
 The return refuses a source binding or active membership moved to a third room,
 and rolls back the associated state transition. An explicitly unlinked known

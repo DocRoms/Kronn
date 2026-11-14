@@ -20,7 +20,7 @@ itself is stopped.
   refuse, allow for this discussion, or allow for the project. An answer that
   allows records the grant and resumes the integration on its own. Only a
   message Kronn posted counts, and no agent token can answer it.
-  [src: file: backend/src/db/orchestration.rs:4122-4177#record_docker_elevation]
+  [src: file: backend/src/db/orchestration.rs:4153-4208#record_docker_elevation]
 - A project's validations reach is a human setting, in the project's settings:
   sandbox only (default), Docker allowed (the sandbox plus the resolved Docker
   socket, nothing else), or full access (no sandbox, behind a warning).

@@ -13,9 +13,9 @@ get SIGTERM, then SIGKILL, and the table is re-read for what was started
 meanwhile. Only the ended dispatch's id is matched.
 [src: file: backend/src/core/dispatch_reaper.rs:29-30#DISPATCH_ENV]
 [src: file: backend/src/core/child_env.rs:941-953#DISPATCH_ENV]
-[src: file: backend/src/api/discussions/runtime.rs:809-811#reap_task_worker_processes]
+[src: file: backend/src/api/discussions/runtime.rs:841-843#reap_task_worker_processes]
 [src: file: backend/src/api/orchestration.rs:1169-1171#reap_task_worker_processes]
-[src: file: backend/src/api/discussions/runtime.rs:809-825#reap_task_worker_processes]
+[src: file: backend/src/api/discussions/runtime.rs:841-857#reap_task_worker_processes]
 [src: file: backend/src/core/dispatch_reaper.rs:638-693#reap_dispatch]
 
 What is taken, and what is not:
