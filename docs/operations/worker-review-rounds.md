@@ -51,7 +51,7 @@ defaults. `[src: file: backend/src/models/setup.rs:100-110#WorkersConfig]`
 | Surface | How |
 |---|---|
 | UI | Settings > Workers: current value, where it applies, number field, « Unlimited » checkbox with the token-burn warning |
-| API | `GET` / `POST /api/config/workers` (`POST` validates: 400 `validation` and the saved value is kept) `[src: file: backend/src/api/setup.rs:769-793#save_workers_config]` |
+| API | `GET` / `POST /api/config/workers` (`POST` validates: 400 `validation` and the saved value is kept) `[src: file: backend/src/api/setup.rs:778-802#save_workers_config]` |
 | MCP | `task_exec_prepare` answers `default_max_review_rounds` (an integer or `"unlimited"`); `task_exec_status` shows `review_rounds` as `used/limit` |
 
 ## Who uses it
