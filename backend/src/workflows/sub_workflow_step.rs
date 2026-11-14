@@ -332,8 +332,9 @@ struct ChildToRun {
 }
 
 /// Everything a sub-workflow step does before its child runs. `Err` is the
-/// step's final outcome: a refusal, or the whole foreach fan-out.
-#[allow(clippy::too_many_arguments)]
+/// step's final outcome: a refusal, or the whole foreach fan-out. It is
+/// returned once per step, not built in a loop: boxing it would only add noise.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 async fn prepare_child(
     state: &crate::AppState,
     parent_run_id: &str,
