@@ -142,7 +142,7 @@ Behaviour:
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
-   `[src: file: backend/src/api/orchestration.rs:16823-16861#wait_for_execution_status]`
+   `[src: file: backend/src/api/orchestration.rs:16876-16914#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
    worker's manifest and the validation results), no room history and no MCP
