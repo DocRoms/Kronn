@@ -701,7 +701,22 @@ pub async fn set_project_workspace(
             }
         }
     }
-    let stored = payload.filter(|workspace| !workspace.hooks.is_empty());
+    let payload = match payload {
+        Some(mut workspace) => {
+            workspace.commit = match workspace.commit.normalized() {
+                Ok(commit) => commit,
+                Err(reason) => return Json(ApiResponse::err(reason)),
+            };
+            Some(workspace)
+        }
+        None => None,
+    };
+    let stored = payload.filter(|workspace| !workspace.is_empty());
+    let registered = stored
+        .as_ref()
+        .map(|workspace| workspace.commit.clone())
+        .unwrap_or_default();
+    let project_id = id.clone();
     match state
         .db
         .with_conn(move |conn| {
@@ -709,7 +724,20 @@ pub async fn set_project_workspace(
         })
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(true)),
+        Ok(()) => {
+            // The merge and worker-commit code reads the setting without a database.
+            if let Ok(Some(project)) = state
+                .db
+                .with_read_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
+                .await
+            {
+                crate::core::commit_policy::register_project(
+                    &crate::core::scanner::resolve_host_path(&project.path),
+                    &registered,
+                );
+            }
+            Json(ApiResponse::ok(true))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
     }
 }

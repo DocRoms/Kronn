@@ -24,6 +24,12 @@ import { MAX_REVIEW_ROUNDS, MIN_REVIEW_ROUNDS } from '../../lib/reviewRounds';
 import { DEFAULT_HEAVY_OUTPUT_KB, MAX_HEAVY_OUTPUT_KB, MIN_HEAVY_OUTPUT_KB } from '../../lib/heavyOutput';
 import { DEFAULT_TASK_WORKERS, MAX_TASK_WORKERS, MIN_TASK_WORKERS } from '../../lib/taskWorkers';
 import {
+  DEFAULT_OS_JUNK_PATTERNS,
+  formatOsJunkPatterns,
+  osJunkListProblem,
+  parseOsJunkPatterns,
+} from '../../lib/osJunk';
+import {
   commandOutlivesGeneration,
   DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
   DEFAULT_BASH_MAX_TIMEOUT_MIN,
@@ -45,6 +51,8 @@ export function WorkersSection({ t }: Props) {
   const [heavyKb, setHeavyKb] = useState(String(DEFAULT_HEAVY_OUTPUT_KB));
   const [bashDefault, setBashDefault] = useState(String(DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
   const [bashMax, setBashMax] = useState(String(DEFAULT_BASH_MAX_TIMEOUT_MIN));
+  // KT-1750 — comma-separated, an empty field meaning none.
+  const [junk, setJunk] = useState(formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS));
   // The generation limit (Settings > Server) cuts the whole turn whatever a command is
   // allowed, so it is shown next to the per-command cap. Read-only here.
   const [generationMin, setGenerationMin] = useState<number | null>(null);
@@ -74,6 +82,7 @@ export function WorkersSection({ t }: Props) {
         setHeavyKb(String(value.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
         setBashDefault(String(value.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
         setBashMax(String(value.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+        setJunk(formatOsJunkPatterns(value.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS));
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -95,7 +104,10 @@ export function WorkersSection({ t }: Props) {
   const validBashDefault = Number.isInteger(bashDefaultMin)
     && bashDefaultMin >= MIN_BASH_TIMEOUT_MIN && validBashMax && bashDefaultMin <= bashMaxMin;
   const validBash = validBashMax && validBashDefault;
-  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash;
+  const junkList = parseOsJunkPatterns(junk);
+  const junkProblem = osJunkListProblem(junkList);
+  const validJunk = junkProblem === null;
+  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validJunk;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
@@ -104,7 +116,9 @@ export function WorkersSection({ t }: Props) {
     && saved !== null && workerCap === saved.max_concurrent_task_workers
     && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)
     && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
-    && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN);
+    && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN)
+    && formatOsJunkPatterns(junkList)
+      === formatOsJunkPatterns(saved.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS);
 
   const save = useAsyncGuard(async () => {
     if (!saved || !valid) return;
@@ -118,6 +132,7 @@ export function WorkersSection({ t }: Props) {
         heavy_output_kb: heavy,
         bash_default_timeout_min: bashDefaultMin,
         bash_max_timeout_min: bashMaxMin,
+        os_junk_patterns: junkList,
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
@@ -127,6 +142,7 @@ export function WorkersSection({ t }: Props) {
       setHeavyKb(String(next.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
       setBashDefault(String(next.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
       setBashMax(String(next.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+      setJunk(formatOsJunkPatterns(next.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS));
     } catch (cause) {
       setError(userError(cause));
     }
@@ -330,6 +346,38 @@ export function WorkersSection({ t }: Props) {
             <AlertTriangle size={13} />
             <span>{t('config.workers.shellTimeoutsOutlive')}</span>
           </div>
+        )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.osJunk')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-junk-hint">{t('config.workers.osJunkHint')}</p>
+        <div className="flex-row gap-3">
+          <input
+            type="text"
+            className="set-input"
+            aria-label={t('config.workers.osJunk')}
+            placeholder={formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS)}
+            value={junk}
+            disabled={saved === null}
+            onChange={event => setJunk(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-junk-input"
+          />
+          <button
+            type="button"
+            className="set-icon-btn"
+            disabled={saved === null || junk === formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS)}
+            onClick={() => setJunk(formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS))}
+            data-testid="workers-junk-reset"
+          >
+            {t('config.workers.osJunkReset')}
+          </button>
+        </div>
+        {!validJunk && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-junk-invalid">
+            {t('config.workers.osJunkInvalid', junkProblem ?? '')}
+          </p>
         )}
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}
       </div>

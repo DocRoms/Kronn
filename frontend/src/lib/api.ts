@@ -322,7 +322,7 @@ import { registerGrantMinter, strongFetch, withStrongConfirm } from './strongCon
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
 import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
-import type { AgentFilesPolicy, LaneSeedCandidate, ProjectLaneSeeds, ProjectValidationsAccess, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, LaneSeedCandidate, ProjectCommitPolicy, ProjectLaneSeeds, ProjectValidationsAccess, ProjectWorkspace, ValidationsAccess, BriefingDefaults, MigrateDocsResponse, ProjectAgentFiles, ProjectDocsLocation, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -1123,6 +1123,15 @@ export const projects = {
     api<ProjectValidationsAccess>('GET', `/projects/${encodeURIComponent(id)}/validations-access`),
   setValidationsAccess: (id: string, access: ValidationsAccess) =>
     api<ProjectValidationsAccess>('PUT', `/projects/${encodeURIComponent(id)}/validations-access`, { access }),
+  /** KT-1750 — what the repository says about who commits and whether to sign off, and what Kronn commits with. */
+  commitPolicy: (id: string) =>
+    api<ProjectCommitPolicy>('GET', `/projects/${encodeURIComponent(id)}/commit-policy`),
+  /** The project's workspace defaults (worktree hooks, commit identity); null when none is set. */
+  workspace: (id: string) =>
+    api<ProjectWorkspace | null>('GET', `/projects/${encodeURIComponent(id)}/workspace`),
+  /** Replaces the whole workspace: send the hooks back with the commit settings. */
+  setWorkspace: (id: string, workspace: ProjectWorkspace | null) =>
+    api<boolean>('PUT', `/projects/${encodeURIComponent(id)}/workspace`, workspace),
   /** Gitignored paths copied into each task worktree, with the last seeding (KT-1438). */
   laneSeeds: (id: string) =>
     api<ProjectLaneSeeds>('GET', `/projects/${encodeURIComponent(id)}/lane-seeds`),

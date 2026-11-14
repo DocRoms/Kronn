@@ -52,7 +52,7 @@ fn the_repository_identity_is_the_default() {
 }
 
 #[test]
-fn a_project_identity_overrides_the_repository_one() {
+fn the_kronn_git_config_keys_are_a_detection_source_over_the_repository_identity() {
     let repo = repo();
     git(repo.path(), &["config", "user.name", "Work Person"]);
     git(repo.path(), &["config", "user.email", "work@corp.example"]);
@@ -62,7 +62,7 @@ fn a_project_identity_overrides_the_repository_one() {
         &["config", "kronn.commitEmail", "bot@corp.example"],
     );
     let policy = CommitPolicy::for_repo(repo.path());
-    assert_eq!(policy.identity_source, IdentitySource::Project);
+    assert_eq!(policy.identity_source, IdentitySource::KronnConfig);
     assert_eq!(policy.identity.display(), "Bot <bot@corp.example>");
 }
 
@@ -229,13 +229,13 @@ fn one_signed_commit_in_an_unsigned_history_is_not_a_habit() {
 }
 
 #[test]
-fn the_setting_beats_the_briefing_and_the_detection() {
+fn the_repository_git_config_beats_the_briefing_and_the_detection() {
     let repo = repo();
     fs::write(repo.path().join("DCO"), "dco").unwrap();
     git(repo.path(), &["config", "kronn.signoff", "false"]);
     let policy = CommitPolicy::for_repo(repo.path());
     assert!(!policy.signoff);
-    assert_eq!(policy.signoff_source, SignoffSource::Setting);
+    assert_eq!(policy.signoff_source, SignoffSource::KronnConfig);
     git(repo.path(), &["config", "kronn.signoff", "true"]);
     assert!(CommitPolicy::for_repo(repo.path()).signoff);
 }
@@ -286,4 +286,155 @@ fn a_linked_worktree_answers_for_its_repository() {
     let policy = CommitPolicy::for_repo(&linked);
     assert!(policy.signoff);
     assert_eq!(policy.identity.display(), "Bot <bot@corp.example>");
+}
+
+fn card(name: &str, email: &str, signoff: SignoffSetting) -> ProjectCommitSettings {
+    ProjectCommitSettings {
+        name: (!name.is_empty()).then(|| name.to_string()),
+        email: (!email.is_empty()).then(|| email.to_string()),
+        signoff,
+    }
+}
+
+#[test]
+fn the_project_card_identity_beats_every_detected_one() {
+    let repo = repo();
+    git(repo.path(), &["config", "user.name", "Work Person"]);
+    git(repo.path(), &["config", "user.email", "work@corp.example"]);
+    git(repo.path(), &["config", "kronn.commitName", "Detected"]);
+    git(
+        repo.path(),
+        &["config", "kronn.commitEmail", "detected@corp.example"],
+    );
+    let detected = CommitPolicy::detect(repo.path());
+    assert_eq!(detected.identity_source, IdentitySource::KronnConfig);
+    let policy = detected.with_settings(&card("Bot", "bot@corp.example", SignoffSetting::Auto));
+    assert_eq!(policy.identity_source, IdentitySource::Setting);
+    assert_eq!(policy.identity.display(), "Bot <bot@corp.example>");
+}
+
+#[test]
+fn an_unset_card_changes_nothing_and_a_half_identity_is_ignored() {
+    let repo = repo();
+    git(repo.path(), &["config", "user.name", "Work Person"]);
+    git(repo.path(), &["config", "user.email", "work@corp.example"]);
+    let detected = CommitPolicy::detect(repo.path());
+    assert_eq!(
+        detected
+            .clone()
+            .with_settings(&ProjectCommitSettings::default()),
+        detected
+    );
+    let half = detected
+        .clone()
+        .with_settings(&card("Bot", "", SignoffSetting::Auto));
+    assert_eq!(half.identity_source, IdentitySource::Repository);
+}
+
+#[test]
+fn the_card_sign_off_is_always_never_or_the_detection() {
+    let repo = repo();
+    fs::write(repo.path().join("DCO"), "dco").unwrap();
+    let detected = CommitPolicy::detect(repo.path());
+    assert!(detected.signoff);
+    assert_eq!(detected.signoff_source, SignoffSource::DcoFile);
+
+    let auto = detected
+        .clone()
+        .with_settings(&card("", "", SignoffSetting::Auto));
+    assert!(auto.signoff);
+    assert_eq!(auto.signoff_source, SignoffSource::DcoFile);
+    let never = detected
+        .clone()
+        .with_settings(&card("", "", SignoffSetting::Never));
+    assert!(!never.signoff);
+    assert_eq!(never.signoff_source, SignoffSource::Setting);
+
+    let unsigned = self::repo();
+    let plain = CommitPolicy::detect(unsigned.path());
+    assert!(!plain.signoff);
+    let always = plain.with_settings(&card("", "", SignoffSetting::Always));
+    assert!(always.signoff);
+    assert_eq!(always.signoff_source, SignoffSource::Setting);
+}
+
+#[test]
+fn the_published_card_settings_reach_the_repository_and_its_worktrees() {
+    let repo = repo();
+    commit(repo.path(), "base");
+    git(repo.path(), &["config", "user.name", "Work Person"]);
+    git(repo.path(), &["config", "user.email", "work@corp.example"]);
+    assert_eq!(
+        CommitPolicy::for_repo(repo.path()).identity.email,
+        "work@corp.example"
+    );
+    register_project(
+        repo.path(),
+        &card("Bot", "bot@corp.example", SignoffSetting::Always),
+    );
+    let linked = repo.path().join(".kronn/worktrees/linked");
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "side",
+            linked.to_str().unwrap(),
+        ],
+    );
+    for path in [repo.path(), linked.as_path()] {
+        let policy = CommitPolicy::for_repo(path);
+        assert_eq!(policy.identity.display(), "Bot <bot@corp.example>");
+        assert_eq!(policy.identity_source, IdentitySource::Setting);
+        assert!(policy.signoff);
+    }
+    // Clearing the card puts the detection back.
+    register_project(repo.path(), &ProjectCommitSettings::default());
+    let policy = CommitPolicy::for_repo(&linked);
+    assert_eq!(policy.identity.email, "work@corp.example");
+    assert!(!policy.signoff);
+}
+
+#[test]
+fn only_a_global_identity_is_flagged_as_one_no_project_decided() {
+    let bare = repo();
+    let global = CommitPolicy::for_repo(bare.path());
+    assert!(global.uses_global_identity());
+    // The card settles it, and so does the repository.
+    assert!(!global
+        .clone()
+        .with_settings(&card("Bot", "bot@corp.example", SignoffSetting::Auto))
+        .uses_global_identity());
+    git(bare.path(), &["config", "user.name", "Work Person"]);
+    git(bare.path(), &["config", "user.email", "work@corp.example"]);
+    assert!(!CommitPolicy::for_repo(bare.path()).uses_global_identity());
+}
+
+#[test]
+fn the_card_identity_is_both_fields_and_a_plausible_address() {
+    let ok = card(" Bot ", " bot@corp.example ", SignoffSetting::Auto)
+        .normalized()
+        .unwrap();
+    assert_eq!(ok.identity(), Some(("Bot", "bot@corp.example")));
+    assert!(card("", "", SignoffSetting::Always).normalized().is_ok());
+    for (name, email) in [
+        ("Bot", ""),
+        ("", "bot@corp.example"),
+        ("Bot", "not-an-address"),
+        ("Bot", "a b@corp.example"),
+        ("Bot", "@corp.example"),
+        ("Bot", "bot@localhost"),
+        ("Bo<t", "bot@corp.example"),
+        ("Bot", "bot@corp.example>"),
+        ("Bo\nt", "bot@corp.example"),
+    ] {
+        assert!(
+            card(name, email, SignoffSetting::Auto)
+                .normalized()
+                .is_err(),
+            "{name:?} {email:?}"
+        );
+    }
 }

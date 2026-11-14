@@ -12077,6 +12077,59 @@ async fn room_lang(db: &Database, parent_discussion_id: &str) -> RoomLang {
         .unwrap_or_default()
 }
 
+/// The notice a project without a commit identity gets (KT-1750): the worker's
+/// commits carry the global git identity, a personal one on a repository that may
+/// not be personal.
+fn global_commit_identity_notice(lang: RoomLang, email: &str) -> String {
+    match lang {
+        RoomLang::Fr => format!(
+            "**Identité de commit à régler** — Ce projet n'a pas d'identité de commit : Kronn \
+             utilise {email}. Règle-la dans la carte du projet."
+        ),
+        RoomLang::En => format!(
+            "**Commit identity to set** — This project has no commit identity: Kronn uses \
+             {email}. Set it in the project card."
+        ),
+    }
+}
+
+/// Tell the worker room and the principal room, once per execution, that its
+/// commits are made with the global git identity (KT-1750). The ids are
+/// deterministic: a second commit, a resume or a restart cannot post it twice.
+/// Commits are never blocked: the point is that it is visible.
+async fn announce_global_commit_identity(
+    db: &Database,
+    execution_id: &str,
+    worker_room: &str,
+    principal_room: &str,
+    email: &str,
+) {
+    let lang = room_lang(db, principal_room).await;
+    for (kind, room) in [("worker", worker_room), ("principal", principal_room)] {
+        let message = orchestrator_message(
+            format!("orch-commit-identity:{execution_id}:{kind}"),
+            global_commit_identity_notice(lang, email),
+        );
+        let room = room.to_string();
+        let posted = db
+            .with_conn(move |conn| {
+                let already: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                    [&message.id],
+                    |row| row.get(0),
+                )?;
+                if !already {
+                    crate::db::discussions::insert_message(conn, &room, &message)?;
+                }
+                Ok(())
+            })
+            .await;
+        if let Err(error) = posted {
+            tracing::warn!(execution_id, "commit identity notice not posted: {error}");
+        }
+    }
+}
+
 /// An orchestrator-authored discussion message (brief, control offer, attach notice):
 /// a backend-authored `User`/`Main` message with the `Orchestrateur` pseudonym. The
 /// caller sets the deterministic id so a resume can never double-post.
@@ -18120,6 +18173,13 @@ pub async fn commit_spawned_worker(
     let data_dir_lock = state.data_dir_lock.clone();
     // The pinned base the doc citations are compared with (KT-1721).
     let base_sha = execution.base_sha.clone();
+    // For the notice a project without a commit identity gets (KT-1750).
+    let identity_notice_for = (
+        execution.id.clone(),
+        discussion_id.to_string(),
+        execution.parent_discussion_id.clone(),
+        root.clone(),
+    );
     let supervisor = spawn_spawned_commit_supervisor(
         state.db.clone(),
         execution.id,
@@ -18143,6 +18203,26 @@ pub async fn commit_spawned_worker(
     .await;
     match supervisor.await {
         Ok((committed, release_error)) => {
+            if matches!(committed, Ok(Ok(_))) {
+                let (execution_id, worker_room, principal_room, root) = identity_notice_for;
+                let policy = tokio::task::spawn_blocking(move || {
+                    crate::core::commit_policy::CommitPolicy::resolve(&root)
+                })
+                .await;
+                if let Some(policy) = policy
+                    .ok()
+                    .filter(crate::core::commit_policy::CommitPolicy::uses_global_identity)
+                {
+                    announce_global_commit_identity(
+                        &state.db,
+                        &execution_id,
+                        &worker_room,
+                        &principal_room,
+                        &policy.identity.email,
+                    )
+                    .await;
+                }
+            }
             spawned_commit_response(committed, release_error, time_limit)
         }
         Err(error) => Json(ApiResponse::err_coded(
@@ -39736,6 +39816,50 @@ pub(crate) mod tests {
 
     async fn delivery_count(db: &Database) -> i64 {
         count(db, "SELECT COUNT(*) FROM task_execution_deliveries").await
+    }
+
+    /// KT-1750 — a project with no commit identity of its own commits with the
+    /// global git one: the worker room and the principal room are told so, once.
+    #[tokio::test]
+    async fn the_global_commit_identity_is_announced_once_in_both_rooms() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent_id, child_id, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        for _ in 0..2 {
+            announce_global_commit_identity(
+                &db,
+                &exec_id,
+                &child_id,
+                &parent_id,
+                "personal@example.com",
+            )
+            .await;
+        }
+        for room in [&child_id, &parent_id] {
+            let room = room.clone();
+            let notices = db
+                .with_conn(move |conn| {
+                    Ok(crate::db::discussions::list_messages(conn, &room)?
+                        .into_iter()
+                        .filter(|message| message.id.starts_with("orch-commit-identity:"))
+                        .map(|message| message.content)
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .unwrap();
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(
+                notices[0].contains("personal@example.com")
+                    && notices[0].contains("carte du projet"),
+                "{}",
+                notices[0]
+            );
+        }
+        assert!(global_commit_identity_notice(RoomLang::Fr, "a@b.c").contains(
+            "Ce projet n'a pas d'identité de commit : Kronn utilise a@b.c. Règle-la dans la carte du projet."
+        ));
+        assert!(global_commit_identity_notice(RoomLang::En, "a@b.c")
+            .contains("This project has no commit identity: Kronn uses a@b.c."));
     }
 
     #[tokio::test]

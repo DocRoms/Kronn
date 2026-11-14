@@ -365,3 +365,34 @@ fn the_bash_timeouts_default_are_bounded_and_clamped_at_spawn() {
         (30 * 60_000, 30 * 60_000)
     );
 }
+
+/// KT-1750 — the OS-junk list of Settings > Workers: the three systems' files by
+/// default, kept by an older `[workers]` table, and only names git's local
+/// exclude reads as names are accepted.
+#[test]
+fn the_os_junk_patterns_default_and_are_validated() {
+    let defaults = WorkersConfig::default();
+    assert_eq!(
+        defaults.os_junk_patterns,
+        [".DS_Store", "Thumbs.db", "desktop.ini", "._*"]
+    );
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert_eq!(partial.os_junk_patterns, defaults.os_junk_patterns);
+    let with = |patterns: &[&str]| WorkersConfig {
+        os_junk_patterns: patterns.iter().map(|p| p.to_string()).collect(),
+        ..Default::default()
+    };
+    assert!(with(&[]).validate().is_ok(), "an empty list means none");
+    assert!(with(&[".DS_Store", "*.swp", "._*"]).validate().is_ok());
+    for bad in [
+        "", " ", "a b", "#x", "!x", "a/b", "dir/", "a\\b", "[ab]", "a?", "a*b*", "*", "**", ".*.*",
+    ] {
+        assert!(with(&[bad]).validate().is_err(), "`{bad}` must be refused");
+    }
+    assert!(with(&[&"x".repeat(101)]).validate().is_err());
+    let too_many = WorkersConfig {
+        os_junk_patterns: (0..51).map(|i| format!("junk{i}")).collect(),
+        ..Default::default()
+    };
+    assert!(too_many.validate().is_err());
+}

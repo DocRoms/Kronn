@@ -635,13 +635,7 @@ export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_
 /**
  * Per-agent model tier overrides (Economy/Reasoning model names).
  */
-model_tiers: ModelTiersConfig,
-/**
- * KT-1706 — what takes over a mode of a named HTTP connection (or the image or
- * video mode of ComfyUI) when its provider cannot serve a request. Kept apart
- * from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
- */
-connection_fallbacks?: Array<ConnectionFallback>, };
+model_tiers: ModelTiersConfig, };
 
 export type AgentSettings = {
 /**
@@ -2572,6 +2566,20 @@ downloadable: boolean, };
  */
 export type CommentDiscussionQuestionRequest = { idempotency_key: string, text: string, };
 
+/**
+ * One resolved policy, with where each half comes from.
+ */
+export type CommitPolicyView = { name: string, email: string,
+/**
+ * `setting`, `kronn_config`, `repository`, `global` or `fallback`.
+ */
+identity_source: string, signoff: boolean,
+/**
+ * `setting`, `kronn_config`, `briefing`, `dco_file`, `commit_msg_hook`,
+ * `history` or `default`.
+ */
+signoff_source: string, };
+
 export type CompareImprovementAvailability = "available" | "different_prompts" | "missing_prompt" | "no_shared_quick_prompt";
 
 export type ComparePromptCompatibility = "identical" | "different" | "missing";
@@ -2592,6 +2600,30 @@ export type ConfirmTrustProofRequest = { code: string,
  * The human-admin secret, as for starting the enrolment.
  */
 admin_secret?: string | null, };
+
+/**
+ * The fallback of one media row, for display: its own link, the links inherited
+ * through the rows of the fallbacks, or why it is refused.
+ */
+export type ConnectionChainView = { owner: string, mode: FallbackMode, links: Array<ConnectionLinkView>, inherited: Array<ConnectionLinkView>, error?: string, };
+
+/**
+ * KT-1706 — the fallback of one mode of an owner (a connection id, or
+ * `local:comfyui` for `image` and `video`).
+ */
+export type ConnectionFallback = { owner: string, row: FallbackMode, fallback: ConnectionFallbackTarget, };
+
+/**
+ * KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
+ * id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
+ * model; without one, the model that target has in its own slot of the mode.
+ */
+export type ConnectionFallbackTarget = { connection: string, model?: string | null, };
+
+/**
+ * One link as Settings shows it.
+ */
+export type ConnectionLinkView = { connection: string, model?: string, transport: FallbackTransport, };
 
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
 
@@ -6458,12 +6490,6 @@ rate_limited: boolean, };
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
 /**
- * The fallback of one media row, for display: its own link, the links inherited
- * through the rows of the fallbacks, or why it is refused.
- */
-export type ConnectionChainView = { owner: string, mode: FallbackMode, links: Array<ConnectionLinkView>, inherited: Array<ConnectionLinkView>, error?: string, };
-
-/**
  * Cost of one generation, as the provider declared it.
  */
 export type MediaCost = {
@@ -6479,30 +6505,12 @@ cost_usd: number,
 is_byok: boolean, };
 
 /**
- * KT-1706 — the fallback of one mode of an owner (a connection id, or
- * `local:comfyui` for `image` and `video`).
- */
-export type ConnectionFallback = { owner: string, row: FallbackMode, fallback: ConnectionFallbackTarget, };
-
-/**
- * KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
- * id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
- * model; without one, the model that target has in its own slot of the mode.
- */
-export type ConnectionFallbackTarget = { connection: string, model?: string | null, };
-
-/**
  * Where a still image can be pinned in a generated clip. Only what the model
  * advertises; nothing is offered by default.
  */
 export type MediaFramePosition = "first_frame" | "last_frame";
 
 export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
-
-/**
- * One link as Settings shows it.
- */
-export type ConnectionLinkView = { connection: string, model?: string, transport: FallbackTransport, };
 
 /**
  * What the model outputs. The execution family is the same for both, so this
@@ -7986,6 +7994,33 @@ outside_dir?: string,
  */
 cleaned?: Array<string>, };
 
+export type ProjectCommitPolicy = {
+/**
+ * What the card saved.
+ */
+settings: ProjectCommitSettings,
+/**
+ * What the repository says by itself: the card's defaults.
+ */
+detected: CommitPolicyView,
+/**
+ * What Kronn commits with: the settings over the detection.
+ */
+effective: CommitPolicyView,
+/**
+ * The effective identity is the global git config's, which no project
+ * decided: a personal address on a repository that may not be personal.
+ */
+global_identity: boolean, };
+
+/**
+ * KT-1750 — the commit identity and sign-off of a project, set in its card.
+ * The identity is both fields or none: a name without an address (or the
+ * reverse) is refused when saved. Nothing set means "use what the repository
+ * itself says".
+ */
+export type ProjectCommitSettings = { name?: string | null, email?: string | null, signoff: SignoffSetting, };
+
 export type ProjectDockerAction = "start" | "stop" | "restart";
 
 export type ProjectDockerActionRequest = { action: ProjectDockerAction, service?: string | null, };
@@ -8321,7 +8356,12 @@ docker_error?: string, };
  * Project defaults for worktree preparation hooks. Workflow hooks override them
  * field by field; omitted fields inherit the project value.
  */
-export type ProjectWorkspace = { hooks: WorkspaceHooks, };
+export type ProjectWorkspace = { hooks: WorkspaceHooks,
+/**
+ * KT-1750 — who Kronn's commits are attributed to and whether they are
+ * signed off, when the owner decided it rather than leaving it detected.
+ */
+commit?: ProjectCommitSettings, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -10340,6 +10380,12 @@ install_dir?: string | null, image_settings?: ComfyGenSettings, video_settings?:
 
 export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
 
+export type SetConnectionFallbackRequest = { owner: string, mode: FallbackMode,
+/**
+ * The fallback of this row; `None` removes it.
+ */
+fallback?: ConnectionFallbackTarget | null, };
+
 export type SetDiscussionFallbackRequest = {
 /**
  * The mode whose override is set.
@@ -10349,12 +10395,6 @@ mode: FallbackMode,
  * `None` removes the override (back to the default); `Some([])` cuts it.
  */
 chain_override?: Array<AgentFallback> | null, };
-
-export type SetConnectionFallbackRequest = { owner: string, mode: FallbackMode,
-/**
- * The fallback of this media row; `None` removes it.
- */
-fallback?: ConnectionFallbackTarget | null, };
 
 export type SetMediaReferenceLimitRequest = { connection_id: string, model: string, modality: MediaModality, max_input_references?: number | null, };
 
@@ -10591,6 +10631,11 @@ export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "succe
  * One gone path the stale block listed, in its doc's section.
  */
 export type ShownPath = { doc: string, section: string, path: string, };
+
+/**
+ * Whether the commits Kronn makes for a project carry a `Signed-off-by`.
+ */
+export type SignoffSetting = "auto" | "always" | "never";
 
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
@@ -12981,7 +13026,16 @@ bash_default_timeout_min: number,
  * the turn. Keep it below the generation limit (`agent_global_timeout_min`),
  * which cuts the whole turn whatever a command is allowed.
  */
-bash_max_timeout_min: number, };
+bash_max_timeout_min: number,
+/**
+ * KT-1750 — file names an operating system or a file manager drops in any
+ * folder (`.DS_Store`, `Thumbs.db`, …): they never count as a worker's
+ * changes, so they block neither a delivery nor the cleanup of a checkout,
+ * and are excluded from `git status` in every lane Kronn creates. A name,
+ * or a name with one `*` standing for any run of characters; an empty list
+ * means none.
+ */
+os_junk_patterns: Array<string>, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

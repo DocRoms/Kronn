@@ -48,6 +48,7 @@ describe('WorkersSection (KT-1345)', () => {
       heavy_output_kb: 256,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
+      os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentRounds(8)'));
@@ -74,6 +75,7 @@ describe('WorkersSection (KT-1345)', () => {
       heavy_output_kb: 256,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
+      os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentUnlimited'));
@@ -130,6 +132,7 @@ describe('WorkersSection (KT-1345)', () => {
       heavy_output_kb: 256,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
+      os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
     }));
     await waitFor(() => expect(screen.getByTestId('workers-cap-current'))
       .toHaveTextContent('config.workers.maxConcurrentCurrent(3)'));
@@ -176,6 +179,7 @@ describe('WorkersSection (KT-1345)', () => {
       heavy_output_kb: 256,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
+      os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
     }));
     await waitFor(() => expect(box).not.toBeChecked());
     expect(screen.getByTestId('workers-save')).toBeDisabled();
@@ -197,7 +201,7 @@ describe('WorkersSection (KT-1345)', () => {
   });
 
   it('KT-1525 — shows the heavy-output threshold, saves a new one and refuses 0 or too many', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60 };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'] };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, heavy_output_kb: 512 });
     render(<WorkersSection t={t} />);
@@ -221,7 +225,7 @@ describe('WorkersSection (KT-1345)', () => {
   });
 
   it('KT-1718 — shows the per-command cap next to the generation limit, saves new limits and refuses a default above the maximum', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60 };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'] };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, bash_max_timeout_min: 90 });
     getServerMock.mockResolvedValue({ agent_global_timeout_min: 120 });
@@ -255,5 +259,40 @@ describe('WorkersSection (KT-1345)', () => {
     await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, bash_max_timeout_min: 90 }));
     await waitFor(() => expect(screen.getByTestId('workers-shell-current'))
       .toHaveTextContent('config.workers.shellTimeoutsSummary(15,90,120)'));
+  });
+  it('KT-1750 — edits the OS junk list, refuses what git would read as something else, and resets it', async () => {
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'] };
+    getMock.mockResolvedValue(saved);
+    saveMock.mockResolvedValue({ ...saved, os_junk_patterns: ['.DS_Store', '*.swp'] });
+    render(<WorkersSection t={t} />);
+    const input = await screen.findByTestId('workers-junk-input');
+    await waitFor(() => expect(input).toHaveValue('.DS_Store, Thumbs.db, desktop.ini, ._*'));
+    expect(screen.getByTestId('workers-junk-reset')).toBeDisabled();
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: '.DS_Store, sub/dir' } });
+    expect(screen.getByTestId('workers-junk-invalid')).toHaveTextContent('config.workers.osJunkInvalid(sub/dir)');
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: ' .DS_Store , *.swp,, ' } });
+    expect(screen.queryByTestId('workers-junk-invalid')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('workers-save'));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, os_junk_patterns: ['.DS_Store', '*.swp'] }));
+    await waitFor(() => expect(input).toHaveValue('.DS_Store, *.swp'));
+
+    fireEvent.click(screen.getByTestId('workers-junk-reset'));
+    expect(input).toHaveValue('.DS_Store, Thumbs.db, desktop.ini, ._*');
+  });
+
+  it('KT-1750 — an empty OS junk field saves an empty list (no pattern)', async () => {
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, os_junk_patterns: ['.DS_Store'] };
+    getMock.mockResolvedValue(saved);
+    saveMock.mockResolvedValue({ ...saved, os_junk_patterns: [] });
+    render(<WorkersSection t={t} />);
+    const input = await screen.findByTestId('workers-junk-input');
+    await waitFor(() => expect(input).toHaveValue('.DS_Store'));
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.click(screen.getByTestId('workers-save'));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, os_junk_patterns: [] }));
   });
 });

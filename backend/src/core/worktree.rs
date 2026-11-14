@@ -1520,28 +1520,34 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
 }
 
 /// Files an operating system or a file manager drops in any folder it opens:
-/// never work, never worth blocking a delivery or a cleanup (KT-1750).
+/// never work, never worth blocking a delivery or a cleanup (KT-1750). The
+/// default of Settings > Workers > OS junk (`workers.os_junk_patterns`).
 pub const OS_JUNK_PATTERNS: [&str; 4] = [".DS_Store", "Thumbs.db", "desktop.ini", "._*"];
 
-/// Replaces [`OS_JUNK_PATTERNS`] for the whole instance: comma-separated
-/// patterns, an empty value meaning none.
-pub const OS_JUNK_ENV: &str = "KRONN_OS_JUNK_PATTERNS";
+/// The Settings > Workers list, published by `config::save` and at boot. `None`
+/// until the config says otherwise, which reads as the defaults.
+static OS_JUNK_SETTING: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
 
-/// The OS-junk patterns in force: the environment's, else the defaults.
-pub fn os_junk_patterns() -> Vec<String> {
-    os_junk_patterns_from(crate::core::child_env::var(OS_JUNK_ENV).ok().as_deref())
+/// Publish the owner's Settings > Workers choice to this process.
+pub fn set_os_junk_patterns(patterns: &[String]) {
+    let mut setting = OS_JUNK_SETTING
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *setting = Some(patterns.to_vec());
 }
 
-fn os_junk_patterns_from(configured: Option<&str>) -> Vec<String> {
-    match configured {
-        Some(list) => list
-            .split(',')
-            .map(str::trim)
-            .filter(|pattern| !pattern.is_empty())
-            .map(str::to_string)
-            .collect(),
-        None => OS_JUNK_PATTERNS.iter().map(|p| p.to_string()).collect(),
-    }
+/// The OS-junk patterns in force: the setting's, else the defaults.
+pub fn os_junk_patterns() -> Vec<String> {
+    OS_JUNK_SETTING
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .unwrap_or_else(default_os_junk_patterns)
+}
+
+/// [`OS_JUNK_PATTERNS`] as the owned list the setting holds.
+pub fn default_os_junk_patterns() -> Vec<String> {
+    OS_JUNK_PATTERNS.iter().map(|p| p.to_string()).collect()
 }
 
 /// Whether the last component of `path` is one of `patterns` (`*` stands for any
@@ -5705,20 +5711,21 @@ mod tests {
 
     #[test]
     fn the_os_junk_patterns_follow_the_global_setting() {
-        assert_eq!(
-            os_junk_patterns_from(None),
-            [".DS_Store", "Thumbs.db", "desktop.ini", "._*"]
-        );
-        assert_eq!(
-            os_junk_patterns_from(Some(" .DS_Store , *.swp,,")),
-            [".DS_Store", "*.swp"]
-        );
-        assert!(os_junk_patterns_from(Some("")).is_empty());
-        let patterns = os_junk_patterns_from(Some("*.swp,._*"));
-        assert!(is_os_junk("a/b/file.swp", &patterns));
-        assert!(is_os_junk("._x", &patterns));
-        assert!(!is_os_junk(".DS_Store", &patterns));
-        assert!(!is_os_junk("swp", &patterns));
+        // The setting is process-wide and other tests rely on the defaults: this
+        // one only ever adds to them, then puts them back.
+        let mut patterns = default_os_junk_patterns();
+        assert_eq!(patterns, [".DS_Store", "Thumbs.db", "desktop.ini", "._*"]);
+        patterns.push("*.junk-setting".to_string());
+        set_os_junk_patterns(&patterns);
+        let published = os_junk_patterns();
+        assert!(is_os_junk("a/b/file.junk-setting", &published));
+        assert!(is_os_junk("._x", &published));
+        assert!(is_os_junk("sub/.DS_Store", &published));
+        assert!(!is_os_junk("file.junk-settings", &published));
+        set_os_junk_patterns(&default_os_junk_patterns());
+        assert!(!is_os_junk("a/file.junk-setting", &os_junk_patterns()));
+        // An empty list means none: nothing is junk.
+        assert!(!is_os_junk(".DS_Store", &[]));
     }
 
     #[test]
@@ -7679,66 +7686,79 @@ mod tests {
         }
     }
 
+    /// A task branch checked out in a linked worktree of `repo`, as Kronn runs
+    /// them (the main checkout is never switched), with one commit of its own.
+    fn child_worktree(repo: &Path, name: &str) -> PathBuf {
+        let child = repo.join(".kronn/worktrees").join(name);
+        let made = crate::core::cmd::git_cmd()
+            .args(["worktree", "add", "-q", "-b", "child"])
+            .arg(&child)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        commit_file(&child, "child.txt", "work", "child work");
+        child
+    }
+
+    fn head_message(dir: &Path, rev: &str) -> String {
+        let message = crate::core::cmd::git_cmd()
+            .args(["log", "-1", "--format=%B", rev])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&message.stdout).into_owned()
+    }
+
     /// Phase 1 brings the parent INTO the child, so the child ends up descending
     /// from the pinned tip — the precondition that lets phase 2 be a fast-forward.
+    /// The merge commit is signed only where the project signs off (KT-1750).
     #[test]
     fn building_the_candidate_makes_the_child_descend_from_the_parent() {
-        let repo = make_test_repo("candidate");
-        let base = commit_file(repo.path(), "shared.txt", "one", "base");
+        for signoff in [true, false] {
+            let repo = make_test_repo("candidate");
+            commit_file(repo.path(), "shared.txt", "one", "base");
+            let setting = if signoff { "true" } else { "false" };
+            let configured = crate::core::cmd::git_cmd()
+                .args(["config", "kronn.signoff", setting])
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(configured.status.success());
+            let child = child_worktree(repo.path(), "candidate");
+            // Meanwhile the parent moves on, untouched by the child.
+            let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
 
-        // A child branch that diverges on its own file.
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        commit_file(repo.path(), "child.txt", "work", "child work");
+            let outcome = build_candidate(&child, &parent_tip).unwrap();
+            let CandidateOutcome::Built { sha } = outcome else {
+                panic!("expected a clean candidate");
+            };
 
-        // Meanwhile the parent moves on, untouched by the child.
-        std::process::Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
-        assert_ne!(parent_tip, base);
+            // The candidate contains the parent tip, so the parent can fast-forward to it.
+            let merge_base = crate::core::cmd::git_cmd()
+                .args(["merge-base", "--is-ancestor", &parent_tip, &sha])
+                .current_dir(&child)
+                .output()
+                .unwrap();
+            assert!(
+                merge_base.status.success(),
+                "candidate must descend from the parent tip"
+            );
 
-        std::process::Command::new("git")
-            .args(["checkout", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let outcome = build_candidate(repo.path(), &parent_tip).unwrap();
-        let CandidateOutcome::Built { sha } = outcome else {
-            panic!("expected a clean candidate");
-        };
-
-        // The candidate contains the parent tip, so the parent can fast-forward to it.
-        let merge_base = crate::core::cmd::git_cmd()
-            .args(["merge-base", "--is-ancestor", &parent_tip, &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(
-            merge_base.status.success(),
-            "candidate must descend from the parent tip"
-        );
-
-        let message = crate::core::cmd::git_cmd()
-            .args(["log", "-1", "--format=%B", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&message.stdout).contains("Signed-off-by: "),
-            "the merge commit must carry a sign-off"
-        );
+            let message = head_message(&child, &sha);
+            assert_eq!(
+                message.contains("Signed-off-by: "),
+                signoff,
+                "the merge commit follows the project's sign-off ({setting}): {message}"
+            );
+        }
     }
 
     /// A repository that enforces the DCO rejects an unsigned merge commit at
     /// `commit-msg` time (KT-854: the merge Kronn made for KT-840 had no
-    /// `Signed-off-by`, so the release PR went red). The integration candidate must
-    /// be built, signed with the identity git is configured with.
+    /// `Signed-off-by`, so the release PR went red). The hook is how the
+    /// repository says so (KT-1750): the integration candidate is signed, with the
+    /// identity the repository commits as, and built.
     #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn the_integration_merge_commit_satisfies_a_dco_enforcing_repository() {
@@ -7746,23 +7766,8 @@ mod tests {
 
         let repo = make_test_repo("candidate-dco");
         commit_file(repo.path(), "shared.txt", "one", "base");
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        commit_file(repo.path(), "child.txt", "work", "child work");
-        std::process::Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let child = child_worktree(repo.path(), "candidate-dco");
         let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
-        std::process::Command::new("git")
-            .args(["checkout", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
 
         // `git merge` runs `commit-msg` for the merge commit it creates.
         let hook = repo.path().join(".git/hooks/commit-msg");
@@ -7773,25 +7778,19 @@ mod tests {
         .unwrap();
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let outcome = build_candidate(repo.path(), &parent_tip).unwrap();
+        let outcome = build_candidate(&child, &parent_tip).unwrap();
         let CandidateOutcome::Built { sha } = outcome else {
             panic!("a DCO-enforcing repository must accept the integration merge, got {outcome:?}");
         };
 
-        let message = crate::core::cmd::git_cmd()
-            .args(["log", "-1", "--format=%B", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let message = head_message(&child, &sha);
         assert!(
-            String::from_utf8_lossy(&message.stdout)
-                .contains("Signed-off-by: Test <test@test.com>"),
-            "the sign-off is the configured git identity: {}",
-            String::from_utf8_lossy(&message.stdout)
+            message.contains("Signed-off-by: Test <test@test.com>"),
+            "the sign-off is the repository's identity: {message}"
         );
         let parents = crate::core::cmd::git_cmd()
             .args(["log", "-1", "--format=%P", &sha])
-            .current_dir(repo.path())
+            .current_dir(&child)
             .output()
             .unwrap();
         assert_eq!(

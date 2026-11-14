@@ -404,6 +404,26 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         Err(e) => tracing::warn!("Registry sync failed: {}", e),
     }
 
+    // KT-1750 — the commit identity and sign-off each project card set, before the
+    // first worker commit or merge of this boot reads them.
+    match state
+        .db
+        .with_read_conn(kronn::db::projects::list_projects)
+        .await
+    {
+        Ok(projects) => {
+            for project in projects {
+                if let Some(workspace) = project.workspace {
+                    kronn::core::commit_policy::register_project(
+                        &kronn::core::scanner::resolve_host_path(&project.path),
+                        &workspace.commit,
+                    );
+                }
+            }
+        }
+        Err(e) => tracing::warn!("project commit settings not loaded: {e}"),
+    }
+
     // Durable agent-dispatch recovery runs before the legacy awaiting scan.
     // A Running row means the process died mid-turn; return it to Pending so
     // the worker can either resume execution or observe an already-persisted
@@ -429,6 +449,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         kronn::core::background_priority::set_enabled(config.workers.background_priority);
         // KT-1718 — the shell limits of a Claude task worker, before the first one.
         kronn::core::task_worker_env::set_bash_timeouts(&config.workers);
+        kronn::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
     }
     // KT-1633 — ask the host once whether its priority launcher runs, off the
     // async path, before recovery can dispatch a worker. A spawn only reads the answer.

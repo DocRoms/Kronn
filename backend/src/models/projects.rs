@@ -21,6 +21,96 @@ use super::AgentType;
 pub struct ProjectWorkspace {
     #[serde(default)]
     pub hooks: crate::models::WorkspaceHooks,
+    /// KT-1750 — who Kronn's commits are attributed to and whether they are
+    /// signed off, when the owner decided it rather than leaving it detected.
+    #[serde(default, skip_serializing_if = "ProjectCommitSettings::is_default")]
+    pub commit: ProjectCommitSettings,
+}
+
+impl ProjectWorkspace {
+    /// A workspace that says nothing is stored as no workspace at all.
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty() && self.commit.is_default()
+    }
+}
+
+/// Whether the commits Kronn makes for a project carry a `Signed-off-by`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SignoffSetting {
+    /// Detected: the briefing, a DCO file or hook, the recent history.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+/// KT-1750 — the commit identity and sign-off of a project, set in its card.
+/// The identity is both fields or none: a name without an address (or the
+/// reverse) is refused when saved. Nothing set means "use what the repository
+/// itself says".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectCommitSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub signoff: SignoffSetting,
+}
+
+impl ProjectCommitSettings {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The explicit identity, when both halves are set.
+    pub fn identity(&self) -> Option<(&str, &str)> {
+        let name = self.name.as_deref()?.trim();
+        let email = self.email.as_deref()?.trim();
+        (!name.is_empty() && !email.is_empty()).then_some((name, email))
+    }
+
+    /// Trim the fields and drop an empty one; what a form must never persist is
+    /// the `Err`.
+    pub fn normalized(mut self) -> Result<Self, String> {
+        let clean = |value: Option<String>| {
+            value
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        self.name = clean(self.name);
+        self.email = clean(self.email);
+        match (&self.name, &self.email) {
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                return Err("the commit name and e-mail go together: set both or neither".into());
+            }
+            (Some(name), Some(email)) => {
+                if name.len() > 200 || name.chars().any(|c| c.is_control() || c == '<' || c == '>')
+                {
+                    return Err(
+                        "the commit name cannot contain `<`, `>` or control characters and is \
+                         limited to 200 characters"
+                            .into(),
+                    );
+                }
+                let (local, domain) = email.split_once('@').unwrap_or_default();
+                if email.len() > 254
+                    || local.is_empty()
+                    || !domain.contains('.')
+                    || email
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control() || c == '<' || c == '>')
+                {
+                    return Err("the commit e-mail is not a valid address".into());
+                }
+            }
+        }
+        Ok(self)
+    }
 }
 
 /// Where Kronn writes a project's agent files (KT-971).

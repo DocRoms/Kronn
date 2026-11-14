@@ -1,23 +1,30 @@
 //! Who a Kronn commit is attributed to, and whether it carries a sign-off
 //! (KT-1750).
 //!
-//! Both follow the project the repository belongs to, never a blanket default:
+//! Both follow the project the repository belongs to, never a blanket default.
+//! The owner sets them in the project card (`ProjectCommitSettings`, stored with
+//! the project and handed here by [`register_project`]); what is left unset is
+//! detected:
 //!
-//! - **identity** — `kronn.commitName` + `kronn.commitEmail` in the repository's
-//!   own git config when both are set (the per-project override); else the
-//!   repository's own `user.name` + `user.email`; else the effective git identity
-//!   (the global config), which is used but reported — a global fallback is
-//!   never silent; else a Kronn placeholder. It is handed to git as
-//!   `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, so no config file is ever written.
-//! - **sign-off** — `kronn.signoff` in the repository's git config; else the
-//!   project briefing's `signoff_required`; else detected (a DCO file, or most
-//!   of the recent history signed); else off.
+//! - **identity** — the card's name + e-mail; else `kronn.commitName` +
+//!   `kronn.commitEmail` in the repository's git config (a detection source,
+//!   not the way to set it); else the repository's own `user.name` +
+//!   `user.email`; else the effective git identity (the global config), which is
+//!   used but reported — a global fallback is never silent; else a Kronn
+//!   placeholder. It is handed to git as `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, so
+//!   no config file is ever written.
+//! - **sign-off** — the card's Always / Never; on Auto, `kronn.signoff` in the
+//!   repository's git config; else the project briefing's `signoff_required`;
+//!   else detected (a DCO file, a `commit-msg` hook, or most of the recent
+//!   history signed); else off.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::RwLock;
 
 use crate::core::cmd::git_cmd;
-use crate::models::BriefingYesNo;
+use crate::models::{BriefingYesNo, ProjectCommitSettings, SignoffSetting};
 
 /// Identity used when git knows none at all.
 const FALLBACK_NAME: &str = "Kronn";
@@ -47,8 +54,10 @@ impl CommitIdentity {
 /// Where the identity of a commit comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentitySource {
-    /// `kronn.commitName` / `kronn.commitEmail` of the repository.
-    Project,
+    /// The name and e-mail set in the project card.
+    Setting,
+    /// `kronn.commitName` / `kronn.commitEmail` of the repository's git config.
+    KronnConfig,
     /// `user.name` / `user.email` of the repository's own config.
     Repository,
     /// Only the global git config knows one: used, but never silently.
@@ -60,7 +69,8 @@ pub enum IdentitySource {
 impl IdentitySource {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Project => "project",
+            Self::Setting => "setting",
+            Self::KronnConfig => "kronn_config",
             Self::Repository => "repository",
             Self::Global => "global",
             Self::Fallback => "fallback",
@@ -71,8 +81,10 @@ impl IdentitySource {
 /// Where the sign-off decision comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignoffSource {
-    /// `kronn.signoff` of the repository.
+    /// Always / Never, set in the project card.
     Setting,
+    /// `kronn.signoff` of the repository's git config.
+    KronnConfig,
     /// The project briefing's `signoff_required`.
     Briefing,
     /// A DCO file at the repository root.
@@ -85,6 +97,20 @@ pub enum SignoffSource {
     Default,
 }
 
+impl SignoffSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Setting => "setting",
+            Self::KronnConfig => "kronn_config",
+            Self::Briefing => "briefing",
+            Self::DcoFile => "dco_file",
+            Self::CommitMsgHook => "commit_msg_hook",
+            Self::History => "history",
+            Self::Default => "default",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitPolicy {
     pub identity: CommitIdentity,
@@ -94,18 +120,30 @@ pub struct CommitPolicy {
 }
 
 impl CommitPolicy {
-    /// The policy of the repository at (or around) `repo_path`; a linked
-    /// worktree answers for the repository it belongs to.
+    /// The policy of the repository at (or around) `repo_path`, with the project
+    /// card's settings applied; a linked worktree answers for the repository it
+    /// belongs to.
     pub fn for_repo(repo_path: &Path) -> Self {
-        let (identity, identity_source) = resolve_identity(repo_path);
-        if identity_source == IdentitySource::Global {
+        let policy = Self::resolve(repo_path);
+        if policy.uses_global_identity() {
             tracing::warn!(
                 path = %repo_path.display(),
-                "commit identity {} comes from the global git config: set user.name and user.email in \
-                 this repository (or kronn.commitName / kronn.commitEmail) to pick the one it commits as",
-                identity.display()
+                "commit identity {} comes from the global git config: set the commit name and e-mail                  in the project card to pick the one it commits as",
+                policy.identity.display()
             );
         }
+        policy
+    }
+
+    /// [`Self::for_repo`] without the warning a global identity logs.
+    pub fn resolve(repo_path: &Path) -> Self {
+        Self::detect(repo_path).with_settings(&registered_settings(repo_path).unwrap_or_default())
+    }
+
+    /// What the repository itself says, the project card ignored: the default
+    /// the card shows and a setting left on Auto follows.
+    pub fn detect(repo_path: &Path) -> Self {
+        let (identity, identity_source) = resolve_identity(repo_path);
         let (signoff, signoff_source) = resolve_signoff(repo_path);
         Self {
             identity,
@@ -113,6 +151,35 @@ impl CommitPolicy {
             signoff,
             signoff_source,
         }
+    }
+
+    /// This (detected) policy with the owner's settings laid over it.
+    pub fn with_settings(mut self, settings: &ProjectCommitSettings) -> Self {
+        if let Some((name, email)) = settings.identity() {
+            self.identity = CommitIdentity {
+                name: name.to_string(),
+                email: email.to_string(),
+            };
+            self.identity_source = IdentitySource::Setting;
+        }
+        match settings.signoff {
+            SignoffSetting::Auto => {}
+            SignoffSetting::Always => {
+                self.signoff = true;
+                self.signoff_source = SignoffSource::Setting;
+            }
+            SignoffSetting::Never => {
+                self.signoff = false;
+                self.signoff_source = SignoffSource::Setting;
+            }
+        }
+        self
+    }
+
+    /// Whether the only identity found is the global git config's: a personal
+    /// one, on a repository that does not say who commits for it.
+    pub fn uses_global_identity(&self) -> bool {
+        self.identity_source == IdentitySource::Global
     }
 
     /// Hand the identity to a `git` command. An amend keeps its author: only
@@ -125,6 +192,45 @@ impl CommitPolicy {
         command.env("GIT_COMMITTER_NAME", &self.identity.name);
         command.env("GIT_COMMITTER_EMAIL", &self.identity.email);
     }
+}
+
+/// The project cards' settings by project directory. The merge and worker-commit
+/// code runs without a database, so the settings are published here: at boot
+/// ([`register_project`] for each project) and whenever a card saves them.
+static PROJECT_SETTINGS: RwLock<Option<HashMap<PathBuf, ProjectCommitSettings>>> =
+    RwLock::new(None);
+
+fn settings_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Publish the commit settings of the project whose checkout is `project_path`;
+/// default settings remove the entry.
+pub fn register_project(project_path: &Path, settings: &ProjectCommitSettings) {
+    let mut registry = PROJECT_SETTINGS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = settings_key(project_path);
+    if settings.is_default() {
+        if let Some(map) = registry.as_mut() {
+            map.remove(&key);
+        }
+    } else {
+        registry
+            .get_or_insert_with(HashMap::new)
+            .insert(key, settings.clone());
+    }
+}
+
+/// The settings of the project `repo_path` belongs to, when its card set any.
+pub fn registered_settings(repo_path: &Path) -> Option<ProjectCommitSettings> {
+    let registry = PROJECT_SETTINGS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let map = registry.as_ref()?;
+    map.get(&settings_key(&project_root(repo_path)))
+        .or_else(|| map.get(&settings_key(repo_path)))
+        .cloned()
 }
 
 /// Run `git config <args>` in `repo_path`: the trimmed, non-empty output.
@@ -181,7 +287,7 @@ fn choose_identity(
     effective: Option<CommitIdentity>,
 ) -> (CommitIdentity, IdentitySource) {
     if let Some(identity) = project {
-        return (identity, IdentitySource::Project);
+        return (identity, IdentitySource::KronnConfig);
     }
     if let Some(identity) = repository {
         return (identity, IdentitySource::Repository);
@@ -203,7 +309,7 @@ fn resolve_signoff(repo_path: &Path) -> (bool, SignoffSource) {
         repo_path,
         &["--local", "--type=bool", "--get", "kronn.signoff"],
     ) {
-        return (value == "true", SignoffSource::Setting);
+        return (value == "true", SignoffSource::KronnConfig);
     }
     let root = project_root(repo_path);
     match briefing_signoff(&root, repo_path) {

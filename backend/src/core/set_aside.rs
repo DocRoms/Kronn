@@ -281,6 +281,7 @@ fn non_secret_shape(path: &[&str]) -> Option<Shape> {
         | "heavy_output_kb"
         | "bash_default_timeout_min"
         | "bash_max_timeout_min"] => Number,
+        ["workers", "os_junk_patterns", "[]"] => Text,
         ["workers", "review_rounds_unlimited"] => Flag,
         ["workers", "background_priority"] => Flag,
         ["tokens", "disabled_overrides", "[]"] => Text,

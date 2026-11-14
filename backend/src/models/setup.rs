@@ -143,6 +143,14 @@ pub struct WorkersConfig {
     /// which cuts the whole turn whatever a command is allowed.
     #[serde(default = "default_workers_bash_max_timeout_min")]
     pub bash_max_timeout_min: u32,
+    /// KT-1750 — file names an operating system or a file manager drops in any
+    /// folder (`.DS_Store`, `Thumbs.db`, …): they never count as a worker's
+    /// changes, so they block neither a delivery nor the cleanup of a checkout,
+    /// and are excluded from `git status` in every lane Kronn creates. A name,
+    /// or a name with one `*` standing for any run of characters; an empty list
+    /// means none.
+    #[serde(default = "default_workers_os_junk_patterns")]
+    pub os_junk_patterns: Vec<String>,
 }
 
 impl Default for WorkersConfig {
@@ -155,8 +163,57 @@ impl Default for WorkersConfig {
             heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
             bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
             bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
+            os_junk_patterns: default_workers_os_junk_patterns(),
         }
     }
+}
+
+/// The OS junk of the three desktop systems: macOS, Windows, and the AppleDouble
+/// files macOS leaves on foreign file systems.
+pub const DEFAULT_OS_JUNK_PATTERNS: [&str; 4] = [".DS_Store", "Thumbs.db", "desktop.ini", "._*"];
+/// Most patterns, and longest one, the Settings form accepts.
+pub const MAX_OS_JUNK_PATTERNS: usize = 50;
+pub const MAX_OS_JUNK_PATTERN_LEN: usize = 100;
+
+fn default_workers_os_junk_patterns() -> Vec<String> {
+    DEFAULT_OS_JUNK_PATTERNS
+        .iter()
+        .map(|pattern| pattern.to_string())
+        .collect()
+}
+
+/// Why `pattern` cannot be an OS-junk pattern, or `None` when it can. A pattern
+/// is written into the repository's local exclude, so what git would read as
+/// something else (a comment, a negation, a path, a character class) is refused.
+pub fn os_junk_pattern_problem(pattern: &str) -> Option<String> {
+    if pattern.is_empty() {
+        return Some("a pattern cannot be empty".into());
+    }
+    if pattern.len() > MAX_OS_JUNK_PATTERN_LEN {
+        return Some(format!(
+            "`{pattern}` is longer than {MAX_OS_JUNK_PATTERN_LEN} characters"
+        ));
+    }
+    if pattern != pattern.trim() || pattern.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some(format!(
+            "`{pattern}` must not contain spaces or control characters"
+        ));
+    }
+    if pattern.starts_with('#') || pattern.starts_with('!') {
+        return Some(format!("`{pattern}` cannot start with `#` or `!`"));
+    }
+    if pattern.contains(['/', '\\', '[', ']', '?']) {
+        return Some(format!(
+            "`{pattern}` must be a file name: no `/`, `\\`, `[`, `]` or `?`"
+        ));
+    }
+    if pattern.matches('*').count() > 1 {
+        return Some(format!("`{pattern}` may contain only one `*`"));
+    }
+    if pattern.chars().all(|c| c == '*' || c == '.') {
+        return Some(format!("`{pattern}` would match too much"));
+    }
+    None
 }
 
 fn default_workers_review_rounds() -> u32 {
@@ -211,6 +268,16 @@ impl WorkersConfig {
 
     /// Refuse what the Settings form must never persist.
     pub fn validate(&self) -> Result<(), String> {
+        if self.os_junk_patterns.len() > MAX_OS_JUNK_PATTERNS {
+            return Err(format!(
+                "os_junk_patterns holds at most {MAX_OS_JUNK_PATTERNS} patterns"
+            ));
+        }
+        for pattern in &self.os_junk_patterns {
+            if let Some(problem) = os_junk_pattern_problem(pattern) {
+                return Err(format!("os_junk_patterns: {problem}"));
+            }
+        }
         if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
             return Err(format!(
                 "bash_max_timeout_min must be between 1 and {MAX_BASH_TIMEOUT_MIN_LIMIT}"
