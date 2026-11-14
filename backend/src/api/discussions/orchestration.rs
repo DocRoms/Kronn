@@ -1567,6 +1567,64 @@ pub(crate) fn is_transient_provider_overload(output: &str) -> bool {
     .any(|pattern| lower.contains(pattern))
 }
 
+/// KT-1743 — the longest reply that can still be "just the provider's error".
+/// A turn that did real work ends on a report far longer than this; one that
+/// only relays a Cloudflare challenge page does not.
+const TRANSIENT_UPSTREAM_REPLY_MAX_CHARS: usize = 1_500;
+
+/// A provider auth/edge error that is the network's doing, not the account's:
+/// `Failed to authenticate. API Error: 403 Attention Required! | Cloudflare`
+/// (a challenge page served to the host during a network blip), a 403 from the
+/// API edge, or a Cloudflare 52x. It clears on its own, so the caller backs off
+/// and redispatches instead of ending the worker.
+///
+/// A real credential loss keeps its own path: a 401, `authentication_error`,
+/// `please run /login`, an expired token — all refused here, as is a hard
+/// quota. The reply must also be short, i.e. the error and nothing else: a
+/// report that merely quotes "403" is the agent's own work.
+pub(crate) fn is_transient_upstream_auth_error(output: &str) -> bool {
+    let trimmed = output.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > TRANSIENT_UPSTREAM_REPLY_MAX_CHARS {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    if is_hard_quota_exhausted(trimmed) {
+        return false;
+    }
+    const REAL_AUTH_LOSS: &[&str] = &[
+        "api error: 401",
+        "http 401",
+        "status 401",
+        "401 unauthorized",
+        "authentication_error",
+        "invalid authentication",
+        "invalid x-api-key",
+        "invalid api key",
+        "not authenticated",
+        "not logged in",
+        "please run /login",
+        "please log in",
+        "oauth token has expired",
+        "token has been revoked",
+    ];
+    if REAL_AUTH_LOSS.iter().any(|needle| lower.contains(needle)) {
+        return false;
+    }
+    [
+        "attention required",
+        "cloudflare",
+        "api error: 403",
+        "http 403",
+        "api error: 520",
+        "api error: 521",
+        "api error: 522",
+        "api error: 523",
+        "api error: 524",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 pub(crate) fn is_hard_quota_exhausted(output: &str) -> bool {
     let lower = output.to_lowercase();
     // NVIDIA's hosted NIM uses ResourceExhausted for shared worker saturation;
