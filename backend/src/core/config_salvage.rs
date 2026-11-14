@@ -146,25 +146,30 @@ const NAME_MAX_CHARS: usize = 256;
 
 /// A key name that is itself a secret: it is printed as a placeholder and treated
 /// as a credential on save, like a credential's value. ONE rule, one linear pass
-/// per clause, on a name of [`NAME_MAX_CHARS`] at most:
+/// per clause, on a name of [`NAME_MAX_CHARS`] at most, every clause judging the
+/// WHOLE name:
 /// (a) a name longer than that is a secret;
-/// (b) with every non-alphanumeric character removed, a run of 32 hex digits or
-///     more (an instance key written whole or in groups, `<uuid>_<uuid>`; a
-///     dashless UUID and a SHA-1 are hidden too, the safe side), EXCEPT a name that
-///     is exactly one canonical dashed UUID (8-4-4-4-12, any case), alone or after
-///     a `<label>_` / `<label>-` whose hex digits add up to fewer than 8 in TOTAL
-///     (an identifier, `proj_<uuid>`): the label alone is then judged by (c)-(e);
 /// (c) a vendor token shape anywhere in it, unanchored
 ///     ([`super::redact::name_embeds_vendor_token`]): `old_sk-…`, `myAKIA…`,
-///     `AKIA…_old`;
+///     `AKIA…_old`, `sk-<uuid>`;
 /// (d) `bearer` / `basic` (any case) followed by white space, `:` or `=` and a run
 ///     of 12 token characters or more, anywhere (`hdr: bearer\tmy-secret-token`,
-///     `hdrbearer my-secret-token`); `bearer token` and `basic auth` are words;
+///     `hdrbearer my-secret-token`, `bearer -<uuid>`); `bearer token` and
+///     `basic auth` are words;
 /// (e) an instance key ([`super::crypto::canonical_secret`]) as the whole name or
-///     as any piece of it (split on characters that are not alphanumeric or
-///     `+/=-_`, and on those that are not alphanumeric), a run of 24 hex digits or
-///     more, or a run of 32 base64 characters or more mixing capitals, lower case
-///     and digits (a snake_case setting has no capital letters).
+///     as any piece of it, a run of 24 hex digits or more, or a run of 32 base64
+///     characters or more with at least 4 digits, 4 capitals and 4 lower-case
+///     letters (a setting name in camelCase or with `OAuth2` in it has too few
+///     digits);
+/// (b) with every non-alphanumeric character removed, the lengths of the maximal
+///     hex runs that hold at least one DECIMAL digit add up to 32 or more (an
+///     instance key written whole, in groups, `0x`-prefixed or behind a label,
+///     `<uuid>_<uuid>`; plain words made of `a`-`f` such as `default`, `face` or
+///     `added` never count; a dashless UUID and a SHA-1 are hidden too, the safe
+///     side), EXCEPT a name that is exactly one canonical dashed UUID (8-4-4-4-12,
+///     any case), alone or after a `<label>_` / `<label>-` whose own such runs add
+///     up to fewer than 8 (an identifier, `proj_<uuid>`). The exemption waives (b)
+///     ONLY: (a), (c), (d) and (e) have already judged the whole name.
 /// A text a pattern of the free-text redactor catches (a connection string, a
 /// JSON credential field) is a secret too.
 fn secret_name(name: &str) -> bool {
@@ -172,19 +177,10 @@ fn secret_name(name: &str) -> bool {
     if name.chars().nth(NAME_MAX_CHARS).is_some() {
         return true;
     }
-    if let Some(label) = identifier_label(name) {
-        // (b) does not apply to the UUID; its label is judged alone.
-        return !label.is_empty() && token_shaped(label);
-    }
-    let squeezed: String = name.chars().filter(char::is_ascii_alphanumeric).collect();
-    if squeezed
-        .as_bytes()
-        .split(|b| !b.is_ascii_hexdigit())
-        .any(|h| h.len() >= 32)
-    {
+    if token_shaped(name) {
         return true;
     }
-    token_shaped(name)
+    !is_identifier(name) && hex_digit_total(name) >= 32
 }
 
 /// (c), (d), (e) of [`secret_name`] on `text`, a name of at most
@@ -196,12 +192,24 @@ fn token_shaped(text: &str) -> bool {
         || embeds_instance_key(text)
 }
 
-/// `Some(label)` when `name` is one canonical dashed UUID (the label is `""`) or
-/// `<label>_<uuid>` / `<label>-<uuid>` with a label that holds fewer than 8 hex
-/// digits in total: an identifier, not a secret (the exemption of (b)). `None`
-/// for anything else, `<uuid>_<uuid>`, `<16 hex>_<uuid>` and
-/// `0123_4567_89ab_cdef_<uuid>` included, which take the squeeze.
-fn identifier_label(name: &str) -> Option<&str> {
+/// (b) of [`secret_name`]: with every non-alphanumeric character removed, the sum
+/// of the lengths of the maximal `[0-9A-Fa-f]` runs that contain at least one
+/// decimal digit.
+fn hex_digit_total(text: &str) -> usize {
+    let squeezed: Vec<u8> = text.bytes().filter(u8::is_ascii_alphanumeric).collect();
+    squeezed
+        .split(|b| !b.is_ascii_hexdigit())
+        .filter(|run| run.iter().any(u8::is_ascii_digit))
+        .map(<[u8]>::len)
+        .sum()
+}
+
+/// Whether `name` is one canonical dashed UUID, or `<label>_<uuid>` /
+/// `<label>-<uuid>` with a label whose [`hex_digit_total`] is under 8: an
+/// identifier, not a secret (the exemption of (b), which waives (b) only).
+/// `<uuid>_<uuid>`, `<16 hex>_<uuid>` and `0123_4567_89ab_cdef_<uuid>` are not
+/// identifiers: their label alone reaches 8.
+fn is_identifier(name: &str) -> bool {
     const UUID_LEN: usize = 36;
     let is_uuid = |s: &str| {
         s.len() == UUID_LEN
@@ -210,18 +218,16 @@ fn identifier_label(name: &str) -> Option<&str> {
                 _ => b.is_ascii_hexdigit(),
             })
     };
-    let label = if is_uuid(name) {
-        ""
-    } else {
-        let cut = name.len().checked_sub(UUID_LEN + 1)?;
-        let (head, tail) = (name.get(..cut)?, name.get(cut + 1..)?);
-        if !is_uuid(tail) || !matches!(name.as_bytes()[cut], b'_' | b'-') {
-            return None;
-        }
-        head
+    if is_uuid(name) {
+        return true;
+    }
+    let Some(cut) = name.len().checked_sub(UUID_LEN + 1) else {
+        return false;
     };
-    let hex_digits = label.bytes().filter(u8::is_ascii_hexdigit).count();
-    (hex_digits < 8).then_some(label)
+    let (Some(head), Some(tail)) = (name.get(..cut), name.get(cut + 1..)) else {
+        return false;
+    };
+    is_uuid(tail) && matches!(name.as_bytes()[cut], b'_' | b'-') && hex_digit_total(head) < 8
 }
 
 /// (d): `bearer` or `basic` (any ASCII case) anywhere in `text`, then one or more
@@ -246,7 +252,8 @@ fn embeds_authorization(text: &str) -> bool {
 }
 
 /// (e): an instance key as the whole name or a piece of it, a hex run of 24 or
-/// more, a base64 run of 32 or more mixing capitals, lower case and digits.
+/// more, a base64 run of 32 or more with at least 4 digits, 4 capitals and 4
+/// lower-case letters.
 fn embeds_instance_key(text: &str) -> bool {
     if super::crypto::canonical_secret(text).is_ok() {
         return true;
@@ -256,7 +263,7 @@ fn embeds_instance_key(text: &str) -> bool {
         if run.len() < 24 {
             return false;
         }
-        let digits = run.bytes().any(|b| b.is_ascii_digit());
+        let count = |class: fn(&u8) -> bool| run.bytes().filter(class).count();
         let hex_run = run
             .as_bytes()
             .split(|b| !b.is_ascii_hexdigit())
@@ -264,9 +271,9 @@ fn embeds_instance_key(text: &str) -> bool {
         hex_run
             || super::crypto::canonical_secret(run).is_ok()
             || (run.len() >= 32
-                && digits
-                && run.bytes().any(|b| b.is_ascii_uppercase())
-                && run.bytes().any(|b| b.is_ascii_lowercase()))
+                && count(u8::is_ascii_digit) >= 4
+                && count(u8::is_ascii_uppercase) >= 4
+                && count(u8::is_ascii_lowercase) >= 4)
     }) || text
         .split(|c: char| !c.is_ascii_alphanumeric())
         .any(|piece| piece.len() >= 24 && super::crypto::canonical_secret(piece).is_ok())
@@ -1546,8 +1553,12 @@ mod tests {
             format!("{uuid2}_{uuid2}"),
             format!("0123456789abcdef_{uuid2}"),
             format!("0123456-789abcd-0123456-789abcd-0123456-789abcd-0123456_{uuid2}"),
-            format!("deadbee_cafebab_{uuid2}"),
             format!("a1b2c3d4_{uuid}"),
+            // round 17, (b) is a TOTAL of the digit-bearing hex runs, not one run
+            "0x0123456789abcdef_0x0123456789abcdef_0x0123456789abcdef_0x0123456789abcdef"
+                .to_string(),
+            "0x0123456789abcdef_0x0123456789abcdef".to_string(),
+            "k1_0123456789abcdef_k2_0123456789abcdef".to_string(),
             "0123456789abcdef0123456789abcdef".to_string(),
             // (c) vendor shapes, anywhere
             "old_sk-clear-abcdefghijklmnopqrstuvwxyz0123456789".to_string(),
@@ -1557,6 +1568,19 @@ mod tests {
             format!("my{aws}"),
             format!("my_{aws}_old"),
             format!("{aws}_{uuid}"),
+            // round 17: the UUID exemption waives (b) ONLY, a token before it is
+            // judged on the whole name
+            format!("sk-{uuid}"),
+            format!("old_sk-{uuid}"),
+            format!("xoxb-{uuid}"),
+            format!("glpat-{uuid}"),
+            format!("p8e-{uuid}"),
+            format!("bearer -{uuid}"),
+            format!("bearer:_{uuid}"),
+            // round 17: the name shapes keep the vendors' own minimum lengths
+            "old_p8e-12345678".to_string(),
+            "old_glpat-abcdefghijklmnop".to_string(),
+            "myglpat-abcdefghijklmnop".to_string(),
             "bot_xoxb-123456789012-123456789012".to_string(),
             "botxoxb-123456789012-123456789012".to_string(),
             "xoxb-123456789012-123456789012_old".to_string(),
@@ -1603,6 +1627,14 @@ mod tests {
             "agent_profile_550e8400-e29b-41d4-a716-446655440000",
             "proj-550e8400-e29b-41d4-a716-446655440000",
             "PROJ_550E8400-E29B-41D4-A716-446655440000",
+            // round 17: a label of plain `a`-`f` words holds no digit-bearing run
+            "default_agent_profile_550e8400-e29b-41d4-a716-446655440000",
+            "deadbee_cafebab_01234567-89ab-cdef-0123-456789abcdef",
+            // round 17: long setting names with a digit or two and capitals are
+            // not base64 blobs (4 digits, 4 capitals, 4 lower-case letters needed)
+            "enable_OAuth2_authorization_code_flow",
+            "default_ClaudeCode_http2_timeout_secs",
+            "enableOAuth2AuthorizationCodeFlow",
         ];
         for name in shown {
             assert!(!secret_name(name), "{name}");
@@ -1626,6 +1658,9 @@ mod tests {
                 "AKIAIOSFODNN7",
                 "my-secret-token",
                 "xoxb-1234",
+                "550e8400",
+                "p8e-1234",
+                "glpat-abcdef",
             ] {
                 assert!(!notice.contains(secret), "{name}: {notice}");
             }

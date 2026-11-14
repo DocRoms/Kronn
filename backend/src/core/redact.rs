@@ -451,42 +451,34 @@ pub fn looks_like_secret(input: &str) -> bool {
             .any(|pat| pat.gate.admits(input) && pat.re.is_match(input))
 }
 
-/// The vendor token shapes of [`RAW_PATTERNS`] (everything after its four
-/// catch-all-line patterns) as they are looked for in a KEY NAME (KT-1528): no
-/// `\b` on either side (a label glued to a token, `old_sk-…`, `myAKIA…`,
-/// `AKIA…_old`, hides it from an anchored pattern: `_` is a word character), the
-/// vendors' own case, and the shorter minimum lengths a name is judged by. A name
-/// is a few words, so a token shape inside it is a secret pasted as a key. A test
-/// (`name_token_shapes_cover_every_vendor_pattern`) keeps this list in step with
-/// [`RAW_PATTERNS`].
-const NAME_TOKEN_SHAPES: &[&str] = &[
-    r"sk-[A-Za-z0-9_-]{20,}",
-    r"p8e-[A-Za-z0-9_-]{10,}",
-    r"AIza[0-9A-Za-z_-]{30,}",
-    r"gh[opsur]_[A-Za-z0-9_]{20,}",
-    r"github_pat_[A-Za-z0-9_]{20,}",
-    r"ya29\.[A-Za-z0-9_-]{20,}",
-    r"1//0[A-Za-z0-9_-]{40,}",
-    r"xox[abprs]-[A-Za-z0-9-]{10,}",
-    r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-    r"AKIA[0-9A-Z]{16}",
-    r"ASIA[0-9A-Z]{16}",
-    r"(?:rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}",
-    r"sk_(?:live|test)_[A-Za-z0-9]{10,}",
-    r"glpat-[A-Za-z0-9_-]{20,}",
-    r"npm_[A-Za-z0-9]{20,}",
-    r"hf_[A-Za-z0-9]{20,}",
-    r"kbt_[A-Za-z0-9]{10,}",
-];
+/// The four catch-all-line patterns that open [`RAW_PATTERNS`]; every pattern
+/// after them is a vendor token shape.
+const CATCH_ALL_PATTERNS: usize = 4;
+
+/// The vendor token shapes of [`RAW_PATTERNS`] as they are looked for in a KEY NAME
+/// (KT-1528), DERIVED from it mechanically: the same body and the same minimum
+/// lengths, only the `\b` on either side dropped (a label glued to a token,
+/// `old_sk-…`, `myAKIA…`, `AKIA…_old`, hides it from an anchored pattern: `_` is a
+/// word character), and the vendors' own case kept. A name is a few words, so a
+/// token shape inside it is a secret pasted as a key. A new vendor pattern in
+/// [`RAW_PATTERNS`] is therefore covered by name without a second list to update.
+fn name_token_shapes() -> impl Iterator<Item = &'static str> {
+    RAW_PATTERNS
+        .iter()
+        .skip(CATCH_ALL_PATTERNS)
+        .map(|(src, _, _)| {
+            let src = src.strip_prefix(r"\b").unwrap_or(src);
+            src.strip_suffix(r"\b").unwrap_or(src)
+        })
+}
 
 static NAME_TOKEN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    NAME_TOKEN_SHAPES
-        .iter()
+    name_token_shapes()
         .filter_map(|s| Regex::new(s).ok())
         .collect()
 });
 
-/// Whether a vendor token shape ([`NAME_TOKEN_SHAPES`]) appears anywhere in
+/// Whether a vendor token shape ([`name_token_shapes`]) appears anywhere in
 /// `name`. The caller bounds the length of `name` (a key name past a few hundred
 /// characters is masked before any pattern runs, see `config_salvage`).
 pub fn name_embeds_vendor_token(name: &str) -> bool {
@@ -2665,19 +2657,26 @@ mod tests {
         assert!(!looks_like_secret(""));
     }
 
-    /// KT-1528 — `NAME_TOKEN_SHAPES` is the vendor part of `RAW_PATTERNS` seen
-    /// without anchors: one shape per vendor pattern (the count is pinned, so a new
-    /// vendor pattern fails here until a shape is added), and a sample of each is
-    /// found inside a longer name, before and after a label.
+    /// KT-1528 — the name shapes are DERIVED from the vendor part of `RAW_PATTERNS`
+    /// (same body, same minimum lengths, only the `\b` anchors dropped): one shape per
+    /// vendor pattern, and a sample of each vendor is found inside a longer name,
+    /// before and after a label.
     #[test]
     fn name_token_shapes_cover_every_vendor_pattern() {
-        // The four catch-all-line patterns come first in RAW_PATTERNS.
         assert_eq!(
-            RAW_PATTERNS.len() - 4,
-            NAME_TOKEN_SHAPES.len(),
+            RAW_PATTERNS.len() - CATCH_ALL_PATTERNS,
+            name_token_shapes().count(),
             "a vendor pattern of RAW_PATTERNS has no shape for key names"
         );
-        assert_eq!(NAME_TOKEN_REGEXES.len(), NAME_TOKEN_SHAPES.len());
+        assert_eq!(NAME_TOKEN_REGEXES.len(), name_token_shapes().count());
+        // Mechanical: no anchor is left, and every body is the vendor's own.
+        for (shape, (src, _, _)) in name_token_shapes().zip(RAW_PATTERNS.iter().skip(4)) {
+            assert!(
+                !shape.starts_with(r"\b") && !shape.ends_with(r"\b"),
+                "{shape}"
+            );
+            assert!(src.contains(shape), "{shape} is not a body of {src}");
+        }
         let samples = [
             "sk-clear-abcdefghijklmnopqrstuvwxyz0123456789",
             "p8e-abcdefghijklmnop",
@@ -2697,7 +2696,7 @@ mod tests {
             "hf_abcdefghijklmnopqrstuvwxyz0123456789",
             "kbt_abcdefghijklmnopqrstuvwx",
         ];
-        assert_eq!(samples.len(), NAME_TOKEN_SHAPES.len());
+        assert_eq!(samples.len(), name_token_shapes().count());
         for sample in samples {
             assert!(looks_like_secret(sample), "{sample}");
             for name in [
@@ -2719,6 +2718,35 @@ mod tests {
             "task_basic_info",
         ] {
             assert!(!name_embeds_vendor_token(plain), "{plain}");
+        }
+    }
+
+    /// KT-1528 round 17 — a name holds a vendor token at the VENDOR's own minimum
+    /// length, label glued or not (the name shapes used to be stricter than
+    /// `RAW_PATTERNS`: `p8e-` 10 against 8, `glpat-` 20 against 16).
+    #[test]
+    fn a_name_holds_a_vendor_token_at_the_vendors_own_minimum() {
+        for name in [
+            "old_p8e-12345678",
+            "oldp8e-12345678",
+            "old_glpat-abcdefghijklmnop",
+            "myglpat-abcdefghijklmnop",
+            "glpat-abcdefghijklmnop_old",
+            "kbt_abcdefghijklmnop_old",
+            "sk_live_abcdefghijklmnop_old",
+            "old_ghp_abcdefghijklmnopqrstuvwxyz0123_x",
+            "hf_abcdefghijklmnopqrstuvwxyz0123_x",
+        ] {
+            assert!(name_embeds_vendor_token(name), "{name}");
+        }
+        // One character under the minimum: not a token (the vendor pattern says so).
+        for name in [
+            "old_p8e-1234567",
+            "old_glpat-abcdefghijklmno",
+            "old_kbt_abcdefghijklmno",
+            "old_sk_live_abcdefghijklmno",
+        ] {
+            assert!(!name_embeds_vendor_token(name), "{name}");
         }
     }
 

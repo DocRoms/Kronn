@@ -297,22 +297,31 @@ Safe to interrupt at any point; a rerun converges:
    secret, and is a credential on the save path (its entry is sheltered and not
    written back to `config.toml`, so the name does not stay in clear there). ONE
    rule decides it (`config_salvage::secret_name`), one linear pass per clause on a
-   name of 256 characters at most: (a) a longer name is masked without any pattern
-   running on it; (b) with every non-alphanumeric character removed, a run of 32
-   hex digits or more (an instance key whole or in groups, `<uuid>_<uuid>`;
-   a dashless UUID and a SHA-1 are hidden too, on the safe side), except a name
-   that is exactly one canonical dashed UUID (8-4-4-4-12, any case), alone or
-   after a `<label>_` or `<label>-` whose hex digits add up to fewer than 8 in
-   total: that is an identifier and is shown; (c) a vendor token shape anywhere in
-   the name with no word-boundary anchor (`old_sk-…`, `myAKIA…`, `AKIA…_old`,
-   `botxoxb-…`, `sk_live_…_old`), taken from the vendor patterns of
-   `redact::RAW_PATTERNS` (`redact::name_embeds_vendor_token`); (d) `bearer` or
-   `basic` in any case followed by white space (any Unicode white space), `:` or
-   `=` and 12 token characters or more, anywhere (`bearer token` and `basic auth`
-   are words and are shown); (e) an instance key as the whole name or any piece of
-   it, a run of 24 hex digits or a base64 run of 32 characters mixing capitals,
-   lower case and digits. The price of the unanchored shapes: a kebab-case name
-   holding `sk-` followed by 20 name characters (`task-queue-max-concurrency`) is
+   name of 256 characters at most, and every clause judges the WHOLE name: (a) a
+   longer name is masked without any pattern running on it; (c) a vendor token
+   shape anywhere in the name with no word-boundary anchor (`old_sk-…`,
+   `myAKIA…`, `AKIA…_old`, `botxoxb-…`, `sk_live_…_old`, `sk-<uuid>`), DERIVED
+   mechanically from the vendor patterns of `redact::RAW_PATTERNS` (same bodies
+   and same minimum lengths, only the anchors dropped:
+   `redact::name_embeds_vendor_token`); (d) `bearer` or `basic` in any case
+   followed by white space (any Unicode white space), `:` or `=` and 12 token
+   characters or more, anywhere (`bearer token` and `basic auth` are words and
+   are shown); (e) an instance key as the whole name or any piece of it, a run of
+   24 hex digits, or a base64 run of 32 characters with at least 4 digits, 4
+   capitals and 4 lower-case letters (`enable_OAuth2_authorization_code_flow` is
+   a setting name, not a blob); (b) with every non-alphanumeric character
+   removed, the lengths of the hex runs that hold at least one DECIMAL digit add
+   up to 32 or more (an instance key whole, in groups, `0x`-prefixed or behind a
+   label, `<uuid>_<uuid>`; plain words made of `a` to `f` such as `default` or
+   `added` never count; a dashless UUID and a SHA-1 are hidden too, on the safe
+   side), except a name that is exactly one canonical dashed UUID (8-4-4-4-12,
+   any case), alone or after a `<label>_` or `<label>-` whose own such runs add
+   up to fewer than 8 in total: that is an identifier and is shown. The
+   exemption waives (b) ONLY, so `sk-<uuid>`, `xoxb-<uuid>`, `bearer -<uuid>`
+   and `AKIA…_<uuid>` stay masked. A label made only of `a`-`f` letters
+   (`default_agent_profile_<uuid>`, `deadbee_cafebab_<uuid>`) holds no such run
+   and keeps the exemption. The price of the unanchored shapes: a kebab-case
+   name holding `sk-` followed by 20 name characters (`task-queue-max-concurrency`) is
    masked and sheltered too, on the safe side; Kronn's own settings are snake_case.
    A symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard
