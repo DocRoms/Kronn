@@ -456,8 +456,9 @@ jobs:
         run: |
           cargo nextest run --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst" \
             --workspace-remap "$PWD" -E 'test(export_bindings)'
-          node ../frontend/scripts/assemble-generated-types.mjs
-          git diff --exit-code ../frontend/src/types/generated.ts
+          # Compare in memory with the committed file: nothing is rewritten, so
+          # a stale bindings dir or a hand edit both fail here, never "fix" it.
+          node ../frontend/scripts/assemble-generated-types.mjs --check
 
   test-backend-quality:
     needs: require-ci-label
