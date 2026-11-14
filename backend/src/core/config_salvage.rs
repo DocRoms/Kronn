@@ -141,13 +141,13 @@ enum Seg {
 /// pattern running on it (a setting's name is a few words; a name this long is a
 /// token, a blob or an attack on the matcher). Every other rule of
 /// [`secret_name`] therefore runs on at most this many characters, so the whole
-/// matcher is linear with a bounded constant.
+/// matcher is bounded (linear in the input past the cap).
 const NAME_MAX_CHARS: usize = 256;
 
 /// A key name that is itself a secret: it is printed as a placeholder and treated
-/// as a credential on save, like a credential's value. ONE rule, one linear pass
-/// per clause, on a name of [`NAME_MAX_CHARS`] at most, every clause judging the
-/// WHOLE name:
+/// as a credential on save, like a credential's value. ONE rule, on a name of
+/// [`NAME_MAX_CHARS`] at most, every clause judging the WHOLE name except where
+/// said:
 /// (a) a name longer than that is a secret;
 /// (c) a vendor token shape anywhere in it, unanchored
 ///     ([`super::redact::name_embeds_vendor_token`]): `old_sk-…`, `myAKIA…`,
@@ -168,9 +168,13 @@ const NAME_MAX_CHARS: usize = 256;
 ///     `added` never count; a dashless UUID and a SHA-1 are hidden too, the safe
 ///     side), EXCEPT a name that is exactly one canonical dashed UUID (8-4-4-4-12,
 ///     any case), alone or after a `<label>_` / `<label>-` whose own such runs add
-///     up to fewer than 8 (an identifier, `proj_<uuid>`). The exemption waives (b)
-///     ONLY, and (e) then judges the label only (its UUID is never an instance key);
-///     (a), (c) and (d) judge the whole name.
+///     up to fewer than 8 (an identifier, `proj_<uuid>`). The exemption waives (b),
+///     and when the label is too short to hold a key (no run of key characters of
+///     [`LABEL_KEY_RUN`] or more) (e) judges the label only, so `PROJ_<uuid>` and
+///     `MCP_SERVER_<uuid>` are shown; a longer label is judged with its UUID, the
+///     safe side (`<key>_<uuid>`). (a), (c) and (d) judge the whole name.
+/// (c) retries every start (a rejected `sk-` inside a word never hides a later
+/// match), so it is quadratic in the worst case, bounded by [`NAME_MAX_CHARS`].
 /// A text a pattern of the free-text redactor catches (a connection string, a
 /// JSON credential field) is a secret too.
 fn secret_name(name: &str) -> bool {
@@ -179,11 +183,27 @@ fn secret_name(name: &str) -> bool {
         return true;
     }
     match identifier_label(name) {
-        // An identifier's UUID is never an instance key: (e) judges its label only
+        // A short label holds no key and the UUID is never one: (e) on the label
         // (`PROJ_<uuid>` would otherwise make one base64 run with 4 capitals).
-        Some(label) => token_shaped(name) || embeds_instance_key(label),
+        Some(label) if longest_key_run(label) < LABEL_KEY_RUN => {
+            token_shaped(name) || embeds_instance_key(label)
+        }
+        Some(_) => token_shaped(name) || embeds_instance_key(name),
         None => token_shaped(name) || embeds_instance_key(name) || hex_digit_total(name) >= 32,
     }
+}
+
+/// The shortest run of key characters a label must hold for its UUID to be
+/// judged with it by (e): below it no instance key, 24-hex run or 32-character
+/// base64 run fits.
+const LABEL_KEY_RUN: usize = 20;
+
+/// The longest run of the characters (e) reads as one key piece.
+fn longest_key_run(text: &str) -> usize {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')))
+        .map(str::len)
+        .max()
+        .unwrap_or(0)
 }
 
 /// (c) and (d) of [`secret_name`] on `text`, a name of at most [`NAME_MAX_CHARS`].
@@ -1579,6 +1599,11 @@ mod tests {
             "old_p8e-12345678".to_string(),
             "old_glpat-abcdefghijklmnop".to_string(),
             "myglpat-abcdefghijklmnop".to_string(),
+            // round 21: a key with few digits behind a UUID is judged with it
+            "qbvEjRWeJqXvEjRWeJqYvEjRWeJqZvEjRWeJqWvEjR=_550e8400-e29b-41d4-a716-446655440000"
+                .to_string(),
+            "AbCdEfGhIjKlMnOpQrStUvWxYz01234_550e8400-e29b-41d4-a716-446655440000".to_string(),
+            "q83vEjRWeJq83vEjRWeJq83vE_550e8400-e29b-41d4-a716-446655440000".to_string(),
             "myAKIAIOSFODNNXEXAMPLE".to_string(),
             "myhf_aBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgH".to_string(),
             "bot_xoxb-123456789012-123456789012".to_string(),

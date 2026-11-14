@@ -321,8 +321,10 @@ Safe to interrupt at any point; a rerun converges:
    side), except a name that is exactly one canonical dashed UUID (8-4-4-4-12,
    any case), alone or after a `<label>_` or `<label>-` whose own such runs add
    up to fewer than 8 in total: that is an identifier and is shown. The
-   exemption waives (b), and (e) judges the label only (`PROJ_<uuid>` and
-   `MCP_SERVER_<uuid>` are shown); (a), (c) and (d) still judge the whole name,
+   exemption waives (b), and when the label is too short to hold a key (no run of
+   20 key characters) (e) judges the label only (`PROJ_<uuid>` and
+   `MCP_SERVER_<uuid>` are shown); a longer label is judged with its UUID, so a key
+   with few digits behind a UUID stays masked; (a), (c) and (d) still judge the whole name,
    so `sk-<uuid>`, `xoxb-<uuid>`, `bearer -<uuid>` and `AKIA…_<uuid>` stay masked. A label made only of `a`-`f` letters
    (`default_agent_profile_<uuid>`, `deadbee_cafebab_<uuid>`) holds no such run
    and keeps the exemption. The price of the unanchored shapes: a name holding
