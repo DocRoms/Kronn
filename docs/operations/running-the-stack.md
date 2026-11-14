@@ -26,8 +26,8 @@ stack, not to start a task. Content verbatim.
   [src: file: scripts/dev-backend-supervisor.sh:109-116#backend_ready]
   [src: file: scripts/dev-backend-supervisor.sh:202-211#readiness_status]
   [src: file: lib/ui.sh:381-400#wait_for_process_http_ready]
-  [src: file: backend/src/main.rs:779-799#sync_all_projects]
-  [src: file: backend/src/main.rs:1006#TcpListener]
+  [src: file: backend/src/main.rs:812-832#sync_all_projects]
+  [src: file: backend/src/main.rs:1036#TcpListener]
 - The desktop app and native CLI share configuration, but the desktop's free
   listener port is process-local (`ServerConfig.runtime_port`, excluded from
   serialization). The persisted `server.port` remains the CLI preference;
@@ -37,8 +37,8 @@ stack, not to start a task. Content verbatim.
   back up `config.toml` and restore `server.port = 3140` for the standard dev
   launcher; preserve all other settings and encryption keys. Install a fixed
   desktop build before switching back to desktop mode.
-  [src: file: backend/src/models/setup.rs:302-305#runtime_port]
-  [src: file: backend/src/models/setup.rs:594-597#listening_port]
+  [src: file: backend/src/models/setup.rs:568-571#runtime_port]
+  [src: file: backend/src/models/setup.rs:860-863#listening_port]
   [src: file: desktop/src-tauri/src/main.rs:583-588#configure_embedded_server]
 - After changing Rust models with `#[derive(TS)]`: run `make typegen` to regenerate `frontend/src/types/generated.ts`.
 - The project Docker tab reads the machine's hosts file to flag published

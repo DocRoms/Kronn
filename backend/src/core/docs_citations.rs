@@ -639,30 +639,33 @@ fn reanchor_span(
     let Some(moved) = &failure.moved else {
         return Ok(None);
     };
-    // This remains the first rule: a unique definition needs no Git history.
-    if let Some(span) = moved.placement() {
-        return Ok(Some(span));
+    // The diff is the evidence of where the cited lines went: a citation of a
+    // mention stays on that mention, not on the symbol's definition, and a
+    // range widened inside keeps its mapped end. The unique definition places
+    // what the diff cannot, with no Git history at all.
+    if let Some((path, Some(old), Some(anchor))) = file_citation_anchored(&failure.citation) {
+        let mapped = match diff
+            .as_mut()
+            .map(|mapper| mapper.span(Path::new(&path), old))
+            .transpose()
+        {
+            Ok(mapped) => mapped.flatten(),
+            Err(_) if moved.placement().is_some() => None,
+            Err(error) => return Err(error),
+        };
+        // Mapping positions is not enough: the mapped range must still name the
+        // cited whole-word anchor under the verifier's exact rule.
+        if let Some(mapped) = mapped {
+            if anchor_miss(&root.join(&path), mapped, &anchor).is_none() {
+                return Ok(Some(mapped));
+            }
+        }
     }
-    let Some((path, Some(old), Some(anchor))) = file_citation_anchored(&failure.citation) else {
-        return Ok(None);
-    };
-    let Some(mapped) = diff
-        .as_mut()
-        .map(|mapper| mapper.span(Path::new(&path), old))
-        .transpose()?
-        .flatten()
-    else {
-        return Ok(None);
-    };
-    // Mapping positions is not enough: the mapped range must still name the
-    // cited whole-word anchor under the verifier's exact rule.
-    Ok(anchor_miss(&root.join(path), mapped, &anchor)
-        .is_none()
-        .then_some(mapped))
+    Ok(moved.placement())
 }
 
-/// Safe line moves in one doc, using the unique-symbol rule first and a Git
-/// diff only for the repeated-symbol cases it cannot settle.
+/// Safe line moves in one doc: where the Git diff from `base` maps the cited
+/// lines (still naming the anchor), else the symbol's unique definition.
 pub(crate) fn suggested_reanchors(
     text: &str,
     root: &Path,

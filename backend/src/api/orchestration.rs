@@ -2920,9 +2920,10 @@ async fn defer_native_provisioning(
             .await
             .map_err(|e| ProvisionError::Internal(e.to_string()));
     };
-    let bound = crate::core::task_worker_lane_warm::WarmStartSettings::from_host()
-        .first_build_timeout
-        .as_secs();
+    let bound =
+        crate::core::task_worker_lane_warm::WarmStartSettings::for_worktree(&launch.worktree_path)
+            .first_build_timeout
+            .as_secs();
     let journal_id = exec_id.clone();
     db.with_conn(move |conn| {
         crate::db::orchestration::record_lane_warming(conn, &journal_id, bound, &backend_actor())
@@ -3473,6 +3474,51 @@ pub enum IntegrationOutcome {
     NotIntegrable { status: TaskExecutionStatus },
 }
 
+/// KT-1748 — the project's own managed worktree roots, on top of the global
+/// Settings > Workers list and the built-in ones.
+fn project_managed_roots(project: &crate::models::Project) -> Vec<std::path::PathBuf> {
+    project
+        .workspace
+        .as_ref()
+        .map(|workspace| {
+            crate::models::effective_managed_worktree_roots(&workspace.managed_worktree_roots)
+        })
+        .unwrap_or_default()
+}
+
+/// KT-1748 — `Some(refusal text)` when the target is held by a Kronn-managed
+/// worktree that a run or a live agent is using right now: integrating would move
+/// its files under that run. `None`: the target is held by nothing, or by an idle
+/// worktree. A database or Git error reads as busy, never as idle.
+async fn busy_target_refusal(
+    db: &Database,
+    repo: &std::path::Path,
+    target_branch: &str,
+    exec_id: &str,
+) -> Option<String> {
+    let repo = repo.to_path_buf();
+    let target = target_branch.to_string();
+    let own = exec_id.to_string();
+    let verdict = db
+        .with_conn(move |conn| {
+            Ok(worktree::integration_target_idle(&repo, &target, &|path| {
+                crate::db::discussion_workspaces::active_holder_of_checkout(conn, path, Some(&own))
+            }))
+        })
+        .await;
+    let unreadable = |error: String| {
+        format!(
+            "integration_target_busy_worktree: cannot tell whether the target's worktree is in use ({error})"
+        )
+    };
+    match verdict {
+        Ok(Ok(Ok(()))) => None,
+        Ok(Ok(Err(refusal))) => Some(refusal.message()),
+        Ok(Err(error)) => Some(unreadable(error)),
+        Err(error) => Some(unreadable(error.to_string())),
+    }
+}
+
 /// Park a refused integration with its reason and fix, and tell the principal
 /// room, so neither an approval nor a validated candidate is silently stranded.
 /// A row parked `Interrupted` gets its recovery decision from the real Git state;
@@ -3961,6 +4007,12 @@ async fn validate_and_apply(
         let tip = if tip != candidate.target_sha {
             tip
         } else {
+            if let Some(reason) = busy_target_refusal(db, repo, target_branch, exec_id).await {
+                let fix = format!(
+                    "Attends que le run qui utilise le worktree de `{target_branch}` se termine, puis relance l'intégration."
+                );
+                return hold_integration(db, exec_id, generic, reason, &fix).await;
+            }
             match worktree::fast_forward_target_to(
                 repo,
                 target_branch,
@@ -4658,6 +4710,24 @@ async fn finish_recovered_apply(
             return Ok(IntegrationOutcome::Refused {
                 reason: "target became dirty; execution parked".into(),
             });
+        }
+        if let Some(reason) = busy_target_refusal(db, repo, target_branch, &execution.id).await {
+            // Parked again, like a dirty target: the next resume asks again.
+            let id = execution.id.clone();
+            let durable_reason = reason.clone();
+            db.with_conn(move |conn| {
+                crate::db::orchestration::block_execution(
+                    conn,
+                    &id,
+                    &backend_actor(),
+                    &durable_reason,
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| internal(error.to_string()))?;
+            return Ok(IntegrationOutcome::Refused { reason });
         }
         claim_recovered_apply(db, &execution.id, "guarded_apply_recheck_complete").await?;
         match worktree::fast_forward_target_to(repo, target_branch, target_sha, merge_sha) {
@@ -10062,6 +10132,7 @@ pub(crate) fn resolve_launch_target(
     conn: &rusqlite::Connection,
     parent_discussion_id: &str,
     repo_path: &std::path::Path,
+    project_roots: &[std::path::PathBuf],
     base_rev: Option<&str>,
 ) -> Result<Result<String, String>> {
     let requested = base_rev.map(str::trim).filter(|rev| !rev.is_empty());
@@ -10083,7 +10154,9 @@ pub(crate) fn resolve_launch_target(
         Ok(branch) => branch,
         Err(reason) => return Ok(Err(reason)),
     };
-    match worktree::integration_target_ownership(repo_path, &branch) {
+    match worktree::integration_target_ownership(repo_path, &branch, project_roots, &|path| {
+        crate::db::discussion_workspaces::is_registered_managed_checkout(conn, path)
+    }) {
         Ok(Ok(())) => Ok(Ok(branch)),
         Ok(Err(refusal)) => Ok(Err(refusal.message())),
         Err(reason) => Ok(Err(reason)),
@@ -10105,8 +10178,14 @@ pub(crate) fn integration_target_preparation(
         return Ok(());
     };
     let repo = scanner::resolve_host_path(&project.path);
-    let Err(message) =
-        resolve_launch_target(conn, &preparation.parent_discussion_id, &repo, base_rev)?
+    let roots = project_managed_roots(&project);
+    let Err(message) = resolve_launch_target(
+        conn,
+        &preparation.parent_discussion_id,
+        &repo,
+        &roots,
+        base_rev,
+    )?
     else {
         return Ok(());
     };
@@ -10289,6 +10368,7 @@ fn begin_provisioning(
             conn,
             parent_discussion_id,
             std::path::Path::new(&repo_path),
+            &project_managed_roots(&project),
             target_branch,
         )? {
             Ok(branch) => branch,
@@ -12353,7 +12433,9 @@ fn preparation_reason(code: &str, detail: impl Into<String>) -> crate::models::C
 /// Refusals that depend only on the typed target. The catalogue and preflight
 /// deliberately share this helper so an identity cannot be advertised with a
 /// different transport/capability verdict than the launch boundary applies.
-fn worker_static_refusal(worker: &MessageTarget) -> Option<crate::models::CampaignTaskReason> {
+pub(crate) fn worker_static_refusal(
+    worker: &MessageTarget,
+) -> Option<crate::models::CampaignTaskReason> {
     if let Err(error) = crate::db::orchestration::ensure_task_worker_transport_compatible(worker) {
         return Some(preparation_reason("worker_transport", error.to_string()));
     }
@@ -13284,7 +13366,12 @@ pub(crate) fn execution_detail(
             .ok()
             .flatten()?;
         let repo = scanner::resolve_host_path(&project.path);
-        Some(worktree::describe_integration_target(&repo, branch))
+        Some(worktree::describe_integration_target(
+            &repo,
+            branch,
+            &project_managed_roots(&project),
+            &|path| crate::db::discussion_workspaces::is_registered_managed_checkout(conn, path),
+        ))
     });
     Ok(crate::models::TaskExecutionDetail {
         lineage,
@@ -14937,6 +15024,15 @@ pub(crate) async fn reassign_native_execution_for_dispatch(
     }
     crate::db::orchestration::ensure_task_worker_transport_compatible(&selection.target)
         .map_err(|error| anyhow::anyhow!("worker_transport: {error}"))?;
+    // KT-1749 — the launch's own static verdict (native ACP route, typed
+    // delivery capability), so a worker is never moved onto an agent the
+    // spawn would then refuse. `Custom` keeps its own connection-pin
+    // validation, which names the missing connection.
+    if selection.target.agent_type != AgentType::Custom {
+        if let Some(reason) = worker_static_refusal(&selection.target) {
+            bail!("{}: {}", reason.code, reason.detail);
+        }
+    }
     let id = exec_id.to_string();
     let execution = state
         .db
@@ -26234,6 +26330,114 @@ pub(crate) mod tests {
         assert_eq!(done.status, TaskExecutionStatus::Done);
         assert_eq!(done.blocked_reason_code, None);
         assert_eq!(done.blocked_reason, None);
+    }
+
+    /// KT-1748 — integrating into a Kronn-managed worktree a run is using right
+    /// now is refused (`integration_target_busy_worktree`, naming the run) and
+    /// leaves the checkout untouched; the next attempt, once the run is over,
+    /// advances the same worktree.
+    #[tokio::test]
+    async fn integration_into_a_worktree_a_run_is_using_waits_for_the_run_to_finish() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (execution, _, _) = approved_execution_with_commit(
+            &db,
+            repo.path(),
+            "target-in-busy-worktree",
+            "worker.txt",
+            "validated",
+            vec![],
+        )
+        .await;
+        assert!(git(repo.path(), &["branch", "feature-target", "main"])
+            .status
+            .success());
+        let checkouts = tempfile::tempdir().unwrap();
+        let held = checkouts.path().join("held");
+        assert!(git(
+            repo.path(),
+            &["worktree", "add", held.to_str().unwrap(), "feature-target"]
+        )
+        .status
+        .success());
+        let held_tip = String::from_utf8_lossy(&git(&held, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+        let registered = held.canonicalize().unwrap().to_string_lossy().to_string();
+        let run_id = execution.orchestration_run_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET target_branch = 'feature-target' WHERE id = ?1",
+                [run_id],
+            )?;
+            conn.execute(
+                "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, \
+                 actions_json, safety_json, workspace_config_json, concurrency_limit, \
+                 enabled, created_at, updated_at) VALUES ('w-auto', 'autoCode', NULL, '{}', \
+                 '[]', '[]', '{}', NULL, NULL, 1, 'now', 'now')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, workspace_path, started_at, status) \
+                 VALUES ('run-live', 'w-auto', ?1, 'now', 'Running')",
+                [registered],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let outcome = run_integration(&db, &execution.id).await.unwrap();
+        let IntegrationOutcome::Refused { reason } = outcome else {
+            panic!("an active run holds the target: got {outcome:?}");
+        };
+        assert!(
+            reason.starts_with("integration_target_busy_worktree: ") && reason.contains("run-live"),
+            "the refusal names the run: {reason}"
+        );
+        let held_back = exec_of(&db, &execution.id).await;
+        assert_eq!(held_back.status, TaskExecutionStatus::Blocked);
+        assert_eq!(
+            held_back.blocked_from_status,
+            Some(TaskExecutionStatus::Applying)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&git(&held, &["rev-parse", "HEAD"]).stdout).trim(),
+            held_tip,
+            "the busy checkout did not move"
+        );
+
+        // Still busy: a resume asks again, is refused again and stays parked.
+        assert!(resume_blocked_apply(&db, &execution.id).await.is_err());
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Blocked
+        );
+
+        // The run finished: the same worktree is idle and the next attempt lands.
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE workflow_runs SET status = 'Success' WHERE id = 'run-live'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let outcome = resume_blocked_apply(&db, &execution.id).await.unwrap();
+        assert!(
+            matches!(outcome, IntegrationOutcome::Integrated { .. }),
+            "got {outcome:?}"
+        );
+        assert_eq!(
+            exec_of(&db, &execution.id).await.status,
+            TaskExecutionStatus::Done
+        );
+        assert_ne!(
+            String::from_utf8_lossy(&git(&held, &["rev-parse", "HEAD"]).stdout).trim(),
+            held_tip,
+            "the idle checkout advanced"
+        );
     }
 
     /// A validation run by `python3` from outside the repository. Tests steer it
@@ -38107,11 +38311,7 @@ pub(crate) mod tests {
             .await
             .remove(0);
         let state = quota_test_state(&db);
-        let available = [
-            AgentType::ClaudeCode,
-            AgentType::Codex,
-            AgentType::GeminiCli,
-        ];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         let allowed = serde_json::to_string(&available).unwrap();
         let id = was.id.clone();
         db.with_conn(move |conn| {
@@ -38132,8 +38332,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             refuse_through_the_fallback(&state, &db, &was.id, hours(1), &available).await,
-            Some(AgentType::GeminiCli),
-            "Claude is the original, Gemini is free"
+            Some(AgentType::Ollama),
+            "Claude is the original, Ollama is free"
         );
         assert_eq!(
             refuse_through_the_fallback(&state, &db, &was.id, hours(2), &available).await,
@@ -38141,7 +38341,7 @@ pub(crate) mod tests {
             "Claude is the original and Codex has not reset"
         );
         let last = exec_of(&db, &was.id).await;
-        assert_eq!(last.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(last.worker_agent_type.as_deref(), Some("Ollama"));
         assert_eq!(last.worker_model_tier.as_deref(), Some("economy"));
         assert_eq!(
             origin_of(&db, &was.id).await.map(|origin| origin.provider),
@@ -38166,8 +38366,8 @@ pub(crate) mod tests {
 
     /// KT-1564 — refusals that announce no reset. The global refusal record
     /// holds NULL for them, so nothing on a clock marks the provider as
-    /// unavailable: Claude (origin) -> Codex -> Gemini, and Gemini's refusal
-    /// must not hand the execution back to Codex, then Gemini again, with a
+    /// unavailable: Claude (origin) -> Codex -> Ollama, and Ollama's refusal
+    /// must not hand the execution back to Codex, then Ollama again, with a
     /// dispatch and a handoff per refusal. It escalates after the second.
     #[tokio::test]
     async fn two_refusals_without_a_reset_escalate_instead_of_bouncing() {
@@ -38177,11 +38377,7 @@ pub(crate) mod tests {
             .await
             .remove(0);
         let state = quota_test_state(&db);
-        let available = [
-            AgentType::ClaudeCode,
-            AgentType::Codex,
-            AgentType::GeminiCli,
-        ];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         let allowed = serde_json::to_string(&available).unwrap();
         let id = was.id.clone();
         db.with_conn(move |conn| {
@@ -38201,14 +38397,14 @@ pub(crate) mod tests {
             refuse_through_the_fallback(&state, &db, &was.id, none(), &available).await,
             Some(AgentType::Codex)
         );
-        // Codex refuses: Gemini is the only provider left that has not refused.
+        // Codex refuses: Ollama is the only provider left that has not refused.
         assert_eq!(
             refuse_through_the_fallback(&state, &db, &was.id, none(), &available).await,
-            Some(AgentType::GeminiCli)
+            Some(AgentType::Ollama)
         );
         let on_gemini = exec_of(&db, &was.id).await;
         let gemini_dispatch = on_gemini.dispatch_job_id.clone().unwrap();
-        // Gemini refuses: Claude is the origin, Codex already refused. Nobody
+        // Ollama refuses: Claude is the origin, Codex already refused. Nobody
         // is left, so no new dispatch and no handoff: the caller escalates.
         for _ in 0..3 {
             assert_eq!(
@@ -38218,7 +38414,7 @@ pub(crate) mod tests {
             );
         }
         let stuck = exec_of(&db, &was.id).await;
-        assert_eq!(stuck.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(stuck.worker_agent_type.as_deref(), Some("Ollama"));
         assert_eq!(stuck.worker_model_tier.as_deref(), Some("economy"));
         assert_eq!(
             stuck.dispatch_job_id.as_deref(),
@@ -38232,10 +38428,7 @@ pub(crate) mod tests {
         let dispatch = gemini_dispatch.clone();
         db.with_conn(move |conn| {
             crate::db::orchestration::escalate_execution_for_dispatch_quota(
-                conn,
-                &dispatch,
-                "GeminiCli",
-                None,
+                conn, &dispatch, "Ollama", None,
             )
         })
         .await
@@ -38271,11 +38464,7 @@ pub(crate) mod tests {
             .await
             .remove(0);
         let state = quota_test_state(&db);
-        let available = [
-            AgentType::ClaudeCode,
-            AgentType::Codex,
-            AgentType::GeminiCli,
-        ];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         let allowed = serde_json::to_string(&available).unwrap();
         let id = was.id.clone();
         db.with_conn(move |conn| {
@@ -38296,7 +38485,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             refuse_through_the_fallback(&state, &db, &was.id, hours(5), &available).await,
-            Some(AgentType::GeminiCli)
+            Some(AgentType::Ollama)
         );
         // Codex's announced reset passes (the stored refusals are what the
         // chain consults, not only the global record).

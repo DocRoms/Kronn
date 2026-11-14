@@ -416,6 +416,84 @@ pub fn list_attached_managed_with_path(conn: &Connection) -> Result<Vec<Discussi
     Ok(rows)
 }
 
+/// Whether Kronn's workspace registry records `path` as one of its own
+/// checkouts (KT-1748): a managed discussion workspace, or the workspace of a
+/// workflow run. Only the exact path counts; an `external` workspace a user
+/// declared stays foreign. A database error answers `false`, never "managed".
+pub fn is_registered_managed_checkout(conn: &Connection, path: &std::path::Path) -> bool {
+    let path = path.to_string_lossy();
+    let known = |sql: &str| {
+        conn.query_row(sql, params![path.as_ref()], |_| Ok(()))
+            .optional()
+            .map(|row| row.is_some())
+            .unwrap_or(false)
+    };
+    known(
+        "SELECT 1 FROM discussion_workspaces WHERE ownership = 'managed' \
+         AND (canonical_path = ?1 OR workspace_path = ?1) LIMIT 1",
+    ) || known("SELECT 1 FROM workflow_runs WHERE workspace_path = ?1 LIMIT 1")
+}
+
+/// Who is using the checkout at `path` right now (KT-1748), as a phrase naming
+/// the run, or `None` when nothing recorded holds it. A holder is: a workflow run
+/// that has not finished, a task execution (other than `own_execution_id`, the
+/// integration asking) that has not reached Done/Failed/Cancelled, or a pending or
+/// running agent dispatch / resume job of the discussion bound to that path.
+/// A database error answers "busy": an unreadable registry never says idle.
+pub fn active_holder_of_checkout(
+    conn: &Connection,
+    path: &std::path::Path,
+    own_execution_id: Option<&str>,
+) -> Option<String> {
+    let path = path.to_string_lossy();
+    let own = own_execution_id.unwrap_or("");
+    let first = |sql: &str, params: &[&dyn rusqlite::ToSql], label: &dyn Fn(String) -> String| {
+        conn.query_row(sql, params, |row| row.get::<_, String>(0))
+            .optional()
+            .map(|row| row.map(label))
+    };
+    let probes = [
+        first(
+            "SELECT id FROM workflow_runs WHERE workspace_path = ?1 \
+             AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota') LIMIT 1",
+            params![path.as_ref()],
+            &|id| format!("workflow run {id} is still active"),
+        ),
+        first(
+            "SELECT te.id FROM discussion_workspaces dw \
+               JOIN task_executions te ON te.id = dw.task_execution_id \
+              WHERE dw.ownership = 'managed' AND (dw.canonical_path = ?1 OR dw.workspace_path = ?1) \
+                AND te.id != ?2 AND te.status NOT IN ('Done', 'Failed', 'Cancelled') LIMIT 1",
+            params![path.as_ref(), own],
+            &|id| format!("task execution {id} is still active"),
+        ),
+        first(
+            "SELECT job.id FROM discussion_workspaces dw \
+               JOIN agent_dispatch_jobs job ON job.discussion_id = dw.disc_id \
+              WHERE (dw.canonical_path = ?1 OR dw.workspace_path = ?1) \
+                AND job.status IN ('Pending', 'Running') LIMIT 1",
+            params![path.as_ref()],
+            &|id| format!("agent dispatch {id} is pending or running"),
+        ),
+        first(
+            "SELECT job.id FROM discussion_workspaces dw \
+               JOIN agent_resume_jobs job ON job.discussion_id = dw.disc_id \
+              WHERE (dw.canonical_path = ?1 OR dw.workspace_path = ?1) \
+                AND job.status IN ('Pending', 'Running') LIMIT 1",
+            params![path.as_ref()],
+            &|id| format!("agent resume job {id} is pending or running"),
+        ),
+    ];
+    for probe in probes {
+        match probe {
+            Ok(Some(holder)) => return Some(holder),
+            Ok(None) => {}
+            Err(error) => return Some(format!("the registry could not be read: {error}")),
+        }
+    }
+    None
+}
+
 /// Retire a successfully removed managed checkout without erasing its lineage.
 ///
 /// `canonical_path` is cleared so the historical row cannot claim ownership of
@@ -648,6 +726,133 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(second.branch, "feature/two");
         assert_eq!(list_for_discussion(&conn, "d1").unwrap().len(), 1);
+    }
+
+    /// KT-1748 — the registry vouches for managed workspaces and workflow runs,
+    /// never for a workspace a user merely declared, nor for an unknown path.
+    #[test]
+    fn registry_vouches_for_managed_and_workflow_checkouts_only() {
+        let conn = fixture();
+        let path = std::path::Path::new;
+        upsert_external(
+            &conn,
+            "d1",
+            7,
+            None,
+            "p1",
+            "/elsewhere/declared",
+            "/elsewhere/declared",
+            "feature/one",
+            "abc",
+        )
+        .unwrap();
+        assert!(!is_registered_managed_checkout(
+            &conn,
+            path("/elsewhere/declared")
+        ));
+        assert!(!is_registered_managed_checkout(&conn, path("/unknown")));
+
+        let exec = seed_execution(&conn, "task-reg", 3);
+        upsert_managed(
+            &conn,
+            &exec,
+            "d1",
+            "d-parent",
+            Some("task-reg"),
+            "p1",
+            "/repo/.kronn/worktrees/lane",
+            "/repo/.kronn/worktrees/lane",
+            "kronn/task/KT-3-lane",
+            "head",
+            "base",
+        )
+        .unwrap();
+        assert!(is_registered_managed_checkout(
+            &conn,
+            path("/repo/.kronn/worktrees/lane")
+        ));
+
+        conn.execute(
+            "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, \
+             actions_json, safety_json, workspace_config_json, concurrency_limit, enabled, \
+             created_at, updated_at) VALUES ('w1', 'wf', NULL, '{}', '[]', '[]', '{}', NULL, \
+             NULL, 1, 'now', 'now')",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, workspace_path, started_at) \
+             VALUES ('r1', 'w1', '/wf/run/worktree', 'now')",
+            [],
+        )
+        .unwrap();
+        assert!(is_registered_managed_checkout(
+            &conn,
+            path("/wf/run/worktree")
+        ));
+    }
+
+    /// KT-1748 — a registered worktree is busy while an execution or a workflow
+    /// run uses it, idle once they finish, and the integration's own execution
+    /// never counts against itself.
+    #[test]
+    fn active_holder_names_the_run_using_a_registered_worktree() {
+        let conn = fixture();
+        let lane = std::path::Path::new("/repo/.kronn/worktrees/lane");
+        let exec = seed_execution(&conn, "task-busy", 4);
+        upsert_managed(
+            &conn,
+            &exec,
+            "d1",
+            "d-parent",
+            Some("task-busy"),
+            "p1",
+            "/repo/.kronn/worktrees/lane",
+            "/repo/.kronn/worktrees/lane",
+            "feat/EW-7704",
+            "head",
+            "base",
+        )
+        .unwrap();
+
+        let holder = active_holder_of_checkout(&conn, lane, None).unwrap();
+        assert!(holder.contains(&exec), "names the execution: {holder}");
+        assert_eq!(active_holder_of_checkout(&conn, lane, Some(&exec)), None);
+        assert_eq!(
+            active_holder_of_checkout(&conn, std::path::Path::new("/unknown"), None),
+            None
+        );
+
+        conn.execute(
+            "UPDATE task_executions SET status = 'Done' WHERE id = ?1",
+            params![exec],
+        )
+        .unwrap();
+        assert_eq!(active_holder_of_checkout(&conn, lane, None), None);
+
+        conn.execute(
+            "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, \
+             actions_json, safety_json, workspace_config_json, concurrency_limit, enabled, \
+             created_at, updated_at) VALUES ('w1', 'wf', NULL, '{}', '[]', '[]', '{}', NULL, \
+             NULL, 1, 'now', 'now')",
+            [],
+        )
+        .ok();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, workspace_path, started_at, status) \
+             VALUES ('r-live', 'w1', '/auto/wt', 'now', 'Running')",
+            [],
+        )
+        .unwrap();
+        let auto = std::path::Path::new("/auto/wt");
+        let holder = active_holder_of_checkout(&conn, auto, None).unwrap();
+        assert!(holder.contains("r-live"), "names the run: {holder}");
+        conn.execute(
+            "UPDATE workflow_runs SET status = 'Success' WHERE id = 'r-live'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(active_holder_of_checkout(&conn, auto, None), None);
     }
 
     #[test]

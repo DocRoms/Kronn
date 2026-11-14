@@ -1006,6 +1006,11 @@ async fn provider_fallback_among(
                 {
                     continue;
                 }
+                // KT-1749 — never an alternative the launch would refuse
+                // (native ACP route, typed-delivery capability).
+                if crate::core::agent_fallback::task_worker_launch_refusal(candidate).is_some() {
+                    continue;
+                }
                 usable.push(candidate.clone());
             }
             let Some(alternative) = select_quota_alternative(&usable, &current, &available_agents)
@@ -1027,7 +1032,8 @@ async fn provider_fallback_among(
     let Some((execution_id, alternative, tier, profile_id)) = candidate else {
         return Ok(None);
     };
-    let mut target = crate::models::MessageTarget::agent(alternative.clone());
+    // An HTTP alternative is a `discussion_agent`, a host CLI an `agent`.
+    let mut target = crate::core::agent_fallback::task_worker_target(&alternative);
     target.tier = tier;
     let selection = crate::models::CampaignWorkerSelection {
         target,
@@ -1210,6 +1216,18 @@ async fn finish_dispatch_turn(
         return;
     }
 
+    // KT-1743 — a provider edge/auth error that is the network's doing (a
+    // Cloudflare challenge, a 403 from the API edge) is waited out on the same
+    // agent, within TRANSIENT_UPSTREAM_BACKOFF_SECONDS. A task worker would
+    // otherwise end Interrupted on a blip that clears in minutes.
+    if !execution_succeeded && super::is_transient_upstream_auth_error(&response) {
+        if let Some(delay_seconds) = transient_upstream_delay(job.turn_attempts) {
+            if retry_after_transient_upstream(state, &job, &response, delay_seconds).await {
+                return;
+            }
+        }
+    }
+
     if !execution_succeeded {
         let dispatch_id = job.id.clone();
         let is_task_worker = state
@@ -1367,6 +1385,89 @@ async fn finish_dispatch_turn(
     state.agent_dispatch_notify.notify_waiters();
 }
 
+/// KT-1743 — waits between the automatic redispatches of a turn that ended on a
+/// transient upstream error: 1, 3 then 6 minutes, ten in all. After the third
+/// retry the failure is real as far as Kronn can tell and settles as before.
+pub(crate) const TRANSIENT_UPSTREAM_BACKOFF_SECONDS: [i64; 3] = [60, 180, 360];
+
+/// The wait before the next redispatch, given how many times the dispatch has
+/// been claimed (`turn_attempts`, 1 on the first run). `None`: retries spent.
+pub(crate) fn transient_upstream_delay(turn_attempts: u32) -> Option<i64> {
+    let retries_done = usize::try_from(turn_attempts.saturating_sub(1)).ok()?;
+    TRANSIENT_UPSTREAM_BACKOFF_SECONDS
+        .get(retries_done)
+        .copied()
+}
+
+/// Re-queues the dispatch after `delay_seconds`, drops the error reply and
+/// tells the room (the worker room, for a task worker) what happens next.
+/// `true`: the turn is queued again and the caller has nothing more to settle.
+async fn retry_after_transient_upstream(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    response: &str,
+    delay_seconds: i64,
+) -> bool {
+    let attempt = job.turn_attempts;
+    let total = TRANSIENT_UPSTREAM_BACKOFF_SECONDS.len();
+    let cause: String = response.trim().chars().take(300).collect();
+    tracing::warn!(
+        "Discussion {} hit a transient upstream error — retry {attempt}/{total} in {delay_seconds}s",
+        job.discussion_id
+    );
+    let retry_id = job.id.clone();
+    let discussion_id = job.discussion_id.clone();
+    let agent_override = job.agent_override.clone();
+    let trigger_message_id = job.trigger_message_id.clone();
+    let retried = state
+        .db
+        .with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let queued = crate::db::agent_dispatch::retry_after(
+                &transaction,
+                &retry_id,
+                delay_seconds,
+                "transient_upstream_error",
+            )?;
+            anyhow::ensure!(queued, "upstream-error dispatch is no longer running");
+            crate::db::discussions::delete_dispatch_reply_messages(
+                &transaction,
+                &discussion_id,
+                &retry_id,
+            )?;
+            if let Some(discussion) = crate::db::discussions::get_discussion(&transaction, &discussion_id)? {
+                let agent = agent_override.unwrap_or_else(|| discussion.agent.clone());
+                let notice = super::agent_fallback::system_notice(
+                    format!(
+                        "**Transient provider error — automatic retry {attempt}/{total}.** \
+                         The provider refused the turn with a network/edge error rather than a lost \
+                         login: `{cause}`. Kronn redispatches it in {delay_seconds}s on the same \
+                         agent; if it is still refused after {total} retries the turn ends as failed \
+                         with this cause."
+                    ),
+                    &agent,
+                    discussion.tier,
+                    &trigger_message_id,
+                );
+                crate::db::discussions::insert_message(&transaction, &discussion_id, &notice)?;
+            }
+            crate::db::discussions::set_awaiting_agent(&transaction, &discussion_id, true)?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await;
+    match retried {
+        Ok(()) => {
+            state.agent_dispatch_notify.notify_one();
+            true
+        }
+        Err(error) => {
+            tracing::warn!(dispatch_job_id = %job.id, "transient upstream retry failed: {error}");
+            false
+        }
+    }
+}
+
 /// Durable `last_error` for a turn that ended unsuccessfully.
 ///
 /// Two callers, two vocabularies. A task worker is expected to submit a
@@ -1376,15 +1477,28 @@ async fn finish_dispatch_turn(
 /// while the provider's own reason (an `HTTP 529`, say) was dropped from the
 /// one field an operator inspects after the fact. Keep the reason.
 fn unsuccessful_completion_diagnostic(response: &str, is_task_worker: bool) -> String {
+    let transient_upstream = super::is_transient_upstream_auth_error(response);
     let failure_kind = if response.trim().is_empty() {
         "no_visible_output"
+    } else if transient_upstream {
+        // KT-1743 — reached only once the automatic retries are spent.
+        "provider_upstream_error"
     } else {
         "worker_reported_failure"
     };
     if is_task_worker {
+        let cause = if transient_upstream {
+            format!(
+                " Cause: {} (still refused after {} automatic retries over ten minutes).",
+                response.trim().chars().take(300).collect::<String>(),
+                TRANSIENT_UPSTREAM_BACKOFF_SECONDS.len()
+            )
+        } else {
+            String::new()
+        };
         return format!(
             "task-worker startup/completion failed: phase=worker_completion; \
-             failure_kind={failure_kind}; exit=unsuccessful. The worker did not submit a durable \
+             failure_kind={failure_kind}; exit=unsuccessful.{cause} The worker did not submit a durable \
              delivery manifest. Inspect the worker sub-discussion, then use `task_exec_reassign` \
              to preserve this execution and its worktree while selecting another available worker."
         );
@@ -3611,3 +3725,7 @@ mod refused_tool_call_notice_tests {
 #[cfg(test)]
 #[path = "runtime_quota_tests.rs"]
 mod quota_turn_tests;
+
+#[cfg(test)]
+#[path = "runtime_transient_upstream_tests.rs"]
+mod transient_upstream_tests;

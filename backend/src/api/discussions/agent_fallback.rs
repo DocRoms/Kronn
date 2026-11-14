@@ -704,7 +704,8 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
     else {
         anyhow::bail!("not a worker switch");
     };
-    let mut target = crate::models::MessageTarget::agent(link.agent.clone());
+    // KT-1749 — an HTTP link is a `discussion_agent`, a host CLI an `agent`.
+    let mut target = fallback::task_worker_target(&link.agent);
     target.tier = Some(plan.tier);
     let id = execution_id.clone();
     let origin = plan.origin.clone();
@@ -743,7 +744,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
         Some(detail) => format!("Task worker execution {execution_id}: {notice} — {detail}"),
         None => format!("Task worker execution {execution_id}: {notice}"),
     };
-    crate::api::orchestration::reassign_native_execution_for_dispatch(
+    if let Err(error) = crate::api::orchestration::reassign_native_execution_for_dispatch(
         state,
         execution_id,
         crate::models::CampaignWorkerSelection {
@@ -755,7 +756,22 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
         crate::api::orchestration::ReassignCause::QuotaFallback { reset_at: until },
         Some(&job.id),
     )
-    .await?;
+    .await
+    {
+        // KT-1758 — the execution moved on meanwhile (the quota return won):
+        // nothing was changed and nothing is said.
+        if crate::api::orchestration::is_execution_moved_on(&error) {
+            return Err(error);
+        }
+        // KT-1749 — a refused reassignment is never only a log line: the
+        // execution stays on its worker and both rooms are told why.
+        let why = format!(
+            "{} could not take over: {error}",
+            fallback::display_name(&link.agent)
+        );
+        post_stop(state, job, plan, &why).await;
+        return Err(error);
+    }
     let message = crate::api::orchestration::orchestrator_message(
         format!("agent-fallback:{}", job.id),
         notice,
@@ -818,33 +834,59 @@ pub(crate) async fn offer_to_escalated_execution_among(
 
 /// A chain is configured and nothing in it can take over: say why, where the
 /// failure is read.
+///
+/// KT-1749 — for a task worker the reason goes to BOTH rooms, the principal's
+/// (the parent) and the worker's own (the dispatch's discussion), in the
+/// principal room's language: the execution stays where it is and nobody has to
+/// read a log to learn why no fallback took over.
 async fn post_stop(state: &AppState, job: &AgentDispatchJob, plan: &Plan, why: &str) {
-    let content = fallback::stop_notice(&plan.failing, plan.trigger, why);
-    let (room, message) = match &plan.surface {
-        Surface::Room => (
-            job.discussion_id.clone(),
-            system_notice(content, &plan.failing, plan.tier, &job.trigger_message_id),
-        ),
+    let mut posts: Vec<(String, DiscussionMessage)> = Vec::new();
+    match &plan.surface {
+        Surface::Room => {
+            let content = fallback::stop_notice(&plan.failing, plan.trigger, why);
+            posts.push((
+                job.discussion_id.clone(),
+                system_notice(content, &plan.failing, plan.tier, &job.trigger_message_id),
+            ));
+        }
         Surface::Worker {
             parent_room,
             execution_id,
-        } => (
-            parent_room.clone(),
-            crate::api::orchestration::orchestrator_message(
-                format!("agent-fallback-stop:{}", job.id),
-                format!("Task worker execution {execution_id}: {content}"),
-            ),
-        ),
-    };
-    if let Err(error) = state
-        .db
-        .with_conn(move |conn| {
-            crate::db::discussions::insert_message(conn, &room, &message)?;
-            Ok(())
-        })
-        .await
-    {
-        tracing::warn!(dispatch_job_id = %job.id, "agent fallback stop notice could not be persisted: {error}");
+        } => {
+            let room = parent_room.clone();
+            let lang = state
+                .db
+                .with_read_conn(move |conn| Ok(crate::db::discussions::room_lang(conn, &room)))
+                .await
+                .unwrap_or_default();
+            let content = fallback::stop_notice_in(&plan.failing, plan.trigger, why, lang);
+            let prefix = lang.pick("Exécution du worker de tâche", "Task worker execution");
+            posts.push((
+                parent_room.clone(),
+                crate::api::orchestration::orchestrator_message(
+                    format!("agent-fallback-stop:{}", job.id),
+                    format!("{prefix} {execution_id}: {content}"),
+                ),
+            ));
+            if job.discussion_id != *parent_room {
+                let mut message =
+                    system_notice(content, &plan.failing, plan.tier, &job.trigger_message_id);
+                message.id = format!("agent-fallback-stop-worker:{}", job.id);
+                posts.push((job.discussion_id.clone(), message));
+            }
+        }
+    }
+    for (room, message) in posts {
+        if let Err(error) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_message(conn, &room, &message)?;
+                Ok(())
+            })
+            .await
+        {
+            tracing::warn!(dispatch_job_id = %job.id, "agent fallback stop notice could not be persisted: {error}");
+        }
     }
 }
 
