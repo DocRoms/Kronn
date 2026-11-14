@@ -128,9 +128,17 @@ by path, found by the round-3 review and the Argon addendum):
   the skip-worktree / assume-unchanged flag and an intent-to-add are recorded with
   its bytes, and the settle drops what the agent left (`update-index
   --force-remove`) and puts the record back (`--index-info`, `add -N`, the flag),
-  then checks it. A file the user hid with one of those flags counts as dirty. The
-  settle looks at every recorded file, not only at what `git status` lists, so a
-  file the agent brought back to HEAD (`git restore`) gets the user's version back.
+  then checks it; the entries go back NUL-separated (`update-index -z
+  --index-info`), so a path holding a newline is one entry, never two. The whole
+  index is read in four git calls (one snapshot, whatever the size of the
+  repository), with hooks and fsmonitor off (`project_git_cmd`). A file the user
+  hid with one of those flags counts as dirty (its bytes are kept up to 2 000
+  flagged files, its index state always), and a flag set or changed during the
+  step is a change, so an edit hidden behind `--assume-unchanged` is restored or
+  reported. A refused path (a link) the agent replaced is reported, and a file the
+  agent added in another AI-doc folder too. The settle looks at every recorded
+  file, not only at what `git status` lists, so a file the agent brought back to
+  HEAD (`git restore`) gets the user's version back.
   A file whose bytes are back but whose index the agent changed is reported; a
   failed index restore is reported without hiding the content restore and its
   blob; a source file the agent only re-staged or flagged is listed with the
@@ -300,11 +308,13 @@ outside the root.
   (rooted at the project since round 7, so a folder above a nested docs root swapped
   for a link reads as empty) and the quote read of `cross_audit::verify_citation`. A
   link there reads as absent or is an error, never as the content it points at.
-  Rounds 7 and 8 closed the rest of `document_optimization`: a citation through a
+  Rounds 7 to 9 closed the rest of `document_optimization`: a citation through a
   link (at the file or at a folder on the way, whatever it points at, a secret
   file included) or with a `.`/`..` component is refused up front with its own
-  message and no stat of the target; the binary sniff reads at most 8 KiB through
-  the primitive (`guarded_read_head`) and the last citable line is read through it;
+  message and no stat of the target, a folder citation included; the binary sniff
+  reads at most 8 KiB through the primitive (`guarded_read_head`), and a text file
+  at most the verifier's 2 MiB cap (past it the bounds are not checked, as the
+  verifier does);
   a file that cannot be read is never called empty (no `(empty)` rewrite from it);
   and an adapter reached through a link is skipped, never read. `adr`'s
   start-of-run capture of the `Decision record` lines is rooted at the project too.

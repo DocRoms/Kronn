@@ -709,6 +709,172 @@ fn a_locked_index_keeps_the_restored_blob_reported() {
     );
 }
 
+/// KT-1595 round 9: a flag set during the step hides the agent's edit from
+/// `git status`; settle compares the flags too.
+#[test]
+fn an_edit_hidden_by_a_flag_set_during_the_step_is_restored_or_reported() {
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    git(
+        dir.path(),
+        &[
+            "update-index",
+            "--assume-unchanged",
+            "docs/tech-debt/TD-1.md",
+        ],
+    );
+    write(dir.path(), "src/main.rs", "fn main() { agent() }\n");
+    git(
+        dir.path(),
+        &["update-index", "--skip-worktree", "src/main.rs"],
+    );
+    assert_eq!(git(dir.path(), &["status", "--porcelain"]), "");
+    let report = remit.settle_blocking();
+    assert_eq!(paths(&report), vec!["docs/tech-debt/TD-1.md"]);
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    assert!(
+        git(dir.path(), &["ls-files", "-v", "docs/tech-debt/TD-1.md"]).starts_with('H'),
+        "the flag the agent set is cleared"
+    );
+    assert!(
+        report.warnings.iter().any(|w| w.contains("src/main.rs")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 9: the recorded entries go back NUL-separated, so a path with a
+/// newline cannot smuggle a second entry (another file's index) in.
+#[cfg(unix)]
+#[test]
+fn a_newline_in_a_path_never_rewrites_another_index_entry() {
+    let dir = repo();
+    write(dir.path(), "Makefile", "all:\n");
+    git(dir.path(), &["add", "Makefile"]);
+    git(dir.path(), &["commit", "-q", "-m", "make"]);
+    let makefile_before = git(dir.path(), &["ls-files", "-s", "Makefile"]);
+    let evil = git(dir.path(), &["hash-object", "-w", "--stdin"]); // empty blob
+    let name = format!("docs/tech-debt/n\n100644 {evil} 0\tMakefile");
+    write(dir.path(), &name, "odd\n");
+    git(dir.path(), &["add", "--", &name]);
+    git(dir.path(), &["commit", "-q", "-m", "odd"]);
+    write(dir.path(), &name, "odd, user wip\n");
+    git(dir.path(), &["add", "--", &name]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), &name, "odd, agent\n");
+    git(dir.path(), &["add", "--", &name]);
+    remit.settle_blocking();
+    assert_eq!(
+        git(dir.path(), &["ls-files", "-s", "Makefile"]),
+        makefile_before
+    );
+    assert_eq!(read(dir.path(), &name), "odd, user wip\n");
+}
+
+/// KT-1595 round 9: an intent-to-add over a path HEAD has (`rm --cached` then
+/// `add -N`) stays one.
+#[test]
+fn an_intent_to_add_over_a_head_path_stays_one() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, rewritten\n");
+    git(
+        dir.path(),
+        &["rm", "-q", "--cached", "docs/tech-debt/TD-1.md"],
+    );
+    git(dir.path(), &["add", "-N", "docs/tech-debt/TD-1.md"]);
+    let status_before = git(
+        dir.path(),
+        &["status", "--porcelain", "docs/tech-debt/TD-1.md"],
+    );
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    assert!(remit.index_before["docs/tech-debt/TD-1.md"].intent_to_add);
+    git(dir.path(), &["add", "docs/tech-debt/TD-1.md"]);
+    remit.settle_blocking();
+    assert_eq!(
+        git(
+            dir.path(),
+            &["status", "--porcelain", "docs/tech-debt/TD-1.md"]
+        ),
+        status_before
+    );
+}
+
+/// KT-1595 round 9: a file the agent adds in another AI-doc folder is reported.
+#[test]
+fn a_file_the_agent_adds_in_another_ai_folder_is_reported() {
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-3.md", "agent sheet\n");
+    git(dir.path(), &["add", "docs/tech-debt/TD-3.md"]);
+    let report = remit.settle_blocking();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("docs/tech-debt/TD-3.md") && w.contains("added")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 9: a tracked name the user had made a link, which the agent
+/// replaced, is reported (it was never read, and is still never written).
+#[cfg(unix)]
+#[test]
+fn a_refused_link_the_agent_replaced_is_reported() {
+    let dir = repo();
+    std::fs::remove_file(dir.path().join("docs/tech-debt/TD-1.md")).unwrap();
+    std::os::unix::fs::symlink("../../CLAUDE.md", dir.path().join("docs/tech-debt/TD-1.md"))
+        .unwrap();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    git(
+        dir.path(),
+        &["checkout", "HEAD", "--", "docs/tech-debt/TD-1.md"],
+    );
+    let report = remit.settle_blocking();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("docs/tech-debt/TD-1.md")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 9: both flags (`s`) come back.
+#[test]
+fn both_flags_come_back() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, wip\n");
+    git(
+        dir.path(),
+        &["update-index", "--skip-worktree", "docs/tech-debt/TD-1.md"],
+    );
+    git(
+        dir.path(),
+        &[
+            "update-index",
+            "--assume-unchanged",
+            "docs/tech-debt/TD-1.md",
+        ],
+    );
+    let tag_before = git(dir.path(), &["ls-files", "-v", "docs/tech-debt/TD-1.md"]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    git(
+        dir.path(),
+        &[
+            "update-index",
+            "--no-skip-worktree",
+            "--no-assume-unchanged",
+            "docs/tech-debt/TD-1.md",
+        ],
+    );
+    remit.settle_blocking();
+    assert_eq!(
+        git(dir.path(), &["ls-files", "-v", "docs/tech-debt/TD-1.md"]),
+        tag_before
+    );
+}
+
 /// KT-1595 round 7: a source file the user had dirty, whose bytes the agent
 /// left alone but whose staged version it changed, is listed (never touched).
 #[test]

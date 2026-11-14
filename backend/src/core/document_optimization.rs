@@ -771,8 +771,14 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
                  and do not quote its content; otherwise name it in backticks outside any \
                  [src:] marker"
             ),
-            Some(path) => match read(project, &path).map(|content| content.lines().count()) {
+            Some(path) => match read_capped(project, &path)
+                .map(|content| content.map_or(usize::MAX, |content| content.lines().count()))
+            {
                 Err(error) => format!("malformed file citation `{raw}`: {error}"),
+                Ok(usize::MAX) => format!(
+                    "malformed file citation `{raw}`: a text file is cited with the line that \
+                     supports the claim, [src: file: {raw}:<line>]"
+                ),
                 Ok(0) => format!(
                     "malformed file citation `{raw}`: the file is empty, so it has no line to \
                      cite. Say it is empty and name it in backticks outside any [src:] marker"
@@ -926,7 +932,30 @@ fn without_anchor(line_part: &str) -> &str {
 }
 
 fn line_count(project: &Path, path: &Path) -> usize {
-    read(project, path).map(|s| s.lines().count()).unwrap_or(0)
+    match read_capped(project, path) {
+        Ok(Some(content)) => content.lines().count(),
+        // Too big to bound-check: the verifier skips it too.
+        Ok(None) => usize::MAX,
+        Err(_) => 0,
+    }
+}
+
+/// A cited text file through the rooted primitive, read up to the verifier's
+/// size cap ([`crate::core::anti_halluc::LINE_COUNT_SIZE_CAP_BYTES`]): `Ok(None)`
+/// past it, so a huge or sparse file is never read whole.
+fn read_capped(project: &Path, path: &Path) -> Result<Option<String>, String> {
+    let cap = crate::core::anti_halluc::LINE_COUNT_SIZE_CAP_BYTES;
+    match crate::core::fs_guard::guarded_read_head(project, path, cap + 1) {
+        Ok(Some(bytes)) if bytes.len() as u64 > cap => Ok(None),
+        Ok(Some(bytes)) => String::from_utf8(bytes).map(Some).map_err(|_| {
+            format!(
+                "read {}: stream did not contain valid UTF-8",
+                path.display()
+            )
+        }),
+        Ok(None) => Err(format!("read {}: not found", path.display())),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
 }
 
 /// The last line a citation may end on: one past [`line_count`] for a
@@ -936,9 +965,11 @@ fn last_line_of(project: &Path, path: &Path) -> usize {
     if crate::acp::secret_files::is_secret_path(path) {
         return 0;
     }
-    read(project, path).map_or(0, |content| {
-        crate::core::anti_halluc::last_citable_line(&content)
-    })
+    match read_capped(project, path) {
+        Ok(Some(content)) => crate::core::anti_halluc::last_citable_line(&content),
+        Ok(None) => usize::MAX,
+        Err(_) => 0,
+    }
 }
 
 /// [`crate::core::anti_halluc::is_binary_file`] through the rooted primitive: a
@@ -1034,8 +1065,13 @@ fn bare_path_form(project: &Path, path: &str) -> String {
     if is_binary(project, &full) {
         return format!("did you mean `{path}`?");
     }
-    match read(project, &full).map(|content| content.lines().count()) {
+    match read_capped(project, &full)
+        .map(|content| content.map_or(usize::MAX, |content| content.lines().count()))
+    {
         Err(error) => format!("`{path}` cannot be cited: {error}"),
+        Ok(usize::MAX) => {
+            format!("did you mean `{path}:<line>`, the line that supports the claim?")
+        }
         Ok(0) => format!(
             "`{path}` is empty, so it has no line to cite: say so and name it in backticks \
              outside any [src:] marker"
@@ -1450,9 +1486,13 @@ fn linked_citation_message(project: &Path, cited: &str) -> Option<String> {
         })
 }
 
+/// A folder of the project reached without a link and without `.`/`..` (a stat
+/// through a link would answer for an outside folder).
 fn is_project_dir(project: &Path, path: &str) -> bool {
-    let path = project.join(path);
-    !outside_project(project, &path) && path.is_dir()
+    cited_forms(project, path).take(1).any(|path| {
+        !link_on_path(project, &path)
+            && fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir())
+    })
 }
 
 fn directory_citation_message(path: &str) -> String {
@@ -2106,6 +2146,26 @@ mod tests {
         assert!(out[1]
             .message
             .contains("one [src: file: path:line] marker per reference"));
+    }
+
+    /// KT-1595 round 9: a folder citation through a link never stats the outside
+    /// folder, and a text file past the size cap is never read whole.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_through_a_link_and_a_huge_file_are_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(external.path().join("inner")).unwrap();
+        std::os::unix::fs::symlink(external.path(), root.join("docs/L")).unwrap();
+        assert!(!is_project_dir(root, "docs/L/inner"));
+        assert!(!is_project_dir(root, "docs/L/../docs"));
+        let big = std::fs::File::create(root.join("docs/big.txt")).unwrap();
+        big.set_len(crate::core::anti_halluc::LINE_COUNT_SIZE_CAP_BYTES + 10)
+            .unwrap();
+        assert_eq!(line_count(root, &root.join("docs/big.txt")), usize::MAX);
+        assert_eq!(last_line_of(root, &root.join("docs/big.txt")), usize::MAX);
     }
 
     /// KT-1595 round 7: an adapter under a linked folder (or a linked

@@ -1224,7 +1224,7 @@ pub fn lint_assertions(text: &str) -> LintReport {
 /// Hard caps to bound work at message-finalize time.
 const MAX_SOURCES_VERIFIED: usize = 50;
 /// Skip line-count verification above this file size (existence still checked).
-const LINE_COUNT_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const LINE_COUNT_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Extract every `[src: …]` marker from the prose, skipping fenced code blocks
 /// AND inline-backtick spans (those are [`extract_quoted_source_markers`]),

@@ -11,8 +11,8 @@
 
 use super::{
     cited_file, did_you_mean_candidates, is_binary, is_project_dir, last_line_of, line_count,
-    link_resolution, markdown_targets, read, root_relative_fix, under_root, visible_markdown,
-    without_anchor,
+    link_resolution, markdown_targets, read_capped, root_relative_fix, under_root,
+    visible_markdown, without_anchor,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -236,7 +236,7 @@ fn empty_file_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
         return None;
     }
     // A file that cannot be read is never called empty.
-    let content = read(project, &path).ok()?;
+    let content = read_capped(project, &path).ok()??;
     content
         .is_empty()
         .then(|| ("empty_file", format!("`{raw}` (empty)")))
