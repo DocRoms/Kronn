@@ -63,7 +63,7 @@ same transaction, and the dispatcher's final claim also checks that native
 mode is still enabled.
 [src: file: backend/src/db/discussions.rs:962-981#set_disc_no_agent_within_tx]
 [src: file: backend/src/db/agent_dispatch.rs:898-984#claim_with_limits]
-[src: file: backend/src/db/agent_dispatch.rs:1158-1176#mark_agent_started]
+[src: file: backend/src/db/agent_dispatch.rs:1239-1257#mark_agent_started]
 
 Current bridges send their durable session id on every wait (resolved by
 session id alone when the provider is unknown). Waking and seeing are separate
@@ -122,7 +122,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: frontend/src/hooks/useMessageQueue.ts:162-258#processingDiscsRef]
 [src: file: frontend/src/hooks/useMessageQueue.ts:260-280#enqueue]
 [src: file: backend/src/db/discussions.rs:1321-1341#insert_user_message_with_dispatches]
-[src: file: backend/src/db/agent_dispatch.rs:997-1146#recover_after_restart]
+[src: file: backend/src/db/agent_dispatch.rs:1082-1231#recover_after_restart]
 [src: file: backend/src/db/discussions.rs:3589-3591#DispatchInProgress]
 [src: file: backend/src/api/discussions/messaging.rs:1105-1113#DispatchInProgress]
 [src: file: backend/src/db/discussions.rs:3539-3801#revise_message_with_dispatch]
@@ -289,7 +289,7 @@ Two distinctions the reason must not blur, and does not:
   names the elapsed deadline and offers an explicit retry.
 [src: file: backend/src/db/discussions.rs:1514-1557#insert_message_with_targeted_dispatch]
   [src: file: backend/src/api/discussions/messaging.rs:115-158#enqueue_dispatches_for_trigger]
-[src: file: backend/src/db/agent_dispatch.rs:997-1146#recover_after_restart]
+[src: file: backend/src/db/agent_dispatch.rs:1082-1231#recover_after_restart]
 [src: file: backend/src/api/discussions/streaming.rs:658-674#timeout_notice]
 
 The pure zero/single-target decision table remains in

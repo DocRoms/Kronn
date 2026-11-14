@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:6849-6906#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:6908-7004#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:6739-6756#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:7051-7117#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:7018-7075#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:7077-7173#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:6908-6925#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:7302-7368#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -477,7 +477,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_lane_warm.rs:925-932#first_build_args]
 [src: file: backend/src/core/task_worker_lane_warm.rs:936-940#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
+[src: file: backend/src/api/orchestration.rs:11003-11034#warm_failure_notice]
 
 ## Long builds in a task worker (KT-1718)
 
