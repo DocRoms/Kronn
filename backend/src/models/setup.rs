@@ -834,7 +834,6 @@ pub struct AgentsConfig {
     /// video mode of ComfyUI) when its provider cannot serve a request. Kept apart
     /// from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[ts(skip)]
     pub connection_fallbacks: Vec<ConnectionFallback>,
 }
 
@@ -1156,6 +1155,22 @@ impl FallbackMode {
             FallbackMode::Video => "video",
         }
     }
+}
+
+/// What a fallback cannot give that the agent it replaces could: a stable code,
+/// so the UI translates the warning instead of showing an English sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackGap {
+    /// No MCP tools.
+    NoMcpTools,
+    /// Cannot write in the worktree.
+    NoWriteAccess,
+    /// Images are not guaranteed.
+    NoImageInput,
+    /// A capped context window.
+    CappedContext,
 }
 
 /// How an agent is reached; shown as a badge on every fallback pill.

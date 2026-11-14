@@ -18,7 +18,7 @@ disabling the authoritative ESLint rules. Details and the remaining inventory
 live in the dedicated React debt entry, whose last recorded count (2026-08-11)
 is 72 warnings; the CI warning budget has since been ratcheted to 63.
 [src: file: docs/tech-debt/TD-20260509-react19-effect-rules.md:21-34#Current]
-[src: file: .github/workflows/ci-test.yml:698-699#max-warnings]
+[src: file: .github/workflows/ci-test.yml:700-701#max-warnings]
 
 ## Dependency and security outcome
 
@@ -94,7 +94,7 @@ side-by-side arrangement keeps `@typescript/typescript6` aliased as the
 `typescript` package and exposes its `tsc6` binary through
 `typecheck:legacy`. Both compiler paths are explicit CI gates.
 [src: file: frontend/package.json:11-13#tsc6] [src: file: frontend/package.json:57#native] [src: file: frontend/package.json:65#typescript]
-[src: file: .github/workflows/ci-test.yml:675-682#typecheck] [src: url:
+[src: file: .github/workflows/ci-test.yml:676-683#typecheck] [src: url:
 https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/]
 
 The earlier preview pilot produced zero diagnostics with both compilers on the
