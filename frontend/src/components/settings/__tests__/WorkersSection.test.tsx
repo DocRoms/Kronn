@@ -295,4 +295,59 @@ describe('WorkersSection (KT-1345)', () => {
     fireEvent.click(screen.getByTestId('workers-save'));
     await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, os_junk_patterns: [] }));
   });
+
+  const withCommit = (commit?: Record<string, unknown>) => ({
+    default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true,
+    heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60,
+    os_junk_patterns: ['.DS_Store', 'Thumbs.db', 'desktop.ini', '._*'],
+    ...(commit ? { commit } : {}),
+  });
+
+  it('KT-1750 — the Kronn commit block starts unset, says projects can override it, and saves the identity and sign-off', async () => {
+    const saved = withCommit();
+    getMock.mockResolvedValue(saved);
+    const next = withCommit({ name: 'Kronn Bot', email: 'bot@corp.example', signoff: 'always' });
+    saveMock.mockResolvedValue(next);
+    render(<WorkersSection t={t} />);
+    const name = await screen.findByTestId('workers-commit-name');
+    await waitFor(() => expect(name).not.toBeDisabled());
+    expect(name).toHaveValue('');
+    expect(screen.getByTestId('workers-commit-email')).toHaveValue('');
+    expect(screen.getByTestId('workers-commit-signoff-auto')).toBeChecked();
+    expect(screen.getByTestId('workers-commit-hint')).toHaveTextContent('config.workers.commitHint');
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+
+    fireEvent.change(name, { target: { value: ' Kronn Bot ' } });
+    fireEvent.change(screen.getByTestId('workers-commit-email'), { target: { value: 'bot@corp.example' } });
+    fireEvent.click(screen.getByTestId('workers-commit-signoff-always'));
+    fireEvent.click(screen.getByTestId('workers-save'));
+
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({
+      ...saved,
+      commit: { name: 'Kronn Bot', email: 'bot@corp.example', signoff: 'always' },
+    }));
+    await waitFor(() => expect(name).toHaveValue('Kronn Bot'));
+    expect(screen.getByTestId('workers-commit-signoff-always')).toBeChecked();
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+  });
+
+  it('KT-1750 — half a commit identity blocks the save; emptying it saves no commit setting at all', async () => {
+    const saved = withCommit({ name: 'Kronn Bot', email: 'bot@corp.example', signoff: 'never' });
+    getMock.mockResolvedValue(saved);
+    saveMock.mockResolvedValue(withCommit());
+    render(<WorkersSection t={t} />);
+    const email = await screen.findByTestId('workers-commit-email');
+    await waitFor(() => expect(email).toHaveValue('bot@corp.example'));
+    expect(screen.getByTestId('workers-commit-signoff-never')).toBeChecked();
+
+    fireEvent.change(email, { target: { value: '' } });
+    expect(screen.getByTestId('workers-commit-incomplete')).toHaveTextContent('config.workers.commitIncomplete');
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId('workers-commit-name'), { target: { value: '' } });
+    fireEvent.click(screen.getByTestId('workers-commit-signoff-auto'));
+    expect(screen.queryByTestId('workers-commit-incomplete')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('workers-save'));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith(withCommit()));
+  });
 });

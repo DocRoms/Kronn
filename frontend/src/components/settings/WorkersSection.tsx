@@ -30,6 +30,14 @@ import {
   parseOsJunkPatterns,
 } from '../../lib/osJunk';
 import {
+  commitFields,
+  commitSettingsOf,
+  isHalfIdentity,
+  sameCommitSettings,
+  SIGNOFF_SETTINGS,
+} from '../../lib/commitSettings';
+import type { SignoffSetting } from '../../types/generated';
+import {
   commandOutlivesGeneration,
   DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
   DEFAULT_BASH_MAX_TIMEOUT_MIN,
@@ -53,6 +61,10 @@ export function WorkersSection({ t }: Props) {
   const [bashMax, setBashMax] = useState(String(DEFAULT_BASH_MAX_TIMEOUT_MIN));
   // KT-1750 — comma-separated, an empty field meaning none.
   const [junk, setJunk] = useState(formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS));
+  // KT-1750 — the commit identity and sign-off every project inherits.
+  const [commitName, setCommitName] = useState('');
+  const [commitEmail, setCommitEmail] = useState('');
+  const [commitSignoff, setCommitSignoff] = useState<SignoffSetting>('auto');
   // The generation limit (Settings > Server) cuts the whole turn whatever a command is
   // allowed, so it is shown next to the per-command cap. Read-only here.
   const [generationMin, setGenerationMin] = useState<number | null>(null);
@@ -83,6 +95,10 @@ export function WorkersSection({ t }: Props) {
         setBashDefault(String(value.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
         setBashMax(String(value.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
         setJunk(formatOsJunkPatterns(value.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS));
+        const fields = commitFields(value.commit);
+        setCommitName(fields.name);
+        setCommitEmail(fields.email);
+        setCommitSignoff(fields.signoff);
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -107,7 +123,10 @@ export function WorkersSection({ t }: Props) {
   const junkList = parseOsJunkPatterns(junk);
   const junkProblem = osJunkListProblem(junkList);
   const validJunk = junkProblem === null;
-  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validJunk;
+  const commitFieldsNow = { name: commitName, email: commitEmail, signoff: commitSignoff };
+  const halfCommit = isHalfIdentity(commitName, commitEmail);
+  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validJunk
+    && !halfCommit;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
@@ -118,7 +137,8 @@ export function WorkersSection({ t }: Props) {
     && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
     && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN)
     && formatOsJunkPatterns(junkList)
-      === formatOsJunkPatterns(saved.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS);
+      === formatOsJunkPatterns(saved.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS)
+    && sameCommitSettings(commitFieldsNow, saved.commit);
 
   const save = useAsyncGuard(async () => {
     if (!saved || !valid) return;
@@ -133,6 +153,8 @@ export function WorkersSection({ t }: Props) {
         bash_default_timeout_min: bashDefaultMin,
         bash_max_timeout_min: bashMaxMin,
         os_junk_patterns: junkList,
+        // Nothing set is no key at all, as the backend stores it.
+        ...(commitSettingsOf(commitFieldsNow) ? { commit: commitSettingsOf(commitFieldsNow) } : {}),
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
@@ -143,6 +165,10 @@ export function WorkersSection({ t }: Props) {
       setBashDefault(String(next.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
       setBashMax(String(next.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
       setJunk(formatOsJunkPatterns(next.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS));
+      const fields = commitFields(next.commit);
+      setCommitName(fields.name);
+      setCommitEmail(fields.email);
+      setCommitSignoff(fields.signoff);
     } catch (cause) {
       setError(userError(cause));
     }
@@ -379,6 +405,56 @@ export function WorkersSection({ t }: Props) {
             {t('config.workers.osJunkInvalid', junkProblem ?? '')}
           </p>
         )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.commit')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-commit-hint">{t('config.workers.commitHint')}</p>
+        <div className="flex-row gap-3">
+          <input
+            type="text"
+            className="set-input"
+            aria-label={t('config.workers.commitName')}
+            placeholder={t('config.workers.commitName')}
+            value={commitName}
+            disabled={saved === null}
+            onChange={event => setCommitName(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-commit-name"
+          />
+          <input
+            type="email"
+            className="set-input"
+            aria-label={t('config.workers.commitEmail')}
+            placeholder={t('config.workers.commitEmail')}
+            value={commitEmail}
+            disabled={saved === null}
+            onChange={event => setCommitEmail(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-commit-email"
+          />
+        </div>
+        {halfCommit && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-commit-incomplete">
+            {t('config.workers.commitIncomplete')}
+          </p>
+        )}
+        <div className="flex-row gap-4 mt-4">
+          <span className="text-sm">{t('config.workers.commitSignoff')}</span>
+          {SIGNOFF_SETTINGS.map(value => (
+            <label key={value} className="flex-row gap-3">
+              <input
+                type="radio"
+                name="workers-commit-signoff"
+                checked={commitSignoff === value}
+                disabled={saved === null}
+                onChange={() => setCommitSignoff(value)}
+                data-testid={`workers-commit-signoff-${value}`}
+              />
+              <span className="text-sm">{t(`config.workers.commitSignoff.${value}`)}</span>
+            </label>
+          ))}
+        </div>
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}
       </div>
     </div>
