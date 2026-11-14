@@ -10,8 +10,9 @@
 //! without a line, a range far outside the file) is never applied.
 
 use super::{
-    cited_file, did_you_mean_candidates, is_project_dir, last_line_of, line_count, link_resolution,
-    markdown_targets, root_relative_fix, under_root, visible_markdown, without_anchor,
+    cited_file, did_you_mean_candidates, is_binary, is_project_dir, last_line_of, line_count,
+    link_resolution, markdown_targets, read, root_relative_fix, under_root, visible_markdown,
+    without_anchor,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -231,14 +232,14 @@ fn empty_file_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
         return None;
     }
     let path = cited_file(project, raw)?;
-    if crate::core::anti_halluc::is_binary_file(&path)
-        || crate::acp::secret_files::is_secret_path(&path)
-        || line_count(project, &path) > 0
-        || last_line_of(&path) > 0
-    {
+    if is_binary(project, &path) || crate::acp::secret_files::is_secret_path(&path) {
         return None;
     }
-    Some(("empty_file", format!("`{raw}` (empty)")))
+    // A file that cannot be read is never called empty.
+    let content = read(project, &path).ok()?;
+    content
+        .is_empty()
+        .then(|| ("empty_file", format!("`{raw}` (empty)")))
 }
 
 /// A line of a secret file (`.ssh/key:1`) can only mean the file is there: the
@@ -320,14 +321,12 @@ fn marker_fix(project: &Path, rel: &str, raw: &str) -> Option<(&'static str, Str
             _ => None,
         };
     };
-    if crate::core::anti_halluc::is_presence_marker(line_part)
-        || crate::core::anti_halluc::is_binary_file(&path)
-    {
+    if crate::core::anti_halluc::is_presence_marker(line_part) || is_binary(project, &path) {
         return None;
     }
     let (start, end) = crate::core::anti_halluc::parse_line_bounds(line_part)?;
     let lines = line_count(project, &path);
-    if crate::core::anti_halluc::range_is_citable(lines, last_line_of(&path), start, end) {
+    if crate::core::anti_halluc::range_is_citable(lines, last_line_of(project, &path), start, end) {
         return None;
     }
     // One line past the end of a file with no closing newline: the count the
@@ -351,7 +350,7 @@ fn bare_fix(project: &Path, raw: &str) -> Option<(&'static str, String)> {
         return None;
     }
     let path = cited_file(project, raw)?;
-    if crate::core::anti_halluc::is_binary_file(&path) {
+    if is_binary(project, &path) {
         return None;
     }
     if crate::acp::secret_files::is_secret_path(&path) {

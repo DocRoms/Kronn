@@ -764,19 +764,20 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
             ));
         }
         return Defect(match cited_file(project, raw) {
-            Some(path) if crate::core::anti_halluc::is_binary_file(&path) => return Skip,
+            Some(path) if is_binary(project, &path) => return Skip,
             Some(path) if crate::acp::secret_files::is_secret_path(&path) => format!(
                 "malformed file citation `{raw}`: this file may hold secrets, so no line of it is \
                  cited. To state that it exists or is tracked, write [src: file: {raw}:exists] \
                  and do not quote its content; otherwise name it in backticks outside any \
                  [src:] marker"
             ),
-            Some(path) => match line_count(project, &path) {
-                0 => format!(
+            Some(path) => match read(project, &path).map(|content| content.lines().count()) {
+                Err(error) => format!("malformed file citation `{raw}`: {error}"),
+                Ok(0) => format!(
                     "malformed file citation `{raw}`: the file is empty, so it has no line to \
                      cite. Say it is empty and name it in backticks outside any [src:] marker"
                 ),
-                lines => format!(
+                Ok(lines) => format!(
                     "malformed file citation `{raw}`: a text file is cited with the line \
                      that supports the claim, [src: file: {raw}:<line>]. To state that \
                      something is absent from it, cite the whole file as \
@@ -785,6 +786,10 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
                      [src: file: {raw}:exists] and do not quote its content"
                 ),
             },
+            None if linked_citation_message(project, raw).is_some() => format!(
+                "malformed file citation `{raw}`: {}",
+                linked_citation_message(project, raw).unwrap_or_default()
+            ),
             None if ignored_path(project, raw) => format!(
                 "malformed file citation `{raw}`: {}",
                 ignored_citation_message(raw)
@@ -799,19 +804,23 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
     let path_part = path_part.trim();
     let Some(path) = cited_file(project, path_part) else {
         // Run O7: `helpers/hbs/:1` was reported as a path that does not exist.
-        return Defect(if is_project_dir(project, path_part) {
-            directory_citation_message(path_part)
-        } else if ignored_path(project, path_part) {
-            format!(
-                "citation path does not exist `{path_part}`: {}",
-                ignored_citation_message(path_part)
-            )
-        } else {
-            format!(
-                "citation path does not exist `{path_part}`{}",
-                did_you_mean(project, rel, path_part, Some(line_part.trim()))
-            )
-        });
+        return Defect(
+            if let Some(message) = linked_citation_message(project, path_part) {
+                message
+            } else if is_project_dir(project, path_part) {
+                directory_citation_message(path_part)
+            } else if ignored_path(project, path_part) {
+                format!(
+                    "citation path does not exist `{path_part}`: {}",
+                    ignored_citation_message(path_part)
+                )
+            } else {
+                format!(
+                    "citation path does not exist `{path_part}`{}",
+                    did_you_mean(project, rel, path_part, Some(line_part.trim()))
+                )
+            },
+        );
     };
     // A presence citation (`path:exists`) claims the file is there, not what it
     // holds: no line to bound, and none to quote from a secret file.
@@ -836,7 +845,7 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
             line_part.trim()
         ));
     }
-    if crate::core::anti_halluc::is_binary_file(&path) {
+    if is_binary(project, &path) {
         return Defect(format!(
             "`{path_part}` is a binary file and has no lines: cite it as \
              [src: file: {path_part}] and name the page or section outside the brackets"
@@ -844,7 +853,7 @@ fn check_citation(project: &Path, rel: &str, raw: &str) -> CitationCheck {
     }
     let max_line = line_count(project, &path);
     // An editor shows a newline-terminated file with one more, empty, line.
-    let last_line = last_line_of(&path);
+    let last_line = last_line_of(project, &path);
     match parse_line_bounds(without_anchor(line_part)) {
         None => Defect(format!(
             "citation line `{}` is not a line number: write a number (`{path_part}:12`) \
@@ -921,9 +930,24 @@ fn line_count(project: &Path, path: &Path) -> usize {
 }
 
 /// The last line a citation may end on: one past [`line_count`] for a
-/// newline-terminated file, as the verifier reads it.
-fn last_line_of(path: &Path) -> usize {
-    crate::core::anti_halluc::last_citable_line_of(path)
+/// newline-terminated file, as the verifier reads it. Read through the rooted
+/// primitive like [`line_count`]; 0 for a secret file or a refused read.
+fn last_line_of(project: &Path, path: &Path) -> usize {
+    if crate::acp::secret_files::is_secret_path(path) {
+        return 0;
+    }
+    read(project, path).map_or(0, |content| {
+        crate::core::anti_halluc::last_citable_line(&content)
+    })
+}
+
+/// [`crate::core::anti_halluc::is_binary_file`] through the rooted primitive: a
+/// link is never followed to sniff its target.
+fn is_binary(project: &Path, path: &Path) -> bool {
+    crate::core::fs_guard::guarded_read(project, path)
+        .ok()
+        .flatten()
+        .is_some_and(|bytes| crate::core::anti_halluc::is_binary_content(&bytes))
 }
 
 /// Citation paths resolve from the repository root. A model often writes the
@@ -984,10 +1008,10 @@ fn did_you_mean_candidates(
             && !crate::acp::secret_files::is_secret_path(&full)
             && match spec {
                 Some(Some((start, end))) => {
-                    !crate::core::anti_halluc::is_binary_file(&full)
+                    !is_binary(project, &full)
                         && crate::core::anti_halluc::range_is_citable(
                             line_count(project, &full),
-                            last_line_of(&full),
+                            last_line_of(project, &full),
                             start,
                             end,
                         )
@@ -1006,15 +1030,16 @@ fn did_you_mean_candidates(
 /// and an empty one is not cited at all.
 fn bare_path_form(project: &Path, path: &str) -> String {
     let full = project.join(path);
-    if crate::core::anti_halluc::is_binary_file(&full) {
+    if is_binary(project, &full) {
         return format!("did you mean `{path}`?");
     }
-    match line_count(project, &full) {
-        0 => format!(
+    match read(project, &full).map(|content| content.lines().count()) {
+        Err(error) => format!("`{path}` cannot be cited: {error}"),
+        Ok(0) => format!(
             "`{path}` is empty, so it has no line to cite: say so and name it in backticks \
              outside any [src:] marker"
         ),
-        lines => format!(
+        Ok(lines) => format!(
             "did you mean `{path}:<line>`, the line that supports the claim (or `{path}:1-{lines}` \
              for the whole file)?"
         ),
@@ -1054,13 +1079,10 @@ fn root_adapters(project: &Path) -> Result<Vec<PathBuf>, String> {
     let mut found: Vec<_> = names
         .iter()
         .map(|n| project.join(n))
-        .filter(|p| {
-            fs::symlink_metadata(p)
-                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-        })
+        .filter(|p| regular_unlinked_file(project, p))
         .collect();
     let entry = project.join(under_root(project, "docs/AGENTS.md"));
-    if found.is_empty() && entry.is_file() {
+    if found.is_empty() && regular_unlinked_file(project, &entry) {
         found.push(entry);
     }
     Ok(found)
@@ -1370,13 +1392,56 @@ fn link_resolution_hint(project: &Path, source: &Path, clean: &str) -> String {
 }
 
 /// The project file a citation names, as written or percent-decoded; both
-/// forms stay inside the project root.
+/// forms stay inside the project root, and neither the file nor a folder on
+/// the way to it is a link (KT-1595: nothing reads a link's target by path).
+/// A link to a secret file is still named, to be refused like the file: its
+/// content is never read.
 fn cited_file(project: &Path, cited: &str) -> Option<PathBuf> {
-    let candidates = std::iter::once(cited.to_string())
-        .chain(crate::core::anti_halluc::percent_decoded_relative(cited));
-    candidates
+    cited_forms(project, cited).find(|path| {
+        regular_unlinked_file(project, path)
+            || (path.is_file() && crate::acp::secret_files::is_secret_path(path))
+    })
+}
+
+fn cited_forms<'a>(project: &'a Path, cited: &str) -> impl Iterator<Item = PathBuf> + 'a {
+    std::iter::once(cited.to_string())
+        .chain(crate::core::anti_halluc::percent_decoded_relative(cited))
         .map(|c| project.join(c))
-        .find(|path| !outside_project(project, path) && path.is_file())
+        .filter(|path| !outside_project(project, path))
+}
+
+/// A regular file reached from `project` without any link (an adapter under a
+/// linked `.github` is skipped like a linked adapter, never read).
+fn regular_unlinked_file(project: &Path, path: &Path) -> bool {
+    !link_on_path(project, path)
+        && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// Whether the file or a folder between `project` and `path` is a link.
+fn link_on_path(project: &Path, path: &Path) -> bool {
+    let Ok(rest) = normalize(path)
+        .strip_prefix(normalize(project))
+        .map(Path::to_path_buf)
+    else {
+        return true;
+    };
+    let mut at = project.to_path_buf();
+    rest.components().any(|component| {
+        at.push(component);
+        fs::symlink_metadata(&at).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    })
+}
+
+/// The message for a citation whose path goes through a link, or `None`.
+fn linked_citation_message(project: &Path, cited: &str) -> Option<String> {
+    cited_forms(project, cited)
+        .any(|path| link_on_path(project, &path))
+        .then(|| {
+            format!(
+                "`{cited}` is a link or lies under a linked folder: cite the file it points \
+                 to by its own path"
+            )
+        })
 }
 
 fn is_project_dir(project: &Path, path: &str) -> bool {
@@ -2035,6 +2100,86 @@ mod tests {
         assert!(out[1]
             .message
             .contains("one [src: file: path:line] marker per reference"));
+    }
+
+    /// KT-1595 round 7: an adapter under a linked folder (or a linked
+    /// `<docs>/AGENTS.md` fallback) is skipped, never read, and does not fail the
+    /// whole analysis.
+    #[cfg(unix)]
+    #[test]
+    fn an_adapter_under_a_linked_folder_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external.path().join("copilot-instructions.md"),
+            "# Outside\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(external.path(), root.join(".github")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "# Agents\n").unwrap();
+        assert_eq!(root_adapters(root).unwrap(), vec![root.join("AGENTS.md")]);
+        std::fs::remove_file(root.join("AGENTS.md")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(external.path().join("AGENTS.md"), "# Outside\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("AGENTS.md"),
+            root.join("docs/AGENTS.md"),
+        )
+        .unwrap();
+        assert!(root_adapters(root).unwrap().is_empty());
+    }
+
+    /// KT-1595 round 7: a citation through a link (at the file or at a folder on
+    /// the way, pointing inside or outside the project) is refused up front with
+    /// its own message; nothing sniffs, counts or reads the target by path, and
+    /// an empty outside file is never written into a document as `(empty)`.
+    #[cfg(unix)]
+    #[test]
+    fn a_citation_through_a_link_is_refused_without_reading_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs/real")).unwrap();
+        std::fs::write(root.join("AGENTS.md"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(root.join("docs/real/x.md"), "x\n").unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("empty.txt"), "").unwrap();
+        std::fs::write(external.path().join("bin.dat"), b"%PDF-1.7\0").unwrap();
+        let link = |target: &std::path::Path, name: &str| {
+            std::os::unix::fs::symlink(target, root.join(name)).unwrap()
+        };
+        link(&root.join("AGENTS.md"), "CLAUDE.md");
+        link(&external.path().join("empty.txt"), "docs/empty.txt");
+        link(&external.path().join("bin.dat"), "docs/bin.dat");
+        link(&root.join("docs/real"), "docs/alias");
+        for raw in [
+            "CLAUDE.md:2",
+            "CLAUDE.md",
+            "docs/empty.txt",
+            "docs/bin.dat",
+            "docs/bin.dat:1",
+            "docs/alias/x.md:1",
+        ] {
+            assert!(
+                cited_file(root, raw.split(':').next().unwrap()).is_none(),
+                "{raw}"
+            );
+            match check_citation(root, "docs/m.md", raw) {
+                CitationCheck::Defect(why) => assert!(why.contains("is a link"), "{raw}: {why}"),
+                _ => panic!("{raw}: a citation through a link must be a defect"),
+            }
+        }
+        assert!(!is_binary(root, &root.join("docs/bin.dat")));
+        assert_eq!(last_line_of(root, &root.join("CLAUDE.md")), 0);
+        // Control: the real files are cited as before.
+        assert!(matches!(
+            check_citation(root, "docs/m.md", "AGENTS.md:2"),
+            CitationCheck::Valid { .. }
+        ));
+        assert!(matches!(
+            check_citation(root, "docs/m.md", "docs/real/x.md:1"),
+            CitationCheck::Valid { .. }
+        ));
     }
 
     /// KT-1595 round 5 (NEW-3): a document that is a planted link is not read

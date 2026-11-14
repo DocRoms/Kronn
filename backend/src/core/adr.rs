@@ -615,9 +615,9 @@ pub struct StartOfRun {
 }
 
 impl StartOfRun {
-    pub fn capture(docs_dir: &Path) -> Self {
+    pub fn capture(root: &Path, docs_dir: &Path) -> Self {
         Self {
-            decisions: read_decisions(docs_dir),
+            decisions: read_decisions(root, docs_dir),
             records: capture_records(docs_dir),
         }
     }
@@ -706,22 +706,16 @@ pub fn downgrade(content: &str, ids: &[String], date: &str) -> String {
 }
 
 /// The text of `<docs>/decisions.md`, empty when absent or not a regular file.
-pub fn read_decisions(docs_dir: &Path) -> String {
-    let path = docs_dir.join(DECISIONS_FILE);
-    // KT-1595: the text ends up in a step prompt, so it is read through the
-    // rooted primitive from the folder ABOVE the docs folder (a link at the docs
-    // folder, at `decisions.md` or in a parent is refused: empty, never an
-    // outside file). Only a docs folder with no parent to root at (a bare
-    // relative name) keeps the by-path read.
-    match docs_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(root) => crate::core::fs_guard::guarded_read(root, &path)
-            .ok()
-            .flatten()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .unwrap_or_default(),
-        None if regular_file(&path) => std::fs::read_to_string(&path).unwrap_or_default(),
-        None => String::new(),
-    }
+/// `root` is the project: the text ends up in a step prompt, so it is read
+/// through the rooted primitive from there (KT-1595), and a link at
+/// `decisions.md`, at the docs folder or at any folder between them and the
+/// project reads as empty, never as an outside file.
+pub fn read_decisions(root: &Path, docs_dir: &Path) -> String {
+    crate::core::fs_guard::guarded_read(root, &docs_dir.join(DECISIONS_FILE))
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -735,10 +729,6 @@ pub struct AdrSettleOutcome {
     pub problems: Vec<String>,
     /// ADRs accepted during the run, set back to `proposed` for a human.
     pub downgraded: Vec<String>,
-}
-
-fn regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
 /// `path` read through the rooted primitive as text (KT-1595): a link in a
@@ -841,8 +831,8 @@ pub fn settle_covered_sheets(
 
 /// The decisions that may settle a TD in this run (in force since before it
 /// started), for the prompt of a step that writes TDs. Empty when there is none.
-pub fn in_force_prompt_block(docs_dir: &Path, baseline: &str) -> String {
-    let current = parse(&read_decisions(docs_dir));
+pub fn in_force_prompt_block(root: &Path, docs_dir: &Path, baseline: &str) -> String {
+    let current = parse(&read_decisions(root, docs_dir));
     let (force, _) = trusted(
         &current,
         Trust::RunBaseline {

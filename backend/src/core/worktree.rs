@@ -1598,6 +1598,12 @@ pub(crate) fn registered_worktree_git_dir(
             continue;
         };
         let recorded = PathBuf::from(String::from_utf8_lossy(&raw).trim().to_string());
+        // `worktree.useRelativePaths` records it relative to the entry itself.
+        let recorded = if recorded.is_relative() {
+            entry.join(recorded)
+        } else {
+            recorded
+        };
         let is_ours = recorded.file_name().is_some_and(|n| n == ".git")
             && recorded
                 .parent()

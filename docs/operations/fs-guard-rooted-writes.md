@@ -122,7 +122,13 @@ by path, found by the round-3 review and the Argon addendum):
   `git add`, the index still holds the agent's version and the next commit would
   re-commit the reverted edit, so `git update-index --add --cacheinfo
   <mode>,<blob>,<prefix><file>` sets the entry from the recorded blob without touching
-  the path (the index path is top-relative, hence the project's `--show-prefix`). A
+  the path (the index path is top-relative, hence the project's `--show-prefix`).
+  A file that was already dirty keeps the user's index entry too (round 7): its
+  `git ls-files -s` entry is recorded with its bytes, and the settle puts it back
+  (`update-index --cacheinfo`, or `--force-remove` for an entry the user had
+  removed). A file whose bytes are back but whose staged version the agent changed
+  is reported, and a source file the agent only re-staged is listed with the other
+  changed files, never touched. A
   failure of that command is reported as a warning. An AI-doc folder
   swapped for a link, or a link planted at the tracked name, is refused and reported
   as a warning ("could not be restored"); nothing is written or deleted through it.
@@ -279,10 +285,15 @@ outside the root.
   the strict multi-citation read), `document_optimization` (`read` and `line_count`,
   rooted at the project), `validation` (`target_snapshot`, `unfilled_companion`, the
   leak check and the step-8 surface with its sheet listing), `adr::read_decisions`
-  (rooted at the folder above the docs folder, because the text goes into a step
-  prompt: a docs folder with no parent keeps the by-path read) and the quote read of
-  `cross_audit::verify_citation`. A link there reads as absent or is an error, never as
-  the content it points at.
+  (rooted at the project since round 7, so a folder above a nested docs root swapped
+  for a link reads as empty) and the quote read of `cross_audit::verify_citation`. A
+  link there reads as absent or is an error, never as the content it points at.
+  Round 7 closed the rest of `document_optimization`: a citation through a link (at
+  the file or at a folder on the way) is refused up front with its own message, the
+  binary sniff and the last citable line are read through the primitive, a file that
+  cannot be read is never called empty (no `(empty)` rewrite from it), and an
+  adapter reached through a link is skipped, never read. A link to a secret file is
+  still refused as a secret, without reading it.
 - `template_reinstall` applies the template's file renames before it writes
   (`apply_renames_in`); a later failure rolls back the files it wrote, not those
   renames.

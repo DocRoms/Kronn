@@ -777,8 +777,8 @@ pub async fn full_audit(
         // them: only those settle a TD at the end. A resume keeps its
         // predecessor's.
         let adr_baseline = {
-            let docs = docs_root.dir(&project_path);
-            let found = tokio::task::spawn_blocking(move || crate::core::adr::StartOfRun::capture(&docs))
+            let (root, docs) = (project_path.clone(), docs_root.dir(&project_path));
+            let found = tokio::task::spawn_blocking(move || crate::core::adr::StartOfRun::capture(&root, &docs))
                 .await.unwrap_or_default();
             let (run_id, previous_id, fallback) = (audit_run_id.clone(), resume_run_id_req.clone(), found.clone());
             match db.with_conn(move |conn| {

@@ -148,6 +148,9 @@ pub(crate) struct StepRemit {
     /// Tracked files outside the root that were already modified and could
     /// not be read safely at that moment (a link): never restored.
     refused_before: HashSet<String>,
+    /// The index entry of each `dirty_outside` file at that moment: a staged
+    /// version is part of what the user had (`None` = not in the index).
+    index_before: HashMap<String, Option<IndexEntry>>,
     /// Project-relative folders outside the root that hold AI docs.
     ai_folders: Vec<String>,
 }
@@ -161,6 +164,24 @@ fn git(project: &Path, args: &[&str]) -> Option<Vec<u8>> {
         .output()
         .ok()?;
     output.status.success().then_some(output.stdout)
+}
+
+/// `(mode, blob id)` of one index entry.
+type IndexEntry = (String, String);
+
+/// The index entry of `rel` (project-relative), `Some(None)` when the index has
+/// none; `None` when git cannot tell.
+fn index_entry(project: &Path, rel: &str) -> Option<Option<IndexEntry>> {
+    let raw = git(project, &["ls-files", "-s", "-z", "--", rel])?;
+    let text = String::from_utf8_lossy(&raw);
+    let Some(line) = text.split('\0').find(|line| !line.is_empty()) else {
+        return Some(None);
+    };
+    // `<mode> SP <blob> SP <stage> TAB <path>`
+    let (meta, _) = line.split_once('\t')?;
+    let mut fields = meta.split(' ');
+    let (mode, blob) = (fields.next()?, fields.next()?);
+    Some(Some((mode.to_string(), blob.to_string())))
 }
 
 fn git_text(project: &Path, args: &[&str]) -> Option<String> {
@@ -258,6 +279,7 @@ impl StepRemit {
         let branch = git_text(project, &["symbolic-ref", "-q", "HEAD"]);
         let mut dirty_outside = HashMap::new();
         let mut refused_before = HashSet::new();
+        let mut index_before = HashMap::new();
         for rel in tracked_changes(project, &prefix)? {
             if docs_root.contains(&rel) || kronn_owned(&rel) {
                 continue;
@@ -267,6 +289,9 @@ impl StepRemit {
             // as an absent file: settle never rewrites or deletes through it.
             match crate::core::fs_guard::guarded_read(project, &project.join(&rel)) {
                 Ok(content) => {
+                    if let Some(entry) = index_entry(project, &rel) {
+                        index_before.insert(rel.clone(), entry);
+                    }
                     dirty_outside.insert(rel, content);
                 }
                 Err(_) => {
@@ -284,6 +309,7 @@ impl StepRemit {
             started: chrono::Utc::now().timestamp(),
             dirty_outside,
             refused_before,
+            index_before,
             ai_folders: ai_doc_folders(project, docs_root),
         })
     }
@@ -479,10 +505,11 @@ impl StepRemit {
                 // Source, config, anything else: the user works here too.
                 // KT-1595: read through the rooted primitive; a refused read
                 // (link) counts as changed, never as the content it points at.
+                // The index counts too: a version the agent staged is a change.
                 let unchanged = before.is_some_and(|b| {
                     crate::core::fs_guard::guarded_read(&self.project, &self.project.join(&rel))
                         .is_ok_and(|now| *b == now)
-                });
+                }) && self.index_unchanged(&rel);
                 if !unchanged {
                     left_alone.push(rel);
                 }
@@ -495,8 +522,19 @@ impl StepRemit {
                 continue;
             }
             let restored = match before {
-                // A user change that was already there: back to that content.
-                Some(before) => self.restore_content(&rel, before.as_deref()),
+                // A user change that was already there: back to that content,
+                // and its index entry back to what the user had staged.
+                Some(before) => self
+                    .restore_content(&rel, before.as_deref())
+                    .and_then(|restored| {
+                        let unstaged = self.restore_index(&rel)?;
+                        if unstaged && restored.is_none() {
+                            report.warnings.push(format!(
+                                "the agent staged a change to `{rel}`; its index entry was put back to what you had staged"
+                            ));
+                        }
+                        Ok(restored)
+                    }),
                 // Clean before the step: back to the recorded commit.
                 None => self.restore_from_head(&rel),
             };
@@ -633,6 +671,47 @@ impl StepRemit {
                 mode.unwrap_or("unknown")
             )),
         }
+    }
+
+    /// Whether the index entry of `rel` is the one recorded before the step
+    /// (false when git cannot tell, or nothing was recorded).
+    fn index_unchanged(&self, rel: &str) -> bool {
+        self.index_before
+            .get(rel)
+            .is_some_and(|before| index_entry(&self.project, rel).as_ref() == Some(before))
+    }
+
+    /// Puts the index entry of a file that was dirty before the step back to the
+    /// recorded one; `true` when it had changed. `update-index` never reads the
+    /// path: `--cacheinfo` takes the recorded blob (a top-relative path, hence
+    /// the prefix), `--force-remove` only drops the entry.
+    fn restore_index(&self, rel: &str) -> Result<bool, String> {
+        let Some(before) = self.index_before.get(rel) else {
+            return Err(format!(
+                "the index entry of `{rel}` was not recorded before the step; run `git diff --cached -- {rel}` to check what is staged"
+            ));
+        };
+        if index_entry(&self.project, rel).as_ref() == Some(before) {
+            return Ok(false);
+        }
+        let done = match before {
+            Some((mode, blob)) => {
+                let entry = format!("{mode},{blob},{}{rel}", self.prefix);
+                git(
+                    &self.project,
+                    &["update-index", "--add", "--cacheinfo", &entry],
+                )
+            }
+            None => git(
+                &self.project,
+                &["update-index", "--force-remove", "--", rel],
+            ),
+        };
+        done.map(|_| true).ok_or_else(|| {
+            format!(
+                "the index entry of `{rel}` could not be put back (git update-index failed); run `git restore --staged -- {rel}`"
+            )
+        })
     }
 
     fn restore_content(

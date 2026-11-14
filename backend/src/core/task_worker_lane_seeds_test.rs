@@ -1304,6 +1304,25 @@ mod moved_pointer {
     }
 
     #[test]
+    fn a_relative_back_pointer_still_names_the_lane() {
+        // `git worktree add --relative-paths` (or `worktree.useRelativePaths`)
+        // records the lane relative to the registry entry.
+        let fx = fixture();
+        let admin =
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).unwrap();
+        let lane = fx.worktree.strip_prefix(&fx.main).unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("../../../{}/.git\n", lane.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).unwrap(),
+            admin
+        );
+    }
+
+    #[test]
     fn a_marker_planted_as_a_link_is_replaced_never_written_through() {
         let fx = fixture();
         let external = tempfile::tempdir().unwrap();

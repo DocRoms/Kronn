@@ -2024,11 +2024,18 @@ pub(crate) fn is_binary_file(path: &Path) -> bool {
     {
         return false;
     }
+    is_binary_content(&head)
+}
+
+/// [`is_binary_file`] on content already read: only its first
+/// [`BINARY_SNIFF_BYTES`] are judged.
+pub(crate) fn is_binary_content(content: &[u8]) -> bool {
+    let head = &content[..content.len().min(BINARY_SNIFF_BYTES)];
     if head.starts_with(b"%PDF-") || head.contains(&0) {
         return true;
     }
     // A multi-byte character cut by the sniff window is not invalid UTF-8.
-    std::str::from_utf8(&head).is_err_and(|e| e.error_len().is_some())
+    std::str::from_utf8(head).is_err_and(|e| e.error_len().is_some())
 }
 
 /// Percent-decoded relative form of a cited or linked path (`My%20File.docx`),
@@ -2073,14 +2080,6 @@ fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
     }
     let content = std::fs::read_to_string(path).ok()?;
     Some((content.lines().count(), last_citable_line(&content)))
-}
-
-/// [`last_citable_line`] of a file on disk; 0 when it cannot be read.
-pub(crate) fn last_citable_line_of(path: &Path) -> usize {
-    if crate::acp::secret_files::is_secret_path(path) {
-        return 0;
-    }
-    std::fs::read_to_string(path).map_or(0, |content| last_citable_line(&content))
 }
 
 /// Verify one `[src: …]` marker against the project root.

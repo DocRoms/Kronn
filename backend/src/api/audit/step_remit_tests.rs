@@ -497,6 +497,68 @@ fn a_users_uncommitted_edit_in_another_ai_folder_is_restored_to_what_it_was() {
     );
 }
 
+/// KT-1595 round 7: a file the user had dirty keeps the user's INDEX entry too.
+/// The agent's staged version never survives the restore, whether the agent
+/// also left its bytes in the working tree or wrote the user's bytes back.
+#[test]
+fn a_users_dirty_ai_file_gets_its_index_entry_back_too() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, user wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    let staged_before = git(dir.path(), &["ls-files", "-s", "docs/tech-debt/TD-1.md"]);
+
+    // A: the agent writes and stages its version.
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    git(dir.path(), &["add", "docs/tech-debt/TD-1.md"]);
+    let report = remit.settle_blocking();
+    assert_eq!(paths(&report), vec!["docs/tech-debt/TD-1.md"]);
+    assert_eq!(
+        read(dir.path(), "docs/tech-debt/TD-1.md"),
+        "td one, user wip\n"
+    );
+    assert_eq!(
+        git(dir.path(), &["ls-files", "-s", "docs/tech-debt/TD-1.md"]),
+        staged_before
+    );
+
+    // B: the agent stages its version, then writes the user's bytes back.
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    git(dir.path(), &["add", "docs/tech-debt/TD-1.md"]);
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, user wip\n");
+    let report = remit.settle_blocking();
+    assert_eq!(
+        git(dir.path(), &["ls-files", "-s", "docs/tech-debt/TD-1.md"]),
+        staged_before
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("docs/tech-debt/TD-1.md") && w.contains("index entry")),
+        "{report:?}"
+    );
+    // Settled: nothing left to do.
+    assert!(remit.settle_blocking().is_empty());
+}
+
+/// KT-1595 round 7: a source file the user had dirty, whose bytes the agent
+/// left alone but whose staged version it changed, is listed (never touched).
+#[test]
+fn a_source_file_whose_index_the_agent_changed_is_reported() {
+    let dir = repo();
+    write(dir.path(), "src/main.rs", "wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "src/main.rs", "agent\n");
+    git(dir.path(), &["add", "src/main.rs"]);
+    write(dir.path(), "src/main.rs", "wip\n");
+    let report = remit.settle_blocking();
+    assert_eq!(read(dir.path(), "src/main.rs"), "wip\n");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("src/main.rs")),
+        "{report:?}"
+    );
+}
+
 #[test]
 fn a_source_file_changed_during_the_step_is_never_touched_only_reported() {
     let dir = repo();

@@ -789,7 +789,7 @@ pub(crate) async fn run_partial_pipeline(
             .any(|&n| chain[n - 1].target_file.ends_with("inconsistencies-tech-debt.md"));
         // KT-1174 — only the ADRs in force and the TD record lines present
         // before this refresh settle a TD.
-        let adr_baseline = crate::core::adr::StartOfRun::capture(&docs_root.dir(&project_path));
+        let adr_baseline = crate::core::adr::StartOfRun::capture(&project_path, &docs_root.dir(&project_path));
         let (detector_signals, ecosystems, prior_td_digests) = if step8_selected {
             let p = project_path.clone();
             let rules = project_rules.clone().unwrap_or_default().rules;

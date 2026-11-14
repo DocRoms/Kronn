@@ -269,9 +269,9 @@ fn the_prompt_block_lists_only_decisions_in_force() {
     let dir = tempfile::tempdir().unwrap();
     let docs = dir.path().join("docs");
     fs::create_dir_all(&docs).unwrap();
-    assert_eq!(in_force_prompt_block(&docs, ""), "");
+    assert_eq!(in_force_prompt_block(dir.path(), &docs, ""), "");
     fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
-    let block = in_force_prompt_block(&docs, CI_LABEL_ADR);
+    let block = in_force_prompt_block(dir.path(), &docs, CI_LABEL_ADR);
     assert!(
         block.contains("- ADR-0001 — CI is label-triggered (covers: quality-gate-not-enforced)")
     );
@@ -281,10 +281,13 @@ fn the_prompt_block_lists_only_decisions_in_force() {
         CI_LABEL_ADR.replace("accepted", "proposed"),
     )
     .unwrap();
-    assert_eq!(in_force_prompt_block(&docs, CI_LABEL_ADR), "");
+    assert_eq!(in_force_prompt_block(dir.path(), &docs, CI_LABEL_ADR), "");
     // Accepted during the run: not in force for this run's steps.
     fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
-    assert_eq!(in_force_prompt_block(&docs, "# Decisions\n"), "");
+    assert_eq!(
+        in_force_prompt_block(dir.path(), &docs, "# Decisions\n"),
+        ""
+    );
 }
 
 /// A docs dir whose `decisions.md` is `decisions`, with one CI sheet.
@@ -419,7 +422,7 @@ fn a_record_line_the_run_writes_on_a_new_sheet_settles_nothing() {
     let docs = dir.path().join("docs");
     fs::create_dir_all(docs.join("tech-debt")).unwrap();
     fs::write(docs.join(DECISIONS_FILE), TWO_ADRS).unwrap();
-    let start = StartOfRun::capture(&docs);
+    let start = StartOfRun::capture(dir.path(), &docs);
     assert_eq!(start.records, "");
     // The TD step writes a real finding and cites an unrelated accepted ADR.
     write_sheet(
@@ -451,7 +454,7 @@ fn a_record_line_the_run_adds_or_changes_on_an_existing_sheet_settles_nothing() 
         "TD-20261001-human",
         "- **Decision record**: ADR-0002\n",
     );
-    let start = StartOfRun::capture(&docs);
+    let start = StartOfRun::capture(dir.path(), &docs);
     assert_eq!(start.records, "TD-20261001-human ADR-0002\n");
     // The REVERIFY block rewrites both sheets during the run.
     write_sheet(
@@ -478,7 +481,7 @@ fn a_record_line_present_before_the_run_still_settles() {
     fs::create_dir_all(docs.join("tech-debt")).unwrap();
     fs::write(docs.join(DECISIONS_FILE), TWO_ADRS).unwrap();
     write_sheet(&docs, "TD-20261001-human", "- **Decision record**: ADR-2\n");
-    let start = StartOfRun::capture(&docs);
+    let start = StartOfRun::capture(dir.path(), &docs);
     let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, start.trust()).unwrap();
     assert_eq!(
         outcome.settled,
@@ -584,7 +587,7 @@ fn a_linked_decisions_file_or_docs_folder_reads_as_empty() {
     fs::write(external.path().join("decisions.md"), CI_LABEL_ADR).unwrap();
     // Control: a plain file is read.
     fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
-    assert!(read_decisions(&docs).contains("ADR-0001"));
+    assert!(read_decisions(project.path(), &docs).contains("ADR-0001"));
     // A link at the file.
     fs::remove_file(docs.join(DECISIONS_FILE)).unwrap();
     std::os::unix::fs::symlink(
@@ -592,12 +595,36 @@ fn a_linked_decisions_file_or_docs_folder_reads_as_empty() {
         docs.join(DECISIONS_FILE),
     )
     .unwrap();
-    assert_eq!(read_decisions(&docs), "");
-    assert!(in_force_prompt_block(&docs, CI_LABEL_ADR).is_empty());
+    assert_eq!(read_decisions(project.path(), &docs), "");
+    assert!(in_force_prompt_block(project.path(), &docs, CI_LABEL_ADR).is_empty());
     // A link at the docs folder itself.
     fs::remove_dir_all(&docs).unwrap();
     std::os::unix::fs::symlink(external.path(), &docs).unwrap();
-    assert_eq!(read_decisions(&docs), "");
+    assert_eq!(read_decisions(project.path(), &docs), "");
+}
+
+/// KT-1595 round 7: a nested docs root (`documentation/ai`) is read from the
+/// project, so a folder ABOVE the docs folder swapped for a link reads as empty.
+#[cfg(unix)]
+#[test]
+fn a_linked_folder_above_a_nested_docs_root_reads_as_empty() {
+    let project = tempfile::tempdir().unwrap();
+    let docs = project.path().join("documentation/ai");
+    fs::create_dir_all(&docs).unwrap();
+    fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
+    assert!(read_decisions(project.path(), &docs).contains("ADR-0001"));
+    let external = tempfile::tempdir().unwrap();
+    fs::create_dir_all(external.path().join("ai")).unwrap();
+    fs::write(
+        external.path().join("ai").join(DECISIONS_FILE),
+        CI_LABEL_ADR,
+    )
+    .unwrap();
+    fs::remove_dir_all(project.path().join("documentation")).unwrap();
+    std::os::unix::fs::symlink(external.path(), project.path().join("documentation")).unwrap();
+    assert_eq!(read_decisions(project.path(), &docs), "");
+    assert!(in_force_prompt_block(project.path(), &docs, CI_LABEL_ADR).is_empty());
+    assert_eq!(StartOfRun::capture(project.path(), &docs).decisions, "");
 }
 
 /// KT-1595: the settlement runs after an agent, so a folder swapped for a link
