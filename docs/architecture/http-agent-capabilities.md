@@ -61,7 +61,7 @@ that may be hosted by a third party.
 
 ## What they have
 
-The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_workspace_tools.rs:1290-1304#TOOL_NAMES]:
+The workspace catalogue, thirteen tools [src: file: backend/src/api/agent_workspace_tools.rs:1319-1333#TOOL_NAMES]:
 
 | Tool | Purpose |
 |---|---|

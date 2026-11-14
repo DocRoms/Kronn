@@ -166,7 +166,7 @@ or parent-milestone section: a bounded edit has neither.
 `[src: file: backend/src/api/agent_workspace_structure.rs:234-252#validate_delimiters]`
 `[src: file: backend/src/api/agent_workspace_structure.rs:270-312#validate_range_indentation]`
 `[src: file: backend/src/api/agent_workspace_tools.rs:95-115#validate_proposed_source]`
-`[src: file: backend/src/api/agent_workspace_tools.rs:1864-1881#validate_range_indentation]`
+`[src: file: backend/src/api/agent_workspace_tools.rs:1897-1914#validate_range_indentation]`
 `[src: file: backend/src/agents/runner.rs:1401-1415#structural_refusal]`
 `[src: file: backend/src/agents/runner.rs:1417-1434#worker_repair_iteration_limit]`
 `[src: file: backend/src/api/orchestration.rs:9793-10021#worker_scope]`
@@ -305,7 +305,7 @@ This is based on the caller's control flow, not an assumption from its comment.
 [src: file: backend/src/agents/runner.rs:3614-3619#is_http_chat_agent]
 [src: file: backend/src/agents/runner.rs:4539-4560#start_ollama_http_with_idle]
 [src: file: backend/src/agents/runner.rs:4764-4777#agent_command_with_task_worker_policy]
-[src: file: backend/src/agents/runner.rs:14284-14293#Ollama]
+[src: file: backend/src/agents/runner.rs:14293-14302#Ollama]
 
 Preflight checks the exact durable target/tier assignment, including unavailable
 rows, before using any HTTP Default assignment. Otherwise the launch cache's

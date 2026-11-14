@@ -315,7 +315,7 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
 [src: file: backend/src/core/task_worker_env.rs:849]
 [src: file: backend/src/core/task_worker_lane_warm.rs:843]
-[src: file: backend/src/agents/runner.rs:14718-14727#agent_launch_priority]
+[src: file: backend/src/agents/runner.rs:14731-14740#agent_launch_priority]
 [src: file: backend/src/core/quick_exec.rs:516-540#build_command]
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
@@ -476,7 +476,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_lane_warm.rs:729-911#warm_lane_cancellable]
 [src: file: backend/src/core/task_worker_lane_warm.rs:925-932#first_build_args]
 [src: file: backend/src/core/task_worker_lane_warm.rs:936-940#has_lib_target]
-[src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
+[src: file: backend/src/core/task_worker_sandbox.rs:318-369#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10876-10907#warm_failure_notice]
 
 ## Long builds in a task worker (KT-1718)
@@ -548,7 +548,7 @@ load, not a performance guarantee.
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:204-211#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:859-869#apply_bash_timeouts]
-[src: file: backend/src/agents/runner.rs:15176-15178#apply_bash_timeouts]
+[src: file: backend/src/agents/runner.rs:15187-15189#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:678-679#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]

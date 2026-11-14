@@ -292,8 +292,8 @@ delivery manifest and diff, then choose one of:
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
   [src: file: backend/src/core/worktree.rs:2429-2457#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:3055-3075#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:3000-3053#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:3061-3081#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:3006-3059#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -307,7 +307,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2822-2829#integration_target]
+[src: file: backend/src/core/worktree.rs:2828-2835#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -358,8 +358,8 @@ removed or renamed) is the lane's to fix; the worker brief says so. The merge a
 worker finishes with `task_exec_commit` runs the same settlement.
 [src: file: backend/src/core/worktree.rs:2472-2576#build_candidate_detailed]
 [src: file: backend/src/core/worktree.rs:2678-2741#settle_branch_docs]
-[src: file: backend/src/core/docs_citations/merge.rs:306-322#resolve_anchor_only_conflicts]
-[src: file: backend/src/core/docs_citations/merge.rs:734-794#newly_unresolved]
+[src: file: backend/src/core/docs_citations/merge.rs:317-333#resolve_anchor_only_conflicts]
+[src: file: backend/src/core/docs_citations/merge.rs:746-806#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]
 
 ### The worker's own commit settles the citations its code shifted
@@ -387,8 +387,8 @@ A doc or a cited file with unstaged changes defers the re-anchoring
 (`doc_citations.reanchor_deferred`) rather than sweeping work in progress; the
 next commit re-anchors. A commit that finishes a merge keeps the merge's own
 settlement above.
-[src: file: backend/src/api/agent_workspace_tools.rs:720-747#git_commit_payload_reanchoring_docs]
-[src: file: backend/src/core/docs_citations/merge.rs:638-650#reanchor_branch_leaving_unplaced]
+[src: file: backend/src/api/agent_workspace_tools.rs:749-776#git_commit_payload_reanchoring_docs]
+[src: file: backend/src/core/docs_citations/merge.rs:650-662#reanchor_branch_leaving_unplaced]
 
 ### A DoD item the principal checks live, after integration
 
