@@ -303,9 +303,11 @@ Safe to interrupt at any point; a rerun converges:
    `myAKIA…`, `AKIA…_old`, `botxoxb-…`, `sk_live_…_old`, `sk-<uuid>`), DERIVED
    mechanically from the vendor patterns of `redact::RAW_PATTERNS` (same bodies
    and same minimum lengths, only the anchors dropped:
-   `redact::name_embeds_vendor_token`); a match glued to a letter on its left
-   counts only when it holds a decimal digit, so `disk-cache-max-size-bytes` and
-   `task-runner-max-concurrency` are shown while `oldsk-…0123…` is masked; (d) `bearer` or `basic` in any case
+   `redact::name_embeds_vendor_token`); one exception: `sk-` glued to a letter
+   on its left (inside an ordinary word) counts only when the match holds a decimal
+   digit or a capital, as every real `sk-` key does, so `disk-cache-max-size-bytes`
+   and `task-runner-max-concurrency` are shown while `oldsk-…0123…` is masked; every
+   other vendor shape counts glued or not, digits or not (`myAKIA…`, `myhf_…`); (d) `bearer` or `basic` in any case
    followed by white space (any Unicode white space), `:` or `=` and 12 token
    characters or more, anywhere (`bearer token` and `basic auth` are words and
    are shown); (e) an instance key as the whole name or any piece of it, a run of

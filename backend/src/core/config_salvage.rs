@@ -1578,7 +1578,9 @@ mod tests {
             // round 17: the name shapes keep the vendors' own minimum lengths
             "old_p8e-12345678".to_string(),
             "old_glpat-abcdefghijklmnop".to_string(),
-            "myglpat-abcdefghijkl1234".to_string(),
+            "myglpat-abcdefghijklmnop".to_string(),
+            "myAKIAIOSFODNNXEXAMPLE".to_string(),
+            "myhf_aBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgH".to_string(),
             "bot_xoxb-123456789012-123456789012".to_string(),
             "botxoxb-123456789012-123456789012".to_string(),
             "xoxb-123456789012-123456789012_old".to_string(),

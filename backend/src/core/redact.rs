@@ -478,21 +478,27 @@ static NAME_TOKEN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Whether a vendor token shape ([`name_token_shapes`]) appears in `name`. A
-/// match glued to a letter on its left counts only when it holds a decimal digit:
-/// `disk-cache-max-size-bytes` holds `sk-` + 20 characters inside a word, a real
-/// token is random and holds digits (`oldsk-…0123`, `myAKIA…7…`). Every start is
-/// tried, so a rejected match never hides a later one. The caller bounds the
-/// length of `name` (see `config_salvage`).
+/// Whether a vendor token shape ([`name_token_shapes`]) appears in `name`,
+/// anywhere, glued to a label or not. One exception: `sk-` inside an ordinary
+/// word (`di|sk-cache-max-size-bytes`, `ta|sk-runner-…`) counts only when the
+/// match holds a decimal digit or a capital, as every real `sk-` key does; a
+/// kebab-case setting name holds neither. Every start is tried, so a rejected
+/// match never hides a later one. The caller bounds the length of `name` (see
+/// `config_salvage`).
 pub fn name_embeds_vendor_token(name: &str) -> bool {
     NAME_TOKEN_REGEXES.iter().any(|re| {
+        let word_prefix = re.as_str().starts_with("sk-");
         let mut from = 0;
         while let Some(m) = re.find_at(name, from) {
             let glued = name[..m.start()]
                 .chars()
                 .next_back()
                 .is_some_and(|c| c.is_ascii_alphabetic());
-            if !glued || m.as_str().bytes().any(|b| b.is_ascii_digit()) {
+            let token_like = m
+                .as_str()
+                .bytes()
+                .any(|b| b.is_ascii_digit() || b.is_ascii_uppercase());
+            if !(word_prefix && glued) || token_like {
                 return true;
             }
             from = m.start() + name[m.start()..].chars().next().map_or(1, char::len_utf8);
@@ -2707,10 +2713,10 @@ mod tests {
             "ASIAIOSFODNN7EXAMPLE",
             "rk_live_abcdefghij1234567890",
             "sk_live_abcdefghij1234567890",
-            "glpat-abcdefghijklmnopqrst1234",
+            "glpat-abcdefghijklmnopqrstuvwxyz",
             "npm_abcdefghijklmnopqrstuvwxyz0123456789",
             "hf_abcdefghijklmnopqrstuvwxyz0123456789",
-            "kbt_abcdefghijklmnopqrst12",
+            "kbt_abcdefghijklmnopqrstuvwx",
         ];
         assert_eq!(samples.len(), name_token_shapes().count());
         for sample in samples {
@@ -2746,7 +2752,7 @@ mod tests {
             "old_p8e-12345678",
             "oldp8e-12345678",
             "old_glpat-abcdefghijklmnop",
-            "myglpat-abcdefghijkl1234",
+            "myglpat-abcdefghijklmnop",
             "glpat-abcdefghijklmnop_old",
             "kbt_abcdefghijklmnop_old",
             "sk_live_abcdefghijklmnop_old",
@@ -2766,10 +2772,10 @@ mod tests {
         }
     }
 
-    /// KT-1528 round 19 — a vendor prefix inside an ordinary word (`di|sk-`,
-    /// `ta|sk-`) is not a token unless the match holds a digit; a token after a
-    /// separator, at the start or glued with digits is still found, and a rejected
-    /// glued match never hides a later one.
+    /// KT-1528 rounds 19-20 — `sk-` inside an ordinary word (`di|sk-`, `ta|sk-`)
+    /// is not a token unless the match holds a digit or a capital; every other
+    /// vendor shape, and `sk-` after a separator or at the start, is found glued
+    /// or not, and a rejected glued match never hides a later one.
     #[test]
     fn a_vendor_prefix_inside_a_word_is_not_a_token() {
         for name in [
@@ -2792,6 +2798,19 @@ mod tests {
             "botxoxb-123456789012-123456789012",
             "disk-cache-max-size-bytes_sk-abcdefghijklmnopqrstuvwxyz",
             "oldsk-abcdefghij0123456789",
+            "oldsk-abcdefghijKlmnopqrstuv",
+            // Round 20: every other vendor shape counts glued to a label even
+            // without a digit (a real token may hold none).
+            "myAKIAIOSFODNNXEXAMPLE",
+            "oldASIAIOSFODNNXEXAMPLE",
+            "myhf_aBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgH",
+            "myglpat-abcdefghijklmnop",
+            "myghp_abcdefghijklmnopqrstuvwxyzABCDEF",
+            "mysk_live_abcdefghijklmnopqrst",
+            "botxoxb-abcdefghijklmnop",
+            "mynpm_abcdefghijklmnopqrstuvwxyzABCD",
+            "mykbt_abcdefghijklmnop",
+            "oldAKIAIOSFODNNXEXAMPLE_550e8400-e29b-41d4-a716-446655440000",
         ] {
             assert!(name_embeds_vendor_token(name), "{name}");
         }
