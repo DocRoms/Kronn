@@ -338,6 +338,9 @@ pub(crate) async fn intercept_failed_turn_among(
                 Ok(()) => true,
                 Err(error) => {
                     tracing::warn!(dispatch_job_id = %job.id, "agent fallback of a task worker failed: {error}");
+                    // The settlement held the interruption back for the link
+                    // that was to take over; none did.
+                    park_undelivered_worker(state, job).await;
                     false
                 }
             }
@@ -644,7 +647,7 @@ async fn settle_worker_failure(
     let settled = state
         .db
         .with_conn(move |conn| {
-            super::runtime::persist_dispatch_settlement(
+            super::runtime::persist_dispatch_settlement_handing_over(
                 conn,
                 &id,
                 &discussion_id,
@@ -657,6 +660,21 @@ async fn settle_worker_failure(
         .await;
     if let Err(error) = settled {
         tracing::warn!(dispatch_job_id = %job.id, "unable to settle the dispatch before its fallback: {error}");
+    }
+}
+
+/// KT-1758 — no link took the worker over: the execution is parked and the
+/// principal told, which [`settle_worker_failure`] held back for the link.
+async fn park_undelivered_worker(state: &AppState, job: &AgentDispatchJob) {
+    let (id, discussion_id) = (job.id.clone(), job.discussion_id.clone());
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            super::runtime::interrupt_undelivered_after_failure(conn, &id, &discussion_id)
+        })
+        .await
+    {
+        tracing::warn!(dispatch_job_id = %job.id, "unable to park the worker no link took over: {error}");
     }
 }
 

@@ -860,6 +860,14 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             ("Pending", Some("watchdog_stall_redispatch")) => PresenceState::ResumeExpected,
             _ => continue,
         };
+        // KT-1758 — the claim keeps a `runtime_unavailable[n]: …` marker in
+        // `last_error` so the deferral count survives it. It is bookkeeping of
+        // the claim loop, not a reason for a RUNNING agent: the participant
+        // popover reads "agent dispatch" there, as it did before the marker.
+        let error = error.filter(|error| {
+            status != "Running"
+                || crate::db::agent_dispatch::parse_runtime_unavailable(error).is_none()
+        });
         insert_signal(
             agent_type,
             state,

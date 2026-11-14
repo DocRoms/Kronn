@@ -1210,6 +1210,17 @@ pub fn note_execution_origin(
     Ok(())
 }
 
+/// KT-1758 — forgets where a worker started: a person's choice, or the return
+/// to the original worker, ends the fallback, and the chain a later failure
+/// walks is the new worker's own.
+pub fn clear_execution_origin(conn: &Connection, execution_id: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM execution_fallback_origins WHERE execution_id = ?1",
+        [execution_id],
+    )?;
+    Ok(())
+}
+
 // ─── A dispatch continued on a fallback ──────────────────────────────────
 
 /// The decision a discussion turn runs on: which agent, which model, which

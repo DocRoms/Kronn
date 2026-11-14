@@ -155,6 +155,84 @@ async fn a_rate_limited_or_unauthenticated_worker_continues_on_the_fallback_too(
     }
 }
 
+/// KT-1758 — the outage chain takes the worker over from `Working`: the
+/// principal is not told to « reassign or cancel » an execution Kronn is
+/// reassigning, and the per-execution notice is not spent by it — it still
+/// fires, once, if the replacement later ends without a delivery.
+#[tokio::test]
+async fn an_outage_move_neither_parks_the_worker_nor_spends_the_undelivered_notice() {
+    let (_repo, db, was, job) = the_economy_worker().await;
+    let state = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+    let undelivered = format!("orch-worker-undelivered:{}", was.id);
+    let notice = |db: std::sync::Arc<Database>, parent: String, id: String| async move {
+        messages_of(&db, &parent)
+            .await
+            .into_iter()
+            .find(|message| message.id == id)
+            .map(|message| message.content)
+    };
+
+    assert!(
+        intercept_failed_turn_among(
+            &state,
+            &job,
+            "[Agent provider error] API Error: 500 Internal Server Error",
+            Some(usable())
+        )
+        .await
+    );
+
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(after.worker_agent_type.as_deref(), Some("GeminiCli"));
+    assert_eq!(
+        after.status,
+        TaskExecutionStatus::Working,
+        "taken over, never parked"
+    );
+    assert!(
+        notice(
+            db.clone(),
+            was.parent_discussion_id.clone(),
+            undelivered.clone()
+        )
+        .await
+        .is_none(),
+        "no « reassign or cancel » before an automatic move"
+    );
+    assert!(fallback_notice(&db, &was, &job.id).await.is_some());
+
+    // The replacement ends without a delivery: now the principal is told, once.
+    let replacement = after.dispatch_job_id.clone().unwrap();
+    let (claim_id, child) = (
+        replacement.clone(),
+        after.sub_discussion_id.clone().unwrap(),
+    );
+    db.with_conn(move |conn| {
+        crate::db::agent_dispatch::claim(conn, &claim_id)?.expect("the replacement is due now");
+        crate::api::discussions::runtime::persist_dispatch_settlement(
+            conn,
+            &claim_id,
+            &child,
+            None,
+            crate::db::workflows::BatchChildOutcome::Failed,
+            Some("the replacement crashed"),
+            None,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        exec_of(&db, &was.id).await.status,
+        TaskExecutionStatus::Interrupted
+    );
+    assert!(
+        notice(db.clone(), was.parent_discussion_id.clone(), undelivered)
+            .await
+            .is_some_and(|content| content.contains("réaffecte ou annule")),
+        "the notice was kept for the replacement's own end"
+    );
+}
+
 #[tokio::test]
 async fn a_task_failure_a_refusal_a_test_failure_or_a_work_timeout_never_moves_a_worker() {
     let (_repo, db, was, job) = the_economy_worker().await;
