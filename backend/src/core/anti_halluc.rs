@@ -2006,7 +2006,7 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 }
 
 /// Bytes sniffed to tell a binary file from a text one.
-const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+pub(crate) const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// A file with no lines to cite (.docx, .pdf, images), told apart by content,
 /// not extension: a NUL byte, invalid UTF-8, or a PDF header in the first

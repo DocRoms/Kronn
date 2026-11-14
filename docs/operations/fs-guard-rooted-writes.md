@@ -123,12 +123,18 @@ by path, found by the round-3 review and the Argon addendum):
   re-commit the reverted edit, so `git update-index --add --cacheinfo
   <mode>,<blob>,<prefix><file>` sets the entry from the recorded blob without touching
   the path (the index path is top-relative, hence the project's `--show-prefix`).
-  A file that was already dirty keeps the user's index entry too (round 7): its
-  `git ls-files -s` entry is recorded with its bytes, and the settle puts it back
-  (`update-index --cacheinfo`, or `--force-remove` for an entry the user had
-  removed). A file whose bytes are back but whose staged version the agent changed
-  is reported, and a source file the agent only re-staged is listed with the other
-  changed files, never touched. A
+  A file that was already dirty keeps the user's whole index state too (rounds 7
+  and 8): every `git ls-files -s` line (the three stages of a conflict included),
+  the skip-worktree / assume-unchanged flag and an intent-to-add are recorded with
+  its bytes, and the settle drops what the agent left (`update-index
+  --force-remove`) and puts the record back (`--index-info`, `add -N`, the flag),
+  then checks it. A file the user hid with one of those flags counts as dirty. The
+  settle looks at every recorded file, not only at what `git status` lists, so a
+  file the agent brought back to HEAD (`git restore`) gets the user's version back.
+  A file whose bytes are back but whose index the agent changed is reported; a
+  failed index restore is reported without hiding the content restore and its
+  blob; a source file the agent only re-staged or flagged is listed with the
+  other changed files, never touched. A
   failure of that command is reported as a warning. An AI-doc folder
   swapped for a link, or a link planted at the tracked name, is refused and reported
   as a warning ("could not be restored"); nothing is written or deleted through it.
@@ -294,12 +300,14 @@ outside the root.
   (rooted at the project since round 7, so a folder above a nested docs root swapped
   for a link reads as empty) and the quote read of `cross_audit::verify_citation`. A
   link there reads as absent or is an error, never as the content it points at.
-  Round 7 closed the rest of `document_optimization`: a citation through a link (at
-  the file or at a folder on the way) is refused up front with its own message, the
-  binary sniff and the last citable line are read through the primitive, a file that
-  cannot be read is never called empty (no `(empty)` rewrite from it), and an
-  adapter reached through a link is skipped, never read. A link to a secret file is
-  still refused as a secret, without reading it.
+  Rounds 7 and 8 closed the rest of `document_optimization`: a citation through a
+  link (at the file or at a folder on the way, whatever it points at, a secret
+  file included) or with a `.`/`..` component is refused up front with its own
+  message and no stat of the target; the binary sniff reads at most 8 KiB through
+  the primitive (`guarded_read_head`) and the last citable line is read through it;
+  a file that cannot be read is never called empty (no `(empty)` rewrite from it);
+  and an adapter reached through a link is skipped, never read. `adr`'s
+  start-of-run capture of the `Decision record` lines is rooted at the project too.
 - `template_reinstall` applies the template's file renames before it writes
   (`apply_renames_in`); a later failure rolls back the files it wrote, not those
   renames.

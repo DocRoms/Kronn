@@ -278,7 +278,7 @@ pub(crate) mod swap_probe {
 pub use imp::guarded_set_mode;
 pub use imp::{
     guarded_copy_new, guarded_create_dir_all, guarded_create_new_dir, guarded_list,
-    guarded_move_new, guarded_read, guarded_remove_dir, guarded_remove_file,
+    guarded_move_new, guarded_read, guarded_read_head, guarded_remove_dir, guarded_remove_file,
     guarded_remove_file_if_ours, guarded_remove_tree, guarded_rename, guarded_replace,
     guarded_replace_if_unchanged_keeping_mode, guarded_replace_like, guarded_write_new,
     guarded_write_new_identified, FileId,
@@ -882,6 +882,20 @@ mod imp {
         Ok(Some(bytes))
     }
 
+    /// [`guarded_read`] of at most the first `max` bytes: a sniff never reads a
+    /// huge or sparse file whole.
+    pub fn guarded_read_head(root: &Path, path: &Path, max: u64) -> io::Result<Option<Vec<u8>>> {
+        let Some((parent, name)) = parent_of(root, path, false).map_err(refused)? else {
+            return Ok(None);
+        };
+        let Some(file) = parent.open_regular(name)? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        file.take(max).read_to_end(&mut bytes)?;
+        Ok(Some(bytes))
+    }
+
     /// `unlinkat(AT_REMOVEDIR)` of the empty folder at `path`.
     pub fn guarded_remove_dir(root: &Path, path: &Path) -> io::Result<()> {
         match parent_of(root, path, false).map_err(refused)? {
@@ -1016,6 +1030,9 @@ mod imp {
         refused_io()
     }
     pub fn guarded_read(_: &Path, _: &Path) -> io::Result<Option<Vec<u8>>> {
+        refused_io()
+    }
+    pub fn guarded_read_head(_: &Path, _: &Path, _: u64) -> io::Result<Option<Vec<u8>>> {
         refused_io()
     }
     pub fn guarded_list(_: &Path, _: &Path) -> io::Result<Option<Vec<std::ffi::OsString>>> {
@@ -1214,6 +1231,19 @@ mod imp {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    pub fn guarded_read_head(root: &Path, path: &Path, max: u64) -> io::Result<Option<Vec<u8>>> {
+        use std::io::Read;
+        assert_contained_no_symlink(root, path).map_err(refused)?;
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let mut bytes = Vec::new();
+        file.take(max).read_to_end(&mut bytes)?;
+        Ok(Some(bytes))
     }
 
     pub fn guarded_copy_new(root: &Path, src: &Path, dst: &Path) -> Result<bool, String> {

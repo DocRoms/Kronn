@@ -431,37 +431,14 @@ fn td_sheets_guarded(
     Ok(sheets)
 }
 
-/// Every `<docs>/tech-debt/TD-*.md` sheet, sorted by id, by path: for the
-/// capture taken BEFORE an agent runs, which writes nothing. Empty when
-/// `tech-debt/` is a link: a sheet must live in the repository. After an agent
-/// use [`td_sheets_guarded`].
-fn td_sheets(docs_dir: &Path) -> Vec<(String, std::path::PathBuf)> {
-    let td_dir = docs_dir.join("tech-debt");
-    if !crate::core::td_index::is_real_dir(&td_dir) {
-        return Vec::new();
-    }
-    let Ok(entries) = std::fs::read_dir(td_dir) else {
-        return Vec::new();
-    };
-    let mut sheets: Vec<(String, std::path::PathBuf)> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            let id = name.strip_suffix(".md")?.to_string();
-            crate::core::td_index::is_td_id(&id).then(|| (id, e.path()))
-        })
-        .collect();
-    sheets.sort();
-    sheets
-}
-
 /// The `Decision record` lines of the TD sheets as they are now, one
 /// `TD-id ADR-id` per line: what a run stores at its start.
-pub fn capture_records(docs_dir: &Path) -> String {
+/// Read through the rooted primitive from the project `root` (KT-1595): a
+/// linked `tech-debt/`, sheet or folder above them is no sheet.
+pub fn capture_records(root: &Path, docs_dir: &Path) -> String {
     let mut out = String::new();
-    for (id, path) in td_sheets(docs_dir) {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+    for (id, path) in td_sheets_guarded(root, docs_dir).unwrap_or_default() {
+        let Ok(Some(content)) = read_guarded(root, &path) else {
             continue;
         };
         if let Some(adr) = decision_record(&content) {
@@ -618,7 +595,7 @@ impl StartOfRun {
     pub fn capture(root: &Path, docs_dir: &Path) -> Self {
         Self {
             decisions: read_decisions(root, docs_dir),
-            records: capture_records(docs_dir),
+            records: capture_records(root, docs_dir),
         }
     }
 

@@ -493,7 +493,7 @@ fn a_record_line_present_before_the_run_still_settles() {
     );
     // Settled lines are part of the next run's baseline.
     assert_eq!(
-        parse_records(&capture_records(&docs)),
+        parse_records(&capture_records(docs.parent().unwrap(), &docs)),
         Records::from([("TD-20261001-human".to_string(), "ADR-0002".to_string())])
     );
 }

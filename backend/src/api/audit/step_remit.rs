@@ -148,9 +148,9 @@ pub(crate) struct StepRemit {
     /// Tracked files outside the root that were already modified and could
     /// not be read safely at that moment (a link): never restored.
     refused_before: HashSet<String>,
-    /// The index entry of each `dirty_outside` file at that moment: a staged
-    /// version is part of what the user had (`None` = not in the index).
-    index_before: HashMap<String, Option<IndexEntry>>,
+    /// What the index held for each `dirty_outside` file at that moment: a
+    /// staged version, a conflict or a flag is part of what the user had.
+    index_before: HashMap<String, IndexRecord>,
     /// Project-relative folders outside the root that hold AI docs.
     ai_folders: Vec<String>,
 }
@@ -166,22 +166,82 @@ fn git(project: &Path, args: &[&str]) -> Option<Vec<u8>> {
     output.status.success().then_some(output.stdout)
 }
 
-/// `(mode, blob id)` of one index entry.
-type IndexEntry = (String, String);
+/// What the index holds for one path: every `ls-files -s` line (all stages of
+/// a conflict, top-relative paths, as `update-index --index-info` reads them
+/// back), the `ls-files -v` tag (lower case = assume-unchanged, `S` =
+/// skip-worktree) and whether the entry is an intent-to-add (`git add -N`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct IndexRecord {
+    lines: Vec<String>,
+    tag: Option<char>,
+    intent_to_add: bool,
+}
 
-/// The index entry of `rel` (project-relative), `Some(None)` when the index has
-/// none; `None` when git cannot tell.
-fn index_entry(project: &Path, rel: &str) -> Option<Option<IndexEntry>> {
-    let raw = git(project, &["ls-files", "-s", "-z", "--", rel])?;
-    let text = String::from_utf8_lossy(&raw);
-    let Some(line) = text.split('\0').find(|line| !line.is_empty()) else {
-        return Some(None);
+/// The [`IndexRecord`] of `rel` (project-relative); `None` when git cannot tell.
+fn index_record(project: &Path, rel: &str) -> Option<IndexRecord> {
+    let raw = git(project, &["ls-files", "-s", "-z", "--full-name", "--", rel])?;
+    let lines: Vec<String> = String::from_utf8_lossy(&raw)
+        .split('\0')
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    let tags = git(project, &["ls-files", "-v", "-z", "--", rel])?;
+    let tag = String::from_utf8_lossy(&tags).chars().next();
+    // An intent-to-add entry holds the empty blob like a staged empty file;
+    // only the cached diff tells them apart.
+    let listed = |flag: &str| {
+        git(
+            project,
+            &["diff", "--cached", "--name-only", "-z", flag, "--", rel],
+        )
+        .map(|out| !out.is_empty())
     };
-    // `<mode> SP <blob> SP <stage> TAB <path>`
-    let (meta, _) = line.split_once('\t')?;
-    let mut fields = meta.split(' ');
-    let (mode, blob) = (fields.next()?, fields.next()?);
-    Some(Some((mode.to_string(), blob.to_string())))
+    let intent_to_add = !lines.is_empty()
+        && listed("--ita-visible-in-index")?
+        && !listed("--ita-invisible-in-index")?;
+    Some(IndexRecord {
+        lines,
+        tag,
+        intent_to_add,
+    })
+}
+
+/// Project-relative paths the index flags skip-worktree or assume-unchanged
+/// (`ls-files -v` tag `S` or lower case): `git status` does not show them.
+fn flagged_files(project: &Path) -> Vec<String> {
+    let Some(raw) = git(project, &["ls-files", "-v", "-z"]) else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&raw)
+        .split('\0')
+        .filter_map(|entry| {
+            let (tag, path) = entry.split_once(' ')?;
+            let tag = tag.chars().next()?;
+            (tag == 'S' || tag.is_ascii_lowercase()).then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// `git <args>` with `input` on stdin.
+fn git_with_input(project: &Path, args: &[&str], input: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = crate::core::cmd::git_cmd()
+        .arg("--literal-pathspecs")
+        .arg("-C")
+        .arg(project)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    let payload = input.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&payload));
+    let output = child.wait_with_output().ok()?;
+    writer.join().ok()?.ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 fn git_text(project: &Path, args: &[&str]) -> Option<String> {
@@ -280,7 +340,13 @@ impl StepRemit {
         let mut dirty_outside = HashMap::new();
         let mut refused_before = HashSet::new();
         let mut index_before = HashMap::new();
-        for rel in tracked_changes(project, &prefix)? {
+        let mut dirty = tracked_changes(project, &prefix)?;
+        // A file the user hid from `git status` (skip-worktree, assume-unchanged)
+        // may hold local changes too: recorded like a dirty one.
+        dirty.extend(flagged_files(project));
+        let mut seen = HashSet::new();
+        dirty.retain(|rel| seen.insert(rel.clone()));
+        for rel in dirty {
             if docs_root.contains(&rel) || kronn_owned(&rel) {
                 continue;
             }
@@ -289,8 +355,8 @@ impl StepRemit {
             // as an absent file: settle never rewrites or deletes through it.
             match crate::core::fs_guard::guarded_read(project, &project.join(&rel)) {
                 Ok(content) => {
-                    if let Some(entry) = index_entry(project, &rel) {
-                        index_before.insert(rel.clone(), entry);
+                    if let Some(record) = index_record(project, &rel) {
+                        index_before.insert(rel.clone(), record);
                     }
                     dirty_outside.insert(rel, content);
                 }
@@ -491,9 +557,15 @@ impl StepRemit {
     }
 
     fn revert_outside_root(&self, report: &mut RemitReport) {
-        let Some(changed) = tracked_changes(&self.project, &self.prefix) else {
+        let Some(mut changed) = tracked_changes(&self.project, &self.prefix) else {
             return;
         };
+        // A file the user had dirty that the agent brought back to HEAD (`git
+        // restore`, `checkout HEAD --`) or hid (`--assume-unchanged`) is no longer
+        // listed by `git status`: it is looked at all the same.
+        let mut recorded: Vec<&String> = self.dirty_outside.keys().collect();
+        recorded.sort();
+        changed.extend(recorded.into_iter().cloned());
         let mut seen = HashSet::new();
         let mut left_alone = Vec::new();
         for rel in changed {
@@ -526,14 +598,13 @@ impl StepRemit {
                 // and its index entry back to what the user had staged.
                 Some(before) => self
                     .restore_content(&rel, before.as_deref())
-                    .and_then(|restored| {
-                        let unstaged = self.restore_index(&rel)?;
-                        if unstaged && restored.is_none() {
-                            report.warnings.push(format!(
-                                "the agent staged a change to `{rel}`; its index entry was put back to what you had staged"
-                            ));
-                        }
-                        Ok(restored)
+                    .inspect(|restored| match self.restore_index(&rel) {
+                        Ok(true) if restored.is_none() => report.warnings.push(format!(
+                            "the agent changed the index entry of `{rel}`; it was put back to what you had staged"
+                        )),
+                        Ok(_) => {}
+                        // The content restore stands (its blob is reported).
+                        Err(e) => report.warnings.push(e),
                     }),
                 // Clean before the step: back to the recorded commit.
                 None => self.restore_from_head(&rel),
@@ -678,40 +749,66 @@ impl StepRemit {
     fn index_unchanged(&self, rel: &str) -> bool {
         self.index_before
             .get(rel)
-            .is_some_and(|before| index_entry(&self.project, rel).as_ref() == Some(before))
+            .is_some_and(|before| index_record(&self.project, rel).as_ref() == Some(before))
     }
 
-    /// Puts the index entry of a file that was dirty before the step back to the
-    /// recorded one; `true` when it had changed. `update-index` never reads the
-    /// path: `--cacheinfo` takes the recorded blob (a top-relative path, hence
-    /// the prefix), `--force-remove` only drops the entry.
+    /// Puts the index of a file that was dirty before the step back to the
+    /// recorded [`IndexRecord`]; `true` when it had changed. Every stage the
+    /// agent left is dropped (`--force-remove`), then the recorded lines go back
+    /// through `--index-info`, an intent-to-add through `add -N`, and the
+    /// assume-unchanged / skip-worktree flag is set again. Nothing reads the path.
     fn restore_index(&self, rel: &str) -> Result<bool, String> {
+        let failed = || {
+            format!(
+                "the index entry of `{rel}` could not be put back (git update-index failed); check `git diff --cached -- {rel}`"
+            )
+        };
         let Some(before) = self.index_before.get(rel) else {
             return Err(format!(
-                "the index entry of `{rel}` was not recorded before the step; run `git diff --cached -- {rel}` to check what is staged"
+                "the index entry of `{rel}` was not recorded before the step; check `git diff --cached -- {rel}`"
             ));
         };
-        if index_entry(&self.project, rel).as_ref() == Some(before) {
+        if index_record(&self.project, rel).as_ref() == Some(before) {
             return Ok(false);
         }
-        let done = match before {
-            Some((mode, blob)) => {
-                let entry = format!("{mode},{blob},{}{rel}", self.prefix);
+        git(
+            &self.project,
+            &["update-index", "--force-remove", "--", rel],
+        )
+        .ok_or_else(failed)?;
+        if before.intent_to_add {
+            git(&self.project, &["add", "-N", "--", rel]).ok_or_else(failed)?;
+        } else if !before.lines.is_empty() {
+            let mut input = before.lines.join("\n");
+            input.push('\n');
+            git_with_input(
+                &self.project,
+                &["update-index", "--index-info"],
+                input.as_bytes(),
+            )
+            .ok_or_else(failed)?;
+        }
+        match before.tag {
+            Some('S') | Some('s') => {
                 git(
                     &self.project,
-                    &["update-index", "--add", "--cacheinfo", &entry],
+                    &["update-index", "--skip-worktree", "--", rel],
                 )
+                .ok_or_else(failed)?;
             }
-            None => git(
-                &self.project,
-                &["update-index", "--force-remove", "--", rel],
-            ),
-        };
-        done.map(|_| true).ok_or_else(|| {
-            format!(
-                "the index entry of `{rel}` could not be put back (git update-index failed); run `git restore --staged -- {rel}`"
-            )
-        })
+            Some(tag) if tag.is_ascii_lowercase() => {
+                git(
+                    &self.project,
+                    &["update-index", "--assume-unchanged", "--", rel],
+                )
+                .ok_or_else(failed)?;
+            }
+            _ => {}
+        }
+        if index_record(&self.project, rel).as_ref() != Some(before) {
+            return Err(failed());
+        }
+        Ok(true)
     }
 
     fn restore_content(

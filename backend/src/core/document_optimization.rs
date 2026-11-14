@@ -944,7 +944,8 @@ fn last_line_of(project: &Path, path: &Path) -> usize {
 /// [`crate::core::anti_halluc::is_binary_file`] through the rooted primitive: a
 /// link is never followed to sniff its target.
 fn is_binary(project: &Path, path: &Path) -> bool {
-    crate::core::fs_guard::guarded_read(project, path)
+    let sniff = crate::core::anti_halluc::BINARY_SNIFF_BYTES as u64;
+    crate::core::fs_guard::guarded_read_head(project, path, sniff)
         .ok()
         .flatten()
         .is_some_and(|bytes| crate::core::anti_halluc::is_binary_content(&bytes))
@@ -1394,18 +1395,23 @@ fn link_resolution_hint(project: &Path, source: &Path, clean: &str) -> String {
 /// The project file a citation names, as written or percent-decoded; both
 /// forms stay inside the project root, and neither the file nor a folder on
 /// the way to it is a link (KT-1595: nothing reads a link's target by path).
-/// A link to a secret file is still named, to be refused like the file: its
-/// content is never read.
+/// A link is refused whatever it points at (a secret file included), with no
+/// stat of its target.
 fn cited_file(project: &Path, cited: &str) -> Option<PathBuf> {
-    cited_forms(project, cited).find(|path| {
-        regular_unlinked_file(project, path)
-            || (path.is_file() && crate::acp::secret_files::is_secret_path(path))
-    })
+    cited_forms(project, cited).find(|path| regular_unlinked_file(project, path))
 }
 
+/// The cited path as written and percent-decoded, joined to the project. A form
+/// with `.`, `..` or a root is dropped: after a link, `..` would climb out of the
+/// folder the link points at, past every check made on the written path.
 fn cited_forms<'a>(project: &'a Path, cited: &str) -> impl Iterator<Item = PathBuf> + 'a {
     std::iter::once(cited.to_string())
         .chain(crate::core::anti_halluc::percent_decoded_relative(cited))
+        .filter(|c| {
+            Path::new(c)
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+        })
         .map(|c| project.join(c))
         .filter(|path| !outside_project(project, path))
 }
@@ -2169,6 +2175,15 @@ mod tests {
                 _ => panic!("{raw}: a citation through a link must be a defect"),
             }
         }
+        // `..` after a link climbs out of the folder it points at: never named.
+        std::fs::write(external.path().join("outside.txt"), "o\n").unwrap();
+        std::os::unix::fs::symlink(external.path().join("sub-missing"), root.join("docs/L"))
+            .unwrap();
+        std::fs::create_dir_all(external.path().join("sub")).unwrap();
+        std::fs::remove_file(root.join("docs/L")).unwrap();
+        std::os::unix::fs::symlink(external.path().join("sub"), root.join("docs/L")).unwrap();
+        assert!(cited_file(root, "docs/L/../outside.txt").is_none());
+        assert!(cited_file(root, "../outside.txt").is_none());
         assert!(!is_binary(root, &root.join("docs/bin.dat")));
         assert_eq!(last_line_of(root, &root.join("CLAUDE.md")), 0);
         // Control: the real files are cited as before.
@@ -3329,25 +3344,23 @@ mod tests {
 
     #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
-    fn a_symlink_to_a_secret_file_is_refused_like_the_file() {
+    fn a_symlink_to_a_secret_file_is_refused_as_a_link() {
         let tmp = tempfile::tempdir().unwrap();
         write(&tmp.path().join(".ssh/review-key"), "k1\nk2\nk3\n");
         std::os::unix::fs::symlink(".ssh/review-key", tmp.path().join("key-view.txt")).unwrap();
+        // KT-1595 round 8: a link is refused as a link whatever it points at,
+        // a presence claim included; nothing stats or reads its target.
         for cite in [
             "[src: file: key-view.txt:2]",
             "[src: file: key-view.txt:1-3]",
             "[src: file: key-view.txt]",
+            "[src: file: key-view.txt:exists]",
         ] {
             let messages = citation_messages(tmp.path(), cite);
             assert_eq!(messages.len(), 1, "{cite}: {messages:#?}");
-            assert!(
-                messages[0].contains("may hold secrets")
-                    && messages[0].contains("[src: file: key-view.txt:exists]"),
-                "{cite}: {messages:#?}"
-            );
+            assert!(messages[0].contains("is a link"), "{cite}: {messages:#?}");
+            assert!(!messages[0].contains("k1"), "{cite}: {messages:#?}");
         }
-        let messages = citation_messages(tmp.path(), "[src: file: key-view.txt:exists]");
-        assert!(messages.is_empty(), "{messages:#?}");
     }
 
     #[test]

@@ -541,6 +541,174 @@ fn a_users_dirty_ai_file_gets_its_index_entry_back_too() {
     assert!(remit.settle_blocking().is_empty());
 }
 
+/// KT-1595 round 8: a file the user had dirty that the agent brought back to
+/// HEAD (`git restore`, `git checkout HEAD --`) is no longer listed by `git
+/// status`, and is restored all the same: bytes and staged version.
+#[test]
+fn a_users_dirty_file_the_agent_restored_to_head_comes_back() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, staged wip\n");
+    git(dir.path(), &["add", "docs/tech-debt/TD-1.md"]);
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, wip\n");
+    write(dir.path(), "src/main.rs", "fn main() { wip() }\n");
+    let staged_before = git(dir.path(), &["ls-files", "-s", "docs/tech-debt/TD-1.md"]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+
+    git(
+        dir.path(),
+        &[
+            "restore",
+            "--staged",
+            "--worktree",
+            "--",
+            "docs/tech-debt/TD-1.md",
+            "src/main.rs",
+        ],
+    );
+    assert_eq!(git(dir.path(), &["status", "--porcelain"]), "");
+    let report = remit.settle_blocking();
+
+    assert_eq!(paths(&report), vec!["docs/tech-debt/TD-1.md"]);
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one, wip\n");
+    assert_eq!(
+        git(dir.path(), &["ls-files", "-s", "docs/tech-debt/TD-1.md"]),
+        staged_before
+    );
+    // A source file is never touched, only reported.
+    assert_eq!(read(dir.path(), "src/main.rs"), "fn main() {}\n");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("src/main.rs")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 8: a source file the agent hid with `--assume-unchanged` is
+/// still a change.
+#[test]
+fn a_source_file_hidden_with_assume_unchanged_is_reported() {
+    let dir = repo();
+    write(dir.path(), "src/main.rs", "wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    git(
+        dir.path(),
+        &["update-index", "--assume-unchanged", "src/main.rs"],
+    );
+    let report = remit.settle_blocking();
+    assert!(
+        report.warnings.iter().any(|w| w.contains("src/main.rs")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 8: the whole index state comes back: an intent-to-add entry
+/// stays one (no empty file staged), and a flag the user set is set again.
+#[test]
+fn an_intent_to_add_entry_and_a_flag_come_back_as_they_were() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, wip\n");
+    git(
+        dir.path(),
+        &["update-index", "--skip-worktree", "docs/tech-debt/TD-1.md"],
+    );
+    write(dir.path(), "docs/tech-debt/TD-9.md", "new sheet\n");
+    git(dir.path(), &["add", "-N", "docs/tech-debt/TD-9.md"]);
+    let before = git(dir.path(), &["ls-files", "-v", "-s", "docs/tech-debt"]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    assert!(remit.index_before.contains_key("docs/tech-debt/TD-9.md"));
+
+    git(dir.path(), &["add", "docs/tech-debt/TD-9.md"]);
+    git(
+        dir.path(),
+        &[
+            "update-index",
+            "--no-skip-worktree",
+            "docs/tech-debt/TD-1.md",
+        ],
+    );
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    git(dir.path(), &["add", "docs/tech-debt/TD-1.md"]);
+    remit.settle_blocking();
+
+    assert_eq!(
+        git(dir.path(), &["ls-files", "-v", "-s", "docs/tech-debt"]),
+        before
+    );
+    assert_eq!(
+        git(
+            dir.path(),
+            &[
+                "diff",
+                "--cached",
+                "--name-only",
+                "--",
+                "docs/tech-debt/TD-9.md"
+            ]
+        ),
+        "",
+        "an intent-to-add entry stages nothing"
+    );
+}
+
+/// KT-1595 round 8: the stages of a conflict are part of what the user had: an
+/// agent's `git add` of the file does not settle the user's merge.
+#[test]
+fn a_users_conflict_keeps_its_stages() {
+    let dir = repo();
+    git(dir.path(), &["switch", "-q", "-c", "side"]);
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, side\n");
+    git(dir.path(), &["commit", "-q", "-am", "side"]);
+    git(dir.path(), &["switch", "-q", "main"]);
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, main\n");
+    git(dir.path(), &["commit", "-q", "-am", "main"]);
+    let merge = crate::core::cmd::git_cmd()
+        .args([
+            "-c",
+            "user.name=F",
+            "-c",
+            "user.email=f@e.invalid",
+            "merge",
+            "-q",
+            "side",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the fixture needs a conflict");
+    let stages_before = git(dir.path(), &["ls-files", "-s", "docs/tech-debt/TD-1.md"]);
+    assert_eq!(stages_before.lines().count(), 3, "{stages_before}");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    git(dir.path(), &["add", "docs/tech-debt/TD-1.md"]);
+    remit.settle_blocking();
+
+    assert_eq!(
+        git(dir.path(), &["ls-files", "-s", "docs/tech-debt/TD-1.md"]),
+        stages_before
+    );
+}
+
+/// KT-1595 round 8: an index that cannot be written (a lock) does not hide the
+/// content restore: the overwritten bytes are still reported as a blob.
+#[test]
+fn a_locked_index_keeps_the_restored_blob_reported() {
+    let dir = repo();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    git(dir.path(), &["add", "docs/tech-debt/TD-1.md"]);
+    std::fs::write(dir.path().join(".git/index.lock"), "").unwrap();
+    let report = remit.settle_blocking();
+    std::fs::remove_file(dir.path().join(".git/index.lock")).unwrap();
+    assert_eq!(paths(&report), vec!["docs/tech-debt/TD-1.md"]);
+    assert!(report.reverted[0].blob.is_some());
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one, wip\n");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("index entry")),
+        "{report:?}"
+    );
+}
+
 /// KT-1595 round 7: a source file the user had dirty, whose bytes the agent
 /// left alone but whose staged version it changed, is listed (never touched).
 #[test]
