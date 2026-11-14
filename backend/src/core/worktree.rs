@@ -1517,23 +1517,7 @@ pub(crate) fn ensure_local_git_exclude_pinned(
     repo_path: &Path,
     pattern: &str,
 ) -> Result<(), String> {
-    ensure_local_git_exclude_pinned_for(repo_path, repo_path, pattern)
-}
-
-/// [`ensure_local_git_exclude_pinned`] for a rule that concerns a LINKED
-/// worktree (a task lane): whether git already ignores `pattern` is judged
-/// from `judge` (the lane, where the file or link the rule hides exists), but
-/// the rule is written to the REGISTERED checkout `repo_path` — the
-/// `info/exclude` a linked worktree shares is the main repository's, so that
-/// is the file git would have named, reached without asking git (the lane's
-/// own `.git` pointer is agent-writable). `judge` only decides whether to
-/// write at all: a wrong answer from it skips a rule, it never moves one.
-pub(crate) fn ensure_local_git_exclude_pinned_for(
-    judge: &Path,
-    repo_path: &Path,
-    pattern: &str,
-) -> Result<(), String> {
-    if already_ignored(judge, pattern) {
+    if already_ignored(repo_path, pattern) {
         return Ok(());
     }
     let git_dir = repo_path.join(".git");
@@ -1564,6 +1548,98 @@ pub(crate) fn ensure_local_git_exclude_pinned_for(
         }
     }
     write_local_exclude(repo_path, &git_dir.join("info").join("exclude"), pattern)
+}
+
+/// [`ensure_local_git_exclude_pinned`] for a rule that concerns a LINKED
+/// worktree (a task lane): whether git already ignores `pattern` is judged
+/// from `judge` (the lane, where the file or link the rule hides exists), but
+/// the rule is written to the REGISTERED checkout `repo_path` — the
+/// `info/exclude` a linked worktree shares is the main repository's, so that
+/// is the file git would have named, reached without asking git (the lane's
+/// own `.git` pointer is agent-writable). `judge` only decides whether to
+/// write at all: a wrong answer from it skips a rule, it never moves one.
+///
+/// The git directory is resolved from the REGISTERED checkout `repo_path` (the
+/// project Kronn registered, never the lane): its common git directory, which is
+/// also where a registered checkout that is itself a linked worktree, or a
+/// project below the repository top, keeps `info/exclude`. The write is rooted
+/// at that directory, so a link at `info` or `exclude` is refused. A project
+/// below the repository top gets the rule anchored under its prefix; a path git
+/// does not know as a repository is left alone.
+pub(crate) fn ensure_local_git_exclude_pinned_for(
+    judge: &Path,
+    repo_path: &Path,
+    pattern: &str,
+) -> Result<(), String> {
+    if already_ignored(judge, pattern) {
+        return Ok(());
+    }
+    let Some((common_dir, prefix)) = registered_git_layout(repo_path)? else {
+        return Ok(());
+    };
+    write_local_exclude(
+        &common_dir,
+        &common_dir.join("info").join("exclude"),
+        &anchored_under_prefix(&prefix, pattern),
+    )
+}
+
+/// `(common git directory, prefix of repo_path below the repository top)` as
+/// the REGISTERED checkout `repo_path` answers, or `None` when it is not inside
+/// a git work tree. The directory must be a real folder, not a link.
+fn registered_git_layout(repo_path: &Path) -> Result<Option<(PathBuf, String)>, String> {
+    let output = crate::core::cmd::git_cmd()
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "--show-prefix",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("cannot resolve the git directory: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        return Err(format!(
+            "cannot resolve the git directory of {}: {}",
+            repo_path.display(),
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let common = lines.next().map(str::trim).unwrap_or_default();
+    let prefix = lines.next().map(str::trim).unwrap_or_default().to_string();
+    if common.is_empty() {
+        return Err("git returned an empty common git directory".into());
+    }
+    let common = PathBuf::from(common);
+    if !common.is_absolute() {
+        return Err(format!(
+            "git returned a relative common git directory {}",
+            common.display()
+        ));
+    }
+    match std::fs::symlink_metadata(&common) {
+        Ok(meta) if meta.file_type().is_dir() => Ok(Some((common, prefix))),
+        Ok(_) => Err(format!(
+            "{} is not a plain git directory (a link): nothing is written under it",
+            common.display()
+        )),
+        Err(error) => Err(format!("cannot inspect {}: {error}", common.display())),
+    }
+}
+
+/// A rule anchored with a leading `/` is relative to the repository top, so a
+/// project below it needs its prefix in the rule.
+fn anchored_under_prefix(prefix: &str, pattern: &str) -> String {
+    match pattern.strip_prefix('/') {
+        Some(rest) if !prefix.is_empty() => format!("/{prefix}{rest}"),
+        _ => pattern.to_string(),
+    }
 }
 
 /// The git administrative directory (`<main>/.git/worktrees/<id>`) the REGISTERED

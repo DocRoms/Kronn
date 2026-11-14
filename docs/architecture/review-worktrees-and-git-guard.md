@@ -50,8 +50,8 @@ A review worktree is disposable only when removing it loses nothing:
 It is never force-removed, and only a `<slug>--review-<id>` directory directly under
 `.kronn/worktrees/` qualifies. A kept worktree is retried by the sweep.
 
-[src: file: backend/src/core/worktree.rs:1865-1931#create_review_worktree]
-[src: file: backend/src/core/worktree.rs:1949-1981#release_review_worktree]
+[src: file: backend/src/core/worktree.rs:1941-2007#create_review_worktree]
+[src: file: backend/src/core/worktree.rs:2025-2057#release_review_worktree]
 [src: file: backend/src/api/discussions/crud.rs:839-870#provision_review_workspace]
 
 ## Agents cannot move a main checkout

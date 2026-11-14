@@ -440,17 +440,17 @@ impl WorkerLane {
         // A lane target beside the repo must never make the main checkout look
         // dirty: the integration preflight refuses a dirty target. A project
         // that already ignores `/target/` writes nothing.
-        if let Some(root) = self
-            .main_checkout
-            .as_ref()
-            .filter(|root| root.join(".git").exists())
-        {
+        if let Some(root) = self.main_checkout.as_ref() {
             // KT-1595: provisioning runs on every worker launch, correction
-            // rounds included, so after an agent: the rule goes to the
-            // registered checkout's own `.git/info/exclude` only.
-            if let Err(error) =
-                crate::core::worktree::ensure_local_git_exclude_pinned(root, LANE_TARGET_EXCLUDE)
-            {
+            // rounds included, so after an agent: the rule goes to the exclude
+            // of the git directory resolved from the REGISTERED checkout (a
+            // linked worktree or a project below the repo top included),
+            // never from the lane's pointer.
+            if let Err(error) = crate::core::worktree::ensure_local_git_exclude_pinned_for(
+                root,
+                root,
+                LANE_TARGET_EXCLUDE,
+            ) {
                 warnings.push(format!(
                     "cannot ignore the lane target directories: {error}"
                 ));

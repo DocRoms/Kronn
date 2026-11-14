@@ -86,8 +86,9 @@
 //! checkout and the submodule parent folders. The `info/exclude` write is
 //! rooted: `worktree::ensure_local_git_exclude_pinned` (after an agent) writes
 //! only `<repo>/.git/info/exclude` and refuses a `.git` file, a link or a
-//! `commondir`, and `ensure_local_git_exclude_pinned_for` writes a linked
-//! worktree's rule to the REGISTERED checkout's exclude; the lane seed marker
+//! `commondir`, and `ensure_local_git_exclude_pinned_for` writes a lane
+//! rule to the exclude of the common git directory resolved from the
+//! REGISTERED checkout (a linked-worktree or below-the-top project included); the lane seed marker
 //! lives in the git directory the registered checkout recorded for the lane
 //! (`worktree::registered_worktree_git_dir`, a moved `.git` pointer is
 //! refused). `worktree::ensure_local_git_exclude` (the `.kronn/` rule of

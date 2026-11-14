@@ -782,6 +782,125 @@ fn a_lane_whose_git_pointer_was_moved_gets_no_exclude_written_elsewhere() {
     assert!(main_exclude.contains("/target/wt-*/"), "{main_exclude}");
 }
 
+/// KT-1595 round 7 (B3): a registered checkout that is itself a LINKED
+/// worktree keeps `info/exclude` in the main repository's git directory. The
+/// lane rules go there, resolved from the registered checkout (never the lane),
+/// instead of being dropped because `<checkout>/.git` is a file.
+#[test]
+fn a_registered_linked_worktree_gets_the_lane_excludes_in_the_common_dir() {
+    let main = tempfile::tempdir().unwrap();
+    let main = main.path().canonicalize().unwrap();
+    std::fs::write(main.join(".gitignore"), "node_modules/\n.kronn/\n").unwrap();
+    std::fs::create_dir_all(main.join("frontend")).unwrap();
+    std::fs::write(main.join("frontend").join("package.json"), "{}").unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["add", "-A"]);
+    git(&main, &["commit", "-q", "-m", "init"]);
+    let holder = tempfile::tempdir().unwrap();
+    let registered = holder.path().canonicalize().unwrap().join("registered");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "reg",
+            registered.to_str().unwrap(),
+        ],
+    );
+    assert!(registered.join(".git").is_file());
+    let lane = registered
+        .join(".kronn")
+        .join("worktrees")
+        .join("task-kt-1246-abc12345");
+    git(
+        &registered,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "kt-1246",
+            lane.to_str().unwrap(),
+        ],
+    );
+    let bin = registered
+        .join("frontend")
+        .join("node_modules")
+        .join(".bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("vitest"), "#!/bin/sh\n").unwrap();
+    let home = fake_cargo_home(true);
+    let lane_env = WorkerLane::for_worktree(&lane).unwrap();
+    assert_eq!(
+        lane_env.main_checkout.as_deref(),
+        Some(registered.as_path())
+    );
+    let caches = SharedCaches::from_roots(Some(home.path()), None, None, None, Some(&registered));
+
+    let provisioned = lane_env.provision(&caches);
+
+    let exclude = std::fs::read_to_string(main.join(".git/info/exclude")).unwrap_or_default();
+    assert!(exclude.contains("/target/wt-*/"), "{exclude}");
+    assert!(
+        !provisioned
+            .warnings
+            .iter()
+            .any(|w| w.contains("cannot ignore")),
+        "{:?}",
+        provisioned.warnings
+    );
+}
+
+/// KT-1595 round 7 (B3): a project below the repository top has no `.git` of
+/// its own. The lane rule is written to the repository's exclude, anchored
+/// under the project's prefix, instead of being dropped.
+#[test]
+fn a_project_below_the_repo_top_gets_the_lane_exclude_under_its_prefix() {
+    let top = tempfile::tempdir().unwrap();
+    let top = top.path().canonicalize().unwrap();
+    let project = top.join("app");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("README.md"), "x\n").unwrap();
+    git(&top, &["init", "-q", "-b", "main"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-q", "-m", "init"]);
+    let lane = project
+        .join(".kronn")
+        .join("worktrees")
+        .join("task-kt-1246-abc12345");
+    git(
+        &top,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "kt-1246",
+            lane.to_str().unwrap(),
+        ],
+    );
+    let home = fake_cargo_home(true);
+    let lane_env = WorkerLane::for_worktree(&lane).unwrap();
+    assert_eq!(lane_env.main_checkout.as_deref(), Some(project.as_path()));
+    let caches = SharedCaches::from_roots(Some(home.path()), None, None, None, Some(&project));
+
+    let provisioned = lane_env.provision(&caches);
+
+    let exclude = std::fs::read_to_string(top.join(".git/info/exclude")).unwrap_or_default();
+    assert!(exclude.contains("/app/target/wt-*/"), "{exclude}");
+    assert!(
+        !provisioned
+            .warnings
+            .iter()
+            .any(|w| w.contains("cannot ignore")),
+        "{:?}",
+        provisioned.warnings
+    );
+    assert!(!project.join(".git").exists());
+}
+
 #[test]
 fn shared_caches_keep_only_what_exists() {
     let fx = fixture();

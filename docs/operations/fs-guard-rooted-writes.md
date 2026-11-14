@@ -197,8 +197,14 @@ by path, found by the round-3 review and the Argon addendum):
   written; the exclude of a linked worktree is the main repository's, written when the
   worktree was provisioned. The callers that concern a LINKED worktree after an agent
   (round 5, below) use `ensure_local_git_exclude_pinned_for(judge, registered_checkout,
-  ...)`: the rule goes to the REGISTERED checkout's `<main>/.git/info/exclude`, the file
-  a linked worktree shares, and the lane is only where git is asked whether the rule is
+  ...)`: the git directory is resolved from the REGISTERED checkout (`rev-parse
+  --git-common-dir --show-prefix` run there, never in the lane), so the rule goes to the
+  `info/exclude` of its common git directory, the file a linked worktree shares, even
+  when the registered checkout is itself a linked worktree or the project sits below the
+  repository top (the rule is then anchored under the project prefix, round 7). The
+  write is rooted at that directory and a common directory that is a link is refused.
+  The registered checkout is trusted there: it is not a workspace of the lane agent. The
+  lane is only where git is asked whether the rule is
   already there, so a wrong answer skips a write, it never moves one. The write is create-only when the file is missing, an
   optimistic replace by rename otherwise (no longer an append: a line another process
   appends in that instant is refused, not lost silently). The original
@@ -221,8 +227,8 @@ by path, found by the round-3 review and the Argon addendum):
   so a link planted at the marker, or the admin folder swapped for a link, is never
   written through. The exclude rules (`/.kronn-seeding-*`, `/.kronn-seeded-old-*`, the
   lane `target` rule, the `node_modules` link) go through the pinned variants above; a
-  project whose registered checkout is itself a linked worktree (a `.git` file) or has a
-  `commondir` gets a warning and no rule. An agent can still write its OWN admin folder
+  project whose registered checkout is itself a linked worktree, or sits below the repo
+  top, gets its rule in the common git directory under its prefix (round 7). An agent can still write its OWN admin folder
   (for instance its `gitdir` back-pointer): that makes the lane unregistered, which is a
   refusal, never a fallback to git's answer.
 - `audit_state::new_template_backup_dir`: `guarded_create_new_dir` per candidate name,

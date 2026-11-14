@@ -100,8 +100,9 @@ common ways a Kronn deployment ends up exposed.
   Kronn works is never written through nor copied from. The local git
   exclude and the lane seed marker, written after an agent, do not follow
   git's `commondir` / `gitdir:` pointers nor a task lane's `.git` file: the
-  exclude is a plain `<repo>/.git/info/exclude` of the registered checkout,
-  and the lane's git directory is the one the registered checkout recorded
+  exclude of the audited project is a plain `<repo>/.git/info/exclude`, a
+  lane's rule goes to the common git directory resolved from the registered
+  checkout (never from the lane), and the lane's git directory is the one the registered checkout recorded
   (a lane whose pointer was moved is refused). Only the `.kronn/` rule of
   worktree creation and the MCP settings route still follow git's answer;
   neither runs after an agent. This is not every write nor every read: the
