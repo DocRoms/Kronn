@@ -470,7 +470,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 (`first_build.outcome`, `duration_ms`) and check the lane target for
 `.kronn-warm.json`.
 
-[src: file: backend/src/core/task_worker_env.rs:1141-1182#drain_output]
+[src: file: backend/src/core/task_worker_env.rs:1153-1194#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:68-80#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:148-154#compiler_temp_env_for]
 [src: file: backend/src/core/task_worker_lane_warm.rs:729-911#warm_lane_cancellable]
@@ -547,7 +547,7 @@ load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:204-211#effective_bash_timeouts_ms]
-[src: file: backend/src/core/task_worker_env.rs:859-869#apply_bash_timeouts]
+[src: file: backend/src/core/task_worker_env.rs:871-881#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15176-15178#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:678-679#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]

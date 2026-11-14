@@ -33,14 +33,14 @@ a parenthesised `(src: file: …)` is refused (only the bracketed marker is
 verified), and every path or range the gate suggests is one it accepts. A Stack table
 row without its `Latest stable` or `Support end` source and date (or
 `not verified: no source`) raises the non-blocking `stack_currency` warning.
-[src: file: backend/src/core/document_optimization.rs:1466-1481#inspect_stack_currency]
-[src: file: backend/src/core/document_optimization.rs:1716-1788#stack_currency_problems]
-[src: file: backend/src/core/document_optimization.rs:1787-1807#diag]
+[src: file: backend/src/core/document_optimization.rs:1481-1496#inspect_stack_currency]
+[src: file: backend/src/core/document_optimization.rs:1735-1807#stack_currency_problems]
+[src: file: backend/src/core/document_optimization.rs:1809-1829#diag]
 
 A citation into a path git ignores (a vendored dependency, a build output) that
 is absent from the checkout is refused as before, but the message says the path
 is git-ignored and cannot be verified from a fresh clone, instead of leaving a
-bare "does not exist". [src: file: backend/src/core/document_optimization.rs:871-881#ignored_citation_message]
+bare "does not exist". [src: file: backend/src/core/document_optimization.rs:880-890#ignored_citation_message]
 
 A tech-debt sheet is referenced from prose with a markdown link relative to the
 document, or with the `:exists` presence form of a file citation; the rows Kronn
@@ -69,7 +69,7 @@ comment after a reference the gate refuses, a comment holding a backtick, a
 bracket or a parenthesis, a list with a comment, several candidate paths, a text
 file cited without a line, an empty file cited with a line, a range farther out
 of the file, and anything inside fenced or inline code.
-[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:933-939#check_attempt]
+[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:955-961#check_attempt]
 
 **Detector signals the agent never addressed** (KT-1357). Step 8 must dispose of
 each deterministic detector signal: the index, or a TD sheet the index lists,

@@ -54,7 +54,7 @@ this degrades and continues.
   behaviour: the step fails and the run is interrupted. All or nothing: if one
   marker cannot be demoted, or the document still fails after demoting, the
   originals are put back and the step fails as before.
-  [src: file: backend/src/api/audit/document_repair.rs:668-740#demote_last_attempt]
+  [src: file: backend/src/api/audit/document_repair.rs:678-750#demote_last_attempt]
 - **What it writes.** a marker on path `X` becomes `` `X` (unverified reference) ``
   (line, range, anchor and `:exists` dropped; a bundle becomes one flagged list).
   Nothing else of the marker survives: a comment the agent put inside it is
@@ -90,19 +90,19 @@ this degrades and continues.
   recovery snapshots the same way). The copy has every such marker replaced by
   the placeholder (`scrub_secret_markers`), so no secret text survives under
   the docs root or the audit state.
-  [src: file: backend/src/api/audit/document_repair.rs:777-781#preserve_original]
+  [src: file: backend/src/api/audit/document_repair.rs:791-795#preserve_original]
 - **The step is done with a warning**, not failed and without a partial banner:
   `cli_success` stays true and `step_warning` lists every demoted reference
   (document, path part of the marker). The step emits `documentary_demoted` and its
   `step_done` carries `unverified_references`.
-  [src: file: backend/src/api/audit/document_repair.rs:648-663#demotion_notes]
+  [src: file: backend/src/api/audit/document_repair.rs:658-673#demotion_notes]
 - **The run says how many.** The `done` event carries `unverified_references`;
   `audit_runs.documentary_notes` gains `unverified` (step, document, marker),
   in the Full pipeline at the final gate and in the partial one after each step
   that demoted (appended to what a resumed run already listed). The audit
   timeline lists them next to the other documentary notes, and the
   validation prompt names them for the human.
-  [src: file: backend/src/api/audit/document_repair.rs:450-486#notes_json]
+  [src: file: backend/src/api/audit/document_repair.rs:460-496#notes_json]
 - **Both pipelines.** The Full pipeline demotes where its documentary gate
   would fail the step. The partial pipeline has no per-attempt documentary
   gate: it demotes where it fails a step for the citations left on its target,
@@ -148,7 +148,7 @@ this degrades and continues.
   bring it, so the blocker stays pre-existing. Only a step *handed* the blocker
   to fix is charged with it afterwards (`release`), and is then retried and
   redone like any other.
-  [src: file: backend/src/api/audit/document_repair.rs:180-186#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:252-255#release] [src: file: backend/src/api/audit/full.rs:3330#split_preexisting]
+  [src: file: backend/src/api/audit/document_repair.rs:190-196#seed_preexisting] [src: file: backend/src/api/audit/document_repair.rs:262-265#release] [src: file: backend/src/api/audit/full.rs:3330#split_preexisting]
 - **The exemption is the run's, not the ledger's** (KT-1353). The ledger stores
   the content hash of each pre-existing blocker's document as the run last left
   it (`seal`, after every step and after the final gate's own write). The
@@ -157,7 +157,7 @@ this degrades and continues.
   validation (a validation agent's, a human's) hands that document's blockers
   back, so a citation fixed then brought back is refused. A ledger written
   without hashes honours nothing.
-  [src: file: backend/src/api/audit/document_repair.rs:212-216#unchanged_since_run] [src: file: backend/src/api/audit/validate.rs:624#split_preexisting_in]
+  [src: file: backend/src/api/audit/document_repair.rs:222-226#unchanged_since_run] [src: file: backend/src/api/audit/validate.rs:624#split_preexisting_in]
 - **What the gate let through or repaired reaches the human** (KT-1353). The
   pre-existing blockers of the final gate and the exact replacements applied
   during the run are stored on the run (`audit_runs.documentary_notes`, JSON
@@ -166,7 +166,7 @@ this degrades and continues.
   Kronn", both with their list), and prepended to the validation discussion's
   first prompt, which tells the agent to list them to the user and that editing
   such a document makes its problems blocking again.
-  [src: file: backend/src/api/audit/document_repair.rs:450-454#notes_json] [src: file: backend/src/api/audit/helpers.rs:463#documentary_notes_block] [src: file: backend/src/db/audit_runs.rs:225#set_documentary_notes] [src: file: frontend/src/components/AuditTimeline.tsx:57#parseDocumentaryNotes]
+  [src: file: backend/src/api/audit/document_repair.rs:460-464#notes_json] [src: file: backend/src/api/audit/helpers.rs:463#documentary_notes_block] [src: file: backend/src/db/audit_runs.rs:225#set_documentary_notes] [src: file: frontend/src/components/AuditTimeline.tsx:57#parseDocumentaryNotes]
 - **The blame ledger follows the blocker, not its wording** (KT-1353). A gate
   message restates the cited file's line count or a suggested path, so it
   changes when a later step rewrites that file. Two blockers are the same when

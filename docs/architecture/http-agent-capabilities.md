@@ -416,8 +416,8 @@ why the gates exist. An HTTP run that answers in prose instead of calling a tool
 ends cleanly, so its exit code says "success"; the output validator and the
 rewrite proof are what record the step as failed when its target is missing,
 still the template, or byte-identical to before the agent ran
-[src: file: backend/src/api/audit/validation.rs:225-357#validate_step_output]
-[src: file: backend/src/api/audit/validation.rs:61-71#target_snapshot]. The final review step has no
+[src: file: backend/src/api/audit/validation.rs:236-368#validate_step_output]
+[src: file: backend/src/api/audit/validation.rs:72-82#target_snapshot]. The final review step has no
 target file and is judged on the exit code alone, for an HTTP agent as for a CLI
 one.
 
