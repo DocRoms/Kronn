@@ -1013,6 +1013,119 @@ fn a_replace_ref_never_hides_an_edit() {
     );
 }
 
+/// KT-1595 round 11: programs the agent declares through config hooks, an
+/// included file, a filter name holding `=` or the worktree config never run.
+#[cfg(unix)]
+#[test]
+fn hooks_and_hidden_filters_the_agent_declares_never_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    let marker = dir.path().join("program-ran");
+    let script = dir.path().join(".git/prog.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let prog = script.to_str().unwrap();
+    git(dir.path(), &["config", "hook.k.command", prog]);
+    git(
+        dir.path(),
+        &["config", "--add", "hook.k.event", "post-index-change"],
+    );
+    git(
+        dir.path(),
+        &["config", "--add", "hook.k.event", "reference-transaction"],
+    );
+    let include = dir.path().join(".git/extra.cfg");
+    std::fs::write(&include, format!("[filter \"inc\"]\n\tclean = {prog}\n")).unwrap();
+    git(
+        dir.path(),
+        &["config", "include.path", include.to_str().unwrap()],
+    );
+    git(dir.path(), &["config", "filter.a=b.clean", prog]);
+    std::fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+    std::fs::write(
+        dir.path().join(".git/info/attributes"),
+        "docs/tech-debt/TD-1.md filter=inc\ndocs/inconsistencies-performance.md filter=a=b\n",
+    )
+    .unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td ONE\n");
+    write(
+        dir.path(),
+        "docs/inconsistencies-performance.md",
+        "OLD docs\n",
+    );
+    let report = remit.settle_blocking();
+    assert!(!marker.exists(), "no configured program may run");
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    assert_eq!(
+        read(dir.path(), "docs/inconsistencies-performance.md"),
+        "old docs\n"
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("git configuration")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 11: a staged rename whose new name is not UTF-8 keeps the
+/// status fields paired: the origin is restored, nothing bogus is reported and
+/// no settle panics.
+#[cfg(unix)]
+#[test]
+fn a_rename_to_a_non_utf8_name_keeps_the_status_paired() {
+    use std::io::Write;
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    let blob = git(dir.path(), &["rev-parse", "HEAD:docs/tech-debt/TD-1.md"]);
+    git(
+        dir.path(),
+        &["rm", "-q", "--cached", "docs/tech-debt/TD-1.md"],
+    );
+    std::fs::remove_file(dir.path().join("docs/tech-debt/TD-1.md")).unwrap();
+    // The new name lives in the index only (APFS refuses non-UTF-8 names).
+    let mut entry = format!("100644 {blob} 0\t").into_bytes();
+    entry.extend_from_slice(b"docs/tech-debt/\xff.md\0");
+    let mut child = std::process::Command::new("git")
+        .args(["update-index", "-z", "--index-info"])
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&entry).unwrap();
+    assert!(child.wait().unwrap().success());
+    let report = remit.settle_blocking();
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    assert!(
+        report.warnings.iter().all(|w| !w.contains("s/tech-debt")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 11: an orphan branch (HEAD unreadable) before a step is said,
+/// never a silent unguarded step.
+#[test]
+fn a_step_on_an_unreadable_head_is_reported() {
+    let dir = repo();
+    git(dir.path(), &["checkout", "-q", "--orphan", "wip"]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai"))
+        .expect("a repository with commits is guarded or reported");
+    let report = remit.settle_blocking();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("could not be read before the step")),
+        "{report:?}"
+    );
+}
+
 /// KT-1595 round 7: a source file the user had dirty, whose bytes the agent
 /// left alone but whose staged version it changed, is listed (never touched).
 #[test]

@@ -1639,28 +1639,25 @@ fn untracked_claim(reference: &str, roots: &[&Path]) -> bool {
 /// Whether git tracks `rel` in the repository at `root`. Outside a repository,
 /// or without git, nothing is tracked.
 pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
-    crate::core::cmd::agent_touched_git_cmd(root)
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "--error-unmatch", "--", rel])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    agent_git_succeeds(root, &["ls-files", "--error-unmatch", "--", rel])
+}
+
+/// A git query on a checkout an agent may have reconfigured: no program its
+/// configuration names runs, and a blocking configuration (a FIFO) fails the
+/// query in bounded time (`false`).
+fn agent_git_succeeds(root: &Path, args: &[&str]) -> bool {
+    let Some(mut cmd) = crate::core::cmd::agent_touched_git_cmd(root) else {
+        return false;
+    };
+    cmd.arg("-C").arg(root).args(args);
+    crate::core::cmd::run_bounded(&mut cmd, &[], crate::core::cmd::AGENT_GIT_TIMEOUT).is_some()
 }
 
 /// Whether git ignores `rel` in the repository at `root` (a vendored or generated
 /// path, absent from a clone), whether or not the file is on disk. Outside a
 /// repository, or without git, nothing is ignored.
 pub(crate) fn is_git_ignored(root: &Path, rel: &str) -> bool {
-    crate::core::cmd::agent_touched_git_cmd(root)
-        .arg("-C")
-        .arg(root)
-        .args(["check-ignore", "-q", "--", rel])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    agent_git_succeeds(root, &["check-ignore", "-q", "--", rel])
 }
 
 /// The en and em dash, which models write where a line range wants a hyphen.

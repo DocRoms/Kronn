@@ -159,6 +159,12 @@ pub(crate) struct StepRemit {
     git_setup_before: String,
     /// Why the state before the step could not be fully read, if it could not.
     capture_gap: Option<String>,
+    /// The state before the step could not be read at all (HEAD unreadable in
+    /// a repository): the settle only says so.
+    unguarded: bool,
+    /// Flagged files past FLAGGED_CONTENT_MAX: their bytes were not kept, so an
+    /// edit behind a flag kept as it was is not seen.
+    flagged_unchecked: usize,
     /// Project-relative folders outside the root that hold AI docs.
     ai_folders: Vec<String>,
 }
@@ -172,7 +178,7 @@ fn git(project: &Path, args: &[&str]) -> Option<Vec<u8>> {
 }
 
 /// The longest a single git call of the remit may take.
-const GIT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const GIT_CALL_TIMEOUT: std::time::Duration = crate::core::cmd::AGENT_GIT_TIMEOUT;
 
 /// What the index holds for one path: every `ls-files -s` line (all stages of
 /// a conflict, top-relative paths, as `update-index --index-info` reads them
@@ -244,6 +250,7 @@ fn index_snapshot(
             "--cached",
             "--name-status",
             "--no-renames",
+            "--ignore-submodules=all",
             "-z",
             flag,
         ])?;
@@ -310,51 +317,23 @@ fn link_fingerprint(project: &Path, rel: &str) -> String {
     kind
 }
 
-/// `git <args>` with `input` on stdin.
+/// `git <args>` with `input` on stdin, through `agent_touched_git_cmd` and
+/// bounded by `run_bounded`.
 fn git_with_input(project: &Path, args: &[&str], input: &[u8]) -> Option<Vec<u8>> {
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut child = crate::core::cmd::agent_touched_git_cmd(project)
-        .arg("--literal-pathspecs")
+    let mut cmd = crate::core::cmd::agent_touched_git_cmd(project)?;
+    cmd.arg("--literal-pathspecs")
         .arg("-C")
         .arg(project)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdin = child.stdin.take()?;
-    let payload = input.to_vec();
-    let writer = std::thread::spawn(move || stdin.write_all(&payload));
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut out = Vec::new();
-        stdout.read_to_end(&mut out).map(|_| out)
-    });
-    let deadline = std::time::Instant::now() + GIT_CALL_TIMEOUT;
-    let status = loop {
-        match child.try_wait().ok()? {
-            Some(status) => break status,
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(10)),
-        }
-    };
-    let _ = writer.join();
-    let output = reader.join().ok()?.ok()?;
-    status.success().then_some(output)
+        .args(args);
+    crate::core::cmd::run_bounded(&mut cmd, input, GIT_CALL_TIMEOUT)
 }
 
-/// The repository's local configuration (no includes) and its replace refs, as
-/// text: what an agent changes to steer git's answers.
+/// The repository's effective configuration and its replace refs, as text:
+/// what an agent changes to steer git's answers.
 fn git_setup(project: &Path) -> String {
-    let config =
-        git(project, &["config", "--local", "--no-includes", "--list"]).unwrap_or_default();
+    // The effective configuration (local, worktree, includes, with its scope):
+    // any change to it during the step is reported.
+    let config = git(project, &["config", "--list", "--show-scope"]).unwrap_or_default();
     let replace = git(
         project,
         &[
@@ -380,29 +359,33 @@ fn git_text(project: &Path, args: &[&str]) -> Option<String> {
 fn tracked_changes(project: &Path, prefix: &str) -> Option<Vec<String>> {
     let raw = git(
         project,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=no"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=no",
+            "--ignore-submodules=all",
+        ],
     )?;
-    // A path that is not UTF-8 is left out (never written back under a lossy
-    // name); the field still counts, so a rename's origin stays paired.
-    let mut parts = raw
-        .split(|b| *b == 0)
-        .map(|p| String::from_utf8(p.to_vec()).ok());
+    // Parsed on bytes: `XY SP path NUL`, and a rename or copy carries its origin
+    // as one more NUL field, always consumed. A path that is not UTF-8 is left
+    // out (never written back under a lossy name).
+    let mut fields = raw.split(|b| *b == 0);
     let mut out = Vec::new();
-    while let Some(entry) = parts.next() {
-        let Some(entry) = entry else {
-            continue;
-        };
-        if entry.len() < 4 {
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 || entry[2] != b' ' {
             continue;
         }
-        let (status, path) = entry.split_at(3);
-        let mut paths = vec![Some(path.to_string())];
-        // A rename or copy carries its origin as one more NUL field.
-        if status.contains(['R', 'C']) {
-            paths.push(parts.next().flatten());
+        let status = &entry[..2];
+        let mut paths = vec![&entry[3..]];
+        if status.contains(&b'R') || status.contains(&b'C') {
+            paths.extend(fields.next());
         }
-        for p in paths.into_iter().flatten() {
-            if let Some(rel) = p.strip_prefix(prefix) {
+        for path in paths {
+            if let Some(rel) = std::str::from_utf8(path)
+                .ok()
+                .and_then(|p| p.strip_prefix(prefix))
+            {
                 out.push(rel.to_string());
             }
         }
@@ -429,6 +412,18 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(9)]
 }
 
+/// Whether `<dir>/AGENTS.md` opens with Kronn's signature, read through the
+/// rooted primitive (a link is refused, a FIFO never blocks) and at most 64 KiB.
+fn kronn_signed(project: &Path, dir: &str) -> bool {
+    let path = project.join(dir).join("AGENTS.md");
+    crate::core::fs_guard::guarded_read_head(project, &path, 64 * 1024)
+        .ok()
+        .flatten()
+        .is_some_and(|bytes| {
+            crate::core::legacy_docs::is_kronn_signature(&String::from_utf8_lossy(&bytes))
+        })
+}
+
 /// Folders outside the docs root that hold AI documentation written by Kronn:
 /// the folder of a `.kronn.json`, of a Kronn-signed `AGENTS.md` or of an
 /// `inconsistencies-*.md`, and the parent of a `tech-debt/TD-*.md`. Read from
@@ -446,9 +441,7 @@ fn ai_doc_folders(project: &Path, docs_root: &DocsRoot) -> Vec<String> {
         };
         let folder = match name {
             ".kronn.json" => dir,
-            "AGENTS.md" if crate::core::legacy_docs::is_kronn_managed_docs(&project.join(dir)) => {
-                dir
-            }
+            "AGENTS.md" if kronn_signed(project, dir) => dir,
             n if n.starts_with("inconsistencies-") && n.ends_with(".md") => dir,
             n if n.starts_with("TD-") && n.ends_with(".md") => match dir.rsplit_once('/') {
                 Some((parent, "tech-debt")) => parent,
@@ -467,7 +460,23 @@ impl StepRemit {
     /// Record the state before the agent runs. `None` outside a git repository
     /// or before its first commit: there is no history to protect.
     pub fn capture_blocking(project: &Path, docs_root: &DocsRoot) -> Option<Self> {
-        let head = git_text(project, &["rev-parse", "--verify", "-q", "HEAD"])?;
+        let Some(head) = git_text(project, &["rev-parse", "--verify", "-q", "HEAD"]) else {
+            // Outside a repository (or before its first commit) there is no
+            // history to protect; inside one, an unreadable HEAD (an orphan
+            // branch, a configuration git cannot read in time) is said, never
+            // a silent unguarded step.
+            if !project
+                .ancestors()
+                .any(|dir| dir.join(".git").symlink_metadata().is_ok())
+                || git(project, &["rev-parse", "--git-dir"]).is_some()
+                    && git(project, &["rev-parse", "--verify", "-q", "HEAD^{commit}"]).is_none()
+                    && git(project, &["rev-list", "-n", "1", "--all"])
+                        .is_some_and(|out| out.is_empty())
+            {
+                return None;
+            }
+            return Some(Self::unguarded(project, docs_root));
+        };
         let prefix = git_text(project, &["rev-parse", "--show-prefix"]).unwrap_or_default();
         let branch = git_text(project, &["symbolic-ref", "-q", "HEAD"]);
         let mut dirty_outside = HashMap::new();
@@ -515,6 +524,7 @@ impl StepRemit {
                 }
             }
         }
+        let flagged_unchecked = if keep_flagged { 0 } else { flags_before.len() };
         Some(Self {
             project: project.to_path_buf(),
             prefix,
@@ -529,8 +539,33 @@ impl StepRemit {
             flags_before,
             git_setup_before: git_setup(project),
             capture_gap,
+            unguarded: false,
+            flagged_unchecked,
             ai_folders: ai_doc_folders(project, docs_root),
         })
+    }
+
+    /// A remit for a repository whose state could not be read before the step:
+    /// its settle only reports that the step ran without the check.
+    fn unguarded(project: &Path, docs_root: &DocsRoot) -> Self {
+        Self {
+            project: project.to_path_buf(),
+            prefix: String::new(),
+            docs_root: docs_root.clone(),
+            head: String::new(),
+            branch: None,
+            refs: HashSet::new(),
+            started: chrono::Utc::now().timestamp(),
+            dirty_outside: HashMap::new(),
+            refused_before: HashMap::new(),
+            index_before: HashMap::new(),
+            flags_before: HashMap::new(),
+            git_setup_before: String::new(),
+            capture_gap: Some("HEAD could not be read".to_string()),
+            unguarded: true,
+            flagged_unchecked: 0,
+            ai_folders: Vec::new(),
+        }
     }
 
     fn in_ai_folder(&self, rel: &str) -> bool {
@@ -565,9 +600,22 @@ impl StepRemit {
     /// every attempt, a second call finds nothing left to do.
     pub fn settle_blocking(&self) -> RemitReport {
         let mut report = RemitReport::default();
+        if self.unguarded {
+            report.warnings.push(
+                "the repository's HEAD could not be read before the step (an orphan branch or a configuration git cannot read): this step ran without the check of commits and of the files outside the docs root"
+                    .to_string(),
+            );
+            return report;
+        }
         if let Some(gap) = &self.capture_gap {
             report.warnings.push(format!(
                 "the repository could not be read before the step ({gap}): the check of the files outside the docs root is incomplete"
+            ));
+        }
+        if self.flagged_unchecked > 0 {
+            report.warnings.push(format!(
+                "{} files are flagged skip-worktree / assume-unchanged (more than {FLAGGED_CONTENT_MAX}): their index state is checked, their content is not",
+                self.flagged_unchecked
             ));
         }
         if git_setup(&self.project) != self.git_setup_before {
@@ -580,7 +628,7 @@ impl StepRemit {
         self.report_new_refs(&mut report);
         if head_settled {
             self.revert_outside_root(&mut report);
-        } else {
+        } else if git_text(&self.project, &["rev-parse", "--verify", "-q", "HEAD"]).is_some() {
             report.warnings.push(
                 "HEAD moved during the step and was left as it is: the tracked files outside the docs root were not checked"
                     .to_string(),

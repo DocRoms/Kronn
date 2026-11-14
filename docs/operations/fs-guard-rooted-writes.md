@@ -131,13 +131,21 @@ by path, found by the round-3 review and the Argon addendum):
   then checks it; the entries go back NUL-separated (`update-index -z
   --index-info`), so a path holding a newline is one entry, never two. The whole
   index is read in four git calls (one snapshot, whatever the size of the
-  repository), through `cmd::agent_touched_git_cmd` (round 10): hooks and
-  fsmonitor off, every `filter.*` / `diff.*` / `merge.*` program of the local
-  configuration turned off by name, no replace refs, no signature check, the stat
-  cache, `diff.relative` and `core.bare` pinned to git's defaults, and each call
-  bounded to 120 s (an include on a FIFO fails the call instead of hanging). The
-  settle reports a git failure, a capture that could not be read, and any change
-  of the local configuration or replace refs during the step. A path that is not
+  repository), through `cmd::agent_touched_git_cmd` (rounds 10-11): hooks and
+  fsmonitor off, every `filter.*` / `diff.*` / `merge.*` / `hook.*` entry of the
+  EFFECTIVE configuration (includes and worktree config read too) turned off by
+  name through `GIT_CONFIG_COUNT` (a name holding `=` stays one key), no replace
+  refs, no lazy fetch, no optional index writes, no signature check, submodules
+  ignored by status, the stat cache, `diff.relative` and `core.bare` pinned to
+  git's defaults; every call, the configuration listing included, runs under
+  `cmd::run_bounded` (120 s, the whole process group killed on a timeout), so an
+  include or a config file that is a FIFO fails the call instead of hanging. A
+  configuration that cannot be read in time runs nothing and is reported. The
+  settle reports a git failure, a capture that could not be read (an unreadable
+  HEAD in a repository makes a remit that only says so, never a silent unguarded
+  step), more flagged files than are checked, and any change of the configuration
+  or replace refs during the step. `git status` is parsed on bytes, a rename's
+  origin always consumed. A path that is not
   UTF-8 is never written back. Not covered, by owner decision (KT-1769): an
   agent can still write `.git/config`, `.git/info` and `refs/replace` (the root
   fix is a sandbox write deny on `.git`); the change is reported, not undone. A file the user

@@ -446,16 +446,53 @@ pub fn project_git_cmd() -> std::process::Command {
 }
 
 /// [`project_git_cmd`] for a checkout an agent may have reconfigured (an audit
-/// step's project after its agent ran): no program its configuration names runs
-/// — hooks and fsmonitor off, every `filter.*` / `diff.*` / `merge.*` program of
-/// its local configuration turned off by name, no replace refs, no signature
-/// check — and the stat cache, `diff.relative` and `core.bare` are pinned to
-/// git's defaults so a changed setting cannot hide an edit. Reading the local
-/// configuration (`--no-includes`) runs nothing.
-pub fn agent_touched_git_cmd(repo: &std::path::Path) -> std::process::Command {
+/// step's project after its agent ran): no program its configuration names runs.
+/// Hooks and fsmonitor are off; every `filter.*`, `diff.*`, `merge.*` and
+/// `hook.*` entry of the EFFECTIVE configuration (includes and worktree config
+/// read too) is turned off by name, passed through `GIT_CONFIG_COUNT` so a name
+/// holding `=` is one key; replace refs, lazy fetches (a promisor remote's
+/// upload-pack), optional index writes and the signature check are off; the stat
+/// cache, `diff.relative` and `core.bare` are pinned to git's defaults. `None`
+/// when the configuration cannot be read in time: nothing is run then.
+pub fn agent_touched_git_cmd(repo: &std::path::Path) -> Option<std::process::Command> {
+    let mut list = git_cmd();
+    list.arg("-C")
+        .arg(repo)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(["config", "--list", "--name-only", "--null"]);
+    let names = run_bounded(&mut list, &[], AGENT_GIT_TIMEOUT)?;
+    let mut off: Vec<(String, String)> = Vec::new();
+    for key in String::from_utf8_lossy(&names).split('\0') {
+        let Some((section, rest)) = key.split_once('.') else {
+            continue;
+        };
+        let Some((name, _)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        let keys: &[(&str, &str)] = match section.to_ascii_lowercase().as_str() {
+            "filter" => &[
+                ("clean", ""),
+                ("smudge", ""),
+                ("process", ""),
+                ("required", "false"),
+            ],
+            "diff" => &[("textconv", ""), ("command", "")],
+            "merge" => &[("driver", "")],
+            "hook" => &[("enabled", "false")],
+            _ => continue,
+        };
+        for (variable, value) in keys {
+            let setting = (format!("{section}.{name}.{variable}"), (*value).to_string());
+            if !off.contains(&setting) {
+                off.push(setting);
+            }
+        }
+    }
     let mut cmd = project_git_cmd();
     cmd.arg("--no-replace-objects")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .args([
             "-c",
             "log.showSignature=false",
@@ -467,49 +504,86 @@ pub fn agent_touched_git_cmd(repo: &std::path::Path) -> std::process::Command {
             "diff.relative=false",
             "-c",
             "core.bare=false",
-        ]);
-    let programs = git_cmd()
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "config",
-            "--local",
-            "--no-includes",
-            "--null",
-            "--name-only",
-            "--get-regexp",
-            r"^(filter|diff|merge)\.",
         ])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-        .unwrap_or_default();
-    let mut off: Vec<String> = Vec::new();
-    for key in programs.split('\0').filter(|key| !key.is_empty()) {
-        let Some((section, rest)) = key.split_once('.') else {
-            continue;
-        };
-        let Some((name, _)) = rest.rsplit_once('.') else {
-            continue;
-        };
-        let keys: &[&str] = match section {
-            "filter" => &["clean=", "smudge=", "process=", "required=false"],
-            "diff" => &["textconv=", "command="],
-            "merge" => &["driver="],
-            _ => continue,
-        };
-        for suffix in keys {
-            let setting = format!("{section}.{name}.{suffix}");
-            if !off.contains(&setting) {
-                off.push(setting);
+        .env("GIT_CONFIG_COUNT", off.len().to_string());
+    for (index, (key, value)) in off.iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    Some(cmd)
+}
+
+/// The longest a git call on an agent-touched checkout may take: a
+/// configuration that blocks git (an include or a config file that is a FIFO)
+/// fails the call instead of hanging the caller.
+pub const AGENT_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Runs `cmd` with `input` on stdin, bounded by `timeout`: its stdout when it
+/// exits successfully in time, `None` otherwise. On a timeout the whole
+/// process group is killed (a filter or hook it started included) and reaped.
+pub fn run_bounded(
+    cmd: &mut std::process::Command,
+    input: &[u8],
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let kill = |child: &mut std::process::Child| {
+        #[cfg(unix)]
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: plain kill(2) on the group this child leads.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
             }
         }
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        kill(&mut child);
+        return None;
+    };
+    let payload = input.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&payload));
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                // The threads are left to end with the killed group's pipes:
+                // a joined reader could wait on an escaped grandchild.
+                kill(&mut child);
+                return None;
+            }
+        }
+    };
+    // A grandchild that kept stdout open must not hold the caller either.
+    while !reader.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            kill(&mut child);
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    for setting in off {
-        cmd.arg("-c").arg(setting);
-    }
-    cmd
+    drop(writer);
+    let output = reader.join().ok()?.ok()?;
+    status.success().then_some(output)
 }
 
 /// [`git_cmd`] for tokio.
