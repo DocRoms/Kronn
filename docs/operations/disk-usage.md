@@ -83,7 +83,7 @@ keeps its months-old mtime and is exactly what a lane wants):
   list — a removed dependency — is stale whatever its age. No lock read means no such rule, never "everything
   is stale".
 [src: file: backend/src/core/seed_prune.rs:267-342#stale_units]
-[src: file: backend/src/core/task_worker_lane_warm.rs:633-651#main_checkout_locked_packages]
+[src: file: backend/src/core/task_worker_lane_warm.rs:641-659#main_checkout_locked_packages]
 
 `incremental/` is left alone: its directories are keyed by crate name, and a library and its tests share one
 and are both current. Pruning a seed at worst makes a lane rebuild one crate it would have found warm: it
@@ -94,7 +94,7 @@ a held lock, shared or exclusive, makes the prune a no-op and the seed is not cl
 empty, as before). The lock is then handed back *shared* for the clone, so a build that starts waits instead of
 changing what is being cloned. The result (units, entries and bytes removed) is recorded on the lane's
 `lane_warm_start` event (`seed.pruned`) and logged.
-[src: file: backend/src/core/task_worker_lane_warm.rs:674-726#seed_lane]
+[src: file: backend/src/core/task_worker_lane_warm.rs:682-734#seed_lane]
 
 Only the main checkout's `target/` is ever a seed, and so the only one ever pruned: a lane's own target is
 never a seed source (a worker may write it, KT-1250).
