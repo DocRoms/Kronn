@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:1342-1372#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:1357-1387#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -230,7 +230,7 @@ durable catalog. Bootstrap failures are logged; an unavailable projection
 does not silently authorize an effort. Discussion preflight may refresh the
 catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
-[src: file: backend/src/main.rs:309-313#migrate_hardcoded_catalog_once]
+[src: file: backend/src/main.rs:320-324#migrate_hardcoded_catalog_once]
 [src: file: desktop/src-tauri/src/main.rs:716-720#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:156-276#refresh_runtime_cache]
 
@@ -276,8 +276,8 @@ that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
 [src: file: frontend/src/components/settings/AgentsSection.tsx:233-278#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:939-968#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:937-942#supportsEffort]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:955-984#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:953-958#supportsEffort]
 
 ## Migration and test invariants
 

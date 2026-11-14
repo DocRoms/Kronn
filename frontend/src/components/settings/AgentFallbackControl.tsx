@@ -48,9 +48,11 @@ const REASONS: Record<string, string> = {
 };
 
 /** Settings > Agents: the one « Models and fallbacks » block of a card, one row
- *  per mode — « Mode · [model ▾] → fallback → inherited fallback ». The model
- *  picker sets the mode's model; the fallback is what takes over when the
- *  provider cannot serve it. A discussion or a workflow step can override a
+ *  per mode — the label on the left, one column on the right: the model picker,
+ *  « If unavailable: », the fallbacks numbered in the order Kronn tries them
+ *  (the row's own link, then the ones inherited through other cards' rows).
+ *  The model picker sets the mode's model; the fallback is what takes over when
+ *  the provider cannot serve it. A discussion or a workflow step can override a
  *  mode; with no override this one applies. */
 export function AgentFallbackControl({ agentType, modes, pickers, hint, extraRows, options, chains, cooldown, onChange, onOpenAgent }: Props) {
   const { t } = useT();
@@ -80,6 +82,7 @@ export function AgentFallbackControl({ agentType, modes, pickers, hint, extraRow
             view={view}
             inherited={view?.inherited ?? inheritedAfter(chains, agentType, mode, links)}
             options={options}
+            maxLinks={1}
             onOpenAgent={onOpenAgent}
             onChange={async (next) => onChange(mode, next[0] ?? null)}
           />

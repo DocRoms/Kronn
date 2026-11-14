@@ -45,8 +45,8 @@ existing `Interrupted | ChangesRequested | Escalated` resume match), while a
 CLI target reuses the pre-existing generic "not-Interrupted → Interrupted,
 then open a fresh `cli_reassignment` offer" path unchanged — no per-status
 branch was needed there.
-[src: file: backend/src/api/orchestration.rs:14593-14611#Provisioning]
-[src: file: backend/src/api/orchestration.rs:15159-15183#cli_reassignment]
+[src: file: backend/src/api/orchestration.rs:14589-14607#Provisioning]
+[src: file: backend/src/api/orchestration.rs:15170-15194#cli_reassignment]
 
 Regression coverage, and exactly what each layer proves:
 
