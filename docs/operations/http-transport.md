@@ -85,7 +85,7 @@ rewritten. Originals are saved by content hash under
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
-[src: file: backend/src/api/audit/document_repair.rs:785-859#split_verified_citations]
+[src: file: backend/src/api/audit/document_repair.rs:801-875#split_verified_citations]
 [src: file: backend/src/core/audit_state.rs:11#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2559-2589#check_attempt]
 [src: file: backend/src/api/audit/full.rs:1893-1897#max_attempts]
@@ -128,7 +128,7 @@ step (the baseline is taken before any write of the step, the cross-agent
 path's included); and a step is blocked only by diagnostics absent before it ran
 (`documentary_preexisting` reports the others) unless the recovery plan hands
 them to it (KT-1306).
-[src: file: backend/src/api/audit/document_repair.rs:282-318#recovery_plan]
+[src: file: backend/src/api/audit/document_repair.rs:293-329#recovery_plan]
 [src: file: backend/src/db/audit_runs.rs:1509-1527#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with

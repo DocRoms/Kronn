@@ -5,7 +5,7 @@ reconciliation and before validation. It writes
 `.kronn/audit/document-optimization.json`, Kronn's local working state (listed
 in `.git/info/exclude`, never in your `.gitignore`); any blocking diagnostic prevents the
 audit from completing and the validation endpoint re-runs the same gate before
-recording validated state. [src: file: backend/src/api/audit/full.rs:3330-3397#analyze_and_write] [src: file: backend/src/core/document_optimization.rs:240-250#analyze_and_write] [src: file: backend/src/core/audit_state.rs:38-58#state_dir]
+recording validated state. [src: file: backend/src/api/audit/full.rs:3317-3384#analyze_and_write] [src: file: backend/src/core/document_optimization.rs:240-250#analyze_and_write] [src: file: backend/src/core/audit_state.rs:38-58#state_dir]
 [src: file: backend/src/api/audit/validate.rs:610-626#blocking_diagnostics]
 
 Defaults are 220 words per root adapter, 800 words for `docs/AGENTS.md`, 1,200
@@ -69,7 +69,7 @@ comment after a reference the gate refuses, a comment holding a backtick, a
 bracket or a parenthesis, a list with a comment, several candidate paths, a text
 file cited without a line, an empty file cited with a line, a range farther out
 of the file, and anything inside fenced or inline code.
-[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:925#check_attempt]
+[src: file: backend/src/core/document_optimization/mechanical_fix.rs:36#mechanical_repair] [src: file: backend/src/api/audit/document_repair.rs:933-939#check_attempt]
 
 **Detector signals the agent never addressed** (KT-1357). Step 8 must dispose of
 each deterministic detector signal: the index, or a TD sheet the index lists,

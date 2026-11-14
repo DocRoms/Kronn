@@ -51,7 +51,7 @@ It is never force-removed, and only a `<slug>--review-<id>` directory directly u
 `.kronn/worktrees/` qualifies. A kept worktree is retried by the sweep.
 
 [src: file: backend/src/core/worktree.rs:1715-1781#create_review_worktree]
-[src: file: backend/src/core/worktree.rs:1768-1800#release_review_worktree]
+[src: file: backend/src/core/worktree.rs:1853-1885#release_review_worktree]
 [src: file: backend/src/api/discussions/crud.rs:839-870#provision_review_workspace]
 
 ## Agents cannot move a main checkout
