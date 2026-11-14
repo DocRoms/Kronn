@@ -88,6 +88,7 @@ async fn a_projects_lane_warm_settings_are_stored_published_and_cleared() {
                 ..WorkspaceHooks::default()
             },
             lane_warm: lane_warm(Some(5), Some("  composer install  ")),
+            ..ProjectWorkspace::default()
         })),
     )
     .await;
@@ -111,6 +112,7 @@ async fn a_projects_lane_warm_settings_are_stored_published_and_cleared() {
         Json(Some(ProjectWorkspace {
             hooks: WorkspaceHooks::default(),
             lane_warm: lane_warm(Some(0), None),
+            ..ProjectWorkspace::default()
         })),
     )
     .await;

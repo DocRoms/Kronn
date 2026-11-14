@@ -841,6 +841,11 @@ pub(crate) async fn try_quota_provider_fallback_among(
                 {
                     continue;
                 }
+                // KT-1749 — never an alternative the launch would refuse
+                // (native ACP route, typed-delivery capability).
+                if crate::core::agent_fallback::task_worker_launch_refusal(candidate).is_some() {
+                    continue;
+                }
                 usable.push(candidate.clone());
             }
             let Some(alternative) = select_quota_alternative(&usable, &current, &available_agents)
@@ -862,7 +867,8 @@ pub(crate) async fn try_quota_provider_fallback_among(
     let Some((execution_id, alternative, tier, profile_id)) = candidate else {
         return Ok(None);
     };
-    let mut target = crate::models::MessageTarget::agent(alternative.clone());
+    // An HTTP alternative is a `discussion_agent`, a host CLI an `agent`.
+    let mut target = crate::core::agent_fallback::task_worker_target(&alternative);
     target.tier = tier;
     let selection = crate::models::CampaignWorkerSelection {
         target,

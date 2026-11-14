@@ -2569,7 +2569,11 @@ async fn execute_run_body(
                     )
                     .await
                 }
-                StepType::Agent => {
+                // KT-1755 — boxed: inlined, this arm's temporaries sit in the
+                // poll frame of the step future, which every nested run pays
+                // again whatever its step type (a debug build gives each one
+                // its own stack slot). Behind the box only an Agent step pays.
+                StepType::Agent => Box::pin(async {
                     // 0.7+ — hydrate optional QuickPrompt reference. Le helper
                     // est no-op si `step.quick_prompt_id` est None. Sinon il
                     // injecte prompt_template / tier / skill_ids depuis le QP
@@ -2662,6 +2666,7 @@ async fn execute_run_body(
                                     ollama_context_overrides: ollama_context_overrides.clone(),
                                     ctx: ctx.clone(),
                                     run_state: run.state.clone(),
+                                    cancel: cancel_token.clone(),
                                 });
                         if let (Some(shadow_run), Some(input)) = (&shadow_snapshot, &shadow_input) {
                             super::shadow::start_for_step(
@@ -2886,7 +2891,8 @@ async fn execute_run_body(
                         }
                         outcome
                     }
-                }
+                })
+                .await,
                 StepType::Gate => {
                     // 0.7.0 Phase 4 — human-in-the-loop pause. Zero tokens —
                     // the engine builds a `WaitingApproval` outcome with the
@@ -10440,6 +10446,96 @@ mod tests {
         assert!(
             !output.contains(&dir_name(parent_repo.path())),
             "never in the parent's worktree: {output}"
+        );
+    }
+
+    /// KT-1755 — every nested run keeps its poll frames on the worker's stack
+    /// until it ends, in production as in tests. The chain runs on the
+    /// production runtime (`runtime_builder`, its worker stack size), never on
+    /// a thread this test sizes: a run that outgrows that stack aborts the
+    /// whole process. The root and three nested sub-workflows run to the end.
+    #[test]
+    fn a_three_level_sub_workflow_chain_runs_on_a_production_worker_stack() {
+        const LEVELS: usize = 3;
+        let runtime = crate::runtime_builder()
+            .worker_threads(1)
+            .build()
+            .expect("production-shaped runtime");
+        let chain = runtime.block_on(async {
+            tokio::spawn(async {
+                let (state, tokens, agents) = test_state_and_configs();
+                // The leaf first: each level calls the one inserted before it.
+                let mut called: Option<String> = None;
+                let mut root: Option<Workflow> = None;
+                for level in (0..=LEVELS).rev() {
+                    let mut workflow = make_workflow_with_artifacts(Default::default());
+                    workflow.id = format!("wf-chain-{level}");
+                    workflow.name = format!("chain-{level}");
+                    workflow.project_id = None;
+                    workflow.steps = vec![match called.take() {
+                        Some(target) => {
+                            let mut call = fake_step("call_next");
+                            call.step_type = StepType::SubWorkflow;
+                            call.sub_workflow_id = Some(target);
+                            call
+                        }
+                        None => json_data_step("leaf", serde_json::json!({ "level": level })),
+                    }];
+                    called = Some(workflow.id.clone());
+                    if level == 0 {
+                        root = Some(workflow);
+                    } else {
+                        let nested = workflow.clone();
+                        state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::workflows::insert_workflow(conn, &nested)
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+                let root = root.expect("root workflow");
+                let mut run = pending_run("run-chain-0", &root.id);
+                insert_wf_and_run(&state, &root, &run).await;
+                execute_run(
+                    state.clone(),
+                    &root,
+                    &mut run,
+                    &tokens,
+                    &agents,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("root run");
+
+                // Follow the child run ids down the chain: every level ran.
+                let mut statuses = vec![run.status.clone()];
+                let mut next = run.step_results[0].child_run_id.clone();
+                while let Some(child_run_id) = next {
+                    let child = state
+                        .db
+                        .with_conn(move |conn| crate::db::workflows::get_run(conn, &child_run_id))
+                        .await
+                        .unwrap()
+                        .expect("child run row");
+                    statuses.push(child.status.clone());
+                    next = child
+                        .step_results
+                        .first()
+                        .and_then(|result| result.child_run_id.clone());
+                }
+                statuses
+            })
+            .await
+            .expect("the chain finished on the worker")
+        });
+        assert_eq!(
+            chain,
+            vec![RunStatus::Success; LEVELS + 1],
+            "root + {LEVELS} nested runs all succeed"
         );
     }
 

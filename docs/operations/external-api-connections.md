@@ -4,7 +4,7 @@ Kronn's **Settings → Agents → External API mode** manages named connections 
 OpenAI-compatible chat services. LiteLLM, NVIDIA and OpenRouter provide endpoint
 presets; `Other` uses the same contract for an operator-supplied service. Every
 connection owns a display name, a unique discussion alias, an endpoint and
-optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1928-1944#ExternalApiSection]
+optional Economy, Default and Reasoning models. [src: file: frontend/src/components/settings/AgentsSection.tsx:1940-1956#ExternalApiSection]
 [src: file: backend/src/models/external_api_connection.rs:11-20#ExternalApiConnection]
 
 The required HTTP surface is `GET /v1/models` plus
@@ -125,7 +125,7 @@ encrypted with the instance key in the `stored_credentials` table since 0.14.3
 `config.toml` without them. `#[ts(skip)]` only keeps the value out of the
 generated TypeScript model. See [key-management.md](key-management.md).
 [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
-[src: file: backend/src/models/setup.rs:944-949#ApiKey]
+[src: file: backend/src/models/setup.rs:999-1004#ApiKey]
 
 Deletion is not transactional across SQLite and the local configuration. Kronn
 deletes the connection row first, then removes the matching token entry from a
@@ -206,7 +206,7 @@ previously saved connection values into the compatibility configuration still
 read by the runner. This prevents selector tooltips and executions from keeping
 stale pre-migration model names. [src: file: backend/src/api/external_api_connections.rs:2125-2129#sync_runtime_config]
 [src: file: backend/src/db/external_api_connections.rs:21-46#sync_runtime_config]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1937-1942#onModelTiersChanged]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1953-1958#onModelTiersChanged]
 
 The former standalone LiteLLM settings card (`LiteLlmCard`) and its frontend
 client were removed (KT-668): nothing mounted them, and the named connection
@@ -315,7 +315,7 @@ those tokens ahead of the call.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:16514-16523#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:16609-16618#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6183-6198#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:167-185#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]

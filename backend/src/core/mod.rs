@@ -72,6 +72,7 @@ pub mod faithfulness;
 pub mod frontend_spa;
 pub mod fs_guard;
 pub mod generated_paths;
+pub mod git_global_config;
 pub mod git_guard;
 pub mod github_connection;
 pub mod home_credentials;

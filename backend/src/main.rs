@@ -23,6 +23,17 @@ fn main() -> anyhow::Result<()> {
             println!("{}", kronn::core::cli_args::HELP);
             return Ok(());
         }
+        kronn::core::cli_args::CliAction::CleanGitConfig => {
+            let file = kronn::core::git_global_config::global_config_path()
+                .ok_or_else(|| anyhow::anyhow!("cannot locate the global git config"))?;
+            kronn::core::git_global_config::cleanup_interactive(
+                &file,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            return Ok(());
+        }
         kronn::core::cli_args::CliAction::Refuse(reason) => anyhow::bail!(reason),
     }
     // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
@@ -418,6 +429,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         kronn::core::background_priority::set_enabled(config.workers.background_priority);
         // KT-1718 — the shell limits of a Claude task worker, before the first one.
         kronn::core::task_worker_env::set_bash_timeouts(&config.workers);
+        // KT-1748 — the managed worktree roots, before the first launch of this boot.
+        kronn::core::worktree::set_global_managed_worktree_roots(&config.workers);
         // KT-1742 — how lanes are warmed: the global entry now, each project's own
         // below, before the first lane of this boot.
         kronn::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);

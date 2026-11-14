@@ -36,8 +36,8 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{
-    AgentFallback, AgentType, AgentsConfig, FallbackKind, FallbackMode, FallbackTransport,
-    ModeFallback, ModelTier,
+    AgentFallback, AgentType, AgentsConfig, FallbackGap, FallbackKind, FallbackMode,
+    FallbackTransport, ModeFallback, ModelTier,
 };
 
 /// Links followed from one agent. Bounded so a long chain cannot turn one
@@ -236,6 +236,27 @@ pub fn capability_gap(agent: &AgentType, needs: &TurnNeeds) -> Option<&'static s
         return Some("its context window is too small for this transcript");
     }
     None
+}
+
+/// KT-1749 — the typed identity a task worker on `agent` is launched with: an
+/// HTTP provider (Ollama, LiteLLM, NVIDIA) is a `discussion_agent`, a host CLI
+/// process an `agent`. The same rule `ensure_task_worker_transport_compatible`
+/// enforces, so a fallback never builds a target the launch rejects.
+pub fn task_worker_target(agent: &AgentType) -> crate::models::MessageTarget {
+    if crate::agents::runner::is_http_chat_agent(agent) {
+        crate::models::MessageTarget::discussion_agent(agent.clone())
+    } else {
+        crate::models::MessageTarget::agent(agent.clone())
+    }
+}
+
+/// KT-1749 — why the launch of a task worker would refuse `agent` before any
+/// spawn (transport, native ACP route, typed-delivery capability): the very
+/// check the launch boundary applies to a typed worker target, so the fallback
+/// walk skips such a link instead of moving the execution onto it.
+pub fn task_worker_launch_refusal(agent: &AgentType) -> Option<String> {
+    crate::api::orchestration::worker_static_refusal(&task_worker_target(agent))
+        .map(|reason| reason.detail)
 }
 
 /// How an agent is reached: a CLI process (OpenCode's ACP included), a remote
@@ -649,7 +670,7 @@ pub struct LinkView {
     pub mode: FallbackMode,
     pub transport: FallbackTransport,
     /// What a turn could need that this link cannot give, as warnings.
-    pub gaps: Vec<String>,
+    pub gaps: Vec<FallbackGap>,
 }
 
 /// A fallback reached through another agent's row: it is not set here but on
@@ -690,16 +711,16 @@ fn link_view(
         |have: bool, owner_has: fn(&Capabilities) -> bool| !have && owner.is_none_or(owner_has);
     let mut gaps = Vec::new();
     if lacks(has.mcp_tools, |c| c.mcp_tools) {
-        gaps.push("no MCP tools".to_string());
+        gaps.push(FallbackGap::NoMcpTools);
     }
     if lacks(has.write_access, |c| c.write_access) {
-        gaps.push("cannot write in the worktree".to_string());
+        gaps.push(FallbackGap::NoWriteAccess);
     }
     if lacks(has.image_input, |c| c.image_input) {
-        gaps.push("images are not guaranteed".to_string());
+        gaps.push(FallbackGap::NoImageInput);
     }
     if lacks(has.long_context, |c| c.long_context) {
-        gaps.push("capped context window".to_string());
+        gaps.push(FallbackGap::CappedContext);
     }
     LinkView {
         agent: link.agent.clone(),
@@ -857,6 +878,12 @@ pub fn select(
             skipped.push(format!("{name} cannot take this turn: {gap}"));
             continue;
         }
+        if needs.task_worker {
+            if let Some(refusal) = task_worker_launch_refusal(&link.agent) {
+                skipped.push(format!("{name} cannot take this turn: {refusal}"));
+                continue;
+            }
+        }
         return Selection::Switch(link.clone());
     }
     let why = if skipped.is_empty() {
@@ -915,6 +942,24 @@ pub fn stop_notice(failing: &AgentType, trigger: Trigger, why: &str) -> String {
         display_name(failing),
         trigger.reason()
     )
+}
+
+/// [`stop_notice`] in the room's language (the detail `why` is the policy's own
+/// wording and stays as it is).
+pub fn stop_notice_in(
+    failing: &AgentType,
+    trigger: Trigger,
+    why: &str,
+    lang: crate::core::room_lang::RoomLang,
+) -> String {
+    let reason = match trigger {
+        Trigger::RateLimit => lang.pick("limite de débit atteinte", trigger.reason()),
+        Trigger::QuotaExhausted => lang.pick("quota épuisé", trigger.reason()),
+        Trigger::Outage => lang.pick("fournisseur indisponible", trigger.reason()),
+        Trigger::NotAuthenticated => lang.pick("non authentifié", trigger.reason()),
+    };
+    let none = lang.pick("aucun agent de repli", "no fallback");
+    format!("{}: {reason} → {none} ({why})", display_name(failing))
 }
 
 // ─── Cooldown ────────────────────────────────────────────────────────────

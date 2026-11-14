@@ -25,6 +25,17 @@ pub struct ProjectWorkspace {
     /// inherits the global `[workers.lane_warm]` entry.
     #[serde(default)]
     pub lane_warm: crate::models::LaneWarmConfig,
+    /// KT-1748 — absolute directories whose worktrees Kronn manages for this
+    /// project, added to the global Settings > Workers list and the built-in roots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_worktree_roots: Vec<String>,
+}
+
+impl ProjectWorkspace {
+    /// Nothing to store: no hook, no managed root and no lane warm-up setting.
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty() && self.managed_worktree_roots.is_empty() && self.lane_warm.is_empty()
+    }
 }
 
 /// Where Kronn writes a project's agent files (KT-971).

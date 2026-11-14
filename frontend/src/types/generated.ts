@@ -631,12 +631,6 @@ idle_limit_ms: number | null, stopped: AgentRunStop | null, };
  */
 export type AgentRunStop = "finished" | "failed" | "cancelled" | "idle" | "timed_out";
 
-export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_code: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
-/**
- * Per-agent model tier overrides (Economy/Reasoning model names).
- */
-model_tiers: ModelTiersConfig, };
-
 export type AgentSettings = {
 /**
  * Explicit model override (expert mode). Takes priority over tier.
@@ -678,6 +672,18 @@ fallback?: Array<AgentFallback>, };
 export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
 export type AgentUsageSummary = { agent_type: string, total_tokens: number, message_count: number, by_project: Array<AgentProjectUsage>, };
+
+export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_code: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
+/**
+ * Per-agent model tier overrides (Economy/Reasoning model names).
+ */
+model_tiers: ModelTiersConfig,
+/**
+ * KT-1706 — what takes over a mode of a named HTTP connection (or the image or
+ * video mode of ComfyUI) when its provider cannot serve a request. Kept apart
+ * from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
+ */
+connection_fallbacks?: Array<ConnectionFallback>, };
 
 export type AiAuditStatus = "NoTemplate" | "TemplateInstalled" | "Bootstrapped" | "Audited" | "Validated";
 
@@ -1584,6 +1590,11 @@ export type AuditTodo = { file: string, line: number, text: string, };
 export type AuditTokenBreakdown = { uncached_input?: number, input_as_reported?: number, output?: number, cache_read?: number, cache_write?: number, total_with_cache?: number, };
 
 /**
+ * Why Kronn disabled a workflow on its own (KT-1037).
+ */
+export type AutoDisableReason = "agent_edit" | "dependency_edited_by_agent" | "created_by_agent" | "imported";
+
+/**
  * A workflow Kronn disabled on its own and no human has enabled since.
  */
 export type AutoDisabledWorkflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, reason: AutoDisableReason, disabled_at: string,
@@ -1595,11 +1606,6 @@ disabled_by: string,
  * What changed, in a few words ("steps changed by Codex").
  */
 summary: string, };
-
-/**
- * Why Kronn disabled a workflow on its own (KT-1037).
- */
-export type AutoDisableReason = "agent_edit" | "dependency_edited_by_agent" | "created_by_agent" | "imported";
 
 /**
  * Auto-trigger regex buckets declared in a skill's frontmatter YAML.
@@ -1790,14 +1796,14 @@ source_of_truth: boolean,
  */
 last_commit: string | null, };
 
-export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
-
-export type BriefingDocsDirSource = "project_override" | "existing" | "global_default" | "default";
-
 /**
  * The state the user gives a location. `Unknown` is an unanswered state.
  */
 export type BriefingDocState = "unknown" | "recent" | "old" | "obsolete" | "partial" | "reference";
+
+export type BriefingDocsAnswers = { locations: Array<BriefingDocLocation>, };
+
+export type BriefingDocsDirSource = "project_override" | "existing" | "global_default" | "default";
 
 export type BriefingEnvironment = { kind: BriefingEnvironmentKind, url: string, };
 
@@ -2002,28 +2008,6 @@ default_headers?: Array<ApiDefaultHeader>,
 test_endpoint?: string, };
 
 /**
- * A custom skill carried by a workflow or Page export (KT-1446): the file as
- * stored, so the importer recreates it byte for byte.
- */
-export type BundledSkill = {
-/**
- * The id on the exporting Kronn (`custom-<slug>`).
- */
-id: string, name: string,
-/**
- * The newest version index on the exporting Kronn, when it has a history.
- */
-version?: number,
-/**
- * Hex sha256 of `content`.
- */
-sha256: string,
-/**
- * The skill file (frontmatter + body), without any project scope.
- */
-content: string, };
-
-/**
  * One Quick API declared inside a bundle.
  */
 export type BundleQuickApi = { bundle_id: string, name: string, icon: string | null, description: string, project_id: string | null, api_plugin_slug: string, api_config_id: string, api_endpoint_path: string, api_method: string | null, api_query: { [key in string]: string } | null, api_path_params: { [key in string]: string } | null, api_headers: { [key in string]: string } | null, api_body: JsonValue | null, api_extract: ExtractSpec | null, api_pagination: PaginationSpec | null, api_timeout_ms: number | null, api_max_retries: number | null, variables: Array<PromptVariable>, profile_ids: Array<string>, directive_ids: Array<string>, };
@@ -2083,6 +2067,28 @@ export type BundleTask = { reference: string, title: string, status: string,
 dod_progress: string | null, };
 
 export type BundleWorkflowCreated = { id: string, name: string, };
+
+/**
+ * A custom skill carried by a workflow or Page export (KT-1446): the file as
+ * stored, so the importer recreates it byte for byte.
+ */
+export type BundledSkill = {
+/**
+ * The id on the exporting Kronn (`custom-<slug>`).
+ */
+id: string, name: string,
+/**
+ * The newest version index on the exporting Kronn, when it has a history.
+ */
+version?: number,
+/**
+ * Hex sha256 of `content`.
+ */
+sha256: string,
+/**
+ * The skill file (frontmatter + body), without any project scope.
+ */
+content: string, };
 
 /**
  * The reviewer a campaign names at creation. A delivery is never addressed to
@@ -3539,31 +3545,6 @@ export type DiscLoadOtherQuery = { disc_id: string, from?: number | null, to?: n
 
 export type DiscLoadOtherResponse = { disc_id: string, title: string, total_messages: number, from_idx: number, to_idx: number, messages: Array<DiscLoadOtherMessage>, };
 
-export type DiscoveredHostMcp = { source_file: string, scope: HostScope, name: string, transport: McpTransport,
-/**
- * Env variable **names** declared by the entry. Values are never
- * surfaced through this struct (even though the file already exposes
- * them locally) so the API response is safe to log.
- */
-env_keys: Array<string>, managed_by_kronn: KronnOwnership, };
-
-export type DiscoveredKey = { provider: string, source: string, suggested_name: string, already_exists: boolean, };
-
-export type DiscoverKeysResponse = { discovered: Array<DiscoveredKey>, imported_count: number, };
-
-export type DiscoverReposRequest = { source_ids?: Array<string>, };
-
-export type DiscoverReposResponse = { repos: Array<RemoteRepo>, sources: Array<string>, available_sources: Array<RepoSource>, errors: Array<DiscoverSourceError>, };
-
-/**
- * 0.8.7 — per-source failure surfaced to the user (GitLab silently
- * returning 0 repos because the token expired was the trigger ; the
- * front-end now renders a chip with the error so the user knows WHY
- * a source produced no results, instead of guessing the integration
- * is broken).
- */
-export type DiscoverSourceError = { source_id: string, source_label: string, provider: string, message: string, };
-
 /**
  * LIKE-based full-text search across disc titles + message content.
  * Cheap-and-cheerful (no FTS5 wiring): finds the N most recent discs
@@ -3641,6 +3622,49 @@ export type DiscUnlinkRequest = { disc_id: string,
  * do implicitly: it is reserved for an explicit human "detach this thread".
  */
 source_agent?: string | null, source_session_id?: string | null, };
+
+export type DiscWorkspaceBlocker = { kind: string, message: string, };
+
+export type DiscWorkspaceHistoryLeaseRequest = { source_agent: string, source_session_id: string,
+/**
+ * `acquire` (or idempotent renewal) / `release`.
+ */
+action: string, backup_ref?: string | null, };
+
+export type DiscWorkspaceHistoryLeaseResponse = { acquired: boolean, advisory: boolean, lease: WorkspaceHistoryLease | null, blocker: DiscWorkspaceBlocker | null, };
+
+export type DiscWorkspaceQuery = { source_agent: string, source_session_id: string, };
+
+export type DiscWorkspaceSetRequest = { source_agent: string, source_session_id: string, workspace_path: string, task_ref?: string | null, };
+
+export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blockers: Array<DiscWorkspaceBlocker>, };
+
+export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
+
+export type DiscoverKeysResponse = { discovered: Array<DiscoveredKey>, imported_count: number, };
+
+export type DiscoverReposRequest = { source_ids?: Array<string>, };
+
+export type DiscoverReposResponse = { repos: Array<RemoteRepo>, sources: Array<string>, available_sources: Array<RepoSource>, errors: Array<DiscoverSourceError>, };
+
+/**
+ * 0.8.7 — per-source failure surfaced to the user (GitLab silently
+ * returning 0 repos because the token expired was the trigger ; the
+ * front-end now renders a chip with the error so the user knows WHY
+ * a source produced no results, instead of guessing the integration
+ * is broken).
+ */
+export type DiscoverSourceError = { source_id: string, source_label: string, provider: string, message: string, };
+
+export type DiscoveredHostMcp = { source_file: string, scope: HostScope, name: string, transport: McpTransport,
+/**
+ * Env variable **names** declared by the entry. Values are never
+ * surfaced through this struct (even though the file already exposes
+ * them locally) so the API response is safe to log.
+ */
+env_keys: Array<string>, managed_by_kronn: KronnOwnership, };
+
+export type DiscoveredKey = { provider: string, source: string, suggested_name: string, already_exists: boolean, };
 
 export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType,
 /**
@@ -4439,18 +4463,6 @@ message_bytes: number, };
 export type DiscussionWeightConfig = { enabled: boolean, amber_bytes: number, red_bytes: number, };
 
 /**
- * Batch answer. `weights` is SPARSE and indexed by discussion id: an id that
- * was requested but holds nothing is absent, which the UI must render as
- * "empty" rather than as a zero it could confuse with a failed load.
- */
-export type DiscussionWeightsResponse = { weights: { [key in string]: DiscussionWeightView }, thresholds: WeightThresholds,
-/**
- * True when the configured pair was unusable and the defaults took over.
- * Surfaced rather than hidden, so a bad config is visible.
- */
-thresholds_from_defaults: boolean, };
-
-/**
  * One discussion's weight with its graded level, as served to the UI.
  */
 export type DiscussionWeightView = { total_bytes: number, reclaimable_bytes: number, level: WeightLevel, discussion_id: string,
@@ -4468,6 +4480,18 @@ extracted_text_bytes: number,
  */
 message_bytes: number, };
 
+/**
+ * Batch answer. `weights` is SPARSE and indexed by discussion id: an id that
+ * was requested but holds nothing is absent, which the UI must render as
+ * "empty" rather than as a zero it could confuse with a failed load.
+ */
+export type DiscussionWeightsResponse = { weights: { [key in string]: DiscussionWeightView }, thresholds: WeightThresholds,
+/**
+ * True when the configured pair was unusable and the defaults took over.
+ * Surfaced rather than hidden, so a bad config is visible.
+ */
+thresholds_from_defaults: boolean, };
+
 export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: number | null, session_agent_type: string | null, task_id: string | null, task_reference: string | null, project_id: string, workspace_path: string | null, canonical_path: string | null, branch: string, head_sha: string | null, ownership: string, state: string,
 /**
  * Managed-worktree lineage (KT-318, migration 127). Populated only for a
@@ -4476,24 +4500,6 @@ export type DiscussionWorkspace = { id: string, disc_id: string, session_pk: num
  * CLI-declared `external` workspace.
  */
 parent_discussion_id: string | null, base_sha: string | null, task_execution_id: string | null, created_at: string, updated_at: string, };
-
-export type DiscWorkspaceBlocker = { kind: string, message: string, };
-
-export type DiscWorkspaceHistoryLeaseRequest = { source_agent: string, source_session_id: string,
-/**
- * `acquire` (or idempotent renewal) / `release`.
- */
-action: string, backup_ref?: string | null, };
-
-export type DiscWorkspaceHistoryLeaseResponse = { acquired: boolean, advisory: boolean, lease: WorkspaceHistoryLease | null, blocker: DiscWorkspaceBlocker | null, };
-
-export type DiscWorkspaceQuery = { source_agent: string, source_session_id: string, };
-
-export type DiscWorkspaceSetRequest = { source_agent: string, source_session_id: string, workspace_path: string, task_ref?: string | null, };
-
-export type DiscWorkspaceSetResponse = { workspace: DiscussionWorkspace, blockers: Array<DiscWorkspaceBlocker>, };
-
-export type DiscWorkspaceState = { disc_id: string, session_pk: number, current: DiscussionWorkspace | null, workspaces: Array<DiscussionWorkspace>, };
 
 export type DocProvenanceReport = { docs: Array<DocProvenanceStatus>, to_reconfirm: number,
 /**
@@ -4517,6 +4523,8 @@ kronn_writes: Array<KronnWrite>,
  */
 changes: Array<ProvenanceChange>, };
 
+export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
+
 /**
  * Which rule picked the folder.
  */
@@ -4535,8 +4543,6 @@ site_generator: string | null,
  * `<folder>/legacy/` already exists: Kronn never merges into it.
  */
 legacy_exists: boolean, };
-
-export type DocWriter = "full_audit" | "partial_audit" | "revalidation" | "template_reinstall" | "document_repair" | "td_index";
 
 /**
  * What changed since a previous audit — KT-194 drift.
@@ -4619,11 +4625,6 @@ http_status: number, failures: number,
 successes: number, last_seen: string, };
 
 /**
- * Who authorised an enrolment. There is deliberately no anonymous variant.
- */
-export type EnrolledBy = "admin" | "human";
-
-/**
  * The presented secret never appears in a URL or a query string — a path is
  * logged by every proxy in the world, and a body is not.
  */
@@ -4639,6 +4640,11 @@ authority: string, role: GrantRole, label: string, };
  * hash.
  */
 export type EnrolResponse = { credential: HumanCredential, secret: string, };
+
+/**
+ * Who authorised an enrolment. There is deliberately no anonymous variant.
+ */
+export type EnrolledBy = "admin" | "human";
 
 /**
  * One piece of evidence backing a claim. `kind` mirrors the citable source
@@ -4876,6 +4882,12 @@ fail_on_empty: boolean, };
 export type Faithfulness = "entailment" | "neutral" | "contradiction";
 
 /**
+ * What a fallback cannot give that the agent it replaces could: a stable code,
+ * so the UI translates the warning instead of showing an English sentence.
+ */
+export type FallbackGap = "no_mcp_tools" | "no_write_access" | "no_image_input" | "capped_context";
+
+/**
  * KT-1693 — a mode of an agent: the kind of work one model of it serves. The
  * three text modes are the quality tiers (`ModelTier`); decision, image and
  * video are capabilities, never tiers.
@@ -4956,12 +4968,6 @@ export type GitBlameQuery = { path: string, };
 
 export type GitBlameResponse = { path: string, lines: Array<GitBlameLine>, };
 
-export type GitBranchesResponse = { current_branch: string, default_branch: string, branches: Array<GitBranchSummary>, commits: Array<GitGraphCommit>,
-/**
- * True when more commits exist than the bounded graph returned here.
- */
-truncated: boolean, };
-
 export type GitBranchRequest = { name: string, };
 
 export type GitBranchResponse = { branch: string, };
@@ -4975,6 +4981,12 @@ name: string,
  * Full ref name, retained so the backend never has to reconstruct it.
  */
 ref_name: string, commit: string, subject: string, author: string, committed_at: number, is_current: boolean, is_remote: boolean, upstream: string | null, ahead: number, behind: number, };
+
+export type GitBranchesResponse = { current_branch: string, default_branch: string, branches: Array<GitBranchSummary>, commits: Array<GitGraphCommit>,
+/**
+ * True when more commits exist than the bounded graph returned here.
+ */
+truncated: boolean, };
 
 /**
  * KT-67 — what an annotated line is actually about. `git blame` gives a hash
@@ -5055,44 +5067,6 @@ export type GitFileStatus = { path: string, status: string, staged: boolean, };
 
 export type GitGraphCommit = { hash: string, short_hash: string, parents: Array<string>, refs: Array<string>, subject: string, author: string, committed_at: number, };
 
-/**
- * What a project persists: whether its agents receive a GitHub token, and from where.
- */
-export type GithubConnectionMode = "not_connected" | "gh_login" | "stored_token";
-
-/**
- * What the UI shows: the persisted mode plus whether the machine has a token.
- */
-export type GithubConnectionState = "not_connected" | "available_but_off" | "connected_gh_login" | "connected_stored_token";
-
-export type GithubMachineTokenSource = "environment" | "gh_cli";
-
-/**
- * The scope a token actually has, as GitHub reported it.
- */
-export type GithubScope = {
-/**
- * False when GitHub could not be asked or did not say; `reason` explains.
- */
-verified: boolean, token_kind: GithubTokenKind, login: string | null,
-/**
- * OAuth scopes (`X-OAuth-Scopes`) of a classic or OAuth token.
- */
-scopes: Array<string>,
-/**
- * Repositories a fine-grained token can reach (`owner/name`).
- */
-repositories: Array<string>, repositories_truncated: boolean,
-/**
- * The token reaches every repository of the account (e.g. classic `repo`).
- */
-broad: boolean, reason: string | null, checked_at: string, };
-
-/**
- * Read from the token prefix only; GitHub documents these prefixes.
- */
-export type GithubTokenKind = "classic" | "oauth" | "fine_grained" | "app" | "unknown";
-
 export type GitPushResponse = { success: boolean, message: string, };
 
 export type GitStatusResponse = { branch: string, default_branch: string, is_default_branch: boolean, files: Array<GitFileStatus>,
@@ -5165,6 +5139,44 @@ export type GitSwitchBranchRequest = { branch: string, };
 
 export type GitWorkspaceProvenance = { workspace_id: string | null, ownership: string, state: string, path: string | null, branch: string, base_sha: string | null, head_sha: string | null, integrated_sha: string | null, task_execution_id: string | null, task_reference: string | null, };
 
+/**
+ * What a project persists: whether its agents receive a GitHub token, and from where.
+ */
+export type GithubConnectionMode = "not_connected" | "gh_login" | "stored_token";
+
+/**
+ * What the UI shows: the persisted mode plus whether the machine has a token.
+ */
+export type GithubConnectionState = "not_connected" | "available_but_off" | "connected_gh_login" | "connected_stored_token";
+
+export type GithubMachineTokenSource = "environment" | "gh_cli";
+
+/**
+ * The scope a token actually has, as GitHub reported it.
+ */
+export type GithubScope = {
+/**
+ * False when GitHub could not be asked or did not say; `reason` explains.
+ */
+verified: boolean, token_kind: GithubTokenKind, login: string | null,
+/**
+ * OAuth scopes (`X-OAuth-Scopes`) of a classic or OAuth token.
+ */
+scopes: Array<string>,
+/**
+ * Repositories a fine-grained token can reach (`owner/name`).
+ */
+repositories: Array<string>, repositories_truncated: boolean,
+/**
+ * The token reaches every repository of the account (e.g. classic `repo`).
+ */
+broad: boolean, reason: string | null, checked_at: string, };
+
+/**
+ * Read from the token prefix only; GitHub documents these prefixes.
+ */
+export type GithubTokenKind = "classic" | "oauth" | "fine_grained" | "app" | "unknown";
+
 export type GrantDiscussionProjectRequest = {
 /**
  * The project to open; omitted with `all: true`.
@@ -5219,6 +5231,97 @@ export type HumanCitationTodo = { section: string, citation: CitationStatus, };
  * is safe to return.
  */
 export type HumanCredential = { id: string, label: string, role: GrantRole, enrolled_by: EnrolledBy, created_at: string, revoked_at: string | null, revoked_reason: string | null, };
+
+export type ImportBundlePreview = { bundle_id: string, already_imported: boolean, includes_values: boolean,
+/**
+ * The file was a single-plugin JSON from the old per-plugin export.
+ */
+legacy: boolean, plugins: Array<ImportPreviewPlugin>, };
+
+export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
+
+export type ImportDiscussionRequest = { content: string, project_id?: string | null, };
+
+export type ImportPluginBundleReport = { bundle_id: string, already_imported: boolean, imported_config_ids: Array<string>,
+/**
+ * Human-readable rows for the post-import scope assignment UI. Kept in
+ * addition to `imported_config_ids` for backwards API compatibility.
+ */
+imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
+
+export type ImportPluginBundleRequest = { content: string, passphrase?: string | null,
+/**
+ * Source config ids whose bundled custom arguments the importer accepted.
+ * They replace the plugin's whole command line, so every other plugin's
+ * arguments are dropped.
+ */
+accept_args_for?: Array<string>,
+/**
+ * Values the importer typed for the placeholders of a configuration-only
+ * bundle, by source config id then placeholder key (KT-1040).
+ */
+placeholder_values?: Record<string, Record<string, string>>, };
+
+/**
+ * One plugin as the import would treat it, before anything is written.
+ */
+export type ImportPreviewPlugin = { source_config_id: string, label: string, server_name: string,
+/**
+ * The command line the plugin runs today (catalogue), for stdio plugins.
+ */
+usual_args: Array<string> | null,
+/**
+ * The bundle's proposed command line, secret-looking parts masked.
+ */
+proposed_args: Array<string> | null, args_differ: boolean, importable: boolean, issue: string | null,
+/**
+ * Base URL of a custom API-only plugin; only its origin when the rest is withheld.
+ */
+base_url: string | null,
+/**
+ * Names of the headers a custom API plugin sends on every call; never their values.
+ */
+default_header_names: Array<string>,
+/**
+ * Values a configuration-only export withheld, for the importer to fill.
+ */
+placeholders: Array<ExportPlaceholder>, };
+
+export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
+/**
+ * Replace the Kronn copy even when it holds edits the repository does
+ * not have. Without it such an import is refused.
+ */
+overwrite_kronn_changes?: boolean, };
+
+/**
+ * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
+ */
+export type ImportQuickApiRequest = { content: string, project_id?: string | null, };
+
+export type ImportQuickExecRequest = { content: string, project_id?: string | null, };
+
+/**
+ * 0.7.0 UX pass — payload for `POST /api/quick-prompts/import`.
+ */
+export type ImportQuickPromptRequest = { content: string, project_id?: string | null, };
+
+export type ImportResult = { warnings: Array<string>, invalid_paths: Array<string>, };
+
+/**
+ * 0.7.0 UX pass — payload for `POST /api/workflows/import`.
+ * `content` is the raw JSON of a `WorkflowExportEnvelope` (string
+ * rather than nested object so the frontend can `JSON.parse` once
+ * from the dropped file and pass it through). `project_id` is the
+ * importer's project to attach the workflow to — `None` keeps it
+ * unattached (the user picks a project later via the wizard).
+ */
+export type ImportWorkflowRequest = { content: string, project_id?: string | null,
+/**
+ * How each bundled skill in conflict is settled (KT-1446); a conflict
+ * without a choice gets a copy.
+ */
+skill_choices?: Array<SkillImportChoice>, };
 
 /**
  * `required: false` is the explicit "none" the contract asks for, so an
@@ -5315,98 +5418,7 @@ dedup_key: string, title: string,
  */
 highlight: string, context?: string | null, impact: string, action_required: ImportantAction, references: ImportantReferences, };
 
-export type ImportBundlePreview = { bundle_id: string, already_imported: boolean, includes_values: boolean,
-/**
- * The file was a single-plugin JSON from the old per-plugin export.
- */
-legacy: boolean, plugins: Array<ImportPreviewPlugin>, };
-
-export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
-
-export type ImportDiscussionRequest = { content: string, project_id?: string | null, };
-
 export type ImportedPluginConfig = { config_id: string, server_id: string, label: string, server_name: string, };
-
-export type ImportPluginBundleReport = { bundle_id: string, already_imported: boolean, imported_config_ids: Array<string>,
-/**
- * Human-readable rows for the post-import scope assignment UI. Kept in
- * addition to `imported_config_ids` for backwards API compatibility.
- */
-imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
-
-export type ImportPluginBundleRequest = { content: string, passphrase?: string | null,
-/**
- * Source config ids whose bundled custom arguments the importer accepted.
- * They replace the plugin's whole command line, so every other plugin's
- * arguments are dropped.
- */
-accept_args_for?: Array<string>,
-/**
- * Values the importer typed for the placeholders of a configuration-only
- * bundle, by source config id then placeholder key (KT-1040).
- */
-placeholder_values?: Record<string, Record<string, string>>, };
-
-/**
- * One plugin as the import would treat it, before anything is written.
- */
-export type ImportPreviewPlugin = { source_config_id: string, label: string, server_name: string,
-/**
- * The command line the plugin runs today (catalogue), for stdio plugins.
- */
-usual_args: Array<string> | null,
-/**
- * The bundle's proposed command line, secret-looking parts masked.
- */
-proposed_args: Array<string> | null, args_differ: boolean, importable: boolean, issue: string | null,
-/**
- * Base URL of a custom API-only plugin; only its origin when the rest is withheld.
- */
-base_url: string | null,
-/**
- * Names of the headers a custom API plugin sends on every call; never their values.
- */
-default_header_names: Array<string>,
-/**
- * Values a configuration-only export withheld, for the importer to fill.
- */
-placeholders: Array<ExportPlaceholder>, };
-
-export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
-/**
- * Replace the Kronn copy even when it holds edits the repository does
- * not have. Without it such an import is refused.
- */
-overwrite_kronn_changes?: boolean, };
-
-/**
- * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
- */
-export type ImportQuickApiRequest = { content: string, project_id?: string | null, };
-
-export type ImportQuickExecRequest = { content: string, project_id?: string | null, };
-
-/**
- * 0.7.0 UX pass — payload for `POST /api/quick-prompts/import`.
- */
-export type ImportQuickPromptRequest = { content: string, project_id?: string | null, };
-
-export type ImportResult = { warnings: Array<string>, invalid_paths: Array<string>, };
-
-/**
- * 0.7.0 UX pass — payload for `POST /api/workflows/import`.
- * `content` is the raw JSON of a `WorkflowExportEnvelope` (string
- * rather than nested object so the frontend can `JSON.parse` once
- * from the dropped file and pass it through). `project_id` is the
- * importer's project to attach the workflow to — `None` keeps it
- * unattached (the user picks a project later via the wizard).
- */
-export type ImportWorkflowRequest = { content: string, project_id?: string | null,
-/**
- * How each bundled skill in conflict is settled (KT-1446); a conflict
- * without a choice gets a copy.
- */
-skill_choices?: Array<SkillImportChoice>, };
 
 /**
  * A discussion's in-app tokens with the cache told apart from the real input.
@@ -5780,6 +5792,25 @@ export type LearningScope = "user" | "project";
  */
 export type LearningStatus = "pending" | "validated" | "rejected" | "stale" | "promoted" | "promoting";
 
+export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: LivePageDiscussionRelation | null, };
+
+export type LinkMcpConfigRequest = { project_ids: Array<string>, };
+
+export type LinkPlanningDiscussionRequest = { discussion_id: string, placement?: PlanningPlacement, is_primary?: boolean, position?: number | null, actor?: PlanningActor, };
+
+/**
+ * One fallback as the Settings card shows it.
+ */
+export type LinkView = { agent: AgentType, model?: string,
+/**
+ * The mode of the model it runs on.
+ */
+mode: FallbackMode, transport: FallbackTransport,
+/**
+ * What a turn could need that this link cannot give, as warnings.
+ */
+gaps: Array<FallbackGap>, };
+
 /**
  * A companion repository linked to a project. The `location` is
  * either a filesystem path (preferred — gives the agent direct
@@ -5828,25 +5859,6 @@ export type LinkedRepoDocStatus = { id: string, ai_doc: LinkedRepoAiDoc,
  * Path of the entry point relative to the repository, when there is one.
  */
 doc_path: string | null, };
-
-export type LinkLivePageDiscussionRequest = { discussion_id: string, relation?: LivePageDiscussionRelation | null, };
-
-export type LinkMcpConfigRequest = { project_ids: Array<string>, };
-
-export type LinkPlanningDiscussionRequest = { discussion_id: string, placement?: PlanningPlacement, is_primary?: boolean, position?: number | null, actor?: PlanningActor, };
-
-/**
- * One fallback as the Settings card shows it.
- */
-export type LinkView = { agent: AgentType, model?: string,
-/**
- * The mode of the model it runs on.
- */
-mode: FallbackMode, transport: FallbackTransport,
-/**
- * What a turn could need that this link cannot give, as warnings.
- */
-gaps: Array<string>, };
 
 /**
  * The lint result attached to an agent message.
@@ -6120,8 +6132,6 @@ export type LivePageRevision = { id: string, page_id: string, revision: number, 
  */
 export type LivePageRevisionSummary = { id: string, page_id: string, revision: number, html_size_bytes: number, created_by_agent: string | null, created_at: string, };
 
-export type LivePagesCapability = { activated: boolean, activated_at: string | null, };
-
 /**
  * Live workflow configurations that publish into this Page. A Page is not
  * owned by one workflow: several workflows may feed the same destination.
@@ -6135,6 +6145,8 @@ export type LivePageWrite = { dataset: string, operation: LivePageWriteOperation
 value: any, observed_at: string | null, dedupe_key: string | null, key_field: string | null, };
 
 export type LivePageWriteOperation = "replace" | "append" | "upsert" | "clear";
+
+export type LivePagesCapability = { activated: boolean, activated_at: string | null, };
 
 /**
  * A per-DoD coverage claim. `dod_id` references the task's DoD item; the schema
@@ -6801,6 +6813,15 @@ export type MissingShadow = { shadow_id: string, label: string, reason: string, 
  */
 export type ModeFallback = { row: FallbackMode, fallback: AgentFallback, };
 
+/**
+ * A discussion's own fallback for one mode.
+ */
+export type ModeOverride = { mode: FallbackMode,
+/**
+ * The links that replace the default of the mode; empty is "no fallback".
+ */
+chain: Array<AgentFallback>, };
+
 export type ModelAvailability = "available" | "unavailable";
 
 export type ModelCatalogAlert = { model_id: string, replacement?: string | null, references: Array<ModelCatalogReference>, };
@@ -6910,15 +6931,6 @@ export type ModelTiersConfig = { claude_code: ModelTierConfig, codex: ModelTierC
  * and audit history so the UI never has to parse a provider-specific string.
  */
 export type ModelUnavailableReason = "disappeared" | "auth_required" | "timeout" | "cli_missing" | "invalid_catalog" | "provider_error" | "unsupported" | "not_found" | "access_denied";
-
-/**
- * A discussion's own fallback for one mode.
- */
-export type ModeOverride = { mode: FallbackMode,
-/**
- * The links that replace the default of the mode; empty is "no fallback".
- */
-chain: Array<AgentFallback>, };
 
 /**
  * Config for the "Multi-agent review" option on an Agent step (see
@@ -8200,6 +8212,13 @@ export type ProjectRepositoryResourceLevel = "usable_without_kronn" | "kronn_req
 export type ProjectRepositoryResourceMutation = { kind: ProjectRepositoryResourceKind, id: string, slug: string, status: ProjectRepositoryResourceStatus, approved: boolean, };
 
 /**
+ * Synchronization state between the repository and Kronn's database for one
+ * resource, following the same vocabulary for every kind (skills included).
+ * Exactly one is true at a time so the UI shows exactly one primary action.
+ */
+export type ProjectRepositoryResourceStatus = "repository_only" | "kronn_only" | "up_to_date" | "repository_newer" | "kronn_newer" | "conflict" | "approval_required" | "native_skill";
+
+/**
  * Read-only projection of the skills, automations and artifacts attached to a
  * project and their alignment with the repository's `kronn/` directory.
  */
@@ -8219,13 +8238,6 @@ can_write_repository: boolean, can_write_repository_reason?: RepositoryWriteBloc
  * changed, not committed" count.
  */
 uncommitted_managed_paths: Array<string>, };
-
-/**
- * Synchronization state between the repository and Kronn's database for one
- * resource, following the same vocabulary for every kind (skills included).
- * Exactly one is true at a time so the UI shows exactly one primary action.
- */
-export type ProjectRepositoryResourceStatus = "repository_only" | "kronn_only" | "up_to_date" | "repository_newer" | "kronn_newer" | "conflict" | "approval_required" | "native_skill";
 
 export type ProjectRepositorySkill = { id: string, name: string, slug: string, description: string, provenance: ProjectRepositorySkillProvenance, is_builtin?: boolean | null,
 /**
@@ -8363,7 +8375,12 @@ export type ProjectWorkspace = { hooks: WorkspaceHooks,
  * KT-1742 — this project's lane warm-up settings; a field left unset
  * inherits the global `[workers.lane_warm]` entry.
  */
-lane_warm: LaneWarmConfig, };
+lane_warm: LaneWarmConfig,
+/**
+ * KT-1748 — absolute directories whose worktrees Kronn manages for this
+ * project, added to the global Settings > Workers list and the built-in roots.
+ */
+managed_worktree_roots?: Array<string>, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -8505,13 +8522,13 @@ pending_proposal_count: number,
  */
 pending_item_count: number, };
 
+export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
+
 /**
  * A correction Kronn proposes. Nothing is applied by itself: the agent pass
  * the human launches carries it out, and the human validates the result.
  */
 export type ProposedCorrection = { kind: CorrectionKind, reference: string, proposal: string, };
-
-export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
 
 export type ProvenanceChange = {
 /**
@@ -9116,6 +9133,8 @@ newer_than_local: boolean,
  */
 resumable: boolean, briefing_changed: boolean, td_total: number, td_settled: number, validated_at: string | null, validated_by: string | null, };
 
+export type RepoSource = { id: string, label: string, provider: string, };
+
 export type ReportTelemetryRequest = {
 /**
  * The CLI's own durable session id, as sent at join. Resolved to the Kronn
@@ -9274,8 +9293,6 @@ missing: boolean, };
  * translates, never a raw error message.
  */
 export type RepositoryWriteBlocker = "kronn_path_is_file" | "repository_read_only" | "repository_unreadable";
-
-export type RepoSource = { id: string, label: string, provider: string, };
 
 /**
  * A secret name a resource requires (`secret://NAME` in its file, listed in
@@ -10472,19 +10489,6 @@ acknowledged_vault_unprotected?: boolean,
  */
 proof?: string | null, };
 
-export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agents_detected: Array<AgentDetection>, scan_paths_set: boolean, repos_detected: Array<DetectedRepo>, default_scan_path: string | null,
-/**
- * Paths actually scanned, exposed to diagnose empty results and missing mounts.
- */
-scan_paths_explored: Array<string>,
-/**
- * config.toml could not be read at this start and was kept aside: the
- * notice the wizard shows (where it is, key and data intact).
- */
-config_set_aside: string | null, };
-
-export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
-
 /**
  * Validate a workflow's scope as it is now; an empty list clears it.
  */
@@ -10501,6 +10505,19 @@ confirm?: string | null,
  * The scope fingerprint the human's screen showed.
  */
 expected_fingerprint?: string | null, };
+
+export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agents_detected: Array<AgentDetection>, scan_paths_set: boolean, repos_detected: Array<DetectedRepo>, default_scan_path: string | null,
+/**
+ * Paths actually scanned, exposed to diagnose empty results and missing mounts.
+ */
+scan_paths_explored: Array<string>,
+/**
+ * config.toml could not be read at this start and was kept aside: the
+ * notice the wizard shows (where it is, key and data intact).
+ */
+config_set_aside: string | null, };
+
+export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 
 /**
  * The agent a shadow runs its step on instead of the step's own.
@@ -10528,11 +10545,6 @@ max_tokens?: number,
  * main step, which never waits for it.
  */
 max_duration_secs?: number, max_cost_usd?: number, };
-
-/**
- * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
- */
-export type ShadowedInstall = { path: string, version: string, };
 
 /**
  * One execution of a step, as the comparison shows it.
@@ -10620,6 +10632,11 @@ export type ShadowPrompt = { "type": "quick_prompt", id: string, version?: numbe
  * How a stored execution stands.
  */
 export type ShadowStatus = "running" | "success" | "failed" | "skipped" | "over_budget" | "timed_out" | "interrupted";
+
+/**
+ * A copy of an agent CLI that PATH order hides behind the one Kronn runs.
+ */
+export type ShadowedInstall = { path: string, version: string, };
 
 export type ShareDiscussionRequest = { contact_ids: Array<string>, };
 
@@ -10723,9 +10740,9 @@ resolution?: SkillConflictResolution, };
 
 export type SkillMigrationAction = "move" | "duplicate";
 
-export type SkillMigrationBlocked = { path: string, reason: SkillMigrationBlockReason, };
-
 export type SkillMigrationBlockReason = "symlink" | "unreadable" | "reserved_slug" | "target_occupied" | "too_large";
+
+export type SkillMigrationBlocked = { path: string, reason: SkillMigrationBlockReason, };
 
 export type SkillMigrationConflict = { slug: string, target: string,
 /**
@@ -10907,12 +10924,6 @@ export type SourceOriginKind = "checkout" | "worktree";
 export type SourceProvenance = "human_validated" | "ai_generated";
 
 /**
- * "Sources clean" badge, recomputed on every read. Distinct from the dated
- * "audit complete" milestone (`validated_at` in `.kronn.json`).
- */
-export type SourcesState = "unknown" | "clean" | "needs_reverification";
-
-/**
  * One source's contribution, or a stated reason it has none.
  */
 export type SourceState = { "state": "ready",
@@ -10929,6 +10940,12 @@ metrics: Array<Metric>, } | { "state": "unavailable", diagnosis: string, remedy:
  * Result of mechanically verifying one `[src: …]` marker.
  */
 export type SourceStatus = "verified" | "not_found" | "out_of_bounds" | "empty_ref" | "outside_project" | "unchecked" | "rejected";
+
+/**
+ * "Sources clean" badge, recomputed on every read. Distinct from the dated
+ * "audit complete" milestone (`validated_at` in `.kronn.json`).
+ */
+export type SourcesState = "unknown" | "clean" | "needs_reverification";
 
 export type StartAgentBackgroundJobRequest = {
 /**
@@ -11806,11 +11823,6 @@ export type TdTaskItem = { td_id: string, theme: string, state: TdTaskState, tas
 reason: string | null, };
 
 /**
- * `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
- */
-export type TdTasksOutcome = { created: number, already_linked: number, skipped: number, themes: Array<TdTaskTheme>, items: Array<TdTaskItem>, };
-
-/**
  * What the conversion did with one tech-debt sheet (KT-1167).
  */
 export type TdTaskState = "created" | "already_linked" | "skipped";
@@ -11819,6 +11831,11 @@ export type TdTaskState = "created" | "already_linked" | "skipped";
  * The parent task grouping the sheets of one theme.
  */
 export type TdTaskTheme = { theme: string, label: string, task_reference: string, created: boolean, };
+
+/**
+ * `POST /api/projects/:id/audit/td-tasks`: tech-debt sheets turned into tasks.
+ */
+export type TdTasksOutcome = { created: number, already_linked: number, skipped: number, themes: Array<TdTaskTheme>, items: Array<TdTaskItem>, };
 
 /**
  * The rule that lets a project be validated without the discussion marker:
@@ -11851,13 +11868,13 @@ attributed: number,
  */
 attributed_without_counters: number, };
 
-export type TemplateMergeAccepted = { branch: string, commit: string, committed: Array<string>, };
-
 export type TemplateMergeAcceptRequest = {
 /**
  * Repo-relative files to commit; the others stay uncommitted in the worktree.
  */
 paths: Array<string>, };
+
+export type TemplateMergeAccepted = { branch: string, commit: string, committed: Array<string>, };
 
 export type TemplateMergeRequest = { base?: MergeBase, };
 
@@ -12048,17 +12065,6 @@ is_empty: boolean,
 error: string | null, };
 
 /**
- * KT-1246 — the worker's explicit statement of whether any test was actually
- * executed, and which. Replaces a sentence at the end of a report: a reviewer
- * reads `executed` and `which` instead of inferring them from `tests`.
- */
-export type TestsExecuted = { executed: boolean,
-/**
- * The commands (or suites) that ran. Empty exactly when `executed` is false.
- */
-which: Array<string>, };
-
-/**
  * A test verdict in a [`DeliveryManifestV1`].
  */
 export type TestStatus = "pass" | "fail" | "skipped";
@@ -12076,6 +12082,17 @@ mock_variables?: { [key in string]: string } | null,
  * Dry run: agent describes what it would do without executing any write actions
  */
 dry_run?: boolean, };
+
+/**
+ * KT-1246 — the worker's explicit statement of whether any test was actually
+ * executed, and which. Replaces a sentence at the end of a report: a reviewer
+ * reads `executed` and `which` instead of inferring them from `tests`.
+ */
+export type TestsExecuted = { executed: boolean,
+/**
+ * The commands (or suites) that ran. Empty exactly when `executed` is false.
+ */
+which: Array<string>, };
 
 /**
  * A move the audit suggests. Never applied.
@@ -12100,6 +12117,8 @@ export type TokenInjection = "BearerHeader" | { "CustomHeader": { name: string, 
 
 export type TokenOverride = { provider: string, token: string, };
 
+export type TokenUsageSummary = { total_tokens: number, total_cost: CostAggregate, discussion_tokens: number, workflow_tokens: number, by_provider: Array<ProviderUsage>, by_project: Array<ProjectUsage>, top_discussions: Array<UsageEntry>, top_workflows: Array<UsageEntry>, daily_history: Array<DailyUsage>, };
+
 export type TokensConfig = {
 /**
  * Legacy fields — kept for backward compat when reading old config.toml
@@ -12109,8 +12128,6 @@ anthropic?: string | null, openai?: string | null, google?: string | null,
  * All API keys (new multi-key system)
  */
 keys: Array<ApiKey>, disabled_overrides: Array<string>, };
-
-export type TokenUsageSummary = { total_tokens: number, total_cost: CostAggregate, discussion_tokens: number, workflow_tokens: number, by_provider: Array<ProviderUsage>, by_project: Array<ProjectUsage>, top_discussions: Array<UsageEntry>, top_workflows: Array<UsageEntry>, daily_history: Array<DailyUsage>, };
 
 export type TourDemoDiscussionResponse = { discussion_id: string, created: boolean,
 /**
@@ -12684,14 +12701,6 @@ export type ValidationBlock = "no_local_run" | "audit_running" | "run_not_comple
 export type ValidationReason = "audit_validation" | "validation_card" | "acknowledged" | "revalidation" | "confirmed" | "human_owned";
 
 /**
- * Where Kronn writes a project's agent files (KT-971).
- * How far a project's integration validations reach beyond the lane sandbox
- * (KT-1433). Only a human sets it: the Docker socket is the host's root, and
- * `Full` runs the worker's tree with the backend's own rights.
- */
-export type ValidationsAccess = "sandbox" | "docker" | "full";
-
-/**
  * Where a validation state comes from (KT-1199): the run this instance
  * recorded, or the committed run state of the repository (a colleague's run
  * after a fetch or a rebase).
@@ -12724,6 +12733,14 @@ started_by: string | null, validated_by: string | null, validated_at: string | n
  * reads the filesystem, is decided by the POST itself).
  */
 can_validate: boolean, blocked: ValidationBlock | null, };
+
+/**
+ * Where Kronn writes a project's agent files (KT-971).
+ * How far a project's integration validations reach beyond the lane sandbox
+ * (KT-1433). Only a human sets it: the Docker socket is the host's root, and
+ * `Full` runs the worker's tree with the backend's own rights.
+ */
+export type ValidationsAccess = "sandbox" | "docker" | "full";
 
 /**
  * The gone prose paths of one section that no acknowledgement accepted.
@@ -13024,6 +13041,13 @@ bash_default_timeout_min: number,
  * which cuts the whole turn whatever a command is allowed.
  */
 bash_max_timeout_min: number,
+/**
+ * KT-1748 — absolute directories whose worktrees Kronn manages, on top of the
+ * built-in roots (`<repo>/.kronn/worktrees`, `~/.kronn/autocode-worktrees`). A
+ * branch checked out under one may be an integration target; the owner's own
+ * checkout never is. A project can name more of its own.
+ */
+managed_worktree_roots: Array<string>,
 /**
  * KT-1742 — how every project's lane is warmed unless the project says
  * otherwise. Last field: a TOML table goes after the plain values.

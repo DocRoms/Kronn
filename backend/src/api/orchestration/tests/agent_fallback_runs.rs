@@ -24,6 +24,7 @@ fn usable() -> Vec<AgentType> {
         AgentType::ClaudeCode,
         AgentType::Codex,
         AgentType::GeminiCli,
+        AgentType::Ollama,
     ]
 }
 
@@ -66,7 +67,7 @@ async fn fallback_notice(db: &Database, was: &TaskExecution, dispatch: &str) -> 
 #[tokio::test]
 async fn a_quota_refused_worker_continues_on_the_fallback_in_its_own_room_with_the_same_tier() {
     let (_repo, db, was, job) = the_economy_worker().await;
-    let state = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
 
     assert!(
         worker_after_quota_among(&state, &job, CLAUDE_LIMIT, Some(usable()))
@@ -75,7 +76,7 @@ async fn a_quota_refused_worker_continues_on_the_fallback_in_its_own_room_with_t
     );
 
     let after = exec_of(&db, &was.id).await;
-    assert_eq!(after.worker_agent_type.as_deref(), Some("GeminiCli"));
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
     assert_eq!(
         after.worker_model_tier.as_deref(),
         Some("economy"),
@@ -101,7 +102,7 @@ async fn a_quota_refused_worker_continues_on_the_fallback_in_its_own_room_with_t
         notice.starts_with(&format!(
             "Task worker execution {}: Claude Code · eco mode: quota exhausted until ",
             was.id
-        )) && notice.ends_with(" → continued with Gemini CLI · eco mode [CLI]"),
+        )) && notice.ends_with(" → continued with Ollama · eco mode [Local]"),
         "{notice}"
     );
     // The refused agent is on cooldown, so new turns start on the fallback.
@@ -132,7 +133,7 @@ async fn a_rate_limited_or_unauthenticated_worker_continues_on_the_fallback_too(
         "[Agent provider error] API Error: 500 Internal Server Error",
     ] {
         let (_repo, db, was, job) = the_economy_worker().await;
-        let state = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+        let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
         assert!(
             intercept_failed_turn_among(&state, &job, response, Some(usable())).await,
             "{response}"
@@ -140,7 +141,7 @@ async fn a_rate_limited_or_unauthenticated_worker_continues_on_the_fallback_too(
         let after = exec_of(&db, &was.id).await;
         assert_eq!(
             after.worker_agent_type.as_deref(),
-            Some("GeminiCli"),
+            Some("Ollama"),
             "{response}"
         );
         assert_eq!(
@@ -158,7 +159,7 @@ async fn a_rate_limited_or_unauthenticated_worker_continues_on_the_fallback_too(
 #[tokio::test]
 async fn a_task_failure_a_refusal_a_test_failure_or_a_work_timeout_never_moves_a_worker() {
     let (_repo, db, was, job) = the_economy_worker().await;
-    let state = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
     for failure in [
         "test result: FAILED. 12 passed; 3 failed; 0 ignored",
         "I can't help with that request.",
@@ -206,7 +207,7 @@ async fn a_worker_whose_agent_has_no_fallback_or_whose_fallback_is_unusable_stay
         .expect("the stop is said");
     assert!(
         stop.content
-            .contains("Claude Code: quota exhausted → no fallback")
+            .contains("Claude Code: quota épuisé → aucun agent de repli")
             && stop
                 .content
                 .contains("LiteLLM is not installed or not enabled"),
@@ -226,7 +227,7 @@ async fn the_quota_back_decision_point_offers_the_fallback_when_the_provider_sti
     let was = escalate_claude_without_reset(&db, repo.path(), 1)
         .await
         .remove(0);
-    let state = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
     let probe = StubQuotaProbe::new(Some(false));
     let rechecker = rechecker_with(&probe).with_usable_agents(usable());
     let t0 = chrono::Utc::now();
@@ -249,7 +250,7 @@ async fn the_quota_back_decision_point_offers_the_fallback_when_the_provider_sti
     );
     assert_eq!(probe.asked(), vec![AgentType::ClaudeCode]);
     let after = exec_of(&db, &was.id).await;
-    assert_eq!(after.worker_agent_type.as_deref(), Some("GeminiCli"));
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
     assert_eq!(after.worker_model_tier.as_deref(), Some("economy"));
     assert_ne!(after.status, TaskExecutionStatus::Escalated);
     assert_eq!(after.sub_discussion_id, was.sub_discussion_id);
@@ -276,7 +277,7 @@ async fn the_quota_back_decision_point_waits_when_there_is_no_chain_or_the_provi
         TaskExecutionStatus::Escalated
     );
     // A chain, but the provider said nothing: inconclusive is not "refused".
-    let chained = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+    let chained = state_with_chain(&db, Some(link(AgentType::Ollama)));
     let silent = StubQuotaProbe::new(None);
     let rechecker = rechecker_with(&silent).with_usable_agents(usable());
     rechecker.recheck_pass(&chained, t0).await;

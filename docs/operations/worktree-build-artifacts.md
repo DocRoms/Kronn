@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:6849-6906#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:6908-7004#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:6739-6756#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:7051-7117#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:6918-6975#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:6977-7073#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:6808-6825#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:7202-7268#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -371,13 +371,9 @@ What was established, and what was not:
 
 **The fix: the temporary file stays in the lane.** The lane environment
 (`WorkerLane::env`, so the warm-up, the sandboxed validations *and* the worker's
-own shell) carries `-save-temps=obj` on macOS for a project that builds C through
-`cc` — under the target-scoped `CFLAGS_aarch64_apple_darwin` /
-`CFLAGS_x86_64_apple_darwin` since KT-1742 (it was a plain `CFLAGS` on every macOS
-lane in KT-1736), and configurable globally and per project; see "Seed and lane
-agree on the C flags" below: clang
-then writes its intermediate files next to the object file, inside the lane's own
-target, and the profile is **not** widened. The alternative — granting the real
+own shell) carries `CFLAGS=-save-temps=obj` on macOS: clang then writes its
+intermediate files next to the object file, inside the lane's own target, and the
+profile is **not** widened. The alternative — granting the real
 `DARWIN_USER_TEMP_DIR` to the profile — would let worker-written code (a
 `build.rs`, a test) write into a directory shared with every other process of the
 owner's session, and was not taken.
@@ -392,15 +388,11 @@ owner's session, and was not taken.
   refusal's absence; the refusal's absence under the profile is the replay row
   above.
 - A lane whose seed was built without the flag recompiles its `cc` build scripts
-  (the `cc` crate tracks `CFLAGS` with `rerun-if-env-changed`) **and everything
-  that depends on them**. KT-1736 called that "the cost of the fix"; on 13/11 it
-  was the cause of the next timeout, and KT-1742 removes it by having Kronn build
-  the project's seed with the same flag before cloning it (next section). Linux hosts are untouched: bubblewrap gives
+  once (the `cc` crate tracks `CFLAGS` with `rerun-if-env-changed`): `aws-lc-sys`,
+  `libsqlite3-sys`. That is the cost of the fix; `aws-lc-sys` was already being
+  recompiled on the lanes that failed. Linux hosts are untouched: bubblewrap gives
   a private `/tmp`, so the variable is not set there.
-- The lane sets the flag as a default: a command that sets its own
-  (`probe.env`) wins over the lane's variable, but a plain `CFLAGS` of a project is
-  shadowed by it in `cc`-based builds, since `cc` reads `CFLAGS_<target>` before
-  `CFLAGS` (KT-1742).
+- `CFLAGS` is a default: a command that sets its own (`probe.env`) wins.
 
 **What the warm-up builds (decided by the owner, KT-1736).** The first build is
 `cargo test --lib --no-run --locked --offline` — the dependency graph (the test
@@ -478,297 +470,14 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 (`first_build.outcome`, `duration_ms`) and check the lane target for
 `.kronn-warm.json`.
 
-[src: file: backend/src/core/task_worker_env.rs:1161-1203#drain_output]
+[src: file: backend/src/core/task_worker_env.rs:1165-1206#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
-[src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1777-1777#first_build_args]
-[src: file: backend/src/core/project_toolchains.rs:137-137#has_lib_target]
+[src: file: backend/src/core/task_worker_env.rs:151-164#compiler_temp_env_for]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1138-1320#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1765-1777#first_build_args]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1779-1783#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
-
-## Seed and lane agree on the C flags (KT-1742)
-
-**What happened.** After KT-1736 the two first lanes of 13/11 (KT-1595, KT-1731)
-and this task's own lane ended `first_build: timed_out` at 1 800 026 / 1 800 037 /
-1 800 030 ms (`build_jobs` 3, seed `main_checkout`, clone under 1 s, host load
-8–11), with no `.kronn-warm.json`. `aws-lc-sys` itself now built (its `.i`/`.s`
-temps sat beside the `.o`); the time went elsewhere.
-
-**Cause, measured** (13/11, a shell with the lane's environment, outside the OS
-sandbox; the seed is the main checkout's `target/debug`, cloned with
-`cp -cR` in 7 s):
-
-- `CARGO_LOG=cargo::core::compiler::fingerprint=info cargo test --lib --no-run
-  --locked --offline -v` on that clone with the lane's `CFLAGS=-save-temps=obj`
-  logs, for the two `cc` build scripts of the graph,
-  `dirty: EnvVarChanged { name: "CFLAGS", old_value: None, new_value:
-  Some("-save-temps=obj") }` (`aws-lc-sys` `build-script-main`, `libsqlite3-sys`
-  `build-script-build`), and then `dirty: UnitDependencyInfoChanged` /
-  `StaleDepFingerprint` on everything that depends on them: `aws-lc-sys` (lib),
-  `aws-lc-rs` (lib and build script), `rustls`, `rustls-webpki`, `tungstenite`,
-  `libsqlite3-sys` (lib), `utoipa-swagger-ui`… (the log was cut at 45 s; the
-  complete list is the `Dirty` list of the probe seed below).
-- The seed's `run-build-script-*.json` fingerprints record `CFLAGS: None`; this
-  task's lane, after its own timed-out warm-up, records
-  `CFLAGS: '-save-temps=obj'`. The `cc` crate reads (and so fingerprints)
-  `AWS_LC_SYS_CFLAGS[_<target>]`, `CFLAGS_<target>` and `CFLAGS`; the lane set the
-  last one and the seed never did.
-- Rebuilt by the flag alone: `aws-lc-sys` and `libsqlite3-sys`, then their
-  dependents `aws-lc-rs`, `rustls`, `rustls-webpki`, `tokio-rustls`, `tungstenite`,
-  `hyper-rustls`, `rustls-platform-verifier`, `tokio-tungstenite`, `axum`,
-  `reqwest`, `utoipa-swagger-ui`, `rusqlite` (`cargo build -v` `Dirty …: the env
-  variable CFLAGS… changed` / `info of dependency … changed`).
-
-Nothing in that is specific to Kronn's repository: **any** Rust project that
-builds C through `cc` (TLS, SQLite, zstd…) and is warmed from its own main-checkout
-target meets it. The fix is therefore in the engine, configurable, and does not
-rely on a file of the project.
-
-### The fix, generic
-
-**1. The lane's compiler environment is a setting with a detected default**
-(`core/task_worker_lane_settings.rs`). Resolved field by field, project over
-global over detected:
-
-| Setting | Detected default | Global (`[workers.lane_warm]`, Settings > Workers) | Per project (stored with the project's workspace settings, project card) |
-|---|---|---|---|
-| `compiler_env` — one `NAME=value` per entry | on macOS, `CFLAGS_aarch64_apple_darwin` / `CFLAGS_x86_64_apple_darwin` = `-save-temps=obj`, **only** when a Rust root of the project lists `cc` in its `Cargo.lock`; nothing otherwise (a project that is not a Rust one, any other host) | replaces it; an empty list means none at all | replaces the global one |
-| `seed_alignment` | on | on / off | on / off |
-| `first_build_command` | none: the detected cargo warm-up of every Rust root | a shell command that replaces it (runs **only under the lane's OS sandbox**, see 5) | idem |
-| `first_build_timeout_min` | 60 | 1–1440 | idem |
-| `rust_roots` — the Rust roots to warm, directories relative to the repository (`.` for its root) | every root found from the manifests | not offered (it cannot name directories of repositories it does not know) | the list; blank = every root; a name that is no root is reported in the record, never silently ignored |
-
-The first build's bound resolves **project setting > global setting >
-`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` > the 60-min default**: the variable
-only fills a bound that no setting gave (`WarmStartSettings::with_configured_timeout`,
-`EffectiveLaneSettings::configured_first_build_timeout`), and Settings > Workers
-and the project card show a notice under the field when it is set on the host
-(`GET /api/config/workers/first-build-env-secs`). Before KT-1742's last round
-the variable won over both. The flags are target-scoped, never a plain `CFLAGS`: `cc` reads them first
-and they reach no Linux or Windows build. The names are validated (portable
-names, no `KRONN_*`, none of the variables the lane owns: `CARGO_TARGET_DIR`,
-`CARGO_HOME`, `CARGO_BUILD_JOBS`, `CARGO_NET_OFFLINE`, `TMPDIR`, `PATH`). Every
-consumer of the lane's environment (the warm-up, the worker's launch, its
-sandbox) reads the same resolution, so a build the worker runs later sees the very
-environment the seed and the first build were made with.
-
-**2. The seed is built once with that environment** (`core/task_worker_seed_align.rs`).
-A seed is the project's own main-checkout target, and nothing in the repository
-says which environment built it, so Kronn keeps a stamp beside it,
-`<target>/.kronn-seed-env.json` (outside `debug/`, which is what a lane clones):
-the compiler environment, the hash of the main checkout crate's `Cargo.lock`, and
-the newest modification time of a `run-build-script-*` fingerprint file when the
-stamp was written.
-
-- stamp present and matching (same environment, same lock, no build script run
-  since — the owner's own build under another environment re-runs the `cc` build
-  scripts, which moves that time): the seed is cloned as it is, **no build**;
-- stamp missing or different: Kronn runs ONE `cargo build --locked --offline` in
-  the seed's own crate directory of the main checkout, outside any sandbox, behind
-  the same gate slot and jobs cap as the first build, at background priority, with
-  the lane's compiler environment, the host's Cargo home and
-  `CARGO_TARGET_DIR` aimed at the seed (nothing of the lane's ports or data), then
-  writes the stamp and clones. Its bound is half the first-build bound. The next
-  lane of the project with the same lock reuses it;
-- **the owner's builds are never disturbed.** Before building, Kronn waits (bounded,
-  2 min) for Cargo's lock on `debug/` (`.cargo-lock`); if a build of the owner's
-  still holds it, nothing is built, the record says
-  `aligned: false (a build holds the seed's Cargo lock …)` and the lane falls back to
-  what it did before: a seed a build is writing is not cloned either (KT-1691), so
-  the lane starts from the target it has. A failed or timed-out seed build is
-  reported the same way, and leaves no stamp;
-- not attempted (`aligned: skipped(<reason>)`): alignment off, no compiler
-  environment to align to (Linux, no `cc`), no `target/debug` yet in the main
-  checkout (Kronn does not create a target in the owner's checkout), the lane does
-  not use the host's Cargo home, or no seed target could be resolved.
-
-A trade-off stated plainly: the build is the owner's own `cargo build` of their
-**current** checkout, in their target. And because the owner's own `cargo` (the dev
-supervisor, an IDE) normally runs without the lane's variables, it re-runs the `cc`
-build scripts of the seed the next time it builds, which un-aligns the seed again;
-the next lane then notices (the build-script time moved) and aligns once more. A
-project that wants one stable fingerprint sets the same variables in its own
-`.cargo/config.toml` `[env]` or in its own build scripts; Kronn then finds nothing
-to rebuild (its seed build is a no-op) and only writes the stamp.
-
-**3. The warm-up does not assume Kronn's layout** (`core/project_toolchains.rs`,
-the one place KT-1747's generic toolchain detection reuses):
-
-- every **Rust workspace root** is found from the manifests, anywhere in the
-  checkout up to four levels deep (`backend/`, `redis-flush/`,
-  `desktop/src-tauri/`…; a directory with a `Cargo.toml` is a root and its members
-  are not searched; `target`, `node_modules`, `vendor`, hidden and `.kronn`
-  directories are skipped; at most 8). Each is built
-  (`cargo test [--lib] --no-run --locked --offline` in its own directory), seeded
-  and aligned; the build bound is shared by all of them;
-- the seed of a root is its own target directory: `cargo metadata --format-version
-  1 --no-deps --offline` run **in the main checkout** (so only the owner's
-  `.cargo/config.toml` speaks; a worker's edit of its own worktree cannot point the
-  seed anywhere) and its `target_directory`, never a hard-coded `<repo>/target/debug`.
-  The lane has one `debug/`: the first seed is cloned whole, the others are merged
-  into it entry by entry (Cargo names every unit by a hash). What a root did is
-  remembered **per root** (see 5), not by one lane-wide hash;
-- a project with **no Rust root** gets no cargo stub and no Cargo warm-up: the
-  record says `no Cargo.toml in the repository and no first-build command declared
-  for this project: nothing to warm`. Its owner can declare a **first-build command**
-  (global or per project; run in the worktree root **under the lane's OS sandbox**,
-  under the same bound, journalled as the crate `command`, marked by a key over the
-  command, the locks and the compiler environment): a `composer install`, an
-  `npm ci`. KT-1747 provides the dependency directories such a command writes into.
-
-**5. Per root, and only under the sandbox** (`core/task_worker_root_marks.rs`,
-`core/task_worker_lane_warm.rs`). Kronn's own repository has two roots, `backend/`
-and `desktop/src-tauri/`, and they do not warm alike: the desktop one needs system
-libraries (GTK, WebKit) a host may lack. A lane-wide marker made its failure erase
-the backend's success and be paid again by every relaunch and every new lane. So:
-
-- **a mark per root** in the lane's `.kronn-warm.json` (`roots: [{path, key,
-  state: built|failed, reason?, at_unix}]`). The key is a hash of the root, **its**
-  `Cargo.lock` hash and the lane's compiler environment (sorted). One root's success
-  survives another's failure; a changed lock rebuilds that root only. A marker
-  written before (no `roots`) still vouches for the whole lane at its old key;
-- **a failure is cached beside the seed**, in `<seed target>/.kronn-warm-failures.json`
-  (outside `debug/`, written by Kronn only, never by a worker): a root that FAILED for
-  a key is not tried by any later lane of the project until its lock or the
-  environment changes. It is reported as `build: failed("not retried: it failed
-  before for this Cargo.lock and compiler environment: <reason>")`, takes no build
-  slot and does not make the aggregate `first_build` fail (only a root that failed
-  *in this run* does, and its detail names the root). A root that builds again
-  clears its entry. A **timeout**, a **cancellation**, and a build that never started
-  (`not run: …` from a host with no sandbox, `cannot start …`) are never cached: they
-  say nothing about the root. To retry a cached failure sooner, delete that file;
-- **a seed alignment build that fails is cached too** (`.kronn-seed-env-failure.json`
-  beside the stamp), for the same lock and environment — but only for 6 hours, because
-  unlike a lane (a clean checkout of the base) the seed is built from the owner's live
-  tree, where a failure may be half-written code;
-- `first_build_pending` (what decides whether the worker's start waits for a first
-  build) is per root as well; a root that failed in *another* lane is only known once
-  its seed is resolved, so a brand-new lane counts as pending and its warm-up then
-  skips that root at once;
-- **the declared command runs only under the lane's OS sandbox.** The worktree it
-  runs in holds what the worker wrote (`package.json` scripts, a `Makefile`, composer
-  scripts), and on a resumed lane that includes files written in an earlier turn; run
-  with the host's rights, `npm ci` would execute them as the user. The command goes
-  through the same `SandboxedProbeRunner` as the cargo first build (so the process
-  Kronn starts is the sandbox launcher and `sh -c` starts inside it: writes confined
-  to the lane, no network). The engine also refuses it itself when the runner it was
-  given does not report `confined()`, and a host with no usable sandbox refuses it
-  (`not run: …`): the record says `first_build: failed("the declared first-build
-  command was not run: … only runs under the lane's OS sandbox …")` or the runner's
-  reason, nothing reaches a process, nothing is marked warm. Consequence of the
-  sandbox, said plainly: a command that needs the network (`npm ci` from a registry)
-  fails there; it works for what is already cached or vendored, and KT-1747's
-  dependency provisioning is the place for the rest.
-
-**4. What the journal says.** `lane_warm_start` keeps its shape and gains
-`seed.aligned` (on the `cloned` outcome: the first root's) and `crates`, one entry
-per Rust root (or the declared command): `path`, `seed_target`,
-`seed_aligned` (`{"state":"aligned","rebuilt":true|false,"build_ms":…}`,
-`{"state":"not_aligned","reason":…}` or `{"state":"skipped","reason":…}`) and its
-own `build` outcome. `first_build` is their aggregate.
-
-**Why not the first attempt** (an `[env]` table in the repository's
-`.cargo/config.toml`, same two variables, pinned by a test, kept for one review
-round): it aligned the Kronn repository only. Any other project's seed was still
-built without the lane's flags, so every lane rebuilt its `cc` crates and
-dependents. Rejected for that reason, and removed. The other options of the task:
-
-| Option | Verdict |
-|---|---|
-| Set a plain `CFLAGS` | rejected: reaches the Linux and Windows builds too (a clang flag handed to MSVC; not tried) |
-| Set it in the dev supervisor scripts only | rejected: Kronn-only, and any other `cargo` of the owner flips the shared target's fingerprint back and forth |
-| Scope it to `aws-lc-sys` (`AWS_LC_SYS_CFLAGS`) | rejected: `aws-lc-sys` and the 11 crates above it still differ from a seed without it; only `libsqlite3-sys` would be spared |
-| Stop setting it in the lane | rejected: it is what lets `aws-lc-sys`'s `.S` sources build under the Seatbelt profile (KT-1736) |
-| `CFLAGS_<apple triple>` in the lane + a seed aligned by Kronn | **taken**: no effect off macOS, read by `cc` first, identical value on both sides by construction (the first build and the seed build both take the resolved environment) |
-
-**Pinned** (`task_worker_lane_warm_test.rs`, `task_worker_seed_align_test.rs`,
-`task_worker_lane_settings_test.rs`, `project_toolchains_test.rs`,
-`task_worker_lane_warm_roots_test.rs`, `task_worker_root_marks_test.rs`,
-`task_worker_sandbox_test.rs`): two roots, one fails → the other's mark is kept, the
-failing one is not rebuilt by a relaunch nor by the next lane with the same lock, and
-is retried when its lock or the environment changes
-(`one_roots_success_survives_another_roots_failure_and_the_failure_is_not_retried`,
-`a_failure_is_tried_again_when_the_compiler_environment_changes`); a timeout is not
-cached (`a_timed_out_root_is_not_remembered_as_a_failure`); the roots setting selects
-and reports an unknown root
-(`the_rust_roots_setting_selects_the_roots_to_warm_and_reports_an_unknown_one`); a
-declared command is refused by an unconfined runner, runs as `sandbox-exec … sh -c`
-under a confined one, is refused on a host with no sandbox, and a command writing
-outside the lane is denied by the OS and reported
-(`a_declared_command_is_refused_by_a_runner_that_does_not_confine_it`,
-`a_declared_first_build_command_only_ever_runs_inside_the_os_sandbox`,
-`a_declared_first_build_command_on_a_host_without_a_sandbox_is_refused_and_reported`,
-`a_declared_first_build_command_writing_outside_the_lane_is_denied_by_the_os_and_reported`
-— the last one runs only where the OS sandbox can be applied from the test process);
-a failed seed build is not retried for the same lock and environment
-(`a_failed_seed_build_is_not_retried_for_the_same_lock_and_environment`):
-a project that is not Kronn gets its seed aligned once, a second lane reuses it
-without a build, a changed lock aligns it again
-(`a_project_that_is_not_kronn_gets_its_seed_aligned_once_and_the_next_lane_reuses_it`);
-a held Cargo lock falls back and is reported
-(`a_seed_the_owner_is_building_is_left_alone_and_the_fallback_is_reported`); every
-Rust root is warmed, seeded and aligned wherever it is
-(`every_rust_root_of_the_repository_is_warmed_seeded_and_aligned_wherever_it_is`);
-a project with no Cargo workspace is skipped with the reason and a declared command
-warms it; the settings resolve default / global / project
-(`nothing_configured_gives_the_detected_defaults`,
-`the_global_entry_overrides_every_detected_default`,
-`a_project_field_wins_over_the_global_one_and_the_rest_is_inherited`); the lane
-side keeps the target-scoped names on macOS for a `cc` project only
-(`the_lane_keeps_clang_temp_files_in_the_object_dir_on_macos_for_a_cc_project_only`).
-
-**What a fresh lane from a fresh seed costs now** (13/11, load average 14, 3
-jobs, one lane at a time, outside the OS sandbox; measured with the first attempt's
-seed, which has the same fingerprints as an aligned one):
-
-| Step | Measured |
-|---|---|
-| seed refreshed with the flag (`cargo build -v` of the clone, stopped before the `kronn` crate): `aws-lc-sys`, `libsqlite3-sys`, their 12 dependents above, and 10 units unrelated to the flag (`icu_normalizer`, `idna_adapter`, `idna`, `url`, `zopfli`, `zip`, `regex` rebuilt with no `Dirty` reason, i.e. no usable fingerprint in the main target, and `tower-http`, `calamine`, `serde_json_path` above them) — this is the cost of Kronn's alignment build, paid once per lock | 3 min 41 s, 24 units |
-| lane cloned from that seed, `cargo test --lib --no-run`: no `EnvVarChanged`; 24 test-profile units absent from a `cargo build` seed (dev-dependencies such as `wiremock`/`serial_test` unify more features into `futures-util`, `hyper-util`, `reqwest`, `axum`, `image`, `lopdf`…) | 1 min 56 s |
-| `kronn` lib **with `test-support`** (the package is its own dev-dependency, `backend/Cargo.toml`: every test build compiles the lib twice) | 8 min 25 s (rustc front end 291 s, codegen 214 s) |
-| `kronn` lib **test** binary | 24 min 27 s (1 467 s) |
-| **whole `cargo test --lib --timings`** | **32 min 56 s** |
-
-The `cc` crates are no longer in the list; what is left is the worktree's own
-crate, which no seed can cover (a path crate is fingerprinted by its path). Cargo's
-timings report has no codegen/link split for a test unit, so the share of the final
-link in the 24 min was **not** separated (the linker prints `ld: __eh_frame
-section too large (max 16MB)`; the dev profile keeps no incremental objects here to
-date the link by). Two warm-ups at once were **not** run here.
-
-**Consequence, said plainly: the former 30-minute bound was too tight for this
-crate on a loaded host, so the default is now 60 minutes.** With the seed fixed
-the warm-up no longer rebuilds the dependency graph, but the two compiles of
-`kronn` alone took 32 min 56 s at load 14 with 3 jobs (KT-1736 measured 22 min
-19 s for a worker's own `cargo test --lib` build). A 30-min bound would end
-`timed_out` just before the last `rustc` finishes and throw that work away (a
-killed `rustc` leaves no artifact), so the worker would pay it again.
-`DEFAULT_FIRST_BUILD_TIMEOUT` (`backend/src/core/task_worker_lane_warm.rs`) is
-therefore 3600 s: the measured 32 min 56 s plus a margin of about 27 min for a
-slower or busier host; the per-project and global `first_build_timeout_min` override
-it, and `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` replaces it only when neither is set. The same bound limits
-the gate (queue) wait. Not done here, each its own ticket: stop compiling the lib
-twice for `cargo test --lib` (the self dev-dependency exists for the `it`
-integration binary, KT-1189); lower the gate's concurrency under load. The live
-check, done by the principal after the restart, is: launch two tasks at once on a
-project, read each `lane_warm_start` (`seed.aligned`, `crates`,
-`first_build.outcome`, `duration_ms`, build_jobs, host load) and look for
-`.kronn-warm.json` in the lane target.
-
-[src: file: backend/src/core/task_worker_lane_warm.rs:59-59#DEFAULT_FIRST_BUILD_TIMEOUT]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:962-962#warm_units]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1789-1789#first_build_pending]
-[src: file: backend/src/core/task_worker_root_marks.rs:68-68#root_key]
-[src: file: backend/src/core/task_worker_root_marks.rs:131-131#cached_failure]
-[src: file: backend/src/core/task_worker_seed_align.rs:275-275#align_seed]
-[src: file: backend/src/core/task_worker_seed_align.rs:217-217#recent_failure]
-[src: file: backend/src/core/task_worker_lane_settings.rs:83-83#resolve]
-[src: file: backend/src/core/project_toolchains.rs:113-113#select_roots]
-[src: file: backend/src/core/project_toolchains.rs:72-72#rust_roots]
-[src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
-[src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
+[src: file: backend/src/api/orchestration.rs:10913-10944#warm_failure_notice]
 
 ## Long builds in a task worker (KT-1718)
 
@@ -837,14 +546,14 @@ worker's own environment predates the setting), and on a warmed lane a filtered
 load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
-[src: file: backend/src/models/setup.rs:204-211#effective_bash_timeouts_ms]
+[src: file: backend/src/models/setup.rs:260-267#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:883-893#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15176-15178#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:678-679#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]
 [src: file: backend/src/core/task_worker_lane_warm.rs:872]
-[src: file: frontend/src/components/settings/WorkersSection.tsx:44#WorkersSection]
+[src: file: frontend/src/components/settings/WorkersSection.tsx:49#WorkersSection]
 
 ## Maintenance command
 

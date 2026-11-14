@@ -659,7 +659,7 @@ pub async fn set_default_skills(
 }
 
 /// GET/PUT /api/projects/{id}/workspace. A null body clears the inherited
-/// worktree preparation hooks.
+/// worktree preparation hooks and managed worktree roots.
 pub async fn get_project_workspace(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -701,9 +701,14 @@ pub async fn set_project_workspace(
             }
         }
     }
-    // KT-1742 — the project's lane warm-up settings are refused or stored whole,
-    // like the hooks: a first-build command runs on the host.
     if let Some(workspace) = payload.as_ref() {
+        if let Err(reason) =
+            crate::models::validate_managed_worktree_roots(&workspace.managed_worktree_roots)
+        {
+            return Json(ApiResponse::err(reason));
+        }
+        // KT-1742 — the project's lane warm-up settings are refused or stored whole,
+        // like the hooks: a first-build command runs on the host.
         if let Err(reason) = workspace.lane_warm.validate() {
             return Json(ApiResponse::err(reason));
         }
@@ -713,7 +718,7 @@ pub async fn set_project_workspace(
             workspace.lane_warm = workspace.lane_warm.normalized();
             workspace
         })
-        .filter(|workspace| !workspace.hooks.is_empty() || !workspace.lane_warm.is_empty());
+        .filter(|workspace| !workspace.is_empty());
     let lane_warm = stored.as_ref().map(|workspace| workspace.lane_warm.clone());
     match state
         .db

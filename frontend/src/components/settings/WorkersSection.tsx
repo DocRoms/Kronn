@@ -30,6 +30,11 @@ import {
   MAX_BASH_TIMEOUT_MIN,
   MIN_BASH_TIMEOUT_MIN,
 } from '../../lib/workerShellTimeouts';
+import {
+  MAX_MANAGED_WORKTREE_ROOTS,
+  parseManagedRoots,
+  validManagedRoots,
+} from '../../lib/managedWorktreeRoots';
 import { LaneWarmFields } from '../LaneWarmFields';
 import {
   EMPTY_LANE_WARM_DRAFT, configOf, draftOf, draftProblem, sameDraft,
@@ -50,6 +55,8 @@ export function WorkersSection({ t }: Props) {
   const [heavyKb, setHeavyKb] = useState(String(DEFAULT_HEAVY_OUTPUT_KB));
   const [bashDefault, setBashDefault] = useState(String(DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
   const [bashMax, setBashMax] = useState(String(DEFAULT_BASH_MAX_TIMEOUT_MIN));
+  // KT-1748 — one absolute folder per line; the built-in roots are always included.
+  const [managedRoots, setManagedRoots] = useState('');
   // KT-1742 — how every project's lane is warmed (a project may override it).
   const [laneWarm, setLaneWarm] = useState<LaneWarmDraft>(EMPTY_LANE_WARM_DRAFT);
   // The generation limit (Settings > Server) cuts the whole turn whatever a command is
@@ -81,6 +88,7 @@ export function WorkersSection({ t }: Props) {
         setHeavyKb(String(value.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
         setBashDefault(String(value.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
         setBashMax(String(value.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+        setManagedRoots((value.managed_worktree_roots ?? []).join('\n'));
         setLaneWarm(draftOf(value.lane_warm));
       })
       .catch(cause => { if (live) setError(userError(cause)); });
@@ -104,12 +112,19 @@ export function WorkersSection({ t }: Props) {
     && bashDefaultMin >= MIN_BASH_TIMEOUT_MIN && validBashMax && bashDefaultMin <= bashMaxMin;
   const validBash = validBashMax && validBashDefault;
   const validLaneWarm = draftProblem(laneWarm) === null;
-  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validLaneWarm;
+  const rootList = parseManagedRoots(managedRoots);
+  const validRoots = validManagedRoots(rootList);
+  const savedRoots = saved?.managed_worktree_roots ?? [];
+  const rootsUnchanged = rootList.length === savedRoots.length
+    && rootList.every((root, index) => root === savedRoots[index]);
+  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash
+    && validRoots && validLaneWarm;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
     && (unlimited || count === saved.default_max_review_rounds);
   const unchanged = roundsUnchanged
+    && rootsUnchanged
     && saved !== null && workerCap === saved.max_concurrent_task_workers
     && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)
     && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
@@ -128,6 +143,7 @@ export function WorkersSection({ t }: Props) {
         heavy_output_kb: heavy,
         bash_default_timeout_min: bashDefaultMin,
         bash_max_timeout_min: bashMaxMin,
+        managed_worktree_roots: rootList,
         lane_warm: configOf(laneWarm),
       });
       setSaved(next);
@@ -138,6 +154,7 @@ export function WorkersSection({ t }: Props) {
       setHeavyKb(String(next.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
       setBashDefault(String(next.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
       setBashMax(String(next.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+      setManagedRoots((next.managed_worktree_roots ?? []).join('\n'));
       setLaneWarm(draftOf(next.lane_warm));
     } catch (cause) {
       setError(userError(cause));
@@ -342,6 +359,26 @@ export function WorkersSection({ t }: Props) {
             <AlertTriangle size={13} />
             <span>{t('config.workers.shellTimeoutsOutlive')}</span>
           </div>
+        )}
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.managedRoots')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-roots-hint">{t('config.workers.managedRootsHint')}</p>
+        <textarea
+          className="set-input"
+          rows={3}
+          spellCheck={false}
+          aria-label={t('config.workers.managedRoots')}
+          placeholder={t('config.workers.managedRootsPlaceholder')}
+          value={managedRoots}
+          disabled={saved === null}
+          onChange={event => setManagedRoots(event.target.value)}
+          data-testid="workers-roots-input"
+        />
+        {!validRoots && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-roots-invalid">
+            {t('config.workers.managedRootsInvalid', MAX_MANAGED_WORKTREE_ROOTS)}
+          </p>
         )}
         <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }} data-testid="workers-lane-warm">
           <Flame size={14} className="text-accent" />
