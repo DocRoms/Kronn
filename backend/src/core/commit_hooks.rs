@@ -6,29 +6,29 @@
 //! resolves its hooks inside the worktree, which the worker writes — so letting
 //! git run them is running worker-authored code unconfined.
 //!
-//! The rule: git never resolves a hook inside the worktree for such a command.
-//! Every Kronn-run git command of a worker lane carries
-//! `-c core.hooksPath=<absolute dir outside the worktree, or /dev/null>`
-//! ([`git_config_args`]), and the one hook that gates a commit (`pre-commit`, or
-//! `pre-merge-commit` for a merge) is run by Kronn itself ([`run_gating_hook`])
-//! according to the project's [`WorkerCommitHooks`] policy, so that a refusal is
-//! its own outcome ([`HookRefusal`]) with the hook's output instead of a bare
-//! git failure.
+//! The rule: git never runs a hook for a Kronn-run command on a worker's
+//! worktree. Every such command is built by [`crate::core::lane_git`] (pinned
+//! repository, `core.hooksPath=/dev/null`), and the one hook that gates a commit
+//! (`pre-commit`, or `pre-merge-commit` for a merge) is run by Kronn itself
+//! ([`run_gating_hook`]) according to the project's [`WorkerCommitHooks`] policy,
+//! so that a refusal is its own outcome ([`HookRefusal`]) with the hook's output
+//! instead of a bare git failure. No other hook runs under any policy: a
+//! `commit-msg` check (commitlint) is not run for a worker's commit.
 //!
 //! The DCO check needs no `commit-msg` hook: Kronn signs every commit off itself
 //! (`git commit -s`).
 
 use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::core::child_env::ChildRoute;
+use crate::core::lane_git::LaneGit;
 use crate::models::WorkerCommitHooks;
 
-/// What git is given for `core.hooksPath` when no hook may run.
-const NO_HOOKS: &str = "/dev/null";
-/// Longest a gating hook may run.
+/// Longest a gating hook may run, on the host or confined.
 const HOOK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Lines of a refused hook's output that travel with the refusal.
 const REFUSAL_LINES: usize = 20;
@@ -84,8 +84,9 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 /// `git rev-parse <flag>` in `work_dir`, as an absolute path. Reading it runs no
-/// hook (`project_git_cmd`).
+/// hook (`project_git_cmd`). Only for a checkout that is not a managed worktree.
 fn rev_parse_path(work_dir: &Path, flag: &str) -> Option<PathBuf> {
+    // lane-git-allow: an unmanaged checkout (the owner's own), never a lane worktree.
     let output = crate::core::cmd::project_git_cmd()
         .args(["rev-parse", flag])
         .current_dir(work_dir)
@@ -97,90 +98,67 @@ fn rev_parse_path(work_dir: &Path, flag: &str) -> Option<PathBuf> {
     if line.is_empty() {
         return None;
     }
-    let path = PathBuf::from(line);
-    Some(if path.is_absolute() {
+    Some(absolute_in(work_dir, PathBuf::from(line)))
+}
+
+/// `core.hooksPath` as `dir`'s own configuration sets it, as a path (git has
+/// expanded `~`). Plain `git config` runs no hook. `dir` is the registered
+/// project checkout for a managed worktree: never read through a worktree.
+fn configured_hooks_path(dir: &Path) -> Option<PathBuf> {
+    // lane-git-allow: asked of the registered project checkout / an unmanaged checkout.
+    crate::core::cmd::git_cmd()
+        .args(["config", "--type=path", "--get", "core.hooksPath"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn absolute_in(base: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
         path
     } else {
-        work_dir.join(path)
-    })
-}
-
-/// The hooks directory of the main checkout: `<git-common-dir>/hooks`, absolute.
-/// `None` when it is not known or lies inside `work_dir` (a plain checkout is
-/// its own main checkout: nothing under the tree a worker writes is trusted).
-fn main_checkout_hooks(work_dir: &Path) -> Option<PathBuf> {
-    let common = rev_parse_path(work_dir, "--git-common-dir")?;
-    let hooks = canonical(&common).join("hooks");
-    (!hooks.starts_with(canonical(work_dir))).then_some(hooks)
-}
-
-/// The `core.hooksPath` a Kronn-run git command of a worker lane gets: an
-/// absolute directory that is never under the worktree, or `/dev/null`.
-pub fn hooks_path_for_git(work_dir: &Path, policy: WorkerCommitHooks) -> PathBuf {
-    match policy {
-        // Kronn runs the gating hook itself for the other policies; git runs
-        // none: the directory is only what is left for the passive hooks, and
-        // those come from the main checkout alone.
-        WorkerCommitHooks::MainCheckout => {
-            main_checkout_hooks(work_dir).unwrap_or_else(|| PathBuf::from(NO_HOOKS))
-        }
-        WorkerCommitHooks::Off | WorkerCommitHooks::Sandboxed => PathBuf::from(NO_HOOKS),
+        base.join(path)
     }
-}
-
-/// The `-c` arguments that go in front of a Kronn-run `git` subcommand of a
-/// worker lane. Also turns the file-system monitor off (a program named by the
-/// repository's configuration).
-pub fn git_config_args(work_dir: &Path, policy: WorkerCommitHooks) -> Vec<String> {
-    vec![
-        "-c".to_string(),
-        format!(
-            "core.hooksPath={}",
-            hooks_path_for_git(work_dir, policy).display()
-        ),
-        "-c".to_string(),
-        "core.fsmonitor=false".to_string(),
-    ]
-}
-
-/// A `git` command for a worker lane, with [`git_config_args`] in front.
-pub fn worker_git_cmd(work_dir: &Path, policy: WorkerCommitHooks) -> std::process::Command {
-    let mut command = crate::core::cmd::git_cmd();
-    command.args(git_config_args(work_dir, policy));
-    command
 }
 
 /// The directory the gating hook of `policy` is looked up in, `None` when the
 /// policy runs none.
-fn gating_hooks_dir(work_dir: &Path, policy: WorkerCommitHooks) -> Option<PathBuf> {
-    match policy {
-        WorkerCommitHooks::Off => None,
-        WorkerCommitHooks::MainCheckout => main_checkout_hooks(work_dir),
-        WorkerCommitHooks::Sandboxed => {
-            // Plain `git config` runs no hook; `project_git_cmd` would override
-            // the very value read here.
-            let configured = crate::core::cmd::git_cmd()
-                .args(["config", "--type=path", "--get", "core.hooksPath"])
-                .current_dir(work_dir)
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-                .filter(|value| !value.is_empty());
-            match configured {
-                // Git resolves a relative value against the directory it runs the
-                // hook from: the worktree.
-                Some(value) => {
-                    let path = PathBuf::from(value);
-                    Some(if path.is_absolute() {
-                        path
-                    } else {
-                        work_dir.join(path)
-                    })
-                }
-                None => rev_parse_path(work_dir, "--git-common-dir").map(|c| c.join("hooks")),
-            }
+///
+/// For a managed worktree it comes from the REGISTERED project checkout alone
+/// (its configuration and its common git directory), never from what the
+/// worktree's `.git` pointer leads to:
+///
+/// - `main_checkout`: the hooks of that checkout, resolved against it — the
+///   owner's files, outside every path the worker writes;
+/// - `sandboxed`: what the repository configures, resolved against the worktree
+///   as git would (possibly the worker's own `.husky`) — run confined.
+fn gating_hooks_dir(lane: &LaneGit, policy: WorkerCommitHooks) -> Option<PathBuf> {
+    let work_dir = lane.work_dir();
+    match (policy, lane.pinned()) {
+        (WorkerCommitHooks::Off, _) => None,
+        (WorkerCommitHooks::MainCheckout, Some(pinned)) => Some(
+            configured_hooks_path(&pinned.repo)
+                .map(|path| absolute_in(&pinned.repo, path))
+                .unwrap_or_else(|| pinned.common_dir.join("hooks")),
+        ),
+        (WorkerCommitHooks::Sandboxed, Some(pinned)) => Some(
+            configured_hooks_path(&pinned.repo)
+                .map(|path| absolute_in(work_dir, path))
+                .unwrap_or_else(|| pinned.common_dir.join("hooks")),
+        ),
+        // Not a managed worktree: the owner's own checkout. A plain checkout is
+        // its own main checkout, so nothing under its tree is trusted.
+        (WorkerCommitHooks::MainCheckout, None) => {
+            let hooks = canonical(&rev_parse_path(work_dir, "--git-common-dir")?).join("hooks");
+            (!hooks.starts_with(work_dir)).then_some(hooks)
         }
+        (WorkerCommitHooks::Sandboxed, None) => configured_hooks_path(work_dir)
+            .map(|path| absolute_in(work_dir, path))
+            .or_else(|| rev_parse_path(work_dir, "--git-common-dir").map(|dir| dir.join("hooks"))),
     }
 }
 
@@ -207,53 +185,75 @@ fn is_runnable(path: &Path) -> bool {
 /// run or it passed.
 ///
 /// - [`WorkerCommitHooks::Off`]: nothing runs.
-/// - [`WorkerCommitHooks::MainCheckout`]: the hook of the main checkout's common
-///   git directory, as the host user (it is the owner's own hook, not
-///   worker-written).
+/// - [`WorkerCommitHooks::MainCheckout`]: the hook of the registered main
+///   checkout, as the host user (it is the owner's own hook, not worker-written).
 /// - [`WorkerCommitHooks::Sandboxed`]: the hook the repository configures
 ///   (possibly inside the worktree), under the lane's OS sandbox profile. A host
 ///   without a usable sandbox refuses: worker-written code is never run
 ///   unconfined.
+///
+/// A worktree whose `.git` pointer was redirected is refused
+/// ([`crate::core::lane_git::TAMPER_PREFIX`]) before anything runs.
 pub fn run_gating_hook(
     work_dir: &Path,
     policy: WorkerCommitHooks,
     name: &str,
     data_dir_lock: Option<&File>,
 ) -> Result<(), HookRefusal> {
-    let Some(dir) = gating_hooks_dir(work_dir, policy) else {
-        return Ok(());
-    };
-    let hook = dir.join(name);
-    if !is_runnable(&hook) {
+    if policy == WorkerCommitHooks::Off {
         return Ok(());
     }
     let refuse = |output: String| HookRefusal {
         hook: name.to_string(),
         output,
     };
+    let lane = LaneGit::resolve(work_dir).map_err(refuse)?;
+    let Some(dir) = gating_hooks_dir(&lane, policy) else {
+        return Ok(());
+    };
+    let hook = dir.join(name);
+    if !is_runnable(&hook) {
+        return Ok(());
+    }
     match policy {
         WorkerCommitHooks::Off => Ok(()),
-        WorkerCommitHooks::MainCheckout => run_on_host(&hook, work_dir, data_dir_lock)
-            .map_err(|output| refuse(first_lines(&output))),
+        WorkerCommitHooks::MainCheckout => {
+            run_on_host(&hook, &lane, data_dir_lock).map_err(|output| refuse(first_lines(&output)))
+        }
         WorkerCommitHooks::Sandboxed => {
-            run_confined(&hook, work_dir).map_err(|output| refuse(first_lines(&output)))
+            run_confined(&hook, &lane).map_err(|output| refuse(first_lines(&output)))
         }
     }
 }
 
-/// The hook as the host user, in `work_dir`, keeping the data-directory lock
-/// alive in it and its descendants like the commit it gates.
-fn run_on_host(hook: &Path, work_dir: &Path, data_dir_lock: Option<&File>) -> Result<(), String> {
+/// What a hook's own `git` is pinned to: the registered repository.
+fn pinned_git_env(lane: &LaneGit) -> Vec<(&'static str, std::ffi::OsString)> {
+    match lane.pinned() {
+        Some(pinned) => vec![
+            ("GIT_DIR", pinned.git_dir.clone().into_os_string()),
+            ("GIT_WORK_TREE", lane.work_dir().as_os_str().to_os_string()),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// The hook as the host user, in the worktree, keeping the data-directory lock
+/// alive in it and its descendants like the commit it gates, and bounded by
+/// [`HOOK_TIMEOUT`] like the confined path.
+fn run_on_host(hook: &Path, lane: &LaneGit, data_dir_lock: Option<&File>) -> Result<(), String> {
     let child_lock = data_dir_lock
         .map(crate::core::config::inherit_data_dir_lock_for_child)
         .transpose()
         .map_err(|error| format!("cannot inherit the data-directory lock: {error}"))?;
     let mut command = crate::core::cmd::sync_cmd(hook, ChildRoute::Git);
     command
-        .current_dir(work_dir)
+        .current_dir(lane.work_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (name, value) in pinned_git_env(lane) {
+        command.env(name, value);
+    }
     #[cfg(unix)]
     if let Some(child_lock) = child_lock.as_ref() {
         crate::core::config::inherit_data_dir_lock_on_command(&mut command, child_lock);
@@ -263,14 +263,64 @@ fn run_on_host(hook: &Path, work_dir: &Path, data_dir_lock: Option<&File>) -> Re
         crate::core::config::inherit_data_dir_lock_on_command(&mut command, child_lock)
             .map_err(|error| format!("cannot attach the data-directory lock: {error}"))?;
     }
-    let output = command
-        .output()
-        .map_err(|error| format!("cannot start {}: {error}", hook.display()))?;
+    let result = run_bounded(command, hook, HOOK_TIMEOUT);
     drop(child_lock);
-    if output.status.success() {
-        return Ok(());
+    result
+}
+
+/// Run `command` to its end or kill it after `limit`; `Err` carries its output.
+fn run_bounded(
+    mut command: std::process::Command,
+    hook: &Path,
+    limit: Duration,
+) -> Result<(), String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("cannot start {}: {error}", hook.display()))?;
+    let drain = |stream: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut stream) = stream {
+                let _ = stream.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    );
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() >= limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!(
+                    "{} did not finish within {} s and was stopped",
+                    hook.display(),
+                    limit.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => break Err(format!("cannot wait for {}: {error}", hook.display())),
+        }
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    match status? {
+        status if status.success() => Ok(()),
+        _ => Err(hook_output(&stdout, &stderr)),
     }
-    Err(hook_output(&output.stdout, &output.stderr))
 }
 
 fn hook_output(stdout: &[u8], stderr: &[u8]) -> String {
@@ -286,16 +336,20 @@ fn hook_output(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 /// The hook under the lane's OS sandbox: it reads the filesystem, writes only the
-/// lane's roots, and has no network.
-fn run_confined(hook: &Path, work_dir: &Path) -> Result<(), String> {
+/// lane's roots (never its own `.git` pointer), and has no network.
+fn run_confined(hook: &Path, lane: &LaneGit) -> Result<(), String> {
     use crate::core::task_worker_env::{ProbeCommand, ProbeRunner, ProcessProbeRunner};
+    let work_dir = lane.work_dir();
     let confinement = crate::core::task_worker_sandbox::Confinement::for_worktree(work_dir)
         .map_err(|reason| format!("not run: {reason}"))?;
     let probe = ProbeCommand {
         program: hook.to_string_lossy().into_owned(),
         args: Vec::new(),
         cwd: work_dir.to_path_buf(),
-        env: Vec::new(),
+        env: pinned_git_env(lane)
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+            .collect(),
         timeout: HOOK_TIMEOUT,
         priority: crate::core::background_priority::Priority::Normal,
         clean_env: false,

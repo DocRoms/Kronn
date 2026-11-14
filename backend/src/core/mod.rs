@@ -82,6 +82,7 @@ pub mod key_discovery;
 pub mod keystore;
 pub mod keyvault;
 pub mod kronn_state;
+pub mod lane_git;
 pub mod launch_context;
 pub mod learning_doc;
 pub mod learning_gate;

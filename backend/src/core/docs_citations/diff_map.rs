@@ -148,9 +148,15 @@ impl<'a> DiffMap<'a> {
 
     fn file(&mut self, file: &Path) -> Result<&FileMap, String> {
         if !self.files.contains_key(file) {
-            let mut command = crate::core::cmd::git_cmd();
+            let mut command = crate::core::lane_git::git(self.root)?;
             command
-                .args(["diff", "--unified=0", "--no-ext-diff", "--no-color"])
+                .args([
+                    "diff",
+                    "--unified=0",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-color",
+                ])
                 .arg(self.base);
             if !self.to_worktree {
                 command.arg("HEAD");
@@ -158,7 +164,6 @@ impl<'a> DiffMap<'a> {
             let output = command
                 .arg("--")
                 .arg(file)
-                .current_dir(self.root)
                 .output()
                 .map_err(|error| format!("cannot run git diff: {error}"))?;
             if !output.status.success() {
@@ -206,11 +211,10 @@ pub(super) fn default_merge_base(root: &Path) -> Result<Option<String>, String> 
     let Some(target) = crate::core::project_profile::default_branch_ref(root) else {
         return Ok(None);
     };
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(root)?
         .args(["merge-base"])
         .arg(&target)
         .arg("HEAD")
-        .current_dir(root)
         .output()
         .map_err(|error| format!("cannot run git merge-base: {error}"))?;
     if !output.status.success() {

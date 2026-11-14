@@ -1,56 +1,121 @@
-# Git hooks of Kronn's commits and merges for a worker (KT-1745)
+# Git on a worker's worktree: hooks and pinned repository (KT-1745)
 
-Security and worker-lane policy. Kronn commits and merges for a task worker in
-its own process tree: outside the worker's OS sandbox, as the host user, with
-the user's credentials. Letting git run the repository's hooks there runs
-whatever those hooks point at.
+Security and worker-lane policy. Kronn inspects, stages, commits and merges for a
+task worker in its own process tree: outside the worker's OS sandbox, as the host
+user, with the user's credentials. Whatever git reads from the worktree and runs
+there is therefore worker-chosen code running unconfined.
 
-## The hole this closes
+## What the worker controls
 
-A relative `core.hooksPath` (husky: `.husky`, `.husky/_`) resolves **inside the
-worktree**, which the worker writes. Before this change a worker could edit
-`.husky/pre-commit`, call `task_exec_commit` (or wait for the candidate merge)
-and Kronn would execute that script unsandboxed. Functionally the same path
-made every worker commit fail on a repository whose tracked hook needs a
-gitignored file (`_/husky.sh`) the fresh worktree lacks, and the candidate merge
-reported that failure as an empty conflict, so the worker looped.
+The worker writes its whole worktree, **including the `.git` pointer file in it**
+and every file git reads from there:
 
-## The rule
+- hooks, when `core.hooksPath` is relative (husky: `.husky`, `.husky/_`) — they
+  resolve inside the worktree;
+- `.gitattributes`, naming `filter=`, `merge=`, `diff=` drivers;
+- through a redirected `.git` pointer (`gitdir: <a directory it wrote>`), a whole
+  repository configuration: `filter.*.clean|smudge|process`,
+  `merge.*.driver`, `diff.*.textconv`, `diff.external`, `core.fsmonitor`,
+  `commit.gpgsign` + `gpg.program`, `core.hooksPath`, `http.*`, `url.*.insteadOf`.
 
-No Kronn-run git command of a worker lane lets git resolve a hook inside the
-worktree. Each carries `-c core.hooksPath=<absolute dir outside the worktree, or
-/dev/null>` and `-c core.fsmonitor=false`
-([src: file: backend/src/core/commit_hooks.rs:134#git_config_args]). The two
-Kronn-made commits are covered:
+A plain `git` run in that directory by Kronn follows the pointer and runs all of
+it as the host user. The end-to-end proofs are in
+`backend/src/core/lane_git_test.rs` (each with a control showing the plain git
+does run the program).
 
-- `task_exec_commit` / `git_commit` — `run_commit_command`
-  ([src: file: backend/src/api/git_ops.rs:1173#run_commit_command]);
-- the candidate merge and the doc re-anchoring commit —
-  `build_candidate_with_hooks`
-  ([src: file: backend/src/core/worktree.rs:2520#build_candidate_with_hooks]).
+## The rule: one builder, pinned to the registration
 
-A commit the user asks for in their own checkout (`POST /git/commit`) is
-unchanged: the repository's hooks run, as ever.
+Every git command Kronn runs on a worker's worktree is built by
+[src: file: backend/src/core/lane_git.rs:290#git]
+([src: file: backend/src/core/lane_git.rs:63#LaneGit]), never by `git_cmd()`:
 
-The DCO check needs no `commit-msg` hook: Kronn signs every commit off itself
-(`git commit -s`), so the sign-off is enforced whatever the policy.
+- **The repository is pinned, not discovered.** The command carries
+  `--git-dir=<repo>/.git/worktrees/<lane>` and `--work-tree=<worktree>`. `<repo>`
+  is the project checkout the worktree path sits under
+  (`<repo>/.kronn/worktrees/<lane>`), its git directory is read from that
+  checkout, and the `<lane>` entry is the one git itself registered for this
+  worktree (`<admin>/gitdir`)
+  ([src: file: backend/src/core/lane_git.rs:135#registered_admin_dir]). Neither
+  the worktree's `.git` file nor a `commondir` is consulted.
+- **The pointer is verified before every command**
+  ([src: file: backend/src/core/lane_git.rs:198#verify]). If `<worktree>/.git`
+  no longer reads `gitdir: <that admin dir>` (absolute or Kronn's portable
+  relative form), nothing runs and the operation fails with
+  `WorktreeTampered: …` — the text `task_exec_commit` returns to the worker, and
+  the error the candidate build holds the integration with.
+- **Git is given nothing to run**: `core.hooksPath=/dev/null`,
+  `core.fsmonitor=false`, `commit.gpgSign=false`, `tag.gpgSign=false`
+  (`--no-gpg-sign` on every commit), no `GIT_EXTERNAL_DIFF`, and diffs run with
+  `--no-ext-diff --no-textconv`. With the repository pinned, a filter, merge
+  driver or textconv program can only be one the *registered* repository's own
+  configuration names (git-lfs, say), which the worker cannot write; an unknown
+  `filter=` in a worktree `.gitattributes` resolves to nothing.
+- A path that is not a managed worktree is the owner's own checkout: it keeps
+  git's discovery and gets the same switches. A **push** keeps the owner's hooks
+  there (`pre-push`)
+  ([src: file: backend/src/core/lane_git.rs:297#git_keeping_owner_hooks]); from a
+  managed worktree it is pinned and hook-less like the rest
+  ([src: file: backend/src/api/git_ops.rs:1629#run_git_push]), and the token-bearing
+  authenticated push therefore reads the registered repository's configuration
+  only ([src: file: backend/src/api/git_ops.rs:1593#authenticated_push_command]).
+  A task worker never pushes (only a human does, from the UI).
+
+Call sites: the commit/merge commit, staging and identity of `task_exec_commit` /
+`git_commit` ([src: file: backend/src/api/git_ops.rs:1190#run_commit_command]),
+the candidate merge, its abort and its commits
+([src: file: backend/src/core/worktree.rs:2519#build_candidate_with_hooks]), the doc
+citations settling (`git checkout`, `add`, `grep`, `show`, `diff`), the worktree
+inspections (`worktree_dirty_files`, `committed_file_changes`, `git_head`, …), the
+HTTP agent's `git_status` / `git_diff` / `git_log`, the sub-task diff, the
+time-limit checkpoint. A test fails when any of those functions calls a plain
+`git_cmd()` ([src: file: backend/src/core/lane_git_guard_test.rs:65#plain_git]);
+a deliberate plain call carries a `lane-git-allow:` comment saying why.
+
+## The worker cannot write its pointer
+
+The pointer is the one file the pinned commands trust, so it is read-only to the
+worker wherever it writes:
+
+- Kronn's Seatbelt profile denies writes to it
+  ([src: file: backend/src/core/task_worker_sandbox.rs:511#seatbelt_profile_read_only]) and
+  bubblewrap binds it read-only
+  ([src: file: backend/src/core/task_worker_sandbox.rs:529#bubblewrap_args_read_only]);
+- Claude's task-worker settings carry `sandbox.filesystem.denyWrite` for it and
+  `Edit/Write/MultiEdit/NotebookEdit` permission denies
+  ([src: file: backend/src/agents/runner.rs:13219#claude_task_worker_settings]);
+- the HTTP agents' write tools refuse it, and a symlink to it
+  ([src: file: backend/src/api/agent_workspace_tools.rs:434#resolve_writable_in_workspace]);
+- Codex already keeps `.git` read-only.
+
+This is defence in depth: the verification above is what makes a write that gets
+through (a CLI whose sandbox Kronn does not control) harmless.
 
 ## The setting: `worker_commit_hooks`
 
-Per project, in the project workspace (`PUT /api/projects/{id}/workspace`,
-field `worker_commit_hooks`; a human route, not reachable by a worker's bridge
-token). Default `off`.
+Per project, in the project workspace (`PUT /api/projects/{id}/workspace`, field
+`worker_commit_hooks`; a human route, not reachable by a worker's bridge token).
+Default `off`. It decides which **gating hook** Kronn itself runs before its own
+commit (`pre-commit`, or `pre-merge-commit` for a merge); git never runs a hook
+for these commands, whatever the value.
 
 | Value | What runs for a worker's commit / merge commit |
 |---|---|
 | `off` (default) | No hook. |
-| `main_checkout` | The gating hook (`pre-commit`, `pre-merge-commit` for a merge) from `<git-common-dir>/hooks` of the main checkout, as the host user. It is the owner's own hook, never a file of the worktree. When that directory lies inside the checkout being committed, nothing runs. |
-| `sandboxed` | The gating hook the repository configures (a worktree `.husky` included), **inside the lane's OS sandbox profile** (read the filesystem, write the lane's roots only, no network). A host with no usable sandbox refuses the commit instead of running it unconfined. |
+| `main_checkout` | The gating hook of the **registered main checkout** — its configured `core.hooksPath` resolved against it (husky's `.husky/_` included), else `<common git dir>/hooks` — as the host user, with `GIT_DIR`/`GIT_WORK_TREE` pinned. It is the owner's own file, outside every path the worker writes. For a plain (non-managed) checkout, whose hooks are under the tree, nothing runs. |
+| `sandboxed` | The gating hook the repository configures, resolved against the worktree (a worker-written `.husky` included), **inside the lane's OS sandbox profile** (reads the filesystem, writes the lane's roots but not its `.git` pointer, no network). A host with no usable sandbox refuses the commit instead of running it unconfined. The pointer is verified again before Kronn's own commit. |
 
-Whatever the value, git itself is given a hooks directory that is `/dev/null` or
-the main checkout's, so no passive hook (`post-commit`, `post-merge`,
-`prepare-commit-msg`…) of the worktree runs
-([src: file: backend/src/core/commit_hooks.rs:119#hooks_path_for_git]).
+Both run bounded by a 10-minute limit
+([src: file: backend/src/core/commit_hooks.rs:272#run_bounded]); a hook still
+running then is killed and refuses the commit.
+
+**Not run under any value**: `commit-msg` (commitlint), `prepare-commit-msg`,
+`post-commit`, `post-merge`, `reference-transaction`… Only the gating hook is
+run, by Kronn. A repository that relies on a `commit-msg` check for a rule other
+than DCO does not get it on a worker's commits.
+
+The DCO check needs no `commit-msg` hook: Kronn signs every commit off itself
+(`git commit -s`), so the sign-off is enforced whatever the policy.
+
 The policy type is
 [src: file: backend/src/models/projects.rs:37#WorkerCommitHooks].
 
@@ -58,22 +123,55 @@ The policy type is
 
 A gating hook that exits non-zero is a `HookRefused`, with the first lines of its
 output (20 lines / 2 000 characters), never a conflict
-([src: file: backend/src/core/commit_hooks.rs:217#run_gating_hook]):
+([src: file: backend/src/core/commit_hooks.rs:197#run_gating_hook]):
 
 - `task_exec_commit` / `git_commit` fail with `HookRefused (pre-commit): <output>`
   and commit nothing;
 - the candidate build returns `CandidateOutcome::HookRefused { hook, output }`
-  ([src: file: backend/src/core/worktree.rs:2423#HookRefused]), undoes the merge
+  ([src: file: backend/src/core/worktree.rs:2422#HookRefused]), undoes the merge
   and is reported to the principal and worker with the hook's output.
 
-A `git merge` refused before it starts, or a merge commit git itself rejects, is
-no longer an empty `Conflict { files: [] }` either: git's message is logged or
-returned as the error.
+A `git merge` refused before it starts (a dirty tree, unrelated histories) is an
+error carrying git's own words (`… was refused before it started: …`), which
+holds the integration for the child worktree; it is never an empty
+`Conflict { files: [] }`. A merge commit git itself rejects is an error too.
 
 ## Tests
 
-`backend/src/core/commit_hooks_test.rs`: a relative-hooksPath hook writing a
-marker outside the worktree is never run by a worker commit nor a candidate
-merge; a failing hook is `HookRefused` with its output and commits nothing; DCO
-sign-off stays enforced; `main_checkout` runs the common-dir hook and not the
-worktree's; `sandboxed` cannot write outside the worktree.
+- `backend/src/core/lane_git_test.rs`: the pointer is pinned to the registration
+  (absolute and portable-relative forms); a redirected pointer (a repository whose
+  configuration names a filter, a file-system monitor, a signing program, a merge
+  driver, a hooks directory) makes every Kronn git command refuse with
+  `WorktreeTampered` and none of those programs ever runs, with a control showing
+  plain git does run the filter; a pointer into `<repo>/target/wt-<lane>` cannot
+  pass for the main checkout under `main_checkout` or `sandboxed`; the registered
+  repo's hook runs when the pointer is intact; a conflict abort fires no
+  `reference-transaction`; a merge refused before it starts is an error; the HTTP
+  write tools refuse the pointer.
+- `backend/src/core/docs_citations/merge_tests.rs`: restoring staged docs fires no
+  `post-checkout`.
+- `backend/src/core/commit_hooks_test.rs`: a relative-hooksPath hook writing a
+  marker outside the worktree is never run by a worker commit nor a candidate
+  merge; a failing hook is `HookRefused` with its output and commits nothing; DCO
+  sign-off stays enforced; `main_checkout` runs the registered checkout's hook
+  and not the worktree's; `sandboxed` cannot write outside the worktree; a hook
+  that never ends is stopped on the host.
+- `backend/src/core/task_worker_sandbox_test.rs` and
+  `backend/src/agents/runner_test.rs`: the pointer is read-only in the profile
+  (and, where the OS sandbox can be applied, to a real confined command) and in
+  Claude's settings.
+- `backend/src/core/lane_git_guard_test.rs`: no plain `git_cmd()` in a function
+  that runs git on a worker's worktree.
+
+## Residual risk
+
+- A CLI worker's own sandbox is not Kronn's: if it lets the worker write the
+  repository's *shared* git directory (`<repo>/.git`, where the registered
+  configuration and `hooks/` live) the pinned commands trust what it wrote. Kronn's
+  own profiles and Claude's task-worker settings write only the worktree and the
+  lane's Cargo target.
+- `fast_forward_to` and the integration target's checks run in the target
+  checkout with the owner's hooks, as the owner's own git does; the target is not a
+  worker lane.
+- Discussion worktrees outside the task lanes share the builder only where their
+  code path goes through the functions listed above.

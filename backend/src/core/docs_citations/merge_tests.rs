@@ -1401,3 +1401,46 @@ fn a_citation_beyond_the_shrunk_file_with_two_candidates_is_settled_by_the_diff(
     );
     assert_eq!(broken(dir), Vec::<String>::new());
 }
+
+/// KT-1745 — putting staged docs back is `git checkout HEAD -- <docs>`, which
+/// fires `post-checkout`; in a worker's worktree that hook is the worker's.
+#[cfg(unix)]
+#[test]
+fn restoring_staged_docs_fires_no_hook_of_the_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = scratch_repo();
+    fs::write(repo.path().join("README.md"), "one\n").unwrap();
+    commit_all(repo.path(), "init");
+    let root = repo.path().canonicalize().unwrap();
+    let worktree = root.join(".kronn/worktrees/task-kt-1745-docs");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "work", worktree.to_str().unwrap()],
+    );
+    let markers = tempfile::tempdir().unwrap();
+    let marker = markers.path().join("POST_CHECKOUT");
+    let hook = worktree.join(".husky/post-checkout");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(&worktree, &["config", "core.hooksPath", ".husky"]);
+    fs::write(worktree.join("README.md"), "changed\n").unwrap();
+    git(&worktree, &["add", "README.md"]);
+
+    merge::git_stdout(&worktree, &["checkout", "HEAD", "--", "README.md"]).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "one\n"
+    );
+    assert!(
+        !marker.exists(),
+        "post-checkout of the worktree ran as the host user"
+    );
+    // Control: a plain checkout does run it.
+    fs::write(worktree.join("README.md"), "changed\n").unwrap();
+    git(&worktree, &["add", "README.md"]);
+    git(&worktree, &["checkout", "HEAD", "--", "README.md"]);
+    assert!(marker.exists(), "the control checkout fires the hook");
+}

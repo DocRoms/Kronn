@@ -10790,6 +10790,34 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn claude_task_worker_cannot_write_the_worktrees_git_pointer() {
+        // KT-1745 — Kronn's own git commands in the worktree trust what the
+        // pointer names: the shell is denied it, and so are the file tools.
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        let settings: serde_json::Value =
+            serde_json::from_str(&super::super::claude_task_worker_settings(&worktree).unwrap())
+                .unwrap();
+        let pointer = worktree.join(".git");
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyWrite"],
+            serde_json::json!([pointer])
+        );
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+            let rule = format!("{tool}(/{})", pointer.to_string_lossy());
+            assert!(
+                deny.contains(&serde_json::json!(rule)),
+                "{rule} in {deny:?}"
+            );
+        }
+        // The worktree itself stays writable.
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["allowWrite"][0],
+            serde_json::json!(worktree)
+        );
+    }
+
+    #[test]
     fn claude_task_worker_sandbox_stays_fail_closed_after_the_widening() {
         let (_repo_dir, _repo, worktree) = managed_task_worktree();
         let settings: serde_json::Value =

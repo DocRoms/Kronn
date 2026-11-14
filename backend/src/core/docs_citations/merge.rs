@@ -19,7 +19,6 @@ use super::{
     DocCitationFailure, ReanchorOutcome,
 };
 use crate::core::anti_halluc::{anchor_miss, anchor_miss_in};
-use crate::core::cmd::git_cmd;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -130,10 +129,22 @@ impl MergeDocs {
     }
 }
 
-fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = git_cmd()
-        .args(args)
-        .current_dir(root)
+/// `git` on `root` through the lane builder (KT-1745): the repository is the
+/// registered one, no hook or filter of the worktree runs (`git checkout` fires
+/// `post-checkout`, `git add` the clean filters), and a diff runs no program.
+fn lane_command(root: &Path, args: &[&str]) -> Result<std::process::Command, String> {
+    let mut command = crate::core::lane_git::git(root)?;
+    if let Some((subcommand, rest)) = args.split_first() {
+        command
+            .arg(subcommand)
+            .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(rest);
+    }
+    Ok(command)
+}
+
+pub(super) fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = lane_command(root, args)?
         .output()
         .map_err(|error| format!("cannot run git {}: {error}", args.join(" ")))?;
     if !output.status.success() {
@@ -163,13 +174,14 @@ pub fn merge_in_progress(root: &Path) -> bool {
 /// The merged (staged) text of every doc of the citation corpus that holds at
 /// least one `[src:` marker, sorted by path. The working tree is never read.
 fn citation_docs(root: &Path) -> Result<Vec<(PathBuf, String)>, String> {
-    let output = git_cmd()
-        .args([
+    let output = lane_command(
+        root,
+        &[
             "grep", "--cached", "-l", "-z", "-i", "-F", "[src:", "--", "*.md",
-        ])
-        .current_dir(root)
-        .output()
-        .map_err(|error| format!("cannot run git grep: {error}"))?;
+        ],
+    )?
+    .output()
+    .map_err(|error| format!("cannot run git grep: {error}"))?;
     // Exit 1 is "no match", not a failure.
     if !output.status.success() && output.status.code() != Some(1) {
         return Err(format!(

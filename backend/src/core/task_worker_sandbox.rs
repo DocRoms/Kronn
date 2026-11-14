@@ -212,6 +212,10 @@ pub struct SandboxPolicy {
     /// Directories the command can neither read nor write (KT-1492): the Kronn
     /// data directory, for a validation a trust level reached Docker for.
     pub hidden: Vec<PathBuf>,
+    /// Files inside a write root the command may read but never write nor
+    /// replace: the worktree's `.git` pointer (KT-1745). Whatever Kronn runs in
+    /// that worktree afterwards trusts what the pointer names.
+    pub read_only: Vec<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -223,6 +227,7 @@ impl SandboxPolicy {
             temp_dir: lane.tmp_dir(),
             docker_socket: None,
             hidden: Vec::new(),
+            read_only: vec![lane.worktree.join(".git")],
         }
     }
 
@@ -270,6 +275,15 @@ pub(crate) fn real_path(path: &Path) -> PathBuf {
             }
             _ => return path.to_path_buf(),
         }
+    }
+}
+
+/// `path` with its parent resolved through symlinks and its own last component
+/// kept as is: a file replaced by a symlink is still that file's name.
+fn protected_path(path: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => real_path(parent).join(name),
+        _ => path.to_path_buf(),
     }
 }
 
@@ -433,12 +447,22 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
             mechanism.launcher().to_string(),
             vec![
                 "-p".to_string(),
-                seatbelt_profile_hiding(&writable, policy.docker_socket.as_deref(), &policy.hidden),
+                seatbelt_profile_read_only(
+                    seatbelt_profile_hiding(
+                        &writable,
+                        policy.docker_socket.as_deref(),
+                        &policy.hidden,
+                    ),
+                    &policy.read_only,
+                ),
             ],
         ),
         Mechanism::Bubblewrap => (
             mechanism.launcher().to_string(),
-            bubblewrap_args_hiding(&writable, policy.docker_socket.as_deref(), &policy.hidden),
+            bubblewrap_args_read_only(
+                bubblewrap_args_hiding(&writable, policy.docker_socket.as_deref(), &policy.hidden),
+                &policy.read_only,
+            ),
         ),
     };
     args.push(probe.program.clone());
@@ -481,6 +505,45 @@ fn seatbelt_profile_hiding(
     let mut profile = seatbelt_profile_with(writable, docker_socket);
     profile.push_str(&crate::core::trust_sandbox::seatbelt_hide_rules(hidden));
     profile
+}
+
+/// `profile` plus a write deny over each `read_only` file, last so it wins.
+pub(crate) fn seatbelt_profile_read_only(mut profile: String, read_only: &[PathBuf]) -> String {
+    if read_only.is_empty() {
+        return profile;
+    }
+    profile.push_str("(deny file-write*\n");
+    for path in read_only {
+        profile.push_str(&format!(
+            "  (literal {})\n",
+            seatbelt_literal(&protected_path(path))
+        ));
+    }
+    profile.push_str(")\n");
+    profile
+}
+
+/// `args` with each existing `read_only` file bound read-only over itself, before
+/// the namespace flags. A file that does not exist is left out: `bwrap` refuses a
+/// bind whose source is missing.
+pub(crate) fn bubblewrap_args_read_only(
+    mut args: Vec<String>,
+    read_only: &[PathBuf],
+) -> Vec<String> {
+    let at = args
+        .iter()
+        .position(|arg| arg == "--unshare-net")
+        .unwrap_or(args.len());
+    let mut binds = Vec::new();
+    for path in read_only {
+        let path = protected_path(path);
+        if path.is_file() {
+            let text = path.to_string_lossy().into_owned();
+            binds.extend(["--ro-bind".to_string(), text.clone(), text]);
+        }
+    }
+    args.splice(at..at, binds);
+    args
 }
 
 /// The Docker socket a validation of this host reaches: `DOCKER_HOST` when it

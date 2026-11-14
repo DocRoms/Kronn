@@ -2233,9 +2233,8 @@ pub fn remove_discussion_worktree(
 
 /// Read the current HEAD commit SHA of a git dir (repo or worktree).
 fn git_head(dir: &Path) -> Result<String, String> {
-    let out = crate::core::cmd::git_cmd()
+    let out = crate::core::lane_git::git(dir)?
         .args(["rev-parse", "HEAD"])
-        .current_dir(dir)
         .output()
         .map_err(|e| format!("git rev-parse HEAD failed: {e}"))?;
     if !out.status.success() {
@@ -2526,9 +2525,8 @@ pub fn build_candidate_with_hooks(
     // The merge stops before its commit so the doc citations the two sides
     // shifted are settled into it (KT-1321) and the commit is made once.
     // A fast-forward does run `post-merge`, hence the hooks override here too.
-    let out = crate::core::commit_hooks::worker_git_cmd(worktree_path, hooks)
+    let out = crate::core::lane_git::git(worktree_path)?
         .args(["merge", "--no-edit", "--no-commit", base_sha])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git merge failed: {e}"))?;
     if !crate::core::docs_citations::merge::merge_in_progress(worktree_path) {
@@ -2537,22 +2535,28 @@ pub fn build_candidate_with_hooks(
             return settle_branch_docs(worktree_path, base_sha, hooks);
         }
         // The merge was refused before it started (a dirty tree, an unrelated
-        // history…): no file conflicts, and what git said is not lost.
+        // history…): there are no conflicting files to name, so this is not a
+        // `Conflict { files: [] }` the worker can only loop on — what git said
+        // travels as the error.
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
         tracing::warn!(
             "git merge refused in {}: {}",
             worktree_path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            said.trim()
         );
-        return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
-            files: Vec::new(),
-        }));
+        return Err(format!(
+            "git merge of {base_sha} was refused before it started: {}",
+            crate::core::commit_hooks::first_lines(&said)
+        ));
     }
     let conflicted_files = |path: &Path| {
-        crate::core::cmd::git_cmd()
-            .args(["diff", "--name-only", "--diff-filter=U"])
-            .current_dir(path)
-            .output()
+        crate::core::lane_git::git(path)
             .ok()
+            .and_then(|mut git| {
+                git.args(["diff", "--name-only", "--diff-filter=U", "--no-ext-diff"])
+                    .output()
+                    .ok()
+            })
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -2616,14 +2620,13 @@ pub fn build_candidate_with_hooks(
             output: refusal.output,
         }));
     }
-    let mut commit = crate::core::commit_hooks::worker_git_cmd(worktree_path, hooks);
-    commit.args(["commit", "--signoff", "--cleanup=strip"]);
+    let mut commit = crate::core::lane_git::git(worktree_path)?;
+    commit.args(["commit", "--signoff", "--no-gpg-sign", "--cleanup=strip"]);
     match docs.as_ref().and_then(|docs| docs.summary()) {
         Some(note) => commit.args(["-m", &merge_subject(worktree_path, base_sha), "-m", &note]),
         None => commit.arg("--no-edit"),
     };
     let committed = commit
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git commit failed: {e}"))?;
     if !committed.status.success() {
@@ -2732,17 +2735,17 @@ fn settle_branch_docs(
                 output: refusal.output,
             }));
         }
-        let committed = crate::core::commit_hooks::worker_git_cmd(worktree_path, hooks)
+        let committed = crate::core::lane_git::git(worktree_path)?
             .args([
                 "commit",
                 "--signoff",
+                "--no-gpg-sign",
                 "--cleanup=strip",
                 "-m",
                 "Re-anchor doc citations moved by the branch's code",
                 "-m",
                 &note,
             ])
-            .current_dir(worktree_path)
             .output()
             .map_err(|e| format!("git commit failed: {e}"))?;
         if !committed.status.success() {
@@ -2761,20 +2764,23 @@ fn settle_branch_docs(
     })
 }
 
+/// Undo the merge in progress. Runs through the lane builder: `git merge --abort`
+/// fires `reference-transaction`, and a hook of the worktree is the worker's.
 fn abort_merge(worktree_path: &Path) {
-    let _ = crate::core::cmd::git_cmd()
-        .args(["merge", "--abort"])
-        .current_dir(worktree_path)
-        .output();
+    if let Ok(mut git) = crate::core::lane_git::git(worktree_path) {
+        let _ = git.args(["merge", "--abort"]).output();
+    }
 }
 
 /// The subject git prepared for the merge in progress.
 fn merge_subject(worktree_path: &Path, base_sha: &str) -> String {
-    let prepared = crate::core::cmd::git_cmd()
-        .args(["rev-parse", "--git-path", "MERGE_MSG"])
-        .current_dir(worktree_path)
-        .output()
+    let prepared = crate::core::lane_git::git(worktree_path)
         .ok()
+        .and_then(|mut git| {
+            git.args(["rev-parse", "--git-path", "MERGE_MSG"])
+                .output()
+                .ok()
+        })
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|path| worktree_path.join(path.trim()))
         .and_then(|path| std::fs::read_to_string(path).ok())
@@ -4214,9 +4220,8 @@ fn parse_porcelain(stdout: &str) -> Vec<DirtyFile> {
 /// dirty, unlocking it would lose the changes. We surface the list so the UI
 /// can block with a "commit first" CTA rather than a blind refusal.
 pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(worktree_path)?
         .args(["status", "--porcelain=v1"])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git status failed in worktree: {}", e))?;
     if !output.status.success() {
@@ -4238,9 +4243,11 @@ pub fn committed_file_changes(
     base_rev: &str,
     head_rev: &str,
 ) -> Result<Vec<CommittedFileChange>, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(worktree_path)?
         .args([
             "diff",
+            "--no-ext-diff",
+            "--no-textconv",
             "--name-status",
             "--no-renames",
             "-z",
@@ -4248,7 +4255,6 @@ pub fn committed_file_changes(
             head_rev,
             "--",
         ])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git diff failed in worktree: {e}"))?;
     if !output.status.success() {
@@ -4313,9 +4319,8 @@ pub(crate) fn parse_commit_log(stdout: &[u8]) -> Vec<(String, String)> {
 /// Raw bytes of `path` as committed at `rev`.
 pub fn file_at_revision(worktree_path: &Path, rev: &str, path: &str) -> Result<Vec<u8>, String> {
     reject_option_like_rev(rev)?;
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(worktree_path)?
         .args(["cat-file", "blob", &format!("{rev}:{path}")])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git cat-file failed in worktree: {e}"))?;
     if !output.status.success() {
@@ -4329,9 +4334,8 @@ pub fn file_at_revision(worktree_path: &Path, rev: &str, path: &str) -> Result<V
 
 /// The `Name <email>` that `git commit -s` signs with in this worktree.
 pub fn committer_identity(worktree_path: &Path) -> Result<String, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(worktree_path)?
         .args(["var", "GIT_COMMITTER_IDENT"])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git var failed in worktree: {e}"))?;
     if !output.status.success() {

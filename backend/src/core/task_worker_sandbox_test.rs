@@ -1758,3 +1758,64 @@ fn the_os_sandbox_reaches_the_docker_socket_only_when_the_policy_opens_it() {
     );
     assert!(listener.accept().is_ok(), "the connection never arrived");
 }
+
+// ── KT-1745: the worktree's `.git` pointer is read-only to the worker ────
+
+#[test]
+fn the_worktrees_git_pointer_is_denied_to_a_confined_command() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join(".git"), "gitdir: /registered\n").unwrap();
+    let policy = policy_of(&layout);
+    let pointer = layout.worktree.canonicalize().unwrap().join(".git");
+    assert_eq!(policy.read_only, vec![layout.worktree.join(".git")]);
+    let command = probe("true", &[], &layout.worktree);
+
+    // Seatbelt: a write deny on the file, after every allow so it wins.
+    let seatbelt = confine(Mechanism::Seatbelt, &policy, &command);
+    let profile = &seatbelt.args[1];
+    let deny = format!(
+        "(deny file-write*\n  (literal {})\n)",
+        seatbelt_literal(&pointer)
+    );
+    let at = profile.find(&deny).unwrap_or_else(|| panic!("{profile}"));
+    assert!(at > profile.find("(allow file-write*").unwrap());
+
+    // Bubblewrap: bound read-only over itself, before the namespace flags.
+    let bwrap = confine(Mechanism::Bubblewrap, &policy, &command).args;
+    let text = pointer.to_string_lossy().into_owned();
+    let bind = bwrap
+        .windows(3)
+        .position(|w| w[0] == "--ro-bind" && w[1] == text && w[2] == text)
+        .expect("the pointer is bound read-only");
+    assert!(bind < bwrap.iter().position(|a| a == "--unshare-net").unwrap());
+}
+
+#[test]
+fn a_confined_command_cannot_rewrite_or_replace_the_git_pointer() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    let pointer = layout.worktree.join(".git");
+    std::fs::write(&pointer, "gitdir: /registered\n").unwrap();
+    let run = |script: &str| {
+        let command = probe("sh", &["-c", script], &layout.worktree);
+        SandboxedProbeRunner::new(
+            Ok(policy_of(&layout)),
+            Some(mechanism),
+            Arc::new(ProcessProbeRunner),
+        )
+        .run(&command)
+    };
+
+    assert!(!run("echo 'gitdir: /evil' > .git").success);
+    assert!(!run("rm -f .git && echo 'gitdir: /evil' > .git").success);
+    assert!(!run("mv .git .git.bak").success);
+    assert_eq!(
+        std::fs::read_to_string(&pointer).unwrap(),
+        "gitdir: /registered\n"
+    );
+    // The rest of the worktree stays writable.
+    assert!(run("echo ok > other.txt").success);
+    assert!(layout.worktree.join("other.txt").exists());
+}

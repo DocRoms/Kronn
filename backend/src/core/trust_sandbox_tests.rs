@@ -121,6 +121,7 @@ fn the_worker_sandbox_hides_the_data_dir_inside_the_options_before_the_command()
         temp_dir: PathBuf::from("/work/tmp"),
         docker_socket: None,
         hidden: hidden.to_vec(),
+        read_only: Vec::new(),
     };
     let command = probe(
         "--unshare-net",

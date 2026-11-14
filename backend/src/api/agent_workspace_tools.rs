@@ -225,6 +225,8 @@ pub enum Refusal {
     PrivateAddress(String),
     /// The path leaves the workspace once canonicalised.
     OutsideWorkspace(String),
+    /// The path is the worktree's `.git` pointer, which a worker never writes.
+    ProtectedGitPointer(String),
     /// The discussion has no declared workspace, so there is nothing to scope to.
     NoWorkspace,
 }
@@ -245,6 +247,10 @@ impl Refusal {
                 "refused: `{path}` is outside this discussion's workspace. \
                  Paths are relative to the workspace root; `..` and absolute \
                  paths cannot leave it."
+            ),
+            Refusal::ProtectedGitPointer(path) => format!(
+                "refused: `{path}` is the repository pointer of this worktree. Kronn runs git \
+                 in it for you (task_exec_commit, git_commit…); it is never written by a worker."
             ),
             Refusal::NoWorkspace => "refused: this discussion is not attached to any \
                  directory — it has no project and no workspace — so there is nothing to \
@@ -420,6 +426,22 @@ pub fn resolve_in_workspace(root: &Path, requested: &str) -> Result<PathBuf, Ref
     Ok(target)
 }
 
+/// [`resolve_in_workspace`] for a path the model is about to WRITE: the `.git`
+/// pointer of a worktree is also refused (KT-1745). Kronn's own git commands in
+/// that worktree trust what it names, so a worker that redirected it would pick
+/// the repository, and the programs its configuration names, Kronn runs. A
+/// symlink to it is refused as the file itself.
+pub fn resolve_writable_in_workspace(root: &Path, requested: &str) -> Result<PathBuf, Refusal> {
+    let target = resolve_in_workspace(root, requested)?;
+    let root_canonical = root.canonicalize().map_err(|_| Refusal::NoWorkspace)?;
+    let pointer = root_canonical.join(".git");
+    let resolved = crate::core::task_worker_sandbox::real_path(&target);
+    if resolved.starts_with(&pointer) || target.starts_with(&pointer) {
+        return Err(Refusal::ProtectedGitPointer(requested.to_string()));
+    }
+    Ok(target)
+}
+
 /// Cap on a diff or a log payload. A full diff of a large branch would blow the
 /// model's window and be useless; truncation is reported so a partial diff is
 /// never mistaken for the whole change.
@@ -434,9 +456,16 @@ const MAX_GIT_BYTES: usize = 192 * 1024;
 /// agent actually needs to review work. The separate commit primitive below is
 /// narrower still: named paths only, after durable execution authorisation.
 fn git_read(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(args)
-        .current_dir(root)
+    // KT-1745 — the repository is the registered one, never what the worktree's
+    // `.git` file says; a diff runs no external program.
+    let mut command = crate::core::lane_git::git(root)?;
+    if let Some((subcommand, rest)) = args.split_first() {
+        command
+            .arg(subcommand)
+            .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(rest);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("git could not run: {error}"))?;
     if !output.status.success() {
@@ -1529,7 +1558,8 @@ pub fn write_file_payload_with_receipt(
     content: &str,
     expected_sha256: Option<&str>,
 ) -> Result<Value, String> {
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     validate_proposed_source(&path, requested, content)?;
     if agent_workspace_structure::is_guarded(&path) {
         if let Ok(original) = std::fs::read_to_string(&path) {
@@ -1547,7 +1577,8 @@ fn write_file_payload_inner(
     content: &str,
     expected_sha256: Option<&str>,
 ) -> Result<Value, String> {
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("could not create `{}`: {error}", parent.display()))?;
@@ -1672,7 +1703,8 @@ pub fn edit_file_payload(
     if old_string == new_string {
         return Err("`old_string` and `new_string` are identical — nothing would change.".into());
     }
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     if !sha256_receipt_is_well_formed(expected_sha256) {
         return Err(invalid_sha256_receipt_message());
     }
@@ -1800,7 +1832,8 @@ pub fn edit_lines_payload(
     if !sha256_receipt_is_well_formed(expected_sha256) {
         return Err(invalid_sha256_receipt_message());
     }
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1918,7 +1951,8 @@ pub fn insert_after_line_payload(
     if !sha256_receipt_is_well_formed(expected_sha256) {
         return Err(invalid_sha256_receipt_message());
     }
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

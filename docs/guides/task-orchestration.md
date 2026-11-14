@@ -162,12 +162,17 @@ execution boundary according to the worker transport:
   cannot proceed without such a bypass, the task fails visibly and can be
   reassigned; Kronn does not trade confinement for apparent progress.
 
-Kronn's own commits and merges for a worker run in Kronn's process, not the
-worker's sandbox, so they never let git resolve a hook inside the worktree (a
-husky `.husky/pre-commit` is worker-written code). The project's
+Every git command Kronn runs on a worker's worktree (inspect, stage, commit,
+merge, abort, doc re-anchoring) runs in Kronn's process, not the worker's
+sandbox. It is therefore built by one function that pins the repository to the
+registered project checkout (never to the worktree's own `.git` file, which the
+worker could redirect), gives git no hook, file-system monitor or signing
+program (so no program a worker names can run), and refuses with `WorktreeTampered` when the pointer was
+changed; the worker cannot write that file in the first place. The project's
 `worker_commit_hooks` setting (`off` by default, `main_checkout`, `sandboxed`)
-decides which hook runs, and a refusing hook is reported as `HookRefused` with
-its output, not as a conflict; see
+decides which gating hook Kronn itself runs, and a refusing hook is reported as
+`HookRefused` with its output, not as a conflict; `commit-msg` checks other than
+the DCO sign-off Kronn adds are not run. See
 [worker-commit-hooks](../operations/worker-commit-hooks.md).
 
 Sandbox startup failure is a launch failure, not a reason to run unsandboxed.

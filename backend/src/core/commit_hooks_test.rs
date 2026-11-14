@@ -58,18 +58,20 @@ impl Lane {
         fs::write(main.path().join("README.md"), "# test").unwrap();
         git(main.path(), &["add", "."]);
         git(main.path(), &["commit", "-m", "init"]);
-        let parent = tempfile::Builder::new()
-            .prefix("kronn-hooks-wt")
-            .tempdir()
-            .unwrap();
-        let worktree = parent.path().canonicalize().unwrap().join("work");
+        // Where Kronn puts a worker's worktree: `<repo>/.kronn/worktrees/<lane>`.
+        let main_root = main.path().canonicalize().unwrap();
+        let worktree = main_root.join(".kronn/worktrees/task-kt-1745-hooks");
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
         git(
             main.path(),
             &["worktree", "add", "-b", "work", worktree.to_str().unwrap()],
         );
         Self {
             main,
-            _parent: parent,
+            _parent: tempfile::Builder::new()
+                .prefix("kronn-hooks-unused")
+                .tempdir()
+                .unwrap(),
             worktree,
             marker_dir: tempfile::Builder::new()
                 .prefix("kronn-hooks-marker")
@@ -169,13 +171,16 @@ mod unix {
     }
 
     #[test]
-    fn main_checkout_hooks_run_from_the_common_dir_and_a_worktree_hook_does_not() {
+    fn main_checkout_hooks_run_from_the_registered_checkout_and_a_worktree_hook_does_not() {
         let lane = Lane::new();
+        // The repository's configuration is shared: `core.hooksPath = .husky`
+        // resolves against the main checkout for the owner's own hook, and
+        // against the worktree for the worker's.
+        lane.husky("pre-commit", &lane.touch_marker("worktree"));
         write_hook(
-            &lane.main.path().join(".git/hooks/pre-commit"),
+            &lane.main.path().join(".husky/pre-commit"),
             &lane.touch_marker("main"),
         );
-        lane.husky("pre-commit", &lane.touch_marker("worktree"));
         let files = lane.add_file("a.txt");
 
         run_git_commit_for_worker(
@@ -191,13 +196,6 @@ mod unix {
 
         assert!(lane.marker("main").exists(), "the owner's hook ran");
         assert!(!lane.marker("worktree").exists());
-        let path = hooks_path_for_git(&lane.worktree, WorkerCommitHooks::MainCheckout);
-        assert!(path.is_absolute());
-        assert!(
-            !path.starts_with(&lane.worktree),
-            "never a path under the worktree: {}",
-            path.display()
-        );
     }
 
     #[test]
@@ -301,6 +299,17 @@ mod unix {
         for hook in ["pre-merge-commit", "post-merge", "pre-commit", "commit-msg"] {
             assert!(!lane.marker(hook).exists(), "{hook} ran as the host user");
         }
+        // The merge commit is a real two-parent merge, signed off by Kronn, not
+        // by a `commit-msg` hook.
+        assert_eq!(
+            git(&lane.worktree, &["rev-parse", &format!("{sha}^2")]),
+            parent_tip
+        );
+        let message = git(&lane.worktree, &["log", "-1", "--format=%B", &sha]);
+        assert!(
+            message.contains("Signed-off-by: Test <test@test.com>"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -355,20 +364,22 @@ mod unix {
     }
 
     #[test]
-    fn the_git_hooks_path_is_never_under_the_worktree() {
-        let lane = Lane::new();
-        for policy in [
-            WorkerCommitHooks::Off,
-            WorkerCommitHooks::MainCheckout,
-            WorkerCommitHooks::Sandboxed,
-        ] {
-            let path = hooks_path_for_git(&lane.worktree, policy);
-            assert!(!path.starts_with(&lane.worktree), "{policy:?}: {path:?}");
-        }
+    fn a_plain_checkout_runs_no_main_checkout_hook_of_its_own_tree() {
         // A plain checkout is its own main checkout: its `.git/hooks` is under
         // the tree, so nothing is trusted there either.
-        let plain = hooks_path_for_git(lane.main.path(), WorkerCommitHooks::MainCheckout);
-        assert_eq!(plain, PathBuf::from("/dev/null"));
+        let lane = Lane::new();
+        write_hook(
+            &lane.main.path().join(".git/hooks/pre-commit"),
+            &lane.touch_marker("plain"),
+        );
+        let result = run_gating_hook(
+            lane.main.path(),
+            WorkerCommitHooks::MainCheckout,
+            "pre-commit",
+            None,
+        );
+        assert!(result.is_ok());
+        assert!(!lane.marker("plain").exists());
     }
 }
 
@@ -396,4 +407,46 @@ fn first_lines_bounds_what_travels_with_a_refusal() {
     assert_eq!(first_lines(&long).lines().count(), REFUSAL_LINES);
     assert!(first_lines(&"x".repeat(10_000)).chars().count() <= REFUSAL_CHARS + 1);
     assert_eq!(first_lines("\n\n"), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hook_that_never_ends_is_stopped_after_its_time_limit_on_the_host_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let hook = dir.path().join("pre-commit");
+    unix_hook(&hook, "echo started >&2; exec sleep 30");
+    let mut command = std::process::Command::new(&hook);
+    command
+        .current_dir(dir.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let started = std::time::Instant::now();
+    let error = run_bounded(command, &hook, Duration::from_millis(300)).unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(error.contains("did not finish"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hook_that_fails_reports_its_output_through_the_bounded_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let hook = dir.path().join("pre-commit");
+    unix_hook(&hook, "echo 'lint failed' >&2; exit 3");
+    let mut command = std::process::Command::new(&hook);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let error = run_bounded(command, &hook, Duration::from_secs(30)).unwrap_err();
+    assert!(error.contains("lint failed"), "{error}");
+}
+
+#[cfg(unix)]
+fn unix_hook(path: &Path, body: &str) {
+    write_hook(path, body);
 }

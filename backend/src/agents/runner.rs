@@ -13226,6 +13226,14 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     let lane = crate::core::task_worker_env::WorkerLane::for_worktree(&work_dir)?;
     let caches =
         crate::core::task_worker_env::SharedCaches::discover(lane.main_checkout.as_deref());
+    // KT-1745 — the `.git` pointer of the worktree is the repository Kronn's own
+    // git commands in it trust: the worker reads it, never writes or replaces it
+    // (the shell through `denyWrite`, the file tools through a permission rule).
+    let git_pointer = lane.worktree.join(".git");
+    let mut permission_deny = crate::core::vault_guard::claude_permission_deny();
+    for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        permission_deny.push(format!("{tool}(/{})", git_pointer.to_string_lossy()));
+    }
     serde_json::to_string(&serde_json::json!({
         "sandbox": {
             "enabled": true,
@@ -13235,6 +13243,7 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             "excludedCommands": [],
             "filesystem": {
                 "allowWrite": lane.write_roots(),
+                "denyWrite": [git_pointer],
                 "allowRead": lane.read_roots(&caches),
                 // KT-1495 — the Kronn data directory: `allowRead` is additive, so
                 // without this the worker's shell reads the keys and the database.
@@ -13242,7 +13251,7 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             },
             "network": { "allowLocalBinding": true }
         },
-        "permissions": { "deny": crate::core::vault_guard::claude_permission_deny() },
+        "permissions": { "deny": permission_deny },
         "hooks": claude_project_cargo_hooks(&work_dir)
     }))
     .map_err(|error| format!("Unable to encode the Claude task-worker sandbox policy: {error}"))
