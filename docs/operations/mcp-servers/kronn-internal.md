@@ -100,7 +100,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2984-3032#decline]`
+`[src: file: backend/src/lib.rs:2988-3036#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:655-770#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
@@ -561,7 +561,7 @@ paid for inside the catalogue budget; on an execution the limit itself escalated
 back to its worker, unless the campaign's `token_budget` is spent: the answer then says `stop_reason:
 token_budget_exhausted` and nothing is scheduled (a `request_changes` or a worker reassignment is stopped the same way). The whole contract, the sentinel and the UI are in
 [worker review rounds](../worker-review-rounds.md).
-`[src: file: backend/src/api/orchestration.rs:17642-17647#extend_execution_review_rounds]`
+`[src: file: backend/src/api/orchestration.rs:17643-17648#extend_execution_review_rounds]`
 
 The worker brief of a worker with a shell says who runs which gates: the worker
 runs the TARGETED tests, the long validations the principal persisted are played

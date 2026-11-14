@@ -49,6 +49,7 @@ describe('WorkersSection (KT-1345)', () => {
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
       managed_worktree_roots: [],
+      lane_warm: {},
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentRounds(8)'));
@@ -76,6 +77,7 @@ describe('WorkersSection (KT-1345)', () => {
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
       managed_worktree_roots: [],
+      lane_warm: {},
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentUnlimited'));
@@ -133,6 +135,7 @@ describe('WorkersSection (KT-1345)', () => {
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
       managed_worktree_roots: [],
+      lane_warm: {},
     }));
     await waitFor(() => expect(screen.getByTestId('workers-cap-current'))
       .toHaveTextContent('config.workers.maxConcurrentCurrent(3)'));
@@ -180,6 +183,7 @@ describe('WorkersSection (KT-1345)', () => {
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
       managed_worktree_roots: [],
+      lane_warm: {},
     }));
     await waitFor(() => expect(box).not.toBeChecked());
     expect(screen.getByTestId('workers-save')).toBeDisabled();
@@ -219,7 +223,7 @@ describe('WorkersSection (KT-1345)', () => {
     fireEvent.change(input, { target: { value: '512' } });
     expect(screen.queryByTestId('workers-heavy-invalid')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('workers-save'));
-    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, heavy_output_kb: 512 }));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, heavy_output_kb: 512, lane_warm: {} }));
     await waitFor(() => expect(screen.getByTestId('workers-heavy-current'))
       .toHaveTextContent('config.workers.heavyOutputCurrent(512)'));
   });
@@ -244,7 +248,7 @@ describe('WorkersSection (KT-1345)', () => {
     fireEvent.change(input, { target: { value: '/srv/lanes\n\n  /Users/me/wt  \n' } });
     expect(screen.queryByTestId('workers-roots-invalid')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('workers-save'));
-    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, managed_worktree_roots: ['/srv/lanes', '/Users/me/wt'] }));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, managed_worktree_roots: ['/srv/lanes', '/Users/me/wt'], lane_warm: {} }));
     await waitFor(() => expect(input).toHaveValue('/srv/lanes\n/Users/me/wt'));
   });
 
@@ -280,8 +284,72 @@ describe('WorkersSection (KT-1345)', () => {
     fireEvent.change(max, { target: { value: '90' } });
     expect(screen.queryByTestId('workers-shell-outlive-warning')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('workers-save'));
-    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, bash_max_timeout_min: 90 }));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, bash_max_timeout_min: 90, lane_warm: {} }));
     await waitFor(() => expect(screen.getByTestId('workers-shell-current'))
       .toHaveTextContent('config.workers.shellTimeoutsSummary(15,90,120)'));
+  });
+});
+
+describe('WorkersSection lane warm-up (KT-1742)', () => {
+  const base = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, managed_worktree_roots: [] };
+
+  it('shows what is saved and starts on the detected defaults', async () => {
+    getMock.mockResolvedValue({ ...base, lane_warm: { seed_alignment: false, first_build_command: 'npm ci', first_build_timeout_min: 90 } });
+    render(<WorkersSection t={t} />);
+    await waitFor(() => expect(screen.getByTestId('workers-lane-warm-alignment')).toHaveValue('off'));
+    expect(screen.getByTestId('workers-lane-warm-command')).toHaveValue('npm ci');
+    expect(screen.getByTestId('workers-lane-warm-timeout')).toHaveValue(90);
+    expect(screen.getByTestId('workers-lane-warm-env-mode')).toHaveValue('inherit');
+  });
+
+  it('saves the global entry: a custom environment, a command and a bound', async () => {
+    getMock.mockResolvedValue({ ...base, lane_warm: {} });
+    saveMock.mockImplementation(async (value: unknown) => value);
+    render(<WorkersSection t={t} />);
+    await waitFor(() => expect(screen.getByTestId('workers-lane-warm-env-mode')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('workers-lane-warm-env-mode'), { target: { value: 'custom' } });
+    fireEvent.change(screen.getByTestId('workers-lane-warm-env-text'), { target: { value: 'CC=clang\nCFLAGS=-O1' } });
+    fireEvent.change(screen.getByTestId('workers-lane-warm-command'), { target: { value: 'composer install' } });
+    fireEvent.change(screen.getByTestId('workers-lane-warm-timeout'), { target: { value: '45' } });
+    fireEvent.change(screen.getByTestId('workers-lane-warm-alignment'), { target: { value: 'on' } });
+    fireEvent.click(screen.getByTestId('workers-save'));
+
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({
+      ...base,
+      lane_warm: {
+        seed_alignment: true,
+        compiler_env: ['CC=clang', 'CFLAGS=-O1'],
+        first_build_command: 'composer install',
+        first_build_timeout_min: 45,
+      },
+    }));
+  });
+
+  it('refuses a malformed environment line or an out-of-range bound before saving', async () => {
+    getMock.mockResolvedValue({ ...base, lane_warm: {} });
+    render(<WorkersSection t={t} />);
+    await waitFor(() => expect(screen.getByTestId('workers-lane-warm-env-mode')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('workers-lane-warm-env-mode'), { target: { value: 'custom' } });
+    fireEvent.change(screen.getByTestId('workers-lane-warm-env-text'), { target: { value: 'NOT_AN_ASSIGNMENT' } });
+    expect(screen.getByTestId('workers-lane-warm-env-invalid')).toBeInTheDocument();
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId('workers-lane-warm-env-mode'), { target: { value: 'none' } });
+    fireEvent.change(screen.getByTestId('workers-lane-warm-timeout'), { target: { value: '0' } });
+    expect(screen.getByTestId('workers-lane-warm-timeout-invalid')).toBeInTheDocument();
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+  });
+
+  it('an empty list means no compiler environment at all, saved as such', async () => {
+    getMock.mockResolvedValue({ ...base, lane_warm: {} });
+    saveMock.mockImplementation(async (value: unknown) => value);
+    render(<WorkersSection t={t} />);
+    await waitFor(() => expect(screen.getByTestId('workers-lane-warm-env-mode')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('workers-lane-warm-env-mode'), { target: { value: 'none' } });
+    fireEvent.click(screen.getByTestId('workers-save'));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...base, lane_warm: { compiler_env: [] } }));
   });
 });

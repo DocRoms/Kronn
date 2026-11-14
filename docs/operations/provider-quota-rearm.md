@@ -4,7 +4,7 @@ Kronn blocks new delegations for a provider after a real quota-exhaustion recove
 
 A human confirmation in Config > Agents can acknowledge that one provider's quota is available again. The action records an idempotent provider-scoped audit event and watermark; it does not restart, cancel, or change any historical execution or recovery row. A later quota marker for that provider is newer than the watermark and blocks launches again. [src: file: backend/src/db/orchestration.rs:3659-3700#rearm_provider_quota]
 
-The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3349-3352#rearm_provider_quota] [src: file: backend/src/api/orchestration.rs:16574-16606#rearm_provider_quota]
+The re-arm endpoint is a browser route and is not part of the task-worker MCP surface. [src: file: backend/src/lib.rs:3353-3356#rearm_provider_quota] [src: file: backend/src/api/orchestration.rs:16574-16606#rearm_provider_quota]
 
 ## Reassigning to the same provider is a re-arm (KT-838)
 
@@ -32,4 +32,4 @@ The stored origin is spent when the execution is back on its original provider a
 
 The opt-in is reachable from the launch dialog ("Fall back to another allowed agent when the quota runs out", off by default; campaign creation field `quota_fallback`) and, for a single task, from the `quota_fallback_agents` argument of `task_exec_launch` and of `POST /api/orchestration/provision`: the providers the launch lets the execution fall back to, in preference order. Empty or absent means never. Migration 286 adds the flag off for every existing campaign. [src: file: backend/src/db/orchestration.rs:3379#fallback_executions_past_origin_reset]
 
-Every provider switch is journaled (`worker_reassigned` carries `from_provider`). It is shown where the reviewer decides, in the review-request card posted when the worker delivers (`Provider fallback: the execution moved from X to Y`), and again as a `fallback:` attention point of the accepted-delivery report. [src: file: backend/src/api/orchestration.rs:11091-11096#build_review_request_message] [src: file: backend/src/api/delivery_publication.rs:173#summary_from_manifest]
+Every provider switch is journaled (`worker_reassigned` carries `from_provider`). It is shown where the reviewer decides, in the review-request card posted when the worker delivers (`Provider fallback: the execution moved from X to Y`), and again as a `fallback:` attention point of the accepted-delivery report. [src: file: backend/src/api/orchestration.rs:11092-11097#build_review_request_message] [src: file: backend/src/api/delivery_publication.rs:173#summary_from_manifest]

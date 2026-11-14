@@ -220,7 +220,7 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:607-623#agent_handoff_paid_limit]
+[src: file: backend/src/models/setup.rs:818-834#agent_handoff_paid_limit]
 [src: file: backend/src/db/discussions.rs:1702-1703#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1711-1746#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
@@ -235,7 +235,7 @@ clock (KT-1247) does not run during them (KT-1689).
 | Phase | Execution status | What shows in the status | Clock |
 | --- | --- | --- | --- |
 | Worktree creation, lane provisioning, seed clone, lane seeds | `Provisioning` | `phase: warming`, the `warming_steps` | None: the activity clock only expires a `Working` execution. |
-| Build-slot wait (`gate_wait`, up to 30 min) and lane first build (`first_build`, up to the first-build timeout) | `Provisioning` | `warming_steps` with their durations | None, same reason. A 30-min wait or a 24-min build never counts as inactivity. |
+| Build-slot wait (`gate_wait`, up to the first-build timeout, 60 min by default) and lane first build (`first_build`, up to the first-build timeout) | `Provisioning` | `warming_steps` with their durations | None, same reason. A long wait or a 24-min build never counts as inactivity. |
 | Toolchain smoke check, brief, dispatch | `Provisioning` → `Working` | `smoke_check` step | None until the dispatch exists. |
 | Queued for a worker slot (task-worker cap, agent or host caps) | `Working`, dispatch `Pending` | `phase: queued`, reason `task_worker_limit:<running>/<cap>`, queue position | **Queue deadline** only (below). The activity clock is suspended while the dispatch is `Pending`. |
 | Worker's turn: claimed, agent started, tool calls, messages, commits | `Working`, dispatch `Running` | `launching`, `tool_activity`, `upstream_wait` | **Activity clock**: 20 min without a tool call, message, commit or delivery interrupts the execution (`activity_timeout`, resumable). It starts at the claim of the dispatch, not at its creation, and a single tool call in flight counts as activity up to its cap. |
