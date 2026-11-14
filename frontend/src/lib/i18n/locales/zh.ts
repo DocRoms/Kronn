@@ -7526,8 +7526,8 @@ const zh: TranslationDict = {
   "laneWarm.detected": "自动检测",
   "laneWarm.on": "开",
   "laneWarm.off": "关",
-  "laneWarm.seedAlignment": "seed 对齐",
-  "laneWarm.seedAlignmentHelp": "在从项目自身的 target 克隆 lane 之前，先用 lane 的编译器环境构建它一次，使克隆可被复用。它在项目的主检出中运行，绝不会在你的构建持有 Cargo 锁时运行。",
+  "laneWarm.seedAlignment": "对齐基础构建",
+  "laneWarm.seedAlignmentHelp": "用 lane 的设置把项目重新构建一次，这样新的 lane 会复用这次构建，而不是全部重新编译。",
   "laneWarm.compilerEnv": "C 编译器环境",
   "laneWarm.compilerEnvHelp": "每行一个 NAME=value。自动检测：在 macOS 上，对通过 cc crate 编译 C 的 Rust 项目使用 CFLAGS_<arch>_apple_darwin=-save-temps=obj；其他情况为空。",
   "laneWarm.custom": "自定义",
@@ -7541,7 +7541,8 @@ const zh: TranslationDict = {
   "laneWarm.rootsInvalid": "每行必须是仓库内的目录（不能以 / 开头，也不能含 ..）。",
   "laneWarm.commandPlaceholder": "自动检测（每个 Rust 工作区运行 cargo test --lib --no-run）",
   "laneWarm.timeout": "首次构建时间上限（分钟）",
-  "laneWarm.timeoutHelp": "默认 {0}。若主机上设置了 KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS，则以它为准。",
+  "laneWarm.timeoutHelp": "默认 {0}。此字段优先于主机上的 KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS 变量，只有此字段为空时才使用该变量。",
+  "laneWarm.timeoutEnvNotice": "同时由变量 KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS 设置（= {0} 分钟）：仅在此字段为空时使用。",
   "laneWarm.timeoutInvalid": "介于 {0} 和 {1} 分钟之间。",
 };
 

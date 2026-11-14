@@ -766,6 +766,15 @@ pub async fn get_workers_config(State(state): State<AppState>) -> Json<ApiRespon
     Json(ApiResponse::ok(state.config.read().await.workers.clone()))
 }
 
+/// GET /api/config/workers/first-build-env-secs — KT-1742: the host's
+/// `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (positive seconds), or null. It only
+/// fills an unset first-build bound; Settings > Workers shows it under the field.
+pub async fn get_first_build_env_secs() -> Json<ApiResponse<Option<u64>>> {
+    Json(ApiResponse::ok(
+        crate::core::task_worker_lane_warm::WarmStartSettings::first_build_timeout_env_secs(),
+    ))
+}
+
 /// POST /api/config/workers — the default review-round limit every launch
 /// path starts from: an integer ≥ 1, or unlimited. Anything else is a 400 and
 /// leaves the saved value alone.

@@ -282,7 +282,7 @@ The clone itself takes 14-38 s and no disk space.
 | --- | --- | --- |
 | `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker, and the budget of its test and build tools (KT-1634) |
 | `KRONN_WORKER_MAX_CONCURRENT_BUILDS` | 2 | first builds running at once on this backend process |
-| `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 3600 (was 1800 until KT-1742) | bound of the first build and of its queue wait |
+| `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 3600 (was 1800 until KT-1742) | bound of the first build and of its queue wait; used only when neither the project's nor the global `first_build_timeout_min` is set (project > global > this variable > default) |
 | `KRONN_WORKER_PRIVATE_CARGO_HOME` | unset | `1` keeps KT-1246's lane-private `CARGO_HOME` (no seeding) |
 
 ## Where the warming time goes (KT-1637)

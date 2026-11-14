@@ -33,6 +33,11 @@ fn nothing_configured_gives_the_detected_defaults() {
     assert_eq!(effective.compiler_env, pairs(&MACOS_FLAGS));
     assert_eq!(effective.first_build_command, None);
     assert_eq!(effective.first_build_timeout, Duration::from_secs(60 * 60));
+    assert_eq!(
+        effective.configured_first_build_timeout(),
+        None,
+        "no setting: the host's env var, then the default, fill the bound"
+    );
 }
 
 #[test]
@@ -97,6 +102,10 @@ fn the_global_entry_overrides_every_detected_default() {
     );
     assert_eq!(effective.first_build_command.as_deref(), Some("make deps"));
     assert_eq!(effective.first_build_timeout, Duration::from_secs(90 * 60));
+    assert_eq!(
+        effective.configured_first_build_timeout(),
+        Some(Duration::from_secs(90 * 60))
+    );
 }
 
 #[test]

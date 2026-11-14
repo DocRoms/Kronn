@@ -298,6 +298,33 @@ fn jobs_default_to_half_of_the_performance_cores_and_never_below_one() {
     );
 }
 
+/// KT-1742: project setting > global setting > env var > built-in default. The
+/// two settings are folded by `task_worker_lane_settings::resolve` into one
+/// `configured` bound; the env var only fills what no setting gave.
+#[test]
+fn the_env_var_only_fills_an_unset_first_build_bound() {
+    let env = WarmStartSettings::resolve(None, None, Some("5400"), 10);
+    let configured = Some(Duration::from_secs(90 * 60));
+
+    // a setting beats the env var
+    assert_eq!(
+        env.with_configured_timeout(configured).first_build_timeout,
+        Duration::from_secs(90 * 60)
+    );
+    // no setting: the env var fills it
+    assert_eq!(
+        env.with_configured_timeout(None).first_build_timeout,
+        Duration::from_secs(5400)
+    );
+    // no setting and no env var: the built-in default
+    assert_eq!(
+        WarmStartSettings::resolve(None, None, None, 10)
+            .with_configured_timeout(None)
+            .first_build_timeout,
+        DEFAULT_FIRST_BUILD_TIMEOUT
+    );
+}
+
 #[test]
 fn jobs_the_limit_and_the_timeout_are_configurable() {
     let configured = WarmStartSettings::resolve(Some("6"), Some("3"), Some("90"), 10);

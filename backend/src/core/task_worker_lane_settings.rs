@@ -8,7 +8,7 @@
 //! | `compiler_env` | on macOS, `CFLAGS_<triple>=-save-temps=obj` when a Rust root of the project lists `cc` in its `Cargo.lock`; nothing otherwise |
 //! | `seed_alignment` | on |
 //! | `first_build_command` | none: the detected cargo warm-up of every Rust root |
-//! | `first_build_timeout_min` | 60 |
+//! | `first_build_timeout_min` | `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` when set on the host, else 60 (the variable only fills an unset config) |
 //! | `rust_roots` (a project's own only) | every Rust root found from the manifests |
 //!
 //! Every consumer of the lane's environment (the warm-up, the worker's launch,
@@ -37,10 +37,22 @@ pub struct EffectiveLaneSettings {
     pub compiler_env: Vec<(String, String)>,
     /// A command that replaces the detected first build.
     pub first_build_command: Option<String>,
+    /// The bound in force when no env var fills it: the configured one, else 60 min.
     pub first_build_timeout: Duration,
+    /// Whether a project or the global setting gave `first_build_timeout`. When
+    /// not, `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (if set) fills it.
+    pub first_build_timeout_configured: bool,
     /// The Rust roots to warm (directories relative to the repository), or
     /// `None` for every root found from the manifests. A project's own setting.
     pub rust_roots: Option<Vec<String>>,
+}
+
+impl EffectiveLaneSettings {
+    /// The first-build bound the owner set (project, else global), if any.
+    pub fn configured_first_build_timeout(&self) -> Option<Duration> {
+        self.first_build_timeout_configured
+            .then_some(self.first_build_timeout)
+    }
 }
 
 /// What detection says about a project, computed only when a setting needs it.
@@ -79,9 +91,10 @@ pub fn resolve(
         .compiler_env_pairs()
         .or_else(|| global.compiler_env_pairs())
         .unwrap_or_else(|| detected().compiler_env);
-    let minutes = project
+    let configured_minutes = project
         .first_build_timeout_min
-        .or(global.first_build_timeout_min)
+        .or(global.first_build_timeout_min);
+    let minutes = configured_minutes
         .unwrap_or(DEFAULT_LANE_FIRST_BUILD_TIMEOUT_MIN)
         .max(1);
     EffectiveLaneSettings {
@@ -97,6 +110,7 @@ pub fn resolve(
             .map(|command| command.trim().to_string())
             .filter(|command| !command.is_empty()),
         first_build_timeout: Duration::from_secs(u64::from(minutes) * 60),
+        first_build_timeout_configured: configured_minutes.is_some(),
         rust_roots: project.rust_roots.clone().filter(|roots| !roots.is_empty()),
     }
 }

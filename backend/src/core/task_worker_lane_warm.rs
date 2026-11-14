@@ -97,24 +97,35 @@ impl WarmStartSettings {
         )
     }
 
-    /// [`WarmStartSettings::from_host`] for a project whose own setting (or the
-    /// global one) gives the first build's bound: the operator's
-    /// `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, when set to a positive integer,
-    /// still wins over it.
-    pub fn from_host_with_timeout(setting: Duration) -> Self {
-        let mut settings = Self::from_host();
-        let operator = crate::core::child_env::var_os(FIRST_BUILD_TIMEOUT_ENV)
+    /// [`WarmStartSettings::from_host`] with the first build's bound the owner
+    /// configured (the project's own setting, else Settings > Workers). Order:
+    /// project setting > global setting > `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`
+    /// > built-in default; the environment variable only fills an unset config.
+    pub fn from_host_with_timeout(configured: Option<Duration>) -> Self {
+        Self::from_host().with_configured_timeout(configured)
+    }
+
+    /// The configured first-build bound, when there is one, replaces whatever
+    /// the host's environment or the default gave.
+    pub fn with_configured_timeout(mut self, configured: Option<Duration>) -> Self {
+        if let Some(configured) = configured {
+            self.first_build_timeout = configured;
+        }
+        self
+    }
+
+    /// The host's `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, when set to a positive
+    /// integer: what Settings > Workers shows under the field.
+    pub fn first_build_timeout_env_secs() -> Option<u64> {
+        crate::core::child_env::var_os(FIRST_BUILD_TIMEOUT_ENV)
             .and_then(|value| value.into_string().ok())
             .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|secs| *secs > 0);
-        if operator.is_none() {
-            settings.first_build_timeout = setting;
-        }
-        settings
+            .filter(|secs| *secs > 0)
     }
 
     /// The settings of the lane of `work_dir`: the host's, with the first
-    /// build's bound of its project (Settings > Workers, then the project's own).
+    /// build's bound of its project (the project's own setting, then Settings >
+    /// Workers).
     pub fn for_worktree(work_dir: &Path) -> Self {
         let lane = work_dir
             .canonicalize()
@@ -126,7 +137,7 @@ impl WarmStartSettings {
                     &lane.worktree,
                     lane.main_checkout.as_deref(),
                 );
-                Self::from_host_with_timeout(effective.first_build_timeout)
+                Self::from_host_with_timeout(effective.configured_first_build_timeout())
             }
             None => Self::from_host(),
         }
@@ -1819,7 +1830,9 @@ pub fn warm_worktree(
                 &lane.worktree,
                 lane.main_checkout.as_deref(),
             );
-            let settings = WarmStartSettings::from_host_with_timeout(effective.first_build_timeout);
+            let settings = WarmStartSettings::from_host_with_timeout(
+                effective.configured_first_build_timeout(),
+            );
             let host = WarmHost {
                 seed_alignment: effective.seed_alignment,
                 compiler_env: effective.compiler_env,

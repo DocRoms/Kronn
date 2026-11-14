@@ -66,11 +66,13 @@ export function ProjectLaneWarmSetting({ projectId, t }: Props) {
 
   return (
     <section className="project-agent-files" data-testid="project-lane-warm">
-      <h4>
-        <Flame size={14} aria-hidden="true" /> {t('laneWarm.projectTitle')}
+      {/* Same title and help layout as the global block of Settings > Workers. */}
+      <div className="flex-row gap-4 mb-3" data-testid="project-lane-warm-title">
+        <Flame size={14} className="text-accent" aria-hidden="true" />
+        <span className="label">{t('laneWarm.projectTitle')}</span>
         {(saving || !loaded) && !error && <Loader2 size={12} className="spin" aria-hidden="true" />}
-      </h4>
-      <p className="project-agent-files-help">{t('laneWarm.projectHelp')}</p>
+      </div>
+      <p className="text-sm text-faint mb-4">{t('laneWarm.projectHelp')}</p>
       <LaneWarmFields
         draft={draft}
         onChange={setDraft}

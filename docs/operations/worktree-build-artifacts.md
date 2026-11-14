@@ -481,8 +481,8 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_env.rs:1161-1203#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1139-1139#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1766-1766#first_build_args]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1777-1777#first_build_args]
 [src: file: backend/src/core/project_toolchains.rs:137-137#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
@@ -539,8 +539,13 @@ global over detected:
 | `first_build_timeout_min` | 60 | 1–1440 | idem |
 | `rust_roots` — the Rust roots to warm, directories relative to the repository (`.` for its root) | every root found from the manifests | not offered (it cannot name directories of repositories it does not know) | the list; blank = every root; a name that is no root is reported in the record, never silently ignored |
 
-`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, when set on the host, still wins over
-both. The flags are target-scoped, never a plain `CFLAGS`: `cc` reads them first
+The first build's bound resolves **project setting > global setting >
+`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` > the 60-min default**: the variable
+only fills a bound that no setting gave (`WarmStartSettings::with_configured_timeout`,
+`EffectiveLaneSettings::configured_first_build_timeout`), and Settings > Workers
+and the project card show a notice under the field when it is set on the host
+(`GET /api/config/workers/first-build-env-secs`). Before KT-1742's last round
+the variable won over both. The flags are target-scoped, never a plain `CFLAGS`: `cc` reads them first
 and they reach no Linux or Windows build. The names are validated (portable
 names, no `KRONN_*`, none of the variables the lane owns: `CARGO_TARGET_DIR`,
 `CARGO_HOME`, `CARGO_BUILD_JOBS`, `CARGO_NET_OFFLINE`, `TMPDIR`, `PATH`). Every
@@ -741,8 +746,8 @@ the warm-up no longer rebuilds the dependency graph, but the two compiles of
 killed `rustc` leaves no artifact), so the worker would pay it again.
 `DEFAULT_FIRST_BUILD_TIMEOUT` (`backend/src/core/task_worker_lane_warm.rs`) is
 therefore 3600 s: the measured 32 min 56 s plus a margin of about 27 min for a
-slower or busier host; the global and per-project `first_build_timeout_min` and
-`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` still override it. The same bound limits
+slower or busier host; the per-project and global `first_build_timeout_min` override
+it, and `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` replaces it only when neither is set. The same bound limits
 the gate (queue) wait. Not done here, each its own ticket: stop compiling the lib
 twice for `cargo test --lib` (the self dev-dependency exists for the `it`
 integration binary, KT-1189); lower the gate's concurrency under load. The live
@@ -752,14 +757,14 @@ project, read each `lane_warm_start` (`seed.aligned`, `crates`,
 `.kronn-warm.json` in the lane target.
 
 [src: file: backend/src/core/task_worker_lane_warm.rs:59-59#DEFAULT_FIRST_BUILD_TIMEOUT]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1139-1139#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:951-951#warm_units]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1778-1778#first_build_pending]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:962-962#warm_units]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1789-1789#first_build_pending]
 [src: file: backend/src/core/task_worker_root_marks.rs:68-68#root_key]
 [src: file: backend/src/core/task_worker_root_marks.rs:131-131#cached_failure]
 [src: file: backend/src/core/task_worker_seed_align.rs:275-275#align_seed]
 [src: file: backend/src/core/task_worker_seed_align.rs:217-217#recent_failure]
-[src: file: backend/src/core/task_worker_lane_settings.rs:71-71#resolve]
+[src: file: backend/src/core/task_worker_lane_settings.rs:83-83#resolve]
 [src: file: backend/src/core/project_toolchains.rs:113-113#select_roots]
 [src: file: backend/src/core/project_toolchains.rs:72-72#rust_roots]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]

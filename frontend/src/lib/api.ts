@@ -987,6 +987,8 @@ export const config = {
   /** Settings > Workers: the default review-round limit of every launch path (KT-1345). */
   getWorkers: () => api<WorkersConfig>('GET', '/config/workers'),
   saveWorkers: (workers: WorkersConfig) => api<WorkersConfig>('POST', '/config/workers', workers),
+  /** The host's KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS (seconds), or null: it only fills an unset bound. */
+  getFirstBuildEnvSecs: () => api<number | null>('GET', '/config/workers/first-build-env-secs'),
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
