@@ -477,7 +477,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_lane_warm.rs:925-932#first_build_args]
 [src: file: backend/src/core/task_worker_lane_warm.rs:936-940#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
+[src: file: backend/src/api/orchestration.rs:10845-10876#warm_failure_notice]
 
 ## Long builds in a task worker (KT-1718)
 

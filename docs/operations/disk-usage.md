@@ -202,7 +202,7 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
 [src: file: backend/src/api/orchestration.rs:4691-4703#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:14310-14321#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:14372-14383#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -225,7 +225,7 @@ managed workspaces that still name their worktree give the lane name Kronn would
 execution that owned it. It is then judged by the rules above (worktree gone, execution terminal, idle). A
 dir no managed workspace names, one that belongs to an unmanaged workspace, or a lane name two executions
 derive in common is attributed to nobody and stays `foreign`.
-[src: file: backend/src/core/worktree.rs:906-961#process_lane_target_idle]
+[src: file: backend/src/core/worktree.rs:1030-1085#process_lane_target_idle]
 [src: file: backend/src/core/worktree.rs:976-1012#lane_target_last_write]
 [src: file: backend/src/api/disk.rs:151-162#lane_entry_state]
 
@@ -266,7 +266,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:1132-1200#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:10513-10536#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:10524-10547#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.
