@@ -90,7 +90,7 @@ fn a_global_only_identity_is_used_but_reported_as_global() {
 
 #[test]
 fn no_identity_at_all_is_the_placeholder_and_writes_no_config() {
-    let (identity, source) = choose_identity(None, None, None);
+    let (identity, source) = choose_identity(None, None, None, None);
     assert_eq!(source, IdentitySource::Fallback);
     assert_eq!(identity.display(), "Kronn <kronn@localhost>");
     // Nothing here writes a git config: a repository stays as it was.
@@ -410,6 +410,135 @@ fn only_a_global_identity_is_flagged_as_one_no_project_decided() {
     git(bare.path(), &["config", "user.name", "Work Person"]);
     git(bare.path(), &["config", "user.email", "work@corp.example"]);
     assert!(!CommitPolicy::for_repo(bare.path()).uses_global_identity());
+}
+
+fn who(name: &str, email: &str) -> Option<CommitIdentity> {
+    Some(CommitIdentity {
+        name: name.into(),
+        email: email.into(),
+    })
+}
+
+#[test]
+fn the_identity_precedence_runs_card_repository_kronn_global_machine_placeholder() {
+    let source = |a, b, c, d| choose_identity(a, b, c, d).1;
+    let (kc, repo, kg, machine) = (
+        who("KC", "kc@corp.example"),
+        who("Repo", "repo@corp.example"),
+        who("Global", "global@kronn.example"),
+        who("Machine", "me@personal.example"),
+    );
+    // 2. The repository's own, before the Kronn global one.
+    assert_eq!(
+        source(kc.clone(), repo.clone(), kg.clone(), machine.clone()),
+        IdentitySource::KronnConfig
+    );
+    let (identity, repository) = choose_identity(None, repo.clone(), kg.clone(), machine.clone());
+    assert_eq!(repository, IdentitySource::Repository);
+    assert_eq!(identity.email, "repo@corp.example");
+    // 3. The Kronn global setting, before the machine's.
+    let (identity, kronn_global) = choose_identity(None, None, kg.clone(), machine.clone());
+    assert_eq!(kronn_global, IdentitySource::KronnGlobal);
+    assert_eq!(identity.email, "global@kronn.example");
+    // 4. The machine's git config.
+    let (identity, machine_source) = choose_identity(None, None, None, machine);
+    assert_eq!(machine_source, IdentitySource::Global);
+    assert_eq!(identity.email, "me@personal.example");
+    // 5. The placeholder.
+    assert_eq!(source(None, None, None, None), IdentitySource::Fallback);
+}
+
+#[test]
+fn a_company_repository_identity_is_never_overwritten_by_the_kronn_global_one() {
+    let repo = repo();
+    let global = card("Global", "global@kronn.example", SignoffSetting::Auto);
+    // Nothing in the repository: the Kronn global identity is used, and it is no
+    // reason for the machine-identity warning.
+    let inherited = CommitPolicy::detect_with(repo.path(), &global);
+    assert_eq!(inherited.identity_source, IdentitySource::KronnGlobal);
+    assert_eq!(
+        inherited.identity.display(),
+        "Global <global@kronn.example>"
+    );
+    assert!(!inherited.uses_global_identity());
+    // The repository says who commits for it: that wins.
+    git(repo.path(), &["config", "user.name", "Work Person"]);
+    git(repo.path(), &["config", "user.email", "work@corp.example"]);
+    let own = CommitPolicy::detect_with(repo.path(), &global);
+    assert_eq!(own.identity_source, IdentitySource::Repository);
+    assert_eq!(own.identity.email, "work@corp.example");
+    // The project's own setting wins over both.
+    let project = own.with_settings(&card("Bot", "bot@corp.example", SignoffSetting::Auto));
+    assert_eq!(project.identity_source, IdentitySource::Setting);
+    assert_eq!(project.identity.email, "bot@corp.example");
+}
+
+#[test]
+fn without_a_kronn_global_identity_the_machine_one_is_used_and_flagged() {
+    let repo = repo();
+    let policy = CommitPolicy::detect_with(repo.path(), &ProjectCommitSettings::default());
+    assert_eq!(policy.identity_source, IdentitySource::Global);
+    assert!(policy.uses_global_identity());
+    // A half Kronn global identity is no identity.
+    let half = CommitPolicy::detect_with(repo.path(), &card("Global", "", SignoffSetting::Auto));
+    assert_eq!(half.identity_source, IdentitySource::Global);
+}
+
+#[test]
+fn the_kronn_global_sign_off_decides_only_what_the_repository_leaves_open() {
+    let always = card("", "", SignoffSetting::Always);
+    let never = card("", "", SignoffSetting::Never);
+    let auto = ProjectCommitSettings::default();
+
+    // Nothing detected: the Kronn global setting, else off.
+    let bare = repo();
+    let policy = CommitPolicy::detect_with(bare.path(), &always);
+    assert!(policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::KronnGlobal);
+    let policy = CommitPolicy::detect_with(bare.path(), &never);
+    assert!(!policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::KronnGlobal);
+    let policy = CommitPolicy::detect_with(bare.path(), &auto);
+    assert!(!policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::Default);
+
+    // The repository's own answers (DCO file, git config, signed history) win.
+    let dco = repo();
+    fs::write(dco.path().join("DCO"), "dco").unwrap();
+    let policy = CommitPolicy::detect_with(dco.path(), &never);
+    assert!(policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::DcoFile);
+    let configured = repo();
+    git(configured.path(), &["config", "kronn.signoff", "false"]);
+    let policy = CommitPolicy::detect_with(configured.path(), &always);
+    assert!(!policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::KronnConfig);
+    let signed = repo();
+    for n in 0..4 {
+        commit(
+            signed.path(),
+            &format!("change {n}\n\nSigned-off-by: A <a@x.example>"),
+        );
+    }
+    let policy = CommitPolicy::detect_with(signed.path(), &never);
+    assert!(policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::History);
+
+    // The project's own setting wins over all of them.
+    let policy = CommitPolicy::detect_with(dco.path(), &always).with_settings(&card(
+        "",
+        "",
+        SignoffSetting::Never,
+    ));
+    assert!(!policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::Setting);
+    let policy = CommitPolicy::detect_with(bare.path(), &never).with_settings(&card(
+        "",
+        "",
+        SignoffSetting::Always,
+    ));
+    assert!(policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::Setting);
 }
 
 #[test]

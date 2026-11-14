@@ -6,17 +6,19 @@
 //! the project and handed here by [`register_project`]); what is left unset is
 //! detected:
 //!
-//! - **identity** — the card's name + e-mail; else `kronn.commitName` +
-//!   `kronn.commitEmail` in the repository's git config (a detection source,
-//!   not the way to set it); else the repository's own `user.name` +
-//!   `user.email`; else the effective git identity (the global config), which is
-//!   used but reported — a global fallback is never silent; else a Kronn
-//!   placeholder. It is handed to git as `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, so
-//!   no config file is ever written.
-//! - **sign-off** — the card's Always / Never; on Auto, `kronn.signoff` in the
-//!   repository's git config; else the project briefing's `signoff_required`;
-//!   else detected (a DCO file, a `commit-msg` hook, or most of the recent
-//!   history signed); else off.
+//! - **identity**, the first that is known: (1) the card's name + e-mail;
+//!   (2) the repository's own — `kronn.commitName` + `kronn.commitEmail` in its
+//!   git config (a detection source, not the way to set it), else its local
+//!   `user.name` + `user.email`, so a company repository's identity is never
+//!   overwritten by a personal global one; (3) the Kronn identity of Settings >
+//!   Workers; (4) the machine's global git config, which is used but reported —
+//!   a global fallback is never silent; (5) a Kronn placeholder. It is handed to
+//!   git as `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, so no config file is ever written.
+//! - **sign-off**, the first that decides: (1) the card's Always / Never;
+//!   (2) the repository's own — `kronn.signoff` in its git config, the project
+//!   briefing's `signoff_required`, a DCO file, a `commit-msg` hook, or most of
+//!   the recent history signed (or unsigned); (3) the Always / Never of Settings
+//!   > Workers; (4) off.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -60,7 +62,9 @@ pub enum IdentitySource {
     KronnConfig,
     /// `user.name` / `user.email` of the repository's own config.
     Repository,
-    /// Only the global git config knows one: used, but never silently.
+    /// The Kronn identity of Settings > Workers.
+    KronnGlobal,
+    /// Only the machine's global git config knows one: used, but never silently.
     Global,
     /// Git knows none: the Kronn placeholder.
     Fallback,
@@ -72,6 +76,7 @@ impl IdentitySource {
             Self::Setting => "setting",
             Self::KronnConfig => "kronn_config",
             Self::Repository => "repository",
+            Self::KronnGlobal => "kronn_global",
             Self::Global => "global",
             Self::Fallback => "fallback",
         }
@@ -93,6 +98,8 @@ pub enum SignoffSource {
     CommitMsgHook,
     /// Most of the recent history is signed (or none of it is).
     History,
+    /// The Always / Never of Settings > Workers.
+    KronnGlobal,
     /// Nothing says otherwise.
     Default,
 }
@@ -106,6 +113,7 @@ impl SignoffSource {
             Self::DcoFile => "dco_file",
             Self::CommitMsgHook => "commit_msg_hook",
             Self::History => "history",
+            Self::KronnGlobal => "kronn_global",
             Self::Default => "default",
         }
     }
@@ -128,7 +136,8 @@ impl CommitPolicy {
         if policy.uses_global_identity() {
             tracing::warn!(
                 path = %repo_path.display(),
-                "commit identity {} comes from the global git config: set the commit name and e-mail                  in the project card to pick the one it commits as",
+                "commit identity {} comes from the machine's git config: set the commit name and \
+                 e-mail in the project card (or in Settings > Workers) to pick the one it commits as",
                 policy.identity.display()
             );
         }
@@ -140,11 +149,17 @@ impl CommitPolicy {
         Self::detect(repo_path).with_settings(&registered_settings(repo_path).unwrap_or_default())
     }
 
-    /// What the repository itself says, the project card ignored: the default
-    /// the card shows and a setting left on Auto follows.
+    /// What a project inherits, its card ignored: the repository's own answers,
+    /// then Settings > Workers', then the machine's. The default the card shows
+    /// and a setting left on Inherit / Auto follows.
     pub fn detect(repo_path: &Path) -> Self {
-        let (identity, identity_source) = resolve_identity(repo_path);
-        let (signoff, signoff_source) = resolve_signoff(repo_path);
+        Self::detect_with(repo_path, &global_settings())
+    }
+
+    /// [`Self::detect`] with the Settings > Workers commit settings given.
+    pub fn detect_with(repo_path: &Path, global: &ProjectCommitSettings) -> Self {
+        let (identity, identity_source) = resolve_identity(repo_path, global);
+        let (signoff, signoff_source) = inherit_signoff(resolve_signoff(repo_path), global);
         Self {
             identity,
             identity_source,
@@ -191,6 +206,41 @@ impl CommitPolicy {
         }
         command.env("GIT_COMMITTER_NAME", &self.identity.name);
         command.env("GIT_COMMITTER_EMAIL", &self.identity.email);
+    }
+}
+
+/// The commit settings of Settings > Workers, published at boot and on save like
+/// the other worker settings: what a project inherits when its card and its
+/// repository say nothing.
+static GLOBAL_SETTINGS: RwLock<Option<ProjectCommitSettings>> = RwLock::new(None);
+
+pub fn set_global_settings(settings: &ProjectCommitSettings) {
+    *GLOBAL_SETTINGS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(settings.clone());
+}
+
+pub fn global_settings() -> ProjectCommitSettings {
+    GLOBAL_SETTINGS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
+/// The Settings > Workers sign-off decides only what the repository left
+/// undecided.
+fn inherit_signoff(
+    detected: (bool, SignoffSource),
+    global: &ProjectCommitSettings,
+) -> (bool, SignoffSource) {
+    if detected.1 != SignoffSource::Default {
+        return detected;
+    }
+    match global.signoff {
+        SignoffSetting::Auto => detected,
+        SignoffSetting::Always => (true, SignoffSource::KronnGlobal),
+        SignoffSetting::Never => (false, SignoffSource::KronnGlobal),
     }
 }
 
@@ -267,7 +317,10 @@ fn identity_of(
     })
 }
 
-fn resolve_identity(repo_path: &Path) -> (CommitIdentity, IdentitySource) {
+fn resolve_identity(
+    repo_path: &Path,
+    global: &ProjectCommitSettings,
+) -> (CommitIdentity, IdentitySource) {
     choose_identity(
         identity_of(
             repo_path,
@@ -276,23 +329,33 @@ fn resolve_identity(repo_path: &Path) -> (CommitIdentity, IdentitySource) {
             "kronn.commitEmail",
         ),
         identity_of(repo_path, &["--local"], "user.name", "user.email"),
+        global.identity().map(|(name, email)| CommitIdentity {
+            name: name.to_string(),
+            email: email.to_string(),
+        }),
         identity_of(repo_path, &[], "user.name", "user.email"),
     )
 }
 
-/// The first identity that is known, in order of authority.
+/// The first identity that is known, in order of authority: the repository's own
+/// (`kronn.commit*`, then local `user.*`), the Kronn global setting, the
+/// machine's git config.
 fn choose_identity(
-    project: Option<CommitIdentity>,
+    kronn_config: Option<CommitIdentity>,
     repository: Option<CommitIdentity>,
-    effective: Option<CommitIdentity>,
+    kronn_global: Option<CommitIdentity>,
+    machine: Option<CommitIdentity>,
 ) -> (CommitIdentity, IdentitySource) {
-    if let Some(identity) = project {
+    if let Some(identity) = kronn_config {
         return (identity, IdentitySource::KronnConfig);
     }
     if let Some(identity) = repository {
         return (identity, IdentitySource::Repository);
     }
-    if let Some(identity) = effective {
+    if let Some(identity) = kronn_global {
+        return (identity, IdentitySource::KronnGlobal);
+    }
+    if let Some(identity) = machine {
         return (identity, IdentitySource::Global);
     }
     (

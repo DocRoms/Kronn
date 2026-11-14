@@ -679,6 +679,8 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     crate::core::task_worker_env::set_bash_timeouts(&config.workers);
     // KT-1750 — Settings > Workers: the OS junk files that never count as work.
     crate::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
+    // KT-1750 — Settings > Workers: the commit identity and sign-off projects inherit.
+    crate::core::commit_policy::set_global_settings(&config.workers.commit);
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())

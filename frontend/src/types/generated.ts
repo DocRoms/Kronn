@@ -2571,12 +2571,13 @@ export type CommentDiscussionQuestionRequest = { idempotency_key: string, text: 
  */
 export type CommitPolicyView = { name: string, email: string,
 /**
- * `setting`, `kronn_config`, `repository`, `global` or `fallback`.
+ * `setting`, `kronn_config`, `repository`, `kronn_global`, `global` or
+ * `fallback`.
  */
 identity_source: string, signoff: boolean,
 /**
  * `setting`, `kronn_config`, `briefing`, `dco_file`, `commit_msg_hook`,
- * `history` or `default`.
+ * `history`, `kronn_global` or `default`.
  */
 signoff_source: string, };
 
@@ -13035,7 +13036,15 @@ bash_max_timeout_min: number,
  * or a name with one `*` standing for any run of characters; an empty list
  * means none.
  */
-os_junk_patterns: Array<string>, };
+os_junk_patterns: Array<string>,
+/**
+ * KT-1750 — who the commits Kronn makes are attributed to, and whether they
+ * carry a `Signed-off-by`, for every project that neither sets its own in
+ * its card nor has a repository that says (its own `user.name` /
+ * `user.email`, a DCO file or hook, a signed history). Nothing set: the
+ * machine's git identity, reported, and no sign-off.
+ */
+commit?: ProjectCommitSettings, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

@@ -22,11 +22,12 @@ use crate::AppState;
 pub struct CommitPolicyView {
     pub name: String,
     pub email: String,
-    /// `setting`, `kronn_config`, `repository`, `global` or `fallback`.
+    /// `setting`, `kronn_config`, `repository`, `kronn_global`, `global` or
+    /// `fallback`.
     pub identity_source: String,
     pub signoff: bool,
     /// `setting`, `kronn_config`, `briefing`, `dco_file`, `commit_msg_hook`,
-    /// `history` or `default`.
+    /// `history`, `kronn_global` or `default`.
     pub signoff_source: String,
 }
 
@@ -35,7 +36,8 @@ pub struct CommitPolicyView {
 pub struct ProjectCommitPolicy {
     /// What the card saved.
     pub settings: ProjectCommitSettings,
-    /// What the repository says by itself: the card's defaults.
+    /// What the project inherits when its card says nothing: the repository's
+    /// own answers, then Settings > Workers', then the machine's git config.
     pub detected: CommitPolicyView,
     /// What Kronn commits with: the settings over the detection.
     pub effective: CommitPolicyView,

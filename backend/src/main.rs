@@ -450,6 +450,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         // KT-1718 — the shell limits of a Claude task worker, before the first one.
         kronn::core::task_worker_env::set_bash_timeouts(&config.workers);
         kronn::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
+        // KT-1750 — the commit identity and sign-off every project inherits.
+        kronn::core::commit_policy::set_global_settings(&config.workers.commit);
     }
     // KT-1633 — ask the host once whether its priority launcher runs, off the
     // async path, before recovery can dispatch a worker. A spawn only reads the answer.

@@ -366,6 +366,49 @@ fn the_bash_timeouts_default_are_bounded_and_clamped_at_spawn() {
     );
 }
 
+/// KT-1750 — the commit identity and sign-off of Settings > Workers: nothing set
+/// (and so nothing written) by default, kept by an older `[workers]` table, and
+/// refused when half an identity or not an address.
+#[test]
+fn the_commit_setting_defaults_to_unset_and_is_validated() {
+    use crate::models::{ProjectCommitSettings, SignoffSetting};
+    let defaults = WorkersConfig::default();
+    assert!(defaults.commit.is_default());
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert!(partial.commit.is_default());
+    assert!(
+        !toml::to_string(&defaults).unwrap().contains("commit"),
+        "an unset commit setting is not written"
+    );
+    let with = |name: &str, email: &str, signoff| WorkersConfig {
+        commit: ProjectCommitSettings {
+            name: (!name.is_empty()).then(|| name.to_string()),
+            email: (!email.is_empty()).then(|| email.to_string()),
+            signoff,
+        },
+        ..Default::default()
+    };
+    assert!(with("", "", SignoffSetting::Always).validate().is_ok());
+    assert!(with("Bot", "bot@corp.example", SignoffSetting::Never)
+        .validate()
+        .is_ok());
+    for (name, email) in [
+        ("Bot", ""),
+        ("", "bot@corp.example"),
+        ("Bot", "not-an-address"),
+        ("Bo<t", "bot@corp.example"),
+    ] {
+        assert!(
+            with(name, email, SignoffSetting::Auto).validate().is_err(),
+            "{name:?} {email:?} must be refused"
+        );
+    }
+    // It survives a round trip through the config file.
+    let saved = with("Bot", "bot@corp.example", SignoffSetting::Always);
+    let back: WorkersConfig = toml::from_str(&toml::to_string(&saved).unwrap()).unwrap();
+    assert_eq!(back, saved);
+}
+
 /// KT-1750 — the OS-junk list of Settings > Workers: the three systems' files by
 /// default, kept by an older `[workers]` table, and only names git's local
 /// exclude reads as names are accepted.

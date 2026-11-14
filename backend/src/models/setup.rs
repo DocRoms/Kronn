@@ -151,6 +151,16 @@ pub struct WorkersConfig {
     /// means none.
     #[serde(default = "default_workers_os_junk_patterns")]
     pub os_junk_patterns: Vec<String>,
+    /// KT-1750 — who the commits Kronn makes are attributed to, and whether they
+    /// carry a `Signed-off-by`, for every project that neither sets its own in
+    /// its card nor has a repository that says (its own `user.name` /
+    /// `user.email`, a DCO file or hook, a signed history). Nothing set: the
+    /// machine's git identity, reported, and no sign-off.
+    #[serde(
+        default,
+        skip_serializing_if = "super::ProjectCommitSettings::is_default"
+    )]
+    pub commit: super::ProjectCommitSettings,
 }
 
 impl Default for WorkersConfig {
@@ -164,6 +174,7 @@ impl Default for WorkersConfig {
             bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
             bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
             os_junk_patterns: default_workers_os_junk_patterns(),
+            commit: super::ProjectCommitSettings::default(),
         }
     }
 }
@@ -268,6 +279,10 @@ impl WorkersConfig {
 
     /// Refuse what the Settings form must never persist.
     pub fn validate(&self) -> Result<(), String> {
+        self.commit
+            .clone()
+            .normalized()
+            .map_err(|problem| format!("commit: {problem}"))?;
         if self.os_junk_patterns.len() > MAX_OS_JUNK_PATTERNS {
             return Err(format!(
                 "os_junk_patterns holds at most {MAX_OS_JUNK_PATTERNS} patterns"
