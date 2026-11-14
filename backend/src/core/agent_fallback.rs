@@ -64,9 +64,20 @@ pub enum Trigger {
     /// never changes it, and it says nothing against the agent for other turns:
     /// no cooldown is written for it, only the next link is asked for.
     LaunchRefused,
+    /// KT-1758 — a task worker whose launch kept failing for a cause that can
+    /// change, until its retries ran out. Not a refusal: nothing says the agent
+    /// cannot be this kind of worker, only that it was not there this time. Like
+    /// [`Trigger::LaunchRefused`], it writes no cooldown.
+    LaunchUnavailable,
 }
 
 impl Trigger {
+    /// A stop at the launch of a worker, which is about this worker's start and
+    /// not about the provider: no cooldown, no "until".
+    pub fn is_launch_stop(self) -> bool {
+        matches!(self, Trigger::LaunchRefused | Trigger::LaunchUnavailable)
+    }
+
     pub fn code(self) -> &'static str {
         match self {
             Trigger::RateLimit => "rate_limit",
@@ -74,6 +85,7 @@ impl Trigger {
             Trigger::Outage => "outage",
             Trigger::NotAuthenticated => "not_authenticated",
             Trigger::LaunchRefused => "launch_refused",
+            Trigger::LaunchUnavailable => "launch_unavailable",
         }
     }
 
@@ -85,6 +97,7 @@ impl Trigger {
             Trigger::Outage => "provider unavailable",
             Trigger::NotAuthenticated => "not authenticated",
             Trigger::LaunchRefused => "cannot be launched as a task worker",
+            Trigger::LaunchUnavailable => "unavailable at launch",
         }
     }
 
@@ -97,7 +110,7 @@ impl Trigger {
             Trigger::QuotaExhausted => crate::workflows::quota_wait::RECHECK_INTERVAL,
             Trigger::NotAuthenticated => Duration::minutes(30),
             // Not a cooldown: see `Trigger::LaunchRefused`.
-            Trigger::LaunchRefused => Duration::zero(),
+            Trigger::LaunchRefused | Trigger::LaunchUnavailable => Duration::zero(),
         }
     }
 
@@ -108,6 +121,7 @@ impl Trigger {
             Trigger::Outage,
             Trigger::NotAuthenticated,
             Trigger::LaunchRefused,
+            Trigger::LaunchUnavailable,
         ]
         .into_iter()
         .find(|trigger| trigger.code() == code)
@@ -1210,9 +1224,11 @@ pub fn note_execution_origin(
     Ok(())
 }
 
-/// KT-1758 — forgets where a worker started: a person's choice, or the return
-/// to the original worker, ends the fallback, and the chain a later failure
-/// walks is the new worker's own.
+/// KT-1758 — forgets where a worker started: a person's choice of worker (a
+/// native reassignment or a CLI session) ends the fallback, and the chain a later
+/// failure walks is the new worker's own. Kronn's own return to the original
+/// worker does not clear it: the origin is then the current worker, which is how
+/// the launch path reads "not a fallback" (`worker_launch_context`).
 pub fn clear_execution_origin(conn: &Connection, execution_id: &str) -> anyhow::Result<()> {
     conn.execute(
         "DELETE FROM execution_fallback_origins WHERE execution_id = ?1",

@@ -14881,6 +14881,32 @@ impl ReassignCause {
     }
 }
 
+/// KT-1758 — a fallback's reassignment found the execution no longer on the
+/// dispatch that failed: something else (the quota return, a person) moved it
+/// since. The failed dispatch's hand-over has nothing left to do, and says
+/// nothing about an execution that is no longer its own.
+#[derive(Debug)]
+pub(crate) struct ExecutionMovedOn {
+    pub(crate) execution_id: String,
+}
+
+impl std::fmt::Display for ExecutionMovedOn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "execution {} no longer runs the dispatch that failed: it was moved meanwhile",
+            self.execution_id
+        )
+    }
+}
+
+impl std::error::Error for ExecutionMovedOn {}
+
+/// Whether `error` is [`ExecutionMovedOn`].
+pub(crate) fn is_execution_moved_on(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ExecutionMovedOn>().is_some()
+}
+
 /// [`reassign_native_execution`] with the [`ReassignCause`] behind the move.
 pub(crate) async fn reassign_native_execution_as(
     state: &AppState,
@@ -14889,6 +14915,23 @@ pub(crate) async fn reassign_native_execution_as(
     reason: &str,
     cause: ReassignCause,
 ) -> Result<ExecutionRecoveryView> {
+    reassign_native_execution_for_dispatch(state, exec_id, selection, reason, cause, None).await
+}
+
+/// [`reassign_native_execution_as`] for the hand-over of a failed dispatch:
+/// `expected_dispatch` is the dispatch whose failure is being answered. The
+/// execution must still point at it, checked before anything is written and
+/// again inside the transaction; otherwise nothing is done and the error is
+/// [`ExecutionMovedOn`].
+pub(crate) async fn reassign_native_execution_for_dispatch(
+    state: &AppState,
+    exec_id: &str,
+    selection: crate::models::CampaignWorkerSelection,
+    reason: &str,
+    cause: ReassignCause,
+    expected_dispatch: Option<&str>,
+) -> Result<ExecutionRecoveryView> {
+    let expected_dispatch = expected_dispatch.map(str::to_string);
     if selection.target.kind == MessageTargetKind::Cli {
         bail!("native reassignment cannot target a CLI session");
     }
@@ -14902,6 +14945,15 @@ pub(crate) async fn reassign_native_execution_as(
                 .context("execution vanished before worker reassignment")
         })
         .await?;
+    if let Some(expected) = expected_dispatch.as_deref() {
+        // Before the git re-anchoring below, which is not undone.
+        if execution.dispatch_job_id.as_deref() != Some(expected) {
+            return Err(ExecutionMovedOn {
+                execution_id: execution.id,
+            }
+            .into());
+        }
+    }
     if cause.is_quota_return() {
         // Same check as the one inside the reassignment transaction (which
         // stays authoritative), run first so a return that is already stale
@@ -14930,6 +14982,18 @@ pub(crate) async fn reassign_native_execution_as(
             // the same outage no longer keeps the provider refused, whichever
             // of the two is reassigned first.
             let provider = crate::db::orchestration::agent_type_to_db(&selection.target.agent_type);
+            if let Some(expected) = expected_dispatch.as_deref() {
+                // Authoritative: the check above ran before the git
+                // re-anchoring, and the quota return may have landed since.
+                let current = crate::db::orchestration::get_task_execution(conn, &id)?
+                    .context("execution vanished before worker reassignment")?;
+                if current.dispatch_job_id.as_deref() != Some(expected) {
+                    return Err(ExecutionMovedOn {
+                        execution_id: id.clone(),
+                    }
+                    .into());
+                }
+            }
             let quota_retry =
                 crate::db::orchestration::is_quota_retry_on_same_provider(conn, &id, &provider)?;
             // Refuse tôt (KT-515): before starting the transaction, and before
@@ -15179,13 +15243,19 @@ pub async fn reassign_execution(
         .with_conn(move |conn| {
             let before = crate::db::orchestration::get_task_execution(conn, &id)?
                 .context("unknown task execution")?;
+            let transaction = conn.unchecked_transaction()?;
             let execution = crate::db::orchestration::reassign_execution_worker(
-                conn,
+                &transaction,
                 &id,
                 &selection,
                 &reason,
                 &backend_actor(),
             )?;
+            // KT-1758 — a person's choice of worker, a CLI session included,
+            // ends the chain's memory of where the worker started (as the
+            // native reassignment does): the session is not a fallback.
+            crate::core::agent_fallback::clear_execution_origin(&transaction, &id)?;
+            transaction.commit()?;
             let lang = crate::db::discussions::room_lang(conn, &before.parent_discussion_id);
             let dod_note = dod_readopted_note(conn, &before, &execution, lang)?;
             let note = [rejected_delivery_note(&before, lang), dod_note.clone()]
@@ -38653,11 +38723,22 @@ pub(crate) mod tests {
             "the fallback keeps working"
         );
 
-        // Its turn ends: the next sweep hands the execution back.
+        // Its turn ends (the dispatch goes back to the queue, its agent no
+        // longer running): the next sweep hands the execution back. A Working
+        // execution whose dispatch is terminal is not this case: a fallback
+        // hand-over owns it (see the hand-over tests).
         let ended = fallback.clone();
-        db.with_conn(move |conn| crate::db::agent_dispatch::mark_completed(conn, &ended))
-            .await
-            .unwrap();
+        db.with_conn(move |conn| {
+            assert!(crate::db::agent_dispatch::retry_after(
+                conn,
+                &ended,
+                0,
+                "turn_ended"
+            )?);
+            Ok(())
+        })
+        .await
+        .unwrap();
         assert_eq!(
             return_quota_escalations_past_reset(&state).await,
             vec![was.id.clone()]
@@ -39252,6 +39333,467 @@ pub(crate) mod tests {
         );
     }
 
+    /// A fallback worker running on Codex, the original provider's reset passed,
+    /// its turn ended in a failure the chain takes over: the execution is left
+    /// `Working` with a `Failed` dispatch, as the hand-over leaves it.
+    async fn a_failed_fallback_being_handed_over(
+        state: &AppState,
+        db: &std::sync::Arc<Database>,
+        was: &TaskExecution,
+    ) -> (String, String, String) {
+        let limits = default_dispatch_limits(state).await;
+        let claude = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(db, &limits, &claude, true).await);
+        let on_codex = fall_back_to_codex(
+            state,
+            db,
+            was,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await;
+        let fallback = on_codex.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(db, &limits, &fallback, false).await);
+        pass_the_origin_reset(db, &was.id).await;
+        let job = dispatch_of(db, fallback.clone()).await;
+        let discussion = job.discussion_id.clone();
+        let (job_id, settled_discussion) = (job.id.clone(), job.discussion_id.clone());
+        db.with_conn(move |conn| {
+            crate::api::discussions::runtime::persist_dispatch_settlement_handing_over(
+                conn,
+                &job_id,
+                &settled_discussion,
+                None,
+                crate::db::workflows::BatchChildOutcome::Failed,
+                Some("outage: the provider is down"),
+                Some("outage"),
+            )
+        })
+        .await
+        .unwrap();
+        (claude, fallback, discussion)
+    }
+
+    /// KT-1758 — the quota return and a failed fallback's hand-over both want
+    /// the same execution. While a `Working` execution's dispatch is terminal the
+    /// hand-over owns it: the sweep neither lists it nor moves it, so the
+    /// hand-over's reassignment never cancels a turn the return has just queued.
+    #[tokio::test]
+    async fn the_quota_return_leaves_an_execution_being_handed_to_the_next_link() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let (_claude, fallback, child) =
+            a_failed_fallback_being_handed_over(&state, &db, &was).await;
+
+        let handing = exec_of(&db, &was.id).await;
+        assert_eq!(handing.status, TaskExecutionStatus::Working);
+        assert_eq!(handing.dispatch_job_id.as_deref(), Some(fallback.as_str()));
+        assert_eq!(
+            dispatch_of(&db, fallback.clone()).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Failed
+        );
+        let id = was.id.clone();
+        let (listed, handing_over) = db
+            .with_read_conn(move |conn| {
+                Ok((
+                    crate::db::orchestration::fallback_executions_past_origin_reset(
+                        conn,
+                        chrono::Utc::now(),
+                    )?,
+                    crate::db::orchestration::execution_handing_over(conn, &id)?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert!(handing_over);
+        assert!(listed.is_empty(), "the hand-over owns it: {listed:?}");
+
+        // The sweep does not move it, and one that read it earlier is refused
+        // inside the reassignment transaction.
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+        let refused = reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "back to the original provider",
+            ReassignCause::QuotaReturn,
+        )
+        .await
+        .err()
+        .expect("a hand-over is not interrupted by the return");
+        assert!(
+            refused.to_string().contains("next fallback link"),
+            "{refused}"
+        );
+        let still = exec_of(&db, &was.id).await;
+        assert_eq!(still.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(still.dispatch_job_id.as_deref(), Some(fallback.as_str()));
+
+        // The hand-over fails to find a link: the execution is parked, and the
+        // sweep has nothing to say about an Interrupted one either.
+        let job_id = fallback.clone();
+        db.with_conn(move |conn| {
+            crate::api::discussions::runtime::interrupt_undelivered_after_failure(
+                conn, &job_id, &child,
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Interrupted
+        );
+        assert!(return_quota_escalations_past_reset(&state).await.is_empty());
+    }
+
+    /// KT-1758 — the other interleaving: the quota return lands first, the
+    /// hand-over's reassignment comes after and finds the execution no longer on
+    /// the dispatch that failed. It moves nothing: the turn the return queued is
+    /// not cancelled, the chain's memory is not written, the origin is not
+    /// re-recorded.
+    #[tokio::test]
+    async fn a_hand_over_beaten_by_the_return_moves_nothing_and_cancels_nothing() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let claude = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &claude, true).await);
+        let on_codex = fall_back_to_codex(
+            &state,
+            &db,
+            &was,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await;
+        let failed = on_codex.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &failed, false).await);
+        // The return took the execution while the hand-over was being prepared:
+        // it now runs a fresh dispatch of its own, mid-turn.
+        let returned = reassign_native_execution_as(
+            &state,
+            &was.id,
+            selection_of(&was),
+            "human: back on the original worker",
+            ReassignCause::Human,
+        )
+        .await
+        .unwrap();
+        let back = exec_of(&db, &was.id).await;
+        assert_eq!(back.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        let returned_dispatch = back.dispatch_job_id.clone().unwrap();
+        assert_ne!(returned_dispatch, failed);
+        drop(returned);
+        assert!(run_then_refuse(&db, &limits, &returned_dispatch, false).await);
+
+        let mut gemini = crate::models::MessageTarget::agent(AgentType::GeminiCli);
+        gemini.tier = None;
+        let error = reassign_native_execution_for_dispatch(
+            &state,
+            &was.id,
+            crate::models::CampaignWorkerSelection {
+                target: gemini,
+                model: None,
+                profile_id: None,
+            },
+            "automatic agent fallback: the dispatch that failed",
+            ReassignCause::QuotaFallback { reset_at: None },
+            Some(&failed),
+        )
+        .await
+        .err()
+        .expect("the execution is no longer on the dispatch that failed");
+        assert!(is_execution_moved_on(&error), "{error}");
+
+        let after = exec_of(&db, &was.id).await;
+        assert_eq!(after.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(
+            after.dispatch_job_id.as_deref(),
+            Some(returned_dispatch.as_str())
+        );
+        let running = dispatch_of(&db, returned_dispatch).await;
+        assert_eq!(
+            running.status,
+            crate::db::agent_dispatch::DispatchStatus::Running,
+            "the turn the return queued is not cancelled"
+        );
+        assert!(running.agent_started_at.is_some());
+    }
+
+    /// KT-1758 — the quota return lands the instant a fallback's refused launch
+    /// is settled: no link is found because the execution is no longer that
+    /// dispatch's, and "no usable fallback link is left" is not said about an
+    /// execution that is running on its original worker. Nothing is parked.
+    #[tokio::test]
+    async fn a_refused_launch_whose_execution_the_return_moved_says_nothing() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let available = [AgentType::ClaudeCode, AgentType::OpenCode];
+        opt_into_fallback_among(&db, &was.id, &available).await;
+        let claude = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &claude, true).await);
+        assert_eq!(
+            refuse_through_the_fallback(
+                &state,
+                &db,
+                &was.id,
+                chrono::Utc::now() + chrono::Duration::hours(2),
+                &available
+            )
+            .await,
+            Some(AgentType::OpenCode)
+        );
+        let refused = exec_of(&db, &was.id).await.dispatch_job_id.unwrap();
+        assert!(run_then_refuse(&db, &limits, &refused, false).await);
+        let job = dispatch_of(&db, refused.clone()).await;
+        // The return takes the execution at the very moment the refused
+        // dispatch is settled `Failed`.
+        let (refused_id, claude_id) = (refused.clone(), claude.clone());
+        db.with_conn(move |conn| {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER the_return_wins AFTER UPDATE OF status ON agent_dispatch_jobs \
+                 WHEN NEW.id = '{refused_id}' AND NEW.status = 'Failed' \
+                 BEGIN UPDATE task_executions SET dispatch_job_id = '{claude_id}', \
+                       worker_agent_type = 'ClaudeCode' \
+                       WHERE dispatch_job_id = '{refused_id}'; END;"
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            crate::api::discussions::runtime::settle_worker_launch_refusal_among(
+                &state,
+                &job,
+                &native_acp_refusal(),
+                Some(available.to_vec()),
+            )
+            .await,
+            "settled: nothing left for the caller to do"
+        );
+
+        let after = exec_of(&db, &was.id).await;
+        assert_eq!(after.worker_agent_type.as_deref(), Some("ClaudeCode"));
+        assert_eq!(after.dispatch_job_id.as_deref(), Some(claude.as_str()));
+        assert_eq!(
+            after.status,
+            TaskExecutionStatus::Working,
+            "an execution that is not this dispatch's is not parked"
+        );
+        for (room, id) in [
+            (
+                after.parent_discussion_id.clone(),
+                format!("worker-launch-refused:{refused}"),
+            ),
+            (
+                after.parent_discussion_id.clone(),
+                format!("worker-launch-fallback:{refused}"),
+            ),
+            (
+                after.parent_discussion_id.clone(),
+                format!("orch-worker-undelivered:{}", was.id),
+            ),
+            (
+                job.discussion_id.clone(),
+                format!("worker-launch-refused-child:{refused}"),
+            ),
+        ] {
+            assert!(
+                room_message(&db, room, id.clone()).await.is_none(),
+                "{id} must not be posted"
+            );
+        }
+    }
+
+    /// KT-1758 — the late interrupt of a hand-over nobody took is robust: a
+    /// notice that cannot be stored never leaves the execution `Working` with a
+    /// terminal dispatch. It is tried twice, then the execution is parked
+    /// without it.
+    #[tokio::test]
+    async fn a_late_interrupt_whose_notice_fails_still_parks_the_execution() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let (_claude, fallback, child) =
+            a_failed_fallback_being_handed_over(&state, &db, &was).await;
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Working
+        );
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER notice_storage_down BEFORE INSERT ON messages \
+                 WHEN NEW.id LIKE 'orch-worker-undelivered:%' \
+                 BEGIN SELECT RAISE(ABORT, 'notice storage is down'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let job_id = fallback.clone();
+        db.with_conn(move |conn| {
+            crate::api::discussions::runtime::interrupt_undelivered_after_failure(
+                conn, &job_id, &child,
+            )
+        })
+        .await
+        .expect("the execution is parked even when the notice cannot be");
+
+        let parked = exec_of(&db, &was.id).await;
+        assert_eq!(parked.status, TaskExecutionStatus::Interrupted);
+        assert!(room_message(
+            &db,
+            parked.parent_discussion_id.clone(),
+            format!("orch-worker-undelivered:{}", was.id)
+        )
+        .await
+        .is_none());
+    }
+
+    /// KT-1758 — a fallback worker whose launch kept being unavailable until the
+    /// retries ran out, taken over by the chain: the room line says it was
+    /// unavailable N times in a row, not that it "cannot be launched as a task
+    /// worker" (which is the refusal's wording).
+    #[tokio::test]
+    async fn the_chain_line_after_exhausted_retries_says_unavailable_not_refused() {
+        use crate::models::AgentFallback;
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        {
+            let mut config = state.config.write().await;
+            let link = |agent| AgentFallback {
+                agent,
+                model: None,
+                mode: None,
+            };
+            config.agents.claude_code.fallback_chain =
+                vec![link(AgentType::OpenCode), link(AgentType::GeminiCli)];
+            crate::core::agent_fallback::migrate_legacy_chains(&mut config.agents);
+        }
+        let usable = vec![
+            AgentType::ClaudeCode,
+            AgentType::OpenCode,
+            AgentType::GeminiCli,
+        ];
+        let claude = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &claude, true).await);
+        let quota_job = dispatch_of(&db, claude).await;
+        assert!(
+            crate::api::discussions::agent_fallback::worker_after_quota_among(
+                &state,
+                &quota_job,
+                "quota_exhausted: You've hit your 5-hour limit",
+                Some(usable.clone()),
+            )
+            .await
+            .unwrap()
+        );
+        let on_opencode = exec_of(&db, &was.id).await;
+        let dispatch = on_opencode.dispatch_job_id.clone().unwrap();
+        let bound = crate::api::discussions::runtime::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
+        let reason = "OpenCode ACP spawn failed: connection refused";
+        for _ in 0..=bound {
+            let job = claim_when_due(&db, &dispatch).await;
+            crate::api::discussions::runtime::defer_or_stop_runtime_unavailable_among(
+                &state,
+                &job,
+                reason,
+                Some(usable.clone()),
+            )
+            .await;
+        }
+
+        let next = exec_of(&db, &was.id).await;
+        assert_eq!(next.worker_agent_type.as_deref(), Some("GeminiCli"));
+        let line = room_message(
+            &db,
+            next.parent_discussion_id.clone(),
+            format!("agent-fallback:{dispatch}"),
+        )
+        .await
+        .expect("the parent room says the chain moved on");
+        assert!(
+            line.contains(&format!("unavailable {} times in a row", bound + 1)),
+            "{line}"
+        );
+        assert!(line.contains(reason), "{line}");
+        assert!(
+            !line.contains("cannot be launched as a task worker"),
+            "a transient stop is not a refusal: {line}"
+        );
+    }
+
+    /// KT-1758 — a person's choice of a CLI session as the worker ends the
+    /// chain's memory of where the worker started, as a native reassignment does.
+    #[tokio::test]
+    async fn a_cli_reassignment_forgets_the_chain_origin() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let id = was.id.clone();
+        db.with_conn(move |conn| {
+            crate::core::agent_fallback::note_execution_origin(conn, &id, &AgentType::ClaudeCode)
+        })
+        .await
+        .unwrap();
+
+        seed_cli_session(&db, 101, &was.parent_discussion_id, "cli-sess").await;
+        // What follows the reassignment (the offer to the session) is not what
+        // this asks about: the reassignment itself, and what it forgets.
+        let _ = reassign_execution(
+            State(state.clone()),
+            Path(was.id.clone()),
+            Json(ReassignExecutionRequest {
+                worker: crate::models::CampaignWorkerSelection {
+                    target: MessageTarget::cli(AgentType::ClaudeCode, 101),
+                    model: None,
+                    profile_id: None,
+                },
+                reason: "a person picks a session".into(),
+            }),
+        )
+        .await;
+
+        let after = exec_of(&db, &was.id).await;
+        assert_eq!(
+            after.worker_target_kind,
+            Some(MessageTargetKind::Cli),
+            "the reassignment itself landed"
+        );
+        let id = was.id.clone();
+        assert!(
+            db.with_conn(move |conn| crate::core::agent_fallback::get_execution_origin(conn, &id))
+                .await
+                .unwrap()
+                .is_none(),
+            "a worker a person chose is not a fallback"
+        );
+    }
+
     /// KT-1758 — a transient `RuntimeUnavailable` is still retried (every 30 s,
     /// its count kept in the dispatch), a different reason starts a new count,
     /// and the same reason ten times in a row ends the retries: the dispatch
@@ -39384,9 +39926,17 @@ pub(crate) mod tests {
         assert!(run_then_refuse(&db, &limits, &fallback, false).await);
         pass_the_origin_reset(&db, &was.id).await;
         let ended = fallback.clone();
-        db.with_conn(move |conn| crate::db::agent_dispatch::mark_completed(conn, &ended))
-            .await
-            .unwrap();
+        db.with_conn(move |conn| {
+            assert!(crate::db::agent_dispatch::retry_after(
+                conn,
+                &ended,
+                0,
+                "turn_ended"
+            )?);
+            Ok(())
+        })
+        .await
+        .unwrap();
         assert_eq!(
             return_quota_escalations_past_reset(&state).await,
             vec![was.id.clone()]

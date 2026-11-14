@@ -198,7 +198,7 @@ async fn plan(
         .with_conn(move |conn| {
             // A launch refusal is about this agent as a task worker, not about
             // its provider: no cooldown, so its rooms keep using it.
-            let until = if trigger == Trigger::LaunchRefused {
+            let until = if trigger.is_launch_stop() {
                 now
             } else {
                 fallback::set_cooldown(conn, &failing_for_db, trigger, announced, now)?
@@ -236,7 +236,8 @@ async fn plan(
         surface,
         tier,
         hops,
-        detail: (trigger == Trigger::LaunchRefused)
+        detail: trigger
+            .is_launch_stop()
             .then(|| response.chars().take(LAUNCH_REFUSAL_DETAIL_CHARS).collect()),
     })
 }
@@ -336,6 +337,12 @@ pub(crate) async fn intercept_failed_turn_among(
             settle_worker_failure(state, job, response, trigger).await;
             match apply_worker(state, job, &plan).await {
                 Ok(()) => true,
+                // Moved by someone else since the dispatch failed (the quota
+                // return): the execution is theirs now, nothing is parked.
+                Err(error) if crate::api::orchestration::is_execution_moved_on(&error) => {
+                    tracing::info!(dispatch_job_id = %job.id, "agent fallback skipped: {error}");
+                    true
+                }
                 Err(error) => {
                     tracing::warn!(dispatch_job_id = %job.id, "agent fallback of a task worker failed: {error}");
                     // The settlement held the interruption back for the link
@@ -402,13 +409,19 @@ pub(crate) async fn worker_after_quota_among(
 /// next link after the one that was refused. `Ok(true)`: the execution moved on.
 /// `Ok(false)`: nothing in the chain can take it (the stop is said in the
 /// caller's own words, in both rooms).
+///
+/// `trigger` says which stop it is, which is what the room line says:
+/// [`Trigger::LaunchRefused`] for a refusal, [`Trigger::LaunchUnavailable`] for
+/// retries that ran out.
 pub(crate) async fn worker_after_launch_refusal_among(
     state: &AppState,
     job: &AgentDispatchJob,
+    trigger: Trigger,
     reason: &str,
     usable: Option<Vec<AgentType>>,
 ) -> anyhow::Result<bool> {
-    let Some(plan) = plan(state, job, Trigger::LaunchRefused, reason, usable).await else {
+    debug_assert!(trigger.is_launch_stop());
+    let Some(plan) = plan(state, job, trigger, reason, usable).await else {
         return Ok(false);
     };
     if !matches!(plan.surface, Surface::Worker { .. }) {
@@ -695,18 +708,29 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
     target.tier = Some(plan.tier);
     let id = execution_id.clone();
     let origin = plan.origin.clone();
+    let failed_dispatch = job.id.clone();
     let profile_id = state
         .db
         .with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?;
+            // KT-1758 — the execution may have been moved (the quota return)
+            // since this dispatch failed: it is then not this hand-over's, and
+            // the chain's memory of where it started is not touched either.
+            if execution.as_ref().is_some_and(|execution| {
+                execution.dispatch_job_id.as_deref() != Some(failed_dispatch.as_str())
+            }) {
+                return Err(
+                    crate::api::orchestration::ExecutionMovedOn { execution_id: id }.into(),
+                );
+            }
             // Where the worker started: the chain it keeps walking is this agent's.
             fallback::note_execution_origin(conn, &id, &origin)?;
-            Ok(crate::db::orchestration::get_task_execution(conn, &id)?
-                .and_then(|execution| execution.worker_profile_id))
+            Ok(execution.and_then(|execution| execution.worker_profile_id))
         })
         .await?;
     // A launch refusal has no "until": the agent is not unavailable, it cannot
     // be this kind of worker.
-    let until = (plan.trigger != Trigger::LaunchRefused).then_some(plan.until);
+    let until = (!plan.trigger.is_launch_stop()).then_some(plan.until);
     let notice = fallback::notice(
         &plan.failing,
         plan.from_model.as_deref(),
@@ -719,7 +743,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
         Some(detail) => format!("Task worker execution {execution_id}: {notice} — {detail}"),
         None => format!("Task worker execution {execution_id}: {notice}"),
     };
-    crate::api::orchestration::reassign_native_execution_as(
+    crate::api::orchestration::reassign_native_execution_for_dispatch(
         state,
         execution_id,
         crate::models::CampaignWorkerSelection {
@@ -729,6 +753,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
         },
         &format!("automatic agent fallback: {notice}"),
         crate::api::orchestration::ReassignCause::QuotaFallback { reset_at: until },
+        Some(&job.id),
     )
     .await?;
     let message = crate::api::orchestration::orchestrator_message(

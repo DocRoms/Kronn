@@ -3381,6 +3381,27 @@ const TURN_IN_PROGRESS_SQL: &str = "EXISTS (
            AND live_turn.agent_started_at IS NOT NULL
      )";
 
+/// KT-1758 — SQL predicate over `task_executions e`: a `Working` execution whose
+/// current dispatch is already terminal. A failed worker is handed to the next
+/// link of its chain in that state (the execution is not parked for the
+/// principal while Kronn is moving it), so it belongs to that hand-over until
+/// the reassignment lands: the quota-return sweep must not move it as well.
+const HANDING_OVER_SQL: &str = "(e.status = 'Working' AND EXISTS (
+         SELECT 1 FROM agent_dispatch_jobs AS settled
+         WHERE settled.id = e.dispatch_job_id
+           AND settled.status IN ('Failed', 'Cancelled', 'Completed')
+     ))";
+
+/// KT-1758 — the worker of `exec_id` is mid-hand-over: `Working`, and its
+/// current dispatch is terminal (see [`HANDING_OVER_SQL`]).
+pub fn execution_handing_over(conn: &Connection, exec_id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!("SELECT {HANDING_OVER_SQL} FROM task_executions e WHERE e.id = ?1"),
+        [exec_id],
+        |row| row.get(0),
+    )?)
+}
+
 /// KT-1758 — the worker of `exec_id` is mid-turn: its current dispatch is
 /// `Running` and its agent has started. A quota return must not replace it.
 pub fn execution_turn_in_progress(conn: &Connection, exec_id: &str) -> Result<bool> {
@@ -3400,6 +3421,10 @@ pub fn execution_turn_in_progress(conn: &Connection, exec_id: &str) -> Result<bo
 /// KT-1758 — nor is a worker whose turn is under way (its dispatch is claimed
 /// and its agent started): the return would cancel that turn and throw its work
 /// away. It is listed again once that turn has ended, or never started.
+///
+/// KT-1758 — nor is a `Working` execution whose current dispatch is already
+/// terminal: a failed worker's hand-over to the next link owns it until the
+/// reassignment lands (see [`HANDING_OVER_SQL`]).
 pub fn fallback_executions_past_origin_reset(
     conn: &Connection,
     now: DateTime<Utc>,
@@ -3412,6 +3437,7 @@ pub fn fallback_executions_past_origin_reset(
          WHERE q.reset_at IS NOT NULL
            AND q.reset_at <= ?1
            AND NOT {TURN_IN_PROGRESS_SQL}
+           AND NOT {HANDING_OVER_SQL}
            AND COALESCE(e.worker_target_kind, '') <> 'cli'
            AND (e.status = 'Working'
                 OR (e.status = 'Escalated'
@@ -3522,6 +3548,11 @@ pub fn ensure_quota_return_still_due(
     // A worker that has not started yet is replaced as before: nothing is lost.
     if execution_turn_in_progress(conn, exec_id)? {
         bail!("quota return skipped: the worker is mid-turn; the return waits for it to end");
+    }
+    // KT-1758 — a failed worker is being handed to the next link of its chain:
+    // that move owns the execution, and a second one would cancel what it queues.
+    if execution_handing_over(conn, exec_id)? {
+        bail!("quota return skipped: the execution is being handed to the next fallback link");
     }
     if let Some(origin) = quota_origin(conn, exec_id)? {
         let execution = get_task_execution(conn, exec_id)?

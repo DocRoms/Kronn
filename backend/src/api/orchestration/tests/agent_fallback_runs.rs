@@ -233,6 +233,80 @@ async fn an_outage_move_neither_parks_the_worker_nor_spends_the_undelivered_noti
     );
 }
 
+/// KT-1758 — the quota return took the execution while the outage chain was
+/// settling the failed dispatch: the chain's reassignment finds the execution
+/// on another dispatch and does nothing. The turn the return queued is not
+/// cancelled, the origin is not recorded, nothing is posted and nothing is
+/// parked.
+#[tokio::test]
+async fn an_outage_hand_over_beaten_by_the_quota_return_moves_nothing_and_parks_nothing() {
+    let (_repo, db, was, job) = the_economy_worker().await;
+    let state = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+    let child = was.sub_discussion_id.clone().unwrap();
+    let failed = job.id.clone();
+    db.with_conn(move |conn| {
+        // What the return queues for the same execution.
+        crate::db::agent_dispatch::enqueue_for_latest_user(
+            conn,
+            crate::db::agent_dispatch::NewLatestUserDispatch {
+                id: "returned-dispatch",
+                discussion_id: &child,
+                dedupe_key: "returned-dispatch",
+                agent_override: Some(&AgentType::ClaudeCode),
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )?;
+        // …landing at the very moment the failed dispatch is settled.
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER the_return_wins AFTER UPDATE OF status ON agent_dispatch_jobs \
+             WHEN NEW.id = '{failed}' AND NEW.status = 'Failed' \
+             BEGIN UPDATE task_executions SET dispatch_job_id = 'returned-dispatch' \
+                   WHERE dispatch_job_id = '{failed}'; END;"
+        ))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        intercept_failed_turn_among(
+            &state,
+            &job,
+            "[Agent provider error] API Error: 500 Internal Server Error",
+            Some(usable())
+        )
+        .await,
+        "handled: the failed dispatch has nothing left to do"
+    );
+
+    let after = exec_of(&db, &was.id).await;
+    assert_eq!(after.status, TaskExecutionStatus::Working, "not parked");
+    assert_eq!(after.worker_agent_type.as_deref(), Some("ClaudeCode"));
+    assert_eq!(after.dispatch_job_id.as_deref(), Some("returned-dispatch"));
+    assert_eq!(
+        dispatch_of(&db, "returned-dispatch".into()).await.status,
+        crate::db::agent_dispatch::DispatchStatus::Pending,
+        "the dispatch the return queued is not cancelled"
+    );
+    assert!(fallback_notice(&db, &was, &job.id).await.is_none());
+    let id = was.id.clone();
+    assert!(
+        db.with_conn(move |conn| fallback::get_execution_origin(conn, &id))
+            .await
+            .unwrap()
+            .is_none(),
+        "the chain's origin is not written for a move that did not happen"
+    );
+    let undelivered = format!("orch-worker-undelivered:{}", was.id);
+    assert!(messages_of(&db, &was.parent_discussion_id)
+        .await
+        .iter()
+        .all(|message| message.id != undelivered));
+}
+
 #[tokio::test]
 async fn a_task_failure_a_refusal_a_test_failure_or_a_work_timeout_never_moves_a_worker() {
     let (_repo, db, was, job) = the_economy_worker().await;

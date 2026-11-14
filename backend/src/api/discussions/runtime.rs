@@ -244,14 +244,46 @@ fn interrupt_undelivered_with_notice(
 /// KT-1758 — the interruption a settlement held back (see
 /// [`persist_dispatch_settlement_handing_over`]), once no link could take the
 /// work over: the execution is `Interrupted` and the principal is told.
+///
+/// The settlement left the execution `Working` with a terminal dispatch, a state
+/// nothing else is going to resolve soon, so this does not give up: the
+/// interruption and the notice are tried twice, and if the notice is what keeps
+/// failing the execution is still parked, without it (said in the log).
 pub(crate) fn interrupt_undelivered_after_failure(
     conn: &rusqlite::Connection,
     job_id: &str,
     discussion_id: &str,
 ) -> anyhow::Result<()> {
-    let transaction = conn.unchecked_transaction()?;
-    interrupt_undelivered_with_notice(&transaction, job_id, discussion_id, true)?;
-    transaction.commit()?;
+    let attempt = || -> anyhow::Result<()> {
+        let transaction = conn.unchecked_transaction()?;
+        interrupt_undelivered_with_notice(&transaction, job_id, discussion_id, true)?;
+        transaction.commit()?;
+        Ok(())
+    };
+    let Err(first) = attempt() else {
+        return Ok(());
+    };
+    tracing::warn!(dispatch_job_id = %job_id, "interrupting an undelivered worker failed, retrying once: {first}");
+    let Err(second) = attempt() else {
+        return Ok(());
+    };
+    tracing::error!(
+        dispatch_job_id = %job_id,
+        "the undelivered-worker notice could not be posted ({second}); parking the execution without it"
+    );
+    let actor = crate::models::PlanningActor {
+        kind: crate::models::PlanningActorKind::Backend,
+        id: Some("orchestrator".into()),
+        session_id: None,
+        source_message_id: None,
+    };
+    crate::db::orchestration::interrupt_undelivered_execution_for_dispatch(
+        conn,
+        job_id,
+        "worker_failed_without_delivery",
+        &actor,
+    )
+    .map_err(|error| anyhow::anyhow!("the execution could not be parked either: {error}"))?;
     Ok(())
 }
 
@@ -1002,7 +1034,9 @@ async fn provider_fallback_among(
         model: None,
         profile_id,
     };
-    let view = crate::api::orchestration::reassign_native_execution_as(
+    // KT-1758 — only while the execution still runs the dispatch that failed:
+    // the quota return may have moved it since, and the move is then its own.
+    let view = crate::api::orchestration::reassign_native_execution_for_dispatch(
         state,
         &execution_id,
         selection,
@@ -1014,6 +1048,7 @@ async fn provider_fallback_among(
         crate::api::orchestration::ReassignCause::QuotaFallback {
             reset_at: announced_reset,
         },
+        Some(&job.id),
     )
     .await?;
     state.agent_dispatch_notify.notify_one();
@@ -1951,15 +1986,25 @@ async fn settle_worker_launch_refusal(
         match provider_fallback_among(state, job, None, available.clone(), true).await {
             Ok(Some((alternative, _room))) => moved_to = Some(format!("{alternative:?}")),
             Ok(None) => {}
+            Err(error) if crate::api::orchestration::is_execution_moved_on(&error) => {
+                return execution_moved_on_since_refusal(state, job);
+            }
             Err(error) => {
                 tracing::warn!(dispatch_job_id = %job.id, "provider fallback after a refused launch failed: {error}")
             }
         }
         if moved_to.is_none() {
             // The chain posts its own line in the parent room when it moves on.
+            let trigger = match stop {
+                LaunchStop::Refused => crate::core::agent_fallback::Trigger::LaunchRefused,
+                LaunchStop::Unavailable { .. } => {
+                    crate::core::agent_fallback::Trigger::LaunchUnavailable
+                }
+            };
             match super::agent_fallback::worker_after_launch_refusal_among(
                 state,
                 job,
+                trigger,
                 &detail,
                 Some(available),
             )
@@ -1970,10 +2015,20 @@ async fn settle_worker_launch_refusal(
                     return true;
                 }
                 Ok(false) => {}
+                Err(error) if crate::api::orchestration::is_execution_moved_on(&error) => {
+                    return execution_moved_on_since_refusal(state, job);
+                }
                 Err(error) => {
                     tracing::warn!(dispatch_job_id = %job.id, "agent fallback chain after a refused launch failed: {error}")
                 }
             }
+        }
+        // No link was found because the execution is no longer this dispatch's
+        // (the quota return moved it between the settlement and here): it is
+        // running on its original worker, and "no usable link is left" would be
+        // said about it.
+        if moved_to.is_none() && !execution_still_runs_dispatch(state, job).await {
+            return execution_moved_on_since_refusal(state, job);
         }
     }
     if hands_over && moved_to.is_none() {
@@ -2064,6 +2119,36 @@ async fn settle_worker_launch_refusal(
             .await;
         }
     }
+    state.agent_dispatch_notify.notify_waiters();
+    true
+}
+
+/// KT-1758 — whether the execution of `job` still points at it. `true` when
+/// that cannot be read: the caller then keeps its own behaviour.
+async fn execution_still_runs_dispatch(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) -> bool {
+    let id = job.id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            Ok(crate::db::orchestration::get_execution_for_dispatch(conn, &id)?.is_some())
+        })
+        .await
+        .unwrap_or(true)
+}
+
+/// KT-1758 — the execution moved on while a refused launch was being settled:
+/// the failed dispatch has nothing left to hand over, and says nothing.
+fn execution_moved_on_since_refusal(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) -> bool {
+    tracing::info!(
+        dispatch_job_id = %job.id,
+        "a refused launch's execution was moved meanwhile: nothing to hand over, nothing said"
+    );
     state.agent_dispatch_notify.notify_waiters();
     true
 }
