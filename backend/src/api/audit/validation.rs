@@ -2167,14 +2167,22 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
         std::fs::create_dir_all(&docs).unwrap();
-        std::fs::write(docs.join("inconsistencies-tech-debt.md"), "| TD-1 | x |\n").unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "| TD-20260603-linked-sheet | x |\n",
+        )
+        .unwrap();
         let external = tempfile::TempDir::new().unwrap();
-        std::fs::write(external.path().join("TD-1.md"), "OUTSIDE SHEET").unwrap();
+        std::fs::write(
+            external.path().join("TD-20260603-linked-sheet.md"),
+            "OUTSIDE SHEET",
+        )
+        .unwrap();
         // Control: the same sheet in a real folder is part of the surface.
         std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
         std::fs::copy(
-            external.path().join("TD-1.md"),
-            docs.join("tech-debt/TD-1.md"),
+            external.path().join("TD-20260603-linked-sheet.md"),
+            docs.join("tech-debt/TD-20260603-linked-sheet.md"),
         )
         .unwrap();
         assert_eq!(step8_surface(tmp.path(), false).1.len(), 1);
