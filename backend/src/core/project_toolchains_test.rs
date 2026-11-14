@@ -34,6 +34,28 @@ fn rust_roots_are_found_from_the_manifests_wherever_they_are() {
 }
 
 #[test]
+fn the_roots_a_project_names_are_kept_and_an_unknown_one_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    write(repo, "backend/Cargo.toml", "");
+    write(repo, "redis-flush/Cargo.toml", "");
+    write(repo, "desktop/src-tauri/Cargo.toml", "");
+
+    let (all, unknown) = select_roots(rust_roots(repo), None);
+    assert_eq!(all.len(), 3);
+    assert!(unknown.is_empty());
+
+    let wanted = vec![
+        "redis-flush".to_string(),
+        "./backend/".to_string(),
+        "gone".to_string(),
+    ];
+    let (kept, unknown) = select_roots(rust_roots(repo), Some(&wanted));
+    assert_eq!(labels(&kept), ["backend", "redis-flush"]);
+    assert_eq!(unknown, ["gone"]);
+}
+
+#[test]
 fn a_manifest_at_the_root_is_the_root_and_its_members_are_not_roots() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();

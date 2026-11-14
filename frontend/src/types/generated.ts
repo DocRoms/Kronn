@@ -635,13 +635,7 @@ export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_
 /**
  * Per-agent model tier overrides (Economy/Reasoning model names).
  */
-model_tiers: ModelTiersConfig,
-/**
- * KT-1706 — what takes over a mode of a named HTTP connection (or the image or
- * video mode of ComfyUI) when its provider cannot serve a request. Kept apart
- * from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
- */
-connection_fallbacks?: Array<ConnectionFallback>, };
+model_tiers: ModelTiersConfig, };
 
 export type AgentSettings = {
 /**
@@ -2592,6 +2586,30 @@ export type ConfirmTrustProofRequest = { code: string,
  * The human-admin secret, as for starting the enrolment.
  */
 admin_secret?: string | null, };
+
+/**
+ * The fallback of one media row, for display: its own link, the links inherited
+ * through the rows of the fallbacks, or why it is refused.
+ */
+export type ConnectionChainView = { owner: string, mode: FallbackMode, links: Array<ConnectionLinkView>, inherited: Array<ConnectionLinkView>, error?: string, };
+
+/**
+ * KT-1706 — the fallback of one mode of an owner (a connection id, or
+ * `local:comfyui` for `image` and `video`).
+ */
+export type ConnectionFallback = { owner: string, row: FallbackMode, fallback: ConnectionFallbackTarget, };
+
+/**
+ * KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
+ * id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
+ * model; without one, the model that target has in its own slot of the mode.
+ */
+export type ConnectionFallbackTarget = { connection: string, model?: string | null, };
+
+/**
+ * One link as Settings shows it.
+ */
+export type ConnectionLinkView = { connection: string, model?: string, transport: FallbackTransport, };
 
 export type Contact = { id: string, pseudo: string, avatar_email: string | null, kronn_url: string, invite_code: string, status: string, created_at: string, updated_at: string, };
 
@@ -5620,7 +5638,14 @@ first_build_command?: string,
 /**
  * The first build's time limit, in minutes. `None` = 60.
  */
-first_build_timeout_min?: number, };
+first_build_timeout_min?: number,
+/**
+ * Which Rust workspace roots of the project to warm, as directories
+ * relative to the repository (`.` for the root itself). `None` = every root
+ * found from the manifests. A project's own setting only: the global entry
+ * cannot name directories of a repository it does not know.
+ */
+rust_roots?: Array<string>, };
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**
@@ -6494,12 +6519,6 @@ rate_limited: boolean, };
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
 /**
- * The fallback of one media row, for display: its own link, the links inherited
- * through the rows of the fallbacks, or why it is refused.
- */
-export type ConnectionChainView = { owner: string, mode: FallbackMode, links: Array<ConnectionLinkView>, inherited: Array<ConnectionLinkView>, error?: string, };
-
-/**
  * Cost of one generation, as the provider declared it.
  */
 export type MediaCost = {
@@ -6515,30 +6534,12 @@ cost_usd: number,
 is_byok: boolean, };
 
 /**
- * KT-1706 — the fallback of one mode of an owner (a connection id, or
- * `local:comfyui` for `image` and `video`).
- */
-export type ConnectionFallback = { owner: string, row: FallbackMode, fallback: ConnectionFallbackTarget, };
-
-/**
- * KT-1706 — where a connection-scoped fallback runs: a named HTTP connection (its
- * id) or, for image and video, ComfyUI (`local:comfyui`), and optionally the
- * model; without one, the model that target has in its own slot of the mode.
- */
-export type ConnectionFallbackTarget = { connection: string, model?: string | null, };
-
-/**
  * Where a still image can be pinned in a generated clip. Only what the model
  * advertises; nothing is offered by default.
  */
 export type MediaFramePosition = "first_frame" | "last_frame";
 
 export type MediaJobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
-
-/**
- * One link as Settings shows it.
- */
-export type ConnectionLinkView = { connection: string, model?: string, transport: FallbackTransport, };
 
 /**
  * What the model outputs. The execution family is the same for both, so this
@@ -10381,6 +10382,12 @@ install_dir?: string | null, image_settings?: ComfyGenSettings, video_settings?:
 
 export type SetComfyUiSlotsRequest = { image_model?: string | null, video_model?: string | null, };
 
+export type SetConnectionFallbackRequest = { owner: string, mode: FallbackMode,
+/**
+ * The fallback of this row; `None` removes it.
+ */
+fallback?: ConnectionFallbackTarget | null, };
+
 export type SetDiscussionFallbackRequest = {
 /**
  * The mode whose override is set.
@@ -10390,12 +10397,6 @@ mode: FallbackMode,
  * `None` removes the override (back to the default); `Some([])` cuts it.
  */
 chain_override?: Array<AgentFallback> | null, };
-
-export type SetConnectionFallbackRequest = { owner: string, mode: FallbackMode,
-/**
- * The fallback of this media row; `None` removes it.
- */
-fallback?: ConnectionFallbackTarget | null, };
 
 export type SetMediaReferenceLimitRequest = { connection_id: string, model: string, modality: MediaModality, max_input_references?: number | null, };
 

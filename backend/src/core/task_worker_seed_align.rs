@@ -87,6 +87,22 @@ struct SeedStamp {
     build_script_unix: u64,
 }
 
+/// Where a seed build that FAILED is remembered, beside the stamp.
+pub const SEED_FAILURE: &str = ".kronn-seed-env-failure.json";
+/// How long a failed seed build is not retried for the same lock and
+/// environment. Unlike a lane (a clean checkout of the base), the seed is built
+/// from the owner's live working tree, where a failure may be their half-written
+/// code: it is tried again after this, whatever the key says.
+pub const SEED_FAILURE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SeedFailure {
+    lock_hash: Option<String>,
+    env: Vec<(String, String)>,
+    reason: String,
+    failed_unix: u64,
+}
+
 /// One seed to align.
 pub struct AlignRequest<'a> {
     /// The seed's crate in the main checkout: the build runs there.
@@ -196,6 +212,35 @@ fn write_stamp(request: &AlignRequest<'_>) -> io::Result<()> {
     std::fs::rename(staging, path)
 }
 
+/// The reason of a recent seed build that failed for this very lock and
+/// environment, when there is one: the build is not run again for it.
+fn recent_failure(request: &AlignRequest<'_>) -> Option<String> {
+    let failure: SeedFailure =
+        serde_json::from_slice(&std::fs::read(request.target.join(SEED_FAILURE)).ok()?).ok()?;
+    let fresh = unix_now().saturating_sub(failure.failed_unix) < SEED_FAILURE_TTL.as_secs();
+    (fresh && failure.lock_hash == request.lock_hash && failure.env == sorted(request.compiler_env))
+        .then_some(failure.reason)
+}
+
+fn remember_seed_failure(request: &AlignRequest<'_>, reason: &str) {
+    let failure = SeedFailure {
+        lock_hash: request.lock_hash.clone(),
+        env: sorted(request.compiler_env),
+        reason: reason.to_string(),
+        failed_unix: unix_now(),
+    };
+    let result = serde_json::to_vec(&failure)
+        .map_err(io::Error::other)
+        .and_then(|bytes| {
+            let staging = request.target.join(format!("{SEED_FAILURE}.tmp"));
+            std::fs::write(&staging, bytes)?;
+            std::fs::rename(staging, request.target.join(SEED_FAILURE))
+        });
+    if let Err(error) = result {
+        tracing::warn!(target = %request.target.display(), "seed failure not cached: {error}");
+    }
+}
+
 /// Wait, within `wait`, for Cargo's lock on the seed's profile directory to be
 /// free, without keeping it: the build that follows takes it itself.
 fn wait_for_free_lock(
@@ -265,7 +310,13 @@ pub fn assess(request: &AlignRequest<'_>) -> Assessment {
             rebuilt: false,
             build_ms: 0,
         }),
-        Err(reason) => Assessment::NeedsBuild(reason),
+        Err(reason) => match recent_failure(request) {
+            Some(failed) => Assessment::Settled(SeedAlignment::not_aligned(format!(
+                "not retried: the seed build ({reason}) already failed for this Cargo.lock \
+                 and compiler environment: {failed}; the seed is cloned as it is"
+            ))),
+            None => Assessment::NeedsBuild(reason),
+        },
     }
 }
 
@@ -302,12 +353,18 @@ pub fn build_aligned(
         let why = if cancel.is_cancelled() {
             "cancelled".to_string()
         } else {
+            // A build that ran out of time or was cancelled says nothing about
+            // the crate: only a real failure is remembered.
+            if !outcome.detail.starts_with("timed out after") {
+                remember_seed_failure(request, &outcome.detail);
+            }
             outcome.detail
         };
         return SeedAlignment::not_aligned(format!(
             "the seed build ({stale}) did not finish: {why}; the seed is cloned as it is"
         ));
     }
+    let _ = std::fs::remove_file(request.target.join(SEED_FAILURE));
     if let Err(error) = write_stamp(request) {
         // The seed is aligned; the next lane will only rebuild (a no-op build).
         tracing::warn!(target = %request.target.display(), "seed stamp not written: {error}");

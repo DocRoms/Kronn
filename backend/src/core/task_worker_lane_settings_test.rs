@@ -85,6 +85,7 @@ fn the_global_entry_overrides_every_detected_default() {
         compiler_env: Some(vec!["CC=clang".into(), "CFLAGS=-O1".into()]),
         first_build_command: Some("  make deps  ".into()),
         first_build_timeout_min: Some(90),
+        rust_roots: None,
     };
 
     let effective = resolve(&global, None, never_detected);
@@ -117,6 +118,7 @@ fn a_project_field_wins_over_the_global_one_and_the_rest_is_inherited() {
         compiler_env: Some(vec!["CC=clang".into()]),
         first_build_command: Some("make deps".into()),
         first_build_timeout_min: Some(90),
+        rust_roots: None,
     };
     let project = LaneWarmConfig {
         first_build_timeout_min: Some(20),
@@ -209,6 +211,77 @@ fn a_projects_entry_reaches_the_lanes_of_that_project_only() {
     assert_eq!(reset.first_build_timeout, Duration::from_secs(60 * 60));
 }
 
+// ── The Rust roots to warm ───────────────────────────────────────────────
+
+#[test]
+fn the_rust_roots_default_to_every_detected_root_and_are_a_projects_own_setting() {
+    // Default: none named, so every root found from the manifests.
+    let none = resolve(&LaneWarmConfig::default(), None, Detected::default);
+    assert_eq!(none.rust_roots, None);
+
+    // A project names the roots to warm.
+    let project = LaneWarmConfig {
+        rust_roots: Some(vec!["backend".into(), "tools/exporter".into()]),
+        ..LaneWarmConfig::default()
+    };
+    let effective = resolve(
+        &LaneWarmConfig::default(),
+        Some(&project),
+        Detected::default,
+    );
+    assert_eq!(
+        effective.rust_roots,
+        Some(vec!["backend".to_string(), "tools/exporter".to_string()])
+    );
+
+    // The global entry cannot name directories of repositories it does not know.
+    let global = LaneWarmConfig {
+        rust_roots: Some(vec!["backend".into()]),
+        ..LaneWarmConfig::default()
+    };
+    assert_eq!(resolve(&global, None, Detected::default).rust_roots, None);
+}
+
+#[test]
+fn the_rust_roots_are_normalized_and_validated_before_they_are_stored() {
+    let config = LaneWarmConfig {
+        rust_roots: Some(vec![
+            " ./redis-flush/ ".into(),
+            "redis-flush".into(),
+            "".into(),
+            ".".into(),
+        ]),
+        ..LaneWarmConfig::default()
+    };
+    assert_eq!(config.validate(), Ok(()));
+    assert_eq!(
+        config.normalized().rust_roots,
+        Some(vec!["redis-flush".to_string(), ".".to_string()]),
+        "trimmed, de-duplicated, blank entries dropped"
+    );
+    let blank = LaneWarmConfig {
+        rust_roots: Some(vec!["  ".into()]),
+        ..LaneWarmConfig::default()
+    };
+    assert_eq!(
+        blank.normalized().rust_roots,
+        None,
+        "a blank list is every detected root, not none"
+    );
+    for bad in ["../outside", "/etc", "a/../../b"] {
+        let config = LaneWarmConfig {
+            rust_roots: Some(vec![bad.into()]),
+            ..LaneWarmConfig::default()
+        };
+        assert!(config.validate().is_err(), "{bad} must be refused");
+    }
+    let many = LaneWarmConfig {
+        rust_roots: Some((0..17).map(|n| format!("crate-{n}")).collect()),
+        ..LaneWarmConfig::default()
+    };
+    assert!(many.validate().is_err());
+}
+
 // ── What the forms may store ─────────────────────────────────────────────
 
 #[test]
@@ -217,6 +290,7 @@ fn the_settings_are_validated_before_they_are_stored() {
         compiler_env: Some(vec!["CFLAGS_aarch64_apple_darwin=-save-temps=obj".into()]),
         first_build_command: Some("composer install".into()),
         first_build_timeout_min: Some(45),
+        rust_roots: None,
         seed_alignment: Some(true),
     };
     assert_eq!(ok.validate(), Ok(()));
@@ -281,6 +355,7 @@ fn the_workers_config_carries_the_global_entry_and_it_survives_a_toml_round_trip
             compiler_env: Some(vec!["CC=clang".into()]),
             first_build_command: Some("npm ci".into()),
             first_build_timeout_min: Some(30),
+            rust_roots: None,
         },
         ..WorkersConfig::default()
     };

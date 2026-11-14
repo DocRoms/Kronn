@@ -481,9 +481,9 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_env.rs:1161-1203#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1049-1231#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1460-1472#first_build_args]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1474-1478#has_lib_target]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1139-1139#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1766-1766#first_build_args]
+[src: file: backend/src/core/project_toolchains.rs:137-137#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
 
@@ -535,8 +535,9 @@ global over detected:
 |---|---|---|---|
 | `compiler_env` — one `NAME=value` per entry | on macOS, `CFLAGS_aarch64_apple_darwin` / `CFLAGS_x86_64_apple_darwin` = `-save-temps=obj`, **only** when a Rust root of the project lists `cc` in its `Cargo.lock`; nothing otherwise (a project that is not a Rust one, any other host) | replaces it; an empty list means none at all | replaces the global one |
 | `seed_alignment` | on | on / off | on / off |
-| `first_build_command` | none: the detected cargo warm-up of every Rust root | a shell command that replaces it | idem |
+| `first_build_command` | none: the detected cargo warm-up of every Rust root | a shell command that replaces it (runs **only under the lane's OS sandbox**, see 5) | idem |
 | `first_build_timeout_min` | 60 | 1–1440 | idem |
+| `rust_roots` — the Rust roots to warm, directories relative to the repository (`.` for its root) | every root found from the manifests | not offered (it cannot name directories of repositories it does not know) | the list; blank = every root; a name that is no root is reported in the record, never silently ignored |
 
 `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, when set on the host, still wins over
 both. The flags are target-scoped, never a plain `CFLAGS`: `cc` reads them first
@@ -601,15 +602,59 @@ the one place KT-1747's generic toolchain detection reuses):
   `.cargo/config.toml` speaks; a worker's edit of its own worktree cannot point the
   seed anywhere) and its `target_directory`, never a hard-coded `<repo>/target/debug`.
   The lane has one `debug/`: the first seed is cloned whole, the others are merged
-  into it entry by entry (Cargo names every unit by a hash). The marker's key is the
-  hash of every root's `Cargo.lock`;
+  into it entry by entry (Cargo names every unit by a hash). What a root did is
+  remembered **per root** (see 5), not by one lane-wide hash;
 - a project with **no Rust root** gets no cargo stub and no Cargo warm-up: the
   record says `no Cargo.toml in the repository and no first-build command declared
   for this project: nothing to warm`. Its owner can declare a **first-build command**
-  (global or per project; run through the host's shell in the worktree root, under the
-  same bound, journalled as the crate `command`, marked warm by a hash of the
-  command): a `composer install`, an `npm ci`. KT-1747 provides the dependency
-  directories such a command writes into.
+  (global or per project; run in the worktree root **under the lane's OS sandbox**,
+  under the same bound, journalled as the crate `command`, marked by a key over the
+  command, the locks and the compiler environment): a `composer install`, an
+  `npm ci`. KT-1747 provides the dependency directories such a command writes into.
+
+**5. Per root, and only under the sandbox** (`core/task_worker_root_marks.rs`,
+`core/task_worker_lane_warm.rs`). Kronn's own repository has two roots, `backend/`
+and `desktop/src-tauri/`, and they do not warm alike: the desktop one needs system
+libraries (GTK, WebKit) a host may lack. A lane-wide marker made its failure erase
+the backend's success and be paid again by every relaunch and every new lane. So:
+
+- **a mark per root** in the lane's `.kronn-warm.json` (`roots: [{path, key,
+  state: built|failed, reason?, at_unix}]`). The key is a hash of the root, **its**
+  `Cargo.lock` hash and the lane's compiler environment (sorted). One root's success
+  survives another's failure; a changed lock rebuilds that root only. A marker
+  written before (no `roots`) still vouches for the whole lane at its old key;
+- **a failure is cached beside the seed**, in `<seed target>/.kronn-warm-failures.json`
+  (outside `debug/`, written by Kronn only, never by a worker): a root that FAILED for
+  a key is not tried by any later lane of the project until its lock or the
+  environment changes. It is reported as `build: failed("not retried: it failed
+  before for this Cargo.lock and compiler environment: <reason>")`, takes no build
+  slot and does not make the aggregate `first_build` fail (only a root that failed
+  *in this run* does, and its detail names the root). A root that builds again
+  clears its entry. A **timeout**, a **cancellation**, and a build that never started
+  (`not run: …` from a host with no sandbox, `cannot start …`) are never cached: they
+  say nothing about the root. To retry a cached failure sooner, delete that file;
+- **a seed alignment build that fails is cached too** (`.kronn-seed-env-failure.json`
+  beside the stamp), for the same lock and environment — but only for 6 hours, because
+  unlike a lane (a clean checkout of the base) the seed is built from the owner's live
+  tree, where a failure may be half-written code;
+- `first_build_pending` (what decides whether the worker's start waits for a first
+  build) is per root as well; a root that failed in *another* lane is only known once
+  its seed is resolved, so a brand-new lane counts as pending and its warm-up then
+  skips that root at once;
+- **the declared command runs only under the lane's OS sandbox.** The worktree it
+  runs in holds what the worker wrote (`package.json` scripts, a `Makefile`, composer
+  scripts), and on a resumed lane that includes files written in an earlier turn; run
+  with the host's rights, `npm ci` would execute them as the user. The command goes
+  through the same `SandboxedProbeRunner` as the cargo first build (so the process
+  Kronn starts is the sandbox launcher and `sh -c` starts inside it: writes confined
+  to the lane, no network). The engine also refuses it itself when the runner it was
+  given does not report `confined()`, and a host with no usable sandbox refuses it
+  (`not run: …`): the record says `first_build: failed("the declared first-build
+  command was not run: … only runs under the lane's OS sandbox …")` or the runner's
+  reason, nothing reaches a process, nothing is marked warm. Consequence of the
+  sandbox, said plainly: a command that needs the network (`npm ci` from a registry)
+  fails there; it works for what is already cached or vendored, and KT-1747's
+  dependency provisioning is the place for the rest.
 
 **4. What the journal says.** `lane_warm_start` keeps its shape and gains
 `seed.aligned` (on the `cloned` outcome: the first root's) and `crates`, one entry
@@ -633,7 +678,26 @@ dependents. Rejected for that reason, and removed. The other options of the task
 | `CFLAGS_<apple triple>` in the lane + a seed aligned by Kronn | **taken**: no effect off macOS, read by `cc` first, identical value on both sides by construction (the first build and the seed build both take the resolved environment) |
 
 **Pinned** (`task_worker_lane_warm_test.rs`, `task_worker_seed_align_test.rs`,
-`task_worker_lane_settings_test.rs`, `project_toolchains_test.rs`):
+`task_worker_lane_settings_test.rs`, `project_toolchains_test.rs`,
+`task_worker_lane_warm_roots_test.rs`, `task_worker_root_marks_test.rs`,
+`task_worker_sandbox_test.rs`): two roots, one fails → the other's mark is kept, the
+failing one is not rebuilt by a relaunch nor by the next lane with the same lock, and
+is retried when its lock or the environment changes
+(`one_roots_success_survives_another_roots_failure_and_the_failure_is_not_retried`,
+`a_failure_is_tried_again_when_the_compiler_environment_changes`); a timeout is not
+cached (`a_timed_out_root_is_not_remembered_as_a_failure`); the roots setting selects
+and reports an unknown root
+(`the_rust_roots_setting_selects_the_roots_to_warm_and_reports_an_unknown_one`); a
+declared command is refused by an unconfined runner, runs as `sandbox-exec … sh -c`
+under a confined one, is refused on a host with no sandbox, and a command writing
+outside the lane is denied by the OS and reported
+(`a_declared_command_is_refused_by_a_runner_that_does_not_confine_it`,
+`a_declared_first_build_command_only_ever_runs_inside_the_os_sandbox`,
+`a_declared_first_build_command_on_a_host_without_a_sandbox_is_refused_and_reported`,
+`a_declared_first_build_command_writing_outside_the_lane_is_denied_by_the_os_and_reported`
+— the last one runs only where the OS sandbox can be applied from the test process);
+a failed seed build is not retried for the same lock and environment
+(`a_failed_seed_build_is_not_retried_for_the_same_lock_and_environment`):
 a project that is not Kronn gets its seed aligned once, a second lane reuses it
 without a build, a changed lock aligns it again
 (`a_project_that_is_not_kronn_gets_its_seed_aligned_once_and_the_next_lane_reuses_it`);
@@ -687,10 +751,16 @@ project, read each `lane_warm_start` (`seed.aligned`, `crates`,
 `first_build.outcome`, `duration_ms`, build_jobs, host load) and look for
 `.kronn-warm.json` in the lane target.
 
-[src: file: backend/src/core/task_worker_lane_warm.rs:58-58#DEFAULT_FIRST_BUILD_TIMEOUT]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1061-1061#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_seed_align.rs:230-230#align_seed]
-[src: file: backend/src/core/task_worker_lane_settings.rs:67-67#resolve]
+[src: file: backend/src/core/task_worker_lane_warm.rs:59-59#DEFAULT_FIRST_BUILD_TIMEOUT]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1139-1139#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:951-951#warm_units]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1778-1778#first_build_pending]
+[src: file: backend/src/core/task_worker_root_marks.rs:68-68#root_key]
+[src: file: backend/src/core/task_worker_root_marks.rs:131-131#cached_failure]
+[src: file: backend/src/core/task_worker_seed_align.rs:275-275#align_seed]
+[src: file: backend/src/core/task_worker_seed_align.rs:217-217#recent_failure]
+[src: file: backend/src/core/task_worker_lane_settings.rs:71-71#resolve]
+[src: file: backend/src/core/project_toolchains.rs:113-113#select_roots]
 [src: file: backend/src/core/project_toolchains.rs:72-72#rust_roots]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]

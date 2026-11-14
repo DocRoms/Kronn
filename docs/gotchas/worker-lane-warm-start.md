@@ -53,7 +53,21 @@ Failure modes, all ending in a (cold) dispatch:
   manifests (any depth up to four, e.g. `redis-flush/Cargo.toml`) is warmed, seeded
   from its own target directory (`cargo metadata`, run in the main checkout) and
   aligned; a project with no Rust root is not warmed by Cargo (the record says why)
-  and may declare a first-build command instead (`composer install`, `npm ci`);
+  and may declare a first-build command instead (`composer install`, `npm ci`).
+  That command executes the worktree's own scripts, which the worker writes, so it
+  runs **only under the lane's OS sandbox** (the same runner as the cargo first
+  build; a runner that does not confine is refused by the engine, a host with no
+  sandbox refuses it: `lane_warm_start` says so, nothing is marked warm). It has no
+  network there;
+- what a root did is remembered **per root** (`.kronn-warm.json` `roots[]`, keyed on
+  the root's `Cargo.lock` hash and the compiler environment): a root that built stays
+  built when another fails, and a root that FAILED is cached beside its seed
+  (`<target>/.kronn-warm-failures.json`) and not rebuilt by a relaunch or by the next
+  lane until its lock or the environment changes — Kronn's own `desktop/src-tauri`
+  needs system libraries a host may lack, and used to be rebuilt by every lane. A
+  timeout, a cancellation or a build that never started is never cached. A project
+  can list the roots to warm (project card, `rust_roots`; default every detected
+  root);
 - a queue that does not drain is given up after
   `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 60 min) and the worker
   starts with the target it has;

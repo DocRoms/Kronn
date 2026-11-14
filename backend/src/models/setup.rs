@@ -282,6 +282,13 @@ pub struct LaneWarmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub first_build_timeout_min: Option<u32>,
+    /// Which Rust workspace roots of the project to warm, as directories
+    /// relative to the repository (`.` for the root itself). `None` = every root
+    /// found from the manifests. A project's own setting only: the global entry
+    /// cannot name directories of a repository it does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rust_roots: Option<Vec<String>>,
 }
 
 /// KT-1742 — default bound of a lane's first build, in minutes (measured: the
@@ -292,6 +299,7 @@ pub const MAX_LANE_FIRST_BUILD_TIMEOUT_MIN: u32 = 1_440;
 const MAX_LANE_ENV_ENTRIES: usize = 32;
 const MAX_LANE_ENV_BYTES: usize = 2_000;
 const MAX_LANE_COMMAND_BYTES: usize = 4_000;
+const MAX_LANE_ROOTS: usize = 16;
 /// Variables a lane owns: letting a setting move them would break its sandbox,
 /// its target or its isolation.
 const LANE_OWNED_ENV: [&str; 6] = [
@@ -333,6 +341,20 @@ impl LaneWarmConfig {
                 .filter(|entry| !entry.is_empty())
                 .collect()
         });
+        // A blank list is « every detected root », not « no root ».
+        self.rust_roots = self
+            .rust_roots
+            .map(|roots| {
+                let mut kept: Vec<String> = Vec::new();
+                for root in roots {
+                    let root = normalize_lane_root(&root);
+                    if !root.is_empty() && !kept.contains(&root) {
+                        kept.push(root);
+                    }
+                }
+                kept
+            })
+            .filter(|roots| !roots.is_empty());
         self
     }
 
@@ -354,6 +376,14 @@ impl LaneWarmConfig {
                 ));
             }
         }
+        if let Some(roots) = &self.rust_roots {
+            if roots.len() > MAX_LANE_ROOTS {
+                return Err(format!("rust_roots is limited to {MAX_LANE_ROOTS} entries"));
+            }
+            for root in roots.iter().filter(|root| !root.trim().is_empty()) {
+                validate_lane_root(root)?;
+            }
+        }
         if let Some(entries) = &self.compiler_env {
             if entries.len() > MAX_LANE_ENV_ENTRIES {
                 return Err(format!(
@@ -366,6 +396,30 @@ impl LaneWarmConfig {
         }
         Ok(())
     }
+}
+
+/// `./redis-flush/` → `redis-flush`; the repository root stays `.`.
+pub fn normalize_lane_root(root: &str) -> String {
+    let trimmed = root.trim().trim_end_matches('/');
+    trimmed.strip_prefix("./").unwrap_or(trimmed).to_string()
+}
+
+/// A root names a directory inside the repository: relative, no `..`, no NUL.
+fn validate_lane_root(root: &str) -> Result<(), String> {
+    let root = normalize_lane_root(root);
+    let escapes = std::path::Path::new(&root).components().any(|part| {
+        !matches!(
+            part,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if root.is_empty() || escapes || root.contains('\0') || root.len() > 300 {
+        return Err(format!(
+            "rust_roots entry `{root}` must be a directory inside the repository \
+             (relative, no `..`)"
+        ));
+    }
+    Ok(())
 }
 
 /// `NAME=value` → `(NAME, value)`: a portable variable name, a value without a

@@ -23,6 +23,33 @@ afterEach(() => {
 });
 
 describe('ProjectLaneWarmSetting (KT-1742)', () => {
+  it('lists the Rust roots to warm next to the command and stores them with the override', async () => {
+    getMock.mockResolvedValue({ hooks: {}, lane_warm: { rust_roots: ['backend'] } });
+    setMock.mockResolvedValue(true);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-roots')).not.toBeDisabled());
+    expect(screen.getByTestId('project-lane-warm-roots')).toHaveValue('backend');
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-roots'), { target: { value: 'backend\nredis-flush' } });
+    fireEvent.click(screen.getByTestId('project-lane-warm-save'));
+
+    await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', {
+      hooks: {},
+      lane_warm: { rust_roots: ['backend', 'redis-flush'] },
+    }));
+  });
+
+  it('refuses a root outside the repository before saving', async () => {
+    getMock.mockResolvedValue(null);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-roots')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-roots'), { target: { value: '../elsewhere' } });
+
+    expect(screen.getByTestId('project-lane-warm-roots-invalid')).toBeInTheDocument();
+    expect(screen.getByTestId('project-lane-warm-save')).toBeDisabled();
+  });
+
   it('starts on « inherit » for a project that has no workspace settings', async () => {
     getMock.mockResolvedValue(null);
     render(<ProjectLaneWarmSetting projectId="p1" t={t} />);

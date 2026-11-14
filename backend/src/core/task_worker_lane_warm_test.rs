@@ -57,6 +57,7 @@ impl Fixture {
                 lock_hash: hash_of(lock),
                 completed_unix: 1,
                 cargo_home: None,
+                roots: Vec::new(),
             })
             .unwrap(),
         )
@@ -113,6 +114,7 @@ fn host() -> WarmHost<'static> {
         seed_alignment: false,
         compiler_env: Vec::new(),
         first_build_command: None,
+        rust_roots: None,
         metadata: &fixture_metadata,
         seed_runner: &NeverRuns,
         lock_wait: Duration::from_millis(50),
@@ -164,6 +166,10 @@ fn copy_dir(source: &Path, destination: &Path) -> io::Result<()> {
 struct ScriptedBuild {
     calls: Mutex<Vec<ProbeCommand>>,
     outcome: ProbeOutcome,
+    /// Whether this stand-in claims to run its commands under the OS sandbox.
+    sandboxed: bool,
+    /// A build whose directory ends with this fails with `failure_detail`.
+    fails_in: Option<(PathBuf, String)>,
 }
 
 impl ScriptedBuild {
@@ -178,7 +184,22 @@ impl ScriptedBuild {
                 success,
                 detail: detail.into(),
             },
+            sandboxed: false,
+            fails_in: None,
         }
+    }
+
+    /// The same runner, claiming the lane's OS sandbox (a declared command runs
+    /// only under one).
+    fn sandboxed(mut self) -> Self {
+        self.sandboxed = true;
+        self
+    }
+
+    /// A runner whose build in a directory ending with `dir` fails.
+    fn failing_in(mut self, dir: &str, detail: &str) -> Self {
+        self.fails_in = Some((PathBuf::from(dir), detail.to_string()));
+        self
     }
 
     fn calls(&self) -> Vec<ProbeCommand> {
@@ -189,7 +210,19 @@ impl ScriptedBuild {
 impl ProbeRunner for ScriptedBuild {
     fn run(&self, probe: &ProbeCommand) -> ProbeOutcome {
         self.calls.lock().unwrap().push(probe.clone());
+        if let Some((dir, detail)) = &self.fails_in {
+            if probe.cwd.ends_with(dir) {
+                return ProbeOutcome {
+                    success: false,
+                    detail: detail.clone(),
+                };
+            }
+        }
         self.outcome.clone()
+    }
+
+    fn confined(&self) -> bool {
+        self.sandboxed
     }
 }
 
@@ -498,6 +531,7 @@ fn a_lane_target_is_never_a_seed_source() {
             lock_hash: hash_of(LOCK_A),
             completed_unix: u64::MAX / 2,
             cargo_home: None,
+            roots: Vec::new(),
         })
         .unwrap(),
     )
@@ -918,7 +952,7 @@ fn a_successful_first_build_writes_the_marker_and_records_its_duration() {
 }
 
 #[test]
-fn a_failed_or_timed_out_build_leaves_no_marker() {
+fn a_failed_or_timed_out_build_is_never_marked_built() {
     let fx = fixture();
     let failed_lane = fx.lane("kt-1250-failed", LOCK_A);
     let failed = warm(
@@ -931,9 +965,14 @@ fn a_failed_or_timed_out_build_leaves_no_marker() {
         matches!(&failed.first_build, FirstBuild::Failed { detail, .. } if detail.contains("E0432")),
         "{failed:?}"
     );
-    assert!(read_marker(&failed_lane.cargo_target_dir).is_none());
+    // KT-1742: the failure is remembered per root (so a relaunch does not run it
+    // again), never as a build that succeeded.
+    let marker = read_marker(&failed_lane.cargo_target_dir).expect("the failure is recorded");
+    assert_eq!(marker.roots.len(), 1);
+    assert!(matches!(marker.roots[0].state, RootState::Failed { .. }));
 
-    let slow_lane = fx.lane("kt-1250-slow", LOCK_A);
+    // Another lock: the first lane's failure is cached for LOCK_A (KT-1742).
+    let slow_lane = fx.lane("kt-1250-slow", LOCK_B);
     let slow = warm(
         &slow_lane,
         &ScriptedBuild::with(false, "timed out after 60s"),
@@ -1623,7 +1662,13 @@ fn a_first_build_is_pending_only_for_a_lock_that_is_not_already_built() {
     assert!(first_build_pending(&lane.worktree));
 
     fx.write_build(&lane.cargo_target_dir, "built");
-    write_marker(&lane, &hash_of(LOCK_A), &HomeKey::of(&lane, &provisioned())).unwrap();
+    write_marker(
+        &lane,
+        &hash_of(LOCK_A),
+        &HomeKey::of(&lane, &provisioned()),
+        Vec::new(),
+    )
+    .unwrap();
     assert!(
         !first_build_pending(&lane.worktree),
         "a lane built for this lock has nothing left to build"
@@ -1665,6 +1710,7 @@ fn aligned_host(seed_runner: &dyn ProbeRunner) -> WarmHost<'_> {
         seed_alignment: true,
         compiler_env: cc_env(),
         first_build_command: None,
+        rust_roots: None,
         metadata: &main_metadata,
         seed_runner,
         lock_wait: Duration::from_millis(150),
@@ -2049,7 +2095,7 @@ fn a_project_with_no_cargo_workspace_is_not_warmed_and_the_record_says_why() {
 fn a_declared_first_build_command_warms_a_project_that_is_not_a_cargo_one() {
     let fx = fixture();
     let lane = fx.plain_lane("kt-1742-composer");
-    let runner = ScriptedBuild::ok();
+    let runner = ScriptedBuild::ok().sandboxed();
     let seed_build = ScriptedBuild::ok();
     let mut host = aligned_host(&seed_build);
     host.first_build_command = Some("composer install --no-interaction".into());
@@ -2121,3 +2167,6 @@ fn the_alignment_is_journalled_as_tagged_json() {
     .unwrap();
     assert_eq!(refused["state"], "not_aligned");
 }
+
+#[path = "task_worker_lane_warm_roots_test.rs"]
+mod roots;

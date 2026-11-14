@@ -18,6 +18,7 @@ fn warm_host() -> WarmHost<'static> {
         seed_alignment: false,
         compiler_env: Vec::new(),
         first_build_command: None,
+        rust_roots: None,
         metadata: &no_metadata,
         seed_runner: &ProcessProbeRunner,
         lock_wait: Duration::from_millis(10),
@@ -762,6 +763,150 @@ fn a_relaunch_after_the_worker_changed_its_build_never_reaches_a_process_unconfi
         // wrapping to the process runner, which starts it behind the launcher.
         assert_eq!(call.priority, Priority::Background, "{call:?}");
     }
+}
+
+/// KT-1742 — a project's declared first-build command (`npm ci`, `composer
+/// install`) executes the worktree's own scripts, which the worker writes. The
+/// process Kronn starts for it is the OS sandbox, never the shell.
+#[test]
+fn a_declared_first_build_command_only_ever_runs_inside_the_os_sandbox() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join("package.json"), "{}").unwrap();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let inner = Recorder::new();
+    let runner = SandboxedProbeRunner::new(
+        Ok(SandboxPolicy::for_lane(&lane)),
+        Some(Mechanism::Seatbelt),
+        inner.clone(),
+    );
+    let settings = WarmStartSettings::resolve(Some("1"), Some("1"), Some("60"), 4);
+    let mut host = warm_host();
+    host.first_build_command = Some("npm ci".into());
+
+    let record = warm_lane(
+        &lane,
+        &provisioned(),
+        &settings,
+        &host,
+        &BuildGate::new(),
+        &runner,
+        &|_, _| Ok(()),
+        |_| {},
+    );
+
+    assert!(
+        matches!(record.first_build, FirstBuild::Succeeded { .. }),
+        "{record:?}"
+    );
+    let calls = inner.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].program, SANDBOX_EXEC, "{:?}", calls[0]);
+    assert!(calls[0].args[1].contains("(deny default)"));
+    assert_eq!(
+        &calls[0].args[calls[0].args.len() - 3..],
+        ["sh", "-c", "npm ci"],
+        "the shell only starts inside the sandbox command"
+    );
+}
+
+/// KT-1742 — a host with no usable sandbox runs no declared command: the
+/// record says why, nothing reached a process, and nothing is marked warm.
+#[test]
+fn a_declared_first_build_command_on_a_host_without_a_sandbox_is_refused_and_reported() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join("package.json"), "{}").unwrap();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let inner = Recorder::new();
+    let runner = SandboxedProbeRunner::new(Ok(SandboxPolicy::for_lane(&lane)), None, inner.clone());
+    let settings = WarmStartSettings::resolve(Some("1"), Some("1"), Some("60"), 4);
+    let mut host = warm_host();
+    host.first_build_command = Some("npm ci".into());
+
+    let record = warm_lane(
+        &lane,
+        &provisioned(),
+        &settings,
+        &host,
+        &BuildGate::new(),
+        &runner,
+        &|_, _| Ok(()),
+        |_| {},
+    );
+
+    let FirstBuild::Failed { detail, .. } = &record.first_build else {
+        panic!("expected a refusal, got {record:?}");
+    };
+    assert!(detail.contains("not run"), "{detail}");
+    assert!(inner.calls().is_empty(), "no process was started");
+    assert!(
+        !lane.cargo_target_dir.join(".kronn-warm.json").exists(),
+        "nothing is marked warm"
+    );
+}
+
+/// KT-1742 — and under the REAL OS sandbox, a declared command that writes
+/// outside the lane's roots is stopped by the OS, and the event reports it.
+#[test]
+fn a_declared_first_build_command_writing_outside_the_lane_is_denied_by_the_os_and_reported() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    std::fs::write(layout.worktree.join("package.json"), "{}").unwrap();
+    let lane = WorkerLane::for_worktree(&layout.worktree).unwrap();
+    let outside_dir = outside_dir();
+    let outside = outside_dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("escaped.txt");
+    let inside = layout.worktree.join("inside.txt");
+    let runner = SandboxedProbeRunner::new(
+        Ok(SandboxPolicy::for_lane(&lane)),
+        Some(mechanism),
+        Arc::new(ProcessProbeRunner),
+    );
+    let settings = WarmStartSettings::resolve(Some("1"), Some("1"), Some("60"), 4);
+    let mut host = warm_host();
+    host.first_build_command = Some(format!(
+        "echo x > {inside:?} && echo x > {outside:?}",
+        inside = inside.display().to_string(),
+        outside = outside.display().to_string()
+    ));
+
+    let record = warm_lane(
+        &lane,
+        &provisioned(),
+        &settings,
+        &host,
+        &BuildGate::new(),
+        &runner,
+        &|_, _| Ok(()),
+        |_| {},
+    );
+
+    assert!(
+        matches!(record.first_build, FirstBuild::Failed { .. }),
+        "the write outside the lane must fail the command: {record:?}"
+    );
+    assert!(!outside.exists(), "the escape reached the host's disk");
+    assert!(inside.exists(), "a write inside the lane is still allowed");
+    assert!(
+        !lane.cargo_target_dir.join(".kronn-warm.json").exists() || read_failed_command_mark(&lane),
+        "a command that failed is never marked built"
+    );
+    let json = serde_json::to_value(&record).unwrap();
+    assert_eq!(json["first_build"]["outcome"], "failed");
+    assert_eq!(json["crates"][0]["path"], "command");
+}
+
+/// Whether the lane's marker holds only a failed `command` entry.
+fn read_failed_command_mark(lane: &WorkerLane) -> bool {
+    let bytes = std::fs::read(lane.cargo_target_dir.join(".kronn-warm.json")).unwrap();
+    let marker: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    marker["roots"]
+        .as_array()
+        .is_some_and(|roots| roots.iter().all(|root| root["state"] == "failed"))
 }
 
 /// KT-1633: the sandboxed runner hands the process level the priority the

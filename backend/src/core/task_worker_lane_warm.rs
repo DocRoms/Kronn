@@ -35,6 +35,7 @@ use crate::core::task_worker_env::{
     prepare_launch, ProbeCommand, ProbeRunner, ProcessProbeRunner, Provisioned, WorkerLane,
 };
 use crate::core::task_worker_lane_settings;
+use crate::core::task_worker_root_marks::{self, RootMark, RootState};
 pub use crate::core::task_worker_seed_align::SeedAlignment;
 use crate::core::task_worker_seed_align::{self, AlignRequest, Assessment};
 use crate::models::WarmingStepKind;
@@ -65,6 +66,9 @@ const DEBUG_DIR: &str = "debug";
 #[cfg(test)]
 const CARGO_BUILD_LOCK: &str = seed_prune::CARGO_BUILD_LOCK;
 const TIMED_OUT_DETAIL_PREFIX: &str = "timed out after";
+/// How a probe's detail starts when the runner refused it (the sandboxed runner,
+/// `not run: …`) or could not start the program: not a verdict on a root.
+const NOT_STARTED_PREFIXES: [&str; 2] = ["not run:", "cannot start"];
 /// How often a queued first build looks at its cancellation.
 const GATE_POLL: Duration = Duration::from_millis(100);
 
@@ -490,6 +494,10 @@ struct WarmMarker {
     /// dependency (measured on this host: no reuse at all).
     #[serde(default)]
     cargo_home: Option<PathBuf>,
+    /// KT-1742 — what each root did in this lane, per root: one root's success
+    /// survives another's failure. Empty in a marker written before.
+    #[serde(default)]
+    roots: Vec<RootMark>,
 }
 
 /// Which Cargo home a lane's builds run under, for judging whether a warm
@@ -778,10 +786,18 @@ fn seed_lane(
 
 // ─── Warm start ───────────────────────────────────────────────────────────
 
-fn write_marker(lane: &WorkerLane, lock_hash: &str, home: &HomeKey) -> io::Result<()> {
+/// Writes the lane's marker: `lock_hash` is the aggregate key (what a marker
+/// always carried), `roots` what each root did.
+fn write_marker(
+    lane: &WorkerLane,
+    lock_hash: &str,
+    home: &HomeKey,
+    roots: Vec<RootMark>,
+) -> io::Result<()> {
     let marker = WarmMarker {
         lock_hash: lock_hash.to_string(),
         cargo_home: home.cargo_home.clone(),
+        roots,
         completed_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| elapsed.as_secs())
@@ -804,8 +820,12 @@ pub struct WarmHost<'a> {
     pub seed_alignment: bool,
     /// The lane's C compiler environment (the owner's settings, or detected).
     pub compiler_env: Vec<(String, String)>,
-    /// A shell command that replaces the detected first build.
+    /// A shell command that replaces the detected first build. It runs only
+    /// under the lane's OS sandbox ([`ProbeRunner::confined`]): the worktree it
+    /// runs in holds files the worker wrote.
     pub first_build_command: Option<String>,
+    /// The Rust roots to warm (relative directories); `None` = every detected one.
+    pub rust_roots: Option<Vec<String>>,
     /// Resolves a crate directory of the MAIN checkout to its target directory.
     pub metadata: project_toolchains::MetadataResolver<'a>,
     /// Runs the seed's alignment build. The seed is the owner's own target,
@@ -916,6 +936,64 @@ fn warm_key(roots: &[RustRoot], command: Option<&str>) -> Option<String> {
             locks.unwrap_or_default()
         ))),
     }
+}
+
+/// One thing the warm-up builds, and the key its outcome is remembered under: a
+/// Rust root, or the project's declared command.
+#[derive(Debug, Clone)]
+struct Unit {
+    label: String,
+    key: String,
+}
+
+/// The units of a warm-up, in the order of `roots` (or the single command unit
+/// when a command replaces the roots' builds).
+fn warm_units(
+    roots: &[RustRoot],
+    command: Option<&str>,
+    aggregate: Option<&str>,
+    compiler_env: &[(String, String)],
+) -> Vec<Unit> {
+    if command.is_some() {
+        return vec![Unit {
+            label: "command".into(),
+            key: task_worker_root_marks::root_key("command", aggregate, compiler_env),
+        }];
+    }
+    roots
+        .iter()
+        .map(|root| Unit {
+            label: root.label(),
+            key: task_worker_root_marks::root_key(
+                &root.label(),
+                root.lock_hash().as_deref(),
+                compiler_env,
+            ),
+        })
+        .collect()
+}
+
+/// The lane's marker, when what it vouches for is still there: a Cargo lane
+/// needs its `debug/`.
+fn usable_marker(lane: &WorkerLane, no_cargo_roots: bool) -> Option<WarmMarker> {
+    if !no_cargo_roots && !lane.cargo_target_dir.join(DEBUG_DIR).is_dir() {
+        return None;
+    }
+    read_marker(&lane.cargo_target_dir)
+}
+
+/// What the lane's marker says `unit` did, for its key. A marker written before
+/// per-root entries (none) vouches for the whole lane at its aggregate key.
+fn marked(marker: Option<&WarmMarker>, unit: &Unit, aggregate: Option<&str>) -> Option<RootState> {
+    let marker = marker?;
+    if marker.roots.is_empty() {
+        return (Some(marker.lock_hash.as_str()) == aggregate).then_some(RootState::Built);
+    }
+    marker
+        .roots
+        .iter()
+        .find(|mark| mark.path == unit.label && mark.key == unit.key)
+        .map(|mark| mark.state.clone())
 }
 
 /// The environment of a lane's own builds: the lane's, with the compiler
@@ -1071,14 +1149,24 @@ pub fn warm_lane_cancellable(
 ) -> WarmStartRecord {
     let jobs = settings.build_jobs;
     let home = HomeKey::of(lane, provisioned);
-    let roots = project_toolchains::rust_roots(&lane.worktree);
+    let (roots, unknown_roots) = project_toolchains::select_roots(
+        project_toolchains::rust_roots(&lane.worktree),
+        host.rust_roots.as_deref(),
+    );
     let command = host.first_build_command.clone();
     if roots.is_empty() && command.is_none() {
-        return WarmStartRecord::not_applicable(
+        let reason = if host.rust_roots.is_some() {
+            format!(
+                "the project's Rust roots setting names no Rust workspace of the repository \
+                 ({}): nothing to warm",
+                unknown_roots.join(", ")
+            )
+        } else {
             "no Cargo.toml in the repository and no first-build command declared for this \
-             project: nothing to warm",
-            jobs,
-        );
+             project: nothing to warm"
+                .to_string()
+        };
+        return WarmStartRecord::not_applicable(&reason, jobs);
     }
     let cargo_lock = project_toolchains::combined_lock_hash(&roots);
     let lock_hash = warm_key(&roots, command.as_deref());
@@ -1256,15 +1344,32 @@ pub fn warm_lane_cancellable(
         }
     }
     let seed_ms = seeding.elapsed().as_millis() as u64;
+    let unknown_crates = || -> Vec<WarmedCrate> {
+        unknown_roots
+            .iter()
+            .map(|path| WarmedCrate {
+                path: path.clone(),
+                seed_target: None,
+                seed_aligned: SeedAlignment::skipped("not a Rust root of the repository"),
+                build: FirstBuild::Skipped {
+                    reason: "listed in the project's Rust roots setting, but there is no \
+                             Cargo.toml there"
+                        .into(),
+                },
+            })
+            .collect()
+    };
     let skipped_crates = |states: &[CrateState], reason: &str| -> Vec<WarmedCrate> {
-        states
+        let mut crates: Vec<WarmedCrate> = states
             .iter()
             .map(|state| {
                 state.warmed(FirstBuild::Skipped {
                     reason: reason.to_string(),
                 })
             })
-            .collect()
+            .collect();
+        crates.extend(unknown_crates());
+        crates
     };
 
     // `--locked` cannot build without a lock file, and a build with no lock hash
@@ -1284,23 +1389,148 @@ pub fn warm_lane_cancellable(
         );
     }
 
-    // A lane already built for this exact key (a relaunch) is warm.
-    let already_built = lock_hash.as_ref().is_some_and(|hash| {
-        (roots.is_empty() || lane.cargo_target_dir.join(DEBUG_DIR).is_dir())
-            && read_marker(&lane.cargo_target_dir).is_some_and(|marker| marker.lock_hash == *hash)
-    });
-    if already_built {
-        let reason = "the lane target was already built for this Cargo.lock";
+    // What each unit (a Rust root, or the declared command) already is. Per unit,
+    // so one root's success survives another's failure: it was built or failed in
+    // this lane (the lane's marker), or failed before for this very key in another
+    // lane of the project (the failure cache beside the seed). Neither is run again.
+    let units = warm_units(
+        &roots,
+        command.as_deref(),
+        lock_hash.as_deref(),
+        &host.compiler_env,
+    );
+    let marker = usable_marker(lane, roots.is_empty());
+    let mut marks: Vec<RootMark> = marker
+        .as_ref()
+        .map(|marker| marker.roots.clone())
+        .unwrap_or_default();
+    let mut marks_changed = false;
+    let mut known: Vec<Option<WarmedCrate>> = vec![None; states.len()];
+    let mut pending: Vec<usize> = Vec::new();
+    let mut command_pending = false;
+    let mut failed_before = 0usize;
+    if command.is_some() {
+        match marked(marker.as_ref(), &units[0], lock_hash.as_deref()) {
+            None => command_pending = true,
+            Some(RootState::Built) => {}
+            Some(RootState::Failed { .. }) => failed_before += 1,
+        }
+    } else {
+        for (index, state) in states.iter().enumerate() {
+            let unit = &units[index];
+            let prior = marked(marker.as_ref(), unit, lock_hash.as_deref()).or_else(|| {
+                let seed = state.seed_target.as_deref()?;
+                let reason = task_worker_root_marks::cached_failure(seed, &unit.label, &unit.key)?;
+                task_worker_root_marks::upsert(
+                    &mut marks,
+                    RootMark::new(
+                        &unit.label,
+                        &unit.key,
+                        RootState::Failed {
+                            reason: reason.clone(),
+                        },
+                    ),
+                );
+                marks_changed = true;
+                Some(RootState::Failed { reason })
+            });
+            match prior {
+                None => pending.push(index),
+                Some(RootState::Built) => {
+                    known[index] = Some(state.warmed(FirstBuild::Skipped {
+                        reason: "already built for this Cargo.lock and compiler environment".into(),
+                    }));
+                }
+                Some(RootState::Failed { reason }) => {
+                    failed_before += 1;
+                    known[index] = Some(state.warmed(FirstBuild::Failed {
+                        duration_ms: 0,
+                        detail: format!(
+                            "not retried: it failed before for this Cargo.lock and compiler \
+                             environment: {reason}"
+                        ),
+                    }));
+                }
+            }
+        }
+    }
+    if pending.is_empty() && !command_pending {
+        if marks_changed {
+            if let Err(error) = write_marker(lane, lock_hash.as_deref().unwrap_or(""), &home, marks)
+            {
+                tracing::warn!(lane = %lane.name, "warm marker not written: {error}");
+            }
+        }
+        let reason = if failed_before == 0 {
+            "the lane target was already built for this Cargo.lock".to_string()
+        } else {
+            format!(
+                "nothing left to build: {failed_before} root(s) failed before for this \
+                 Cargo.lock and compiler environment and are not retried"
+            )
+        };
+        let mut crates: Vec<WarmedCrate> = known.into_iter().flatten().collect();
+        if command.is_some() {
+            crates = skipped_crates(
+                &states,
+                "replaced by the project's declared first-build command",
+            );
+            crates.push(WarmedCrate {
+                path: "command".into(),
+                seed_target: None,
+                seed_aligned: SeedAlignment::skipped("a declared command builds no seed"),
+                build: FirstBuild::Skipped {
+                    reason: reason.clone(),
+                },
+            });
+        } else {
+            crates.extend(unknown_crates());
+        }
         return record_of(
             lock_hash,
             seed,
             jobs,
-            FirstBuild::Skipped {
-                reason: reason.into(),
+            FirstBuild::Skipped { reason },
+            0,
+            Some(seed_ms),
+            crates,
+        );
+    }
+
+    // The declared command runs the worktree's own scripts (package.json, a
+    // Makefile, composer scripts), and a resumed lane's worktree holds what the
+    // worker wrote: never with the host's rights. A runner that does not confine
+    // its commands to the lane's OS sandbox refuses it, and the record says so.
+    if command_pending && !runner.confined() {
+        let detail = "the declared first-build command was not run: it executes scripts of \
+                      the worktree, which the worker writes, so it only runs under the lane's \
+                      OS sandbox, and this runner does not confine its commands";
+        return record_of(
+            lock_hash,
+            seed,
+            jobs,
+            FirstBuild::Failed {
+                duration_ms: 0,
+                detail: detail.into(),
             },
             0,
             Some(seed_ms),
-            skipped_crates(&states, reason),
+            {
+                let mut crates = skipped_crates(
+                    &states,
+                    "replaced by the project's declared first-build command",
+                );
+                crates.push(WarmedCrate {
+                    path: "command".into(),
+                    seed_target: None,
+                    seed_aligned: SeedAlignment::skipped("a declared command builds no seed"),
+                    build: FirstBuild::Failed {
+                        duration_ms: 0,
+                        detail: detail.into(),
+                    },
+                });
+                crates
+            },
         );
     }
 
@@ -1340,10 +1570,9 @@ pub fn warm_lane_cancellable(
     let deadline = slot.held_since.unwrap_or_else(Instant::now) + settings.first_build_timeout;
     let env = lane_build_env(lane, provisioned, host);
 
-    // What to run: the declared command, or one `cargo test` per Rust root.
-    let mut warmed: Vec<WarmedCrate> = Vec::new();
-    let mut builds: Vec<FirstBuild> = Vec::new();
-    let mut run = |label: String, probe: ProbeCommand, state: Option<&CrateState>| -> bool {
+    // What to run: the declared command, or one `cargo test` per pending Rust root.
+    let mut attempted: Vec<(String, FirstBuild)> = Vec::new();
+    let mut run = |label: &str, probe: ProbeCommand| -> bool {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let started = Instant::now();
         let build = if remaining.is_zero() {
@@ -1362,16 +1591,7 @@ pub fn warm_lane_cancellable(
             build,
             FirstBuild::TimedOut { .. } | FirstBuild::Cancelled { .. }
         );
-        warmed.push(match state {
-            Some(state) => state.warmed(build.clone()),
-            None => WarmedCrate {
-                path: label,
-                seed_target: None,
-                seed_aligned: SeedAlignment::skipped("a declared command builds no seed"),
-                build: build.clone(),
-            },
-        });
-        builds.push(build);
+        attempted.push((label.to_string(), build));
         stop
     };
     if let Some(command) = &command {
@@ -1385,9 +1605,10 @@ pub fn warm_lane_cancellable(
             priority: Priority::Background,
             clean_env: false,
         };
-        run("command".into(), probe, None);
+        run("command", probe);
     } else {
-        for state in &states {
+        for &index in &pending {
+            let state = &states[index];
             let probe = ProbeCommand {
                 program: "cargo".into(),
                 args: first_build_args(&state.root.manifest_dir),
@@ -1398,17 +1619,87 @@ pub fn warm_lane_cancellable(
                 priority: Priority::Background,
                 clean_env: false,
             };
-            if run(state.root.label(), probe, Some(state)) {
+            if run(&state.root.label(), probe) {
                 break;
             }
         }
     }
     drop(slot);
 
-    // The aggregate: the first build that did not succeed, else the total.
-    let total_ms: u64 = builds
+    // What each attempted unit taught: a success is marked built (and forgets an
+    // old failure); a failure is marked and cached for its key; a timeout and a
+    // cancellation say nothing about the root and leave no trace.
+    let mut warmed: Vec<WarmedCrate> = Vec::new();
+    for (label, build) in &attempted {
+        let unit = units.iter().find(|unit| &unit.label == label);
+        let seed_dir = states
+            .iter()
+            .find(|state| &state.root.label() == label)
+            .and_then(|state| state.seed_target.clone());
+        let learned = match build {
+            FirstBuild::Succeeded { .. } => Some(RootState::Built),
+            // A build that never started (no sandbox on this host, no `cargo`)
+            // says nothing about the root: it is tried again once that is fixed.
+            FirstBuild::Failed { detail, .. }
+                if !NOT_STARTED_PREFIXES.iter().any(|p| detail.starts_with(p)) =>
+            {
+                Some(RootState::Failed {
+                    reason: detail.clone(),
+                })
+            }
+            _ => None,
+        };
+        if let (Some(unit), Some(state)) = (unit, learned) {
+            match (&state, &seed_dir) {
+                (RootState::Failed { reason }, Some(seed)) => {
+                    task_worker_root_marks::remember_failure(seed, label, &unit.key, reason);
+                }
+                (RootState::Built, Some(seed)) => {
+                    task_worker_root_marks::forget_failure(seed, label)
+                }
+                _ => {}
+            }
+            task_worker_root_marks::upsert(&mut marks, RootMark::new(label, &unit.key, state));
+            marks_changed = true;
+        }
+        if command.is_none() {
+            if let Some(index) = states.iter().position(|state| &state.root.label() == label) {
+                known[index] = Some(states[index].warmed(build.clone()));
+            }
+        }
+    }
+    if command.is_some() {
+        // The declared command replaced the roots' builds; their seeds still count.
+        warmed = skipped_crates(
+            &states,
+            "replaced by the project's declared first-build command",
+        );
+        for (label, build) in &attempted {
+            warmed.push(WarmedCrate {
+                path: label.clone(),
+                seed_target: None,
+                seed_aligned: SeedAlignment::skipped("a declared command builds no seed"),
+                build: build.clone(),
+            });
+        }
+    } else {
+        // A root nothing attempted (the bound ran out first) is reported, not hidden.
+        for (index, entry) in known.iter_mut().enumerate() {
+            if entry.is_none() {
+                *entry = Some(states[index].warmed(FirstBuild::Skipped {
+                    reason: "not reached: the first build stopped before it".into(),
+                }));
+            }
+        }
+        warmed.extend(known.into_iter().flatten());
+        warmed.extend(unknown_crates());
+    }
+
+    // The aggregate: the first attempted build that did not succeed, else the
+    // total. A root that failed before and was not retried is in its own entry.
+    let total_ms: u64 = attempted
         .iter()
-        .map(|build| match build {
+        .map(|(_, build)| match build {
             FirstBuild::Succeeded { duration_ms }
             | FirstBuild::Failed { duration_ms, .. }
             | FirstBuild::TimedOut { duration_ms }
@@ -1416,26 +1707,29 @@ pub fn warm_lane_cancellable(
             FirstBuild::Skipped { .. } => 0,
         })
         .sum();
-    let first_build = builds
+    let first_build = attempted
         .iter()
-        .find(|build| !matches!(build, FirstBuild::Succeeded { .. }))
-        .cloned()
+        .find(|(_, build)| !matches!(build, FirstBuild::Succeeded { .. }))
+        .map(|(label, build)| match build {
+            // Which root, when the repository has several.
+            FirstBuild::Failed {
+                duration_ms,
+                detail,
+            } if roots.len() > 1 && command.is_none() => FirstBuild::Failed {
+                duration_ms: *duration_ms,
+                detail: format!("{label}: {detail}"),
+            },
+            other => other.clone(),
+        })
         .unwrap_or(FirstBuild::Succeeded {
             duration_ms: total_ms,
         });
-    if matches!(first_build, FirstBuild::Succeeded { .. }) {
+    if marks_changed {
         if let Some(hash) = &lock_hash {
-            if let Err(error) = write_marker(lane, hash, &home) {
+            if let Err(error) = write_marker(lane, hash, &home, marks) {
                 tracing::warn!(lane = %lane.name, "warm marker not written: {error}");
             }
         }
-    }
-    if command.is_some() {
-        // The declared command replaced the roots' builds; their seeds still count.
-        let replaced = "replaced by the project's declared first-build command";
-        let mut all = skipped_crates(&states, replaced);
-        all.extend(warmed);
-        warmed = all;
     }
     record_of(
         lock_hash,
@@ -1490,12 +1784,22 @@ pub fn first_build_pending(work_dir: &Path) -> bool {
     };
     let effective =
         task_worker_lane_settings::effective_for(&lane.worktree, lane.main_checkout.as_deref());
-    let roots = project_toolchains::rust_roots(&lane.worktree);
-    let Some(hash) = warm_key(&roots, effective.first_build_command.as_deref()) else {
+    let (roots, _) = project_toolchains::select_roots(
+        project_toolchains::rust_roots(&lane.worktree),
+        effective.rust_roots.as_deref(),
+    );
+    let command = effective.first_build_command.as_deref();
+    let Some(hash) = warm_key(&roots, command) else {
         return false;
     };
-    !((roots.is_empty() || lane.cargo_target_dir.join(DEBUG_DIR).is_dir())
-        && read_marker(&lane.cargo_target_dir).is_some_and(|marker| marker.lock_hash == hash))
+    let units = warm_units(&roots, command, Some(&hash), &effective.compiler_env);
+    let marker = usable_marker(&lane, roots.is_empty());
+    // A root that failed before in another lane is only known once the seed's
+    // target is resolved (a `cargo metadata` run): it counts as pending here, and
+    // the warm-up itself then skips it at once.
+    units
+        .iter()
+        .any(|unit| marked(marker.as_ref(), unit, Some(&hash)).is_none())
 }
 
 /// Provision the lane of `work_dir`, then [`warm_lane`] it with the host's
@@ -1520,6 +1824,7 @@ pub fn warm_worktree(
                 seed_alignment: effective.seed_alignment,
                 compiler_env: effective.compiler_env,
                 first_build_command: effective.first_build_command,
+                rust_roots: effective.rust_roots,
                 metadata: &project_toolchains::host_cargo_metadata,
                 seed_runner: &ProcessProbeRunner,
                 lock_wait: task_worker_seed_align::DEFAULT_LOCK_WAIT,

@@ -38,6 +38,21 @@ describe('laneWarm draft (KT-1742)', () => {
     expect(draftProblem({ ...base, envMode: 'none', envText: 'garbage' })).toBeNull();
   });
 
+  it('stores the Rust roots a project names, one per line, and leaves a blank list to detection', () => {
+    const draft = draftOf({ rust_roots: ['backend', 'tools/exporter'] });
+    expect(draft.rootsText).toBe('backend\ntools/exporter');
+    expect(configOf(draft)).toEqual({ rust_roots: ['backend', 'tools/exporter'] });
+    expect(configOf({ ...EMPTY_LANE_WARM_DRAFT, rootsText: ' ./redis-flush/ \n\nredis-flush\n.' }))
+      .toEqual({ rust_roots: ['redis-flush', '.'] });
+    expect(configOf({ ...EMPTY_LANE_WARM_DRAFT, rootsText: '  \n ' })).toEqual({});
+    expect(draftProblem({ ...EMPTY_LANE_WARM_DRAFT, rootsText: 'backend' })).toBeNull();
+    expect(draftProblem({ ...EMPTY_LANE_WARM_DRAFT, rootsText: '../outside' })).toBe('roots');
+    expect(draftProblem({ ...EMPTY_LANE_WARM_DRAFT, rootsText: '/etc' })).toBe('roots');
+    expect(draftProblem({ ...EMPTY_LANE_WARM_DRAFT, rootsText: 'a/../b' })).toBe('roots');
+    expect(sameDraft(draft, { ...draft, rootsText: './backend/\ntools/exporter' })).toBe(true);
+    expect(sameDraft(draft, { ...draft, rootsText: 'backend' })).toBe(false);
+  });
+
   it('compares drafts the way they are stored', () => {
     const a = draftOf({ compiler_env: ['CC=clang'], first_build_command: ' make ' });
     const b = { ...a, envText: ' CC=clang \n', command: 'make' };

@@ -107,6 +107,32 @@ fn collect_roots(repo_root: &Path, dir: &Path, depth: usize, roots: &mut Vec<Rus
     }
 }
 
+/// The roots a project's `rust_roots` setting keeps (`None` keeps every one),
+/// and the listed directories that are not a detected root (a typo, or a crate
+/// that moved), which the caller reports instead of silently ignoring.
+pub fn select_roots(
+    roots: Vec<RustRoot>,
+    wanted: Option<&[String]>,
+) -> (Vec<RustRoot>, Vec<String>) {
+    let Some(wanted) = wanted else {
+        return (roots, Vec::new());
+    };
+    let wanted: Vec<String> = wanted
+        .iter()
+        .map(|entry| crate::models::normalize_lane_root(entry))
+        .collect();
+    let unknown = wanted
+        .iter()
+        .filter(|entry| !roots.iter().any(|root| root.label() == **entry))
+        .cloned()
+        .collect();
+    let kept = roots
+        .into_iter()
+        .filter(|root| wanted.contains(&root.label()))
+        .collect();
+    (kept, unknown)
+}
+
 /// Does the package at `manifest_dir` have a library target.
 pub fn has_lib_target(manifest_dir: &Path) -> bool {
     manifest_dir.join("src").join("lib.rs").is_file()

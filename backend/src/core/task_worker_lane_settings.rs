@@ -9,6 +9,7 @@
 //! | `seed_alignment` | on |
 //! | `first_build_command` | none: the detected cargo warm-up of every Rust root |
 //! | `first_build_timeout_min` | 60 |
+//! | `rust_roots` (a project's own only) | every Rust root found from the manifests |
 //!
 //! Every consumer of the lane's environment (the warm-up, the worker's launch,
 //! its sandbox) asks [`effective_for`], so a build the worker runs later sees the
@@ -37,6 +38,9 @@ pub struct EffectiveLaneSettings {
     /// A command that replaces the detected first build.
     pub first_build_command: Option<String>,
     pub first_build_timeout: Duration,
+    /// The Rust roots to warm (directories relative to the repository), or
+    /// `None` for every root found from the manifests. A project's own setting.
+    pub rust_roots: Option<Vec<String>>,
 }
 
 /// What detection says about a project, computed only when a setting needs it.
@@ -93,6 +97,7 @@ pub fn resolve(
             .map(|command| command.trim().to_string())
             .filter(|command| !command.is_empty()),
         first_build_timeout: Duration::from_secs(u64::from(minutes) * 60),
+        rust_roots: project.rust_roots.clone().filter(|roots| !roots.is_empty()),
     }
 }
 
@@ -110,6 +115,7 @@ static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
         compiler_env: None,
         first_build_command: None,
         first_build_timeout_min: None,
+        rust_roots: None,
     },
     projects: BTreeMap::new(),
 });

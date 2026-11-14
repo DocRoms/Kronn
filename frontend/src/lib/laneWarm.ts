@@ -22,6 +22,8 @@ export interface LaneWarmDraft {
   command: string;
   /** Minutes; blank = the default. */
   timeout: string;
+  /** KT-1742 — Rust roots to warm, one directory per line; blank = every detected root (a project's own). */
+  rootsText: string;
 }
 
 export const EMPTY_LANE_WARM_DRAFT: LaneWarmDraft = {
@@ -30,6 +32,7 @@ export const EMPTY_LANE_WARM_DRAFT: LaneWarmDraft = {
   envText: '',
   command: '',
   timeout: '',
+  rootsText: '',
 };
 
 export function draftOf(config: LaneWarmConfig | null | undefined): LaneWarmDraft {
@@ -45,6 +48,7 @@ export function draftOf(config: LaneWarmConfig | null | undefined): LaneWarmDraf
     timeout: config.first_build_timeout_min === undefined || config.first_build_timeout_min === null
       ? ''
       : String(config.first_build_timeout_min),
+    rootsText: (config.rust_roots ?? []).join('\n'),
   };
 }
 
@@ -52,8 +56,18 @@ export function envLines(text: string): string[] {
   return text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
 }
 
+/** The Rust roots of a draft: one directory per line, `./` and a trailing `/` dropped. */
+export function rootLines(text: string): string[] {
+  const roots: string[] = [];
+  for (const line of envLines(text)) {
+    const root = line.replace(/^\.\//, '').replace(/\/+$/, '');
+    if (root !== '' && !roots.includes(root)) roots.push(root);
+  }
+  return roots;
+}
+
 /** The first problem of a draft, as the part of the form it is in. */
-export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | null {
+export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' | null {
   const raw = draft.timeout.trim();
   if (raw !== '') {
     const minutes = Number(raw);
@@ -64,6 +78,8 @@ export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | null {
     if (entries.length === 0) return 'env';
     if (!entries.every(entry => /^[A-Za-z_][A-Za-z0-9_]*=/.test(entry))) return 'env';
   }
+  // A root is a directory inside the repository: relative, no `..`.
+  if (rootLines(draft.rootsText).some(root => root.startsWith('/') || root.split('/').includes('..'))) return 'roots';
   return null;
 }
 
@@ -77,6 +93,8 @@ export function configOf(draft: LaneWarmDraft): LaneWarmConfig {
   if (command !== '') config.first_build_command = command;
   const timeout = draft.timeout.trim();
   if (timeout !== '') config.first_build_timeout_min = Number(timeout);
+  const roots = rootLines(draft.rootsText);
+  if (roots.length > 0) config.rust_roots = roots;
   return config;
 }
 
@@ -85,5 +103,6 @@ export function sameDraft(a: LaneWarmDraft, b: LaneWarmDraft): boolean {
     && a.envMode === b.envMode
     && (a.envMode !== 'custom' || envLines(a.envText).join('\n') === envLines(b.envText).join('\n'))
     && a.command.trim() === b.command.trim()
-    && a.timeout.trim() === b.timeout.trim();
+    && a.timeout.trim() === b.timeout.trim()
+    && rootLines(a.rootsText).join('\n') === rootLines(b.rootsText).join('\n');
 }

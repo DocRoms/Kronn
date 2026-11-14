@@ -152,6 +152,7 @@ pub mod task_worker_env;
 pub mod task_worker_lane_seeds;
 pub mod task_worker_lane_settings;
 pub mod task_worker_lane_warm;
+pub mod task_worker_root_marks;
 pub mod task_worker_sandbox;
 pub mod task_worker_seed_align;
 pub mod td_decisions;

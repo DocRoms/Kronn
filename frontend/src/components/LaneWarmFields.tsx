@@ -89,6 +89,31 @@ export function LaneWarmFields({ draft, onChange, scope, disabled = false, idPre
       </label>
       <p className="text-sm text-faint">{t('laneWarm.commandHelp')}</p>
 
+      {scope === 'project' && (
+        <>
+          <label className="lane-warm-field" htmlFor={`${idPrefix}-roots`}>
+            <span className="label">{t('laneWarm.roots')}</span>
+            <textarea
+              id={`${idPrefix}-roots`}
+              className="set-input"
+              rows={2}
+              spellCheck={false}
+              placeholder={t('laneWarm.rootsPlaceholder')}
+              value={draft.rootsText}
+              disabled={disabled}
+              onChange={event => set({ rootsText: event.target.value })}
+              data-testid={`${idPrefix}-roots`}
+            />
+          </label>
+          <p className="text-sm text-faint">{t('laneWarm.rootsHelp')}</p>
+          {problem === 'roots' && (
+            <p role="alert" className="default-docs-dir-error" data-testid={`${idPrefix}-roots-invalid`}>
+              {t('laneWarm.rootsInvalid')}
+            </p>
+          )}
+        </>
+      )}
+
       <label className="lane-warm-field" htmlFor={`${idPrefix}-timeout`}>
         <span className="label">{t('laneWarm.timeout')}</span>
         <input
