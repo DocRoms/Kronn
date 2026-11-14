@@ -553,7 +553,7 @@ load, not a performance guarantee.
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]
 [src: file: backend/src/core/task_worker_lane_warm.rs:872]
-[src: file: frontend/src/components/settings/WorkersSection.tsx:45#WorkersSection]
+[src: file: frontend/src/components/settings/WorkersSection.tsx:53#WorkersSection]
 
 ## Maintenance command
 
