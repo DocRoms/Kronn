@@ -303,7 +303,9 @@ Safe to interrupt at any point; a rerun converges:
    `myAKIA…`, `AKIA…_old`, `botxoxb-…`, `sk_live_…_old`, `sk-<uuid>`), DERIVED
    mechanically from the vendor patterns of `redact::RAW_PATTERNS` (same bodies
    and same minimum lengths, only the anchors dropped:
-   `redact::name_embeds_vendor_token`); (d) `bearer` or `basic` in any case
+   `redact::name_embeds_vendor_token`); a match glued to a letter on its left
+   counts only when it holds a decimal digit, so `disk-cache-max-size-bytes` and
+   `task-runner-max-concurrency` are shown while `oldsk-…0123…` is masked; (d) `bearer` or `basic` in any case
    followed by white space (any Unicode white space), `:` or `=` and 12 token
    characters or more, anywhere (`bearer token` and `basic auth` are words and
    are shown); (e) an instance key as the whole name or any piece of it, a run of
@@ -317,12 +319,14 @@ Safe to interrupt at any point; a rerun converges:
    side), except a name that is exactly one canonical dashed UUID (8-4-4-4-12,
    any case), alone or after a `<label>_` or `<label>-` whose own such runs add
    up to fewer than 8 in total: that is an identifier and is shown. The
-   exemption waives (b) ONLY, so `sk-<uuid>`, `xoxb-<uuid>`, `bearer -<uuid>`
-   and `AKIA…_<uuid>` stay masked. A label made only of `a`-`f` letters
+   exemption waives (b), and (e) judges the label only (`PROJ_<uuid>` and
+   `MCP_SERVER_<uuid>` are shown); (a), (c) and (d) still judge the whole name,
+   so `sk-<uuid>`, `xoxb-<uuid>`, `bearer -<uuid>` and `AKIA…_<uuid>` stay masked. A label made only of `a`-`f` letters
    (`default_agent_profile_<uuid>`, `deadbee_cafebab_<uuid>`) holds no such run
-   and keeps the exemption. The price of the unanchored shapes: a kebab-case
-   name holding `sk-` followed by 20 name characters (`task-queue-max-concurrency`) is
-   masked and sheltered too, on the safe side; Kronn's own settings are snake_case.
+   and keeps the exemption. The price of the unanchored shapes: a name holding
+   a vendor prefix after a separator or with digits (`sk-cache-max-size-bytes`,
+   `task-runner-v2-max-concurrency`) is masked and sheltered too, on the safe
+   side; Kronn's own settings are snake_case.
    A symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard
    links, which the pass never reads through, renames over or removes. An

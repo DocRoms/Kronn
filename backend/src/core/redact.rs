@@ -478,11 +478,27 @@ static NAME_TOKEN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .collect()
 });
 
-/// Whether a vendor token shape ([`name_token_shapes`]) appears anywhere in
-/// `name`. The caller bounds the length of `name` (a key name past a few hundred
-/// characters is masked before any pattern runs, see `config_salvage`).
+/// Whether a vendor token shape ([`name_token_shapes`]) appears in `name`. A
+/// match glued to a letter on its left counts only when it holds a decimal digit:
+/// `disk-cache-max-size-bytes` holds `sk-` + 20 characters inside a word, a real
+/// token is random and holds digits (`oldsk-…0123`, `myAKIA…7…`). Every start is
+/// tried, so a rejected match never hides a later one. The caller bounds the
+/// length of `name` (see `config_salvage`).
 pub fn name_embeds_vendor_token(name: &str) -> bool {
-    NAME_TOKEN_REGEXES.iter().any(|re| re.is_match(name))
+    NAME_TOKEN_REGEXES.iter().any(|re| {
+        let mut from = 0;
+        while let Some(m) = re.find_at(name, from) {
+            let glued = name[..m.start()]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphabetic());
+            if !glued || m.as_str().bytes().any(|b| b.is_ascii_digit()) {
+                return true;
+            }
+            from = m.start() + name[m.start()..].chars().next().map_or(1, char::len_utf8);
+        }
+        false
+    })
 }
 
 // ── Secret-ASSIGNMENT patterns for audit artifacts (0.9.0 blocker) ─────
@@ -2691,10 +2707,10 @@ mod tests {
             "ASIAIOSFODNN7EXAMPLE",
             "rk_live_abcdefghij1234567890",
             "sk_live_abcdefghij1234567890",
-            "glpat-abcdefghijklmnopqrstuvwxyz",
+            "glpat-abcdefghijklmnopqrst1234",
             "npm_abcdefghijklmnopqrstuvwxyz0123456789",
             "hf_abcdefghijklmnopqrstuvwxyz0123456789",
-            "kbt_abcdefghijklmnopqrstuvwx",
+            "kbt_abcdefghijklmnopqrst12",
         ];
         assert_eq!(samples.len(), name_token_shapes().count());
         for sample in samples {
@@ -2730,7 +2746,7 @@ mod tests {
             "old_p8e-12345678",
             "oldp8e-12345678",
             "old_glpat-abcdefghijklmnop",
-            "myglpat-abcdefghijklmnop",
+            "myglpat-abcdefghijkl1234",
             "glpat-abcdefghijklmnop_old",
             "kbt_abcdefghijklmnop_old",
             "sk_live_abcdefghijklmnop_old",
@@ -2747,6 +2763,37 @@ mod tests {
             "old_sk_live_abcdefghijklmno",
         ] {
             assert!(!name_embeds_vendor_token(name), "{name}");
+        }
+    }
+
+    /// KT-1528 round 19 — a vendor prefix inside an ordinary word (`di|sk-`,
+    /// `ta|sk-`) is not a token unless the match holds a digit; a token after a
+    /// separator, at the start or glued with digits is still found, and a rejected
+    /// glued match never hides a later one.
+    #[test]
+    fn a_vendor_prefix_inside_a_word_is_not_a_token() {
+        for name in [
+            "disk-cache-max-size-bytes",
+            "task-runner-max-concurrency",
+            "mask-sensitive-headers-in-logs",
+            "risk-assessment-threshold-ms",
+            "kiosk-mode-refresh-interval-seconds",
+            "desk-booking-calendar-sync",
+            "ask-before-running-shell-commands",
+        ] {
+            assert!(!name_embeds_vendor_token(name), "{name}");
+        }
+        for name in [
+            "sk-550e8400-e29b-41d4-a716-446655440000",
+            "old_sk-550e8400-e29b-41d4-a716-446655440000",
+            "1sk-abcdefghijklmnopqrst1",
+            "my_AKIAIOSFODNN7EXAMPLE",
+            "myAKIAIOSFODNN7EXAMPLE",
+            "botxoxb-123456789012-123456789012",
+            "disk-cache-max-size-bytes_sk-abcdefghijklmnopqrstuvwxyz",
+            "oldsk-abcdefghij0123456789",
+        ] {
+            assert!(name_embeds_vendor_token(name), "{name}");
         }
     }
 

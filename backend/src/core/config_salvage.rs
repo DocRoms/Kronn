@@ -169,7 +169,8 @@ const NAME_MAX_CHARS: usize = 256;
 ///     side), EXCEPT a name that is exactly one canonical dashed UUID (8-4-4-4-12,
 ///     any case), alone or after a `<label>_` / `<label>-` whose own such runs add
 ///     up to fewer than 8 (an identifier, `proj_<uuid>`). The exemption waives (b)
-///     ONLY: (a), (c), (d) and (e) have already judged the whole name.
+///     ONLY, and (e) then judges the label only (its UUID is never an instance key);
+///     (a), (c) and (d) judge the whole name.
 /// A text a pattern of the free-text redactor catches (a connection string, a
 /// JSON credential field) is a secret too.
 fn secret_name(name: &str) -> bool {
@@ -177,19 +178,19 @@ fn secret_name(name: &str) -> bool {
     if name.chars().nth(NAME_MAX_CHARS).is_some() {
         return true;
     }
-    if token_shaped(name) {
-        return true;
+    match identifier_label(name) {
+        // An identifier's UUID is never an instance key: (e) judges its label only
+        // (`PROJ_<uuid>` would otherwise make one base64 run with 4 capitals).
+        Some(label) => token_shaped(name) || embeds_instance_key(label),
+        None => token_shaped(name) || embeds_instance_key(name) || hex_digit_total(name) >= 32,
     }
-    !is_identifier(name) && hex_digit_total(name) >= 32
 }
 
-/// (c), (d), (e) of [`secret_name`] on `text`, a name of at most
-/// [`NAME_MAX_CHARS`].
+/// (c) and (d) of [`secret_name`] on `text`, a name of at most [`NAME_MAX_CHARS`].
 fn token_shaped(text: &str) -> bool {
     super::redact::name_embeds_vendor_token(text)
         || super::redact::looks_like_secret(text)
         || embeds_authorization(text)
-        || embeds_instance_key(text)
 }
 
 /// (b) of [`secret_name`]: with every non-alphanumeric character removed, the sum
@@ -204,12 +205,12 @@ fn hex_digit_total(text: &str) -> usize {
         .sum()
 }
 
-/// Whether `name` is one canonical dashed UUID, or `<label>_<uuid>` /
-/// `<label>-<uuid>` with a label whose [`hex_digit_total`] is under 8: an
-/// identifier, not a secret (the exemption of (b), which waives (b) only).
-/// `<uuid>_<uuid>`, `<16 hex>_<uuid>` and `0123_4567_89ab_cdef_<uuid>` are not
-/// identifiers: their label alone reaches 8.
-fn is_identifier(name: &str) -> bool {
+/// When `name` is one canonical dashed UUID, or `<label>_<uuid>` / `<label>-<uuid>`
+/// with a label whose [`hex_digit_total`] is under 8 (an identifier, not a
+/// secret: (b) is waived and (e) judges the label only), that label: empty for a
+/// bare UUID. `<uuid>_<uuid>`, `<16 hex>_<uuid>` and `0123_4567_89ab_cdef_<uuid>`
+/// are not identifiers: their label alone reaches 8.
+fn identifier_label(name: &str) -> Option<&str> {
     const UUID_LEN: usize = 36;
     let is_uuid = |s: &str| {
         s.len() == UUID_LEN
@@ -219,15 +220,12 @@ fn is_identifier(name: &str) -> bool {
             })
     };
     if is_uuid(name) {
-        return true;
+        return Some("");
     }
-    let Some(cut) = name.len().checked_sub(UUID_LEN + 1) else {
-        return false;
-    };
-    let (Some(head), Some(tail)) = (name.get(..cut), name.get(cut + 1..)) else {
-        return false;
-    };
-    is_uuid(tail) && matches!(name.as_bytes()[cut], b'_' | b'-') && hex_digit_total(head) < 8
+    let cut = name.len().checked_sub(UUID_LEN + 1)?;
+    let (head, tail) = (name.get(..cut)?, name.get(cut + 1..)?);
+    (is_uuid(tail) && matches!(name.as_bytes()[cut], b'_' | b'-') && hex_digit_total(head) < 8)
+        .then_some(head)
 }
 
 /// (d): `bearer` or `basic` (any ASCII case) anywhere in `text`, then one or more
@@ -1580,7 +1578,7 @@ mod tests {
             // round 17: the name shapes keep the vendors' own minimum lengths
             "old_p8e-12345678".to_string(),
             "old_glpat-abcdefghijklmnop".to_string(),
-            "myglpat-abcdefghijklmnop".to_string(),
+            "myglpat-abcdefghijkl1234".to_string(),
             "bot_xoxb-123456789012-123456789012".to_string(),
             "botxoxb-123456789012-123456789012".to_string(),
             "xoxb-123456789012-123456789012_old".to_string(),
@@ -1627,6 +1625,18 @@ mod tests {
             "agent_profile_550e8400-e29b-41d4-a716-446655440000",
             "proj-550e8400-e29b-41d4-a716-446655440000",
             "PROJ_550E8400-E29B-41D4-A716-446655440000",
+            // round 19: a capital label beside a lower-case UUID, and a vendor
+            // prefix inside an ordinary word
+            "PROJ_550e8400-e29b-41d4-a716-446655440000",
+            "TEAM-550e8400-e29b-41d4-a716-446655440000",
+            "AGENT_550e8400-e29b-41d4-a716-446655440000",
+            "MCP_SERVER_550e8400-e29b-41d4-a716-446655440000",
+            "disk-cache-max-size-bytes",
+            "task-runner-max-concurrency",
+            "mask-sensitive-headers-in-logs",
+            "risk-assessment-threshold-ms",
+            "kiosk-mode-refresh-interval-seconds",
+            "ask-before-running-shell-commands",
             // round 17: a label of plain `a`-`f` words holds no digit-bearing run
             "default_agent_profile_550e8400-e29b-41d4-a716-446655440000",
             "deadbee_cafebab_01234567-89ab-cdef-0123-456789abcdef",
