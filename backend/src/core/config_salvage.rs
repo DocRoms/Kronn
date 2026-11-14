@@ -271,7 +271,9 @@ fn embeds_authorization(text: &str) -> bool {
 
 /// (e): an instance key as the whole name or a piece of it, a hex run of 24 or
 /// more, a base64 run of 32 or more with at least 4 digits, 4 capitals and 4
-/// lower-case letters.
+/// lower-case letters, or a run of 40 or more with 4 capitals and 4 lower-case
+/// letters whatever its digits (a 32-byte key in base64, 43-44 characters, can
+/// hold three digits or none).
 fn embeds_instance_key(text: &str) -> bool {
     if super::crypto::canonical_secret(text).is_ok() {
         return true;
@@ -290,6 +292,9 @@ fn embeds_instance_key(text: &str) -> bool {
             || super::crypto::canonical_secret(run).is_ok()
             || (run.len() >= 32
                 && count(u8::is_ascii_digit) >= 4
+                && count(u8::is_ascii_uppercase) >= 4
+                && count(u8::is_ascii_lowercase) >= 4)
+            || (run.len() >= 40
                 && count(u8::is_ascii_uppercase) >= 4
                 && count(u8::is_ascii_lowercase) >= 4)
     }) || text
@@ -1599,6 +1604,10 @@ mod tests {
             "old_p8e-12345678".to_string(),
             "old_glpat-abcdefghijklmnop".to_string(),
             "myglpat-abcdefghijklmnop".to_string(),
+            // round 22: a 32-byte base64 key with three digits or fewer
+            "J3GBqgtdTdHqtRpygAMtiXimewPRHDDsoe6ngumYD8k=".to_string(),
+            "u/h/A/tywu8mlpkmiHsTIzcNEzXPhq0sEGLcPXXFnKU=".to_string(),
+            "qbvEjRWeJqXvEjRWeJqYvEjRWeJqZvEjRWeJqWvEjR=".to_string(),
             // round 21: a key with few digits behind a UUID is judged with it
             "qbvEjRWeJqXvEjRWeJqYvEjRWeJqZvEjRWeJqWvEjR=_550e8400-e29b-41d4-a716-446655440000"
                 .to_string(),

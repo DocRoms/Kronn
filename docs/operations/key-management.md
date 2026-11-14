@@ -296,8 +296,9 @@ Safe to interrupt at any point; a rerun converges:
    A key name that is a secret is never printed in a notice, like a vendor-shaped
    secret, and is a credential on the save path (its entry is sheltered and not
    written back to `config.toml`, so the name does not stay in clear there). ONE
-   rule decides it (`config_salvage::secret_name`), one linear pass per clause on a
-   name of 256 characters at most, and every clause judges the WHOLE name: (a) a
+   rule decides it (`config_salvage::secret_name`), on a name of 256 characters at
+   most, every clause judging the WHOLE name except where said ((c) retries every
+   start, bounded by the cap): (a) a
    longer name is masked without any pattern running on it; (c) a vendor token
    shape anywhere in the name with no word-boundary anchor (`old_sk-…`,
    `myAKIA…`, `AKIA…_old`, `botxoxb-…`, `sk_live_…_old`, `sk-<uuid>`), DERIVED
@@ -311,9 +312,11 @@ Safe to interrupt at any point; a rerun converges:
    followed by white space (any Unicode white space), `:` or `=` and 12 token
    characters or more, anywhere (`bearer token` and `basic auth` are words and
    are shown); (e) an instance key as the whole name or any piece of it, a run of
-   24 hex digits, or a base64 run of 32 characters with at least 4 digits, 4
+   24 hex digits, a base64 run of 32 characters with at least 4 digits, 4
    capitals and 4 lower-case letters (`enable_OAuth2_authorization_code_flow` is
-   a setting name, not a blob); (b) with every non-alphanumeric character
+   a setting name, not a blob), or a run of 40 characters or more with 4 capitals
+   and 4 lower-case letters whatever its digits (a 32-byte key in base64 can hold
+   three digits or none; a long camelCase name is masked too, the safe side); (b) with every non-alphanumeric character
    removed, the lengths of the hex runs that hold at least one DECIMAL digit add
    up to 32 or more (an instance key whole, in groups, `0x`-prefixed or behind a
    label, `<uuid>_<uuid>`; plain words made of `a` to `f` such as `default` or
@@ -325,9 +328,9 @@ Safe to interrupt at any point; a rerun converges:
    20 key characters) (e) judges the label only (`PROJ_<uuid>` and
    `MCP_SERVER_<uuid>` are shown); a longer label is judged with its UUID, so a key
    with few digits behind a UUID stays masked; (a), (c) and (d) still judge the whole name,
-   so `sk-<uuid>`, `xoxb-<uuid>`, `bearer -<uuid>` and `AKIA…_<uuid>` stay masked. A label made only of `a`-`f` letters
-   (`default_agent_profile_<uuid>`, `deadbee_cafebab_<uuid>`) holds no such run
-   and keeps the exemption. The price of the unanchored shapes: a name holding
+   so `sk-<uuid>`, `xoxb-<uuid>`, `bearer -<uuid>` and `AKIA…_<uuid>` stay masked. A label whose hex runs hold no decimal digit
+   (`default_agent_profile_<uuid>`, `deadbee_cafebab_<uuid>`) keeps the exemption
+   of (b). The price of the unanchored shapes: a name holding
    a vendor prefix after a separator or with digits (`sk-cache-max-size-bytes`,
    `task-runner-v2-max-concurrency`) is masked and sheltered too, on the safe
    side; Kronn's own settings are snake_case.
