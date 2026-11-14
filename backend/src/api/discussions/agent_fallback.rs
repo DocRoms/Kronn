@@ -41,6 +41,10 @@ struct Plan {
     surface: Surface,
     tier: ModelTier,
     hops: u32,
+    /// KT-1758 — the refusal's own words, for a launch the engine refused: the
+    /// room says why the agent could not take the worker, not only that it
+    /// could not.
+    detail: Option<String>,
 }
 
 enum Surface {
@@ -192,8 +196,13 @@ async fn plan(
     let (until, selection) = state
         .db
         .with_conn(move |conn| {
-            let until =
-                fallback::set_cooldown(conn, &failing_for_db, trigger, announced, now)?;
+            // A launch refusal is about this agent as a task worker, not about
+            // its provider: no cooldown, so its rooms keep using it.
+            let until = if trigger == Trigger::LaunchRefused {
+                now
+            } else {
+                fallback::set_cooldown(conn, &failing_for_db, trigger, announced, now)?
+            };
             let cooling = fallback::cooling_lookup(conn, now)?;
             let lookup = |candidate: &AgentType| {
                 cooling
@@ -227,8 +236,14 @@ async fn plan(
         surface,
         tier,
         hops,
+        detail: (trigger == Trigger::LaunchRefused)
+            .then(|| response.chars().take(LAUNCH_REFUSAL_DETAIL_CHARS).collect()),
     })
 }
+
+/// KT-1758 — how much of a refusal the rooms quote. The native ACP refusal is
+/// about 230 characters; the whole sentence is the point.
+pub(crate) const LAUNCH_REFUSAL_DETAIL_CHARS: usize = 600;
 
 pub(super) fn system_notice(
     content: String,
@@ -376,6 +391,32 @@ pub(crate) async fn worker_after_quota_among(
             post_stop(state, job, &plan, why).await;
             Ok(false)
         }
+    }
+}
+
+/// KT-1758 — a task worker whose agent was refused at launch for good (a
+/// native ACP agent as a task worker, a missing binary): the agent's chain, the
+/// next link after the one that was refused. `Ok(true)`: the execution moved on.
+/// `Ok(false)`: nothing in the chain can take it (the stop is said in the
+/// caller's own words, in both rooms).
+pub(crate) async fn worker_after_launch_refusal_among(
+    state: &AppState,
+    job: &AgentDispatchJob,
+    reason: &str,
+    usable: Option<Vec<AgentType>>,
+) -> anyhow::Result<bool> {
+    let Some(plan) = plan(state, job, Trigger::LaunchRefused, reason, usable).await else {
+        return Ok(false);
+    };
+    if !matches!(plan.surface, Surface::Worker { .. }) {
+        return Ok(false);
+    }
+    match &plan.selection {
+        Selection::Switch(_) => {
+            apply_worker(state, job, &plan).await?;
+            Ok(true)
+        }
+        Selection::Stop { .. } => Ok(false),
     }
 }
 
@@ -645,15 +686,21 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
                 .and_then(|execution| execution.worker_profile_id))
         })
         .await?;
+    // A launch refusal has no "until": the agent is not unavailable, it cannot
+    // be this kind of worker.
+    let until = (plan.trigger != Trigger::LaunchRefused).then_some(plan.until);
     let notice = fallback::notice(
         &plan.failing,
         plan.from_model.as_deref(),
         plan.trigger,
-        Some(plan.until),
+        until,
         link,
         plan.tier,
     );
-    let notice = format!("Task worker execution {execution_id}: {notice}");
+    let notice = match &plan.detail {
+        Some(detail) => format!("Task worker execution {execution_id}: {notice} — {detail}"),
+        None => format!("Task worker execution {execution_id}: {notice}"),
+    };
     crate::api::orchestration::reassign_native_execution_as(
         state,
         execution_id,
@@ -663,9 +710,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
             profile_id,
         },
         &format!("automatic agent fallback: {notice}"),
-        crate::api::orchestration::ReassignCause::QuotaFallback {
-            reset_at: Some(plan.until),
-        },
+        crate::api::orchestration::ReassignCause::QuotaFallback { reset_at: until },
     )
     .await?;
     let message = crate::api::orchestration::orchestrator_message(

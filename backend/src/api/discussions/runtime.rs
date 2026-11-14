@@ -14,6 +14,13 @@ use super::SseStream;
 
 const RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS: i64 = 30;
 
+/// KT-1758 — consecutive deferrals of a task worker's dispatch for the same
+/// unavailable-runtime reason before Kronn stops retrying and says why: ten
+/// tries at 30 s is five minutes, longer than any start that is only slow. A
+/// refusal that never changes used to be retried forever (live: a native ACP
+/// agent refused as a task worker, every 30 s for 1h35).
+pub(crate) const RUNTIME_UNAVAILABLE_MAX_DEFERRALS: u32 = 10;
+
 struct DispatchHandoffGuard {
     state: Option<AppState>,
     job_id: String,
@@ -653,10 +660,17 @@ pub(crate) async fn stream_claimed_dispatch_job(
         let reported_success = match outcome {
             AgentExecutionOutcome::Finished { success } => success,
             AgentExecutionOutcome::RuntimeUnavailable { reason } => {
-                defer_runtime_unavailable(&state, &job, &reason).await;
+                defer_or_stop_runtime_unavailable(&state, &job, &reason).await;
                 return;
             }
             AgentExecutionOutcome::PreflightFailed { diagnostic } => {
+                // KT-1758 — a fallback worker refused for good at launch moves
+                // on to the next link instead of failing silently.
+                if is_permanent_task_worker_refusal(&diagnostic)
+                    && settle_worker_launch_refusal_among(&state, &job, &diagnostic, None).await
+                {
+                    return;
+                }
                 fail_dispatch_job(&state, &job, &diagnostic).await;
                 ensure_failure_visible(&state, &job, &diagnostic).await;
                 return;
@@ -776,6 +790,20 @@ pub(crate) async fn try_quota_provider_fallback_among(
     announced_reset: Option<chrono::DateTime<chrono::Utc>>,
     available_agents: Vec<crate::models::AgentType>,
 ) -> anyhow::Result<Option<(crate::models::AgentType, String)>> {
+    provider_fallback_among(state, job, announced_reset, available_agents, false).await
+}
+
+/// The campaign's provider fallback. `launch_refused`: the provider did not
+/// refuse the quota, it was refused as this execution's worker (KT-1758): it
+/// is excluded from this execution's chain without being written down as a
+/// quota refusal for everyone.
+async fn provider_fallback_among(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    announced_reset: Option<chrono::DateTime<chrono::Utc>>,
+    available_agents: Vec<crate::models::AgentType>,
+    launch_refused: bool,
+) -> anyhow::Result<Option<(crate::models::AgentType, String)>> {
     let dispatch_id = job.id.clone();
     let candidate = state
         .db
@@ -812,11 +840,24 @@ pub(crate) async fn try_quota_provider_fallback_among(
             // The provider that just refused is remembered with the reset it
             // announced: a fallback leaves no escalation behind, and a later
             // one must not walk back into it before it is back.
-            crate::db::orchestration::note_provider_quota_refusal(
-                conn,
-                &crate::db::orchestration::agent_type_to_db(&current),
-                announced_reset,
-            )?;
+            if launch_refused {
+                // Nothing announced and nothing to wait for: this execution
+                // never offers that provider to itself again.
+                crate::db::orchestration::record_execution_quota_refusal(
+                    conn,
+                    &execution.id,
+                    &crate::db::orchestration::QuotaRefusal {
+                        provider: crate::db::orchestration::agent_type_to_db(&current),
+                        reset_at: None,
+                    },
+                )?;
+            } else {
+                crate::db::orchestration::note_provider_quota_refusal(
+                    conn,
+                    &crate::db::orchestration::agent_type_to_db(&current),
+                    announced_reset,
+                )?;
+            }
             // Never a candidate: the worker the execution was first given (the
             // sweep hands it back once its reset has passed, a fallback does
             // not), and any provider whose refusal has not reset yet.
@@ -873,7 +914,11 @@ pub(crate) async fn try_quota_provider_fallback_among(
         state,
         &execution_id,
         selection,
-        "automatic quota fallback: the campaign opted into a provider fallback on quota exhaustion",
+        if launch_refused {
+            "automatic fallback: the previous worker agent was refused at launch and the campaign opted into a provider fallback"
+        } else {
+            "automatic quota fallback: the campaign opted into a provider fallback on quota exhaustion"
+        },
         crate::api::orchestration::ReassignCause::QuotaFallback {
             reset_at: announced_reset,
         },
@@ -1594,13 +1639,314 @@ async fn hold_validation_during_audit(
     }
 }
 
-async fn defer_runtime_unavailable(
+/// KT-1758 — a task-worker refusal that waiting cannot change: the launch path
+/// refuses the agent as this kind of worker (a native ACP agent carries neither
+/// the delivery context nor the permission scope).
+pub(crate) fn is_permanent_task_worker_refusal(reason: &str) -> bool {
+    reason.contains(crate::agents::runner::TASK_WORKER_REFUSED_PREFIX)
+}
+
+/// A binary that is not there. For an ordinary room it can appear between two
+/// tries (the established deferral); for a fallback worker it is a link that
+/// cannot run, and the next one is worth more than waiting.
+fn is_missing_binary(reason: &str) -> bool {
+    reason.starts_with("Binary '") && reason.ends_with("not found")
+}
+
+/// The task worker a dispatch belongs to, when it is the execution's current one.
+struct WorkerLaunch {
+    execution_id: String,
+    parent_room: String,
+    /// The agent the execution runs on, in the `agent_type_to_db` form.
+    agent: String,
+    /// A quota or chain fallback moved it here: it has somewhere to go back to.
+    is_fallback: bool,
+}
+
+fn worker_launch_context(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+) -> anyhow::Result<Option<WorkerLaunch>> {
+    let Some(execution) = crate::db::orchestration::get_execution_for_dispatch(conn, dispatch_id)?
+    else {
+        return Ok(None);
+    };
+    if execution.status.is_terminal() {
+        return Ok(None);
+    }
+    let is_fallback = crate::db::orchestration::quota_origin(conn, &execution.id)?.is_some()
+        || crate::core::agent_fallback::get_execution_origin(conn, &execution.id)?.is_some();
+    Ok(Some(WorkerLaunch {
+        agent: execution.worker_agent_type.clone().unwrap_or_default(),
+        parent_room: execution.parent_discussion_id,
+        execution_id: execution.id,
+        is_fallback,
+    }))
+}
+
+/// KT-1758 — a worker agent that cannot start, said once and settled. The
+/// dispatch ends `Failed` with the reason; a fallback then asks for the next
+/// link (the campaign's own opt-in first, then the agent's chain); and when
+/// nothing can take the work, both rooms are told why, in their language, and
+/// nothing is retried behind anyone's back.
+///
+/// Only an execution a fallback moved is handled here: the caller keeps its own
+/// settlement for a worker that was never one. Returns whether the dispatch was
+/// settled here. `available`: the installed agents, detected when `None`.
+pub(crate) async fn settle_worker_launch_refusal_among(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    reason: &str,
+    available: Option<Vec<crate::models::AgentType>>,
+) -> bool {
+    settle_worker_launch_refusal(state, job, reason, available, true).await
+}
+
+/// `fallback_only`: leave an execution that no fallback moved to the caller.
+async fn settle_worker_launch_refusal(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    reason: &str,
+    available: Option<Vec<crate::models::AgentType>>,
+    fallback_only: bool,
+) -> bool {
+    let lookup = job.id.clone();
+    let worker = match state
+        .db
+        .with_conn(move |conn| worker_launch_context(conn, &lookup))
+        .await
+    {
+        Ok(Some(worker)) if worker.is_fallback || !fallback_only => worker,
+        Ok(_) => return false,
+        Err(error) => {
+            tracing::warn!(dispatch_job_id = %job.id, "unable to read the worker of a refused launch: {error}");
+            return false;
+        }
+    };
+    let (fail_id, fail_discussion, fail_group) = (
+        job.id.clone(),
+        job.discussion_id.clone(),
+        job.group_id.clone(),
+    );
+    let fail_error = format!("launch_refused: {reason}");
+    let settled = state
+        .db
+        .with_conn(move |conn| {
+            persist_dispatch_settlement(
+                conn,
+                &fail_id,
+                &fail_discussion,
+                fail_group.as_deref(),
+                crate::db::workflows::BatchChildOutcome::Failed,
+                Some(&fail_error),
+                Some("launch_refused"),
+            )
+        })
+        .await;
+    match settled {
+        Ok(DispatchSettlement {
+            changed: true,
+            batch_run,
+        }) => {
+            if let Some(updated_run) = batch_run {
+                super::streaming::broadcast_batch_progress(state, &job.discussion_id, &updated_run);
+            }
+        }
+        Ok(DispatchSettlement { changed: false, .. }) => {
+            settle_cancelled_dispatch(state, job).await;
+            return true;
+        }
+        Err(error) => {
+            tracing::error!(
+                "Unable to settle the refused launch of dispatch {}: {error}",
+                job.id
+            );
+            return false;
+        }
+    }
+    tracing::warn!(
+        dispatch_job_id = %job.id,
+        execution_id = %worker.execution_id,
+        "task worker refused at launch on {}: {reason}",
+        worker.agent
+    );
+    let mut moved_to: Option<String> = None;
+    if worker.is_fallback {
+        let available = match available {
+            Some(available) => available,
+            None => crate::api::orchestration::available_agent_types_for_state(state).await,
+        };
+        match provider_fallback_among(state, job, None, available.clone(), true).await {
+            Ok(Some((alternative, _room))) => moved_to = Some(format!("{alternative:?}")),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(dispatch_job_id = %job.id, "provider fallback after a refused launch failed: {error}")
+            }
+        }
+        if moved_to.is_none() {
+            // The chain posts its own line in the parent room when it moves on.
+            match super::agent_fallback::worker_after_launch_refusal_among(
+                state,
+                job,
+                reason,
+                Some(available),
+            )
+            .await
+            {
+                Ok(true) => {
+                    state.agent_dispatch_notify.notify_waiters();
+                    return true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(dispatch_job_id = %job.id, "agent fallback chain after a refused launch failed: {error}")
+                }
+            }
+        }
+    }
+    let detail: String = reason
+        .chars()
+        .take(super::agent_fallback::LAUNCH_REFUSAL_DETAIL_CHARS)
+        .collect();
+    let (agent, execution, dispatch) = (&worker.agent, &worker.execution_id, &job.id);
+    match moved_to {
+        Some(alternative) => {
+            post_room_notice(
+                state,
+                worker.parent_room.clone(),
+                format!("worker-launch-fallback:{}", job.id),
+                format!(
+                    "**Bascule automatique — worker refusé au lancement**\n\nLe dispatch `{dispatch}` de l'exécution `{execution}` n'a pas pu démarrer sur `{agent}` : {detail}\n\nCette cause ne change pas en attendant : Kronn a réassigné l'exécution à `{alternative}`, dans sa sous-discussion et son worktree existants."
+                ),
+                format!(
+                    "**Automatic fallback — worker refused at launch**\n\nDispatch `{dispatch}` of execution `{execution}` could not start on `{agent}`: {detail}\n\nWaiting does not change that: Kronn reassigned the execution to `{alternative}`, in its existing child discussion and worktree."
+                ),
+            )
+            .await;
+        }
+        None => {
+            let fr = format!(
+                "**Worker non démarré — `{agent}` refusé au lancement**\n\nLe dispatch `{dispatch}` de l'exécution `{execution}` n'a pas pu démarrer sur `{agent}` : {detail}\n\nCette cause ne change pas en attendant et aucun lien de repli utilisable ne reste : Kronn n'a pas relancé le dispatch et ne le fera pas seul. Réaffecte l'exécution à un worker compatible (Claude Code, Codex, un modèle HTTP, une session CLI jointe) ou annule-la."
+            );
+            let en = format!(
+                "**Worker not started — `{agent}` refused at launch**\n\nDispatch `{dispatch}` of execution `{execution}` could not start on `{agent}`: {detail}\n\nWaiting does not change that and no usable fallback link is left: Kronn did not retry the dispatch and will not do it on its own. Reassign the execution to a compatible worker (Claude Code, Codex, an HTTP model, a joined CLI session) or cancel it."
+            );
+            post_room_notice(
+                state,
+                worker.parent_room.clone(),
+                format!("worker-launch-refused:{}", job.id),
+                fr.clone(),
+                en.clone(),
+            )
+            .await;
+            post_room_notice(
+                state,
+                job.discussion_id.clone(),
+                format!("worker-launch-refused-child:{}", job.id),
+                fr,
+                en,
+            )
+            .await;
+        }
+    }
+    state.agent_dispatch_notify.notify_waiters();
+    true
+}
+
+/// One orchestrator line in `room`, in the room's language, written once per `id`.
+async fn post_room_notice(state: &AppState, room: String, id: String, fr: String, en: String) {
+    let posted = state
+        .db
+        .with_conn(move |conn| {
+            let already: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                [&id],
+                |row| row.get(0),
+            )?;
+            if already {
+                return Ok(());
+            }
+            let lang = crate::db::discussions::room_lang(conn, &room);
+            let message = crate::api::orchestration::orchestrator_message(
+                id,
+                lang.pick(&fr, &en).to_string(),
+            );
+            crate::db::discussions::insert_message(conn, &room, &message)?;
+            Ok(())
+        })
+        .await;
+    if let Err(error) = posted {
+        tracing::warn!("worker launch notice could not be persisted: {error}");
+    }
+}
+
+/// KT-1758 — an unavailable runtime for a task worker's dispatch: retried while
+/// the cause can change, never forever.
+///
+/// The cause is permanent for a fallback whose binary is missing: it moves on.
+/// Otherwise the deferral is counted (in the dispatch's own `last_error`, which
+/// the claim keeps for it); the same reason
+/// [`RUNTIME_UNAVAILABLE_MAX_DEFERRALS`] times in a row ends the retries and
+/// says why, in both rooms, with the reason as the runtime gave it. A dispatch
+/// that is not a task worker's keeps the durable deferral it always had.
+pub(crate) async fn defer_or_stop_runtime_unavailable(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     reason: &str,
 ) {
+    let lookup = job.id.clone();
+    let context = state
+        .db
+        .with_conn(move |conn| {
+            Ok((
+                crate::db::agent_dispatch::get(conn, &lookup)?
+                    .and_then(|current| current.last_error),
+                worker_launch_context(conn, &lookup)?,
+            ))
+        })
+        .await;
+    let (previous, worker) = match context {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::warn!(dispatch_job_id = %job.id, "unable to read the deferred dispatch: {error}");
+            (None, None)
+        }
+    };
+    let Some(worker) = worker else {
+        defer_runtime_unavailable(state, job, reason, 1).await;
+        return;
+    };
+    if worker.is_fallback
+        && is_missing_binary(reason)
+        && settle_worker_launch_refusal(state, job, reason, None, true).await
+    {
+        return;
+    }
+    let deferrals = previous
+        .as_deref()
+        .and_then(crate::db::agent_dispatch::parse_runtime_unavailable)
+        .filter(|(_, earlier)| *earlier == reason)
+        .map_or(0, |(count, _)| count)
+        + 1;
+    if deferrals > RUNTIME_UNAVAILABLE_MAX_DEFERRALS {
+        let spent = format!(
+            "{reason} (still failing after {RUNTIME_UNAVAILABLE_MAX_DEFERRALS} tries, {RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS} s apart)"
+        );
+        if settle_worker_launch_refusal(state, job, &spent, None, false).await {
+            return;
+        }
+    }
+    defer_runtime_unavailable(state, job, reason, deferrals).await;
+}
+
+async fn defer_runtime_unavailable(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    reason: &str,
+    deferrals: u32,
+) {
     let job_id = job.id.clone();
-    let persisted_reason = format!("runtime_unavailable: {reason}");
+    let persisted_reason = crate::db::agent_dispatch::runtime_unavailable_marker(deferrals, reason);
     match state
         .db
         .with_conn(move |conn| {

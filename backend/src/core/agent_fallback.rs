@@ -59,6 +59,11 @@ pub enum Trigger {
     Outage,
     /// The CLI or API key is not authenticated.
     NotAuthenticated,
+    /// KT-1758 — the agent cannot be launched as this kind of worker at all
+    /// (a native ACP agent refused as a task worker, a missing binary). Waiting
+    /// never changes it, and it says nothing against the agent for other turns:
+    /// no cooldown is written for it, only the next link is asked for.
+    LaunchRefused,
 }
 
 impl Trigger {
@@ -68,6 +73,7 @@ impl Trigger {
             Trigger::QuotaExhausted => "quota_exhausted",
             Trigger::Outage => "outage",
             Trigger::NotAuthenticated => "not_authenticated",
+            Trigger::LaunchRefused => "launch_refused",
         }
     }
 
@@ -78,6 +84,7 @@ impl Trigger {
             Trigger::QuotaExhausted => "quota exhausted",
             Trigger::Outage => "provider unavailable",
             Trigger::NotAuthenticated => "not authenticated",
+            Trigger::LaunchRefused => "cannot be launched as a task worker",
         }
     }
 
@@ -89,6 +96,8 @@ impl Trigger {
             Trigger::RateLimit | Trigger::Outage => Duration::minutes(5),
             Trigger::QuotaExhausted => crate::workflows::quota_wait::RECHECK_INTERVAL,
             Trigger::NotAuthenticated => Duration::minutes(30),
+            // Not a cooldown: see `Trigger::LaunchRefused`.
+            Trigger::LaunchRefused => Duration::zero(),
         }
     }
 
@@ -98,6 +107,7 @@ impl Trigger {
             Trigger::QuotaExhausted,
             Trigger::Outage,
             Trigger::NotAuthenticated,
+            Trigger::LaunchRefused,
         ]
         .into_iter()
         .find(|trigger| trigger.code() == code)

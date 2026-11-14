@@ -1002,7 +1002,9 @@ pub fn claim_with_limits(
                  turn_attempts = turn_attempts + 1,
                  claimed_at = ?2,
                  updated_at = ?2,
-                 last_error = NULL,
+                 last_error = CASE
+                     WHEN last_error LIKE '{RUNTIME_UNAVAILABLE_PREFIX}%' THEN last_error
+                     ELSE NULL END,
                  progress_phase = CASE
                      WHEN progress_phase = 'queued'
                           AND substr(progress_detail, 1, length('{TASK_WORKER_QUEUED_DETAIL_PREFIX}'))
@@ -1408,6 +1410,41 @@ pub fn retry_after(conn: &Connection, id: &str, delay_seconds: i64, error: &str)
         params![id, available_at, now.to_rfc3339(), error],
     )?;
     Ok(changed > 0)
+}
+
+/// KT-1758 — what `last_error` starts with after a deferral for an unavailable
+/// runtime. The claim keeps it (every other `last_error` is cleared there), so
+/// the count of consecutive deferrals survives the claim that follows each one.
+pub const RUNTIME_UNAVAILABLE_PREFIX: &str = "runtime_unavailable";
+
+/// KT-1758 — the `last_error` of the `count`-th consecutive deferral for the
+/// same `reason`. The first reads `runtime_unavailable: <reason>` as it always
+/// did; the next ones carry their count, `runtime_unavailable[3]: <reason>`.
+pub fn runtime_unavailable_marker(count: u32, reason: &str) -> String {
+    if count <= 1 {
+        format!("{RUNTIME_UNAVAILABLE_PREFIX}: {reason}")
+    } else {
+        format!("{RUNTIME_UNAVAILABLE_PREFIX}[{count}]: {reason}")
+    }
+}
+
+/// KT-1758 — the count and the reason a [`runtime_unavailable_marker`] holds.
+/// `None` for any other `last_error`. A bare `runtime_unavailable` (no reason)
+/// is one deferral with an empty reason.
+pub fn parse_runtime_unavailable(last_error: &str) -> Option<(u32, &str)> {
+    let rest = last_error.strip_prefix(RUNTIME_UNAVAILABLE_PREFIX)?;
+    let (count, rest) = match rest.strip_prefix('[') {
+        Some(counted) => {
+            let (digits, after) = counted.split_once(']')?;
+            (digits.parse::<u32>().ok()?, after)
+        }
+        None => (1, rest),
+    };
+    if rest.is_empty() {
+        return Some((count, ""));
+    }
+    let reason = rest.strip_prefix(':')?;
+    Some((count, reason.strip_prefix(' ').unwrap_or(reason)))
 }
 
 /// Return a claimed job to the durable queue when its agent runtime could not
@@ -2951,6 +2988,52 @@ mod tests {
             claim(&connection, "j1").unwrap().is_none(),
             "the job must remain delayed until available_at"
         );
+    }
+
+    /// KT-1758 — the count of consecutive deferrals rides in `last_error`, and
+    /// the claim that follows each deferral keeps it (every other `last_error`
+    /// is cleared there), so the count is still there at the next failure.
+    #[test]
+    fn the_deferral_count_survives_the_claim_that_follows_it() {
+        assert_eq!(
+            runtime_unavailable_marker(1, "spawn failed"),
+            "runtime_unavailable: spawn failed"
+        );
+        assert_eq!(
+            runtime_unavailable_marker(4, "spawn failed"),
+            "runtime_unavailable[4]: spawn failed"
+        );
+        for (count, reason) in [(1, "spawn failed"), (7, "Task worker refused: x: y")] {
+            let marker = runtime_unavailable_marker(count, reason);
+            assert_eq!(parse_runtime_unavailable(&marker), Some((count, reason)));
+        }
+        assert_eq!(
+            parse_runtime_unavailable("runtime_unavailable"),
+            Some((1, ""))
+        );
+        assert_eq!(parse_runtime_unavailable("cancelled"), None);
+        assert_eq!(parse_runtime_unavailable("runtime_unavailable[x]: y"), None);
+
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        claim(&connection, "j1").unwrap().unwrap();
+        assert!(defer_runtime_unavailable(
+            &connection,
+            "j1",
+            0,
+            &runtime_unavailable_marker(3, "spawn failed")
+        )
+        .unwrap());
+        let reclaimed = claim(&connection, "j1").unwrap().unwrap();
+        assert_eq!(
+            reclaimed.last_error.as_deref(),
+            Some("runtime_unavailable[3]: spawn failed"),
+            "the claim keeps the deferral marker"
+        );
+
+        // Any other error is still cleared at the claim, as it always was.
+        assert!(retry_after(&connection, "j1", 0, "provider_outage_retry").unwrap());
+        assert_eq!(claim(&connection, "j1").unwrap().unwrap().last_error, None);
     }
 
     #[test]

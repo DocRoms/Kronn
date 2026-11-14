@@ -813,14 +813,23 @@ pub(crate) fn fallback_dispatch_wait_reason(
 ) -> String {
     let provider = wait.provider.as_str();
     let last_error = wait.last_error.as_deref().unwrap_or_default();
-    if let Some(detail) = last_error.strip_prefix("runtime_unavailable:") {
-        let detail: String = detail.trim().chars().take(240).collect();
+    if let Some((deferrals, detail)) =
+        crate::db::agent_dispatch::parse_runtime_unavailable(last_error)
+    {
+        // The reason as the runtime gave it: it is what an operator needs, and
+        // the longest of them (the native ACP refusal) is about 230 characters.
+        let detail: String = detail
+            .trim()
+            .chars()
+            .take(crate::api::discussions::agent_fallback::LAUNCH_REFUSAL_DETAIL_CHARS)
+            .collect();
+        let bound = crate::api::discussions::runtime::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
         return match lang {
             RoomLang::Fr => format!(
-                "le runtime `{provider}` n'a pas pu démarrer ({detail}) ; Kronn réessaie toutes les 30 s"
+                "le runtime `{provider}` n'a pas pu démarrer ({detail}) ; Kronn réessaie toutes les 30 s ({deferrals}/{bound} essais) puis s'arrête"
             ),
             RoomLang::En => format!(
-                "the `{provider}` runtime could not start ({detail}); Kronn retries every 30 s"
+                "the `{provider}` runtime could not start ({detail}); Kronn retries every 30 s ({deferrals}/{bound} tries), then stops"
             ),
         };
     }
@@ -38830,6 +38839,455 @@ pub(crate) mod tests {
             "{}",
             reason(&base)
         );
+    }
+
+    /// KT-1758 — what the launch path says for a native ACP agent asked to be a
+    /// task worker (`runner::start_agent_with_config`), word for word.
+    fn native_acp_refusal() -> String {
+        format!(
+            "{} {}",
+            crate::agents::runner::TASK_WORKER_REFUSED_PREFIX,
+            crate::agents::runner::NATIVE_ACP_TASK_WORKER_REFUSAL
+        )
+    }
+
+    /// KT-1758 — the campaign of `exec_id` opts into the quota fallback among `agents`.
+    async fn opt_into_fallback_among(db: &Database, exec_id: &str, agents: &[AgentType]) {
+        let (id, allowed) = (exec_id.to_string(), serde_json::to_string(agents).unwrap());
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET allowed_agents_json = ?2, quota_fallback = 1 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![id, allowed],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn room_message(db: &Database, room: String, id: String) -> Option<String> {
+        db.with_read_conn(move |conn| {
+            Ok(crate::db::discussions::list_messages(conn, &room)?
+                .into_iter()
+                .find(|message| message.id == id)
+                .map(|message| message.content))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Make a deferred dispatch due and claim it, as the next scanner pass does.
+    async fn claim_when_due(
+        db: &Database,
+        dispatch: &str,
+    ) -> crate::db::agent_dispatch::AgentDispatchJob {
+        let dispatch = dispatch.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE agent_dispatch_jobs SET available_at = ?2 WHERE id = ?1",
+                rusqlite::params![dispatch, chrono::Utc::now().to_rfc3339()],
+            )?;
+            crate::db::agent_dispatch::claim(conn, &dispatch)
+        })
+        .await
+        .unwrap()
+        .expect("the dispatch is claimable")
+    }
+
+    /// KT-1758 — the live 14:36 shape. Claude is quota-limited, the execution
+    /// falls back to OpenCode (native ACP), and the launch path refuses it as a
+    /// task worker. That refusal cannot change by waiting: the dispatch fails at
+    /// once with the reason (it used to be deferred every 30 s, forever), the
+    /// next link of the campaign's fallback (Codex) takes the execution, its new
+    /// dispatch is due now and the parent room is told why.
+    #[tokio::test]
+    async fn a_fallback_refused_at_spawn_fails_fast_and_the_next_link_is_tried() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let available = [AgentType::ClaudeCode, AgentType::OpenCode, AgentType::Codex];
+        opt_into_fallback_among(&db, &was.id, &available).await;
+        let claude = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &claude, true).await);
+        assert_eq!(
+            refuse_through_the_fallback(
+                &state,
+                &db,
+                &was.id,
+                chrono::Utc::now() + chrono::Duration::hours(2),
+                &available
+            )
+            .await,
+            Some(AgentType::OpenCode)
+        );
+        let on_opencode = exec_of(&db, &was.id).await;
+        let refused = on_opencode.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &refused, false).await);
+
+        let job = dispatch_of(&db, refused.clone()).await;
+        assert!(
+            crate::api::discussions::runtime::is_permanent_task_worker_refusal(
+                &native_acp_refusal()
+            )
+        );
+        assert!(
+            crate::api::discussions::runtime::settle_worker_launch_refusal_among(
+                &state,
+                &job,
+                &native_acp_refusal(),
+                Some(available.to_vec()),
+            )
+            .await
+        );
+
+        let failed = dispatch_of(&db, refused.clone()).await;
+        assert_eq!(
+            failed.status,
+            crate::db::agent_dispatch::DispatchStatus::Failed,
+            "failed at once, not deferred"
+        );
+        assert_eq!(failed.failure_kind.as_deref(), Some("launch_refused"));
+        let error = failed.last_error.clone().unwrap_or_default();
+        assert!(
+            error.starts_with(
+                "launch_refused: Task worker refused: this agent runs on its native ACP transport"
+            ),
+            "{error}"
+        );
+
+        let next = exec_of(&db, &was.id).await;
+        assert_eq!(next.worker_agent_type.as_deref(), Some("Codex"));
+        let replacement = next.dispatch_job_id.clone().unwrap();
+        assert_ne!(replacement, refused);
+        let queued = dispatch_of(&db, replacement.clone()).await;
+        assert_eq!(
+            queued.status,
+            crate::db::agent_dispatch::DispatchStatus::Pending
+        );
+        assert!(
+            queued.available_at <= chrono::Utc::now(),
+            "the next link starts now"
+        );
+        assert!(run_then_refuse(&db, &limits, &replacement, false).await);
+        assert!(
+            !db.with_conn(
+                |conn| crate::db::orchestration::provider_quota_unavailable_at(
+                    conn,
+                    "OpenCode",
+                    None,
+                    chrono::Utc::now()
+                )
+            )
+            .await
+            .unwrap(),
+            "a launch refusal is not a quota refusal for everyone"
+        );
+
+        let notice = room_message(
+            &db,
+            next.parent_discussion_id.clone(),
+            format!("worker-launch-fallback:{refused}"),
+        )
+        .await
+        .expect("the parent room says why the execution moved on");
+        assert!(notice.contains("native ACP transport"), "{notice}");
+        assert!(notice.contains("OpenCode"), "{notice}");
+        assert!(notice.contains("Codex"), "{notice}");
+    }
+
+    /// KT-1758 — the refused fallback has no next link: it stops, loudly. Both
+    /// rooms get the reason in their language; the dispatch is not re-queued and
+    /// the execution waits for a person instead of retrying behind their back.
+    #[tokio::test]
+    async fn a_fallback_refused_at_spawn_with_no_link_left_stops_and_says_why_in_both_rooms() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let available = [AgentType::ClaudeCode, AgentType::OpenCode];
+        opt_into_fallback_among(&db, &was.id, &available).await;
+        let parent = was.parent_discussion_id.clone();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET language = 'fr' WHERE id = ?1",
+                [parent],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let claude = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &claude, true).await);
+        assert_eq!(
+            refuse_through_the_fallback(
+                &state,
+                &db,
+                &was.id,
+                chrono::Utc::now() + chrono::Duration::hours(2),
+                &available
+            )
+            .await,
+            Some(AgentType::OpenCode)
+        );
+        let refused = exec_of(&db, &was.id).await.dispatch_job_id.unwrap();
+        assert!(run_then_refuse(&db, &limits, &refused, false).await);
+        let job = dispatch_of(&db, refused.clone()).await;
+
+        assert!(
+            crate::api::discussions::runtime::settle_worker_launch_refusal_among(
+                &state,
+                &job,
+                &native_acp_refusal(),
+                Some(available.to_vec()),
+            )
+            .await
+        );
+
+        let after = exec_of(&db, &was.id).await;
+        assert_eq!(
+            after.dispatch_job_id.as_deref(),
+            Some(refused.as_str()),
+            "no new dispatch: nothing is retried"
+        );
+        assert_eq!(after.status, TaskExecutionStatus::Interrupted);
+        assert_eq!(
+            dispatch_of(&db, refused.clone()).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Failed
+        );
+        let parent_notice = room_message(
+            &db,
+            after.parent_discussion_id.clone(),
+            format!("worker-launch-refused:{refused}"),
+        )
+        .await
+        .expect("the principal's room is told");
+        assert!(
+            parent_notice.contains("native ACP transport"),
+            "{parent_notice}"
+        );
+        assert!(
+            parent_notice.contains("refusé au lancement"),
+            "French room: {parent_notice}"
+        );
+        assert!(parent_notice.contains("n'a pas relancé"), "{parent_notice}");
+        let child_notice = room_message(
+            &db,
+            job.discussion_id.clone(),
+            format!("worker-launch-refused-child:{refused}"),
+        )
+        .await
+        .expect("the worker's room is told");
+        assert!(
+            child_notice.contains("native ACP transport"),
+            "{child_notice}"
+        );
+    }
+
+    /// KT-1758 — the same refusal when the fallback came from the agent's own
+    /// chain (KT-1518) and the campaign has no quota opt-in: the chain walks on
+    /// past the refused link, writes no cooldown against it (it is fine for
+    /// rooms), and says so in the parent room.
+    #[tokio::test]
+    async fn a_chain_link_refused_at_spawn_hands_the_worker_to_the_next_link_without_a_cooldown() {
+        use crate::models::AgentFallback;
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        {
+            let mut config = state.config.write().await;
+            let link = |agent| AgentFallback {
+                agent,
+                model: None,
+                mode: None,
+            };
+            config.agents.claude_code.fallback_chain =
+                vec![link(AgentType::OpenCode), link(AgentType::GeminiCli)];
+            crate::core::agent_fallback::migrate_legacy_chains(&mut config.agents);
+        }
+        let usable = vec![
+            AgentType::ClaudeCode,
+            AgentType::OpenCode,
+            AgentType::GeminiCli,
+        ];
+        let claude = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &claude, true).await);
+        let quota_job = dispatch_of(&db, claude).await;
+        assert!(
+            crate::api::discussions::agent_fallback::worker_after_quota_among(
+                &state,
+                &quota_job,
+                "quota_exhausted: You've hit your 5-hour limit",
+                Some(usable.clone()),
+            )
+            .await
+            .unwrap(),
+            "the chain moves the quota-refused worker to its first link"
+        );
+        let on_opencode = exec_of(&db, &was.id).await;
+        assert_eq!(on_opencode.worker_agent_type.as_deref(), Some("OpenCode"));
+        let refused = on_opencode.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &refused, false).await);
+        let job = dispatch_of(&db, refused.clone()).await;
+
+        assert!(
+            crate::api::discussions::runtime::settle_worker_launch_refusal_among(
+                &state,
+                &job,
+                &native_acp_refusal(),
+                Some(usable),
+            )
+            .await
+        );
+
+        let next = exec_of(&db, &was.id).await;
+        assert_eq!(next.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_ne!(next.dispatch_job_id.as_deref(), Some(refused.as_str()));
+        assert_eq!(
+            dispatch_of(&db, refused.clone()).await.status,
+            crate::db::agent_dispatch::DispatchStatus::Failed
+        );
+        assert!(
+            db.with_conn(|conn| crate::core::agent_fallback::active_cooldown(
+                conn,
+                &AgentType::OpenCode,
+                chrono::Utc::now()
+            ))
+            .await
+            .unwrap()
+            .is_none(),
+            "OpenCode cannot be a task worker, it is not unavailable"
+        );
+        let notice = room_message(
+            &db,
+            next.parent_discussion_id.clone(),
+            format!("agent-fallback:{refused}"),
+        )
+        .await
+        .expect("the parent room says the chain moved on");
+        assert!(notice.contains("native ACP transport"), "{notice}");
+        assert!(notice.contains("Gemini"), "{notice}");
+        assert!(
+            !notice.contains(" until "),
+            "no cooldown to announce: {notice}"
+        );
+    }
+
+    /// KT-1758 — a transient `RuntimeUnavailable` is still retried (every 30 s,
+    /// its count kept in the dispatch), a different reason starts a new count,
+    /// and the same reason ten times in a row ends the retries: the dispatch
+    /// fails with the reason and both rooms are told.
+    #[tokio::test]
+    async fn a_transient_runtime_unavailable_retries_then_stops_after_the_bound() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let dispatch = was.dispatch_job_id.clone().unwrap();
+        let bound = crate::api::discussions::runtime::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
+        let reason = "OpenCode ACP spawn failed: connection refused";
+
+        let job = claim_when_due(&db, &dispatch).await;
+        crate::api::discussions::runtime::defer_or_stop_runtime_unavailable(
+            &state,
+            &job,
+            "another cause",
+        )
+        .await;
+        for attempt in 1..=bound {
+            let job = claim_when_due(&db, &dispatch).await;
+            crate::api::discussions::runtime::defer_or_stop_runtime_unavailable(
+                &state, &job, reason,
+            )
+            .await;
+            let after = dispatch_of(&db, dispatch.clone()).await;
+            assert_eq!(
+                after.status,
+                crate::db::agent_dispatch::DispatchStatus::Pending,
+                "try {attempt}: still retried"
+            );
+            assert_eq!(
+                after.last_error.as_deref(),
+                Some(
+                    crate::db::agent_dispatch::runtime_unavailable_marker(attempt, reason).as_str()
+                ),
+                "a different reason started a new count"
+            );
+            assert!(after.available_at > chrono::Utc::now(), "30 s apart");
+            assert_eq!(after.attempts, 0, "no attempt is spent");
+        }
+
+        let job = claim_when_due(&db, &dispatch).await;
+        crate::api::discussions::runtime::defer_or_stop_runtime_unavailable(&state, &job, reason)
+            .await;
+        let ended = dispatch_of(&db, dispatch.clone()).await;
+        assert_eq!(
+            ended.status,
+            crate::db::agent_dispatch::DispatchStatus::Failed,
+            "the bound ends the retries"
+        );
+        let error = ended.last_error.clone().unwrap_or_default();
+        assert!(error.contains(reason), "{error}");
+        assert!(error.contains("still failing after 10 tries"), "{error}");
+        let notice = room_message(
+            &db,
+            was.parent_discussion_id.clone(),
+            format!("worker-launch-refused:{dispatch}"),
+        )
+        .await
+        .expect("the principal's room is told why the worker stopped");
+        assert!(notice.contains(reason), "{notice}");
+        assert_eq!(
+            exec_of(&db, &was.id).await.status,
+            TaskExecutionStatus::Interrupted
+        );
+    }
+
+    /// KT-1758 — the waiting notice carries the runtime's own reason, whole (it
+    /// used to be cut at 240 characters), with how many tries it has had.
+    #[test]
+    fn the_wait_reason_quotes_the_runtime_refusal_verbatim() {
+        let refusal = native_acp_refusal();
+        assert!(
+            refusal.chars().count() > 200,
+            "a long sentence, quoted whole"
+        );
+        let wait = crate::db::agent_dispatch::WaitingFallbackDispatch {
+            dispatch_id: "d".into(),
+            execution_id: "e".into(),
+            parent_discussion_id: "p".into(),
+            provider: "OpenCode".into(),
+            waiting_since: chrono::Utc::now(),
+            available_at: chrono::Utc::now(),
+            progress_detail: None,
+            last_error: Some(crate::db::agent_dispatch::runtime_unavailable_marker(
+                4, &refusal,
+            )),
+            provider_running: 0,
+            task_workers_running: 0,
+            waiting_ahead: 0,
+        };
+        let reason = fallback_dispatch_wait_reason(
+            &wait,
+            &serde_json::json!({}),
+            chrono::Utc::now(),
+            RoomLang::En,
+        );
+        assert!(reason.contains(&refusal), "{reason}");
+        assert!(reason.contains("(4/10 tries)"), "{reason}");
     }
 
     /// KT-1564 — an execution that is already on its original worker is not
