@@ -1158,6 +1158,22 @@ impl FallbackMode {
     }
 }
 
+/// What a fallback cannot give that the agent it replaces could: a stable code,
+/// so the UI translates the warning instead of showing an English sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackGap {
+    /// No MCP tools.
+    NoMcpTools,
+    /// Cannot write in the worktree.
+    NoWriteAccess,
+    /// Images are not guaranteed.
+    NoImageInput,
+    /// A capped context window.
+    CappedContext,
+}
+
 /// How an agent is reached; shown as a badge on every fallback pill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]

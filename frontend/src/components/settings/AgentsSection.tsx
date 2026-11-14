@@ -689,6 +689,17 @@ export function AgentsSection({
     );
   };
 
+  /** « via <card> » on an inherited media fallback: opens and scrolls to the card that holds it. */
+  const openConnectionCard = (connection: string) => {
+    if (connection === COMFYUI_OWNER) {
+      document.querySelector('[data-agent-type="ComfyUI"]')?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      return;
+    }
+    Array.from(document.querySelectorAll<HTMLElement>('[data-connection-id]'))
+      .find((card) => card.dataset.connectionId === connection)
+      ?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+  };
+
   /** KT-1706 — one image or video row of ComfyUI or of a connection, with its fallback. */
   const renderMediaRow = (owner: string, mode: FallbackMode, model: ReactNode) => (
     <ConnectionFallbackRow
@@ -699,6 +710,7 @@ export function AgentsSection({
       model={model}
       view={fallbackData.overview?.media?.find(view => view.owner === owner && view.mode === mode)}
       options={buildMediaOptions(mediaConnections, comfyMedia, 'ComfyUI')}
+      onOpenConnection={openConnectionCard}
       onChange={async next => {
         await configApi.setConnectionFallback({ owner, mode, fallback: next });
         fallbackData.refetch();
