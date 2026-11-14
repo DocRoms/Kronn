@@ -1456,19 +1456,47 @@ pub fn release_unstarted_claim(conn: &Connection, id: &str, error: &str) -> Resu
     Ok(changed > 0)
 }
 
+/// KT-1758 — a dispatch that must run now: a quota fallback's. Its start is the
+/// whole point of the move, and no hold of the provider it left (the reset the
+/// refusal announced) may stand between it and a free slot — the hold applies to
+/// the agent that is held, which this dispatch is not. Only ever brings
+/// `available_at` forward, and only for a `Pending` job that has not run yet, so
+/// a backoff the dispatch earned by itself is never undone.
+pub fn make_available_now(conn: &Connection, id: &str) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE agent_dispatch_jobs SET available_at = ?2, updated_at = ?2
+         WHERE id = ?1 AND status = 'Pending' AND attempts = 0 AND available_at > ?2",
+        params![id, now],
+    )? > 0)
+}
+
+/// KT-1758 — what a cancellation leaves in `last_error`. It used to overwrite
+/// it with `cancelled`, so the reason a dispatch had been waiting (a deferred
+/// start, an audit hold, a retry) was gone when someone looked for it. The
+/// previous reason is kept: `cancelled (was: <reason>)`, or plain `cancelled`
+/// when there was none.
+const CANCELLED_KEEPING_LAST_ERROR: &str = "CASE
+    WHEN last_error IS NULL OR last_error = '' OR last_error = 'cancelled' THEN 'cancelled'
+    WHEN substr(last_error, 1, 9) = 'cancelled' THEN last_error
+    ELSE 'cancelled (was: ' || last_error || ')'
+END";
+
 pub fn cancel_for_discussion(conn: &Connection, discussion_id: &str) -> Result<u64> {
     let now = Utc::now().to_rfc3339();
     let changed = conn.execute(
-        "UPDATE agent_dispatch_jobs
+        &format!(
+            "UPDATE agent_dispatch_jobs
          SET status = 'Cancelled', completed_at = ?2, updated_at = ?2,
-             last_error = 'cancelled'
+             last_error = {CANCELLED_KEEPING_LAST_ERROR}
          WHERE id = (
              SELECT id FROM agent_dispatch_jobs
              WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
              ORDER BY CASE status WHEN 'Running' THEN 0 ELSE 1 END,
                       created_at, id
              LIMIT 1
-         )",
+         )"
+        ),
         params![discussion_id, now],
     )?;
     Ok(changed as u64)
@@ -1485,11 +1513,13 @@ pub fn cancel_for_discussion_by_id(
 ) -> Result<bool> {
     let now = Utc::now().to_rfc3339();
     let changed = conn.execute(
-        "UPDATE agent_dispatch_jobs
+        &format!(
+            "UPDATE agent_dispatch_jobs
          SET status = 'Cancelled', completed_at = ?3, updated_at = ?3,
-             last_error = 'cancelled'
+             last_error = {CANCELLED_KEEPING_LAST_ERROR}
          WHERE id = ?2 AND discussion_id = ?1
-           AND status IN ('Pending', 'Running')",
+           AND status IN ('Pending', 'Running')"
+        ),
         params![discussion_id, dispatch_id, now],
     )?;
     Ok(changed > 0)

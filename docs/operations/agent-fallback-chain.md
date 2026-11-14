@@ -70,6 +70,28 @@ The return to the declared worker (`return_quota_escalations_past_reset`) cancel
 
 A fallback whose dispatch stays `Pending` is no longer silent. After 5 minutes (`FALLBACK_DISPATCH_WAIT_NOTICE_AFTER_SECONDS`) the watchdog posts one line in the parent room (`fallback-dispatch-waiting:<dispatch>`) naming the cause the queue holds against it, most specific first: the runtime that could not start (`runtime_unavailable:` — the 30 s retry that never spends an attempt), an audit writing `docs/`, the `__task_workers` cap, the provider's own per-agent cap (default 1 for every local agent, OpenCode included), a retry delay, older workers ahead in launch order — or « no cause recorded », which is itself the finding. The claim path itself is covered by `every_fallback_dispatch_of_a_refused_run_gets_its_turn_in_launch_order` (seven refused workers, one slot, launch order, none left `Pending`).
 
+### What holds a fallback dispatch, and what does not (KT-1758)
+
+A fallback's dispatch is a new row created `Pending` with `available_at` = now. It is **not** dated by the provider it left: no writer reads `task_execution_quota_origin.reset_at`, `provider_quota_generations.reset_at` or the rearm schedule to date a dispatch, and the hold on the original provider is tested only against dispatches whose agent is that provider. The reassignment still calls `make_available_now` on the replacement, so a replay of the same handoff over a row dated ahead is brought forward (only `Pending`, `attempts = 0`, so a backoff earned by a real attempt stays). [src: file: backend/src/db/agent_dispatch.rs:1465] [src: file: backend/src/api/orchestration.rs:15086]
+
+Every writer of `available_at` on a row that can be `Pending`, so that a value seen in the table can be traced:
+
+| Writer | Value | Leaves |
+|---|---|---|
+| `enqueue_with_connection` | now | `attempts` 0, no claim |
+| `recover_after_restart` | restart time | `backend_restarted` |
+| `apply_watchdog_stall` | now + 2 s | `watchdog_stall_redispatch` |
+| `retry_after` | now + delay (5 s silent crash, 15–30 s overload, 30 s outage, 0 for a fallback) | the reason |
+| `defer_runtime_unavailable` | now + 30 s (5 s for the audit hold); `attempts` − 1, `claimed_at` and `agent_started_at` cleared | `runtime_unavailable: …` / `audit_running: …` |
+| `release_unstarted_claim` | now; `attempts` − 1, `claimed_at` cleared | `claim_handoff_dropped` |
+| `advance_chain_trigger` | now | none |
+
+[src: file: backend/src/db/agent_dispatch.rs:1082] [src: file: backend/src/db/agent_dispatch.rs:1352] [src: file: backend/src/db/agent_dispatch.rs:1400] [src: file: backend/src/db/agent_dispatch.rs:1417] [src: file: backend/src/db/agent_dispatch.rs:1441] [src: file: backend/src/db/agent_dispatch.rs:1623] None of them is derived from a quota reset, and none lasts more than 30 s. So an `available_at` minutes away from `created_at`, on a row with `attempts` 0 and no `claimed_at`, is the **last** `defer_runtime_unavailable` / `release_unstarted_claim` of a claim that did not reach the agent (it decrements `attempts` and clears the claim), not a dated start: it equals the time of that last bounce (+ 30 s for a deferral). That is how a `+2 min` / `+11 min` after the original provider's reset reads, and it points at a start that kept failing, not at a hold — an inference from the writers above, not a measurement: the live rows were not readable from the worker's sandbox. `last_error` on such a row (`runtime_unavailable: <reason>`) names it, which is why a cancellation no longer erases it.
+
+`cancel_for_discussion` and `cancel_for_discussion_by_id` keep the previous `last_error`: `cancelled (was: runtime_unavailable: …)`, or plain `cancelled` when there was none. [src: file: backend/src/db/agent_dispatch.rs:1479] The workflow cancellations keep writing their own reason.
+
+Tests: `a_fallback_dispatch_is_due_now_while_the_original_provider_is_held_for_80_minutes` (held until +80 min, reassigned, due now, listed and claimed in the next pass), `a_replacement_dispatch_dated_ahead_is_brought_forward_only_before_it_has_run`, `cancelling_a_waiting_dispatch_keeps_the_reason_it_waited`.
+
 ## Tests
 
 `core/agent_fallback_test.rs` (triggers, rows, kind rules, chaining and depth, loop refusal, migration, overrides per mode, selection, cooldown, config round trip), `api/discussions/agent_fallback_tests.rs` (rooms and the per-mode override API), `workflows/agent_fallback_step_tests.rs` (steps, chaining through the target's row), `api/orchestration/tests/agent_fallback_runs.rs` (workers and the KT-1664 decision point), `api/orchestration/tests/agent_fallback_return.rs` (Codex refused for a task worker, the return to the declared worker on resume); each surface has a no-fallback-on-task-failure test. Frontend: `AgentFallbackControl.test.tsx` (rows, pills, transport badges, inherited pill, kind-filtered menu, overrides), `FallbackMenu.test.tsx` (menu placement inside the viewport, search, keyboard), `WorkflowWizard.fallback.test.tsx` and `DiscussionSettingsPanel.test.tsx` (override placement), `fallbackChain.test.ts`, `fallbackNotice.test.ts`, `AgentsSection.actions.test.tsx`, `QuotaPauseControls.test.tsx`.

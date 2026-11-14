@@ -15079,6 +15079,11 @@ pub(crate) async fn reassign_native_execution_as(
                     group_concurrency_limit: None,
                 },
             )?;
+            // KT-1758 — the replacement is due now, whatever hold the worker it
+            // replaces is under: that hold is on the provider it left, not on
+            // this dispatch's. A replay of the same generation returns the job
+            // already queued; it is brought forward too.
+            crate::db::agent_dispatch::make_available_now(&transaction, &job.id)?;
             crate::db::orchestration::attach_execution_dispatch(&transaction, &id, &job.id)?;
             let current = crate::db::orchestration::get_task_execution(&transaction, &id)?
                 .context("execution vanished during handoff")?;
@@ -38418,6 +38423,149 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(pending, 0);
+    }
+
+    /// KT-1758 — the live shape: the execution is held on provider A with its
+    /// reset 80 minutes away and is reassigned to B. The hold is on A, not on
+    /// B's dispatch: that dispatch is due now (never dated near A's reset), the
+    /// next scanner pass lists it and the claim takes it.
+    #[tokio::test]
+    async fn a_fallback_dispatch_is_due_now_while_the_original_provider_is_held_for_80_minutes() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let state = quota_test_state(&db);
+        let limits = default_dispatch_limits(&state).await;
+        let old = was.dispatch_job_id.clone().unwrap();
+        assert!(run_then_refuse(&db, &limits, &old, true).await);
+
+        let reset = chrono::Utc::now() + chrono::Duration::minutes(80);
+        let on_codex = fall_back_to_codex(&state, &db, &was, reset).await;
+        let fallback = on_codex.dispatch_job_id.clone().unwrap();
+
+        let held = db
+            .with_read_conn(|conn| {
+                crate::db::orchestration::provider_quota_unavailable_at(
+                    conn,
+                    "ClaudeCode",
+                    None,
+                    chrono::Utc::now(),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(held, "the original provider is held until its reset");
+
+        let job = dispatch_of(&db, fallback.clone()).await;
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Pending
+        );
+        assert!(
+            job.available_at <= chrono::Utc::now(),
+            "due now, not at the original provider's reset: {:?}",
+            job.available_at
+        );
+        assert_eq!(job.attempts, 0);
+
+        let scan_limits = limits.clone();
+        let (listed, claimed) = db
+            .with_conn(move |conn| {
+                let listed = crate::db::agent_dispatch::list_runnable_ids(conn, 64)?;
+                let claimed = crate::db::agent_dispatch::claim_with_limits(
+                    conn,
+                    &fallback,
+                    Some(&scan_limits),
+                )?
+                .is_some();
+                Ok((listed, claimed))
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![on_codex.dispatch_job_id.clone().unwrap()]);
+        assert!(claimed, "claimed in the next pass");
+    }
+
+    /// KT-1758 — a replacement dispatch found dated ahead of now (a replay of the
+    /// same handoff over a delayed row) is brought forward, but only while it has
+    /// not run: a backoff earned by a real attempt stays.
+    #[tokio::test]
+    async fn a_replacement_dispatch_dated_ahead_is_brought_forward_only_before_it_has_run() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let dispatch = was.dispatch_job_id.clone().unwrap();
+        let ahead = (chrono::Utc::now() + chrono::Duration::minutes(80)).to_rfc3339();
+        let moved = db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs SET available_at = ?2 WHERE id = ?1",
+                    rusqlite::params![dispatch, ahead],
+                )?;
+                let fresh = crate::db::agent_dispatch::make_available_now(conn, &dispatch)?;
+                let after = crate::db::agent_dispatch::get(conn, &dispatch)?.unwrap();
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs SET available_at = ?2, attempts = 1 WHERE id = ?1",
+                    rusqlite::params![dispatch, ahead],
+                )?;
+                let ran = crate::db::agent_dispatch::make_available_now(conn, &dispatch)?;
+                Ok((fresh, after.available_at, ran))
+            })
+            .await
+            .unwrap();
+        assert!(moved.0, "a job that has not run is due now");
+        assert!(moved.1 <= chrono::Utc::now());
+        assert!(!moved.2, "a backoff after a real attempt is not undone");
+    }
+
+    /// KT-1758 — cancelling a dispatch keeps why it had been waiting, so a
+    /// post-mortem can read it: the previous `last_error` is appended, not lost.
+    #[tokio::test]
+    async fn cancelling_a_waiting_dispatch_keeps_the_reason_it_waited() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let was = economy_claude_executions(&db, repo.path(), 1)
+            .await
+            .remove(0);
+        let dispatch = was.dispatch_job_id.clone().unwrap();
+        let child = was.sub_discussion_id.clone().unwrap();
+        let (kept, plain) = db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs SET last_error = 'runtime_unavailable: spawn failed' \
+                     WHERE id = ?1",
+                    [&dispatch],
+                )?;
+                assert!(crate::db::agent_dispatch::cancel_for_discussion_by_id(
+                    conn, &child, &dispatch
+                )?);
+                let kept = crate::db::agent_dispatch::get(conn, &dispatch)?
+                    .unwrap()
+                    .last_error;
+                // A second cancel of a settled job changes nothing, and a job
+                // with no reason still reads plainly `cancelled`.
+                conn.execute(
+                    "UPDATE agent_dispatch_jobs SET status = 'Pending', last_error = NULL \
+                     WHERE id = ?1",
+                    [&dispatch],
+                )?;
+                crate::db::agent_dispatch::cancel_for_discussion_by_id(conn, &child, &dispatch)?;
+                let plain = crate::db::agent_dispatch::get(conn, &dispatch)?
+                    .unwrap()
+                    .last_error;
+                Ok((kept, plain))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            kept.as_deref(),
+            Some("cancelled (was: runtime_unavailable: spawn failed)")
+        );
+        assert_eq!(plain.as_deref(), Some("cancelled"));
     }
 
     /// KT-1758 — the original provider's reset passes while the fallback worker
