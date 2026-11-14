@@ -1529,7 +1529,7 @@ pub const OS_JUNK_ENV: &str = "KRONN_OS_JUNK_PATTERNS";
 
 /// The OS-junk patterns in force: the environment's, else the defaults.
 pub fn os_junk_patterns() -> Vec<String> {
-    os_junk_patterns_from(std::env::var(OS_JUNK_ENV).ok().as_deref())
+    os_junk_patterns_from(crate::core::child_env::var(OS_JUNK_ENV).ok().as_deref())
 }
 
 fn os_junk_patterns_from(configured: Option<&str>) -> Vec<String> {
@@ -7786,7 +7786,8 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&message.stdout)
                 .contains("Signed-off-by: Test <test@test.com>"),
-            "the sign-off is the configured git identity"
+            "the sign-off is the configured git identity: {}",
+            String::from_utf8_lossy(&message.stdout)
         );
         let parents = crate::core::cmd::git_cmd()
             .args(["log", "-1", "--format=%P", &sha])

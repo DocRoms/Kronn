@@ -197,6 +197,24 @@ fn a_signed_history_requires_the_sign_off_and_an_unsigned_one_does_not() {
     assert_eq!(policy.signoff_source, SignoffSource::History);
 }
 
+#[cfg(unix)] // writes an executable hook script
+#[test]
+fn a_commit_msg_hook_checking_the_sign_off_requires_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = repo();
+    let hook = repo.path().join(".git/hooks/commit-msg");
+    fs::write(
+        &hook,
+        "#!/bin/sh\ngrep -q '^Signed-off-by: ' \"$1\" || exit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let policy = CommitPolicy::for_repo(repo.path());
+    assert!(policy.signoff);
+    assert_eq!(policy.signoff_source, SignoffSource::CommitMsgHook);
+}
+
 #[test]
 fn one_signed_commit_in_an_unsigned_history_is_not_a_habit() {
     let repo = repo();
