@@ -8321,7 +8321,12 @@ docker_error?: string, };
  * Project defaults for worktree preparation hooks. Workflow hooks override them
  * field by field; omitted fields inherit the project value.
  */
-export type ProjectWorkspace = { hooks: WorkspaceHooks, };
+export type ProjectWorkspace = { hooks: WorkspaceHooks,
+/**
+ * KT-1748 — absolute directories whose worktrees Kronn manages for this
+ * project, added to the global Settings > Workers list and the built-in roots.
+ */
+managed_worktree_roots?: Array<string>, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -12981,7 +12986,14 @@ bash_default_timeout_min: number,
  * the turn. Keep it below the generation limit (`agent_global_timeout_min`),
  * which cuts the whole turn whatever a command is allowed.
  */
-bash_max_timeout_min: number, };
+bash_max_timeout_min: number,
+/**
+ * KT-1748 — absolute directories whose worktrees Kronn manages, on top of the
+ * built-in roots (`<repo>/.kronn/worktrees`, `~/.kronn/autocode-worktrees`). A
+ * branch checked out under one may be an integration target; the owner's own
+ * checkout never is. A project can name more of its own.
+ */
+managed_worktree_roots: Array<string>, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

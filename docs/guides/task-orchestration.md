@@ -63,12 +63,23 @@ never `main` by default:
   does not fall back to `main`.
 - **The checkout holding the target must be Kronn's.** A target checked out
   nowhere is advanced by a ref compare-and-swap that touches no checkout. One
-  checked out in a Kronn-owned worktree (under `<repo>/.kronn/worktrees`) is
-  advanced inside it. One checked out in the project's own working checkout is
-  refused with `integration_target_owner_checkout`, and one checked out in any
-  other worktree with `integration_target_foreign_worktree`. Those checkouts
-  hold files the owner is working on, and fast-forwarding `main` there would
-  also land a change without going through the pull request.
+  checked out in a Kronn-owned worktree is advanced inside it. A worktree is
+  Kronn's when it sits under `<repo>/.kronn/worktrees`, under Kronn's autoCode
+  root (`~/.kronn/autocode-worktrees`), under a folder listed in Settings >
+  Workers (`managed_worktree_roots`, absolute paths) or in the project's
+  workspace settings, or when Kronn's workspace registry records it (a managed
+  discussion workspace or a workflow run). One checked out in the project's own
+  working checkout is refused with `integration_target_owner_checkout`, even if
+  the registry knows the path, and one checked out in any other worktree with
+  `integration_target_foreign_worktree`. Those checkouts hold files the owner
+  is working on, and fast-forwarding `main` there would also land a change
+  without going through the pull request.
+- **A managed worktree in use is not advanced.** If a run still uses the
+  worktree that holds the target (an unfinished workflow run, an unfinished task
+  execution, or a pending or running agent dispatch of its discussion), the
+  integration is refused with `integration_target_busy_worktree`, naming the
+  run, and nothing is changed. The execution parks like any refused
+  integration; resume it once the run has finished.
 - **The refusal comes at preflight and launch.** `task_exec_prepare` accepts the
   `base_rev` you will launch with (or checks the room's declared branch) and
   answers `launchable: false` with the same code; `task_exec_launch` refuses it
@@ -607,6 +618,8 @@ for the mechanism.
 | Dirty target worktree | Intentionally preserve or commit changes in the selected target branch's checkout, then retry integration. Do not move unrelated files from another checkout. |
 | Target checked out in several worktrees, or not a local branch | Leave at most one checkout of the pinned local target branch, and make sure the target is a branch, not a tag or SHA, before retrying; Kronn does not choose or switch a branch for you. |
 | `integration_target_undeclared`, `integration_target_owner_checkout` or `integration_target_foreign_worktree` at preflight or launch | Name an integration branch (`base_rev`) or declare one on the room's campaign, and pick one that is checked out nowhere or in a Kronn-owned worktree. Kronn never integrates into the owner's checkout or defaults to `main`. |
+| `integration_target_busy_worktree` at integration | The named run still uses the worktree that holds the target. Let it finish (or cancel it), then resume the integration; nothing was moved. |
+| `integration_target_foreign_worktree` for a worktree Kronn itself created elsewhere | Add its parent folder to Settings > Workers > Managed worktree folders (or to the project's workspace settings). |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
 | Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, set the task back to `todo` (`task_update status=todo`; the cancel keeps its status, usually `in_progress`, and the launch preflight refuses any other status), then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |
