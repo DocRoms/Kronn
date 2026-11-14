@@ -875,6 +875,144 @@ fn both_flags_come_back() {
     );
 }
 
+/// KT-1595 round 10: a refused path under a folder that is a link is
+/// fingerprinted without stat'ing through that link, and replacing the link
+/// with a real folder is reported.
+#[cfg(unix)]
+#[test]
+fn a_link_folder_replaced_during_the_step_is_reported() {
+    let dir = repo();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("TD-1.md"), "outside\n").unwrap();
+    std::fs::remove_dir_all(dir.path().join("docs/tech-debt")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("docs/tech-debt")).unwrap();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    assert!(
+        remit.refused_before["docs/tech-debt/TD-1.md"].starts_with("link at"),
+        "{:?}",
+        remit.refused_before
+    );
+    std::fs::remove_file(dir.path().join("docs/tech-debt")).unwrap();
+    git(
+        dir.path(),
+        &["checkout", "HEAD", "--", "docs/tech-debt/TD-1.md"],
+    );
+    let report = remit.settle_blocking();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("docs/tech-debt/TD-1.md")),
+        "{report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("TD-1.md")).unwrap(),
+        "outside\n"
+    );
+}
+
+/// KT-1595 round 10: past FLAGGED_CONTENT_MAX flagged files their bytes are not
+/// kept; a flag the agent cleared is still seen, and such a file is never
+/// rewritten from HEAD.
+#[test]
+fn many_flagged_files_keep_their_index_and_are_never_rewritten_from_head() {
+    let dir = repo();
+    let many: Vec<String> = (0..=FLAGGED_CONTENT_MAX)
+        .map(|n| format!("docs/tech-debt/f{n}.md"))
+        .collect();
+    for rel in &many {
+        write(dir.path(), rel, "x\n");
+    }
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-q", "-m", "many"]);
+    let mut args = vec!["update-index", "--assume-unchanged"];
+    args.extend(many.iter().map(String::as_str));
+    git(dir.path(), &args);
+    write(dir.path(), "docs/tech-debt/f0.md", "user hidden wip\n");
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    assert!(!remit.dirty_outside.contains_key("docs/tech-debt/f0.md"));
+    git(
+        dir.path(),
+        &[
+            "update-index",
+            "--no-assume-unchanged",
+            "docs/tech-debt/f0.md",
+            "docs/tech-debt/f1.md",
+        ],
+    );
+    let report = remit.settle_blocking();
+    assert_eq!(
+        read(dir.path(), "docs/tech-debt/f0.md"),
+        "user hidden wip\n"
+    );
+    assert!(git(dir.path(), &["ls-files", "-v", "docs/tech-debt/f1.md"]).starts_with('h'));
+    assert!(git(dir.path(), &["ls-files", "-v", "docs/tech-debt/f0.md"]).starts_with('h'));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("docs/tech-debt/f1.md")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 10: a clean filter, a replace ref or `core.bare` the agent
+/// writes into the repository never runs a program nor hides its edit from the
+/// settle, and the configuration change is reported.
+#[cfg(unix)]
+#[test]
+fn a_repository_reconfigured_by_the_agent_runs_nothing_and_hides_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    let marker = dir.path().join("filter-ran");
+    let script = dir.path().join(".git/clean.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        dir.path(),
+        &["config", "filter.k.clean", script.to_str().unwrap()],
+    );
+    std::fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+    std::fs::write(
+        dir.path().join(".git/info/attributes"),
+        "docs/tech-debt/TD-1.md filter=k\n",
+    )
+    .unwrap();
+    git(dir.path(), &["config", "log.showSignature", "true"]);
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td ONE\n");
+    let report = remit.settle_blocking();
+    assert!(!marker.exists(), "the clean filter must not run");
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains("git configuration")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_replace_ref_never_hides_an_edit() {
+    let dir = repo();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    write(dir.path(), "docs/tech-debt/TD-1.md", "td one, agent\n");
+    let agent_blob = git(dir.path(), &["hash-object", "-w", "docs/tech-debt/TD-1.md"]);
+    let head_blob = git(dir.path(), &["rev-parse", "HEAD:docs/tech-debt/TD-1.md"]);
+    git(dir.path(), &["replace", &head_blob, &agent_blob]);
+    let report = remit.settle_blocking();
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("replace")),
+        "{report:?}"
+    );
+}
+
 /// KT-1595 round 7: a source file the user had dirty, whose bytes the agent
 /// left alone but whose staged version it changed, is listed (never touched).
 #[test]

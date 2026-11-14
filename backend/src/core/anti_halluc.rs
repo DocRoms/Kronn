@@ -1639,7 +1639,7 @@ fn untracked_claim(reference: &str, roots: &[&Path]) -> bool {
 /// Whether git tracks `rel` in the repository at `root`. Outside a repository,
 /// or without git, nothing is tracked.
 pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
-    crate::core::cmd::git_cmd()
+    crate::core::cmd::agent_touched_git_cmd(root)
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--error-unmatch", "--", rel])
@@ -1653,7 +1653,7 @@ pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
 /// path, absent from a clone), whether or not the file is on disk. Outside a
 /// repository, or without git, nothing is ignored.
 pub(crate) fn is_git_ignored(root: &Path, rel: &str) -> bool {
-    crate::core::cmd::git_cmd()
+    crate::core::cmd::agent_touched_git_cmd(root)
         .arg("-C")
         .arg(root)
         .args(["check-ignore", "-q", "--", rel])

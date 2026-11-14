@@ -445,6 +445,73 @@ pub fn project_git_cmd() -> std::process::Command {
     cmd
 }
 
+/// [`project_git_cmd`] for a checkout an agent may have reconfigured (an audit
+/// step's project after its agent ran): no program its configuration names runs
+/// — hooks and fsmonitor off, every `filter.*` / `diff.*` / `merge.*` program of
+/// its local configuration turned off by name, no replace refs, no signature
+/// check — and the stat cache, `diff.relative` and `core.bare` are pinned to
+/// git's defaults so a changed setting cannot hide an edit. Reading the local
+/// configuration (`--no-includes`) runs nothing.
+pub fn agent_touched_git_cmd(repo: &std::path::Path) -> std::process::Command {
+    let mut cmd = project_git_cmd();
+    cmd.arg("--no-replace-objects")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args([
+            "-c",
+            "log.showSignature=false",
+            "-c",
+            "core.trustctime=true",
+            "-c",
+            "core.checkStat=default",
+            "-c",
+            "diff.relative=false",
+            "-c",
+            "core.bare=false",
+        ]);
+    let programs = git_cmd()
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "config",
+            "--local",
+            "--no-includes",
+            "--null",
+            "--name-only",
+            "--get-regexp",
+            r"^(filter|diff|merge)\.",
+        ])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    let mut off: Vec<String> = Vec::new();
+    for key in programs.split('\0').filter(|key| !key.is_empty()) {
+        let Some((section, rest)) = key.split_once('.') else {
+            continue;
+        };
+        let Some((name, _)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        let keys: &[&str] = match section {
+            "filter" => &["clean=", "smudge=", "process=", "required=false"],
+            "diff" => &["textconv=", "command="],
+            "merge" => &["driver="],
+            _ => continue,
+        };
+        for suffix in keys {
+            let setting = format!("{section}.{name}.{suffix}");
+            if !off.contains(&setting) {
+                off.push(setting);
+            }
+        }
+    }
+    for setting in off {
+        cmd.arg("-c").arg(setting);
+    }
+    cmd
+}
+
 /// [`git_cmd`] for tokio.
 pub fn async_git_cmd() -> tokio::process::Command {
     async_cmd("git", ChildRoute::Git)

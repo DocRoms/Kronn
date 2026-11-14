@@ -154,22 +154,25 @@ pub(crate) struct StepRemit {
     /// The skip-worktree / assume-unchanged tag of every flagged file at that
     /// moment: a flag the agent sets on a clean file hides its edit.
     flags_before: HashMap<String, char>,
+    /// The repository's local configuration and replace refs at that moment: an
+    /// agent that changes them can steer what git reports.
+    git_setup_before: String,
+    /// Why the state before the step could not be fully read, if it could not.
+    capture_gap: Option<String>,
     /// Project-relative folders outside the root that hold AI docs.
     ai_folders: Vec<String>,
 }
 
-/// `git` for the project after an agent ran: hooks and fsmonitor off
-/// (`project_git_cmd`), so a config the agent wrote runs nothing.
+/// `git` for the project after an agent ran (`agent_touched_git_cmd`): no
+/// program its configuration names runs, no replace ref is followed. Bounded in
+/// time: a configuration that blocks git (an include on a FIFO) fails the call
+/// instead of hanging the settle.
 fn git(project: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = crate::core::cmd::project_git_cmd()
-        .arg("--literal-pathspecs")
-        .arg("-C")
-        .arg(project)
-        .args(args)
-        .output()
-        .ok()?;
-    output.status.success().then_some(output.stdout)
+    git_with_input(project, args, &[])
 }
+
+/// The longest a single git call of the remit may take.
+const GIT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// What the index holds for one path: every `ls-files -s` line (all stages of
 /// a conflict, top-relative paths, as `update-index --index-info` reads them
@@ -196,7 +199,14 @@ fn index_snapshot(
         if let Some(rel) = only {
             all.extend(["--", rel]);
         }
-        git(project, &all).map(|raw| String::from_utf8_lossy(&raw).into_owned())
+        // A path that is not UTF-8 is left out: a lossy copy of it would name
+        // another entry when written back.
+        git(project, &all).map(|raw| {
+            raw.split(|b| *b == 0)
+                .filter_map(|entry| std::str::from_utf8(entry).ok())
+                .collect::<Vec<_>>()
+                .join("\0")
+        })
     };
     let mut records: HashMap<String, IndexRecord> = HashMap::new();
     // `<mode> SP <blob> SP <stage> TAB <top-relative path>`, as --index-info reads it.
@@ -276,20 +286,35 @@ fn flags_of(snapshot: &HashMap<String, IndexRecord>) -> HashMap<String, char> {
 /// bytes are not kept: only their index state is.
 const FLAGGED_CONTENT_MAX: usize = 2_000;
 
-/// What a refused path (a link) is, by `lstat` only: its type and, for a link,
-/// where it points. A changed fingerprint means the step touched it.
-fn link_fingerprint(path: &Path) -> String {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => format!("{:?} {:?}", meta.file_type(), std::fs::read_link(path).ok()),
-        Err(error) => format!("missing: {:?}", error.kind()),
+/// What a refused path is, by `lstat` of each component from the project down,
+/// stopping at the first link (its target is recorded, never followed): a
+/// parent folder that is a link is never stat'ed through. A changed
+/// fingerprint means the step touched it.
+fn link_fingerprint(project: &Path, rel: &str) -> String {
+    let mut at = project.to_path_buf();
+    let mut kind = String::new();
+    for part in Path::new(rel).components() {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return format!(
+                    "link at {}: {:?}",
+                    at.display(),
+                    std::fs::read_link(&at).ok()
+                );
+            }
+            Ok(meta) => kind = format!("{:?}", meta.file_type()),
+            Err(error) => return format!("missing at {}: {:?}", at.display(), error.kind()),
+        }
     }
+    kind
 }
 
 /// `git <args>` with `input` on stdin.
 fn git_with_input(project: &Path, args: &[&str], input: &[u8]) -> Option<Vec<u8>> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = crate::core::cmd::project_git_cmd()
+    let mut child = crate::core::cmd::agent_touched_git_cmd(project)
         .arg("--literal-pathspecs")
         .arg("-C")
         .arg(project)
@@ -302,9 +327,48 @@ fn git_with_input(project: &Path, args: &[&str], input: &[u8]) -> Option<Vec<u8>
     let mut stdin = child.stdin.take()?;
     let payload = input.to_vec();
     let writer = std::thread::spawn(move || stdin.write_all(&payload));
-    let output = child.wait_with_output().ok()?;
-    writer.join().ok()?.ok()?;
-    output.status.success().then_some(output.stdout)
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
+    });
+    let deadline = std::time::Instant::now() + GIT_CALL_TIMEOUT;
+    let status = loop {
+        match child.try_wait().ok()? {
+            Some(status) => break status,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    };
+    let _ = writer.join();
+    let output = reader.join().ok()?.ok()?;
+    status.success().then_some(output)
+}
+
+/// The repository's local configuration (no includes) and its replace refs, as
+/// text: what an agent changes to steer git's answers.
+fn git_setup(project: &Path) -> String {
+    let config =
+        git(project, &["config", "--local", "--no-includes", "--list"]).unwrap_or_default();
+    let replace = git(
+        project,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/replace",
+        ],
+    )
+    .unwrap_or_default();
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&config),
+        String::from_utf8_lossy(&replace)
+    )
 }
 
 fn git_text(project: &Path, args: &[&str]) -> Option<String> {
@@ -318,21 +382,26 @@ fn tracked_changes(project: &Path, prefix: &str) -> Option<Vec<String>> {
         project,
         &["status", "--porcelain=v1", "-z", "--untracked-files=no"],
     )?;
+    // A path that is not UTF-8 is left out (never written back under a lossy
+    // name); the field still counts, so a rename's origin stays paired.
     let mut parts = raw
         .split(|b| *b == 0)
-        .map(|p| String::from_utf8_lossy(p).into_owned());
+        .map(|p| String::from_utf8(p.to_vec()).ok());
     let mut out = Vec::new();
     while let Some(entry) = parts.next() {
+        let Some(entry) = entry else {
+            continue;
+        };
         if entry.len() < 4 {
             continue;
         }
         let (status, path) = entry.split_at(3);
-        let mut paths = vec![path.to_string()];
+        let mut paths = vec![Some(path.to_string())];
         // A rename or copy carries its origin as one more NUL field.
         if status.contains(['R', 'C']) {
-            paths.extend(parts.next());
+            paths.push(parts.next().flatten());
         }
-        for p in paths {
+        for p in paths.into_iter().flatten() {
             if let Some(rel) = p.strip_prefix(prefix) {
                 out.push(rel.to_string());
             }
@@ -349,6 +418,7 @@ fn local_refs(project: &Path) -> HashSet<String> {
             "--format=%(refname)",
             "refs/heads",
             "refs/tags",
+            "refs/replace",
         ],
     )
     .map(|t| t.lines().map(str::to_string).collect())
@@ -403,9 +473,16 @@ impl StepRemit {
         let mut dirty_outside = HashMap::new();
         let mut refused_before = HashMap::new();
         let mut index_before = HashMap::new();
-        let snapshot = index_snapshot(project, &prefix, None)?;
+        let mut capture_gap = None;
+        let snapshot = index_snapshot(project, &prefix, None).unwrap_or_else(|| {
+            capture_gap = Some("the index could not be read".to_string());
+            HashMap::new()
+        });
         let flags_before = flags_of(&snapshot);
-        let mut dirty = tracked_changes(project, &prefix)?;
+        let mut dirty = tracked_changes(project, &prefix).unwrap_or_else(|| {
+            capture_gap = Some("`git status` failed".to_string());
+            Vec::new()
+        });
         // A file the user hid from `git status` (skip-worktree, assume-unchanged)
         // may hold local changes too: recorded like a dirty one, its bytes kept
         // unless there are too many to keep.
@@ -433,7 +510,7 @@ impl StepRemit {
                     dirty_outside.insert(rel, content);
                 }
                 Err(_) => {
-                    let fingerprint = link_fingerprint(&project.join(&rel));
+                    let fingerprint = link_fingerprint(project, &rel);
                     refused_before.insert(rel, fingerprint);
                 }
             }
@@ -450,6 +527,8 @@ impl StepRemit {
             refused_before,
             index_before,
             flags_before,
+            git_setup_before: git_setup(project),
+            capture_gap,
             ai_folders: ai_doc_folders(project, docs_root),
         })
     }
@@ -486,6 +565,17 @@ impl StepRemit {
     /// every attempt, a second call finds nothing left to do.
     pub fn settle_blocking(&self) -> RemitReport {
         let mut report = RemitReport::default();
+        if let Some(gap) = &self.capture_gap {
+            report.warnings.push(format!(
+                "the repository could not be read before the step ({gap}): the check of the files outside the docs root is incomplete"
+            ));
+        }
+        if git_setup(&self.project) != self.git_setup_before {
+            report.warnings.push(
+                "the repository's git configuration or replace refs changed during the step: Kronn turned off every program it names for its own checks, but review the change (`git config --local --list`, `git for-each-ref refs/replace`)"
+                    .to_string(),
+            );
+        }
         let head_settled = self.settle_head(&mut report);
         self.report_new_refs(&mut report);
         if head_settled {
@@ -632,6 +722,10 @@ impl StepRemit {
 
     fn revert_outside_root(&self, report: &mut RemitReport) {
         let Some(mut changed) = tracked_changes(&self.project, &self.prefix) else {
+            report.warnings.push(
+                "`git status` failed after the step: the tracked files outside the docs root were not checked"
+                    .to_string(),
+            );
             return;
         };
         // A file the user had dirty that the agent brought back to HEAD (`git
@@ -642,18 +736,26 @@ impl StepRemit {
         changed.extend(recorded.into_iter().cloned());
         // A flag set or changed during the step hides an edit from `git status`;
         // a refused path (a link) the agent replaced is gone from it too.
-        let snapshot = index_snapshot(&self.project, &self.prefix, None).unwrap_or_default();
-        let mut flagged: Vec<(String, char)> = flags_of(&snapshot).into_iter().collect();
+        let snapshot = index_snapshot(&self.project, &self.prefix, None).unwrap_or_else(|| {
+            report.warnings.push(
+                "the index could not be read after the step: staged versions and flags were not checked"
+                    .to_string(),
+            );
+            HashMap::new()
+        });
+        let flags_now = flags_of(&snapshot);
+        let mut flagged: Vec<String> = flags_now
+            .keys()
+            .chain(self.flags_before.keys())
+            .filter(|rel| flags_now.get(*rel) != self.flags_before.get(*rel))
+            .cloned()
+            .collect();
         flagged.sort();
-        for (rel, tag) in flagged {
-            if self.flags_before.get(&rel) != Some(&tag) {
-                changed.push(rel);
-            }
-        }
+        changed.extend(flagged);
         let mut refused: Vec<(&String, &String)> = self.refused_before.iter().collect();
         refused.sort();
         for (rel, fingerprint) in refused {
-            if link_fingerprint(&self.project.join(rel)) != *fingerprint {
+            if link_fingerprint(&self.project, rel) != *fingerprint {
                 changed.push(rel.clone());
             }
         }
@@ -683,6 +785,21 @@ impl StepRemit {
                 report.warnings.push(format!(
                     "`{rel}` could not be read safely before the step (a link?) and was left as it is"
                 ));
+                continue;
+            }
+            if before.is_none() && self.index_before.contains_key(&rel) {
+                // A flagged file whose bytes were not kept (more than
+                // FLAGGED_CONTENT_MAX flagged files): its index state comes back,
+                // its working tree is never rewritten from HEAD.
+                match self.restore_index(&rel) {
+                    Ok(true) => report.warnings.push(format!(
+                        "the agent changed the index state of `{rel}`; it was put back (its bytes were not recorded, the working tree was left as it is)"
+                    )),
+                    Ok(false) => report.warnings.push(format!(
+                        "`{rel}` changed during the step; its bytes were not recorded (too many flagged files), so it was left as it is"
+                    )),
+                    Err(e) => report.warnings.push(e),
+                }
                 continue;
             }
             if before.is_none() && !self.index_before.contains_key(&rel) && !self.at_head(&rel) {
@@ -751,26 +868,13 @@ impl StepRemit {
 
     /// `git hash-object -w --stdin`: the blob id of `bytes`, written.
     fn hash_object(&self, bytes: &[u8]) -> Option<String> {
-        use std::io::Write;
-        use std::process::Stdio;
-        let mut child = crate::core::cmd::project_git_cmd()
-            .arg("--literal-pathspecs")
-            .arg("-C")
-            .arg(&self.project)
-            .args(["hash-object", "-w", "--no-filters", "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let mut stdin = child.stdin.take()?;
-        let payload = bytes.to_vec();
-        // A writer thread: a large file must not deadlock against git's pipe.
-        let writer = std::thread::spawn(move || stdin.write_all(&payload));
-        let output = child.wait_with_output().ok()?;
-        writer.join().ok()?.ok()?;
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        (output.status.success() && !sha.is_empty()).then_some(sha)
+        let out = git_with_input(
+            &self.project,
+            &["hash-object", "-w", "--no-filters", "--stdin"],
+            bytes,
+        )?;
+        let sha = String::from_utf8_lossy(&out).trim().to_string();
+        (!sha.is_empty()).then_some(sha)
     }
 
     /// `Some(blob)` when the file was restored, the blob being what it held.
@@ -869,6 +973,15 @@ impl StepRemit {
                         .collect()
                 })
                 .unwrap_or_default();
+            if self
+                .index_before
+                .get(rel)
+                .is_some_and(|before| before.intent_to_add)
+            {
+                return format!(
+                    "the index entry of `{rel}` could not be put back: it was an intent-to-add (`git add -N -- {rel}` puts it back)"
+                );
+            }
             format!(
                 "the index entry of `{rel}` could not be put back (git update-index failed); what you had staged is kept as blob {} (`git update-index --cacheinfo <mode>,<blob>,<path>` puts it back)",
                 if staged.is_empty() { "none".to_string() } else { staged.join(", ") }

@@ -131,7 +131,16 @@ by path, found by the round-3 review and the Argon addendum):
   then checks it; the entries go back NUL-separated (`update-index -z
   --index-info`), so a path holding a newline is one entry, never two. The whole
   index is read in four git calls (one snapshot, whatever the size of the
-  repository), with hooks and fsmonitor off (`project_git_cmd`). A file the user
+  repository), through `cmd::agent_touched_git_cmd` (round 10): hooks and
+  fsmonitor off, every `filter.*` / `diff.*` / `merge.*` program of the local
+  configuration turned off by name, no replace refs, no signature check, the stat
+  cache, `diff.relative` and `core.bare` pinned to git's defaults, and each call
+  bounded to 120 s (an include on a FIFO fails the call instead of hanging). The
+  settle reports a git failure, a capture that could not be read, and any change
+  of the local configuration or replace refs during the step. A path that is not
+  UTF-8 is never written back. Not covered, by owner decision (KT-1769): an
+  agent can still write `.git/config`, `.git/info` and `refs/replace` (the root
+  fix is a sandbox write deny on `.git`); the change is reported, not undone. A file the user
   hid with one of those flags counts as dirty (its bytes are kept up to 2 000
   flagged files, its index state always), and a flag set or changed during the
   step is a change, so an edit hidden behind `--assume-unchanged` is restored or
