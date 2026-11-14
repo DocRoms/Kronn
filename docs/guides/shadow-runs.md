@@ -21,7 +21,7 @@ prompt context, previous outputs and variables as the main step received them.
 **Only the main output continues the workflow**: a shadow's output never feeds a
 later step (a later step can read a summary of what ran, never an output: see
 [Show the shadows on a Page](#show-the-shadows-on-a-page)).
-[src: file: backend/src/workflows/shadow.rs:494#start_for_step]
+[src: file: backend/src/workflows/shadow.rs:502-508#start_for_step]
 
 Only an Agent step can carry shadows, and not one marked **Acts outside Kronn**.
 [src: file: backend/src/workflows/shadow.rs:465#can_run_shadows]
@@ -85,10 +85,10 @@ Only a person sets shadows: they start extra executions, so an agent's save that
 sets or changes them is refused, and a save that sends the steps back keeps the
 stored ones.
 [src: file: backend/src/api/workflows.rs:2906#AGENT_SHADOW_REFUSAL]
-[src: file: backend/src/workflows/shadow.rs:1032#keep_stored_shadows]
+[src: file: backend/src/workflows/shadow.rs:1111-1113#keep_stored_shadows]
 A save is checked: the ids, the sampling, the overrides, the budgets, and that
 the step is an Agent step that stays inside Kronn.
-[src: file: backend/src/workflows/shadow.rs:877#validate]
+[src: file: backend/src/workflows/shadow.rs:956-958#validate]
 A Page's **Quick Prompts and skills** panel also adds a shadow that tests a
 version on a step, changes the version a shadow tests, and removes a shadow.
 
@@ -106,7 +106,7 @@ A shadow never runs such a step, and never a Gate: saving refuses shadows on
 them, and one saved by hand is recorded as *skipped* instead of run. A later step
 marked `external_effect` runs once, in the main path: no GitHub write, no message,
 no publication happens because of a shadow.
-[src: file: backend/src/workflows/shadow.rs:670#run_one]
+[src: file: backend/src/workflows/shadow.rs:749-751#run_one]
 
 Two cautions:
 
@@ -123,7 +123,7 @@ A shadow that fails, stalls or spends its budget settles its own result and
 nothing else: the main step keeps its status, its duration and its output, and
 does not wait for the shadow. Each shadow runs in the background, one task per
 shadow, and a crash in it is recorded on its own row.
-[src: file: backend/src/workflows/shadow.rs:544#run_step_shadows]
+[src: file: backend/src/workflows/shadow.rs:558#run_step_shadows]
 
 - the **time budget** is enforced: the shadow is stopped (status *time limit
   reached*) and `max_duration_secs` replaces the workflow's timeout for it, so a
@@ -131,7 +131,7 @@ shadow, and a crash in it is recorded on its own row.
 - the **token and cost budgets** are checked when the shadow ends: one that
   spent more is marked *over budget* with the limit, its output kept;
   `max_tokens` is also handed to an agent that takes a generation cap;
-  [src: file: backend/src/workflows/shadow.rs:810#budget_exceeded]
+  [src: file: backend/src/workflows/shadow.rs:890-891#budget_exceeded]
 - a shadow left running by a restart is marked *interrupted*.
   [src: file: backend/src/db/step_shadows.rs:144#interrupt_running]
 
@@ -143,7 +143,7 @@ outputs with the run's.
 
 Open a run: for each step that ran shadows, the run view shows the main
 execution beside its shadows.
-[src: file: backend/src/workflows/shadow.rs:1258#comparisons]
+[src: file: backend/src/workflows/shadow.rs:1337-1339#comparisons]
 `GET /api/workflows/{id}/runs/{run_id}/step-shadows` returns the same data.
 
 - **a header per execution** says what differs from the others (agent, model,
@@ -277,7 +277,7 @@ loads and the one each of its shadows tests.
 
 Either way that shadow stops testing it; the other shadows keep theirs. Promotion
 is a person's decision too: the route has no agent access.
-[src: file: backend/src/workflows/shadow.rs:1092#promote]
+[src: file: backend/src/workflows/shadow.rs:1173#promote]
 [src: file: backend/src/api/workflows.rs:2885#promote_shadow]
 
 ## From the workflow-level shadow
@@ -289,8 +289,8 @@ of a flat shadow is named `shadow`, a lane keeps its id, label, projects,
 sampling, skills, prompt and budget, and an agent set for a named step goes to
 that step. The role (`witness`, `contributor`) is gone. The migration moves only
 the stored shadow: the steps are left as they were.
-[src: file: backend/src/workflows/shadow.rs:1364#legacy_shadow_to_steps]
-[src: file: backend/src/workflows/shadow.rs:1415#migrate_workflow_shadows]
+[src: file: backend/src/workflows/shadow.rs:1442-1445#legacy_shadow_to_steps]
+[src: file: backend/src/workflows/shadow.rs:1493-1496#migrate_workflow_shadows]
 [src: file: backend/src/db/workflows.rs:2985#split_shadows]
 
 Runs the former shadow recorded stay in the run list with a **Shadow** badge.

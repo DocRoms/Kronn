@@ -365,3 +365,45 @@ fn the_bash_timeouts_default_are_bounded_and_clamped_at_spawn() {
         (30 * 60_000, 30 * 60_000)
     );
 }
+
+/// KT-1748 — the managed worktree roots are a validated Settings > Workers list:
+/// empty by default, absolute paths only, never `..` nor the filesystem root.
+#[test]
+fn managed_worktree_roots_are_validated_absolute_paths() {
+    assert!(WorkersConfig::default().managed_worktree_roots.is_empty());
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert!(partial.managed_worktree_roots.is_empty());
+
+    let with = |roots: &[&str]| WorkersConfig {
+        managed_worktree_roots: roots.iter().map(|root| root.to_string()).collect(),
+        ..Default::default()
+    };
+    assert!(with(&["/srv/lanes", "/Users/me/.kronn/autocode-worktrees"])
+        .validate()
+        .is_ok());
+    for bad in ["", "relative/lane", "/srv/../etc", "/", "/srv/\0lane"] {
+        assert!(with(&[bad]).validate().is_err(), "{bad:?} must be refused");
+    }
+    let too_many: Vec<String> = (0..=crate::models::MAX_MANAGED_WORKTREE_ROOTS)
+        .map(|n| format!("/srv/lane-{n}"))
+        .collect();
+    assert!(WorkersConfig {
+        managed_worktree_roots: too_many,
+        ..Default::default()
+    }
+    .validate()
+    .is_err());
+
+    // A hand-edited config.toml never widens the managed set past valid paths.
+    let hand_edited = with(&["/srv/ok", "relative", "/", "/a/../b"]);
+    assert_eq!(
+        crate::models::effective_managed_worktree_roots(&hand_edited.managed_worktree_roots),
+        vec![std::path::PathBuf::from("/srv/ok")]
+    );
+    let round_trip: WorkersConfig =
+        toml::from_str(&toml::to_string(&with(&["/srv/ok"])).unwrap()).unwrap();
+    assert_eq!(
+        round_trip.managed_worktree_roots,
+        vec!["/srv/ok".to_string()]
+    );
+}

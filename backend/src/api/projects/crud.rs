@@ -659,7 +659,7 @@ pub async fn set_default_skills(
 }
 
 /// GET/PUT /api/projects/{id}/workspace. A null body clears the inherited
-/// worktree preparation hooks.
+/// worktree preparation hooks and managed worktree roots.
 pub async fn get_project_workspace(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -701,7 +701,14 @@ pub async fn set_project_workspace(
             }
         }
     }
-    let stored = payload.filter(|workspace| !workspace.hooks.is_empty());
+    if let Some(workspace) = payload.as_ref() {
+        if let Err(reason) =
+            crate::models::validate_managed_worktree_roots(&workspace.managed_worktree_roots)
+        {
+            return Json(ApiResponse::err(reason));
+        }
+    }
+    let stored = payload.filter(|workspace| !workspace.is_empty());
     match state
         .db
         .with_conn(move |conn| {

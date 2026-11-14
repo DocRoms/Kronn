@@ -143,6 +143,12 @@ pub struct WorkersConfig {
     /// which cuts the whole turn whatever a command is allowed.
     #[serde(default = "default_workers_bash_max_timeout_min")]
     pub bash_max_timeout_min: u32,
+    /// KT-1748 — absolute directories whose worktrees Kronn manages, on top of the
+    /// built-in roots (`<repo>/.kronn/worktrees`, `~/.kronn/autocode-worktrees`). A
+    /// branch checked out under one may be an integration target; the owner's own
+    /// checkout never is. A project can name more of its own.
+    #[serde(default)]
+    pub managed_worktree_roots: Vec<String>,
 }
 
 impl Default for WorkersConfig {
@@ -155,8 +161,56 @@ impl Default for WorkersConfig {
             heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
             bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
             bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
+            managed_worktree_roots: Vec::new(),
         }
     }
+}
+
+/// Most managed worktree roots one list (global or per project) may hold.
+pub const MAX_MANAGED_WORKTREE_ROOTS: usize = 32;
+
+/// Refuse a list of managed worktree roots the forms must never persist: each
+/// entry an absolute path with no `..`, and never the filesystem root (which
+/// would make every checkout on the machine Kronn's).
+pub fn validate_managed_worktree_roots(roots: &[String]) -> Result<(), String> {
+    if roots.len() > MAX_MANAGED_WORKTREE_ROOTS {
+        return Err(format!(
+            "managed_worktree_roots holds at most {MAX_MANAGED_WORKTREE_ROOTS} paths"
+        ));
+    }
+    for root in roots {
+        let path = std::path::Path::new(root.trim());
+        if root.trim().is_empty() || root.contains('\0') || !path.is_absolute() {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` is not an absolute path"
+            ));
+        }
+        if path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` must not contain `..`"
+            ));
+        }
+        if path.parent().is_none() {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` is the filesystem root; name the directory \
+                 that holds the worktrees"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The usable roots of a stored list, whatever a hand-edited file holds: only
+/// absolute paths without `..`, and never the filesystem root.
+pub fn effective_managed_worktree_roots(roots: &[String]) -> Vec<std::path::PathBuf> {
+    roots
+        .iter()
+        .filter(|root| validate_managed_worktree_roots(std::slice::from_ref(root)).is_ok())
+        .map(|root| std::path::PathBuf::from(root.trim()))
+        .collect()
 }
 
 fn default_workers_review_rounds() -> u32 {
@@ -211,6 +265,7 @@ impl WorkersConfig {
 
     /// Refuse what the Settings form must never persist.
     pub fn validate(&self) -> Result<(), String> {
+        validate_managed_worktree_roots(&self.managed_worktree_roots)?;
         if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
             return Err(format!(
                 "bash_max_timeout_min must be between 1 and {MAX_BASH_TIMEOUT_MIN_LIMIT}"
@@ -834,7 +889,6 @@ pub struct AgentsConfig {
     /// video mode of ComfyUI) when its provider cannot serve a request. Kept apart
     /// from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[ts(skip)]
     pub connection_fallbacks: Vec<ConnectionFallback>,
 }
 
@@ -1156,6 +1210,22 @@ impl FallbackMode {
             FallbackMode::Video => "video",
         }
     }
+}
+
+/// What a fallback cannot give that the agent it replaces could: a stable code,
+/// so the UI translates the warning instead of showing an English sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackGap {
+    /// No MCP tools.
+    NoMcpTools,
+    /// Cannot write in the worktree.
+    NoWriteAccess,
+    /// Images are not guaranteed.
+    NoImageInput,
+    /// A capped context window.
+    CappedContext,
 }
 
 /// How an agent is reached; shown as a badge on every fallback pill.
