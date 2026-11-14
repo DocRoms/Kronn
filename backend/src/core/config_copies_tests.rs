@@ -717,7 +717,7 @@ fn the_key_is_read_by_toml_from_the_longest_parsing_prefix() {
             Some(k.clone()),
             Fate::Cut,
         ),
-        // The cap (500 lines) ends the read, not the key found before it.
+        // The cap (200 lines) ends the read, not the key found before it.
         (
             format!("encryption_secret = \"{k}\"\n{long_valid}[broken\n"),
             Some(k.clone()),
@@ -1023,6 +1023,57 @@ fn the_key_is_read_by_toml_from_the_longest_parsing_prefix() {
             (Fate::Dropped, Aside::Nothing) => assert!(names(bare.path()).is_empty()),
             (fate, aside) => panic!("{shown:?}: {fate:?} became {aside:?}"),
         }
+    }
+}
+
+/// KT-1528 round 16 — the read of a damaged text stops at the cap (200 lines or
+/// 32 KiB) and fails closed: a key at the last line before it is read, one past it
+/// is not recovered but the copy is kept whole and reported; a shape that is slow to
+/// parse (36-segment dotted keys, nested arrays) fills the cap and returns fast; a
+/// Kronn-shaped config, key near the top, damaged at its end, is far under it.
+#[test]
+fn the_key_read_stops_at_the_cap_and_fails_closed() {
+    let k = crypto::generate_secret();
+    let key = format!("encryption_secret = \"{k}\"\n");
+    // Line 200 (the last line read) holds the key, the damage follows.
+    let at_cap = format!("{}{key}[broken\n", "# filler\n".repeat(199));
+    let read = config::read_key(&at_cap);
+    assert_eq!(read.value.as_deref(), Some(k.as_str()));
+    // Line 201: past the cap, nothing is read, the key stays in the kept copy.
+    let past = format!("{}{key}[broken\n", "# filler\n".repeat(200));
+    let read = config::read_key(&past);
+    assert_eq!(read.value, None);
+    assert!(read.unreadable, "the unread rest spells the key's name");
+    assert_eq!(config::salvage_key_line(&past), None);
+    // The byte cap: one comment line of 32 KiB, then the key.
+    let wide = format!("# {}\n{key}[broken\n", "x".repeat(32 * 1024));
+    let read = config::read_key(&wide);
+    assert_eq!(read.value, None);
+    assert!(read.unreadable);
+    // A Kronn-shaped config: its own fields, the key near the top, a damaged end.
+    let own = format!(
+        "language = \"fr\"\nui_language = \"fr\"\nstt_model = \"x\"\n\
+         disabled_agents = [\n    \"Codex\",\n]\n{key}[server]\nport = 3140\n[tokens]\nanthropic = \"x\"\n[broken\n"
+    );
+    assert_eq!(config::read_key(&own).value.as_deref(), Some(k.as_str()));
+    // Pathological shapes fill the cap and are read in a bounded time.
+    let dotted = |i: usize| format!("{}k{i} = 1\n", "a.".repeat(36));
+    let nested = |i: usize| format!("x{i} = {}1{}\n", "[".repeat(40), "]".repeat(40));
+    let limit = if cfg!(debug_assertions) {
+        20_000
+    } else {
+        3_000
+    };
+    for shape in [&dotted as &dyn Fn(usize) -> String, &nested] {
+        let text = format!("{}[broken\n", (0..300).map(shape).collect::<String>());
+        let started = std::time::Instant::now();
+        let read = config::read_key(&text);
+        assert_eq!(read.value, None);
+        assert!(
+            started.elapsed().as_millis() < limit,
+            "took {:?}",
+            started.elapsed()
+        );
     }
 }
 

@@ -273,7 +273,7 @@ Safe to interrupt at any point; a rerun converges:
    tried and the last one that parses wins, so a multi-line array, string or
    inline table before the key, such as the `disabled_agents = [ … ]` older
    builds wrote, does not hide it; a byte-order mark on line 1 is ignored; the
-   cap is 500 lines and 64 KiB, Kronn's own file being far smaller) and its
+   cap is 200 lines and 32 KiB, Kronn's own file being far smaller) and its
    top-level `encryption_secret` is the key when it is a real key; (3) every
    other case gives no key. No line of a damaged text is read on its own, and no
    region, table header or glued header is guessed at. The key may be spelled `"encryption_secret"`
@@ -293,19 +293,27 @@ Safe to interrupt at any point; a rerun converges:
    `language`, `ui_language`, `stt_model`, `disabled_agents`), so the usual damaged
    file still recovers its key. Two keys, or the same key written twice (a
    duplicate key makes the text invalid TOML), keep the copy whole, reported.
-   A key name that is, or holds, a secret is never printed in a notice, like a
-   vendor-shaped secret: an instance key, a run of 24 or more hex digits or of 32
-   or more base64 characters mixing capitals, lower case and digits, anywhere in
-   the name (`<64 hex>.old`, `key <64 hex>`, `<32 hex>:<32 hex>`), a key written
-   in groups (with the separators removed, any run of 32 hex digits or more: a
-   dashless UUID and a SHA-1 are hidden too, on the safe side; a name that is
-   exactly one canonical dashed UUID, alone or after a `<label>_` that holds no hex
-   run of 8 or more, is an identifier and is shown, while `<uuid>_<uuid>` or
-   `<16 hex>_<uuid>` are hidden), a vendor token or an authorization header
-   (`bearer …`) used as a name, including one that follows a label
-   (`old_sk-…`, `my_AKIA…`, `bot_xoxb-…`, `hdr: bearer …`). It is also a credential on
-   the save path: its entry is sheltered and not written back to `config.toml`,
-   so the name does not stay in clear there.
+   A key name that is a secret is never printed in a notice, like a vendor-shaped
+   secret, and is a credential on the save path (its entry is sheltered and not
+   written back to `config.toml`, so the name does not stay in clear there). ONE
+   rule decides it (`config_salvage::secret_name`), one linear pass per clause on a
+   name of 256 characters at most: (a) a longer name is masked without any pattern
+   running on it; (b) with every non-alphanumeric character removed, a run of 32
+   hex digits or more (an instance key whole or in groups, `<uuid>_<uuid>`;
+   a dashless UUID and a SHA-1 are hidden too, on the safe side), except a name
+   that is exactly one canonical dashed UUID (8-4-4-4-12, any case), alone or
+   after a `<label>_` or `<label>-` whose hex digits add up to fewer than 8 in
+   total: that is an identifier and is shown; (c) a vendor token shape anywhere in
+   the name with no word-boundary anchor (`old_sk-…`, `myAKIA…`, `AKIA…_old`,
+   `botxoxb-…`, `sk_live_…_old`), taken from the vendor patterns of
+   `redact::RAW_PATTERNS` (`redact::name_embeds_vendor_token`); (d) `bearer` or
+   `basic` in any case followed by white space (any Unicode white space), `:` or
+   `=` and 12 token characters or more, anywhere (`bearer token` and `basic auth`
+   are words and are shown); (e) an instance key as the whole name or any piece of
+   it, a run of 24 hex digits or a base64 run of 32 characters mixing capitals,
+   lower case and digits. The price of the unanchored shapes: a kebab-case name
+   holding `sk-` followed by 20 name characters (`task-queue-max-concurrency`) is
+   masked and sheltered too, on the safe side; Kronn's own settings are snake_case.
    A symbolic link or Windows reparse point is reported too, as is a file that is
    not a regular file (a FIFO would block the pass) or a file with several hard
    links, which the pass never reads through, renames over or removes. An

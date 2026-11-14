@@ -1239,12 +1239,17 @@ pub(crate) struct KeyRead {
 const KEY_NAME: &str = "encryption_secret";
 
 /// The most a damaged text is read for its key: lines, and bytes. Kronn's own
-/// config is far smaller and writes the key near its top; every damaged file
-/// reaches the cap, and each line re-parses the growing prefix, so it is kept low
-/// (a few tens of milliseconds at the cap in release). Past the cap nothing is
-/// read: the text after it is the rest.
-const PREFIX_MAX_LINES: usize = 500;
-const PREFIX_MAX_BYTES: usize = 64 * 1024;
+/// config is far smaller (a few dozen lines) and writes the key near its top, so a
+/// damaged file of its own still recovers within the cap. Every damaged file
+/// reaches the cap and each line re-parses the growing prefix, so the cost is
+/// quadratic in the cap and the shape of the text decides it: a few tens of
+/// milliseconds for ordinary lines, but about a second in release for 500 lines of
+/// pathological shapes (36-segment dotted keys, deeply nested arrays), hence these
+/// low caps. Past the cap nothing is read: the text after it is the rest, so a key
+/// there is not recovered, it stays in the copy that is kept, reported (fail
+/// closed).
+const PREFIX_MAX_LINES: usize = 200;
+const PREFIX_MAX_BYTES: usize = 32 * 1024;
 
 /// The top-level `encryption_secret` of `content`, decided by toml itself:
 /// 1. a text that parses: its top-level string value (a number, an array or a

@@ -23,6 +23,17 @@ fn main() -> anyhow::Result<()> {
             println!("{}", kronn::core::cli_args::HELP);
             return Ok(());
         }
+        kronn::core::cli_args::CliAction::CleanGitConfig => {
+            let file = kronn::core::git_global_config::global_config_path()
+                .ok_or_else(|| anyhow::anyhow!("cannot locate the global git config"))?;
+            kronn::core::git_global_config::cleanup_interactive(
+                &file,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            return Ok(());
+        }
         kronn::core::cli_args::CliAction::Refuse(reason) => anyhow::bail!(reason),
     }
     // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then

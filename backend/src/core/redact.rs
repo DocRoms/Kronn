@@ -451,6 +451,48 @@ pub fn looks_like_secret(input: &str) -> bool {
             .any(|pat| pat.gate.admits(input) && pat.re.is_match(input))
 }
 
+/// The vendor token shapes of [`RAW_PATTERNS`] (everything after its four
+/// catch-all-line patterns) as they are looked for in a KEY NAME (KT-1528): no
+/// `\b` on either side (a label glued to a token, `old_sk-…`, `myAKIA…`,
+/// `AKIA…_old`, hides it from an anchored pattern: `_` is a word character), the
+/// vendors' own case, and the shorter minimum lengths a name is judged by. A name
+/// is a few words, so a token shape inside it is a secret pasted as a key. A test
+/// (`name_token_shapes_cover_every_vendor_pattern`) keeps this list in step with
+/// [`RAW_PATTERNS`].
+const NAME_TOKEN_SHAPES: &[&str] = &[
+    r"sk-[A-Za-z0-9_-]{20,}",
+    r"p8e-[A-Za-z0-9_-]{10,}",
+    r"AIza[0-9A-Za-z_-]{30,}",
+    r"gh[opsur]_[A-Za-z0-9_]{20,}",
+    r"github_pat_[A-Za-z0-9_]{20,}",
+    r"ya29\.[A-Za-z0-9_-]{20,}",
+    r"1//0[A-Za-z0-9_-]{40,}",
+    r"xox[abprs]-[A-Za-z0-9-]{10,}",
+    r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+    r"AKIA[0-9A-Z]{16}",
+    r"ASIA[0-9A-Z]{16}",
+    r"(?:rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}",
+    r"sk_(?:live|test)_[A-Za-z0-9]{10,}",
+    r"glpat-[A-Za-z0-9_-]{20,}",
+    r"npm_[A-Za-z0-9]{20,}",
+    r"hf_[A-Za-z0-9]{20,}",
+    r"kbt_[A-Za-z0-9]{10,}",
+];
+
+static NAME_TOKEN_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    NAME_TOKEN_SHAPES
+        .iter()
+        .filter_map(|s| Regex::new(s).ok())
+        .collect()
+});
+
+/// Whether a vendor token shape ([`NAME_TOKEN_SHAPES`]) appears anywhere in
+/// `name`. The caller bounds the length of `name` (a key name past a few hundred
+/// characters is masked before any pattern runs, see `config_salvage`).
+pub fn name_embeds_vendor_token(name: &str) -> bool {
+    NAME_TOKEN_REGEXES.iter().any(|re| re.is_match(name))
+}
+
 // ── Secret-ASSIGNMENT patterns for audit artifacts (0.9.0 blocker) ─────
 //
 // `redact_secrets` above only catches vendor-prefixed (`sk-`, `AIza`…) or
@@ -2621,6 +2663,63 @@ mod tests {
         assert!(!looks_like_secret("use the bearer-token-name convention"));
         assert!(!looks_like_secret("AIza prefix without a real key"));
         assert!(!looks_like_secret(""));
+    }
+
+    /// KT-1528 — `NAME_TOKEN_SHAPES` is the vendor part of `RAW_PATTERNS` seen
+    /// without anchors: one shape per vendor pattern (the count is pinned, so a new
+    /// vendor pattern fails here until a shape is added), and a sample of each is
+    /// found inside a longer name, before and after a label.
+    #[test]
+    fn name_token_shapes_cover_every_vendor_pattern() {
+        // The four catch-all-line patterns come first in RAW_PATTERNS.
+        assert_eq!(
+            RAW_PATTERNS.len() - 4,
+            NAME_TOKEN_SHAPES.len(),
+            "a vendor pattern of RAW_PATTERNS has no shape for key names"
+        );
+        assert_eq!(NAME_TOKEN_REGEXES.len(), NAME_TOKEN_SHAPES.len());
+        let samples = [
+            "sk-clear-abcdefghijklmnopqrstuvwxyz0123456789",
+            "p8e-abcdefghijklmnop",
+            "AIzaSyA1234567890abcdefghijklmnopqrstuvw",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "github_pat_11ABCDEFG0abcdefghijklmnopqr_abcdefghijklmnopqrstuvwxyz0123456789",
+            "ya29.a0AfH6SMBabcdefghijklmnopqrstuvwxyz",
+            "1//0abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP",
+            "xoxb-123456789012-123456789012",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ASIAIOSFODNN7EXAMPLE",
+            "rk_live_abcdefghij1234567890",
+            "sk_live_abcdefghij1234567890",
+            "glpat-abcdefghijklmnopqrstuvwxyz",
+            "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+            "hf_abcdefghijklmnopqrstuvwxyz0123456789",
+            "kbt_abcdefghijklmnopqrstuvwx",
+        ];
+        assert_eq!(samples.len(), NAME_TOKEN_SHAPES.len());
+        for sample in samples {
+            assert!(looks_like_secret(sample), "{sample}");
+            for name in [
+                sample.to_string(),
+                format!("old_{sample}"),
+                format!("old{sample}"),
+                format!("{sample}_old"),
+                format!("my_{sample}_old"),
+            ] {
+                assert!(name_embeds_vendor_token(&name), "{name}");
+            }
+        }
+        for plain in [
+            "port",
+            "max_tokens",
+            "model_id",
+            "skip_tls",
+            "sk_rate",
+            "task_basic_info",
+        ] {
+            assert!(!name_embeds_vendor_token(plain), "{plain}");
+        }
     }
 
     // ── Gates: the fast path may never change what gets redacted ───────

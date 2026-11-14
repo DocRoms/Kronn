@@ -771,16 +771,8 @@ impl Workspace {
 
         // Mark the repo as a safe directory (needed in Docker where the mounted
         // volume owner differs from the container user) before fetching in it.
-        let _ = crate::core::cmd::async_git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &repo_path.to_string_lossy(),
-            ])
-            .output()
-            .await;
+        // Docker only, and never twice: a native run must not grow ~/.gitconfig.
+        crate::core::git_global_config::ensure_safe_directory_async(repo_path.to_path_buf()).await;
 
         // Resolved before anything is written, so a refused base leaves no trace.
         let start_point = match base_ref {
@@ -802,16 +794,7 @@ impl Workspace {
         }
         let worktree_path = worktree_base.join(build_worktree_dir_name(workflow_name, run_id));
 
-        let _ = crate::core::cmd::async_git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &worktree_path.to_string_lossy(),
-            ])
-            .output()
-            .await;
+        crate::core::git_global_config::ensure_safe_directory_async(worktree_path.clone()).await;
 
         // Create the worktree with a new branch. A SHA start point sets up no
         // tracking, so `@{u}` keeps meaning "the agent pushed".
