@@ -527,6 +527,11 @@ pub fn remove_ownerless_worktree(
             worktree_path.display()
         ));
     }
+    // Git refuses to remove a checkout holding an untracked file that is not
+    // ignored: a stale one's `.DS_Store` must not be that file.
+    if let Err(error) = ensure_os_junk_excluded(repo_path) {
+        tracing::warn!(path = %repo_path.display(), "cannot exclude OS junk files: {error}");
+    }
     let dirty = worktree_dirty_files(worktree_path)?;
     if !dirty.is_empty() {
         return Err(format!(
@@ -1514,6 +1519,72 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
     Ok(())
 }
 
+/// Files an operating system or a file manager drops in any folder it opens:
+/// never work, never worth blocking a delivery or a cleanup (KT-1750).
+pub const OS_JUNK_PATTERNS: [&str; 4] = [".DS_Store", "Thumbs.db", "desktop.ini", "._*"];
+
+/// Replaces [`OS_JUNK_PATTERNS`] for the whole instance: comma-separated
+/// patterns, an empty value meaning none.
+pub const OS_JUNK_ENV: &str = "KRONN_OS_JUNK_PATTERNS";
+
+/// The OS-junk patterns in force: the environment's, else the defaults.
+pub fn os_junk_patterns() -> Vec<String> {
+    os_junk_patterns_from(std::env::var(OS_JUNK_ENV).ok().as_deref())
+}
+
+fn os_junk_patterns_from(configured: Option<&str>) -> Vec<String> {
+    match configured {
+        Some(list) => list
+            .split(',')
+            .map(str::trim)
+            .filter(|pattern| !pattern.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => OS_JUNK_PATTERNS.iter().map(|p| p.to_string()).collect(),
+    }
+}
+
+/// Whether the last component of `path` is one of `patterns` (`*` stands for any
+/// run of characters).
+fn is_os_junk(path: &str, patterns: &[String]) -> bool {
+    let name = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
+    patterns.iter().any(|pattern| glob_matches(pattern, name))
+}
+
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == name,
+        Some((head, tail)) => {
+            name.len() >= head.len() + tail.len()
+                && name.starts_with(head)
+                && name[head.len()..].ends_with(tail)
+        }
+    }
+}
+
+/// Keep OS junk out of `git status` for the repository and every worktree of it
+/// (the local exclude is shared), without touching a tracked `.gitignore`.
+pub(crate) fn ensure_os_junk_excluded(repo_path: &Path) -> Result<(), String> {
+    for pattern in os_junk_patterns() {
+        ensure_local_git_exclude(repo_path, &pattern)?;
+    }
+    Ok(())
+}
+
+/// What every Kronn checkout needs ignored: its own `.kronn/` directory (an
+/// error when that fails) and OS junk (only logged: it never blocks a launch).
+pub(crate) fn ensure_managed_excludes(repo_path: &Path) -> Result<(), String> {
+    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    if let Err(error) = ensure_os_junk_excluded(repo_path) {
+        tracing::warn!(path = %repo_path.display(), "cannot exclude OS junk files: {error}");
+    }
+    Ok(())
+}
+
 /// Maximum length of a single slug component (project / discussion).
 ///
 /// Windows MAX_PATH is 260 characters by default. A worktree path looks like:
@@ -1630,7 +1701,7 @@ pub fn create_discussion_worktree(
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
     // Ensure .kronn/worktrees/ is gitignored
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
     // Mark repo as safe directory (needed in Docker where mount owner differs)
     crate::core::git_global_config::ensure_safe_directory(repo_path);
@@ -1722,7 +1793,7 @@ pub fn create_review_worktree(
 
     std::fs::create_dir_all(worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
     crate::core::git_global_config::ensure_safe_directory(repo_path);
     crate::core::git_global_config::ensure_safe_directory(&worktree_path);
@@ -2025,7 +2096,7 @@ pub fn reattach_worktree(
     crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
     crate::core::git_global_config::ensure_safe_directory(repo_path);
     crate::core::git_global_config::ensure_safe_directory(&worktree_path);
@@ -2535,9 +2606,17 @@ pub fn build_candidate_detailed(
         abort_merge(worktree_path);
         return Ok(bounce);
     }
-    // Repositories that enforce DCO reject an unsigned merge commit.
+    // Signed only where the project signs off (a DCO repository rejects an
+    // unsigned merge commit; any other does not want the trailer), as the
+    // project's commit identity (KT-1750).
+    let policy = crate::core::commit_policy::CommitPolicy::for_repo(worktree_path);
     let mut commit = crate::core::cmd::git_cmd();
-    commit.args(["commit", "--signoff", "--cleanup=strip"]);
+    commit.arg("commit");
+    if policy.signoff {
+        commit.arg("--signoff");
+    }
+    commit.arg("--cleanup=strip");
+    policy.apply_identity(&mut commit, false);
     match docs.as_ref().and_then(|docs| docs.summary()) {
         Some(note) => commit.args(["-m", &merge_subject(worktree_path, base_sha), "-m", &note]),
         None => commit.arg("--no-edit"),
@@ -2630,10 +2709,15 @@ fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateB
     }
     let settled = docs.as_ref().and_then(|docs| docs.settlement());
     if let Some(note) = docs.as_ref().and_then(|docs| docs.summary()) {
-        let committed = crate::core::cmd::git_cmd()
+        let policy = crate::core::commit_policy::CommitPolicy::for_repo(worktree_path);
+        let mut commit = crate::core::cmd::git_cmd();
+        commit.arg("commit");
+        if policy.signoff {
+            commit.arg("--signoff");
+        }
+        policy.apply_identity(&mut commit, false);
+        let committed = commit
             .args([
-                "commit",
-                "--signoff",
                 "--cleanup=strip",
                 "-m",
                 "Re-anchor doc citations moved by the branch's code",
@@ -3370,7 +3454,7 @@ pub fn create_task_worktree(
 
     crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))?;
     assert_managed_task_worktree_path(repo_path, &worktree_path)?;
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
     crate::core::git_global_config::ensure_safe_directory(repo_path);
     crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
@@ -4106,7 +4190,43 @@ pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, Stri
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(parse_porcelain(&String::from_utf8_lossy(&output.stdout)))
+    // An untracked `.DS_Store` is the file manager's, not work: a checkout made
+    // before the local exclude carried it must not stay "dirty" for it (KT-1750).
+    let junk = os_junk_patterns();
+    Ok(parse_porcelain(&String::from_utf8_lossy(&output.stdout))
+        .into_iter()
+        .filter(|file| {
+            !(file.status == "??"
+                && (is_os_junk(&file.path, &junk)
+                    || (file.path.ends_with('/')
+                        && holds_only_os_junk(&worktree_path.join(&file.path), &junk))))
+        })
+        .collect())
+}
+
+/// An untracked directory is listed by git as one entry (`?? sub/`): it is junk
+/// when nothing in it, at any depth, is anything else.
+fn holds_only_os_junk(dir: &Path, patterns: &[String]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        let junk = if is_dir {
+            // A nested repository is somebody's work, whatever is inside.
+            !entry.path().join(".git").exists() && holds_only_os_junk(&entry.path(), patterns)
+        } else {
+            is_os_junk(&name, patterns)
+        };
+        if !junk {
+            return false;
+        }
+    }
+    true
 }
 
 /// Return the exact committed file changes between two revisions.
@@ -5532,6 +5652,113 @@ mod tests {
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"README.md"));
         assert!(paths.contains(&"new.txt"));
+    }
+
+    // ── KT-1750 — OS junk never makes a checkout "dirty" ─────────────────────
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn os_junk_is_not_work_but_real_files_still_are() {
+        let repo = make_test_repo("dirty-junk");
+        fs::create_dir_all(repo.path().join("sub")).unwrap();
+        for junk in [
+            ".DS_Store",
+            "Thumbs.db",
+            "desktop.ini",
+            "._resource",
+            "sub/.DS_Store",
+        ] {
+            fs::write(repo.path().join(junk), "x").unwrap();
+        }
+        assert!(worktree_dirty_files(repo.path()).unwrap().is_empty());
+
+        fs::write(repo.path().join("sub/real.txt"), "work").unwrap();
+        fs::write(repo.path().join("DS_Store.txt"), "work").unwrap();
+        let paths: Vec<String> = worktree_dirty_files(repo.path())
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        // git lists an untracked directory as one entry.
+        assert_eq!(paths, ["DS_Store.txt", "sub/"]);
+    }
+
+    #[test]
+    fn a_tracked_os_junk_file_that_changed_is_still_work() {
+        let repo = make_test_repo("dirty-tracked-junk");
+        fs::write(repo.path().join(".DS_Store"), "v1").unwrap();
+        git(repo.path(), &["add", "-f", ".DS_Store"]);
+        git(repo.path(), &["commit", "-q", "-m", "track it"]);
+        fs::write(repo.path().join(".DS_Store"), "v2").unwrap();
+        let files = worktree_dirty_files(repo.path()).unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, ".DS_Store");
+    }
+
+    #[test]
+    fn the_os_junk_patterns_follow_the_global_setting() {
+        assert_eq!(
+            os_junk_patterns_from(None),
+            [".DS_Store", "Thumbs.db", "desktop.ini", "._*"]
+        );
+        assert_eq!(
+            os_junk_patterns_from(Some(" .DS_Store , *.swp,,")),
+            [".DS_Store", "*.swp"]
+        );
+        assert!(os_junk_patterns_from(Some("")).is_empty());
+        let patterns = os_junk_patterns_from(Some("*.swp,._*"));
+        assert!(is_os_junk("a/b/file.swp", &patterns));
+        assert!(is_os_junk("._x", &patterns));
+        assert!(!is_os_junk(".DS_Store", &patterns));
+        assert!(!is_os_junk("swp", &patterns));
+    }
+
+    #[test]
+    fn a_task_worktree_ignores_os_junk_from_its_creation() {
+        let repo = make_test_repo("junk-exclude");
+        let info =
+            create_task_worktree(repo.path(), "KT-1750", "junk", &head_sha(repo.path())).unwrap();
+        let worktree = Path::new(&info.path);
+        for junk in [".DS_Store", "Thumbs.db", "desktop.ini", "._x"] {
+            fs::write(worktree.join(junk), "x").unwrap();
+            let ignored = crate::core::cmd::git_cmd()
+                .args(["check-ignore", "-q", junk])
+                .current_dir(worktree)
+                .status()
+                .unwrap();
+            assert!(ignored.success(), "{junk} must be ignored");
+        }
+        let status = crate::core::cmd::git_cmd()
+            .args(["status", "--porcelain=v1"])
+            .current_dir(worktree)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
+        // No tracked file was touched to get there.
+        assert!(!repo.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn a_checkout_holding_only_a_ds_store_can_be_removed() {
+        let repo = make_test_repo("junk-remove");
+        let info =
+            create_task_worktree(repo.path(), "KT-1750", "stale", &head_sha(repo.path())).unwrap();
+        let worktree = PathBuf::from(&info.path);
+        // A checkout from before the exclude existed: the junk is not ignored.
+        let exclude = repo.path().join(".git/info/exclude");
+        fs::write(&exclude, "").unwrap();
+        fs::write(worktree.join(".DS_Store"), "x").unwrap();
+        remove_ownerless_worktree(repo.path(), &worktree)
+            .expect("a stale .DS_Store does not keep the checkout alive");
+        assert!(!worktree.exists());
     }
 
     #[test]
