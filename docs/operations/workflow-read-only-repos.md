@@ -51,7 +51,7 @@ container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4756-4761#read_only_repos]
 [src: file: backend/src/agents/runner.rs:4792-4794#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:1001-1010#apply]
-[src: file: backend/src/agents/runner.rs:14912-14917#sandbox_required]
+[src: file: backend/src/agents/runner.rs:14892-14897#sandbox_required]
 [src: file: backend/src/agents/runner.rs:15136-15147#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 

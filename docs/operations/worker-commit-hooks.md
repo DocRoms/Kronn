@@ -76,8 +76,34 @@ when a plain git spawn (`git_cmd()`, `async_git_cmd()`, `project_git_cmd()`,
 `Command::new("git")`) appears that is neither marked `lane-git-allow: <why>` nor
 within the per-file ceiling of `PLAIN_GIT_ALLOWED`, which only lists files whose
 commands run in the registered project checkout, the owner's checkout or a
-repository Kronn creates. The ceiling counts lines of test modules the scanner
-does not recognise as such, so it is an upper bound.
+repository Kronn creates. The ceiling is a ratchet: a file whose count goes down
+(a command moved to the lane builder) must lower its entry, so a later plain
+command cannot hide in the slack.
+
+Also pinned, because a worker's worktree can be their argument:
+
+- a directory *inside* a managed worktree (`<wt>/pkg/deep`) resolves to the
+  worktree's pin, so a subdirectory is never a way back to git's discovery;
+- the read helpers of the Git panel and the discussion routes (`run_git_status`,
+  `run_git_diff`, `run_git_blame`, `run_git_commit_patch`, the commit and range
+  pages, `disc_pr_template`, `disc_workspace`'s `git_value`) use
+  `lane_git::git_or_refuse` / `git_keeping_owner_hooks`: in a managed worktree they
+  are pinned and hook-less, in the owner's checkout they are plain git. When the
+  worktree is refused (tampered pointer, nested repository), `git_or_refuse`
+  returns a command aimed at a git directory that does not exist, so a helper
+  that cannot carry an error answers "nothing" and runs nothing;
+- `fast_forward_to` and the checks of `integration_target_worktree`: when the
+  integration target is itself checked out in a Kronn-managed worktree, the
+  fast-forward is the pinned, hook-less command; in the owner's checkout their
+  hooks (`post-merge`) keep running;
+- `ensure_local_git_exclude` (lane seeds, the lane's Cargo target) resolves the
+  exclude file through the pinned command, refuses a symlinked `info` directory,
+  and, for a managed worktree, refuses one that leaves the registered git
+  directory.
+
+The unconfined `main_checkout` mode of the setting no longer exists (see below),
+so no hook of the owner's runs as the host user with a worker's tree as its
+working directory.
 
 ## Submodules and nested repositories
 
