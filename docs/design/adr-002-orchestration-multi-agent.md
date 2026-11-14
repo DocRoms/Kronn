@@ -311,11 +311,11 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
   while the human has uncommitted edits in the main checkout.
 - **Base SHA** — the target rev resolved server-side at provisioning to a **committed** SHA
   (`resolve_commit`, default the parent workspace's target branch tip,
-  `[src: file: backend/src/core/worktree.rs:2287-2308#resolve_commit]`) and **pinned** into `task_executions.base_sha`. The child is
+  `[src: file: backend/src/core/worktree.rs:2248-2269#resolve_commit]`) and **pinned** into `task_executions.base_sha`. The child is
   created from this exact SHA, not from a moving branch tip — and never from a dirty working tree,
   which is precisely why parent cleanliness is an apply-time concern, not a provisioning one. HEAD of
   the fresh child is verified to equal `base_sha` after creation
-  (`verify_worktree_head`, `[src: file: backend/src/core/worktree.rs:3035-3048#verify_worktree_head]`).
+  (`verify_worktree_head`, `[src: file: backend/src/core/worktree.rs:2994-3007#verify_worktree_head]`).
 - **Child branch + worktree** — a managed worktree under `.kronn/worktrees/`, created with
   `git worktree add -b kronn/task/<KT-ref>-<exec-short> <path> <base_sha>` (the SHA-arg variant the
   managed creator must gain, §0-Adapt). The branch carries a short **execution** id, not a review
@@ -345,9 +345,9 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
   3. **Apply phase — guarded fast-forward.** No advisory history lease is taken (the original design
      planned one). The mandatory backup ref is written earlier: `write_backup_ref` writes and reads back
      `refs/kronn-backup/<task-id>-<exec-short>` at `candidate_target_sha` before the candidate is built
-     `[src: file: backend/src/core/worktree.rs:2423-2451#write_backup_ref]`. `fast_forward_target_to`
+     `[src: file: backend/src/core/worktree.rs:2382-2410#write_backup_ref]`. `fast_forward_target_to`
      verifies that the parent tip is **still exactly `candidate_target_sha`** (a compare-and-swap) and
-     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:2994-3014#fast_forward_target_to]`
+     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:2953-2973#fast_forward_target_to]`
      (a target no worktree has checked out has no tree to keep clean: it advances by a `git update-ref`
      compare-and-swap `[src: file: backend/src/core/worktree.rs:2939-2991#update_ref_target_to]`).
   4. Advance the parent to `candidate_merge_sha` **fast-forward only** — a deterministic, short,
@@ -357,7 +357,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      rebuilt on the new tip (→ `Integrating`), never forced through.
 - **Cleanup** — on `Done`, the child worktree is torn down
   (`remove_integrated_task_worktree`, which ends in `remove_discussion_worktree`,
-  `[src: file: backend/src/core/worktree.rs:3960-4028#remove_integrated_task_worktree]`) and the sub-discussion
+  `[src: file: backend/src/core/worktree.rs:3901-3969#remove_integrated_task_worktree]`) and the sub-discussion
   archived. On `Cancelled`/`Failed`, the child branch is preserved for inspection and the worktree
   removed only if clean.
 
