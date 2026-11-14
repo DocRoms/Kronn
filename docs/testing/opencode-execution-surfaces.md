@@ -18,7 +18,7 @@ its create request has no agent field. [src: file: frontend/src/components/workf
 `{ variables }` to `quickApis.runQa`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1792-1802#handleLaunchQA] [src: file: frontend/src/types/generated.ts:9718-9729#RunQuickApiRequest]
 The Quick Exec form instead persists a command, arguments, timeout, output
 format, and variables; its create request likewise has no agent field. [src: file: frontend/src/components/workflows/QuickExecForm.tsx:46-66] [src: file: frontend/src/types/generated.ts:2907-2911#CreateQuickExecRequest] Its direct-run handler sends only
-`{ variables }` to `quickExecs.run`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1771-1776#handleRunQE] [src: file: frontend/src/types/generated.ts:9745#RunQuickExecRequest]
+`{ variables }` to `quickExecs.run`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1771-1776#handleRunQE] [src: file: frontend/src/types/generated.ts:9750#RunQuickExecRequest]
 Therefore this task makes no QA/QE OpenCode-selection assertion; that absence
 comes from their UI/request/executor contracts, rather than from the `AgentType`
 enum.

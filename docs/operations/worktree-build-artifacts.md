@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:6849-6906#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:6908-7004#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:6739-6756#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:7051-7117#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:6918-6975#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:6977-7073#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:6808-6825#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:7202-7268#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -477,7 +477,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_lane_warm.rs:925-932#first_build_args]
 [src: file: backend/src/core/task_worker_lane_warm.rs:936-940#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:10837-10868#warm_failure_notice]
+[src: file: backend/src/api/orchestration.rs:10913-10944#warm_failure_notice]
 
 ## Long builds in a task worker (KT-1718)
 
@@ -546,14 +546,14 @@ worker's own environment predates the setting), and on a warmed lane a filtered
 load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
-[src: file: backend/src/models/setup.rs:204-211#effective_bash_timeouts_ms]
+[src: file: backend/src/models/setup.rs:255-262#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:859-869#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15176-15178#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:684-685#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]
 [src: file: backend/src/core/task_worker_lane_warm.rs:872]
-[src: file: frontend/src/components/settings/WorkersSection.tsx:39#WorkersSection]
+[src: file: frontend/src/components/settings/WorkersSection.tsx:44#WorkersSection]
 
 ## Maintenance command
 

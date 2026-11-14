@@ -54,7 +54,7 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:1038-1084#ModelTier]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:1320-1366#ModelTier]
 [src: file: backend/src/agents/runner.rs:3707-3741#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
@@ -70,7 +70,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:1424-1499#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:1478-1553#AgentDetection]
 
 ## Policy and precedence
 
@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:339-361#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:4860-4869#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:4865-4874#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -233,7 +233,7 @@ project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
 is pulled. [src: file: backend/src/api/agent_tools.rs:205-226#workflow_arc]
-[src: file: backend/src/workflows/runner.rs:2755-2761#workflow_room_arc]
+[src: file: backend/src/workflows/runner.rs:2759-2765#workflow_room_arc]
 [src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
 No-capability declaration should mean “unknown/ineligible”, not “probably
@@ -255,7 +255,7 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
 | Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1840-2081#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3938-4018#execute_step] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1840-2081#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:3943-4023#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 

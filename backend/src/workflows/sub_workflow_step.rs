@@ -250,6 +250,13 @@ fn insert_snapshot_marker(
 /// Run a sub-workflow as a child run. `current_depth` is the depth of the
 /// PARENT run (0 for a top-level run); the child is created at
 /// `current_depth + 1`. `parent_run_id` links the child for drill-down.
+///
+/// KT-1755 — this function is on the recursion path (the child's own
+/// SubWorkflow step comes back here), so it stays small: everything that runs
+/// before and after the child lives in `prepare_child` and `finish_child`,
+/// whose frames are gone by the time the child runs. In a debug build every
+/// local of a big body keeps its own stack slot, so inlining them here would
+/// charge each nesting level for the whole function.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_sub_workflow_step(
     state: &crate::AppState,
@@ -270,8 +277,78 @@ pub async fn execute_sub_workflow_step(
     launch: ChildLaunch<'_>,
 ) -> StepOutcome {
     let start = Instant::now();
+    let ChildToRun {
+        child_wf,
+        mut child_run,
+        child_workspace,
+    } = match Box::pin(prepare_child(
+        state,
+        parent_run_id,
+        current_depth,
+        step,
+        tokens_config,
+        agents_config,
+        budget.clone(),
+        parent_workspace,
+        launch,
+        start,
+    ))
+    .await
+    {
+        Ok(ready) => *ready,
+        Err(outcome) => return outcome,
+    };
+
+    // Re-enter the runner on the child. `Box::pin` breaks the otherwise-
+    // infinite async recursion type (execute_run → dispatch → here → execute_run).
+    let exec_res = Box::pin(crate::workflows::runner::execute_run(
+        state.clone(),
+        &child_wf,
+        &mut child_run,
+        tokens_config,
+        agents_config,
+        None,            // no live SSE for the child in Phase 1; the tree endpoint reads DB
+        Some(budget),    // SHARED budget — child counts against the tree-wide quota
+        child_workspace, // Phase 2 — share the parent's worktree when present
+    ))
+    .await;
+    if let Err(e) = exec_res {
+        // execute_run returns Err only on infra failure; the child status may
+        // still be set. Log and fall through to the status mapping.
+        tracing::warn!(
+            target: "kronn::sub_workflow",
+            child_run = %child_run.id, "sub-workflow run errored: {}", e
+        );
+    }
+    finish_child(step, start, &child_wf, &child_run)
+}
+
+/// What `prepare_child` hands the runner: the child workflow, its run row
+/// (already inserted or claimed) and the worktree it shares, if any.
+struct ChildToRun {
+    child_wf: Workflow,
+    child_run: WorkflowRun,
+    child_workspace: Option<String>,
+}
+
+/// Everything a sub-workflow step does before its child runs. `Err` is the
+/// step's final outcome: a refusal, or the whole foreach fan-out. It is
+/// returned once per step, not built in a loop: boxing it would only add noise.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+async fn prepare_child(
+    state: &crate::AppState,
+    parent_run_id: &str,
+    current_depth: usize,
+    step: &WorkflowStep,
+    tokens_config: &TokensConfig,
+    agents_config: &AgentsConfig,
+    budget: super::runner::SharedBudget,
+    parent_workspace: Option<String>,
+    launch: ChildLaunch<'_>,
+    start: Instant,
+) -> Result<Box<ChildToRun>, StepOutcome> {
     if let Some(error) = secret_mapping_error(step, launch.parent_variables) {
-        return fail(step, start, error);
+        return Err(fail(step, start, error));
     }
 
     let target = match step
@@ -282,11 +359,11 @@ pub async fn execute_sub_workflow_step(
     {
         Some(t) => t.to_string(),
         None => {
-            return fail(
+            return Err(fail(
                 step,
                 start,
                 "SubWorkflow step missing `sub_workflow_id`.".into(),
-            )
+            ))
         }
     };
 
@@ -294,9 +371,9 @@ pub async fn execute_sub_workflow_step(
     // hand-edited JSON or a workflow edited after a reference was created).
     let child_depth = current_depth + 1;
     if child_depth_exceeds(current_depth) {
-        return fail(step, start, format!(
+        return Err(fail(step, start, format!(
             "Sub-workflow depth limit ({MAX_SUBWORKFLOW_DEPTH}) exceeded at `{target}` — refusing to recurse further."
-        ));
+        )));
     }
 
     // 2026-06-12 Phase 3b (MVP) — per-item fan-out. When the step declares
@@ -311,7 +388,7 @@ pub async fn execute_sub_workflow_step(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        return execute_foreach(
+        return Err(execute_foreach(
             state,
             parent_run_id,
             child_depth,
@@ -325,7 +402,7 @@ pub async fn execute_sub_workflow_step(
             start,
             launch,
         )
-        .await;
+        .await);
     }
 
     // Load the child workflow definition.
@@ -342,7 +419,7 @@ pub async fn execute_sub_workflow_step(
         // A child disabled when its parent pinned it, or switched off by a
         // human since, is not run under the parent's activation (KT-1037).
         Ok(Ok(Some(w))) if !w.enabled => {
-            return fail(
+            return Err(fail(
                 step,
                 start,
                 format!(
@@ -350,32 +427,32 @@ pub async fn execute_sub_workflow_step(
                      before its parent can run it.",
                     w.name
                 ),
-            )
+            ))
         }
-        Ok(Err(reason)) => return fail(step, start, reason),
+        Ok(Err(reason)) => return Err(fail(step, start, reason)),
         Ok(Ok(Some(w))) => w,
         Ok(Ok(None)) => {
-            return fail(
+            return Err(fail(
                 step,
                 start,
                 format!("Sub-workflow `{target}` not found (deleted? wrong id?)."),
-            )
+            ))
         }
         Err(e) => {
-            return fail(
+            return Err(fail(
                 step,
                 start,
                 format!("DB error loading sub-workflow `{target}`: {e}"),
-            )
+            ))
         }
     };
 
     if let Some(error) = undeclared_mapping_error(step, &child_wf) {
-        return fail(step, start, error);
+        return Err(fail(step, start, error));
     }
     let supplied = match render_child_variables(step, launch.ctx) {
         Ok(values) => values,
-        Err(error) => return fail(step, start, error),
+        Err(error) => return Err(fail(step, start, error)),
     };
 
     // The child this step left waiting for its provider quota, if the parent
@@ -430,11 +507,11 @@ pub async fn execute_sub_workflow_step(
             RunStatus::WaitingQuota | RunStatus::Interrupted
         )
     }) {
-        return fail(
+        return Err(fail(
             step,
             start,
             ended_while_waiting(&child_wf.name, &child.status),
-        );
+        ));
     }
     let waiting_child = recorded_child;
 
@@ -481,7 +558,7 @@ pub async fn execute_sub_workflow_step(
             .await
             {
                 Ok(prepared) => prepared,
-                Err(error) => return fail(step, start, error),
+                Err(error) => return Err(fail(step, start, error)),
             };
             insert_snapshot_marker(&mut trigger, prepared.snapshot);
             prepared.concurrency_key
@@ -522,7 +599,7 @@ pub async fn execute_sub_workflow_step(
         parent_workspace
     };
     let enforced_deadline = budget.deadline().map(|(deadline, _)| deadline);
-    let mut child_run = if let Some(mut child) = waiting_child {
+    let child_run = if let Some(mut child) = waiting_child {
         // The child keeps its steps and its active-time clock; only its
         // trigger context and concurrency key are rendered again, like a
         // foreach item's resume.
@@ -542,14 +619,14 @@ pub async fn execute_sub_workflow_step(
         match claimed {
             Ok(Ok(())) => child,
             Ok(Err(reason)) => {
-                return fail(
+                return Err(fail(
                     step,
                     start,
                     format!(
                         "Sub-workflow « {} » could not resume after its quota wait: {reason}",
                         child_wf.name
                     ),
-                )
+                ))
             }
             Err(e) => {
                 // Cancelled between the read and the claim: say so, rather
@@ -568,7 +645,7 @@ pub async fn execute_sub_workflow_step(
                         child_wf.name
                     ),
                 };
-                return fail(step, start, message);
+                return Err(fail(step, start, message));
             }
         }
     } else {
@@ -590,18 +667,18 @@ pub async fn execute_sub_workflow_step(
         {
             Ok(Ok(())) => fresh,
             Ok(Err(reason)) => {
-                return fail(
+                return Err(fail(
                     step,
                     start,
                     format!("Sub-workflow « {} » not started: {reason}", child_wf.name),
-                )
+                ))
             }
             Err(e) => {
-                return fail(
+                return Err(fail(
                     step,
                     start,
                     format!("Failed to create sub-workflow run row: {e}"),
-                )
+                ))
             }
         }
     };
@@ -613,33 +690,24 @@ pub async fn execute_sub_workflow_step(
         "entering sub-workflow"
     );
 
-    // Re-enter the runner on the child. `Box::pin` breaks the otherwise-
-    // infinite async recursion type (execute_run → dispatch → here → execute_run).
-    let exec_res = Box::pin(crate::workflows::runner::execute_run(
-        state.clone(),
-        &child_wf,
-        &mut child_run,
-        tokens_config,
-        agents_config,
-        None,            // no live SSE for the child in Phase 1; the tree endpoint reads DB
-        Some(budget),    // SHARED budget — child counts against the tree-wide quota
-        child_workspace, // Phase 2 — share the parent's worktree when present
-    ))
-    .await;
-    if let Err(e) = exec_res {
-        // execute_run returns Err only on infra failure; the child status may
-        // still be set. Log and fall through to the status mapping.
-        tracing::warn!(
-            target: "kronn::sub_workflow",
-            child_run = %child_run.id, "sub-workflow run errored: {}", e
-        );
-    }
+    Ok(Box::new(ChildToRun {
+        child_wf,
+        child_run,
+        child_workspace,
+    }))
+}
 
-    // Map the child's terminal status onto this step.
+/// Map the child's terminal status onto its parent step.
+fn finish_child(
+    step: &WorkflowStep,
+    start: Instant,
+    child_wf: &Workflow,
+    child_run: &WorkflowRun,
+) -> StepOutcome {
     let child_status = child_run.status.clone();
     let success = matches!(child_status, RunStatus::Success);
     // Neither a success nor a failure yet: the parent waits with it (KT-1119).
-    let quota_wait = super::quota_wait::pending_wait(&child_run).cloned();
+    let quota_wait = super::quota_wait::pending_wait(child_run).cloned();
     let status_str = if success {
         "OK"
     } else if quota_wait.is_some() {
@@ -648,7 +716,7 @@ pub async fn execute_sub_workflow_step(
         "SUBWF_FAILED"
     };
     let signal = status_str;
-    let child_tokens = measured_run_tokens(&child_run);
+    let child_tokens = measured_run_tokens(child_run);
     let summary = format!(
         "Sous-workflow « {} » → {:?} ({} étapes, {}){}",
         child_wf.name,
@@ -722,7 +790,7 @@ pub async fn execute_sub_workflow_step(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait,
-            terminal_stop: crate::workflows::safety::run_terminal_stop(&child_run),
+            terminal_stop: crate::workflows::safety::run_terminal_stop(child_run),
             output_bytes: None,
         },
         condition_action,
