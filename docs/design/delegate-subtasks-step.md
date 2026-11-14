@@ -42,14 +42,14 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   `[src: file: backend/src/db/orchestration.rs:4833-4842#ReviewCheckpoint]`
   `[src: file: backend/src/db/orchestration.rs:4872-4884#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human
-  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:15029-15041#reassign_execution]`
-  `[src: file: backend/src/api/orchestration.rs:18747-18756#human_review]`
+  decision has `human_review`. `[src: file: backend/src/api/orchestration.rs:15082-15094#reassign_execution]`
+  `[src: file: backend/src/api/orchestration.rs:18827-18836#human_review]`
 - **Integration saga.** `run_integration` integrates an `Approved` execution
   into `run.target_branch`, through the single worktree where that branch is
   checked out (or by moving the ref when no worktree has it), refusing a dirty
   checkout, and sends a conflict back to the worker.
   `[src: file: backend/src/api/orchestration.rs:3403-3661#run_integration]`
-  `[src: file: backend/src/core/worktree.rs:2789-2811#IntegrationTarget]`
+  `[src: file: backend/src/core/worktree.rs:2795-2817#IntegrationTarget]`
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
@@ -78,8 +78,8 @@ branch. Checked against the code:
   the discussion, or the room's native agent during its own running turn. The
   review obligation and the escalation are messages posted to the principal of
   that discussion.
-  `[src: file: backend/src/api/orchestration.rs:15519-15532#principal_is_authorized]`
-  `[src: file: backend/src/api/orchestration.rs:15590-15632#room_agent_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:15572-15585#principal_is_authorized]`
+  `[src: file: backend/src/api/orchestration.rs:15643-15685#room_agent_is_authorized]`
   `[src: file: backend/src/api/orchestration.rs:7737-7744#deliver_worker_manifest]`
   `[src: file: backend/src/db/orchestration.rs:4785-4792#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
