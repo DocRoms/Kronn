@@ -48,6 +48,7 @@ describe('WorkersSection (KT-1345)', () => {
       heavy_output_kb: 256,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
+      managed_worktree_roots: [],
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentRounds(8)'));
@@ -74,6 +75,7 @@ describe('WorkersSection (KT-1345)', () => {
       heavy_output_kb: 256,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
+      managed_worktree_roots: [],
     }));
     await waitFor(() => expect(screen.getByTestId('workers-current'))
       .toHaveTextContent('config.workers.currentUnlimited'));
@@ -130,6 +132,7 @@ describe('WorkersSection (KT-1345)', () => {
       heavy_output_kb: 256,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
+      managed_worktree_roots: [],
     }));
     await waitFor(() => expect(screen.getByTestId('workers-cap-current'))
       .toHaveTextContent('config.workers.maxConcurrentCurrent(3)'));
@@ -176,6 +179,7 @@ describe('WorkersSection (KT-1345)', () => {
       heavy_output_kb: 256,
       bash_default_timeout_min: 15,
       bash_max_timeout_min: 60,
+      managed_worktree_roots: [],
     }));
     await waitFor(() => expect(box).not.toBeChecked());
     expect(screen.getByTestId('workers-save')).toBeDisabled();
@@ -197,7 +201,7 @@ describe('WorkersSection (KT-1345)', () => {
   });
 
   it('KT-1525 — shows the heavy-output threshold, saves a new one and refuses 0 or too many', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60 };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, managed_worktree_roots: [] };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, heavy_output_kb: 512 });
     render(<WorkersSection t={t} />);
@@ -220,8 +224,32 @@ describe('WorkersSection (KT-1345)', () => {
       .toHaveTextContent('config.workers.heavyOutputCurrent(512)'));
   });
 
+  it('KT-1748 — lists the managed worktree folders, refuses relative or root paths, saves one per line', async () => {
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, managed_worktree_roots: ['/srv/lanes'] };
+    getMock.mockResolvedValue(saved);
+    saveMock.mockResolvedValue({ ...saved, managed_worktree_roots: ['/srv/lanes', '/Users/me/wt'] });
+    render(<WorkersSection t={t} />);
+    const input = await screen.findByTestId('workers-roots-input');
+    await waitFor(() => expect(input).toHaveValue('/srv/lanes'));
+    expect(screen.getByTestId('workers-roots-hint')).toHaveTextContent('config.workers.managedRootsHint');
+    expect(screen.getByTestId('workers-save')).toBeDisabled();
+    expect(screen.queryByTestId('workers-roots-invalid')).not.toBeInTheDocument();
+
+    for (const bad of ['relative/lane', '/', '/srv/../etc']) {
+      fireEvent.change(input, { target: { value: `/srv/lanes\n${bad}` } });
+      expect(screen.getByTestId('workers-roots-invalid')).toHaveTextContent('config.workers.managedRootsInvalid(32)');
+      expect(screen.getByTestId('workers-save')).toBeDisabled();
+    }
+
+    fireEvent.change(input, { target: { value: '/srv/lanes\n\n  /Users/me/wt  \n' } });
+    expect(screen.queryByTestId('workers-roots-invalid')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('workers-save'));
+    await waitFor(() => expect(saveMock).toHaveBeenCalledWith({ ...saved, managed_worktree_roots: ['/srv/lanes', '/Users/me/wt'] }));
+    await waitFor(() => expect(input).toHaveValue('/srv/lanes\n/Users/me/wt'));
+  });
+
   it('KT-1718 — shows the per-command cap next to the generation limit, saves new limits and refuses a default above the maximum', async () => {
-    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60 };
+    const saved = { default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, managed_worktree_roots: [] };
     getMock.mockResolvedValue(saved);
     saveMock.mockResolvedValue({ ...saved, bash_max_timeout_min: 90 });
     getServerMock.mockResolvedValue({ agent_global_timeout_min: 120 });

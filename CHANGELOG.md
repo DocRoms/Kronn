@@ -22,7 +22,13 @@ Release notes for 0.9.3 and earlier are available in the
   in the project's own checkout, or in a worktree outside `.kronn/worktrees`, is
   refused at preflight and launch (`integration_target_owner_checkout`,
   `integration_target_foreign_worktree`) instead of at integration; a branch no
-  checkout holds, or one held by a Kronn-owned worktree, stays valid.
+  checkout holds, or one held by a Kronn-owned worktree, stays valid. A
+  worktree is Kronn-owned under `<repo>/.kronn/worktrees`, under
+  `~/.kronn/autocode-worktrees`, under a folder of Settings > Workers
+  (`managed_worktree_roots`) or of the project's workspace settings, or when
+  Kronn's workspace registry records it (KT-1748). Integrating into such a
+  worktree while a run uses it is refused (`integration_target_busy_worktree`,
+  naming the run) until the run has finished.
   `task_exec_prepare` accepts `base_rev`, and `task_exec_status` names the
   target branch and its worktree (`integration_worktree`,
   `integration_target_state`). The integration branch must now be named: a
