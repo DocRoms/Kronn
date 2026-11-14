@@ -70,7 +70,7 @@ Three Docker services behind nginx gateway:
   content is withheld even when tags are split across chunks or never closed;
   once visible answer content starts, identically named literal tags are
   preserved. The same final sanitizer runs on persisted discussion output.
-  [src: file: backend/src/agents/runner.rs:8799-8909#LeadingThinkingFilter]
+  [src: file: backend/src/agents/runner.rs:8806-8916#LeadingThinkingFilter]
   [src: file: backend/src/api/discussions/streaming.rs:5495-5496#strip_leading_thinking_blocks]
 
 ### Discussions
@@ -257,7 +257,7 @@ is still cut, by its own (wider) bound, with a reason naming the tool instead
 of accusing the model of a silence it never had.
 [src: file: backend/src/agents/idle_watchdog.rs:45-58#TOOL_TIMEOUT_MULTIPLIER] [src: file: backend/src/agents/idle_watchdog.rs:131-170#begin_tool]
 [src: file: backend/src/agents/idle_watchdog.rs:282-295#tool_stall_reason]
-[src: file: backend/src/agents/runner.rs:5938-5946#IdleWatchdog] [src: file: backend/src/agents/runner.rs:6044-6059#begin_tool]
+[src: file: backend/src/agents/runner.rs:5945-5953#IdleWatchdog] [src: file: backend/src/agents/runner.rs:6044-6059#begin_tool]
 [src: file: backend/src/agents/runner_idle_test.rs:1823-1946#a_long_silent_acp_tool_call_is_not_mistaken_for_a_dead_model]
 [src: file: backend/src/acp.rs:1553-1567#ToolCallEnded] [src: file: backend/src/acp.rs:522-527#Activity]
 
@@ -596,8 +596,8 @@ pass (a frequent schedule adds no fire during the repeated hour).
   prunable entries under `<repo>/.kronn/`. Boot repeats that prune for every
   project. It never runs a blanket `git worktree prune`: that would also drop
   a user's own worktree on an unmounted drive.
-  [src: file: backend/src/core/worktree.rs:1955-1963#remove_nested_worktrees]
-  [src: file: backend/src/core/worktree.rs:1976-1986#prune_kronn_worktrees]
+  [src: file: backend/src/core/worktree.rs:1978-1986#remove_nested_worktrees]
+  [src: file: backend/src/core/worktree.rs:1999-2009#prune_kronn_worktrees]
   [src: file: backend/src/workflows/workspace.rs:710-728#prune_orphan_worktrees]
   Removal uses `git worktree remove` without `--force`; the run's own
   `kronn/…` branch is deleted only when fully integrated, by compare-and-swap
