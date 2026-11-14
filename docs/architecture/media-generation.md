@@ -439,7 +439,7 @@ credential, no text tier), and every media path resolves it: generation and
 its preflights, `/api/media/models`, the estimate, the worker, the bridge
 guard and the `agent_list` catalogue.
 [src: file: backend/src/api/comfyui.rs:1283-1307#local_connection]
-[src: file: backend/src/api/orchestration.rs:16545-16551#with_local_media_source]
+[src: file: backend/src/api/orchestration.rs:16550-16556#with_local_media_source]
 
 ComfyUI runs a node graph, so a model is usable only when Kronn has a
 compatible integrated workflow for its family (FLUX.1 schnell, SDXL such as
