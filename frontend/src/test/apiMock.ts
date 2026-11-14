@@ -189,6 +189,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getScanIgnore: resolve([]),
       getScanDepth: resolve(2),
       getDefaultDocsDir: resolve(null),
+      getFirstBuildEnvSecs: resolve(null),
       saveDefaultDocsDir: resolve(null),
       getWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, managed_worktree_roots: [] }),
       saveWorkers: resolve({ default_max_review_rounds: 5, review_rounds_unlimited: false, max_concurrent_task_workers: 2, background_priority: true, heavy_output_kb: 256, bash_default_timeout_min: 15, bash_max_timeout_min: 60, managed_worktree_roots: [] }),

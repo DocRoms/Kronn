@@ -9,7 +9,7 @@ child remains the task/evidence room, and acceptance returns the work instructio
 directly to the CLI. A bridge reload therefore resumes the principal room instead
 of the child.
 [src: file: backend/src/api/orchestration.rs:7428-7448#accept_worker_offer_and_attach]
-[src: file: backend/src/api/orchestration.rs:7558-7577#worker_cli_session_id]
+[src: file: backend/src/api/orchestration.rs:7559-7578#worker_cli_session_id]
 [src: file: backend/src/api/orchestration.rs:17825-17854#source_binding_session_id]
 [src: file: backend/scripts/disc-introspection-mcp.py:6433-6468#call_task_exec_accept_worker_offer]
 

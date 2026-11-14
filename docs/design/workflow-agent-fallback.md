@@ -70,7 +70,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:1478-1553#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:1689-1764#AgentDetection]
 
 ## Policy and precedence
 
@@ -121,7 +121,7 @@ three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 presentation helper that scans raw output after execution; it is not a routing
 contract. [src: file: backend/src/agents/runner.rs:4035#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
-[src: file: backend/src/api/discussions/orchestration.rs:1683-1823#detect_agent_error_hint]
+[src: file: backend/src/api/discussions/orchestration.rs:1742-1882#detect_agent_error_hint]
 
 Fallback first needs a runner-level, provider-normalized error such as:
 

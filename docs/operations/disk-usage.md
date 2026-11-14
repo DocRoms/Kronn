@@ -36,7 +36,7 @@ no workspace row names, and the build dirs of executions Blocked or Interrupted 
 A lane's env is set in `WorkerLane::for_worktree`: a managed worktree gets `<repo>/target/wt-<lane>`, and the
 worker runs with it as `CARGO_TARGET_DIR`. The scratch dir, the private `CARGO_HOME` and the Vite cache live
 inside the lane or the worktree, so they go with it.
-[src: file: backend/src/core/task_worker_env.rs:256-311#for_worktree]
+[src: file: backend/src/core/task_worker_env.rs:274-329#for_worktree]
 
 **Ownership is a manifest, not a name.** `wt-*` proves nothing: humans and other tooling build in
 `target/wt-0151-integration`. Kronn writes `.kronn-lane.json` (execution id, lane, worktree) when it
@@ -83,7 +83,7 @@ keeps its months-old mtime and is exactly what a lane wants):
   list — a removed dependency — is stale whatever its age. No lock read means no such rule, never "everything
   is stale".
 [src: file: backend/src/core/seed_prune.rs:267-342#stale_units]
-[src: file: backend/src/core/task_worker_lane_warm.rs:577-595#main_checkout_locked_packages]
+[src: file: backend/src/core/task_worker_lane_warm.rs:652-670#main_checkout_locked_packages]
 
 `incremental/` is left alone: its directories are keyed by crate name, and a library and its tests share one
 and are both current. Pruning a seed at worst makes a lane rebuild one crate it would have found warm: it
@@ -94,7 +94,7 @@ a held lock, shared or exclusive, makes the prune a no-op and the seed is not cl
 empty, as before). The lock is then handed back *shared* for the clone, so a build that starts waits instead of
 changing what is being cloned. The result (units, entries and bytes removed) is recorded on the lane's
 `lane_warm_start` event (`seed.pruned`) and logged.
-[src: file: backend/src/core/task_worker_lane_warm.rs:598-650#seed_lane]
+[src: file: backend/src/core/task_worker_lane_warm.rs:693-745#seed_lane]
 
 Only the main checkout's `target/` is ever a seed, and so the only one ever pruned: a lane's own target is
 never a seed source (a worker may write it, KT-1250).

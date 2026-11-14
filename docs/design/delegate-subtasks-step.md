@@ -38,7 +38,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   the worker, and escalates (`Escalated`, principal solicited) when the budget
   is spent. `[src: file: backend/src/models/orchestration.rs:2038-2044#ReviewVerdict]`
   `[src: file: backend/src/models/orchestration.rs:2081-2104#ReviewDecisionV1]`
-  `[src: file: backend/src/api/orchestration.rs:8873-8880#decide_review]`
+  `[src: file: backend/src/api/orchestration.rs:8874-8881#decide_review]`
   `[src: file: backend/src/db/orchestration.rs:4833-4842#ReviewCheckpoint]`
   `[src: file: backend/src/db/orchestration.rs:4872-4884#ReviewCheckpointOutcome]`
 - **Reassignment** is its own operation (`reassign_execution`), and a human

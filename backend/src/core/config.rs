@@ -679,6 +679,8 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     crate::core::task_worker_env::set_bash_timeouts(&config.workers);
     // KT-1748 — Settings > Workers: the extra roots of Kronn-managed worktrees.
     crate::core::worktree::set_global_managed_worktree_roots(&config.workers);
+    // KT-1742 — Settings > Workers: how every project's lane is warmed.
+    crate::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())

@@ -431,6 +431,23 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         kronn::core::task_worker_env::set_bash_timeouts(&config.workers);
         // KT-1748 — the managed worktree roots, before the first launch of this boot.
         kronn::core::worktree::set_global_managed_worktree_roots(&config.workers);
+        // KT-1742 — how lanes are warmed: the global entry now, each project's own
+        // below, before the first lane of this boot.
+        kronn::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
+    }
+    match state.db.with_conn(kronn::db::projects::list_projects).await {
+        Ok(projects) => {
+            for project in projects {
+                kronn::core::task_worker_lane_settings::set_project(
+                    std::path::Path::new(&project.path),
+                    project
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| &workspace.lane_warm),
+                );
+            }
+        }
+        Err(error) => tracing::warn!("project lane settings not loaded: {error}"),
     }
     // KT-1633 — ask the host once whether its priority launcher runs, off the
     // async path, before recovery can dispatch a worker. A spawn only reads the answer.
