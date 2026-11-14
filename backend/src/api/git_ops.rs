@@ -1202,15 +1202,15 @@ fn refuse_new_embedded_repository(
 
 /// `git` in `repo_path`: for a commit Kronn makes for a worker (`worker`), the
 /// lane's pinned builder ([`crate::core::lane_git`]); for a commit the user asks
-/// for in their own checkout, plain git with the repository's hooks.
+/// for in their own checkout, plain git with the repository's hooks. A commit the
+/// user asks for in a Kronn-managed worktree (a discussion's, an agent's) is the
+/// pinned, hook-less command too: that worktree is written by an agent, so its
+/// hooks and `.git` pointer are not the user's.
 fn git_in(repo_path: &Path, worker: bool) -> Result<std::process::Command, String> {
     if worker {
         return crate::core::lane_git::git(repo_path);
     }
-    // lane-git-allow: the user's own checkout, committed at their request.
-    let mut command = crate::core::cmd::git_cmd();
-    command.current_dir(repo_path);
-    Ok(command)
+    crate::core::lane_git::git_keeping_owner_hooks(repo_path)
 }
 
 /// Give the repository a fallback git identity when none is configured.

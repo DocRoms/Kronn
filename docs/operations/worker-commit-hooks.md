@@ -92,6 +92,10 @@ Also pinned, because a worker's worktree can be their argument:
   worktree is refused (tampered pointer, nested repository), `git_or_refuse`
   returns a command aimed at a git directory that does not exist, so a helper
   that cannot carry an error answers "nothing" and runs nothing;
+- a commit the *user* asks for from the UI (`run_git_commit`, hooks on) in a
+  Kronn-managed worktree (a discussion's or an agent's) is the pinned, hook-less
+  command as well: that worktree is agent-written, so its hooks are not the
+  user's. Their own checkout keeps its hooks;
 - `fast_forward_to` and the checks of `integration_target_worktree`: when the
   integration target is itself checked out in a Kronn-managed worktree, the
   fast-forward is the pinned, hook-less command; in the owner's checkout their
