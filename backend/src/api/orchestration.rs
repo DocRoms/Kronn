@@ -12175,7 +12175,9 @@ fn preparation_reason(code: &str, detail: impl Into<String>) -> crate::models::C
 /// Refusals that depend only on the typed target. The catalogue and preflight
 /// deliberately share this helper so an identity cannot be advertised with a
 /// different transport/capability verdict than the launch boundary applies.
-fn worker_static_refusal(worker: &MessageTarget) -> Option<crate::models::CampaignTaskReason> {
+pub(crate) fn worker_static_refusal(
+    worker: &MessageTarget,
+) -> Option<crate::models::CampaignTaskReason> {
     if let Err(error) = crate::db::orchestration::ensure_task_worker_transport_compatible(worker) {
         return Some(preparation_reason("worker_transport", error.to_string()));
     }
@@ -14716,6 +14718,15 @@ pub(crate) async fn reassign_native_execution_as(
     }
     crate::db::orchestration::ensure_task_worker_transport_compatible(&selection.target)
         .map_err(|error| anyhow::anyhow!("worker_transport: {error}"))?;
+    // KT-1749 — the launch's own static verdict (native ACP route, typed
+    // delivery capability), so a worker is never moved onto an agent the
+    // spawn would then refuse. `Custom` keeps its own connection-pin
+    // validation, which names the missing connection.
+    if selection.target.agent_type != AgentType::Custom {
+        if let Some(reason) = worker_static_refusal(&selection.target) {
+            bail!("{}: {}", reason.code, reason.detail);
+        }
+    }
     let id = exec_id.to_string();
     let execution = state
         .db
@@ -37846,11 +37857,7 @@ pub(crate) mod tests {
             .await
             .remove(0);
         let state = quota_test_state(&db);
-        let available = [
-            AgentType::ClaudeCode,
-            AgentType::Codex,
-            AgentType::GeminiCli,
-        ];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         let allowed = serde_json::to_string(&available).unwrap();
         let id = was.id.clone();
         db.with_conn(move |conn| {
@@ -37871,8 +37878,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             refuse_through_the_fallback(&state, &db, &was.id, hours(1), &available).await,
-            Some(AgentType::GeminiCli),
-            "Claude is the original, Gemini is free"
+            Some(AgentType::Ollama),
+            "Claude is the original, Ollama is free"
         );
         assert_eq!(
             refuse_through_the_fallback(&state, &db, &was.id, hours(2), &available).await,
@@ -37880,7 +37887,7 @@ pub(crate) mod tests {
             "Claude is the original and Codex has not reset"
         );
         let last = exec_of(&db, &was.id).await;
-        assert_eq!(last.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(last.worker_agent_type.as_deref(), Some("Ollama"));
         assert_eq!(last.worker_model_tier.as_deref(), Some("economy"));
         assert_eq!(
             origin_of(&db, &was.id).await.map(|origin| origin.provider),
@@ -37905,8 +37912,8 @@ pub(crate) mod tests {
 
     /// KT-1564 — refusals that announce no reset. The global refusal record
     /// holds NULL for them, so nothing on a clock marks the provider as
-    /// unavailable: Claude (origin) -> Codex -> Gemini, and Gemini's refusal
-    /// must not hand the execution back to Codex, then Gemini again, with a
+    /// unavailable: Claude (origin) -> Codex -> Ollama, and Ollama's refusal
+    /// must not hand the execution back to Codex, then Ollama again, with a
     /// dispatch and a handoff per refusal. It escalates after the second.
     #[tokio::test]
     async fn two_refusals_without_a_reset_escalate_instead_of_bouncing() {
@@ -37916,11 +37923,7 @@ pub(crate) mod tests {
             .await
             .remove(0);
         let state = quota_test_state(&db);
-        let available = [
-            AgentType::ClaudeCode,
-            AgentType::Codex,
-            AgentType::GeminiCli,
-        ];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         let allowed = serde_json::to_string(&available).unwrap();
         let id = was.id.clone();
         db.with_conn(move |conn| {
@@ -37940,14 +37943,14 @@ pub(crate) mod tests {
             refuse_through_the_fallback(&state, &db, &was.id, none(), &available).await,
             Some(AgentType::Codex)
         );
-        // Codex refuses: Gemini is the only provider left that has not refused.
+        // Codex refuses: Ollama is the only provider left that has not refused.
         assert_eq!(
             refuse_through_the_fallback(&state, &db, &was.id, none(), &available).await,
-            Some(AgentType::GeminiCli)
+            Some(AgentType::Ollama)
         );
         let on_gemini = exec_of(&db, &was.id).await;
         let gemini_dispatch = on_gemini.dispatch_job_id.clone().unwrap();
-        // Gemini refuses: Claude is the origin, Codex already refused. Nobody
+        // Ollama refuses: Claude is the origin, Codex already refused. Nobody
         // is left, so no new dispatch and no handoff: the caller escalates.
         for _ in 0..3 {
             assert_eq!(
@@ -37957,7 +37960,7 @@ pub(crate) mod tests {
             );
         }
         let stuck = exec_of(&db, &was.id).await;
-        assert_eq!(stuck.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(stuck.worker_agent_type.as_deref(), Some("Ollama"));
         assert_eq!(stuck.worker_model_tier.as_deref(), Some("economy"));
         assert_eq!(
             stuck.dispatch_job_id.as_deref(),
@@ -37971,10 +37974,7 @@ pub(crate) mod tests {
         let dispatch = gemini_dispatch.clone();
         db.with_conn(move |conn| {
             crate::db::orchestration::escalate_execution_for_dispatch_quota(
-                conn,
-                &dispatch,
-                "GeminiCli",
-                None,
+                conn, &dispatch, "Ollama", None,
             )
         })
         .await
@@ -38010,11 +38010,7 @@ pub(crate) mod tests {
             .await
             .remove(0);
         let state = quota_test_state(&db);
-        let available = [
-            AgentType::ClaudeCode,
-            AgentType::Codex,
-            AgentType::GeminiCli,
-        ];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         let allowed = serde_json::to_string(&available).unwrap();
         let id = was.id.clone();
         db.with_conn(move |conn| {
@@ -38035,7 +38031,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             refuse_through_the_fallback(&state, &db, &was.id, hours(5), &available).await,
-            Some(AgentType::GeminiCli)
+            Some(AgentType::Ollama)
         );
         // Codex's announced reset passes (the stored refusals are what the
         // chain consults, not only the global record).

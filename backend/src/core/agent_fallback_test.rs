@@ -1255,3 +1255,97 @@ fn a_worker_remembers_the_agent_it_started_on() {
         Some(AgentType::Codex)
     );
 }
+
+// ─── KT-1749 — a task worker is never offered what the launch refuses ─────
+
+#[test]
+fn a_task_worker_is_never_offered_an_agent_the_launch_would_refuse() {
+    let worker = TurnNeeds {
+        write_access: true,
+        task_worker: true,
+        ..Default::default()
+    };
+    for refused in [
+        AgentType::GeminiCli,
+        AgentType::Kiro,
+        AgentType::CopilotCli,
+        AgentType::OpenCode,
+        AgentType::Vibe,
+        AgentType::Codex,
+    ] {
+        let config = agents(&[(AgentType::ClaudeCode, vec![link(refused.clone())])]);
+        match pick(
+            &config,
+            &AgentType::ClaudeCode,
+            &AgentType::ClaudeCode,
+            &everyone(),
+            &worker,
+            &never_cooling,
+        ) {
+            Selection::Stop { why } => {
+                assert!(why.contains("cannot take this turn"), "{refused:?}: {why}")
+            }
+            other => panic!("{refused:?}: {other:?}"),
+        }
+        // The same agent is fine for a plain room turn.
+        assert!(matches!(
+            pick(
+                &config,
+                &AgentType::ClaudeCode,
+                &AgentType::ClaudeCode,
+                &everyone(),
+                &TurnNeeds::default(),
+                &never_cooling,
+            ),
+            Selection::Switch(_)
+        ));
+    }
+    for allowed in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
+        let config = agents(&[(AgentType::ClaudeCode, vec![link(allowed.clone())])]);
+        assert_eq!(
+            pick(
+                &config,
+                &AgentType::ClaudeCode,
+                &AgentType::ClaudeCode,
+                &everyone(),
+                &worker,
+                &never_cooling,
+            ),
+            Selection::Switch(link(allowed)),
+        );
+    }
+}
+
+#[test]
+fn the_worker_target_follows_the_transport_of_the_agent() {
+    use crate::models::MessageTargetKind;
+    for http in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
+        let target = task_worker_target(&http);
+        assert_eq!(target.kind, MessageTargetKind::DiscussionAgent);
+        assert_eq!(task_worker_launch_refusal(&http), None, "{http:?}");
+    }
+    for cli in [AgentType::ClaudeCode, AgentType::Codex] {
+        assert_eq!(task_worker_target(&cli).kind, MessageTargetKind::Agent);
+    }
+    assert!(task_worker_launch_refusal(&AgentType::GeminiCli)
+        .is_some_and(|why| why.contains("native ACP")));
+}
+
+#[test]
+fn the_stop_notice_reads_in_the_room_language() {
+    use crate::core::room_lang::RoomLang;
+    let fr = stop_notice_in(
+        &AgentType::ClaudeCode,
+        Trigger::RateLimit,
+        "raison",
+        RoomLang::Fr,
+    );
+    assert_eq!(
+        fr,
+        "Claude Code: limite de débit atteinte → aucun agent de repli (raison)"
+    );
+    assert_eq!(
+        stop_notice_in(&AgentType::ClaudeCode, Trigger::Outage, "why", RoomLang::En),
+        stop_notice(&AgentType::ClaudeCode, Trigger::Outage, "why")
+    );
+}
