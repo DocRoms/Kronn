@@ -3796,6 +3796,8 @@ mod tests {
         let _ = git_read(repo.path(), &["merge", "--no-edit", "target"]);
         assert!(merge_head_exists(repo.path()));
         std::fs::write(repo.path().join("a.txt"), "main and target\n").unwrap();
+        // KT-1750: the sign-off follows the project's setting, not a default.
+        git_read(repo.path(), &["config", "kronn.signoff", "true"]).unwrap();
 
         let committed =
             git_commit_payload(repo.path(), &["a.txt".into()], "merge: integrate target").unwrap();
@@ -3969,6 +3971,8 @@ mod tests {
         let (repo, base) = cited_repo();
         let root = repo.path();
         shift_the_source(root);
+        // KT-1750: the sign-off follows the project's setting, not a default.
+        git_read(root, &["config", "kronn.signoff", "true"]).unwrap();
 
         let committed = git_commit_payload_reanchoring_docs(
             root,
