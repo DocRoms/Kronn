@@ -167,7 +167,297 @@ fn registered_admin_dir(common_dir: &Path, work_dir: &Path) -> Result<PathBuf, S
     ))
 }
 
+/// Prefix of the error a command refused because a nested repository of the
+/// worktree (a submodule) carries a configuration the worker may have written.
+pub const NESTED_PREFIX: &str = "NestedRepoUnsafe";
+
+/// `filter.*`, `merge.*` and `diff.*` program values of the registered
+/// repository's configuration (and the user's), cached briefly.
+fn registered_programs(common_dir: &Path) -> Vec<(String, String)> {
+    type Cache = Mutex<HashMap<PathBuf, (std::time::Instant, Vec<(String, String)>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((at, known)) = cache.lock().ok().and_then(|c| c.get(common_dir).cloned()) {
+        if at.elapsed() < std::time::Duration::from_secs(30) {
+            return known;
+        }
+    }
+    // lane-git-allow: reads the registered repository's configuration, no worktree.
+    let output = crate::core::cmd::project_git_cmd()
+        .arg(format!("--git-dir={}", common_dir.display()))
+        .args([
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^(filter|merge|diff)\.",
+        ])
+        .output();
+    let mut found = Vec::new();
+    if let Ok(output) = output {
+        for entry in String::from_utf8_lossy(&output.stdout).split('\0') {
+            if let Some((key, value)) = entry.split_once('\n') {
+                found.push((key.to_string(), value.to_string()));
+            }
+        }
+    }
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(
+            common_dir.to_path_buf(),
+            (std::time::Instant::now(), found.clone()),
+        );
+    }
+    found
+}
+
+/// Whether the program `value` of a filter, merge driver or textconv would run
+/// something that lives in the worktree: a relative path, or an argument naming
+/// a file the worktree holds (`sh tools/clean.sh`, `sh clean.sh`).
+fn names_worktree_content(value: &str, work_dir: &Path) -> bool {
+    let mut tokens = value.split_whitespace();
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    if first.contains('/') && !Path::new(first).is_absolute() {
+        return true;
+    }
+    tokens.any(|token| {
+        let token = token.trim_matches(|c| c == '"' || c == '\'');
+        if token.is_empty() || token.starts_with('-') || token.starts_with('%') {
+            return false;
+        }
+        if Path::new(token).is_absolute() {
+            return false;
+        }
+        token.contains('/') || work_dir.join(token).exists()
+    })
+}
+
+/// `-c` settings that turn off the registered configuration's filter, merge
+/// driver and textconv programs that resolve inside the worktree. The registered
+/// configuration is the owner's, but a RELATIVE program in it (`sh tools/clean.sh`)
+/// runs whatever the worker wrote at that path. Reported once per key.
+fn neutralised_programs(common_dir: &Path, work_dir: &Path) -> Vec<String> {
+    static REPORTED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let mut settings = Vec::new();
+    for (key, value) in registered_programs(common_dir) {
+        if !names_worktree_content(&value, work_dir) {
+            continue;
+        }
+        let key = key.to_lowercase();
+        let mut turned_off = Vec::new();
+        if let Some(name) = key.strip_prefix("filter.") {
+            for suffix in [".clean", ".smudge", ".process"] {
+                if let Some(driver) = name.strip_suffix(suffix) {
+                    turned_off.push(format!("filter.{driver}.clean="));
+                    turned_off.push(format!("filter.{driver}.smudge="));
+                    turned_off.push(format!("filter.{driver}.process="));
+                    turned_off.push(format!("filter.{driver}.required=false"));
+                }
+            }
+        } else if let Some(name) = key.strip_prefix("merge.") {
+            if let Some(driver) = name.strip_suffix(".driver") {
+                turned_off.push(format!("merge.{driver}.driver=false"));
+            }
+        } else if let Some(name) = key.strip_prefix("diff.") {
+            for suffix in [".textconv", ".command"] {
+                if let Some(driver) = name.strip_suffix(suffix) {
+                    turned_off.push(format!("diff.{driver}{suffix}="));
+                }
+            }
+        }
+        if turned_off.is_empty() {
+            continue;
+        }
+        let first_time = REPORTED
+            .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+            .lock()
+            .map(|mut seen| seen.insert(format!("{}|{key}", common_dir.display())))
+            .unwrap_or(false);
+        if first_time {
+            tracing::warn!(
+                "lane git: `{key}` runs a program that lives in the worker's worktree ({value}); \
+                 it is turned off for Kronn's own git commands on worker worktrees"
+            );
+        }
+        settings.extend(turned_off);
+    }
+    settings.sort();
+    settings.dedup();
+    settings
+}
+
+/// Configuration keys a nested repository Kronn trusts may carry. Anything else
+/// (`filter.*`, `core.fsmonitor`, `core.hooksPath`, `include.path`, `gpg.*`,
+/// `diff.*`, `merge.*`, `url.*`) is something a worker could have added.
+fn nested_key_is_plain(key: &str) -> bool {
+    const CORE: [&str; 8] = [
+        "core.repositoryformatversion",
+        "core.filemode",
+        "core.bare",
+        "core.logallrefupdates",
+        "core.ignorecase",
+        "core.precomposeunicode",
+        "core.symlinks",
+        "core.worktree",
+    ];
+    if CORE.contains(&key) || matches!(key, "user.name" | "user.email" | "extensions.objectformat")
+    {
+        return true;
+    }
+    let parts: Vec<&str> = key.split('.').collect();
+    match parts.as_slice() {
+        ["remote", .., "url" | "fetch"] | ["branch", .., "remote" | "merge"] => parts.len() >= 3,
+        _ => false,
+    }
+}
+
+/// The keys of a git configuration file's text, lower-cased
+/// (`section.subsection.name`, section and name case-insensitive).
+fn config_keys(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let mut rest = line;
+        if let Some(header) = line.strip_prefix('[') {
+            let Some(end) = header.find(']') else {
+                keys.push(format!("?malformed:{line}"));
+                continue;
+            };
+            let head = &header[..end];
+            section = match head.split_once('"') {
+                Some((name, sub)) => format!(
+                    "{}.{}",
+                    name.trim().to_lowercase(),
+                    sub.trim_end_matches('"')
+                ),
+                None => head.trim().to_lowercase(),
+            };
+            rest = header[end + 1..].trim();
+            if rest.is_empty() {
+                continue;
+            }
+        }
+        let name = rest.split('=').next().unwrap_or_default().trim();
+        if !name.is_empty() {
+            keys.push(format!("{section}.{}", name.to_lowercase()));
+        }
+    }
+    keys
+}
+
+/// The gitlink paths of the worktree's index, cached by the index's size and
+/// modification time. Listing the index runs no program.
+fn gitlink_paths(lane: &LaneGit, pinned: &Pinned) -> Vec<String> {
+    type Known = (Option<std::time::SystemTime>, u64, Vec<String>);
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Known>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let stamp = std::fs::metadata(pinned.git_dir.join("index")).ok();
+    let key = (
+        stamp.as_ref().and_then(|m| m.modified().ok()),
+        stamp.as_ref().map_or(0, |m| m.len()),
+    );
+    if let Some(known) = cache
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&pinned.git_dir).cloned())
+    {
+        if (known.0, known.1) == key {
+            return known.2;
+        }
+    }
+    let output = lane.command().args(["ls-files", "--stage", "-z"]).output();
+    let mut paths = Vec::new();
+    if let Ok(output) = output {
+        for entry in output.stdout.split(|byte| *byte == 0) {
+            let entry = String::from_utf8_lossy(entry);
+            if let Some((meta, path)) = entry.split_once('\t') {
+                if meta.starts_with("160000 ") {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+    }
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(pinned.git_dir.clone(), (key.0, key.1, paths.clone()));
+    }
+    paths
+}
+
 impl LaneGit {
+    /// Every submodule of the worktree is a repository Kronn would trust the
+    /// configuration of when a command recurses into it (`add`, `commit -a`,
+    /// `diff-index` override `diff.ignoreSubmodules`). Refuse while one carries a
+    /// configuration the worker could have written: a nested `.git` directory
+    /// with a key outside [`nested_key_is_plain`], or a `.git` file that does not
+    /// point into the registered repository's own git directory.
+    fn check_nested_repos(&self, pinned: &Pinned) -> Result<(), String> {
+        for path in gitlink_paths(self, pinned) {
+            let nested = self.work_dir.join(&path).join(".git");
+            let Ok(metadata) = std::fs::symlink_metadata(&nested) else {
+                continue; // not materialised: nothing to recurse into
+            };
+            let refuse = |why: String| {
+                tracing::warn!(
+                    "{NESTED_PREFIX}: submodule `{path}` of {} — {why}",
+                    self.work_dir.display()
+                );
+                Err(format!(
+                    "{NESTED_PREFIX}: the submodule `{path}` of {} {why}. Kronn refuses to run git \
+                     where it would read that repository's configuration; restore the submodule \
+                     (remove `{path}/.git` entries the task did not need) and retry.",
+                    self.work_dir.display()
+                ))
+            };
+            if metadata.is_file() {
+                let text = std::fs::read_to_string(&nested).unwrap_or_default();
+                let target = text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.strip_prefix("gitdir:"))
+                    .map(str::trim)
+                    .unwrap_or_default();
+                let target = PathBuf::from(target);
+                let target = canonical(&if target.is_absolute() {
+                    target
+                } else {
+                    nested.parent().unwrap_or(&self.work_dir).join(target)
+                });
+                if !target.starts_with(&pinned.common_dir) {
+                    return refuse(format!(
+                        "has a `.git` file pointing at {}, outside the repository's own git directory",
+                        target.display()
+                    ));
+                }
+            } else if metadata.is_dir() {
+                let config = nested.join("config");
+                let text = match std::fs::symlink_metadata(&config) {
+                    Ok(m) if m.is_file() => std::fs::read_to_string(&config).unwrap_or_default(),
+                    Ok(_) => {
+                        return refuse("has a `.git/config` that is not a regular file".into())
+                    }
+                    Err(_) => String::new(),
+                };
+                let unknown: Vec<String> = config_keys(&text)
+                    .into_iter()
+                    .filter(|key| !nested_key_is_plain(key))
+                    .collect();
+                if !unknown.is_empty() {
+                    return refuse(format!(
+                        "has a `.git/config` with settings Kronn does not trust: {}",
+                        unknown.join(", ")
+                    ));
+                }
+            } else {
+                return refuse("has a `.git` that is neither a directory nor a file".into());
+            }
+        }
+        Ok(())
+    }
+
     /// How to run git on `work_dir`. A managed worktree is pinned to its
     /// registration; one that is not registered, or whose `.git` pointer was
     /// redirected, is refused.
@@ -240,7 +530,7 @@ impl LaneGit {
         if canonical(&path) != pinned.git_dir {
             return refuse(format!("points at `{target}`"));
         }
-        Ok(())
+        self.check_nested_repos(pinned)
     }
 
     /// Whether this is a managed worktree pinned to its registration.
@@ -269,12 +559,26 @@ impl LaneGit {
                 .arg(format!("--git-dir={}", pinned.git_dir.display()))
                 .arg(format!("--work-tree={}", self.work_dir.display()));
         }
-        for setting in [
+        let mut settings = vec![
             format!("core.hooksPath={NO_HOOKS}"),
             "core.fsmonitor=false".to_string(),
             "commit.gpgSign=false".to_string(),
             "tag.gpgSign=false".to_string(),
-        ] {
+            // A submodule is a repository of its own, with a configuration the
+            // worker may have written: git must not descend into it to look for
+            // changes (`status`, `diff`), where its filters would run. `dirty`
+            // still shows a moved gitlink (a pointer change is work to keep) but
+            // never runs `git status` inside the submodule. Commands that
+            // override this (`add`, `commit -a`, `diff-index`) are covered by
+            // `check_nested_repos`.
+            "diff.ignoreSubmodules=dirty".to_string(),
+            "submodule.recurse=false".to_string(),
+            "status.submoduleSummary=false".to_string(),
+        ];
+        if let Some(pinned) = &self.pinned {
+            settings.extend(neutralised_programs(&pinned.common_dir, &self.work_dir));
+        }
+        for setting in settings {
             command.arg("-c").arg(setting);
         }
         command
@@ -289,6 +593,11 @@ impl LaneGit {
 /// module documentation; this is the entry point of every call site.
 pub fn git(work_dir: &Path) -> Result<Command, String> {
     LaneGit::resolve(work_dir).map(|lane| lane.command())
+}
+
+/// [`git`] for tokio.
+pub fn async_git(work_dir: &Path) -> Result<tokio::process::Command, String> {
+    git(work_dir).map(tokio::process::Command::from)
 }
 
 /// [`git`] for a command the user asked for (a push): in a managed worktree it is

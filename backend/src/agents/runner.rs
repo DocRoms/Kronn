@@ -4011,6 +4011,11 @@ pub fn native_full_access_refusal_in(agent: &AgentType, language: &str) -> Strin
     }
 }
 
+/// Why a generic `Custom` HTTP connection cannot run a task worker.
+pub const CUSTOM_HTTP_TASK_WORKER_REFUSAL: &str =
+    "a generic Custom HTTP connection cannot run a task worker; pick a CLI agent or a \
+     supported model provider (Ollama, LiteLLM, NVIDIA)";
+
 /// The worker policy shared by every launch route and by worker preparation.
 /// Returns the `full_access` the launch may use, or why a task worker cannot
 /// run on this agent's resolved transport. A worker never inherits the
@@ -4022,6 +4027,11 @@ pub fn task_worker_route_policy(
 ) -> Result<bool, &'static str> {
     if !task_worker {
         return Ok(full_access);
+    }
+    // KT-1745: the generic `Custom` HTTP connection has no worker lane contract
+    // (no pinned workspace tools, no commit primitive): it never runs a task.
+    if matches!(agent, AgentType::Custom) {
+        return Err(CUSTOM_HTTP_TASK_WORKER_REFUSAL);
     }
     match crate::acp::resolve_acp_route(agent) {
         crate::acp::AcpProductionRoute::NativeAcp => Err(NATIVE_ACP_TASK_WORKER_REFUSAL),
@@ -4865,9 +4875,6 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     if task_worker && *config.agent_type == AgentType::ClaudeCode {
         probe_claude_task_worker_auth(binary, npx_pkg, &work_dir).await?;
-    }
-    if task_worker && *config.agent_type == AgentType::CopilotCli {
-        probe_copilot_task_worker_auth(binary, npx_pkg, &work_dir).await?;
     }
 
     // Invalidate before spawning, not when an init event happens to arrive.
@@ -13231,9 +13238,22 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     // (the shell through `denyWrite`, the file tools through a permission rule).
     let git_pointer = lane.worktree.join(".git");
     let mut permission_deny = crate::core::vault_guard::claude_permission_deny();
+    // …and so is every nested repository's `.git` (a submodule's configuration is
+    // read by commands that look inside it), whatever its case.
+    let nested_git = [
+        format!("{}/**/.git", lane.worktree.to_string_lossy()),
+        format!("{}/**/.git/**", lane.worktree.to_string_lossy()),
+        format!("{}/**/.[gG][iI][tT]", lane.worktree.to_string_lossy()),
+        format!("{}/**/.[gG][iI][tT]/**", lane.worktree.to_string_lossy()),
+    ];
     for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
         permission_deny.push(format!("{tool}(/{})", git_pointer.to_string_lossy()));
+        for pattern in &nested_git {
+            permission_deny.push(format!("{tool}(/{pattern})"));
+        }
     }
+    let mut deny_write = vec![git_pointer.to_string_lossy().into_owned()];
+    deny_write.extend(nested_git.iter().cloned());
     serde_json::to_string(&serde_json::json!({
         "sandbox": {
             "enabled": true,
@@ -13243,7 +13263,7 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             "excludedCommands": [],
             "filesystem": {
                 "allowWrite": lane.write_roots(),
-                "denyWrite": [git_pointer],
+                "denyWrite": deny_write,
                 "allowRead": lane.read_roots(&caches),
                 // KT-1495 — the Kronn data directory: `allowRead` is additive, so
                 // without this the worker's shell reads the keys and the database.
@@ -13654,34 +13674,6 @@ fn parse_copilot_task_worker_preflight(
     }
 }
 
-fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
-    let failure_kind = status
-        .reason_code()
-        .expect("unusable Copilot preflight has a stable reason code");
-    let detail = match status {
-        CopilotTaskWorkerPreflight::AuthInvalid => {
-            "the bounded `copilot -p /user show` preflight rejected the effective authentication"
-        }
-        CopilotTaskWorkerPreflight::Malformed => {
-            "the bounded `copilot -p /user show` preflight returned no account response"
-        }
-        CopilotTaskWorkerPreflight::SpawnFailed => {
-            "the bounded `copilot -p /user show` preflight could not be invoked"
-        }
-        CopilotTaskWorkerPreflight::TimedOut => {
-            "the bounded `copilot -p /user show` preflight did not finish before its deadline"
-        }
-        CopilotTaskWorkerPreflight::FullAccessOff => {
-            "Copilot runs only with full access (Config › Agents › GitHub Copilot › Full access)"
-        }
-        CopilotTaskWorkerPreflight::Usable => unreachable!("usable Copilot preflight has no error"),
-    };
-    format!(
-        "Copilot task worker cannot start: phase=preflight; failure_kind={failure_kind}; {detail}. Run `copilot login` or use \
-         `task_exec_reassign` to move this execution to another available worker."
-    )
-}
-
 const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
 
 async fn run_copilot_task_worker_preflight(
@@ -13825,18 +13817,6 @@ pub(crate) async fn probe_copilot_task_worker_preflight(
         }
     };
     parse_copilot_task_worker_preflight(&output.stdout, output.status.success())
-}
-
-async fn probe_copilot_task_worker_auth(
-    binary: &str,
-    npx_package: Option<&str>,
-    work_dir: &Path,
-) -> Result<(), String> {
-    let status = probe_copilot_task_worker_preflight(binary, npx_package, work_dir).await;
-    match status {
-        CopilotTaskWorkerPreflight::Usable => Ok(()),
-        other => Err(copilot_task_worker_preflight_error(other)),
-    }
 }
 
 fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {

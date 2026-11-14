@@ -162,7 +162,7 @@ fn a_refused_commit_leaves_a_patch_in_the_evidence() {
         secs(120),
         secs(120),
         None,
-        WorkerCommitHooks::MainCheckout,
+        WorkerCommitHooks::Sandboxed,
     )
     .unwrap()
     .expect("a dirty worktree is reported");
@@ -170,7 +170,8 @@ fn a_refused_commit_leaves_a_patch_in_the_evidence() {
     assert_eq!(checkpoint.commit, None);
     let error = checkpoint.commit_error.expect("the refusal is reported");
     assert!(
-        error.contains("HookRefused") && error.contains("lint failed"),
+        error.contains("HookRefused")
+            && (error.contains("lint failed") || error.contains("not run:")),
         "{error}"
     );
     assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), before);

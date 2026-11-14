@@ -279,6 +279,15 @@ fi
         for agent in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
             assert_eq!(task_worker_route_policy(&agent, true, true), Ok(false));
         }
+        // The generic Custom HTTP connection is no worker.
+        assert_eq!(
+            task_worker_route_policy(&AgentType::Custom, true, true),
+            Err(CUSTOM_HTTP_TASK_WORKER_REFUSAL)
+        );
+        assert_eq!(
+            task_worker_route_policy(&AgentType::Custom, true, false),
+            Ok(true)
+        );
         // Direct CLI compatibility route.
         crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
         assert_eq!(
@@ -11590,20 +11599,10 @@ Suite de la réponse.";
             super::super::parse_copilot_task_worker_preflight(b"", true),
             CopilotTaskWorkerPreflight::Malformed
         );
-        let error = super::super::copilot_task_worker_preflight_error(
-            CopilotTaskWorkerPreflight::Malformed,
-        );
-        assert!(error.contains("task_exec_reassign"));
-        assert!(!error.contains("auth error"));
     }
 
     #[test]
     fn copilot_task_worker_preflight_spawn_failure_is_actionable_and_secret_free() {
-        let error = super::super::copilot_task_worker_preflight_error(
-            CopilotTaskWorkerPreflight::SpawnFailed,
-        );
-        assert!(error.contains("could not be invoked"));
-        assert!(error.contains("task_exec_reassign"));
         assert_eq!(
             CopilotTaskWorkerPreflight::SpawnFailed.reason_code(),
             Some("copilot_preflight_spawn_failed")

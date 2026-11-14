@@ -423,9 +423,9 @@ async fn check_branch_for_preservation(worktree: &Path, branch: &str) -> Option<
 
 /// Run `git <args>` in `cwd`, return trimmed stdout if exit was 0.
 async fn git_text_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = crate::core::cmd::async_git_cmd()
+    let out = crate::core::lane_git::async_git(cwd)
+        .ok()?
         .args(args)
-        .current_dir(cwd)
         .output()
         .await
         .ok()?;
@@ -615,9 +615,8 @@ pub enum InterruptedCheckout {
 pub async fn inspect_interrupted_checkout(
     worktree: &Path,
 ) -> std::result::Result<InterruptedCheckout, String> {
-    let status = crate::core::cmd::async_git_cmd()
+    let status = crate::core::lane_git::async_git(worktree)?
         .args(["status", "--porcelain", "--ignore-submodules=none"])
-        .current_dir(worktree)
         .output()
         .await
         .map_err(|error| format!("cannot run git status: {error}"))?;

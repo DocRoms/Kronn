@@ -38,11 +38,12 @@ pub enum WorkerCommitHooks {
     /// No hook runs. The DCO sign-off is added by Kronn itself.
     #[default]
     Off,
-    /// The hooks of the main checkout's common git directory
-    /// (`<git-common-dir>/hooks`), never a directory of the worktree.
-    MainCheckout,
-    /// The worktree's own `pre-commit` hook runs inside the lane's OS sandbox,
-    /// not as the host user. Refused when the host has no sandbox.
+    /// The repository's gating hook (`pre-commit`, `pre-merge-commit`) runs
+    /// inside the lane's OS sandbox, never as the host user. Refused when the
+    /// host has no sandbox. A stored `main_checkout` (the unconfined mode this
+    /// setting briefly had, which ran worker-reachable binaries as the host)
+    /// reads as this value: a configured hook runs confined or not at all.
+    #[serde(alias = "main_checkout")]
     Sandboxed,
 }
 
@@ -54,7 +55,6 @@ impl WorkerCommitHooks {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
-            Self::MainCheckout => "main_checkout",
             Self::Sandboxed => "sandboxed",
         }
     }

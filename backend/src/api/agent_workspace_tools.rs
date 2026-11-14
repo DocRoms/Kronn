@@ -434,9 +434,22 @@ pub fn resolve_in_workspace(root: &Path, requested: &str) -> Result<PathBuf, Ref
 pub fn resolve_writable_in_workspace(root: &Path, requested: &str) -> Result<PathBuf, Refusal> {
     let target = resolve_in_workspace(root, requested)?;
     let root_canonical = root.canonicalize().map_err(|_| Refusal::NoWorkspace)?;
-    let pointer = root_canonical.join(".git");
     let resolved = crate::core::task_worker_sandbox::real_path(&target);
-    if resolved.starts_with(&pointer) || target.starts_with(&pointer) {
+    // The pointer, and every nested repository's `.git` (a submodule's
+    // configuration is read by commands that look inside it). Compared without
+    // regard to case, explicitly: a case-insensitive volume names the same
+    // directory `.GIT`, and the resolved path of a not-yet-existing file is not
+    // normalised by the file system.
+    let names_a_git_entry = |path: &Path| {
+        path.strip_prefix(&root_canonical)
+            .unwrap_or(path)
+            .components()
+            .any(|component| {
+                matches!(component, Component::Normal(name)
+                    if name.to_string_lossy().eq_ignore_ascii_case(".git"))
+            })
+    };
+    if names_a_git_entry(&resolved) || names_a_git_entry(&target) {
         return Err(Refusal::ProtectedGitPointer(requested.to_string()));
     }
     Ok(target)

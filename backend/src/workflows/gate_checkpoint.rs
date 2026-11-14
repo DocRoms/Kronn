@@ -57,7 +57,26 @@ const GIT_ENV_OVERRIDES: &[&str] = &[
 /// this module — production and test alike — must go through this, never
 /// `sync_cmd("git")` directly.
 pub(crate) fn git_cmd(project_path: &Path) -> std::process::Command {
-    let mut cmd = crate::core::cmd::git_cmd();
+    // KT-1745: a workflow worktree is written by an agent, like a task lane. The
+    // checkpoint's `add -A` / `commit` run in Kronn's process, so they go through
+    // the one pinned, hook-less builder. A worktree whose repository pointer was
+    // redirected gets a git that opens no repository (the refusal is logged and
+    // its text is what git prints).
+    let mut cmd = match crate::core::lane_git::git(project_path) {
+        Ok(cmd) => cmd,
+        Err(refusal) => {
+            tracing::error!("{refusal}");
+            // lane-git-allow: refusal stub, a git pointed at a directory that is no repository.
+            let mut stub = crate::core::cmd::git_cmd();
+            let why: String = refusal
+                .chars()
+                .map(|c| if c.is_control() || c == '/' { ' ' } else { c })
+                .take(160)
+                .collect();
+            stub.arg(format!("--git-dir=/nonexistent/{why}"));
+            stub
+        }
+    };
     cmd.current_dir(project_path);
     for var in GIT_ENV_OVERRIDES {
         cmd.env_remove(var);

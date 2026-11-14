@@ -169,7 +169,8 @@ registered project checkout (never to the worktree's own `.git` file, which the
 worker could redirect), gives git no hook, file-system monitor or signing
 program (so no program a worker names can run), and refuses with `WorktreeTampered` when the pointer was
 changed; the worker cannot write that file in the first place. The project's
-`worker_commit_hooks` setting (`off` by default, `main_checkout`, `sandboxed`)
+`worker_commit_hooks` setting (`off` by default, or `sandboxed`; a hook never runs
+as the host user)
 decides which gating hook Kronn itself runs, and a refusing hook is reported as
 `HookRefused` with its output, not as a conflict; `commit-msg` checks other than
 the DCO sign-off Kronn adds are not run. See

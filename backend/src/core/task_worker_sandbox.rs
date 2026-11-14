@@ -216,6 +216,10 @@ pub struct SandboxPolicy {
     /// replace: the worktree's `.git` pointer (KT-1745). Whatever Kronn runs in
     /// that worktree afterwards trusts what the pointer names.
     pub read_only: Vec<PathBuf>,
+    /// Trees under which EVERY `.git` entry, at any depth, is read-only (KT-1745):
+    /// the nested repositories of a worktree (submodules) carry a configuration
+    /// Kronn's own git commands could read.
+    pub read_only_git_under: Vec<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -228,6 +232,7 @@ impl SandboxPolicy {
             docker_socket: None,
             hidden: Vec::new(),
             read_only: vec![lane.worktree.join(".git")],
+            read_only_git_under: vec![lane.worktree.clone()],
         }
     }
 
@@ -454,6 +459,7 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
                         &policy.hidden,
                     ),
                     &policy.read_only,
+                    &policy.read_only_git_under,
                 ),
             ],
         ),
@@ -462,6 +468,7 @@ pub fn confine(mechanism: Mechanism, policy: &SandboxPolicy, probe: &ProbeComman
             bubblewrap_args_read_only(
                 bubblewrap_args_hiding(&writable, policy.docker_socket.as_deref(), &policy.hidden),
                 &policy.read_only,
+                &policy.read_only_git_under,
             ),
         ),
     };
@@ -508,19 +515,67 @@ fn seatbelt_profile_hiding(
 }
 
 /// `profile` plus a write deny over each `read_only` file, last so it wins.
-pub(crate) fn seatbelt_profile_read_only(mut profile: String, read_only: &[PathBuf]) -> String {
-    if read_only.is_empty() {
-        return profile;
+pub(crate) fn seatbelt_profile_read_only(
+    mut profile: String,
+    read_only: &[PathBuf],
+    git_under: &[PathBuf],
+) -> String {
+    if !read_only.is_empty() {
+        profile.push_str("(deny file-write*\n");
+        for path in read_only {
+            profile.push_str(&format!(
+                "  (literal {})\n",
+                seatbelt_literal(&protected_path(path))
+            ));
+        }
+        profile.push_str(")\n");
     }
-    profile.push_str("(deny file-write*\n");
-    for path in read_only {
+    for root in git_under {
+        // `.git`, whatever its case (a case-insensitive volume), at any depth.
         profile.push_str(&format!(
-            "  (literal {})\n",
-            seatbelt_literal(&protected_path(path))
+            "(deny file-write* (regex #\"^{}/(.*/)?\\.[gG][iI][tT](/.*)?$\"))\n",
+            seatbelt_regex_escape(&real_path(root))
         ));
     }
-    profile.push_str(")\n");
     profile
+}
+
+/// `path` as the literal text of a Seatbelt regular expression.
+fn seatbelt_regex_escape(path: &Path) -> String {
+    let mut escaped = String::new();
+    for c in path.to_string_lossy().chars() {
+        if ".^$*+?()[]{}|\\\"".contains(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+/// The `.git` entries (directories or files) below `root`, a few levels deep and
+/// outside build output: the nested repositories of a worktree.
+pub(crate) fn nested_git_entries(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten().take(5_000) {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let path = entry.path();
+            if name.eq_ignore_ascii_case(".git") {
+                found.push(path);
+                continue;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir && depth > 0 && name != "node_modules" && name != "target" {
+                walk(&path, depth - 1, found);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(root, 5, &mut found);
+    found
 }
 
 /// `args` with each existing `read_only` file bound read-only over itself, before
@@ -529,15 +584,22 @@ pub(crate) fn seatbelt_profile_read_only(mut profile: String, read_only: &[PathB
 pub(crate) fn bubblewrap_args_read_only(
     mut args: Vec<String>,
     read_only: &[PathBuf],
+    git_under: &[PathBuf],
 ) -> Vec<String> {
     let at = args
         .iter()
         .position(|arg| arg == "--unshare-net")
         .unwrap_or(args.len());
     let mut binds = Vec::new();
-    for path in read_only {
-        let path = protected_path(path);
-        if path.is_file() {
+    // Every nested `.git` that exists when the sandbox starts (a bind cannot stop
+    // a new one from being created: Kronn's own checks cover that).
+    let nested: Vec<PathBuf> = git_under
+        .iter()
+        .flat_map(|root| nested_git_entries(&real_path(root)))
+        .collect();
+    for path in read_only.iter().cloned().chain(nested) {
+        let path = protected_path(&path);
+        if path.exists() {
             let text = path.to_string_lossy().into_owned();
             binds.extend(["--ro-bind".to_string(), text.clone(), text]);
         }

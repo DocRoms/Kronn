@@ -1259,20 +1259,25 @@ async fn execute_foreach(
         // everything. Deterministic, 0 token. An Interrupted parent run also
         // reconciles its persisted children below before continuing.
         if !item_id.is_empty() {
+            // KT-1745: the workspace is written by agents; Kronn's own git on it
+            // is the pinned, hook-less lane builder.
             let git_done = !quota_waiting_child
-                && crate::core::cmd::async_git_cmd()
-                    .args([
-                        "log",
-                        "--oneline",
-                        "--fixed-strings",
-                        "--grep",
-                        &format!("[{item_id}]"),
-                    ])
-                    .current_dir(&ws)
-                    .output()
-                    .await
-                    .map(|o| o.status.success() && !o.stdout.is_empty())
-                    .unwrap_or(false);
+                && match crate::core::lane_git::async_git(std::path::Path::new(&ws)) {
+                    Ok(mut log) => log
+                        .args([
+                            "log",
+                            "--oneline",
+                            "--no-ext-diff",
+                            "--fixed-strings",
+                            "--grep",
+                            &format!("[{item_id}]"),
+                        ])
+                        .output()
+                        .await
+                        .map(|o| o.status.success() && !o.stdout.is_empty())
+                        .unwrap_or(false),
+                    Err(_) => false,
+                };
             if git_done
                 || child_done_ids.contains(&item_id)
                 || legacy_child_done_indexes.contains(&idx)
@@ -1338,11 +1343,11 @@ async fn execute_foreach(
                         );
                         let mut add = vec!["add".to_string(), ".kronn/decisions.md".to_string()];
                         add.extend(files.iter().map(|(p, _)| p.clone()));
-                        let _ = crate::core::cmd::async_git_cmd()
-                            .args(add.iter().map(|s| s.as_str()))
-                            .current_dir(&ws)
-                            .output()
-                            .await;
+                        if let Ok(mut stage) =
+                            crate::core::lane_git::async_git(std::path::Path::new(&ws))
+                        {
+                            let _ = stage.args(add.iter().map(|s| s.as_str())).output().await;
+                        }
                         let subject =
                             format!("Kronn AutoPilot [{item_id}] — mechanical (engine-applied)");
                         let body = files
@@ -1350,22 +1355,27 @@ async fn execute_foreach(
                             .map(|(p, _)| p.as_str())
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let commit = crate::core::cmd::async_git_cmd()
-                            .args([
-                                "-c",
-                                "user.email=autopilot@kronn.local",
-                                "-c",
-                                "user.name=Kronn AutoPilot",
-                                "commit",
-                                "--no-verify",
-                                "-m",
-                                &subject,
-                                "-m",
-                                &body,
-                            ])
-                            .current_dir(&ws)
-                            .output()
-                            .await;
+                        let commit =
+                            match crate::core::lane_git::async_git(std::path::Path::new(&ws)) {
+                                Ok(mut commit) => {
+                                    commit
+                                        .args([
+                                            "-c",
+                                            "user.email=autopilot@kronn.local",
+                                            "-c",
+                                            "user.name=Kronn AutoPilot",
+                                            "commit",
+                                            "--no-verify",
+                                            "-m",
+                                            &subject,
+                                            "-m",
+                                            &body,
+                                        ])
+                                        .output()
+                                        .await
+                                }
+                                Err(refusal) => Err(std::io::Error::other(refusal)),
+                            };
                         let committed = commit.map(|o| o.status.success()).unwrap_or(false);
                         if committed {
                             tracing::info!(target: "kronn::sub_workflow", item_id=%item_id, files=files.len(), "mechanical item engine-applied (0 tokens)");

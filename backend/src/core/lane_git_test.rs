@@ -321,11 +321,7 @@ mod unix {
         fs::write(world.worktree.join("d.md"), "d").unwrap();
 
         // The commit and the staging of `task_exec_commit` / `git_commit`.
-        for policy in [
-            WorkerCommitHooks::Off,
-            WorkerCommitHooks::MainCheckout,
-            WorkerCommitHooks::Sandboxed,
-        ] {
+        for policy in [WorkerCommitHooks::Off, WorkerCommitHooks::Sandboxed] {
             let error = run_git_commit_for_worker(
                 &world.worktree,
                 &["b.txt".to_string(), "d.md".to_string()],
@@ -395,10 +391,8 @@ mod unix {
         );
         fs::write(world.worktree.join("b.txt"), "b").unwrap();
 
-        for policy in [
-            WorkerCommitHooks::MainCheckout,
-            WorkerCommitHooks::Sandboxed,
-        ] {
+        {
+            let policy = WorkerCommitHooks::Sandboxed;
             let error = run_git_commit_for_worker(
                 &world.worktree,
                 &["b.txt".to_string()],
@@ -410,42 +404,41 @@ mod unix {
             )
             .unwrap_err();
             assert!(is_tamper(&error), "{policy:?}: {error}");
-            let refusal = crate::core::commit_hooks::run_gating_hook(
-                &world.worktree,
-                policy,
-                "pre-commit",
-                None,
-            )
-            .unwrap_err();
+            let refusal =
+                crate::core::commit_hooks::run_gating_hook(&world.worktree, policy, "pre-commit")
+                    .unwrap_err();
             assert!(is_tamper(&refusal.output), "{policy:?}: {refusal}");
         }
         world.assert_no_marker();
     }
 
     #[test]
-    fn the_main_checkout_hook_comes_from_the_registered_repo_even_when_the_pointer_lies() {
-        // Not tampered: the registered checkout's own hook runs, the worktree's
-        // and the lane target's never do.
+    fn the_owners_own_hook_never_runs_as_the_host_user() {
+        // The unconfined `main_checkout` mode is gone: a real hook executes
+        // worktree content (`PATH=node_modules/.bin:$PATH`, lint-staged, make).
+        // Under the only policy that runs a hook, it runs confined: it cannot
+        // write outside the lane, and where there is no sandbox it is not run.
         let world = World::new();
         script(
             &world.main.path().join(".git/hooks/pre-commit"),
             &world.touch("OWNER"),
         );
-        let lane_target = world.root().join("target/wt-kt-1745-poc/hooks");
-        script(&lane_target.join("pre-commit"), &world.touch("LANE_TARGET"));
+        script(
+            &world.worktree.join("node_modules/.bin/lint-staged"),
+            &world.touch("WORKTREE_BINARY"),
+        );
         fs::write(world.worktree.join("b.txt"), "b").unwrap();
-        run_git_commit_for_worker(
+        let _ = run_git_commit_for_worker(
             &world.worktree,
             &["b.txt".to_string()],
             "owner hook",
             false,
             false,
             None,
-            WorkerCommitHooks::MainCheckout,
-        )
-        .unwrap();
-        assert!(world.marker("OWNER").exists());
-        assert!(!world.marker("LANE_TARGET").exists());
+            WorkerCommitHooks::Sandboxed,
+        );
+        assert!(!world.marker("OWNER").exists());
+        assert!(!world.marker("WORKTREE_BINARY").exists());
     }
 
     #[test]
@@ -553,5 +546,219 @@ mod unix {
                 .is_ok()
         );
         assert!(crate::api::agent_workspace_tools::resolve_in_workspace(root, ".git").is_ok());
+    }
+
+    #[test]
+    fn a_nested_git_entry_is_refused_to_the_http_file_tools_whatever_its_case() {
+        let world = World::new();
+        let root = world.worktree.as_path();
+        fs::create_dir_all(root.join("lib/.git")).unwrap();
+        for requested in [
+            "lib/.git/config",
+            "lib/.GIT/config",
+            "lib/.Git",
+            "./lib/.git/hooks/x",
+            ".GIT",
+            ".GiT/config",
+        ] {
+            assert!(
+                crate::api::agent_workspace_tools::resolve_writable_in_workspace(root, requested)
+                    .is_err(),
+                "{requested} must be refused"
+            );
+        }
+        assert!(
+            crate::api::agent_workspace_tools::resolve_writable_in_workspace(root, "lib/gitx.txt")
+                .is_ok()
+        );
+    }
+
+    /// A lane with a submodule: a gitlink in the index, the submodule's own
+    /// repository (a full `.git` directory, as Kronn clones them) in the tree.
+    fn world_with_submodule() -> World {
+        let world = World::new();
+        let sub = world.root().join("upstream-lib");
+        git(
+            world.root().as_path(),
+            &["init", "-q", "-b", "main", sub.to_str().unwrap()],
+        );
+        git(&sub, &["config", "user.email", "t@t.test"]);
+        git(&sub, &["config", "user.name", "T"]);
+        fs::write(sub.join("code.txt"), "x").unwrap();
+        git(&sub, &["add", "."]);
+        git(&sub, &["commit", "-q", "-m", "lib"]);
+        let sha = git(&sub, &["rev-parse", "HEAD"]);
+        let target = world.worktree.join("lib");
+        git(
+            &world.worktree,
+            &["clone", "-q", "--no-local", sub.to_str().unwrap(), "lib"],
+        );
+        assert!(target.join(".git").is_dir());
+        git(
+            &world.worktree,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{sha},lib"),
+            ],
+        );
+        world
+    }
+
+    #[test]
+    fn a_submodule_config_the_worker_wrote_is_refused_and_no_filter_runs() {
+        let world = world_with_submodule();
+        // Control: a submodule as Kronn clones it is accepted.
+        assert!(LaneGit::resolve(&world.worktree).is_ok());
+
+        // The worker appends a clean filter to the submodule's own config and
+        // names it in the submodule's attributes, then touches a file.
+        let config = world.worktree.join("lib/.git/config");
+        let mut text = fs::read_to_string(&config).unwrap();
+        text.push_str(&format!(
+            "[filter \"w\"]\n\tclean = {}; cat\n\trequired = false\n",
+            world.touch("SUBMODULE_FILTER")
+        ));
+        fs::write(&config, text).unwrap();
+        fs::write(world.worktree.join("lib/.gitattributes"), "* filter=w\n").unwrap();
+        fs::write(world.worktree.join("lib/code.txt"), "changed").unwrap();
+
+        let refused = |result: Result<std::process::Command, String>| {
+            let error = result.expect_err("the submodule's configuration is not trusted");
+            assert!(error.starts_with(NESTED_PREFIX), "{error}");
+            assert!(error.contains("filter.w.clean"), "{error}");
+        };
+        refused(git_in_lane(&world.worktree));
+        // Every command a Kronn path builds is refused before it starts.
+        for args in [
+            vec!["status", "--porcelain=v1"],
+            vec!["diff", "HEAD"],
+            vec!["add", "-A"],
+            vec!["commit", "-a", "-m", "x"],
+            vec!["diff-index", "HEAD"],
+        ] {
+            let result = crate::core::lane_git::git(&world.worktree).map(|mut command| {
+                command.args(&args);
+                command
+            });
+            refused(result);
+        }
+        world.assert_no_marker();
+    }
+
+    fn git_in_lane(work_dir: &Path) -> Result<std::process::Command, String> {
+        crate::core::lane_git::git(work_dir)
+    }
+
+    #[test]
+    fn a_submodule_gitfile_pointing_inside_the_worktree_is_refused() {
+        let world = world_with_submodule();
+        let evil = world.worktree.join("evil-modules");
+        fs::create_dir_all(&evil).unwrap();
+        fs::remove_dir_all(world.worktree.join("lib/.git")).unwrap();
+        fs::write(
+            world.worktree.join("lib/.git"),
+            format!("gitdir: {}\n", evil.display()),
+        )
+        .unwrap();
+        let error = crate::core::lane_git::git(&world.worktree).unwrap_err();
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+    }
+
+    #[test]
+    fn a_new_embedded_repository_is_never_staged_for_the_worker() {
+        let world = World::new();
+        let nested = world.worktree.join("vendor/tool");
+        fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q"]);
+        fs::write(nested.join("a.txt"), "a").unwrap();
+        let error = run_git_commit_for_worker(
+            &world.worktree,
+            &["vendor".to_string()],
+            "embed",
+            false,
+            false,
+            None,
+            WorkerCommitHooks::Off,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("EmbeddedRepository"), "{error}");
+        assert_eq!(git(&world.worktree, &["ls-files", "vendor"]), "");
+    }
+
+    #[test]
+    fn a_relative_program_in_the_registered_config_is_turned_off() {
+        // `filter.rel.clean = sh tools/clean.sh` is the owner's configuration,
+        // but the path resolves in the worktree: whatever the worker wrote there
+        // would run as the host user.
+        let world = World::new();
+        git(
+            &world.root(),
+            &["config", "filter.rel.clean", "sh tools/clean.sh"],
+        );
+        git(
+            &world.root(),
+            &["config", "merge.rel.driver", "sh tools/merge.sh %A"],
+        );
+        git(
+            &world.root(),
+            &["config", "filter.abs.clean", "/usr/bin/true"],
+        );
+        script(
+            &world.worktree.join("tools/clean.sh"),
+            &format!("{}; cat", world.touch("RELFILTER")),
+        );
+        fs::write(world.worktree.join(".gitattributes"), "*.txt filter=rel\n").unwrap();
+        fs::write(world.worktree.join("b.txt"), "b").unwrap();
+
+        let command = crate::core::lane_git::git(&world.worktree).unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"filter.rel.clean=".to_string()), "{args:?}");
+        assert!(
+            args.contains(&"filter.rel.required=false".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            args.contains(&"merge.rel.driver=false".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("filter.abs.")),
+            "an absolute program is the owner's own: {args:?}"
+        );
+
+        let mut add = crate::core::lane_git::git(&world.worktree).unwrap();
+        let output = add.args(["add", "-A"]).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn a_program_that_names_no_worktree_file_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        for value in ["git-lfs clean -- %f", "/usr/bin/cat", "cat", "tr a-z A-Z"] {
+            assert!(!names_worktree_content(value, dir.path()), "{value}");
+        }
+        fs::write(dir.path().join("clean.sh"), "").unwrap();
+        for value in ["sh clean.sh", "./clean.sh", "sh tools/x.sh", "tools/clean"] {
+            assert!(names_worktree_content(value, dir.path()), "{value}");
+        }
+    }
+
+    #[test]
+    fn the_seatbelt_profile_denies_every_git_entry_of_the_worktree() {
+        let world = World::new();
+        let profile = crate::core::task_worker_sandbox::seatbelt_profile_read_only(
+            String::new(),
+            &[world.worktree.join(".git")],
+            std::slice::from_ref(&world.worktree),
+        );
+        assert!(profile.contains("(literal "), "{profile}");
+        assert!(profile.contains("[gG][iI][tT]"), "{profile}");
+        assert!(profile.contains("deny file-write*"), "{profile}");
     }
 }

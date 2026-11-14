@@ -1837,9 +1837,8 @@ pub fn release_review_worktree(
 
 /// Why removing the review checkout at `path` would lose something, if it would.
 fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String> {
-    let on_branch = crate::core::cmd::git_cmd()
+    let on_branch = crate::core::lane_git::git(path)?
         .args(["symbolic-ref", "-q", "HEAD"])
-        .current_dir(path)
         .output()
         .map_err(|e| format!("git symbolic-ref failed: {e}"))?
         .status
@@ -1850,9 +1849,8 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
 
     // `--glob=refs/*`, not `--all`: `--all` also counts this worktree's own
     // HEAD, which would make every commit it holds look reachable.
-    let unreachable = crate::core::cmd::git_cmd()
+    let unreachable = crate::core::lane_git::git(path)?
         .args(["rev-list", "-n", "1", "HEAD", "--not", "--glob=refs/*"])
-        .current_dir(path)
         .output()
         .map_err(|e| format!("git rev-list failed: {e}"))?;
     if !unreachable.status.success() {
@@ -1870,9 +1868,8 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
         ));
     }
 
-    let status = crate::core::cmd::git_cmd()
+    let status = crate::core::lane_git::git(path)?
         .args(["status", "--porcelain=v1", "--untracked-files=all"])
-        .current_dir(path)
         .output()
         .map_err(|e| format!("git status failed: {e}"))?;
     if !status.status.success() {
@@ -2612,7 +2609,7 @@ pub fn build_candidate_with_hooks(
     }
     // Repositories that enforce DCO reject an unsigned merge commit.
     if let Err(refusal) =
-        crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-merge-commit", None)
+        crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-merge-commit")
     {
         abort_merge(worktree_path);
         return Ok(CandidateBuild::of(CandidateOutcome::HookRefused {
@@ -2723,7 +2720,7 @@ fn settle_branch_docs(
     let settled = docs.as_ref().and_then(|docs| docs.settlement());
     if let Some(note) = docs.as_ref().and_then(|docs| docs.summary()) {
         if let Err(refusal) =
-            crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-commit", None)
+            crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-commit")
         {
             if let Some(docs) = &docs {
                 if let Err(error) = merge::undo_staged(worktree_path, docs) {
@@ -3681,10 +3678,9 @@ pub const RELEASED_WORKTREE_STAGED_PATCH: &str = "staged-changes.patch";
 pub const RELEASED_WORKTREE_PATCH_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
 fn run_git_in_index(wt: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(wt)?
         .args(args)
         .env("GIT_INDEX_FILE", index)
-        .current_dir(wt)
         .output()
         .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
     if !output.status.success() {
@@ -3701,7 +3697,7 @@ fn run_git_in_index(wt: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>, S
 /// files of `wt` is known to exceed `cap`. Measured from file sizes before
 /// anything is staged, so an oversized tree is refused without copying a byte.
 fn uncommitted_content_over(wt: &Path, cap: u64) -> Result<Option<u64>, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(wt)?
         .args([
             "ls-files",
             "-z",
@@ -3709,7 +3705,6 @@ fn uncommitted_content_over(wt: &Path, cap: u64) -> Result<Option<u64>, String> 
             "--others",
             "--exclude-standard",
         ])
-        .current_dir(wt)
         .output()
         .map_err(|e| format!("git ls-files failed: {e}"))?;
     if !output.status.success() {
@@ -3750,9 +3745,8 @@ fn write_capped_git_patch(
     cap: u64,
 ) -> Result<Option<u64>, String> {
     use std::io::Read;
-    let mut child = crate::core::cmd::git_cmd()
+    let mut child = crate::core::lane_git::git(wt)?
         .args(args)
-        .current_dir(wt)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -3798,9 +3792,8 @@ fn write_capped_git_patch(
 
 /// The real index of `wt`, as a path.
 fn worktree_index_path(wt: &Path) -> Result<PathBuf, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(wt)?
         .args(["rev-parse", "--git-path", "index"])
-        .current_dir(wt)
         .output()
         .map_err(|e| format!("git rev-parse failed: {e}"))?;
     if !output.status.success() {
@@ -3857,6 +3850,7 @@ fn write_uncommitted_patches(
             "diff".to_string(),
             "--binary".to_string(),
             "--no-ext-diff".to_string(),
+            "--no-textconv".to_string(),
             from.to_string(),
             to.to_string(),
         ]

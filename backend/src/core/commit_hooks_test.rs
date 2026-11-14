@@ -171,34 +171,6 @@ mod unix {
     }
 
     #[test]
-    fn main_checkout_hooks_run_from_the_registered_checkout_and_a_worktree_hook_does_not() {
-        let lane = Lane::new();
-        // The repository's configuration is shared: `core.hooksPath = .husky`
-        // resolves against the main checkout for the owner's own hook, and
-        // against the worktree for the worker's.
-        lane.husky("pre-commit", &lane.touch_marker("worktree"));
-        write_hook(
-            &lane.main.path().join(".husky/pre-commit"),
-            &lane.touch_marker("main"),
-        );
-        let files = lane.add_file("a.txt");
-
-        run_git_commit_for_worker(
-            &lane.worktree,
-            &files,
-            "main hooks",
-            false,
-            false,
-            None,
-            WorkerCommitHooks::MainCheckout,
-        )
-        .unwrap();
-
-        assert!(lane.marker("main").exists(), "the owner's hook ran");
-        assert!(!lane.marker("worktree").exists());
-    }
-
-    #[test]
     fn a_failing_hook_is_hook_refused_with_its_output_and_commits_nothing() {
         let lane = Lane::new();
         write_hook(
@@ -215,14 +187,19 @@ mod unix {
             false,
             false,
             None,
-            WorkerCommitHooks::MainCheckout,
+            WorkerCommitHooks::Sandboxed,
         )
         .unwrap_err();
 
         assert!(error.starts_with(HOOK_REFUSED_PREFIX), "{error}");
         assert!(error.contains("pre-commit"), "{error}");
-        assert!(error.contains("lint: 3 errors"), "{error}");
-        assert!(error.contains("second line"), "{error}");
+        // Confined, the hook's own output travels; on a host with no usable
+        // sandbox (or inside another one) the refusal says it was not run.
+        assert!(
+            (error.contains("lint: 3 errors") && error.contains("second line"))
+                || error.contains("not run:"),
+            "{error}"
+        );
         assert_eq!(git(&lane.worktree, &["rev-parse", "HEAD"]), before);
     }
 
@@ -344,42 +321,23 @@ mod unix {
         let parent_tip = git(lane.main.path(), &["rev-parse", "HEAD"]);
         let before = git(&lane.worktree, &["rev-parse", "HEAD"]);
 
-        let build = build_candidate_with_hooks(
-            &lane.worktree,
-            &parent_tip,
-            WorkerCommitHooks::MainCheckout,
-        )
-        .unwrap();
+        let build =
+            build_candidate_with_hooks(&lane.worktree, &parent_tip, WorkerCommitHooks::Sandboxed)
+                .unwrap();
 
         let CandidateOutcome::HookRefused { hook, output } = build.outcome else {
             panic!("expected HookRefused, got {:?}", build.outcome);
         };
         assert_eq!(hook, "pre-merge-commit");
-        assert!(output.contains("merge gate: tests missing"), "{output}");
+        assert!(
+            output.contains("merge gate: tests missing") || output.contains("not run:"),
+            "{output}"
+        );
         assert_eq!(git(&lane.worktree, &["rev-parse", "HEAD"]), before);
         assert!(
             !crate::core::docs_citations::merge::merge_in_progress(&lane.worktree),
             "the refused merge was undone"
         );
-    }
-
-    #[test]
-    fn a_plain_checkout_runs_no_main_checkout_hook_of_its_own_tree() {
-        // A plain checkout is its own main checkout: its `.git/hooks` is under
-        // the tree, so nothing is trusted there either.
-        let lane = Lane::new();
-        write_hook(
-            &lane.main.path().join(".git/hooks/pre-commit"),
-            &lane.touch_marker("plain"),
-        );
-        let result = run_gating_hook(
-            lane.main.path(),
-            WorkerCommitHooks::MainCheckout,
-            "pre-commit",
-            None,
-        );
-        assert!(result.is_ok());
-        assert!(!lane.marker("plain").exists());
     }
 }
 
@@ -388,7 +346,6 @@ fn the_policy_defaults_to_off_and_round_trips_as_snake_case() {
     assert_eq!(WorkerCommitHooks::default(), WorkerCommitHooks::Off);
     for (policy, text) in [
         (WorkerCommitHooks::Off, "\"off\""),
-        (WorkerCommitHooks::MainCheckout, "\"main_checkout\""),
         (WorkerCommitHooks::Sandboxed, "\"sandboxed\""),
     ] {
         assert_eq!(serde_json::to_string(&policy).unwrap(), text);
@@ -397,6 +354,12 @@ fn the_policy_defaults_to_off_and_round_trips_as_snake_case() {
             policy
         );
     }
+    // The unconfined `main_checkout` mode is gone: a stored one reads as the
+    // confined policy, never as a hook run as the host user.
+    assert_eq!(
+        serde_json::from_str::<WorkerCommitHooks>("\"main_checkout\"").unwrap(),
+        WorkerCommitHooks::Sandboxed
+    );
     let workspace: crate::models::ProjectWorkspace = serde_json::from_str("{}").unwrap();
     assert_eq!(workspace.worker_commit_hooks, WorkerCommitHooks::Off);
 }
@@ -407,46 +370,4 @@ fn first_lines_bounds_what_travels_with_a_refusal() {
     assert_eq!(first_lines(&long).lines().count(), REFUSAL_LINES);
     assert!(first_lines(&"x".repeat(10_000)).chars().count() <= REFUSAL_CHARS + 1);
     assert_eq!(first_lines("\n\n"), "");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_hook_that_never_ends_is_stopped_after_its_time_limit_on_the_host_too() {
-    let dir = tempfile::tempdir().unwrap();
-    let hook = dir.path().join("pre-commit");
-    unix_hook(&hook, "echo started >&2; exec sleep 30");
-    let mut command = std::process::Command::new(&hook);
-    command
-        .current_dir(dir.path())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let started = std::time::Instant::now();
-    let error = run_bounded(command, &hook, Duration::from_millis(300)).unwrap_err();
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        started.elapsed()
-    );
-    assert!(error.contains("did not finish"), "{error}");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_hook_that_fails_reports_its_output_through_the_bounded_runner() {
-    let dir = tempfile::tempdir().unwrap();
-    let hook = dir.path().join("pre-commit");
-    unix_hook(&hook, "echo 'lint failed' >&2; exit 3");
-    let mut command = std::process::Command::new(&hook);
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let error = run_bounded(command, &hook, Duration::from_secs(30)).unwrap_err();
-    assert!(error.contains("lint failed"), "{error}");
-}
-
-#[cfg(unix)]
-fn unix_hook(path: &Path, body: &str) {
-    write_hook(path, body);
 }

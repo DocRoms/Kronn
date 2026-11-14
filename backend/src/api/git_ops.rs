@@ -1118,6 +1118,9 @@ fn stage_explicit_paths(
         let file_abs = repo_path.join(clean_file);
 
         if file_abs.exists() {
+            if worker {
+                refuse_new_embedded_repository(repo_path, clean_file, &file_abs)?;
+            }
             let add_output = git_in(repo_path, worker)?
                 .args(["add", "--", clean_file])
                 .output()
@@ -1141,6 +1144,60 @@ fn stage_explicit_paths(
         }
     }
     Ok(added)
+}
+
+/// The first nested git repository at or under `path` (a `.git` entry), looking a
+/// few levels down and skipping build output.
+fn embedded_repository(path: &Path, depth: usize) -> Option<std::path::PathBuf> {
+    if path.join(".git").exists() {
+        return Some(path.to_path_buf());
+    }
+    if depth == 0 || !path.is_dir() {
+        return None;
+    }
+    let entries = std::fs::read_dir(path).ok()?;
+    for entry in entries.flatten().take(5_000) {
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some("node_modules" | "target" | ".git")) {
+            continue;
+        }
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if let Some(found) = embedded_repository(&entry.path(), depth - 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// A repository a worker created inside its worktree is never staged by Kronn: it
+/// would become a gitlink whose own configuration (the worker wrote it) Kronn's
+/// later `git add -A` / `commit -a` would read. A gitlink the index already holds
+/// (a real submodule) is fine.
+fn refuse_new_embedded_repository(
+    repo_path: &Path,
+    clean_file: &str,
+    file_abs: &Path,
+) -> Result<(), String> {
+    let Some(nested) = embedded_repository(file_abs, 4) else {
+        return Ok(());
+    };
+    let relative = nested.strip_prefix(repo_path).unwrap_or(&nested);
+    let known = git_in(repo_path, true)?
+        .args(["ls-files", "--stage", "--"])
+        .arg(relative)
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).starts_with("160000 "))
+        .unwrap_or(false);
+    if known {
+        return Ok(());
+    }
+    Err(format!(
+        "EmbeddedRepository: `{clean_file}` contains a git repository the task created at `{}`; \
+         Kronn does not stage a new embedded repository (its configuration is worker-written). \
+         Remove its `.git` or leave it out of the commit.",
+        relative.display()
+    ))
 }
 
 /// `git` in `repo_path`: for a commit Kronn makes for a worker (`worker`), the
@@ -1194,7 +1251,7 @@ fn run_commit_command(
     hooks: Option<(crate::models::WorkerCommitHooks, &str)>,
 ) -> Result<String, String> {
     if let Some((policy, gate)) = hooks {
-        crate::core::commit_hooks::run_gating_hook(repo_path, policy, gate, data_dir_lock)
+        crate::core::commit_hooks::run_gating_hook(repo_path, policy, gate)
             .map_err(|refusal| refusal.to_string())?;
     }
     // Only `git commit` executes hooks. Keep the inherited descriptor alive

@@ -24,9 +24,10 @@ fn production(text: &str) -> &str {
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
         let is_test_cfg = line.starts_with("#[cfg(") && line.contains("test");
-        let next_is_mod = lines
-            .peek()
-            .is_some_and(|next| next.starts_with("mod ") || next.starts_with("pub mod "));
+        // `#[cfg(test)]` then `mod`, with a `#[path = ".."]` line allowed between.
+        let next_is_mod = lines.peek().is_some_and(|next| {
+            next.starts_with("mod ") || next.starts_with("pub mod ") || next.starts_with("#[path")
+        });
         if is_test_cfg && next_is_mod {
             return &text[..offset];
         }
@@ -61,6 +62,16 @@ fn function<'a>(text: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
+/// What starts a git process that is not the lane builder.
+const SPAWNS: [&str; 6] = [
+    "git_cmd()",
+    "async_git_cmd()",
+    "project_git_cmd()",
+    "Command::new(\"git\")",
+    "sync_cmd(\"git\"",
+    "async_cmd(\"git\"",
+];
+
 /// The lines of `text` that start a plain git command without saying why.
 fn plain_git(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
@@ -70,10 +81,8 @@ fn plain_git(text: &str) -> Vec<String> {
         if code.starts_with("//") {
             continue;
         }
-        let spawns = ["git_cmd()", "async_git_cmd()", "project_git_cmd()"]
-            .iter()
-            .any(|spawn| code.contains(spawn));
-        if !spawns {
+        let spawns = SPAWNS.iter().any(|spawn| code.contains(spawn));
+        if !spawns || code.starts_with("pub fn ") || code.starts_with("fn ") {
             continue;
         }
         let allowed = line.contains("lane-git-allow:")
@@ -121,6 +130,12 @@ fn the_functions_that_run_git_on_a_worktree_never_use_a_plain_git_command() {
                 "git_head",
                 "verify_worktree_head",
                 "worktree_dirty_files",
+                "run_git_in_index",
+                "uncommitted_content_over",
+                "write_capped_git_patch",
+                "worktree_index_path",
+                "review_worktree_holds_something",
+                "write_uncommitted_patches",
                 "committed_file_changes",
                 "file_at_revision",
                 "committer_identity",
@@ -155,6 +170,113 @@ fn the_functions_that_run_git_on_a_worktree_never_use_a_plain_git_command() {
             );
         }
     }
+}
+
+/// Every production `.rs` file under `src`, by path relative to it.
+fn production_files() -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, found: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "tests" {
+                    walk(&path, root, found);
+                }
+            } else if name.ends_with(".rs")
+                && !name.ends_with("_test.rs")
+                && !name.ends_with("_tests.rs")
+                && name != "tests.rs"
+            {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                found.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = Vec::new();
+    walk(&root, &root, &mut found);
+    found.sort();
+    found
+}
+
+/// Files with plain git commands that do not run on a worker's worktree, and how
+/// many each may keep. A file that is not listed keeps none; a listed file may
+/// not gain one. Each entry claims that its commands run in the REGISTERED
+/// project checkout, the owner's own checkout, a repository Kronn creates or a
+/// throw-away one, never in a directory a worker writes. A command that does run
+/// in a worker's worktree goes through `lane_git`, or says why with
+/// `lane-git-allow:` on its line.
+const PLAIN_GIT_ALLOWED: &[(&str, usize)] = &[
+    ("agents/read_only_repos.rs", 3),
+    ("agents/runner.rs", 4),
+    ("api/ai_docs.rs", 1),
+    ("api/audit/step_remit.rs", 1),
+    ("api/disc_git.rs", 1),
+    ("api/disc_workspace.rs", 1),
+    ("api/git_ops.rs", 21),
+    ("api/orchestration.rs", 9),
+    ("api/projects/bootstrap.rs", 1),
+    ("api/projects/clone.rs", 3),
+    ("api/projects/crud.rs", 2),
+    ("api/projects/git.rs", 2),
+    ("api/projects/template_merge.rs", 1),
+    ("api/projects/used_skills.rs", 1),
+    ("core/anti_halluc.rs", 2),
+    ("core/audit_baseline.rs", 1),
+    ("core/audit_detectors.rs", 1),
+    ("core/audit_run_state.rs", 1),
+    ("core/briefing_docs.rs", 1),
+    ("core/checksums.rs", 2),
+    ("core/commit_facts.rs", 1),
+    ("core/doc_relevance.rs", 2),
+    ("core/docs_migration.rs", 3),
+    ("core/kronn_state.rs", 1),
+    ("core/native_files.rs", 1),
+    ("core/repo_facts.rs", 1),
+    ("core/repository_resources.rs", 4),
+    ("core/scanner.rs", 2),
+    ("core/task_worker_lane_seeds.rs", 1),
+    ("core/upstream_mirror.rs", 5),
+    ("core/worktree.rs", 53),
+    ("workflows/batch_step.rs", 1),
+    ("workflows/workspace.rs", 8),
+];
+
+#[test]
+fn every_production_git_command_is_the_lane_builder_or_explained() {
+    let mut surprises = Vec::new();
+    let mut seen = Vec::new();
+    for file in production_files() {
+        if file == "core/cmd.rs" {
+            continue; // defines the plain builders
+        }
+        let text = source(&file);
+        let count = plain_git(production(&text)).len();
+        if count == 0 {
+            continue;
+        }
+        seen.push(format!("    (\"{file}\", {count}),"));
+        let allowed = PLAIN_GIT_ALLOWED
+            .iter()
+            .find(|(name, _)| *name == file)
+            .map_or(0, |(_, allowed)| *allowed);
+        if count > allowed {
+            surprises.push(format!(
+                "{file}: {count} plain git command(s), {allowed} allowed"
+            ));
+        }
+    }
+    assert!(
+        surprises.is_empty(),
+        "a plain git command was added where none was expected. If it runs in a worker's \
+         worktree, build it with crate::core::lane_git::git; if it runs in the registered or \
+         the owner's checkout, say so with `// lane-git-allow: <why>` on its line.\n\
+         {surprises:#?}\ncurrent counts:\n{}",
+        seen.join("\n")
+    );
 }
 
 #[test]
