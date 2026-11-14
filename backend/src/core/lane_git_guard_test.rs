@@ -214,9 +214,6 @@ const PLAIN_GIT_ALLOWED: &[(&str, usize)] = &[
     ("agents/runner.rs", 4),
     ("api/ai_docs.rs", 1),
     ("api/audit/step_remit.rs", 1),
-    ("api/disc_git.rs", 1),
-    ("api/disc_workspace.rs", 1),
-    ("api/git_ops.rs", 21),
     ("api/orchestration.rs", 9),
     ("api/projects/bootstrap.rs", 1),
     ("api/projects/clone.rs", 3),
@@ -240,7 +237,7 @@ const PLAIN_GIT_ALLOWED: &[(&str, usize)] = &[
     ("core/scanner.rs", 2),
     ("core/task_worker_lane_seeds.rs", 1),
     ("core/upstream_mirror.rs", 5),
-    ("core/worktree.rs", 53),
+    ("core/worktree.rs", 48),
     ("workflows/batch_step.rs", 1),
     ("workflows/workspace.rs", 8),
 ];
@@ -255,15 +252,17 @@ fn every_production_git_command_is_the_lane_builder_or_explained() {
         }
         let text = source(&file);
         let count = plain_git(production(&text)).len();
-        if count == 0 {
-            continue;
-        }
-        seen.push(format!("    (\"{file}\", {count}),"));
         let allowed = PLAIN_GIT_ALLOWED
             .iter()
             .find(|(name, _)| *name == file)
             .map_or(0, |(_, allowed)| *allowed);
-        if count > allowed {
+        if count == 0 && allowed == 0 {
+            continue;
+        }
+        seen.push(format!("    (\"{file}\", {count}),"));
+        // A ratchet: a command that left (moved to the lane builder) lowers the
+        // allowance, so a later plain one cannot hide in the slack.
+        if count != allowed {
             surprises.push(format!(
                 "{file}: {count} plain git command(s), {allowed} allowed"
             ));

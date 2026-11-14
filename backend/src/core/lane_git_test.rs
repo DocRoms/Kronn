@@ -750,6 +750,85 @@ mod unix {
     }
 
     #[test]
+    fn a_directory_inside_the_worktree_is_pinned_like_the_worktree() {
+        let world = World::new();
+        let sub = world.worktree.join("pkg/deep");
+        fs::create_dir_all(&sub).unwrap();
+        let lane = LaneGit::resolve(&sub).unwrap();
+        assert!(lane.is_pinned());
+        assert_eq!(lane.work_dir(), world.worktree.canonicalize().unwrap());
+        // Redirecting the pointer is caught from the subdirectory too.
+        let evil = world.worktree.join("evil-repo");
+        world.redirect_pointer_to(&evil);
+        assert!(is_tamper(&LaneGit::resolve(&sub).unwrap_err()));
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn the_read_helpers_run_nothing_in_a_redirected_worktree() {
+        let world = World::new();
+        let evil = world.worktree.join("evil-repo");
+        world.redirect_pointer_to(&evil);
+        fs::write(world.worktree.join("b.txt"), "b").unwrap();
+        // `git_or_refuse` is what the status / diff / blame / commit-patch helpers,
+        // `disc_pr_template` and `disc_workspace::git_value` build on.
+        let refused = git_or_refuse(&world.worktree)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success());
+        let _ = crate::api::git_ops::run_git_status(&world.worktree); // tolerant: may answer "nothing", but runs nothing
+                                                                      // Some of these answer "nothing" instead of an error; what matters is that
+                                                                      // no program the redirected repository names ran.
+        let _ = crate::api::git_ops::run_git_diff(&world.worktree, "b.txt");
+        let _ = crate::api::git_ops::run_git_blame(&world.worktree, "README.md");
+        let _ = crate::api::git_ops::run_git_commit_patch(&world.worktree, "HEAD");
+        assert!(git_keeping_owner_hooks(&world.worktree).is_err());
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn the_local_exclude_of_a_redirected_worktree_is_refused_and_a_symlinked_info_dir_too() {
+        let world = World::new();
+        // Healthy: written once, into the registered repository.
+        crate::core::worktree::ensure_local_git_exclude(&world.worktree, "/.kronn-poc-*").unwrap();
+        let exclude = fs::read_to_string(world.root().join(".git/info/exclude")).unwrap();
+        assert!(exclude.contains("/.kronn-poc-*"), "{exclude}");
+        // A symlinked `info` directory is not followed.
+        let info = world.root().join(".git/info");
+        let elsewhere = world.markers.path().join("elsewhere");
+        fs::rename(&info, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &info).unwrap();
+        let error =
+            crate::core::worktree::ensure_local_git_exclude(&world.worktree, "/.kronn-other-*")
+                .unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+        assert!(!fs::read_to_string(elsewhere.join("exclude"))
+            .unwrap()
+            .contains("kronn-other"));
+        fs::remove_file(&info).unwrap();
+        fs::rename(&elsewhere, &info).unwrap();
+        // A redirected pointer refuses the whole operation.
+        let evil = world.worktree.join("evil-repo");
+        world.redirect_pointer_to(&evil);
+        let error =
+            crate::core::worktree::ensure_local_git_exclude(&world.worktree, "/.kronn-third-*")
+                .unwrap_err();
+        assert!(is_tamper(&error), "{error}");
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn a_fast_forward_into_a_redirected_target_worktree_runs_nothing() {
+        let world = World::new();
+        let evil = world.worktree.join("evil-repo");
+        world.redirect_pointer_to(&evil);
+        let error = crate::core::worktree::fast_forward_to(&world.worktree, "HEAD").unwrap_err();
+        assert!(is_tamper(&error), "{error}");
+        world.assert_no_marker();
+    }
+
+    #[test]
     fn the_seatbelt_profile_denies_every_git_entry_of_the_worktree() {
         let world = World::new();
         let profile = crate::core::task_worker_sandbox::seatbelt_profile_read_only(

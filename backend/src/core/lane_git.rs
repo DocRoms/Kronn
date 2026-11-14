@@ -62,6 +62,8 @@ pub struct Pinned {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneGit {
     work_dir: PathBuf,
+    /// Where the commands start: `work_dir`, or a directory inside it.
+    start: PathBuf,
     pinned: Option<Pinned>,
 }
 
@@ -462,10 +464,16 @@ impl LaneGit {
     /// registration; one that is not registered, or whose `.git` pointer was
     /// redirected, is refused.
     pub fn resolve(work_dir: &Path) -> Result<Self, String> {
-        let work_dir = canonical(work_dir);
-        let Some((repo, _lane)) = managed_parts(&work_dir) else {
+        let start = canonical(work_dir);
+        // A directory INSIDE a managed worktree is still the worker's worktree:
+        // git would find the worker-written `.git` pointer from there.
+        let Some((work_dir, repo)) = start
+            .ancestors()
+            .find_map(|dir| managed_parts(dir).map(|(repo, _lane)| (dir.to_path_buf(), repo)))
+        else {
             return Ok(Self {
-                work_dir,
+                work_dir: start.clone(),
+                start,
                 pinned: None,
             });
         };
@@ -473,6 +481,7 @@ impl LaneGit {
         let git_dir = registered_admin_dir(&common_dir, &work_dir)?;
         let lane = Self {
             work_dir,
+            start,
             pinned: Some(Pinned {
                 repo,
                 common_dir,
@@ -584,7 +593,7 @@ impl LaneGit {
         command
             .env("GIT_ATTR_NOSYSTEM", "1")
             .env_remove("GIT_EXTERNAL_DIFF")
-            .current_dir(&self.work_dir);
+            .current_dir(&self.start);
         command
     }
 }
@@ -610,8 +619,28 @@ pub fn git_keeping_owner_hooks(work_dir: &Path) -> Result<Command, String> {
     }
     // lane-git-allow: the owner's own checkout, not a managed worktree.
     let mut command = crate::core::cmd::git_cmd();
-    command.current_dir(lane.work_dir());
+    command.current_dir(&lane.start);
     Ok(command)
+}
+
+/// [`git_keeping_owner_hooks`] for a read-only helper whose signature cannot carry
+/// an error (`Option`, `String`): when the worktree is refused (tampered pointer,
+/// nested repository, not registered) the command it returns is aimed at a git
+/// directory that does not exist, so it runs nothing and fails like any other
+/// unusable repository. The refusal is logged.
+pub fn git_or_refuse(work_dir: &Path) -> Command {
+    match git_keeping_owner_hooks(work_dir) {
+        Ok(command) => command,
+        Err(error) => {
+            tracing::warn!("lane git refused {}: {error}", work_dir.display());
+            // lane-git-allow: aimed at a git directory that does not exist; runs nothing.
+            let mut command = crate::core::cmd::git_cmd();
+            command
+                .arg("--git-dir=/dev/null/kronn-refused")
+                .current_dir(work_dir);
+            command
+        }
+    }
 }
 
 /// `args` that keep a diff-like subcommand from running a program the

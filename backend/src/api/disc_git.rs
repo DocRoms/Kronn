@@ -1182,7 +1182,7 @@ pub async fn disc_pr_template(
             Err(e) => return Json(ApiResponse::err(e)),
         };
 
-    let branch = crate::core::cmd::git_cmd()
+    let branch = crate::core::lane_git::git_or_refuse(&work_dir)
         .args(["branch", "--show-current"])
         .current_dir(&work_dir)
         .output()

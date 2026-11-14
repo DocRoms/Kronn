@@ -1450,22 +1450,26 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
 /// dirty target is (correctly) refused later by the integration preflight.
 pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
     // Already ignored (a committed rule, or a previous run): write nothing.
-    if crate::core::cmd::git_cmd()
+    // `repo_path` may be a worker's worktree (lane seeds, the lane's Cargo target):
+    // pinned to its registration there, so neither the `.git` pointer nor a nested
+    // repository the worker wrote decides what git reads.
+    let lane = crate::core::lane_git::LaneGit::resolve(repo_path)?;
+    if lane
+        .command()
         .args([
             "check-ignore",
             "-q",
             "--no-index",
             pattern.trim_start_matches('/'),
         ])
-        .current_dir(repo_path)
         .status()
         .is_ok_and(|status| status.success())
     {
         return Ok(());
     }
-    let output = crate::core::cmd::git_cmd()
+    let output = lane
+        .command()
         .args(["rev-parse", "--git-path", "info/exclude"])
-        .current_dir(repo_path)
         .output()
         .map_err(|error| format!("cannot resolve git exclude path: {error}"))?;
     if !output.status.success() {
@@ -1492,13 +1496,34 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
             exclude.display()
         ));
     }
+    let parent = exclude
+        .parent()
+        .ok_or_else(|| format!("{} has no parent", exclude.display()))?;
+    // The directory holding the file is not followed through a symlink either, and
+    // for a managed worktree it must stay inside the registered git directory.
+    if std::fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(format!(
+            "{} is a symlink — refusing to update the local Git exclude",
+            parent.display()
+        ));
+    }
+    if let Some(pinned) = lane.pinned() {
+        // A directory not created yet cannot be a symlink: `create_dir_all` below
+        // makes a real one.
+        let inside = parent
+            .canonicalize()
+            .map_or(true, |real| real.starts_with(&pinned.common_dir));
+        if !inside {
+            return Err(format!(
+                "{} leaves the repository's git directory — refusing to update the local Git exclude",
+                parent.display()
+            ));
+        }
+    }
     let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
     if existing.lines().any(|line| line.trim() == pattern) {
         return Ok(());
     }
-    let parent = exclude
-        .parent()
-        .ok_or_else(|| format!("{} has no parent", exclude.display()))?;
     std::fs::create_dir_all(parent)
         .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     use std::io::Write;
@@ -2375,9 +2400,9 @@ pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<Pat
     let path = path
         .canonicalize()
         .map_err(|error| format!("integration target worktree is unavailable: {error}"))?;
-    let head = crate::core::cmd::git_cmd()
+    // The target checkout may be a Kronn-managed worktree: pinned there.
+    let head = crate::core::lane_git::git_keeping_owner_hooks(&path)?
         .args(["symbolic-ref", "--quiet", "HEAD"])
-        .current_dir(&path)
         .output()
         .map_err(|error| format!("cannot verify target checkout branch: {error}"))?;
     if !head.status.success()
@@ -2386,9 +2411,8 @@ pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<Pat
         return Err("integration target checkout changed branch; refusing to mutate it".into());
     }
     let common_dir = |directory: &Path| -> Result<PathBuf, String> {
-        let output = crate::core::cmd::git_cmd()
+        let output = crate::core::lane_git::git_keeping_owner_hooks(directory)?
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(directory)
             .output()
             .map_err(|error| format!("cannot verify target repository: {error}"))?;
         if !output.status.success() {
@@ -2793,9 +2817,11 @@ fn merge_subject(worktree_path: &Path, base_sha: &str) -> String {
 /// candidate can therefore never be forced over work that landed meanwhile.
 pub fn fast_forward_to(repo_path: &Path, candidate_sha: &str) -> Result<String, String> {
     reject_option_like_rev(candidate_sha)?;
-    let out = crate::core::cmd::git_cmd()
+    // The target checkout may itself be a Kronn-managed worktree (a branch a task
+    // worker also writes): there it is the pinned, hook-less lane command; in the
+    // owner's own checkout their hooks keep running.
+    let out = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?
         .args(["merge", "--ff-only", candidate_sha])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git merge --ff-only failed: {e}"))?;
     if !out.status.success() {

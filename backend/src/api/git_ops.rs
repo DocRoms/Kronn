@@ -75,7 +75,7 @@ fn run_git_commit_page(
     limit: u32,
 ) -> Result<(Vec<GitCommitSummary>, u32, bool), String> {
     let (offset, limit) = normalized_commit_page(offset, limit);
-    let count = crate::core::cmd::git_cmd()
+    let count = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["rev-list", "--count", range, "--"])
         .current_dir(repo_path)
         .output()
@@ -93,7 +93,7 @@ fn run_git_commit_page(
 
     let skip = format!("--skip={offset}");
     let max_count = format!("--max-count={limit}");
-    let log = crate::core::cmd::git_cmd()
+    let log = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "log",
             "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s",
@@ -123,7 +123,7 @@ pub fn run_git_range_page(
     commit_limit: u32,
 ) -> Result<(Vec<GitFileStatus>, Vec<GitCommitSummary>, u32, bool), String> {
     let range = format!("{base_sha}..{head_sha}");
-    let diff = crate::core::cmd::git_cmd()
+    let diff = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["diff", "--name-status", &range, "--"])
         .current_dir(repo_path)
         .output()
@@ -148,7 +148,7 @@ pub fn run_git_diff_range(
     file_path: &str,
 ) -> Result<GitDiffResponse, String> {
     let range = format!("{base_sha}..{head_sha}");
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["diff", &range, "--", file_path])
         .current_dir(repo_path)
         .output()
@@ -221,7 +221,7 @@ fn run_git_status_impl(
     lookup_pr: Option<&[(String, String)]>,
 ) -> Result<GitStatusResponse, String> {
     let run = |args: &[&str]| -> Result<String, String> {
-        let output = crate::core::cmd::git_cmd()
+        let output = crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -230,7 +230,7 @@ fn run_git_status_impl(
     };
 
     let run_with_status = |args: &[&str]| -> (String, bool) {
-        match crate::core::cmd::git_cmd()
+        match crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -435,7 +435,7 @@ fn run_git_status_impl(
 }
 
 fn run_git(repo_path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    crate::core::cmd::git_cmd()
+    crate::core::lane_git::git_or_refuse(repo_path)
         .args(args)
         .current_dir(repo_path)
         .output()
@@ -675,7 +675,7 @@ pub(crate) fn normalize_git_remote_web_url(raw: &str) -> Option<String> {
 }
 
 fn git_remote_web_url(repo_path: &Path) -> Option<String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output()
@@ -692,7 +692,7 @@ fn git_remote_web_url(repo_path: &Path) -> Option<String> {
 /// Returns an empty string when none resolves (detached / fresh repo).
 pub fn resolve_default_branch(repo_path: &Path) -> String {
     let ok = |args: &[&str]| -> bool {
-        crate::core::cmd::git_cmd()
+        crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -721,7 +721,7 @@ pub fn run_git_diff_committed(
     file_path: &str,
 ) -> Result<GitDiffResponse, String> {
     let git_stdout = |args: &[&str]| -> String {
-        crate::core::cmd::git_cmd()
+        crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -748,7 +748,7 @@ pub fn run_git_diff_committed(
 
 pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse, String> {
     let run_diff = |args: &[&str]| -> String {
-        crate::core::cmd::git_cmd()
+        crate::core::lane_git::git_or_refuse(repo_path)
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -857,7 +857,7 @@ fn parse_git_blame_porcelain(output: &str) -> Vec<GitBlameLine> {
 
 /// Return one Git author/date annotation per current working-tree line.
 pub fn run_git_blame(repo_path: &Path, file_path: &str) -> Result<GitBlameResponse, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["blame", "--line-porcelain", "--", file_path])
         .current_dir(repo_path)
         .output()
@@ -904,7 +904,7 @@ pub fn run_git_commit_detail(
     // Unit separator between fields, so a subject containing tabs or pipes
     // can't shift the parse.
     let format = "%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%s%x1f%b";
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["show", "--no-patch", &format!("--format={format}"), sha])
         .current_dir(repo_path)
         .output()
@@ -924,7 +924,7 @@ pub fn run_git_commit_detail(
     // `diff-tree` rather than `git show --name-only`: `--no-patch` would have
     // suppressed the file list too, and a merge commit prints nothing without
     // `-m` — so an empty result here means "nothing attributable", not an error.
-    let files = crate::core::cmd::git_cmd()
+    let files = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "diff-tree",
             "--no-commit-id",
@@ -943,7 +943,7 @@ pub fn run_git_commit_detail(
         })
         .unwrap_or(0);
 
-    let mut branches: Vec<String> = crate::core::cmd::git_cmd()
+    let mut branches: Vec<String> = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "branch",
             "-a",
@@ -995,7 +995,7 @@ pub fn run_git_commit_patch(
         return Err("invalid commit hash".to_string());
     }
 
-    let header = crate::core::cmd::git_cmd()
+    let header = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["show", "--no-patch", "--format=%H%x1f%h%x1f%s", sha])
         .current_dir(repo_path)
         .output()
@@ -1014,7 +1014,7 @@ pub fn run_git_commit_patch(
 
     // No parent listed → root commit. Asked separately because `--root` changes
     // what the patch means, and the UI says so.
-    let is_root = crate::core::cmd::git_cmd()
+    let is_root = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["rev-list", "--parents", "-n", "1", sha])
         .current_dir(repo_path)
         .output()
@@ -1027,7 +1027,7 @@ pub fn run_git_commit_patch(
         .unwrap_or(false);
 
     // `-m` splits a merge into one patch per parent instead of printing nothing.
-    let patch_out = crate::core::cmd::git_cmd()
+    let patch_out = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "show",
             "--format=",
@@ -1065,7 +1065,7 @@ pub fn run_git_commit_patch(
         full.to_string()
     };
 
-    let files_changed = crate::core::cmd::git_cmd()
+    let files_changed = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "diff-tree",
             "--no-commit-id",
@@ -2004,7 +2004,7 @@ pub fn run_exec(
 /// Detect the git hosting provider from the remote origin URL.
 /// Returns "github", "gitlab", or "unknown".
 pub fn detect_provider(repo_path: &Path) -> &'static str {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output();
@@ -2055,7 +2055,7 @@ pub fn run_create_pr(
     github_env: &[(String, String)],
 ) -> Result<String, String> {
     // Ensure the branch is pushed before creating the PR
-    let has_upstream = crate::core::cmd::git_cmd()
+    let has_upstream = crate::core::lane_git::git_or_refuse(repo_path)
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
         .current_dir(repo_path)
         .output()
