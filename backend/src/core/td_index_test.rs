@@ -602,10 +602,11 @@ mod swapped_folder {
     }
 
     /// Guarded calls under `docs/` that come before the index write of a
-    /// resync of the fixture: `decisions.md` (ADR check), the index, the
+    /// resync of the fixture: `decisions.md` (ADR check), the listing of
+    /// `tech-debt/` of the ADR settlement (KT-1595 round 4), the index, the
     /// listing of `tech-debt/`, the three dimension indexes, the second
     /// listing of `tech-debt/` for the detail sheets.
-    const WRITE_AFTER_READS: usize = 7;
+    const WRITE_AFTER_READS: usize = 8;
 
     const POISON: &str = "POISONED-FROM-OUTSIDE";
 
