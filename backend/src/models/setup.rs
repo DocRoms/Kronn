@@ -834,7 +834,6 @@ pub struct AgentsConfig {
     /// video mode of ComfyUI) when its provider cannot serve a request. Kept apart
     /// from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[ts(skip)]
     pub connection_fallbacks: Vec<ConnectionFallback>,
 }
 
