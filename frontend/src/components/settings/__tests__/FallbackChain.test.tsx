@@ -31,7 +31,7 @@ const codexThenOllama = (agent: ChainView['agent'], mode: ChainView['mode']) => 
   links: [{ agent: 'Codex', model: 'gpt-5.6', mode, transport: 'cli', gaps: [] }],
   inherited: [{
     source: 'Codex',
-    link: { agent: 'Ollama', model: 'qwen3-big', mode: 'advanced', transport: 'local', gaps: ['capped context window'] },
+    link: { agent: 'Ollama', model: 'qwen3-big', mode: 'advanced', transport: 'local', gaps: ['capped_context'] },
   }],
 });
 
@@ -77,11 +77,14 @@ describe('a mode row is ONE column: model, caption, numbered chain, add', () => 
         expect(order[0]).toContain('fbr-model');
         expect(order[1]).toContain('fbr-caption');
         expect(column.querySelector('.fbr-caption')?.textContent).toBe('Si indisponible :');
-        expect(order[order.length - 1]).toContain('fbr-foot');
+        // The add foot closes the column; a row that holds its one own fallback has none (no dead add).
+        expect(order[order.length - 1]).toContain(mode === 'standard' ? 'fbc-list' : 'fbr-foot');
         // One vertical axis: nothing sits to the right of the picker, outside the column.
         expect(row.children).toHaveLength(2);
         expect(row.children[0].className).toContain('fbr-mode');
-        expect(within(row).getByTestId(`agent-fallback-${agent}-${mode}-add`)).toBeTruthy();
+        // The row that holds its one own fallback has no add button (it would be dead): the others do.
+        const hasOwn = mode === 'standard';
+        expect(within(row).queryByTestId(`agent-fallback-${agent}-${mode}-add`) !== null).toBe(!hasOwn);
       }
     },
   );
@@ -131,7 +134,8 @@ describe('a reachability warning sits on its own fallback', () => {
     const inherited = screen.getByTestId('agent-fallback-ClaudeCode-standard-inherited-0');
     expect(within(own).queryByTestId('agent-fallback-ClaudeCode-standard-link-0-warning')).toBeNull();
     const warning = within(inherited).getByTestId('agent-fallback-ClaudeCode-standard-inherited-0-warning');
-    expect(warning.textContent).toContain('capped context window');
+    expect(warning.textContent).toContain('fenêtre de contexte réduite');
+    expect(warning.textContent).not.toContain('capped');
     // Beside the fallback's tags, not inside the model picker nor inside the other entry.
     expect(warning.parentElement).toBe(inherited);
     const row = screen.getByTestId('agent-fallback-ClaudeCode-standard');
@@ -162,22 +166,33 @@ describe('the chain of a row that stores several fallbacks (a discussion or step
     expect(onChange).toHaveBeenLastCalledWith([AB[1], AB[0]]);
   });
 
-  it('cannot move the first one up nor the last one down', async () => {
+  it('draws no ↑ on the first one nor ↓ on the last one: no dead control', async () => {
     await mountRow(AB);
-    expect((screen.getByTestId('row-link-0-up') as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByTestId('row-link-1-down') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId('row-link-0-up')).toBeNull();
+    expect(screen.queryByTestId('row-link-1-down')).toBeNull();
     expect((screen.getByTestId('row-link-0-down') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId('row-link-1-up') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('draws no ↑ ↓ at all on a lone fallback, but keeps its × and the add button', async () => {
+    await mountRow([AB[0]]);
+    const item = screen.getByTestId('row-link-0');
+    expect(within(item).queryByRole('button', { name: 'Monter ce repli' })).toBeNull();
+    expect(within(item).queryByRole('button', { name: 'Descendre ce repli' })).toBeNull();
+    expect(within(item).getByRole('button', { name: 'Retirer ce repli' })).toBeTruthy();
+    expect(screen.getByTestId('row-add')).toBeTruthy();
   });
 
   it('labels the controls for the keyboard and a screen reader', async () => {
     await mountRow(AB);
     const item = screen.getByTestId('row-link-0');
-    expect(within(item).getByRole('button', { name: 'Monter ce repli' })).toBeTruthy();
+    const second = screen.getByTestId('row-link-1');
+    expect(within(second).getByRole('button', { name: 'Monter ce repli' })).toBeTruthy();
     expect(within(item).getByRole('button', { name: 'Descendre ce repli' })).toBeTruthy();
     expect(within(item).getByRole('button', { name: 'Retirer ce repli' })).toBeTruthy();
-    const up = within(item).getByRole('button', { name: 'Descendre ce repli' });
-    up.focus();
-    expect(document.activeElement).toBe(up);
+    const down = within(item).getByRole('button', { name: 'Descendre ce repli' });
+    down.focus();
+    expect(document.activeElement).toBe(down);
   });
 
   it('removes one fallback and keeps the others in order', async () => {
@@ -228,13 +243,58 @@ describe('an agent card row stores ONE fallback of its own (the engine keeps one
     // Remove on a row that has one: the row is cleared (null).
     await act(async () => { fireEvent.click(screen.getByTestId('agent-fallback-ClaudeCode-standard-link-0-remove')); });
     expect(onChange).toHaveBeenLastCalledWith('standard', null);
-    // ↑ ↓ have no neighbour of its own to swap with: disabled, not hidden (same shape on every row).
-    expect((screen.getByTestId('agent-fallback-ClaudeCode-standard-link-0-up') as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByTestId('agent-fallback-ClaudeCode-standard-link-0-down') as HTMLButtonElement).disabled).toBe(true);
-    // Its row already holds its own fallback: the next ones are set on that fallback's card.
-    const add = screen.getByTestId('agent-fallback-ClaudeCode-standard-add') as HTMLButtonElement;
-    expect(add.disabled).toBe(true);
-    expect(add.title).toContain('carte du repli');
+    // ↑ ↓ have no neighbour of its own to swap with: not drawn at all, × stays beside the chip.
+    const own = screen.getByTestId('agent-fallback-ClaudeCode-standard-link-0');
+    expect(screen.queryByTestId('agent-fallback-ClaudeCode-standard-link-0-up')).toBeNull();
+    expect(screen.queryByTestId('agent-fallback-ClaudeCode-standard-link-0-down')).toBeNull();
+    const remove = within(own).getByTestId('agent-fallback-ClaudeCode-standard-link-0-remove');
+    const anchor = own.querySelector('.fbc-anchor') as HTMLElement;
+    expect(remove.closest('.fbc-controls')?.previousElementSibling).toBe(anchor);
+    // Its row already holds its own fallback: no add button, a « Changer » action next to the chip instead.
+    expect(screen.queryByTestId('agent-fallback-ClaudeCode-standard-add')).toBeNull();
+    expect(anchor.contains(within(own).getByTestId('agent-fallback-ClaudeCode-standard-link-0-change'))).toBe(true);
+  });
+
+  it('changes the one own fallback from its chip, and from « Changer »', async () => {
+    const onChange = await mountAgent('ClaudeCode', [codexThenOllama('ClaudeCode', 'standard')], MODES);
+    const own = screen.getByTestId('agent-fallback-ClaudeCode-standard-link-0');
+    const triggers = [own.querySelector('.fbc-main') as HTMLElement, within(own).getByTestId('agent-fallback-ClaudeCode-standard-link-0-change')];
+    for (const trigger of triggers) {
+      await act(async () => { fireEvent.click(trigger); });
+      expect(screen.getByTestId('agent-fallback-ClaudeCode-standard-menu')).toBeTruthy();
+      await act(async () => { fireEvent.click(screen.getByTestId('agent-fallback-ClaudeCode-standard-menu-OpenCode-standard-big-pickle')); });
+      expect(onChange).toHaveBeenLastCalledWith('standard', { agent: 'OpenCode', model: 'big-pickle' });
+    }
+  });
+
+  it('names the card an inherited fallback comes from, and opens it on click', async () => {
+    const onOpenAgent = vi.fn();
+    await act(async () => {
+      render(
+        <I18nProvider>
+          <AgentFallbackControl
+            agentType="ClaudeCode"
+            modes={MODES}
+            pickers={{}}
+            options={OPTIONS}
+            chains={[codexThenOllama('ClaudeCode', 'standard')]}
+            onChange={vi.fn()}
+            onOpenAgent={onOpenAgent}
+          />
+        </I18nProvider>,
+      );
+    });
+    const inherited = screen.getByTestId('agent-fallback-ClaudeCode-standard-inherited-0');
+    const via = within(inherited).getByTestId('agent-fallback-ClaudeCode-standard-inherited-0-via');
+    expect(via.textContent).toBe('via Codex');
+    expect(via.title).toBe('Défini sur la carte Codex : clique pour l’ouvrir');
+    // Next to its number: right after it, before the chip.
+    expect(inherited.children[0].className).toContain('fbc-n');
+    expect(inherited.children[1]).toBe(via);
+    await act(async () => { fireEvent.click(via); });
+    expect(onOpenAgent).toHaveBeenCalledWith('Codex');
+    // An own fallback is set here: it says « via » nowhere.
+    expect(screen.queryByTestId('agent-fallback-ClaudeCode-standard-link-0-via')).toBeNull();
   });
 });
 
@@ -279,6 +339,11 @@ describe('the media rows of ComfyUI and of an HTTP connection use the same chain
       inherited: [{ connection: 'conn-b', model: 'sdxl', transport: 'http' }],
     };
     const onChange = await mountMedia(view);
+    // One own link: no ↑ ↓, no add button; × sits right after the chip.
+    expect(screen.queryByTestId('media-link-0-up')).toBeNull();
+    expect(screen.queryByTestId('media-link-0-down')).toBeNull();
+    expect(screen.queryByTestId('media-add')).toBeNull();
+    expect(screen.getByTestId('media-link-0-change').textContent).toBe('Changer');
     const items = within(screen.getByTestId('media-chain')).getAllByRole('listitem');
     expect(items.map((item) => item.querySelector('.fbc-n')?.textContent)).toEqual(['1', '2']);
     expect(items[0].textContent).toContain('OpenRouter');
@@ -287,5 +352,81 @@ describe('the media rows of ComfyUI and of an HTTP connection use the same chain
     expect(screen.getByTestId('media-model').textContent).toBe('picker-image');
     await act(async () => { fireEvent.click(screen.getByTestId('media-link-0-remove')); });
     expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it('names the card of the inherited connection, and opens it on click', async () => {
+    const onOpenConnection = vi.fn();
+    const view: ConnectionChainView = {
+      owner: 'conn-x',
+      mode: 'image',
+      links: [{ connection: 'conn-a', model: 'flux-pro', transport: 'http' }],
+      inherited: [{ connection: 'conn-b', model: 'sdxl', transport: 'http' }],
+    };
+    await act(async () => {
+      render(
+        <I18nProvider>
+          <ConnectionFallbackRow
+            testId="media"
+            mode="image"
+            owner="conn-x"
+            model={<span>picker-image</span>}
+            options={buildMediaOptions(connections, null)}
+            view={view}
+            onChange={vi.fn()}
+            onOpenConnection={onOpenConnection}
+          />
+        </I18nProvider>,
+      );
+    });
+    const via = screen.getByTestId('media-inherited-0-via');
+    expect(via.textContent).toBe('via LiteLLM');
+    expect(via.title).toBe('Défini sur la carte LiteLLM : clique pour l’ouvrir');
+    await act(async () => { fireEvent.click(via); });
+    expect(onOpenConnection).toHaveBeenCalledWith('conn-b');
+  });
+
+  it('changes the one stored fallback from « Changer » instead of a disabled add', async () => {
+    const view: ConnectionChainView = {
+      owner: 'conn-x', mode: 'image', links: [{ connection: 'conn-a', model: 'flux-pro', transport: 'http' }], inherited: [],
+    };
+    const onChange = await mountMedia(view);
+    await act(async () => { fireEvent.click(screen.getByTestId('media-link-0-change')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('media-menu-conn-b-image-sdxl')); });
+    expect(onChange).toHaveBeenLastCalledWith({ connection: 'conn-b', model: 'sdxl' });
+  });
+});
+
+describe('the capability warnings are translated from a stable code', () => {
+  const GAPS = ['no_mcp_tools', 'no_write_access', 'no_image_input', 'capped_context'] as const;
+
+  it('maps every gap code to a text in the UI language, never a backend sentence', async () => {
+    const view = chain('ClaudeCode', 'standard', {
+      links: [{ agent: 'Ollama', model: 'qwen3', mode: 'standard', transport: 'local', gaps: [...GAPS] }],
+    });
+    await mountAgent('ClaudeCode', [view], MODES);
+    expect(screen.getByTestId('agent-fallback-ClaudeCode-standard-link-0-warning').textContent)
+      .toBe('pas d’outils MCP, écriture impossible dans le worktree, images non garanties, fenêtre de contexte réduite');
+  });
+
+  it('shows a code this build does not know as it came, never as an i18n key', async () => {
+    const view = chain('ClaudeCode', 'standard', {
+      links: [{ agent: 'Ollama', model: 'qwen3', mode: 'standard', transport: 'local', gaps: ['brand_new_gap' as never] }],
+    });
+    await mountAgent('ClaudeCode', [view], MODES);
+    expect(screen.getByTestId('agent-fallback-ClaudeCode-standard-link-0-warning').textContent).toBe('brand_new_gap');
+  });
+
+  it('has a text for every gap code in fr, en, es and zh', async () => {
+    const dicts = await Promise.all([
+      import('../../../lib/i18n/locales/fr'),
+      import('../../../lib/i18n/locales/en'),
+      import('../../../lib/i18n/locales/es'),
+      import('../../../lib/i18n/locales/zh'),
+    ]);
+    for (const { default: dict } of dicts) {
+      for (const gap of GAPS) expect(dict[`fallback.gap.${gap}`], gap).toBeTruthy();
+      expect(dict['fallback.via']).toContain('{0}');
+      expect(dict['fallback.openCard']).toContain('{0}');
+    }
   });
 });

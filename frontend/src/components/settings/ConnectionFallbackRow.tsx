@@ -21,6 +21,8 @@ interface Props {
   options: FallbackOption[];
   /** Applies (or, with `null`, removes) the fallback; a refusal rejects with its reason. */
   onChange: (next: ConnectionFallbackTarget | null) => Promise<void>;
+  /** A click on « via <card> » of an inherited item opens the card that holds it (ComfyUI or a connection). */
+  onOpenConnection?: (connection: string) => void;
 }
 
 /** Name and transport of a media source, for a pill. */
@@ -32,7 +34,7 @@ const nameOf = (options: FallbackOption[], link: ConnectionLinkView): string =>
  *  fallback goes to the same kind of mode only (image to image, video to video),
  *  never to the source itself; nothing is shown as changed until the backend has
  *  stored it, so a refusal leaves the row as it was. */
-export function ConnectionFallbackRow({ testId, mode, owner, model, view, options, onChange }: Props) {
+export function ConnectionFallbackRow({ testId, mode, owner, model, view, options, onChange, onOpenConnection }: Props) {
   const { t } = useT();
   const [menuOpen, setMenuOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
@@ -93,12 +95,10 @@ export function ConnectionFallbackRow({ testId, mode, owner, model, view, option
       disabled={busy}
       onClick={() => setMenuOpen((open) => !open)}
       anchorRef={anchorRef}
+      // One own link per row: nothing to reorder, and the add button is gone while it is set.
       controls={{
-        canUp: false,
-        canDown: false,
-        onUp: () => undefined,
-        onDown: () => undefined,
         onRemove: () => void apply(null),
+        onChange: () => setMenuOpen((open) => !open),
       }}
     >
       {menuOpen && menu(link)}
@@ -127,6 +127,10 @@ export function ConnectionFallbackRow({ testId, mode, owner, model, view, option
                 mode={mode}
                 transport={entry.transport}
                 title={t('fallback.inheritedHint')}
+                via={{
+                  name: nameOf(options, entry),
+                  onOpen: onOpenConnection ? () => onOpenConnection(entry.connection) : undefined,
+                }}
               />
             ))}
           </ol>
@@ -134,22 +138,23 @@ export function ConnectionFallbackRow({ testId, mode, owner, model, view, option
         {!link && inherited.length === 0 && (
           <span className="fbr-off" data-testid={`${testId}-none`}>{t('fallback.none')}</span>
         )}
-        <div className="fbr-foot">
-          <span className="fbr-anchor" ref={link ? undefined : anchorRef}>
-            <button
-              type="button"
-              className="fbr-add"
-              disabled={busy || !!link}
-              title={link ? t('fallback.addFull') : undefined}
-              data-testid={`${testId}-add`}
-              onClick={() => setMenuOpen((open) => !open)}
-            >
-              <Plus size={11} aria-hidden="true" />
-              {t('fallback.add')}
-            </button>
-            {!link && menuOpen && menu()}
-          </span>
-        </div>
+        {!link && (
+          <div className="fbr-foot">
+            <span className="fbr-anchor" ref={anchorRef}>
+              <button
+                type="button"
+                className="fbr-add"
+                disabled={busy}
+                data-testid={`${testId}-add`}
+                onClick={() => setMenuOpen((open) => !open)}
+              >
+                <Plus size={11} aria-hidden="true" />
+                {t('fallback.add')}
+              </button>
+              {menuOpen && menu()}
+            </span>
+          </div>
+        )}
       </div>
       {(view?.error || refusal) && (
         <div className="fbr-error" role="alert" data-testid={`${testId}-refused`}>

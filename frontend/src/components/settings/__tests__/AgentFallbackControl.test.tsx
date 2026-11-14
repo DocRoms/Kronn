@@ -120,15 +120,15 @@ describe('the fallback rows of an agent card', () => {
     const inherited = within(row).getByTestId(`${ROW('standard')}-inherited-0`);
     expect(inherited.getAttribute('data-tone')).toBe('inherited');
     expect(within(inherited).getByTestId('fallback-transport-local').textContent).toBe('Local');
-    expect(inherited.querySelector('.fbc-main')?.getAttribute('title')).toContain('Défini sur la carte de Codex');
+    expect(within(inherited).getByTestId(`${ROW('standard')}-inherited-0-via`).getAttribute('title')).toContain('Défini sur la carte de Codex');
     expect(row.textContent).not.toMatch(/paid/i);
   });
 
-  it('opens the card that holds an inherited fallback when its pill is clicked', async () => {
+  it('opens the card that holds an inherited fallback when its « via » is clicked', async () => {
     const onOpenAgent = vi.fn();
     await mountControl({ chains: [CODEX_STANDARD], onOpenAgent });
     await act(async () => {
-      fireEvent.click(within(screen.getByTestId(`${ROW('standard')}-inherited-0`)).getByRole('button'));
+      fireEvent.click(within(screen.getByTestId(`${ROW('standard')}-inherited-0`)).getByRole('button', { name: 'via Codex' }));
     });
     expect(onOpenAgent).toHaveBeenCalledWith('Codex');
   });
@@ -239,12 +239,12 @@ describe('the fallback rows of an agent card', () => {
     const chain = view({
       agent: 'ClaudeCode',
       mode: 'standard',
-      links: [{ agent: 'Ollama', model: 'qwen3', mode: 'standard', transport: 'local', gaps: ['no MCP tools', 'capped context window'] }],
+      links: [{ agent: 'Ollama', model: 'qwen3', mode: 'standard', transport: 'local', gaps: ['no_mcp_tools', 'capped_context'] }],
     });
     const cooldown: Cooldown = { agent: 'ClaudeCode', until: '2026-11-10T14:00:00Z', reason: 'quota_exhausted' };
     await mountControl({ chains: [chain], cooldown });
     const pill = screen.getByTestId(`${ROW('standard')}-link-0`);
-    expect(pill.querySelector('.fbp-gap')?.getAttribute('title')).toContain('no MCP tools, capped context window');
+    expect(pill.querySelector('.fbp-gap')?.getAttribute('title')).toContain('pas d’outils MCP, fenêtre de contexte réduite');
     expect(screen.getByTestId('agent-fallback-cooldown-ClaudeCode').textContent).toContain('quota exhausted');
   });
 });

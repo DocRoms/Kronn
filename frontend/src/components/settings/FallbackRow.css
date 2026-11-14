@@ -216,11 +216,61 @@ button.fbc-main:hover:not(:disabled) {
   background: transparent;
 }
 
+/* The controls hug the chip: they are not pushed to the far edge of the row. */
 .fbc-controls {
   display: inline-flex;
   align-items: center;
   gap: var(--kr-sp-1);
-  margin-left: auto;
+}
+
+/* « via Codex »: where an inherited fallback is set, next to its number. */
+.fbc-via {
+  flex: none;
+  padding: 0;
+  color: var(--kr-text-muted);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  border: 0;
+  background: transparent;
+}
+
+.fbc-via-link {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.fbc-via-link:hover {
+  color: var(--kr-accent-text);
+}
+
+.fbc-via-link:focus-visible,
+.fbc-change:focus-visible {
+  outline: 2px solid var(--kr-accent-border);
+  outline-offset: 1px;
+}
+
+/* « Change »: a quiet text action inside the entry's anchor, in place of the add button. */
+.fbc-change {
+  flex: none;
+  margin-left: var(--kr-sp-2);
+  padding: 0;
+  color: var(--kr-accent-text);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.fbc-change:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.fbc-change:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .fbc-btn {

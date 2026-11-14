@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::{AgentFallback, FallbackMode, FallbackTransport};
+use crate::models::{AgentFallback, FallbackGap, FallbackMode, FallbackTransport};
 
 fn agents(chains: &[(AgentType, Vec<AgentFallback>)]) -> AgentsConfig {
     let mut agents = crate::core::config::default_config().agents;
@@ -416,19 +416,19 @@ fn the_chain_view_shows_the_gaps_of_each_link_as_warnings() {
     assert!(view.inherited[0]
         .link
         .gaps
-        .contains(&"no MCP tools".to_string()));
+        .contains(&FallbackGap::NoMcpTools));
     assert_eq!(view.inherited[1].source, AgentType::LiteLlm);
     assert!(view.inherited[1]
         .link
         .gaps
-        .contains(&"capped context window".to_string()));
+        .contains(&FallbackGap::CappedContext));
     let own = chain_view_of(
         &config,
         None,
         FallbackMode::Standard,
         &[link(AgentType::Ollama)],
     );
-    assert!(own.links[0].gaps.contains(&"no MCP tools".to_string()));
+    assert!(own.links[0].gaps.contains(&FallbackGap::NoMcpTools));
 }
 
 #[test]

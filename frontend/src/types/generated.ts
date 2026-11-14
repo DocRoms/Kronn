@@ -4858,6 +4858,12 @@ fail_on_empty: boolean, };
 export type Faithfulness = "entailment" | "neutral" | "contradiction";
 
 /**
+ * What a fallback cannot give that the agent it replaces could: a stable code,
+ * so the UI translates the warning instead of showing an English sentence.
+ */
+export type FallbackGap = "no_mcp_tools" | "no_write_access" | "no_image_input" | "capped_context";
+
+/**
  * KT-1693 — a mode of an agent: the kind of work one model of it serves. The
  * three text modes are the quality tiers (`ModelTier`); decision, image and
  * video are capabilities, never tiers.
@@ -5785,7 +5791,7 @@ mode: FallbackMode, transport: FallbackTransport,
 /**
  * What a turn could need that this link cannot give, as warnings.
  */
-gaps: Array<string>, };
+gaps: Array<FallbackGap>, };
 
 /**
  * The lint result attached to an agent message.

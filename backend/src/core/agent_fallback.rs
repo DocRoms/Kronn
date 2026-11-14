@@ -36,8 +36,8 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{
-    AgentFallback, AgentType, AgentsConfig, FallbackKind, FallbackMode, FallbackTransport,
-    ModeFallback, ModelTier,
+    AgentFallback, AgentType, AgentsConfig, FallbackGap, FallbackKind, FallbackMode,
+    FallbackTransport, ModeFallback, ModelTier,
 };
 
 /// Links followed from one agent. Bounded so a long chain cannot turn one
@@ -649,7 +649,7 @@ pub struct LinkView {
     pub mode: FallbackMode,
     pub transport: FallbackTransport,
     /// What a turn could need that this link cannot give, as warnings.
-    pub gaps: Vec<String>,
+    pub gaps: Vec<FallbackGap>,
 }
 
 /// A fallback reached through another agent's row: it is not set here but on
@@ -690,16 +690,16 @@ fn link_view(
         |have: bool, owner_has: fn(&Capabilities) -> bool| !have && owner.is_none_or(owner_has);
     let mut gaps = Vec::new();
     if lacks(has.mcp_tools, |c| c.mcp_tools) {
-        gaps.push("no MCP tools".to_string());
+        gaps.push(FallbackGap::NoMcpTools);
     }
     if lacks(has.write_access, |c| c.write_access) {
-        gaps.push("cannot write in the worktree".to_string());
+        gaps.push(FallbackGap::NoWriteAccess);
     }
     if lacks(has.image_input, |c| c.image_input) {
-        gaps.push("images are not guaranteed".to_string());
+        gaps.push(FallbackGap::NoImageInput);
     }
     if lacks(has.long_context, |c| c.long_context) {
-        gaps.push("capped context window".to_string());
+        gaps.push(FallbackGap::CappedContext);
     }
     LinkView {
         agent: link.agent.clone(),

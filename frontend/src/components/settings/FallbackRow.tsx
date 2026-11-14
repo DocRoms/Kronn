@@ -6,7 +6,7 @@ import { createPortal } from 'react-dom';
 import { AlertTriangle, ArrowDown, ArrowUp, Plus, X } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { AGENT_LABELS } from '../../lib/constants';
-import type { AgentFallback, AgentType, ChainView, FallbackMode, FallbackTransport } from '../../types/generated';
+import type { AgentFallback, AgentType, ChainView, FallbackGap, FallbackMode, FallbackTransport } from '../../types/generated';
 import {
   MAX_FALLBACK_CHAIN,
   TRANSPORT_LABEL,
@@ -27,6 +27,14 @@ import './FallbackRow.css';
 
 const label = (agent: AgentType) => AGENT_LABELS[agent] ?? agent;
 
+/** The warnings of a fallback, in the UI's language: the backend sends a stable code, never a sentence. */
+const gapText = (t: (key: string, ...args: string[]) => string, gaps: FallbackGap[]) =>
+  gaps.map((gap) => {
+    const text = t(`fallback.gap.${gap}`);
+    // A code this build does not know (a newer backend) is shown as it came rather than as a key.
+    return text === `fallback.gap.${gap}` ? gap : text;
+  }).join(', ');
+
 /** The badge every pill carries: how the model is reached. There is no « paid » badge. */
 export function TransportBadge({ transport }: { transport: FallbackTransport }) {
   return (
@@ -45,7 +53,7 @@ interface PillProps {
   transport: FallbackTransport;
   /** « eco », « advanced »…: shown when the model serves another mode than its row. */
   mode?: FallbackMode;
-  gaps?: string[];
+  gaps?: FallbackGap[];
   /** `current`: the model the mode runs on; `own`: a fallback set here; `inherited`: set on another card. */
   tone: 'current' | 'own' | 'inherited';
   title?: string;
@@ -68,7 +76,7 @@ export function FallbackPill({
       {mode && <span className="fbp-mode">{t(`fallback.mode.${mode}`)}</span>}
       <TransportBadge transport={transport} />
       {gaps.length > 0 && (
-        <span className="fbp-gap" title={t('fallback.gaps', label(agent), gaps.join(', '))}>
+        <span className="fbp-gap" title={t('fallback.gaps', label(agent), gapText(t, gaps))}>
           <AlertTriangle size={10} aria-hidden="true" />
         </span>
       )}
@@ -284,13 +292,21 @@ interface ItemProps {
   mode: FallbackMode;
   transport: FallbackTransport;
   /** What this fallback may lack (reachability / capabilities): drawn beside it, never on another one. */
-  gaps?: string[];
+  gaps?: FallbackGap[];
   title?: string;
   disabled?: boolean;
-  /** Own: opens the change menu. Inherited: opens the card that holds it. */
+  /** Own: opens the change menu. */
   onClick?: () => void;
-  /** Own only: ↑ ↓ × (a control that cannot apply is disabled). */
-  controls?: { canUp: boolean; canDown: boolean; onUp: () => void; onDown: () => void; onRemove: () => void };
+  /** Inherited only: the card that holds this fallback, named next to its number; a click opens it. */
+  via?: { name: string; onOpen?: () => void };
+  /** Own only, drawn right beside the chip: × always; ↑ ↓ only when this item has a neighbour to
+   *  swap with (a control that could do nothing is not drawn); « Change » when there is no add button. */
+  controls?: {
+    onRemove: () => void;
+    onChange?: () => void;
+    up?: () => void;
+    down?: () => void;
+  };
   /** The change menu is anchored on the item's main button. */
   anchorRef?: (element: HTMLElement | null) => void;
   children?: ReactNode;
@@ -299,7 +315,7 @@ interface ItemProps {
 /** One numbered entry of a fallback chain: `1 · Codex · gpt-5.6 · standard · CLI ⚠ … ↑ ↓ ✕`.
  *  The same item on every card (CLI, Local, HTTP); an inherited one is dashed and has no controls. */
 export function FallbackChainItem({
-  testId, position, tone, agent, name, model, mode, transport, gaps = [], title, disabled, onClick, controls, anchorRef, children,
+  testId, position, tone, agent, name, model, mode, transport, gaps = [], title, disabled, onClick, via, controls, anchorRef, children,
 }: ItemProps) {
   const { t } = useT();
   const shown = name ?? label(agent);
@@ -314,44 +330,67 @@ export function FallbackChainItem({
   return (
     <li className="fbc" data-tone={tone} data-testid={testId}>
       <span className="fbc-n" aria-hidden="true" data-testid={`${testId}-position`}>{position}</span>
+      {via && (via.onOpen ? (
+        <button
+          type="button"
+          className="fbc-via fbc-via-link"
+          title={t('fallback.openCard', via.name)}
+          data-testid={`${testId}-via`}
+          onClick={via.onOpen}
+        >
+          {t('fallback.via', via.name)}
+        </button>
+      ) : (
+        <span className="fbc-via" title={t('fallback.setOn', via.name)} data-testid={`${testId}-via`}>{t('fallback.via', via.name)}</span>
+      ))}
       <span className="fbc-anchor" ref={anchorRef}>
         {onClick ? (
           <button type="button" className="fbc-main" title={title} disabled={disabled} onClick={onClick}>{body}</button>
         ) : (
           <span className="fbc-main" title={title}>{body}</span>
         )}
+        {controls?.onChange && (
+          <button
+            type="button"
+            className="fbc-change"
+            disabled={disabled}
+            title={t('fallback.change')}
+            data-testid={`${testId}-change`}
+            onClick={controls.onChange}
+          >
+            {t('fallback.changeShort')}
+          </button>
+        )}
         {children}
       </span>
-      {gaps.length > 0 && (
-        <span className="fbp-gap" role="note" title={t('fallback.gaps', shown, gaps.join(', '))} data-testid={`${testId}-warning`}>
-          <AlertTriangle size={11} aria-hidden="true" />
-          {gaps.join(', ')}
-        </span>
-      )}
       {controls && (
         <span className="fbc-controls">
-          <button
-            type="button"
-            className="fbc-btn"
-            disabled={disabled || !controls.canUp}
-            title={t('fallback.moveUp')}
-            aria-label={t('fallback.moveUp')}
-            data-testid={`${testId}-up`}
-            onClick={controls.onUp}
-          >
-            <ArrowUp size={11} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            className="fbc-btn"
-            disabled={disabled || !controls.canDown}
-            title={t('fallback.moveDown')}
-            aria-label={t('fallback.moveDown')}
-            data-testid={`${testId}-down`}
-            onClick={controls.onDown}
-          >
-            <ArrowDown size={11} aria-hidden="true" />
-          </button>
+          {controls.up && (
+            <button
+              type="button"
+              className="fbc-btn"
+              disabled={disabled}
+              title={t('fallback.moveUp')}
+              aria-label={t('fallback.moveUp')}
+              data-testid={`${testId}-up`}
+              onClick={controls.up}
+            >
+              <ArrowUp size={11} aria-hidden="true" />
+            </button>
+          )}
+          {controls.down && (
+            <button
+              type="button"
+              className="fbc-btn"
+              disabled={disabled}
+              title={t('fallback.moveDown')}
+              aria-label={t('fallback.moveDown')}
+              data-testid={`${testId}-down`}
+              onClick={controls.down}
+            >
+              <ArrowDown size={11} aria-hidden="true" />
+            </button>
+          )}
           <button
             type="button"
             className="fbc-btn fbc-remove"
@@ -363,6 +402,12 @@ export function FallbackChainItem({
           >
             <X size={11} aria-hidden="true" />
           </button>
+        </span>
+      )}
+      {gaps.length > 0 && (
+        <span className="fbp-gap" role="note" title={t('fallback.gaps', shown, gapText(t, gaps))} data-testid={`${testId}-warning`}>
+          <AlertTriangle size={11} aria-hidden="true" />
+          {gapText(t, gaps)}
         </span>
       )}
     </li>
@@ -500,11 +545,11 @@ export function FallbackRow({
                 onClick={() => setMenu(menu?.index === index ? null : { index })}
                 anchorRef={anchorFor(index)}
                 controls={{
-                  canUp: index > 0,
-                  canDown: index < links.length - 1,
-                  onUp: () => move(index, -1),
-                  onDown: () => move(index, 1),
                   onRemove: () => void apply(links.filter((_, at) => at !== index)),
+                  // Only a row that stores several links can reorder them, and only toward a neighbour.
+                  onChange: full && links.length === 1 ? () => setMenu(menu?.index === index ? null : { index }) : undefined,
+                  up: index > 0 ? () => move(index, -1) : undefined,
+                  down: index < links.length - 1 ? () => move(index, 1) : undefined,
                 }}
               >
                 {menu?.index === index && (
@@ -532,41 +577,44 @@ export function FallbackRow({
                 mode={entry.link.mode}
                 transport={entry.link.transport}
                 gaps={entry.link.gaps}
-                title={`${t('fallback.setOn', label(entry.source))} — ${t('fallback.inheritedHint')}`}
-                onClick={onOpenAgent ? () => onOpenAgent(entry.source) : undefined}
+                title={t('fallback.inheritedHint')}
+                via={{ name: label(entry.source), onOpen: onOpenAgent ? () => onOpenAgent(entry.source) : undefined }}
               />
             ))}
           </ol>
         )}
         {nothing && empty !== undefined && empty}
         {nothing && empty === undefined && <span className="fbr-off" data-testid={`${testId}-none`}>{t('fallback.none')}</span>}
-        <div className="fbr-foot">
-          <span className="fbr-anchor" ref={anchorFor(links.length)}>
-            <button
-              type="button"
-              className="fbr-add"
-              disabled={locked || full}
-              title={full ? (maxLinks === 1 ? t('fallback.addFull') : t('fallback.tooDeep', String(maxLinks))) : undefined}
-              data-testid={`${testId}-add`}
-              onClick={() => setMenu(menu?.index === links.length ? null : { index: links.length })}
-            >
-              <Plus size={11} aria-hidden="true" />
-              {t('fallback.add')}
-            </button>
-            {!full && menu?.index === links.length && (
-              <FallbackMenu
-                testId={`${testId}-menu`}
-                options={offered}
-                anchor={anchor}
-                taken={taken}
-                replaced={mode}
-                onPick={(option) => pick(links.length, option)}
-                onClose={closeMenu}
-              />
+        {(!full || actions) && (
+          <div className="fbr-foot">
+            {!full && (
+              <span className="fbr-anchor" ref={anchorFor(links.length)}>
+                <button
+                  type="button"
+                  className="fbr-add"
+                  disabled={locked}
+                  data-testid={`${testId}-add`}
+                  onClick={() => setMenu(menu?.index === links.length ? null : { index: links.length })}
+                >
+                  <Plus size={11} aria-hidden="true" />
+                  {t('fallback.add')}
+                </button>
+                {menu?.index === links.length && (
+                  <FallbackMenu
+                    testId={`${testId}-menu`}
+                    options={offered}
+                    anchor={anchor}
+                    taken={taken}
+                    replaced={mode}
+                    onPick={(option) => pick(links.length, option)}
+                    onClose={closeMenu}
+                  />
+                )}
+              </span>
             )}
-          </span>
-          {actions}
-        </div>
+            {actions}
+          </div>
+        )}
       </div>
       {(view?.error || refusal) && (
         <div className="fbr-error" role="alert" data-testid={`${testId}-refused`}>
