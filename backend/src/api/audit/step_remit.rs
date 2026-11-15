@@ -167,6 +167,10 @@ pub(crate) struct StepRemit {
     flagged_unchecked: usize,
     /// Project-relative folders outside the root that hold AI docs.
     ai_folders: Vec<String>,
+    /// The tracked files of those folders stored through a filter (Git LFS)
+    /// when the step started, with the filter's name. Read before the agent
+    /// ran: an attribute it adds never spares its own edit.
+    filtered_before: HashMap<String, String>,
 }
 
 /// `git` for the project after an agent ran (`agent_touched_git_cmd`): no
@@ -176,9 +180,6 @@ pub(crate) struct StepRemit {
 fn git(project: &Path, args: &[&str]) -> Option<Vec<u8>> {
     git_with_input(project, args, &[])
 }
-
-/// The longest a single git call of the remit may take.
-const GIT_CALL_TIMEOUT: std::time::Duration = crate::core::cmd::AGENT_GIT_TIMEOUT;
 
 /// What the index holds for one path: every `ls-files -s` line (all stages of
 /// a conflict, top-relative paths, as `update-index --index-info` reads them
@@ -293,6 +294,28 @@ fn flags_of(snapshot: &HashMap<String, IndexRecord>) -> HashMap<String, char> {
 /// bytes are not kept: only their index state is.
 const FLAGGED_CONTENT_MAX: usize = 2_000;
 
+/// The largest file whose bytes the remit keeps or compares: a larger one is
+/// never read whole into memory; it is left as it is and reported when it
+/// changed.
+pub(crate) const REMIT_CONTENT_MAX: u64 = 64 * 1024 * 1024;
+
+/// The bytes of `rel` through the rooted primitive (`None` when absent), or an
+/// error for a link, a non-regular entry or a file past [`REMIT_CONTENT_MAX`].
+fn read_kept(project: &Path, rel: &str) -> std::io::Result<Option<Vec<u8>>> {
+    let path = project.join(rel);
+    let bytes = crate::core::fs_guard::guarded_read_head(project, &path, REMIT_CONTENT_MAX + 1)?;
+    if bytes
+        .as_ref()
+        .is_some_and(|bytes| bytes.len() as u64 > REMIT_CONTENT_MAX)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("larger than {} MiB", REMIT_CONTENT_MAX / (1024 * 1024)),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// What a refused path is, by `lstat` of each component from the project down,
 /// stopping at the first link (its target is recorded, never followed): a
 /// parent folder that is a link is never stat'ed through. A changed
@@ -310,7 +333,14 @@ fn link_fingerprint(project: &Path, rel: &str) -> String {
                     std::fs::read_link(&at).ok()
                 );
             }
-            Ok(meta) => kind = format!("{:?}", meta.file_type()),
+            Ok(meta) => {
+                kind = format!(
+                    "{:?} {} {:?}",
+                    meta.file_type(),
+                    meta.len(),
+                    meta.modified().ok()
+                )
+            }
             Err(error) => return format!("missing at {}: {:?}", at.display(), error.kind()),
         }
     }
@@ -320,12 +350,9 @@ fn link_fingerprint(project: &Path, rel: &str) -> String {
 /// `git <args>` with `input` on stdin, through `agent_touched_git_cmd` and
 /// bounded by `run_bounded`.
 fn git_with_input(project: &Path, args: &[&str], input: &[u8]) -> Option<Vec<u8>> {
-    let mut cmd = crate::core::cmd::agent_touched_git_cmd(project)?;
-    cmd.arg("--literal-pathspecs")
-        .arg("-C")
-        .arg(project)
-        .args(args);
-    crate::core::cmd::run_bounded(&mut cmd, input, GIT_CALL_TIMEOUT)
+    let mut literal = vec!["--literal-pathspecs"];
+    literal.extend_from_slice(args);
+    crate::core::cmd::agent_git_output(project, &literal, input)
 }
 
 /// The repository's effective configuration and its replace refs, as text:
@@ -429,6 +456,37 @@ fn kronn_signed(project: &Path, dir: &str) -> bool {
 /// `inconsistencies-*.md`, and the parent of a `tech-debt/TD-*.md`. Read from
 /// the tracked files before the step, so the agent cannot define them. The
 /// project folder itself and Kronn-owned paths never count.
+/// The tracked files of `folders` with a `filter` attribute (Git LFS), and the
+/// filter's name. With filters off such a file's bytes always differ from its
+/// blob, and the raw blob (an LFS pointer) is not its content. `None` when git
+/// cannot tell.
+fn filtered_files(project: &Path, folders: &[String]) -> Option<HashMap<String, String>> {
+    if folders.is_empty() {
+        return Some(HashMap::new());
+    }
+    let mut args = vec!["ls-files", "-z", "--"];
+    args.extend(folders.iter().map(String::as_str));
+    let listed = git(project, &args)?;
+    if listed.is_empty() {
+        return Some(HashMap::new());
+    }
+    let answer = git_with_input(project, &["check-attr", "-z", "--stdin", "filter"], &listed)?;
+    // `<path> NUL filter NUL <value> NUL` per file.
+    let fields: Vec<&[u8]> = answer.split(|b| *b == 0).collect();
+    Some(
+        fields
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter(|[_, _, value]| !matches!(*value, b"unspecified" | b"unset"))
+            .filter_map(|[path, _, value]| {
+                let rel = std::str::from_utf8(path).ok()?;
+                Some((rel.to_string(), String::from_utf8_lossy(value).into_owned()))
+            })
+            .collect(),
+    )
+}
+
 fn ai_doc_folders(project: &Path, docs_root: &DocsRoot) -> Vec<String> {
     let listed = git(project, &["ls-files", "-z"]).unwrap_or_default();
     let mut folders: Vec<String> = Vec::new();
@@ -511,11 +569,12 @@ impl StepRemit {
                 continue;
             }
             // KT-1595: read through the rooted primitive. A link (or anything
-            // that is not a readable regular file) is recorded as refused, not
-            // as an absent file: settle never rewrites or deletes through it.
-            match crate::core::fs_guard::guarded_read(project, &project.join(&rel)) {
+            // that is not a readable regular file, or one too large to keep) is
+            // recorded as refused, not as an absent file: settle never rewrites
+            // or deletes through it.
+            index_before.insert(rel.clone(), record);
+            match read_kept(project, &rel) {
                 Ok(content) => {
-                    index_before.insert(rel.clone(), record);
                     dirty_outside.insert(rel, content);
                 }
                 Err(_) => {
@@ -525,6 +584,12 @@ impl StepRemit {
             }
         }
         let flagged_unchecked = if keep_flagged { 0 } else { flags_before.len() };
+        let ai_folders = ai_doc_folders(project, docs_root);
+        let filtered_before = filtered_files(project, &ai_folders).unwrap_or_else(|| {
+            capture_gap =
+                Some("the attributes of the AI-doc folders could not be read".to_string());
+            HashMap::new()
+        });
         Some(Self {
             project: project.to_path_buf(),
             prefix,
@@ -541,7 +606,8 @@ impl StepRemit {
             capture_gap,
             unguarded: false,
             flagged_unchecked,
-            ai_folders: ai_doc_folders(project, docs_root),
+            ai_folders,
+            filtered_before,
         })
     }
 
@@ -565,6 +631,7 @@ impl StepRemit {
             unguarded: true,
             flagged_unchecked: 0,
             ai_folders: Vec::new(),
+            filtered_before: HashMap::new(),
         }
     }
 
@@ -820,19 +887,25 @@ impl StepRemit {
                 // KT-1595: read through the rooted primitive; a refused read
                 // (link) counts as changed, never as the content it points at.
                 // The index counts too: a version the agent staged is a change.
-                let unchanged = before.is_some_and(|b| {
-                    crate::core::fs_guard::guarded_read(&self.project, &self.project.join(&rel))
-                        .is_ok_and(|now| *b == now)
-                }) && self.index_before.get(&rel) == Some(&index_now(&rel));
+                let unchanged = match before {
+                    Some(b) => read_kept(&self.project, &rel).is_ok_and(|now| *b == now),
+                    None => self
+                        .refused_before
+                        .get(&rel)
+                        .is_some_and(|fp| link_fingerprint(&self.project, &rel) == *fp),
+                } && self.index_before.get(&rel) == Some(&index_now(&rel));
                 if !unchanged {
                     left_alone.push(rel);
                 }
                 continue;
             }
-            if self.refused_before.contains_key(&rel) {
-                report.warnings.push(format!(
-                    "`{rel}` could not be read safely before the step (a link?) and was left as it is"
-                ));
+            if let Some(fingerprint) = self.refused_before.get(&rel) {
+                if link_fingerprint(&self.project, &rel) != *fingerprint {
+                    report.warnings.push(format!(
+                        "`{rel}` could not be kept before the step (a link, or a file larger than {} MiB) and changed during it; it was left as it is",
+                        REMIT_CONTENT_MAX / (1024 * 1024)
+                    ));
+                }
                 continue;
             }
             if before.is_none() && self.index_before.contains_key(&rel) {
@@ -896,8 +969,7 @@ impl StepRemit {
     /// name or in a parent is refused, never followed) and handed to git on
     /// stdin, so git never reads the path itself.
     fn keep_current(&self, rel: &str) -> Result<Option<String>, String> {
-        let path = self.project.join(rel);
-        let bytes = match crate::core::fs_guard::guarded_read(&self.project, &path) {
+        let bytes = match read_kept(&self.project, rel) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             // A folder or another non-regular entry: not content to keep.
@@ -939,6 +1011,11 @@ impl StepRemit {
         // as the pre-step content is in `restore_content`. A link or a
         // submodule at HEAD is not bytes to write: refused, left as it is.
         let (mode, index_mode, blob_id) = self.head_file_entry(rel)?;
+        if let Some(filter) = self.filtered_before.get(rel) {
+            return Err(format!(
+                "it goes through the `{filter}` filter, which Kronn never runs, so an edit cannot be told apart from a refreshed file; left as it is"
+            ));
+        }
         let bytes = git(&self.project, &["cat-file", "blob", &spec]).ok_or_else(|| {
             format!("the content of `{rel}` at the recorded commit is unreadable")
         })?;
@@ -1092,12 +1169,10 @@ impl StepRemit {
         // project. A link at the name or in a parent folder (the agent may
         // have swapped an AI-doc folder for a link) is refused: nothing is
         // read, written nor deleted through it.
-        use crate::core::fs_guard::{
-            guarded_read, guarded_remove_file, guarded_replace, guarded_write_new,
-        };
+        use crate::core::fs_guard::{guarded_remove_file, guarded_replace, guarded_write_new};
         let path = self.project.join(rel);
-        let now = guarded_read(&self.project, &path)
-            .map_err(|e| format!("refused, left as it is ({e})"))?;
+        let now =
+            read_kept(&self.project, rel).map_err(|e| format!("refused, left as it is ({e})"))?;
         if now.as_deref() == before {
             return Ok(None);
         }

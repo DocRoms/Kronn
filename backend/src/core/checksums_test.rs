@@ -1020,3 +1020,17 @@ fn a_docs_folder_swapped_after_the_walk_never_receives_the_baseline() {
     assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
     assert!(project.join("docs.moved/checksums.json").is_file());
 }
+
+/// KT-1595 round 12: the source-tree fingerprint, taken right after an agent
+/// ran in the project, never runs the file-system monitor its configuration
+/// names.
+#[cfg(unix)]
+#[test]
+fn the_source_tree_fingerprint_runs_no_program_the_repository_names() {
+    use crate::core::cmd::hostile_git::{git, marker_program, repo};
+    let dir = repo();
+    let (program, marker) = marker_program(dir.path());
+    git(dir.path(), &["config", "core.fsmonitor", &program]);
+    assert!(git_source_tree_fingerprint(dir.path()).is_some());
+    assert!(!marker.exists(), "the fsmonitor hook ran");
+}

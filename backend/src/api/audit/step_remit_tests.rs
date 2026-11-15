@@ -1074,6 +1074,105 @@ fn hooks_and_hidden_filters_the_agent_declares_never_run() {
     );
 }
 
+/// KT-1595 round 12: a file stored through a filter (Git LFS) is never
+/// rewritten from its raw blob: with filters off a refreshed file looks edited,
+/// and the blob is not its content.
+#[test]
+fn a_filtered_file_is_never_rewritten_from_its_raw_blob() {
+    let dir = repo();
+    write(
+        dir.path(),
+        ".gitattributes",
+        "docs/tech-debt/TD-1.md filter=up\n",
+    );
+    git(dir.path(), &["config", "filter.up.clean", "tr a-z A-Z"]);
+    git(dir.path(), &["config", "filter.up.smudge", "cat"]);
+    git(dir.path(), &["add", ".gitattributes"]);
+    git(dir.path(), &["add", "--renormalize", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "filtered"]);
+    assert_eq!(
+        git(
+            dir.path(),
+            &["cat-file", "blob", "HEAD:docs/tech-debt/TD-1.md"]
+        ),
+        "TD ONE"
+    );
+    // An older time, recorded by the user's git (which runs the filter): the
+    // file is clean before the step, not racily clean.
+    let now = std::time::SystemTime::now();
+    let rel = "docs/tech-debt/TD-1.md";
+    set_mtime(dir.path(), rel, now - std::time::Duration::from_secs(10));
+    git(dir.path(), &["update-index", "--refresh"]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    // The same bytes, a later time: git must read the file again.
+    set_mtime(dir.path(), rel, now + std::time::Duration::from_secs(5));
+    let report = remit.settle_blocking();
+    assert_eq!(read(dir.path(), "docs/tech-debt/TD-1.md"), "td one\n");
+    assert!(
+        report.warnings.iter().any(|w| w.contains("`up` filter")),
+        "{report:?}"
+    );
+}
+
+fn set_mtime(dir: &Path, rel: &str, at: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(dir.join(rel))
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
+fn set_len(dir: &Path, rel: &str, len: u64) {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join(rel))
+        .unwrap()
+        .set_len(len)
+        .unwrap();
+}
+
+/// KT-1595 round 12: a dirty file past REMIT_CONTENT_MAX is never read whole:
+/// it is left as it is, and reported only once it changed.
+#[test]
+fn a_dirty_file_too_large_to_keep_is_left_as_it_is() {
+    let dir = repo();
+    let rel = "docs/tech-debt/TD-1.md";
+    set_len(dir.path(), rel, REMIT_CONTENT_MAX + 1);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    let report = remit.settle_blocking();
+    assert!(report.is_empty(), "untouched, nothing to say: {report:?}");
+    set_len(dir.path(), rel, REMIT_CONTENT_MAX + 2);
+    let report = remit.settle_blocking();
+    assert_eq!(
+        std::fs::metadata(dir.path().join(rel)).unwrap().len(),
+        REMIT_CONTENT_MAX + 2
+    );
+    assert!(
+        report.warnings.iter().any(|w| w.contains("larger than")),
+        "{report:?}"
+    );
+}
+
+/// KT-1595 round 12: a tracked file the agent grew past REMIT_CONTENT_MAX is
+/// left as it is (its bytes cannot be kept as a blob first), and reported.
+#[test]
+fn a_file_the_agent_grew_past_the_limit_is_left_as_it_is() {
+    let dir = repo();
+    let rel = "docs/tech-debt/TD-1.md";
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    set_len(dir.path(), rel, REMIT_CONTENT_MAX + 1);
+    let report = remit.settle_blocking();
+    assert_eq!(
+        std::fs::metadata(dir.path().join(rel)).unwrap().len(),
+        REMIT_CONTENT_MAX + 1
+    );
+    assert!(
+        report.warnings.iter().any(|w| w.contains("larger than")),
+        "{report:?}"
+    );
+}
+
 /// KT-1595 round 11: a staged rename whose new name is not UTF-8 keeps the
 /// status fields paired: the origin is restored, nothing bogus is reported and
 /// no settle panics.

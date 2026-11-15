@@ -134,13 +134,27 @@ by path, found by the round-3 review and the Argon addendum):
   repository), through `cmd::agent_touched_git_cmd` (rounds 10-11): hooks and
   fsmonitor off, every `filter.*` / `diff.*` / `merge.*` / `hook.*` entry of the
   EFFECTIVE configuration (includes and worktree config read too) turned off by
-  name through `GIT_CONFIG_COUNT` (a name holding `=` stays one key), no replace
-  refs, no lazy fetch, no optional index writes, no signature check, submodules
-  ignored by status, the stat cache, `diff.relative` and `core.bare` pinned to
-  git's defaults; every call, the configuration listing included, runs under
-  `cmd::run_bounded` (120 s, the whole process group killed on a timeout), so an
-  include or a config file that is a FIFO fails the call instead of hanging. A
-  configuration that cannot be read in time runs nothing and is reported. The
+  its exact name, bytes included, through `GIT_CONFIG_COUNT` (a name that is not
+  UTF-8 turns off that very driver, a name holding `=` stays one key; round 12),
+  no replace refs, no lazy fetch, no optional index writes, no signature check,
+  submodules ignored by status, the stat cache, `diff.relative` and `core.bare`
+  pinned to git's defaults; every call runs under `cmd::run_bounded` (120 s, the
+  whole process group killed on a timeout), so an include or a config file that
+  is a FIFO fails the call instead of hanging. The configuration listing gets
+  30 s, and a checkout whose listing ran out of time is not listed again for ten
+  minutes: a blocking configuration costs one wait per pass, not one per call
+  (round 12). A configuration that cannot be read in time, or that declares
+  more than 1 024 driver settings, runs nothing and is reported. The same
+  hardened, bounded git (`cmd::agent_git_output`) serves the
+  doc tooling that runs after an agent (round 12): the `checksums` listings,
+  `doc_relevance`'s file listing and ignore check, the detectors' tracked listing
+  and the `docs_citations` line map (`git diff --no-textconv --no-ext-diff`).
+  The remit never reads a file past 64 MiB (`REMIT_CONTENT_MAX`) whole: such a
+  file is left as it is and reported once it changed. A file that had a
+  `filter` attribute (Git LFS) when the step started is never rewritten from its
+  raw blob: with filters off its bytes always differ from the blob, so it is
+  reported and left as it is; the attributes are read before the agent runs, so
+  one it adds never spares its own edit (round 12). The
   settle reports a git failure, a capture that could not be read (an unreadable
   HEAD in a repository makes a remit that only says so, never a silent unguarded
   step), more flagged files than are checked, and any change of the configuration
@@ -148,7 +162,9 @@ by path, found by the round-3 review and the Argon addendum):
   origin always consumed. A path that is not
   UTF-8 is never written back. Not covered, by owner decision (KT-1769): an
   agent can still write `.git/config`, `.git/info` and `refs/replace` (the root
-  fix is a sandbox write deny on `.git`); the change is reported, not undone. A file the user
+  fix is a sandbox write deny on `.git`); the change is reported, not undone, and
+  a FIFO include still hangs Kronn's other git calls on that project, which are
+  not bounded (`project_profile`, the citation merge-base). A file the user
   hid with one of those flags counts as dirty (its bytes are kept up to 2 000
   flagged files, its index state always), and a flag set or changed during the
   step is a change, so an edit hidden behind `--assume-unchanged` is restored or

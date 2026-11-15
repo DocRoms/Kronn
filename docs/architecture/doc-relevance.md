@@ -21,7 +21,7 @@ Every section (heading to next heading, fenced code excluded, a heading with
 nothing under it skipped) is judged from its anchors: its `[src: file: …]`
 citations, read through the fingerprint report, and the repository paths its
 prose names in backticks.
-[src: file: backend/src/core/doc_relevance.rs:1352#judge]
+[src: file: backend/src/core/doc_relevance.rs:1343-1344#judge]
 
 | Verdict | Meaning |
 |---|---|
@@ -152,7 +152,7 @@ accepts them all.
   when a section is outdated or gone. The paths no fingerprint covers are
   counted apart in `missing_paths`, so `broken_citations` stays a count of
   citations.
-  [src: file: backend/src/core/checksums.rs:893#check_drift]
+  [src: file: backend/src/core/checksums.rs:878-879#check_drift]
   [src: file: backend/src/core/doc_relevance.rs:173#escalate]
 - **Validation state**: a human-validated doc whose prose names a vanished path
   stops counting as human-validated for learning sources, like one with a
@@ -161,8 +161,8 @@ accepts them all.
   proposals the human launches through « Revalider l'audit », then reviews
   and validates; « Vérifié, inchangé » acknowledges a doc, recorded or not,
   that was judged stale but is fine.
-  [src: file: backend/src/core/checksums.rs:862#acknowledge_stale]
+  [src: file: backend/src/core/checksums.rs:842-848#acknowledge_stale]
 
 A citation the git diff maps to a new line past the fingerprint window is
 treated as moved, exactly as the plan re-anchors it.
-[src: file: backend/src/core/doc_relevance.rs:1489#analyze_with_moves]
+[src: file: backend/src/core/doc_relevance.rs:1478-1480#analyze_with_moves]

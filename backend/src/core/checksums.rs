@@ -427,31 +427,17 @@ fn git_source_tree_fingerprint(project_path: &Path) -> Option<String> {
 /// Run a git command returning RAW stdout bytes. Needed where output can
 /// carry arbitrary path bytes (`ls-tree -z`): a lossy UTF-8 pass would
 /// silently alter non-UTF-8 names. Returns None on failure.
+///
+/// KT-1595: the baseline is taken right after an agent ran in the project: no
+/// program its configuration names (fsmonitor, filters) runs, and a blocking
+/// configuration fails the call in bounded time.
 fn run_git_bytes(project_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let mut cmd = crate::core::cmd::git_cmd();
-    cmd.arg("-C").arg(project_path);
-    for arg in args {
-        cmd.arg(arg);
-    }
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(output.stdout)
+    crate::core::cmd::agent_git_output(project_path, args, &[])
 }
 
 /// Run a git command in the given directory, returning stdout trimmed. Returns None on failure.
 fn run_git(project_path: &Path, args: &[&str]) -> Option<String> {
-    let mut cmd = crate::core::cmd::git_cmd();
-    cmd.arg("-C").arg(project_path);
-    for arg in args {
-        cmd.arg(arg);
-    }
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    run_git_bytes(project_path, args).map(|out| String::from_utf8_lossy(&out).trim().to_string())
 }
 
 const SOURCE_TREE_QUIET_PERIOD: Duration = Duration::from_millis(250);

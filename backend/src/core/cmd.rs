@@ -449,45 +449,36 @@ pub fn project_git_cmd() -> std::process::Command {
 /// step's project after its agent ran): no program its configuration names runs.
 /// Hooks and fsmonitor are off; every `filter.*`, `diff.*`, `merge.*` and
 /// `hook.*` entry of the EFFECTIVE configuration (includes and worktree config
-/// read too) is turned off by name, passed through `GIT_CONFIG_COUNT` so a name
-/// holding `=` is one key; replace refs, lazy fetches (a promisor remote's
-/// upload-pack), optional index writes and the signature check are off; the stat
-/// cache, `diff.relative` and `core.bare` are pinned to git's defaults. `None`
-/// when the configuration cannot be read in time: nothing is run then.
+/// read too) is turned off by its exact name, bytes included, passed through
+/// `GIT_CONFIG_COUNT` so a name holding `=` is one key; replace refs, lazy
+/// fetches (a promisor remote's upload-pack), optional index writes and the
+/// signature check are off; the stat cache, `diff.relative` and `core.bare` are
+/// pinned to git's defaults. `None` when the configuration cannot be read in
+/// time or declares more drivers than [`AGENT_GIT_MAX_OFF`]: nothing is run then.
 pub fn agent_touched_git_cmd(repo: &std::path::Path) -> Option<std::process::Command> {
+    agent_touched_git_cmd_within(repo, AGENT_GIT_CONFIG_TIMEOUT)
+}
+
+fn agent_touched_git_cmd_within(
+    repo: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Option<std::process::Command> {
+    if config_timed_out_recently(repo) {
+        return None;
+    }
     let mut list = git_cmd();
     list.arg("-C")
         .arg(repo)
         .env("GIT_NO_LAZY_FETCH", "1")
         .args(["config", "--list", "--name-only", "--null"]);
-    let names = run_bounded(&mut list, &[], AGENT_GIT_TIMEOUT)?;
-    let mut off: Vec<(String, String)> = Vec::new();
-    for key in String::from_utf8_lossy(&names).split('\0') {
-        let Some((section, rest)) = key.split_once('.') else {
-            continue;
-        };
-        let Some((name, _)) = rest.rsplit_once('.') else {
-            continue;
-        };
-        let keys: &[(&str, &str)] = match section.to_ascii_lowercase().as_str() {
-            "filter" => &[
-                ("clean", ""),
-                ("smudge", ""),
-                ("process", ""),
-                ("required", "false"),
-            ],
-            "diff" => &[("textconv", ""), ("command", "")],
-            "merge" => &[("driver", "")],
-            "hook" => &[("enabled", "false")],
-            _ => continue,
-        };
-        for (variable, value) in keys {
-            let setting = (format!("{section}.{name}.{variable}"), (*value).to_string());
-            if !off.contains(&setting) {
-                off.push(setting);
-            }
+    let started = std::time::Instant::now();
+    let Some(names) = run_bounded(&mut list, &[], timeout) else {
+        if started.elapsed() >= timeout {
+            remember_config_timeout(repo);
         }
-    }
+        return None;
+    };
+    let off = driver_settings_off(&names)?;
     let mut cmd = project_git_cmd();
     cmd.arg("--no-replace-objects")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
@@ -506,11 +497,114 @@ pub fn agent_touched_git_cmd(repo: &std::path::Path) -> Option<std::process::Com
             "core.bare=false",
         ])
         .env("GIT_CONFIG_COUNT", off.len().to_string());
-    for (index, (key, value)) in off.iter().enumerate() {
+    for (index, (key, value)) in off.into_iter().enumerate() {
         cmd.env(format!("GIT_CONFIG_KEY_{index}"), key)
             .env(format!("GIT_CONFIG_VALUE_{index}"), value);
     }
     Some(cmd)
+}
+
+/// The settings that turn off every driver `names` (a NUL-separated
+/// `config --list --name-only`) declares, each key kept byte for byte: a name
+/// that is not UTF-8 turns off that very driver. `None` past
+/// [`AGENT_GIT_MAX_OFF`] settings.
+fn driver_settings_off(names: &[u8]) -> Option<Vec<(std::ffi::OsString, &'static str)>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut off = Vec::new();
+    for key in names.split(|byte| *byte == 0) {
+        let Some(dot) = key.iter().position(|byte| *byte == b'.') else {
+            continue;
+        };
+        let (section, rest) = (&key[..dot], &key[dot + 1..]);
+        let Some(last) = rest.iter().rposition(|byte| *byte == b'.') else {
+            continue;
+        };
+        let variables: &[(&str, &'static str)] = match section.to_ascii_lowercase().as_slice() {
+            b"filter" => &[
+                ("clean", ""),
+                ("smudge", ""),
+                ("process", ""),
+                ("required", "false"),
+            ],
+            b"diff" => &[("textconv", ""), ("command", "")],
+            b"merge" => &[("driver", "")],
+            b"hook" => &[("enabled", "false")],
+            _ => continue,
+        };
+        for (variable, value) in variables {
+            let mut setting = section.to_vec();
+            setting.push(b'.');
+            setting.extend_from_slice(&rest[..last]);
+            setting.push(b'.');
+            setting.extend_from_slice(variable.as_bytes());
+            if !seen.insert(setting.clone()) {
+                continue;
+            }
+            if off.len() == AGENT_GIT_MAX_OFF {
+                return None;
+            }
+            off.push((config_key(setting)?, *value));
+        }
+    }
+    Some(off)
+}
+
+#[cfg(unix)]
+fn config_key(bytes: Vec<u8>) -> Option<std::ffi::OsString> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(std::ffi::OsString::from_vec(bytes))
+}
+
+/// Elsewhere an environment value is text: a name that is not is refused.
+#[cfg(not(unix))]
+fn config_key(bytes: Vec<u8>) -> Option<std::ffi::OsString> {
+    String::from_utf8(bytes).ok().map(std::ffi::OsString::from)
+}
+
+/// More driver settings than a real configuration declares (Git LFS adds
+/// four): such a configuration is refused, never handed to git one
+/// environment variable per setting.
+const AGENT_GIT_MAX_OFF: usize = 1024;
+
+/// How long listing an agent-touched checkout's configuration may take.
+pub const AGENT_GIT_CONFIG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A checkout whose configuration listing ran out of time is not listed again
+/// for this long: a blocking configuration costs one wait per pass, not one per
+/// git call.
+const AGENT_GIT_CONFIG_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
+
+static CONFIG_TIMED_OUT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::time::Instant>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn config_timed_out_recently(repo: &std::path::Path) -> bool {
+    let mut timed_out = CONFIG_TIMED_OUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    timed_out.retain(|_, at| at.elapsed() < AGENT_GIT_CONFIG_RETRY);
+    timed_out.contains_key(repo)
+}
+
+fn remember_config_timeout(repo: &std::path::Path) {
+    CONFIG_TIMED_OUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(repo.to_path_buf(), std::time::Instant::now());
+}
+
+/// `git <args>` in `repo` through [`agent_touched_git_cmd`], with `input` on
+/// stdin, bounded by [`AGENT_GIT_TIMEOUT`]: its stdout when git exits
+/// successfully in time, `None` otherwise. A caller taking pathspecs passes
+/// `--literal-pathspecs` first (`check-ignore` refuses it).
+pub fn agent_git_output<S: AsRef<OsStr>>(
+    repo: &std::path::Path,
+    args: &[S],
+    input: &[u8],
+) -> Option<Vec<u8>> {
+    let mut cmd = agent_touched_git_cmd(repo)?;
+    cmd.arg("-C").arg(repo).args(args);
+    run_bounded(&mut cmd, input, AGENT_GIT_TIMEOUT)
 }
 
 /// The longest a git call on an agent-touched checkout may take: a
@@ -559,11 +653,14 @@ pub fn run_bounded(
         stdout.read_to_end(&mut out).map(|_| out)
     });
     let deadline = std::time::Instant::now() + timeout;
+    // A quick git call answers in a few milliseconds: the pause grows from 1 ms.
+    let mut pause = std::time::Duration::from_millis(1);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(std::time::Duration::from_millis(10));
             }
             _ => {
                 // The threads are left to end with the killed group's pipes:
@@ -676,9 +773,154 @@ fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command
     command
 }
 
+/// Test support: a committed repository and a program that leaves a marker
+/// when anything runs it, as a filter, hook or monitor an agent declares would.
+#[cfg(test)]
+pub(crate) mod hostile_git {
+    use std::path::{Path, PathBuf};
+
+    /// `git` for a fixture (identity set, no signing); panics on failure.
+    pub fn git(dir: &Path, args: &[&str]) -> String {
+        let out = super::git_cmd()
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false", "-C"])
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repository holding `a.txt`, committed.
+    pub fn repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "initial"]);
+        dir
+    }
+
+    /// An executable under `<dir>/.git` that creates the returned marker and
+    /// passes its input through: `(program path, marker path)`.
+    #[cfg(unix)]
+    pub fn marker_program(dir: &Path) -> (String, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = dir.join(".git/program-ran");
+        let program = dir.join(".git/program.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (program.to_str().unwrap().to_string(), marker)
+    }
+
+    /// Appends raw bytes to the repository's own configuration.
+    pub fn append_config(dir: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join(".git/config"))
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    /// KT-1595 round 12: a driver whose name is not UTF-8 is turned off by its
+    /// exact bytes; a lossy name would turn off another driver and let it run.
+    #[cfg(unix)]
+    #[test]
+    fn a_driver_named_with_bytes_that_are_not_utf8_never_runs() {
+        use hostile_git::{append_config, git, marker_program, repo};
+        let dir = repo();
+        let (program, marker) = marker_program(dir.path());
+        let mut config = b"[filter \"\xff\"]\n\tclean = ".to_vec();
+        config.extend_from_slice(program.as_bytes());
+        config.extend_from_slice(b"\n");
+        append_config(dir.path(), &config);
+        std::fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+        std::fs::write(
+            dir.path().join(".git/info/attributes"),
+            b"a.txt filter=\xff\n",
+        )
+        .unwrap();
+        // Same size, other bytes: git must read the file to see the change.
+        std::fs::write(dir.path().join("a.txt"), "A\n").unwrap();
+        let status = agent_git_output(dir.path(), &["status", "--porcelain"], &[]);
+        assert!(status.is_some(), "the hardened status runs");
+        assert!(
+            !marker.exists(),
+            "the driver named with non-UTF-8 bytes ran"
+        );
+        // The fixture is live: plain git runs that very driver.
+        git(dir.path(), &["status", "--porcelain"]);
+        assert!(marker.exists(), "plain git must run the fixture's driver");
+    }
+
+    /// KT-1595 round 12: a configuration declaring more drivers than any real
+    /// one is refused (nothing runs) instead of costing a quadratic pass and an
+    /// environment past the system's limit; one filter (Git LFS) is served.
+    #[test]
+    fn a_configuration_declaring_more_drivers_than_any_real_one_runs_nothing() {
+        use hostile_git::{append_config, repo};
+        let dir = repo();
+        append_config(dir.path(), b"[filter \"lfs\"]\n\tclean = x\n\tsmudge = x\n");
+        assert!(agent_touched_git_cmd(dir.path()).is_some());
+        let mut many = String::new();
+        for n in 0..=AGENT_GIT_MAX_OFF / 4 {
+            many.push_str(&format!("[filter \"f{n}\"]\n\tclean = x\n"));
+        }
+        append_config(dir.path(), many.as_bytes());
+        assert!(agent_touched_git_cmd(dir.path()).is_none());
+    }
+
+    /// KT-1595 round 12: a configuration that blocks git (an include on a FIFO)
+    /// costs one bounded wait; the next git call on that checkout is refused
+    /// at once instead of waiting again.
+    #[cfg(unix)]
+    #[test]
+    fn a_configuration_listing_that_ran_out_of_time_is_not_waited_for_again() {
+        use hostile_git::{git, repo};
+        use std::os::unix::ffi::OsStrExt;
+        use std::time::{Duration, Instant};
+        let dir = repo();
+        let fifo = dir.path().join(".git/blocking.cfg");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        git(
+            dir.path(),
+            &["config", "include.path", fifo.to_str().unwrap()],
+        );
+        let wait = Duration::from_millis(300);
+        let started = Instant::now();
+        assert!(agent_touched_git_cmd_within(dir.path(), wait).is_none());
+        assert!(started.elapsed() >= wait);
+        let again = Instant::now();
+        assert!(agent_touched_git_cmd(dir.path()).is_none());
+        assert!(
+            again.elapsed() < Duration::from_secs(5),
+            "the second call waited again: {:?}",
+            again.elapsed()
+        );
+    }
 
     /// A program present on every host and under no directory a test controls:
     /// what stands for "a CLI the developer installed" (KT-1189).

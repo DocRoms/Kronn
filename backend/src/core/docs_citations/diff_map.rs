@@ -1,6 +1,7 @@
 //! Old-to-new line mapping from a zero-context Git diff.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,29 +149,29 @@ impl<'a> DiffMap<'a> {
 
     fn file(&mut self, file: &Path) -> Result<&FileMap, String> {
         if !self.files.contains_key(file) {
-            let mut command = crate::core::cmd::git_cmd();
-            command
-                .args(["diff", "--unified=0", "--no-ext-diff", "--no-color"])
-                .arg(self.base);
+            // KT-1595: an agent may have configured the repository; no textconv,
+            // external diff or other program its configuration names runs.
+            let mut args: Vec<&OsStr> = [
+                "--literal-pathspecs",
+                "diff",
+                "--unified=0",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+            ]
+            .map(OsStr::new)
+            .to_vec();
+            args.push(OsStr::new(self.base));
             if !self.to_worktree {
-                command.arg("HEAD");
+                args.push(OsStr::new("HEAD"));
             }
-            let output = command
-                .arg("--")
-                .arg(file)
-                .current_dir(self.root)
-                .output()
-                .map_err(|error| format!("cannot run git diff: {error}"))?;
-            if !output.status.success() {
-                let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let target = if self.to_worktree { "" } else { " HEAD" };
-                return Err(if detail.is_empty() {
+            args.extend([OsStr::new("--"), file.as_os_str()]);
+            let stdout =
+                crate::core::cmd::agent_git_output(self.root, &args, &[]).ok_or_else(|| {
+                    let target = if self.to_worktree { "" } else { " HEAD" };
                     format!("git diff {}{target} failed", self.base)
-                } else {
-                    format!("git diff {}{target} failed: {detail}", self.base)
-                });
-            }
-            let parsed = FileMap::parse(&String::from_utf8_lossy(&output.stdout))?;
+                })?;
+            let parsed = FileMap::parse(&String::from_utf8_lossy(&stdout))?;
             self.files.insert(file.to_path_buf(), parsed);
         }
         Ok(&self.files[file])
@@ -269,5 +270,32 @@ mod tests {
         assert_eq!(map.span((3, 6)), Some((3, 7)));
         assert_eq!(map.span((4, 6)), None);
         assert_eq!(map.span((3, 5)), None);
+    }
+
+    /// KT-1595 round 12: mapping lines never runs a textconv driver the
+    /// repository's configuration names.
+    #[cfg(unix)]
+    #[test]
+    fn mapping_lines_runs_no_program_the_repository_names() {
+        use crate::core::cmd::hostile_git::{append_config, git, marker_program, repo};
+        let dir = repo();
+        let base = git(dir.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(dir.path().join("a.txt"), "inserted\na\n").unwrap();
+        git(dir.path(), &["commit", "-q", "-am", "insert"]);
+        let (program, marker) = marker_program(dir.path());
+        append_config(
+            dir.path(),
+            format!("[diff \"evil\"]\n\ttextconv = {program}\n").as_bytes(),
+        );
+        std::fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+        std::fs::write(dir.path().join(".git/info/attributes"), "a.txt diff=evil\n").unwrap();
+        let mut map = DiffMap::new(dir.path(), &base);
+        assert_eq!(map.span(Path::new("a.txt"), (1, 1)).unwrap(), Some((2, 2)));
+        assert!(!marker.exists(), "the textconv driver ran");
+        // Against the working tree git reads the index: no monitor runs either.
+        git(dir.path(), &["config", "core.fsmonitor", &program]);
+        let mut map = DiffMap::to_worktree(dir.path(), &base);
+        assert_eq!(map.span(Path::new("a.txt"), (1, 1)).unwrap(), Some((2, 2)));
+        assert!(!marker.exists(), "the fsmonitor hook ran");
     }
 }

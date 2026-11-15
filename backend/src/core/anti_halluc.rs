@@ -1639,18 +1639,23 @@ fn untracked_claim(reference: &str, roots: &[&Path]) -> bool {
 /// Whether git tracks `rel` in the repository at `root`. Outside a repository,
 /// or without git, nothing is tracked.
 pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
-    agent_git_succeeds(root, &["ls-files", "--error-unmatch", "--", rel])
+    agent_git_succeeds(
+        root,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            rel,
+        ],
+    )
 }
 
 /// A git query on a checkout an agent may have reconfigured: no program its
 /// configuration names runs, and a blocking configuration (a FIFO) fails the
 /// query in bounded time (`false`).
 fn agent_git_succeeds(root: &Path, args: &[&str]) -> bool {
-    let Some(mut cmd) = crate::core::cmd::agent_touched_git_cmd(root) else {
-        return false;
-    };
-    cmd.arg("-C").arg(root).args(args);
-    crate::core::cmd::run_bounded(&mut cmd, &[], crate::core::cmd::AGENT_GIT_TIMEOUT).is_some()
+    crate::core::cmd::agent_git_output(root, args, &[]).is_some()
 }
 
 /// Whether git ignores `rel` in the repository at `root` (a vendored or generated
@@ -3180,6 +3185,16 @@ pub fn finalize_lint_report(
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    /// KT-1595 round 12: a cited path is taken literally: a glob never counts
+    /// as a tracked file.
+    #[test]
+    fn a_glob_is_never_a_tracked_path() {
+        let dir = crate::core::cmd::hostile_git::repo();
+        assert!(is_git_tracked(dir.path(), "a.txt"));
+        assert!(!is_git_tracked(dir.path(), "*"));
+        assert!(!is_git_tracked(dir.path(), "a.*"));
+    }
 
     #[test]
     fn truncate_outside_markers_never_cuts_a_marker() {

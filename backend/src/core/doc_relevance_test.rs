@@ -881,3 +881,17 @@ fn kronn_own_docs_report() {
         eprintln!("  {hit}");
     }
 }
+
+/// KT-1595 round 12: listing a project's files and asking what git ignores
+/// never run the file-system monitor its configuration names.
+#[cfg(unix)]
+#[test]
+fn listing_the_files_runs_no_program_the_repository_names() {
+    use crate::core::cmd::hostile_git::{git, marker_program, repo};
+    let dir = repo();
+    let (program, marker) = marker_program(dir.path());
+    git(dir.path(), &["config", "core.fsmonitor", &program]);
+    assert_eq!(git_files(dir.path()), Some(vec!["a.txt".to_string()]));
+    assert!(!is_git_ignored(dir.path(), "a.txt"));
+    assert!(!marker.exists(), "the fsmonitor hook ran");
+}
