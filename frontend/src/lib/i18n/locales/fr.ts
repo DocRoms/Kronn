@@ -1352,6 +1352,7 @@ const fr: TranslationDict = {
   'projects.commitPolicy.identitySource.setting': 'réglé ci-dessus',
   'projects.commitPolicy.identitySource.kronn_config': 'kronn.commitName / kronn.commitEmail du dépôt',
   'projects.commitPolicy.identitySource.repository': 'user.name / user.email du dépôt',
+  'projects.commitPolicy.identitySource.conditional': 'config git conditionnelle du dossier (includeIf)',
   'projects.commitPolicy.identitySource.kronn_global': 'réglage Kronn (Réglages > Workers)',
   'projects.commitPolicy.identitySource.global': 'config git de la machine',
   'projects.commitPolicy.identitySource.fallback': 'aucune identité trouvée',

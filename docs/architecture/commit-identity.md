@@ -20,7 +20,7 @@ override.
   Validated on save (`WorkersConfig::validate`) and published to the process by
   `config::save` and at boot (`commit_policy::set_global_settings`).
   [src: file: backend/src/models/setup.rs:163#commit]
-  [src: file: backend/src/core/commit_policy.rs:217#set_global_settings]
+  [src: file: backend/src/core/commit_policy.rs:222#set_global_settings]
 - **Project — the card** (Dashboard › project › *Identité et signoff des commits*)
   saves `ProjectCommitSettings` inside the project workspace
   (`PUT /api/projects/{id}/workspace`, stored in `workspace_json` next to the
@@ -42,17 +42,21 @@ editable (the saved settings are read from the workspace) and disables only
 
 `core::commit_policy` resolves the identity and the sign-off of the repository a
 path belongs to (a linked worktree answers for its repository).
-[src: file: backend/src/core/commit_policy.rs:134#for_repo]
+[src: file: backend/src/core/commit_policy.rs:136-139#for_repo]
 
 | | Order, first that decides |
 | --- | --- |
-| Identity | 1. the card's name + e-mail → 2. the repository's own: `kronn.commitName` + `kronn.commitEmail` of its git config (a **detection source**, not the way to set it), then its local `user.name` + `user.email` → 3. the Settings › Workers identity → 4. the machine's global git config (**used, but announced**) → 5. the placeholder `Kronn <kronn@localhost>` |
+| Identity | 1. the card's name + e-mail → 2. the repository's own: `kronn.commitName` + `kronn.commitEmail` of its git config (a **detection source**, not the way to set it), then its local `user.name` + `user.email`, then an identity git gives **this directory only** (a conditional include of the global config — `includeIf` on `gitdir:`, `hasconfig:`, `onbranch:` — or the worktree config; source `conditional`) → 3. the Settings › Workers identity → 4. the machine's global git config (**used, but announced**) → 5. the placeholder `Kronn <kronn@localhost>` |
 | Sign-off | 1. the card's *Always* / *Never* → 2. the repository's own: `kronn.signoff` of its git config, the briefing's `signoff_required`, a DCO file, a `commit-msg` hook that checks `Signed-off-by`, or most of the last 30 non-merge commits signed (or unsigned) → 3. the Settings › Workers *Always* / *Never* → 4. off |
 
 A company repository's own identity is therefore never overwritten by a personal
 global one: the Settings › Workers identity only fills what the repository leaves
-open (`choose_identity`, `inherit_signoff`). [src: file: backend/src/core/commit_policy.rs:343#choose_identity]
-[src: file: backend/src/core/commit_policy.rs:233#inherit_signoff]
+open (`choose_identity`, `inherit_signoff`). An effective `user.*` identity that
+differs from both the plain `--global --no-includes` and `--system --no-includes`
+files is directory-specific and ranks with the repository's own, so a personal
+Kronn global identity never signs a company repository that git already
+identifies (`resolve_identity`). [src: file: backend/src/core/commit_policy.rs:368-371#choose_identity]
+[src: file: backend/src/core/commit_policy.rs:236-238#inherit_signoff]
 
 The identity reaches git as `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
 (`CommitPolicy::apply_identity`); an amend keeps its author. The worker brief says
@@ -60,7 +64,7 @@ The identity reaches git as `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
 
 The merge and worker-commit code has no database, so the card's settings are
 published to the process by `register_project` — at boot (`main.rs`) and each time
-a card saves them. [src: file: backend/src/core/commit_policy.rs:259#register_project]
+a card saves them. [src: file: backend/src/core/commit_policy.rs:262-264#register_project]
 
 ## The machine identity is never silent
 

@@ -62,6 +62,10 @@ pub enum IdentitySource {
     KronnConfig,
     /// `user.name` / `user.email` of the repository's own config.
     Repository,
+    /// An identity git gives this directory only: a conditional include of the
+    /// global config (`includeIf` on `gitdir:`, `hasconfig:` or `onbranch:`) or
+    /// the worktree config. The repository's own in spirit, so it ranks with it.
+    Conditional,
     /// The Kronn identity of Settings > Workers.
     KronnGlobal,
     /// Only the machine's global git config knows one: used, but never silently.
@@ -76,6 +80,7 @@ impl IdentitySource {
             Self::Setting => "setting",
             Self::KronnConfig => "kronn_config",
             Self::Repository => "repository",
+            Self::Conditional => "conditional",
             Self::KronnGlobal => "kronn_global",
             Self::Global => "global",
             Self::Fallback => "fallback",
@@ -321,6 +326,28 @@ fn resolve_identity(
     repo_path: &Path,
     global: &ProjectCommitSettings,
 ) -> (CommitIdentity, IdentitySource) {
+    let effective = identity_of(repo_path, &[], "user.name", "user.email");
+    // What git gives every directory: the plain global and system files, their
+    // includes left unfollowed. An effective identity that is neither of them
+    // comes from a conditional include or the worktree config: it is this
+    // directory's own.
+    let plain = |scope: &str| {
+        identity_of(
+            repo_path,
+            &[scope, "--no-includes"],
+            "user.name",
+            "user.email",
+        )
+    };
+    let (directory, machine) = match effective {
+        Some(identity)
+            if plain("--global").as_ref() != Some(&identity)
+                && plain("--system").as_ref() != Some(&identity) =>
+        {
+            (Some(identity), None)
+        }
+        other => (None, other),
+    };
     choose_identity(
         identity_of(
             repo_path,
@@ -329,20 +356,22 @@ fn resolve_identity(
             "kronn.commitEmail",
         ),
         identity_of(repo_path, &["--local"], "user.name", "user.email"),
+        directory,
         global.identity().map(|(name, email)| CommitIdentity {
             name: name.to_string(),
             email: email.to_string(),
         }),
-        identity_of(repo_path, &[], "user.name", "user.email"),
+        machine,
     )
 }
 
 /// The first identity that is known, in order of authority: the repository's own
-/// (`kronn.commit*`, then local `user.*`), the Kronn global setting, the
-/// machine's git config.
+/// (`kronn.commit*`, then local `user.*`, then what git gives this directory
+/// only), the Kronn global setting, the machine's git config.
 fn choose_identity(
     kronn_config: Option<CommitIdentity>,
     repository: Option<CommitIdentity>,
+    directory: Option<CommitIdentity>,
     kronn_global: Option<CommitIdentity>,
     machine: Option<CommitIdentity>,
 ) -> (CommitIdentity, IdentitySource) {
@@ -351,6 +380,9 @@ fn choose_identity(
     }
     if let Some(identity) = repository {
         return (identity, IdentitySource::Repository);
+    }
+    if let Some(identity) = directory {
+        return (identity, IdentitySource::Conditional);
     }
     if let Some(identity) = kronn_global {
         return (identity, IdentitySource::KronnGlobal);

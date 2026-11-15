@@ -91,8 +91,12 @@ describe('ProjectCommitPolicySetting (KT-1750)', () => {
     for (const key of ['projects.commitPolicy.identity', 'projects.commitPolicy.signoff']) {
       const label = screen.getByText(key);
       expect(label.tagName).toBe('SPAN');
-      expect(label).toHaveClass('label', 'text-sm');
+      // The Workers 'Commits Kronn' block's treatment. `.label` alone would
+      // render larger (fs-base) and bolder (600) than the section's h4.
+      expect(label).toHaveClass('text-sm');
+      expect(label).not.toHaveClass('label');
       expect(label.closest('strong')).toBeNull();
+      expect(label.closest('h4')).toBeNull();
     }
   });
 

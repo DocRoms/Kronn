@@ -1068,17 +1068,15 @@ button.dash-badge-tech-debt {
   color: rgb(var(--kr-error-rgb));
 }
 
-/* KT-1750 — one field of the commit-identity block: its label, inputs and the
-   value in force, spaced like the section's own rows. */
+/* KT-1750 — one field of the commit-identity block: its title (a `.text-sm`
+   span, like the Workers 'Commits Kronn' block; never `.label`, which is
+   larger and bolder than the section's h4), inputs and the value in force,
+   spaced like the section's own rows. */
 .project-commit-policy-group {
   display: flex;
   flex-direction: column;
   gap: var(--kr-sp-2);
   margin-top: var(--kr-sp-2);
-}
-
-.project-commit-policy-group .label {
-  margin-bottom: 0;
 }
 
 /* KT-1433 — full access to a project's validations needs a confirmed warning */

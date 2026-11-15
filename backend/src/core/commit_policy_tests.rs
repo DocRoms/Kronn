@@ -90,7 +90,7 @@ fn a_global_only_identity_is_used_but_reported_as_global() {
 
 #[test]
 fn no_identity_at_all_is_the_placeholder_and_writes_no_config() {
-    let (identity, source) = choose_identity(None, None, None, None);
+    let (identity, source) = choose_identity(None, None, None, None, None);
     assert_eq!(source, IdentitySource::Fallback);
     assert_eq!(identity.display(), "Kronn <kronn@localhost>");
     // Nothing here writes a git config: a repository stays as it was.
@@ -421,7 +421,7 @@ fn who(name: &str, email: &str) -> Option<CommitIdentity> {
 
 #[test]
 fn the_identity_precedence_runs_card_repository_kronn_global_machine_placeholder() {
-    let source = |a, b, c, d| choose_identity(a, b, c, d).1;
+    let source = |a, b, c, d| choose_identity(a, b, None, c, d).1;
     let (kc, repo, kg, machine) = (
         who("KC", "kc@corp.example"),
         who("Repo", "repo@corp.example"),
@@ -433,15 +433,27 @@ fn the_identity_precedence_runs_card_repository_kronn_global_machine_placeholder
         source(kc.clone(), repo.clone(), kg.clone(), machine.clone()),
         IdentitySource::KronnConfig
     );
-    let (identity, repository) = choose_identity(None, repo.clone(), kg.clone(), machine.clone());
+    let (identity, repository) =
+        choose_identity(None, repo.clone(), None, kg.clone(), machine.clone());
     assert_eq!(repository, IdentitySource::Repository);
     assert_eq!(identity.email, "repo@corp.example");
+    // 2b. What git gives this directory only (conditional include), also
+    // before the Kronn global one.
+    let (identity, conditional) = choose_identity(
+        None,
+        None,
+        who("Dir", "dir@corp.example"),
+        kg.clone(),
+        machine.clone(),
+    );
+    assert_eq!(conditional, IdentitySource::Conditional);
+    assert_eq!(identity.email, "dir@corp.example");
     // 3. The Kronn global setting, before the machine's.
-    let (identity, kronn_global) = choose_identity(None, None, kg.clone(), machine.clone());
+    let (identity, kronn_global) = choose_identity(None, None, None, kg.clone(), machine.clone());
     assert_eq!(kronn_global, IdentitySource::KronnGlobal);
     assert_eq!(identity.email, "global@kronn.example");
     // 4. The machine's git config.
-    let (identity, machine_source) = choose_identity(None, None, None, machine);
+    let (identity, machine_source) = choose_identity(None, None, None, None, machine);
     assert_eq!(machine_source, IdentitySource::Global);
     assert_eq!(identity.email, "me@personal.example");
     // 5. The placeholder.
@@ -566,4 +578,80 @@ fn the_card_identity_is_both_fields_and_a_plausible_address() {
             "{name:?} {email:?}"
         );
     }
+}
+
+// ── Identity from a conditional include (includeIf gitdir/hasconfig/onbranch) ──
+
+/// A directory under which the isolated global git config (the harness's own
+/// scratch file, see `git_global_config::test_work_dir`) `includeIf`s a work
+/// identity. The condition names this process' own directory, so no other test
+/// sees it; the include file it points at is written here, once.
+fn work_dir() -> &'static Path {
+    static WORK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    WORK.get_or_init(|| {
+        crate::core::git_global_config::isolate_global_git_config_for_tests();
+        let (work, include) = crate::core::git_global_config::test_work_dir();
+        fs::write(
+            include,
+            "[user]\n\tname = Work Person\n\temail = work@company.example\n",
+        )
+        .unwrap();
+        work
+    })
+}
+
+fn repo_in(parent: &Path) -> tempfile::TempDir {
+    let dir = tempfile::tempdir_in(parent).unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    dir
+}
+
+#[test]
+fn an_identity_the_global_config_gives_only_this_directory_is_the_repositorys_own() {
+    let work = repo_in(work_dir());
+    let global = card("Global", "global@kronn.example", SignoffSetting::Auto);
+    let policy = CommitPolicy::detect_with(work.path(), &global);
+    // Git's effective identity here is the conditional include's, not the Kronn
+    // global one: a personal setting never signs a company repository.
+    assert_eq!(policy.identity.email, "work@company.example");
+    assert_eq!(policy.identity_source.as_str(), "conditional");
+    assert!(!policy.uses_global_identity());
+    // The Kronn global setting is out of the way: nothing to warn about either.
+    let bare = CommitPolicy::detect_with(work.path(), &ProjectCommitSettings::default());
+    assert_eq!(bare.identity.email, "work@company.example");
+    assert!(!bare.uses_global_identity());
+}
+
+#[test]
+fn a_repository_outside_the_conditional_include_takes_the_kronn_global_identity() {
+    let outside = repo();
+    let global = card("Global", "global@kronn.example", SignoffSetting::Auto);
+    let policy = CommitPolicy::detect_with(outside.path(), &global);
+    assert_eq!(policy.identity_source, IdentitySource::KronnGlobal);
+    assert_eq!(policy.identity.email, "global@kronn.example");
+}
+
+#[test]
+fn the_plain_machine_identity_is_still_flagged_without_an_include_or_a_kronn_global() {
+    let outside = repo();
+    work_dir();
+    let policy = CommitPolicy::detect_with(outside.path(), &ProjectCommitSettings::default());
+    assert_eq!(policy.identity_source, IdentitySource::Global);
+    assert!(policy.uses_global_identity());
+    assert_eq!(policy.identity.email, "kronn-test@example.invalid");
+}
+
+#[test]
+fn the_repository_own_identity_and_the_project_card_still_beat_a_conditional_one() {
+    let work = repo_in(work_dir());
+    git(work.path(), &["config", "user.name", "Local"]);
+    git(
+        work.path(),
+        &["config", "user.email", "local@company.example"],
+    );
+    let detected = CommitPolicy::detect_with(work.path(), &ProjectCommitSettings::default());
+    assert_eq!(detected.identity_source, IdentitySource::Repository);
+    assert_eq!(detected.identity.email, "local@company.example");
+    let carded = detected.with_settings(&card("Bot", "bot@company.example", SignoffSetting::Auto));
+    assert_eq!(carded.identity_source, IdentitySource::Setting);
 }

@@ -120,7 +120,7 @@ export function ProjectCommitPolicySetting({ projectId, t }: Props) {
       )}
 
       <div className="project-commit-policy-group">
-        <span className="label text-sm">{t('projects.commitPolicy.identity')}</span>
+        <span className="text-sm">{t('projects.commitPolicy.identity')}</span>
         <div className="flex-row gap-3">
           <input
             type="text"
@@ -160,7 +160,7 @@ export function ProjectCommitPolicySetting({ projectId, t }: Props) {
       </div>
 
       <div className="project-commit-policy-group">
-        <span className="label text-sm">{t('projects.commitPolicy.signoff')}</span>
+        <span className="text-sm">{t('projects.commitPolicy.signoff')}</span>
         <div className="flex-row gap-3">
           {SIGNOFF_SETTINGS.map(value => (
             <label key={value} className="flex-row gap-2" data-selected={signoff === value}>

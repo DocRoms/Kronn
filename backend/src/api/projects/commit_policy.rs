@@ -22,7 +22,7 @@ use crate::AppState;
 pub struct CommitPolicyView {
     pub name: String,
     pub email: String,
-    /// `setting`, `kronn_config`, `repository`, `kronn_global`, `global` or
+    /// `setting`, `kronn_config`, `repository`, `conditional`, `kronn_global`, `global` or
     /// `fallback`.
     pub identity_source: String,
     pub signoff: bool,

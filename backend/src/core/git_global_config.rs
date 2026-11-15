@@ -100,18 +100,38 @@ pub fn global_git_config_is_isolated() -> bool {
     under_temp && system.is_some_and(|system| !system.is_empty())
 }
 
+/// The directory of this test process under which the scratch global config
+/// gives another identity (`includeIf "gitdir:"`), and the file it includes.
+/// The include file is written by the tests that need it: git ignores a missing
+/// one, so every other repository keeps the scratch identity.
+pub fn test_work_dir() -> (PathBuf, PathBuf) {
+    let work = std::env::temp_dir().join(format!("kronn-test-work-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&work);
+    let work = std::fs::canonicalize(&work).unwrap_or(work);
+    let include = work.with_extension("inc");
+    (work, include)
+}
+
 /// Point `GIT_CONFIG_GLOBAL` at a scratch file and `GIT_CONFIG_SYSTEM` at the
 /// null device, for the whole process. Called by the test harnesses before the
 /// first test (a constructor in the library's test build and in
 /// `tests/it.rs`); the real `~/.gitconfig` is then never read nor written by a
-/// test. The scratch file only carries a commit identity.
+/// test. The scratch file carries a commit identity, and a conditional include
+/// (see [`test_work_dir`]) that only the tests of a directory-specific identity
+/// make real.
 pub fn isolate_global_git_config_for_tests() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("kronn-test-gitconfig-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let scratch = dir.join("gitconfig");
+    let (work, include) = test_work_dir();
     let _ = std::fs::write(
         &scratch,
-        "[user]\n\tname = Kronn Test\n\temail = kronn-test@example.invalid\n",
+        format!(
+            "[user]\n\tname = Kronn Test\n\temail = kronn-test@example.invalid\n\
+             [includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+            work.display(),
+            include.display()
+        ),
     );
     crate::core::child_env::set_var("GIT_CONFIG_GLOBAL", &scratch);
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };

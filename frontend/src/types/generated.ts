@@ -2571,7 +2571,7 @@ export type CommentDiscussionQuestionRequest = { idempotency_key: string, text: 
  */
 export type CommitPolicyView = { name: string, email: string,
 /**
- * `setting`, `kronn_config`, `repository`, `kronn_global`, `global` or
+ * `setting`, `kronn_config`, `repository`, `conditional`, `kronn_global`, `global` or
  * `fallback`.
  */
 identity_source: string, signoff: boolean,

@@ -1346,6 +1346,7 @@ const zh: TranslationDict = {
   "projects.commitPolicy.identitySource.setting": "上方设置",
   "projects.commitPolicy.identitySource.kronn_config": "仓库的 kronn.commitName / kronn.commitEmail",
   "projects.commitPolicy.identitySource.repository": "仓库的 user.name / user.email",
+  "projects.commitPolicy.identitySource.conditional": "文件夹的条件 git 配置（includeIf）",
   "projects.commitPolicy.identitySource.kronn_global": "Kronn 设置（设置 > Workers）",
   "projects.commitPolicy.identitySource.global": "本机 git 配置",
   "projects.commitPolicy.identitySource.fallback": "未找到任何身份",
