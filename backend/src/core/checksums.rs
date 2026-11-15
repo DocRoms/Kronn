@@ -49,8 +49,6 @@ pub fn compute_sha256(path: &Path) -> Option<String> {
     Some(sha256_of_bytes(&data))
 }
 
-/// Inner helper that computes the hex SHA-256 of a byte slice. Exposed
-/// so tests can pin the exact byte-to-hex contract.
 /// The SHA-256 of a regular file, read in chunks (memory stays bounded,
 /// whatever the file's size). `None` when it cannot be opened or read.
 fn sha256_of_file(path: &Path) -> Option<String> {
@@ -59,11 +57,12 @@ fn sha256_of_file(path: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
-        let read = file.read(&mut chunk).ok()?;
-        if read == 0 {
-            break;
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&chunk[..read]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
         }
-        hasher.update(&chunk[..read]);
     }
     Some(
         hasher
@@ -73,6 +72,11 @@ fn sha256_of_file(path: &Path) -> Option<String> {
             .collect(),
     )
 }
+
+/// The largest file the fingerprint reads. A larger one (a sparse file an agent
+/// left, a media file) is recorded by its size and modification time: reading
+/// it could take hours.
+const FINGERPRINT_CONTENT_MAX: u64 = 64 * 1024 * 1024;
 
 /// The largest root agent context file read as text.
 const ROOT_AGENT_FILE_MAX: u64 = 4 * 1024 * 1024;
@@ -94,6 +98,8 @@ fn read_small_text(path: &Path) -> Option<String> {
     Some(text)
 }
 
+/// Inner helper that computes the hex SHA-256 of a byte slice. Exposed
+/// so tests can pin the exact byte-to-hex contract.
 fn sha256_of_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -406,6 +412,13 @@ fn git_source_tree_fingerprint_with(
             // A FIFO, socket or device an agent left at a tracked path: never
             // opened (a FIFO blocks the open, a device never ends).
             "special".to_string()
+        } else if meta.len() > FINGERPRINT_CONTENT_MAX {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_nanos());
+            format!("large {} {modified}", meta.len())
         } else {
             let Some(content_hash) = sha256_of_file(&full) else {
                 continue;

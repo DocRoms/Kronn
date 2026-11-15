@@ -1067,3 +1067,26 @@ fn a_fifo_left_by_the_agent_never_blocks_the_fingerprint() {
         .expect("the fingerprint blocked on a FIFO");
     assert!(fingerprint.is_some());
 }
+
+/// KT-1595 round 14: a huge sparse file the agent leaves (untracked, no disk
+/// space used) never stalls the fingerprint: past the size cap it is recorded
+/// by its size and time, never read.
+#[cfg(unix)]
+#[test]
+fn a_huge_sparse_file_never_stalls_the_fingerprint() {
+    use crate::core::cmd::hostile_git::repo;
+    let dir = repo();
+    fs::File::create(dir.path().join("big.bin"))
+        .unwrap()
+        .set_len(1 << 40)
+        .unwrap();
+    let project = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(git_source_tree_fingerprint(&project));
+    });
+    let fingerprint = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the fingerprint read a 1 TiB sparse file");
+    assert!(fingerprint.is_some());
+}

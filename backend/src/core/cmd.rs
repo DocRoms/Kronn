@@ -453,8 +453,10 @@ pub fn project_git_cmd() -> std::process::Command {
 /// `GIT_CONFIG_COUNT` so a name holding `=` is one key; replace refs, lazy
 /// fetches (a promisor remote's upload-pack), optional index writes and the
 /// signature check are off; the stat cache, `diff.relative` and `core.bare` are
-/// pinned to git's defaults, and submodules are never looked into (their own
-/// configuration is not in this listing). `None` when the configuration cannot be read in
+/// pinned to git's defaults, and submodules are not looked into by default
+/// (their own configuration is not in this listing; `.gitmodules` can override
+/// that default, so a caller diffing a path that may be a submodule passes
+/// `--ignore-submodules=all`). `None` when the configuration cannot be read in
 /// time or declares more drivers than [`AGENT_GIT_MAX_OFF`]: nothing is run then.
 pub fn agent_touched_git_cmd(repo: &std::path::Path) -> Option<std::process::Command> {
     agent_touched_git_cmd_within(repo, AGENT_GIT_CONFIG_TIMEOUT)
@@ -572,8 +574,8 @@ const AGENT_GIT_MAX_OFF: usize = 1024;
 /// How long listing an agent-touched checkout's configuration may take.
 pub const AGENT_GIT_CONFIG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A checkout where a git call ran out of time (a configuration or an ignore
-/// file that is a FIFO) gets no git call for this long: a blocking checkout
+/// A checkout where the configuration listing or an attribute / ignore query
+/// ran out of time (a FIFO) gets no git call for this long: a blocking checkout
 /// costs one wait per pass, not one per call.
 const AGENT_GIT_CONFIG_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -618,7 +620,19 @@ fn agent_git_output_within<S: AsRef<OsStr>>(
     cmd.arg("-C").arg(repo).args(args);
     let started = std::time::Instant::now();
     let output = run_bounded(&mut cmd, input, timeout);
-    if output.is_none() && started.elapsed() >= timeout {
+    // Only a query that reads attribute or ignore files (a FIFO blocks it) marks
+    // the checkout: a legitimately slow `status` on a huge repository must not
+    // turn git off for the callers that read "unknown" as "no".
+    let quick_query = args
+        .iter()
+        .map(AsRef::as_ref)
+        .find(|arg| !arg.to_string_lossy().starts_with('-'))
+        .is_some_and(|sub| {
+            ["check-ignore", "check-attr", "ls-files"]
+                .iter()
+                .any(|q| sub == *q)
+        });
+    if output.is_none() && quick_query && started.elapsed() >= timeout {
         remember_git_timeout(repo);
     }
     output
@@ -934,6 +948,31 @@ mod tests {
             again.elapsed() < Duration::from_secs(5),
             "the second call waited again: {:?}",
             again.elapsed()
+        );
+    }
+
+    /// KT-1595 round 14: a slow but legitimate call (a `status` on a huge
+    /// repository) never turns git off for the quick queries other callers
+    /// rely on; only a blocked attribute or ignore read does.
+    #[test]
+    fn a_slow_status_never_turns_git_off_for_other_queries() {
+        use hostile_git::repo;
+        let dir = repo();
+        let slow = agent_git_output_within(
+            dir.path(),
+            &["status"],
+            &[],
+            std::time::Duration::from_nanos(1),
+        );
+        assert!(slow.is_none());
+        assert!(
+            agent_git_output(
+                dir.path(),
+                &["ls-files", "--error-unmatch", "--", "a.txt"],
+                &[]
+            )
+            .is_some(),
+            "a slow status turned git off for the checkout"
         );
     }
 

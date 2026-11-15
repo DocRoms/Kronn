@@ -922,7 +922,8 @@ impl StepRemit {
                 // the agent made is put back.
                 if self.index_before.get(&rel) != Some(&index_now(&rel)) {
                     match self.restore_index(&rel) {
-                        Ok(_) => report.warnings.push(format!(
+                        Ok(false) => {}
+                        Ok(true) => report.warnings.push(format!(
                             "the agent changed the index state of `{rel}`; it was put back (the working tree was left as it is)"
                         )),
                         Err(e) => report.warnings.push(e),
@@ -1157,6 +1158,15 @@ impl StepRemit {
         )
         .ok_or_else(failed)?;
         if before.intent_to_add {
+            // `add -N` stages what is at the path: never a folder or a link the
+            // agent left there.
+            let regular = std::fs::symlink_metadata(self.project.join(rel))
+                .is_ok_and(|meta| meta.file_type().is_file());
+            if !regular {
+                return Err(format!(
+                    "`{rel}` was an intent-to-add, but the agent replaced it with something that is not a file; it was not staged again (`git add -N -- {rel}` once the file is back)"
+                ));
+            }
             git(&self.project, &["add", "-N", "--", rel]).ok_or_else(failed)?;
         } else if !before.lines.is_empty() {
             // NUL-separated (`-z`): a path holding a newline or starting with a

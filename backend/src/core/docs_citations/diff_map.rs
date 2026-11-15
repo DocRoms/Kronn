@@ -158,6 +158,7 @@ impl<'a> DiffMap<'a> {
                 "--no-ext-diff",
                 "--no-textconv",
                 "--no-color",
+                "--ignore-submodules=all",
             ]
             .map(OsStr::new)
             .to_vec();
@@ -297,5 +298,49 @@ mod tests {
         let mut map = DiffMap::to_worktree(dir.path(), &base);
         assert_eq!(map.span(Path::new("a.txt"), (1, 1)).unwrap(), Some((2, 2)));
         assert!(!marker.exists(), "the fsmonitor hook ran");
+    }
+
+    /// KT-1595 round 14: a cited path that is a submodule never runs a driver of
+    /// the submodule's own config, even when `.gitmodules` asks git to look in.
+    #[cfg(unix)]
+    #[test]
+    fn a_submodule_path_never_runs_its_driver_whatever_gitmodules_says() {
+        use crate::core::cmd::hostile_git::{git, marker_program, repo};
+        let sub = repo();
+        let dir = repo();
+        git(
+            dir.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.path().to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(
+            dir.path(),
+            &[
+                "config",
+                "-f",
+                ".gitmodules",
+                "submodule.sub.ignore",
+                "none",
+            ],
+        );
+        git(dir.path(), &["commit", "-q", "-am", "sub"]);
+        let base = git(dir.path(), &["rev-parse", "HEAD"]);
+        let (program, marker) = marker_program(dir.path());
+        git(
+            &dir.path().join(".git/modules/sub"),
+            &["config", "filter.evil.clean", &program],
+        );
+        std::fs::write(dir.path().join("sub/.gitattributes"), "* filter=evil\n").unwrap();
+        std::fs::write(dir.path().join("sub/a.txt"), "A\n").unwrap();
+        let mut map = DiffMap::to_worktree(dir.path(), &base);
+        let _ = map.span(Path::new("sub"), (1, 1));
+        assert!(!marker.exists(), "the submodule's filter ran");
     }
 }

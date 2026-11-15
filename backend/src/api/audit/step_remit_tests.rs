@@ -1159,6 +1159,26 @@ fn a_users_version_is_kept_when_the_agent_grows_the_file_past_the_limit() {
     assert_eq!(git(dir.path(), &["rev-parse", &format!(":{rel}")]), staged);
 }
 
+/// KT-1595 round 14: putting back a user's intent-to-add never stages what the
+/// agent left at that path (a folder of files, a link).
+#[test]
+fn an_intent_to_add_never_stages_what_the_agent_put_at_its_path() {
+    let dir = repo();
+    let rel = "docs/tech-debt/TD-9.md";
+    write(dir.path(), rel, "td nine, user\n");
+    git(dir.path(), &["add", "-N", "--", rel]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    git(dir.path(), &["update-index", "--force-remove", "--", rel]);
+    std::fs::remove_file(dir.path().join(rel)).unwrap();
+    write(dir.path(), &format!("{rel}/payload.sh"), "echo agent\n");
+    let report = remit.settle_blocking();
+    assert_eq!(
+        git(dir.path(), &["ls-files", "--", &format!("{rel}/")]),
+        "",
+        "the agent's files were staged: {report:?}"
+    );
+}
+
 /// KT-1595 round 13: a file too large to keep still has its index compared: a
 /// flag the agent sets on it is reported and put back.
 #[test]
