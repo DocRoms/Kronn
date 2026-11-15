@@ -51,6 +51,49 @@ pub fn compute_sha256(path: &Path) -> Option<String> {
 
 /// Inner helper that computes the hex SHA-256 of a byte slice. Exposed
 /// so tests can pin the exact byte-to-hex contract.
+/// The SHA-256 of a regular file, read in chunks (memory stays bounded,
+/// whatever the file's size). `None` when it cannot be opened or read.
+fn sha256_of_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&chunk[..read]);
+    }
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect(),
+    )
+}
+
+/// The largest root agent context file read as text.
+const ROOT_AGENT_FILE_MAX: u64 = 4 * 1024 * 1024;
+
+/// The text of `path` when it is (or links to) a regular file of at most
+/// [`ROOT_AGENT_FILE_MAX`] bytes: a link to a FIFO or a device is never opened.
+fn read_small_text(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > ROOT_AGENT_FILE_MAX {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(ROOT_AGENT_FILE_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
 fn sha256_of_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -359,8 +402,12 @@ fn git_source_tree_fingerprint_with(
             // A directory in ls-files output is a gitlink (submodule) —
             // presence tracked, inner content out of scope.
             "gitlink".to_string()
+        } else if !meta.is_file() {
+            // A FIFO, socket or device an agent left at a tracked path: never
+            // opened (a FIFO blocks the open, a device never ends).
+            "special".to_string()
         } else {
-            let Ok(content) = std::fs::read(&full) else {
+            let Some(content_hash) = sha256_of_file(&full) else {
                 continue;
             };
             #[cfg(unix)]
@@ -370,11 +417,7 @@ fn git_source_tree_fingerprint_with(
             };
             #[cfg(not(unix))]
             let exec = false;
-            format!(
-                "{} {}",
-                if exec { "x" } else { "f" },
-                sha256_of_bytes(&content)
-            )
+            format!("{} {}", if exec { "x" } else { "f" }, content_hash)
         };
         let mut record = record_head.into_bytes();
         record.push(b' ');
@@ -382,7 +425,7 @@ fn git_source_tree_fingerprint_with(
         kept.push(record);
     }
     for &agent_file in ROOT_AGENT_CONTEXT_FILES {
-        let Ok(content) = std::fs::read_to_string(project_path.join(agent_file)) else {
+        let Some(content) = read_small_text(&project_path.join(agent_file)) else {
             continue;
         };
         let user_part = strip_kronn_regions(&content);

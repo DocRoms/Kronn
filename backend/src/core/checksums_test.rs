@@ -1034,3 +1034,36 @@ fn the_source_tree_fingerprint_runs_no_program_the_repository_names() {
     assert!(git_source_tree_fingerprint(dir.path()).is_some());
     assert!(!marker.exists(), "the fsmonitor hook ran");
 }
+
+/// KT-1595 round 13: the fingerprint, taken right after an agent ran, never
+/// blocks on what the agent left: a tracked file replaced by a FIFO, a root
+/// AGENTS.md / CLAUDE.md that is a link to a FIFO.
+#[cfg(unix)]
+#[test]
+fn a_fifo_left_by_the_agent_never_blocks_the_fingerprint() {
+    use crate::core::cmd::hostile_git::{git, repo};
+    use std::os::unix::ffi::OsStrExt;
+    let dir = repo();
+    let mkfifo = |path: &Path| {
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    };
+    fs::write(dir.path().join("CLAUDE.md"), "# Claude\n").unwrap();
+    git(dir.path(), &["add", "CLAUDE.md"]);
+    git(dir.path(), &["commit", "-q", "-m", "claude"]);
+    fs::remove_file(dir.path().join("a.txt")).unwrap();
+    mkfifo(&dir.path().join("a.txt"));
+    mkfifo(&dir.path().join(".git/pipe"));
+    fs::remove_file(dir.path().join("CLAUDE.md")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join(".git/pipe"), dir.path().join("CLAUDE.md")).unwrap();
+    let project = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(git_source_tree_fingerprint(&project));
+    });
+    let fingerprint = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the fingerprint blocked on a FIFO");
+    assert!(fingerprint.is_some());
+}

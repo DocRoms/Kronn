@@ -316,6 +316,31 @@ fn read_kept(project: &Path, rel: &str) -> std::io::Result<Option<Vec<u8>>> {
     Ok(bytes)
 }
 
+/// A regular entry's identity: its type, size and modification time, plus (on
+/// unix) the change time, inode and device, which a same-size edit with its
+/// time put back still moves.
+fn entry_fingerprint(meta: &std::fs::Metadata) -> String {
+    let base = format!(
+        "{:?} {} {:?}",
+        meta.file_type(),
+        meta.len(),
+        meta.modified().ok()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!(
+            "{base} {}.{} {}:{}",
+            meta.ctime(),
+            meta.ctime_nsec(),
+            meta.dev(),
+            meta.ino()
+        )
+    }
+    #[cfg(not(unix))]
+    base
+}
+
 /// What a refused path is, by `lstat` of each component from the project down,
 /// stopping at the first link (its target is recorded, never followed): a
 /// parent folder that is a link is never stat'ed through. A changed
@@ -333,14 +358,7 @@ fn link_fingerprint(project: &Path, rel: &str) -> String {
                     std::fs::read_link(&at).ok()
                 );
             }
-            Ok(meta) => {
-                kind = format!(
-                    "{:?} {} {:?}",
-                    meta.file_type(),
-                    meta.len(),
-                    meta.modified().ok()
-                )
-            }
+            Ok(meta) => kind = entry_fingerprint(&meta),
             Err(error) => return format!("missing at {}: {:?}", at.display(), error.kind()),
         }
     }
@@ -900,6 +918,16 @@ impl StepRemit {
                 continue;
             }
             if let Some(fingerprint) = self.refused_before.get(&rel) {
+                // Its bytes were not kept, its index state was: an index change
+                // the agent made is put back.
+                if self.index_before.get(&rel) != Some(&index_now(&rel)) {
+                    match self.restore_index(&rel) {
+                        Ok(_) => report.warnings.push(format!(
+                            "the agent changed the index state of `{rel}`; it was put back (the working tree was left as it is)"
+                        )),
+                        Err(e) => report.warnings.push(e),
+                    }
+                }
                 if link_fingerprint(&self.project, &rel) != *fingerprint {
                     report.warnings.push(format!(
                         "`{rel}` could not be kept before the step (a link, or a file larger than {} MiB) and changed during it; it was left as it is",
@@ -932,16 +960,19 @@ impl StepRemit {
             let restored = match before {
                 // A user change that was already there: back to that content,
                 // and its index entry back to what the user had staged.
-                Some(before) => self
-                    .restore_content(&rel, before.as_deref())
-                    .inspect(|restored| match self.restore_index(&rel) {
-                        Ok(true) if restored.is_none() => report.warnings.push(format!(
+                Some(before) => {
+                    let restored = self.restore_content(&rel, before.as_deref());
+                    // What the user had staged comes back even when the content
+                    // could not be restored.
+                    match self.restore_index(&rel) {
+                        Ok(true) if matches!(restored, Ok(None)) => report.warnings.push(format!(
                             "the agent changed the index entry of `{rel}`; it was put back to what you had staged"
                         )),
                         Ok(_) => {}
-                        // The content restore stands (its blob is reported).
                         Err(e) => report.warnings.push(e),
-                    }),
+                    }
+                    restored
+                }
                 // Clean before the step: back to the recorded commit.
                 None => self.restore_from_head(&rel),
             };
@@ -1171,8 +1202,18 @@ impl StepRemit {
         // read, written nor deleted through it.
         use crate::core::fs_guard::{guarded_remove_file, guarded_replace, guarded_write_new};
         let path = self.project.join(rel);
-        let now =
-            read_kept(&self.project, rel).map_err(|e| format!("refused, left as it is ({e})"))?;
+        let now = match read_kept(&self.project, rel) {
+            Ok(now) => now,
+            Err(e) => {
+                // The agent's entry cannot be read safely; the user's version
+                // must not be lost with it.
+                let kept = before
+                    .and_then(|bytes| self.hash_object(bytes))
+                    .map(|blob| format!("; your version from before the step is kept as blob {blob} (`git cat-file -p {blob}`)"))
+                    .unwrap_or_default();
+                return Err(format!("refused, left as it is ({e}){kept}"));
+            }
+        };
         if now.as_deref() == before {
             return Ok(None);
         }

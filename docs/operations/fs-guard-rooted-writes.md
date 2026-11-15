@@ -141,9 +141,11 @@ by path, found by the round-3 review and the Argon addendum):
   pinned to git's defaults; every call runs under `cmd::run_bounded` (120 s, the
   whole process group killed on a timeout), so an include or a config file that
   is a FIFO fails the call instead of hanging. The configuration listing gets
-  30 s, and a checkout whose listing ran out of time is not listed again for ten
-  minutes: a blocking configuration costs one wait per pass, not one per call
-  (round 12). A configuration that cannot be read in time, or that declares
+  30 s, and a checkout where a git call ran out of time (the listing, or any
+  call: an ignore file that is a FIFO blocks `check-ignore`) gets no git call for
+  ten minutes: a blocking checkout costs one wait per pass, not one per call
+  (rounds 12-13). Submodules are never looked into (`diff.ignoreSubmodules=all`):
+  their own configuration is not in the listing (round 13). A configuration that cannot be read in time, or that declares
   more than 1 024 driver settings, runs nothing and is reported. The same
   hardened, bounded git (`cmd::agent_git_output`) serves the
   doc tooling that runs after an agent (round 12): the `checksums` listings,
@@ -154,7 +156,15 @@ by path, found by the round-3 review and the Argon addendum):
   `filter` attribute (Git LFS) when the step started is never rewritten from its
   raw blob: with filters off its bytes always differ from the blob, so it is
   reported and left as it is; the attributes are read before the agent runs, so
-  one it adds never spares its own edit (round 12). The
+  one it adds never spares its own edit (round 12). When the agent leaves a
+  user's dirty file unreadable (a link, a FIFO, past 64 MiB), the user's version
+  is kept as a blob the warning names, and what the user had staged comes back
+  in every case; a refused entry has its index compared and put back too, and
+  its fingerprint holds the change time, inode and device, so a same-size edit
+  with its time put back is still seen (round 13). The `checksums` source-tree
+  fingerprint hashes regular files only, in chunks, and reads a root AGENTS.md /
+  CLAUDE.md only when it is (or links to) a regular file of at most 4 MiB: a
+  FIFO or a device left by the agent never blocks it (round 13). The
   settle reports a git failure, a capture that could not be read (an unreadable
   HEAD in a repository makes a remit that only says so, never a silent unguarded
   step), more flagged files than are checked, and any change of the configuration

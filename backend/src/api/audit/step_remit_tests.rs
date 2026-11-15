@@ -1132,6 +1132,88 @@ fn set_len(dir: &Path, rel: &str, len: u64) {
         .unwrap();
 }
 
+/// KT-1595 round 13: when the agent makes a user's dirty file unreadable (grown
+/// past REMIT_CONTENT_MAX), the user's version is kept as a blob and named, and
+/// the user's staged state still comes back.
+#[test]
+fn a_users_version_is_kept_when_the_agent_grows_the_file_past_the_limit() {
+    let dir = repo();
+    let rel = "docs/tech-debt/TD-1.md";
+    write(dir.path(), rel, "td one, user\n");
+    git(dir.path(), &["add", rel]);
+    let staged = git(dir.path(), &["rev-parse", &format!(":{rel}")]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    git(dir.path(), &["reset", "-q", "--", rel]);
+    set_len(dir.path(), rel, REMIT_CONTENT_MAX + 1);
+    let report = remit.settle_blocking();
+    let warning = report
+        .warnings
+        .iter()
+        .find(|w| w.contains(rel) && w.contains("blob"))
+        .unwrap_or_else(|| panic!("{report:?}"));
+    let blob = warning
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .find(|token| token.len() == 40 || token.len() == 64)
+        .unwrap_or_else(|| panic!("no blob named: {warning}"));
+    assert_eq!(git(dir.path(), &["cat-file", "-p", blob]), "td one, user");
+    assert_eq!(git(dir.path(), &["rev-parse", &format!(":{rel}")]), staged);
+}
+
+/// KT-1595 round 13: a file too large to keep still has its index compared: a
+/// flag the agent sets on it is reported and put back.
+#[test]
+fn an_index_change_on_a_file_too_large_to_keep_is_put_back() {
+    let dir = repo();
+    let rel = "docs/tech-debt/TD-1.md";
+    set_len(dir.path(), rel, REMIT_CONTENT_MAX + 1);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    git(
+        dir.path(),
+        &["update-index", "--assume-unchanged", "--", rel],
+    );
+    let report = remit.settle_blocking();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains(rel) && w.contains("index")),
+        "{report:?}"
+    );
+    assert!(git(dir.path(), &["ls-files", "-v", "--", rel]).starts_with("H "));
+}
+
+/// KT-1595 round 13: a same-size edit of a file too large to keep, its time
+/// put back, is still seen (the fingerprint holds the change time and inode).
+#[cfg(unix)]
+#[test]
+fn a_same_size_edit_with_its_time_put_back_is_still_seen() {
+    use std::os::unix::fs::FileExt;
+    let dir = repo();
+    let rel = "docs/tech-debt/TD-1.md";
+    set_len(dir.path(), rel, REMIT_CONTENT_MAX + 1);
+    let mtime = std::fs::metadata(dir.path().join(rel))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::File::options()
+        .write(true)
+        .open(dir.path().join(rel))
+        .unwrap()
+        .write_all_at(b"agent", 0)
+        .unwrap();
+    set_mtime(dir.path(), rel, mtime);
+    let report = remit.settle_blocking();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains(rel) && w.contains("changed during it")),
+        "{report:?}"
+    );
+}
+
 /// KT-1595 round 12: a dirty file past REMIT_CONTENT_MAX is never read whole:
 /// it is left as it is, and reported only once it changed.
 #[test]

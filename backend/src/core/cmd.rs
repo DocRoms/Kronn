@@ -453,7 +453,8 @@ pub fn project_git_cmd() -> std::process::Command {
 /// `GIT_CONFIG_COUNT` so a name holding `=` is one key; replace refs, lazy
 /// fetches (a promisor remote's upload-pack), optional index writes and the
 /// signature check are off; the stat cache, `diff.relative` and `core.bare` are
-/// pinned to git's defaults. `None` when the configuration cannot be read in
+/// pinned to git's defaults, and submodules are never looked into (their own
+/// configuration is not in this listing). `None` when the configuration cannot be read in
 /// time or declares more drivers than [`AGENT_GIT_MAX_OFF`]: nothing is run then.
 pub fn agent_touched_git_cmd(repo: &std::path::Path) -> Option<std::process::Command> {
     agent_touched_git_cmd_within(repo, AGENT_GIT_CONFIG_TIMEOUT)
@@ -463,7 +464,7 @@ fn agent_touched_git_cmd_within(
     repo: &std::path::Path,
     timeout: std::time::Duration,
 ) -> Option<std::process::Command> {
-    if config_timed_out_recently(repo) {
+    if git_timed_out_recently(repo) {
         return None;
     }
     let mut list = git_cmd();
@@ -474,7 +475,7 @@ fn agent_touched_git_cmd_within(
     let started = std::time::Instant::now();
     let Some(names) = run_bounded(&mut list, &[], timeout) else {
         if started.elapsed() >= timeout {
-            remember_config_timeout(repo);
+            remember_git_timeout(repo);
         }
         return None;
     };
@@ -495,6 +496,8 @@ fn agent_touched_git_cmd_within(
             "diff.relative=false",
             "-c",
             "core.bare=false",
+            "-c",
+            "diff.ignoreSubmodules=all",
         ])
         .env("GIT_CONFIG_COUNT", off.len().to_string());
     for (index, (key, value)) in off.into_iter().enumerate() {
@@ -569,16 +572,16 @@ const AGENT_GIT_MAX_OFF: usize = 1024;
 /// How long listing an agent-touched checkout's configuration may take.
 pub const AGENT_GIT_CONFIG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A checkout whose configuration listing ran out of time is not listed again
-/// for this long: a blocking configuration costs one wait per pass, not one per
-/// git call.
+/// A checkout where a git call ran out of time (a configuration or an ignore
+/// file that is a FIFO) gets no git call for this long: a blocking checkout
+/// costs one wait per pass, not one per call.
 const AGENT_GIT_CONFIG_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
 
 static CONFIG_TIMED_OUT: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::time::Instant>>,
 > = std::sync::LazyLock::new(Default::default);
 
-fn config_timed_out_recently(repo: &std::path::Path) -> bool {
+fn git_timed_out_recently(repo: &std::path::Path) -> bool {
     let mut timed_out = CONFIG_TIMED_OUT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -586,7 +589,7 @@ fn config_timed_out_recently(repo: &std::path::Path) -> bool {
     timed_out.contains_key(repo)
 }
 
-fn remember_config_timeout(repo: &std::path::Path) {
+fn remember_git_timeout(repo: &std::path::Path) {
     CONFIG_TIMED_OUT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -602,9 +605,23 @@ pub fn agent_git_output<S: AsRef<OsStr>>(
     args: &[S],
     input: &[u8],
 ) -> Option<Vec<u8>> {
+    agent_git_output_within(repo, args, input, AGENT_GIT_TIMEOUT)
+}
+
+fn agent_git_output_within<S: AsRef<OsStr>>(
+    repo: &std::path::Path,
+    args: &[S],
+    input: &[u8],
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
     let mut cmd = agent_touched_git_cmd(repo)?;
     cmd.arg("-C").arg(repo).args(args);
-    run_bounded(&mut cmd, input, AGENT_GIT_TIMEOUT)
+    let started = std::time::Instant::now();
+    let output = run_bounded(&mut cmd, input, timeout);
+    if output.is_none() && started.elapsed() >= timeout {
+        remember_git_timeout(repo);
+    }
+    output
 }
 
 /// The longest a git call on an agent-touched checkout may take: a
@@ -889,6 +906,83 @@ mod tests {
         }
         append_config(dir.path(), many.as_bytes());
         assert!(agent_touched_git_cmd(dir.path()).is_none());
+    }
+
+    /// KT-1595 round 13: any git call that ran out of time (a FIFO `.gitignore`
+    /// blocks `check-ignore`) is waited for once; the next call on that checkout
+    /// is refused at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_git_call_that_ran_out_of_time_is_not_waited_for_again() {
+        use hostile_git::repo;
+        use std::os::unix::ffi::OsStrExt;
+        use std::time::{Duration, Instant};
+        let dir = repo();
+        let ignore = dir.path().join(".gitignore");
+        let path = std::ffi::CString::new(ignore.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let wait = Duration::from_millis(300);
+        let started = Instant::now();
+        let first =
+            agent_git_output_within(dir.path(), &["check-ignore", "-q", "--", "x"], &[], wait);
+        assert!(first.is_none());
+        assert!(started.elapsed() >= wait);
+        let again = Instant::now();
+        assert!(agent_git_output(dir.path(), &["check-ignore", "-q", "--", "x"], &[]).is_none());
+        assert!(
+            again.elapsed() < Duration::from_secs(5),
+            "the second call waited again: {:?}",
+            again.elapsed()
+        );
+    }
+
+    /// KT-1595 round 13: a driver configured in a SUBMODULE's own config never
+    /// runs through a git call on the superproject.
+    #[cfg(unix)]
+    #[test]
+    fn a_submodule_driver_never_runs_through_the_superproject() {
+        use hostile_git::{git, marker_program, repo};
+        let sub = repo();
+        let dir = repo();
+        git(
+            dir.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                sub.path().to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(dir.path(), &["commit", "-q", "-m", "sub"]);
+        let base = git(dir.path(), &["rev-parse", "HEAD"]);
+        let (program, marker) = marker_program(dir.path());
+        let sub_git = dir.path().join(".git/modules/sub");
+        git(&sub_git, &["config", "filter.evil.clean", &program]);
+        std::fs::write(dir.path().join("sub/.gitattributes"), "* filter=evil\n").unwrap();
+        // Same size, other bytes: git must read the file to see the change.
+        std::fs::write(dir.path().join("sub/a.txt"), "A\n").unwrap();
+        let diff = agent_git_output(
+            dir.path(),
+            &[
+                "diff",
+                "--unified=0",
+                "--no-ext-diff",
+                "--no-textconv",
+                &base,
+                "--",
+                "sub",
+            ],
+            &[],
+        );
+        assert!(diff.is_some());
+        assert!(!marker.exists(), "the submodule's filter ran");
+        // The fixture is live: plain git runs that very driver.
+        git(dir.path(), &["diff", &base, "--", "sub"]);
+        assert!(marker.exists(), "plain git must run the submodule's filter");
     }
 
     /// KT-1595 round 12: a configuration that blocks git (an include on a FIFO)
