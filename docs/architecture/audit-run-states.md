@@ -205,7 +205,7 @@ this degrades and continues.
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:568#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1542-1545#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1552-1573#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:1825-1828#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1825-1828#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1832-1853#progress] [src: file: backend/src/api/audit/full.rs:3919-3922#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
@@ -238,7 +238,7 @@ this degrades and continues.
   run is resumable, it says so and offers "Retry". Every launch button stays
   disabled until it knows. A step retried alone never falls back to a whole
   audit when its run is no longer resumable.
-  [src: file: frontend/src/components/ProjectCard.tsx:529-538#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:891-897#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:557-559#launchBlocked]
+  [src: file: frontend/src/components/ProjectCard.tsx:529-538#resumableUnknown] [src: file: frontend/src/components/ProjectCard.tsx:892-898#retrySteps] [src: file: frontend/src/components/AuditTimeline.tsx:557-559#launchBlocked]
 
 ## Every error carries its action (KT-1169)
 
@@ -256,7 +256,7 @@ this degrades and continues.
 | Verify-docs dialog | A stale-sections refresh failed. | The stale section stays in the single doc-state block. “Update affected steps” retries the partial run; “Verified, unchanged” settles it without an agent. Both remain unavailable while a resumable run takes priority. |
 | Toasts during a run | A step failed or warned. | Informational: the run ends with that step's "Retry this step" and "Accept as it stands". |
 
-- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:858-876#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1074-1097#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:458#auditLaunchError]
+- Launch error banner. [src: file: frontend/src/components/AuditTimeline.tsx:858-876#launchError] [src: file: frontend/src/components/ProjectCard.tsx:1074-1097#setAuditLaunchError] [src: file: frontend/src/components/ProjectCard.tsx:459#auditLaunchError]
 - Unknown resumable state, unreadable timeline. [src: file: frontend/src/components/AuditTimeline.tsx:891-903#resumableUnknown] [src: file: frontend/src/components/AuditTimeline.tsx:904-914#loadFailed]
 - Refused acceptance. [src: file: frontend/src/components/AuditTimeline.tsx:554-576#setAcceptError] [src: file: frontend/src/components/AuditTimeline.tsx:1007-1010#acceptError]
 - Validation prerequisites and linked actions. [src: file: frontend/src/components/AuditTimeline.tsx:1107-1169#completedLocalRun]
@@ -267,7 +267,7 @@ this degrades and continues.
 
 “Verify docs” is the single entry point in the project header, the audit
 timeline and a stale document's viewer. It has no lifecycle of its own.
-[src: file: frontend/src/components/ProjectCard.tsx:1602-1616#project-audit-primary]
+[src: file: frontend/src/components/ProjectCard.tsx:1603-1617#project-audit-primary]
 [src: file: frontend/src/components/AuditTimeline.tsx:618-623#onVerifyDocs]
 [src: file: frontend/src/components/AiDocViewer.tsx:529-538#onOpenDocState]
 
@@ -365,7 +365,7 @@ sections.
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:2054-2057#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
+  [src: file: backend/src/lib.rs:2058-2061#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:812-843#acknowledge_sections]
 
 ## The action offered in each state
 
@@ -373,7 +373,7 @@ The compact header exposes only the honest status, its primary next action and
 the doc-state summary. One “Details” disclosure contains secondary metadata and
 actions. Three pre-audit cases override the legacy `TemplateInstalled` label:
 [src: file: frontend/src/components/ProjectCard.tsx:1483-1516#humanDocsDetected]
-[src: file: frontend/src/components/ProjectCard.tsx:1692-1710#project-audit-details]
+[src: file: frontend/src/components/ProjectCard.tsx:1693-1711#project-audit-details]
 
 - a human-owned docs folder asks the user to choose where Kronn writes;
 - a cancelled first run names its cancellation date and offers a relaunch;
@@ -401,18 +401,18 @@ The validation phase never reads "running" while an audit runs. It derives its
 action from the latest local run of any kind and that run's `latest_validation`;
 an older completed Full or Partial run cannot authorize Validate after a newer
 specialized run. Discussion-title guesses never authorize Validate.
-[src: file: frontend/src/components/ProjectCard.tsx:585-591#latest]
+[src: file: frontend/src/components/ProjectCard.tsx:586-592#latest]
 [src: file: frontend/src/components/AuditTimeline.tsx:346-356#latestRun]
 [src: file: frontend/src/components/AuditTimeline.tsx:1160-1222#linkedValidation]
 
 - Step status, accepted included. [src: file: frontend/src/components/AuditTimeline.tsx:214-229#stepStatus]
 - Launch label: resume, finalize, run again. [src: file: frontend/src/components/AuditTimeline.tsx:540-547#launchLabel]
 - Per-step actions only on the resumable run. [src: file: frontend/src/components/AuditTimeline.tsx:556#stepActions]
-- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:561-562#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:678-683#validationInProgress]
+- Validation phase is not running during an audit. [src: file: frontend/src/components/AuditTimeline.tsx:561-562#validationRunning] [src: file: frontend/src/components/ProjectCard.tsx:683-688#validationInProgress]
 - Validation phase hands over to the run. [src: file: frontend/src/components/AuditTimeline.tsx:1136-1149#runPending]
 - Confirmation before a fresh full audit. [src: file: frontend/src/components/AuditTimeline.tsx:1448-1489#confirmRelaunch]
 - Orphaned lease banner. [src: file: frontend/src/components/AuditTimeline.tsx:780-857#leaseOrphaned]
-- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:743-744#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:456#cancelPending]
+- Cancel pending. [src: file: frontend/src/components/AuditTimeline.tsx:743-744#cancelPending] [src: file: frontend/src/components/ProjectCard.tsx:457#cancelPending]
 
 ## Validation and document trust (KT-1206)
 
@@ -440,7 +440,7 @@ Historical runs without fingerprints require a new audit before signoff.
 [src: file: backend/src/core/audit_documents.rs:11-45#capture]
 [src: file: backend/src/core/audit_documents.rs:51-65#verify]
 [src: file: backend/src/db/discussions.rs:1895-1932#insert_native_agent_message_with_audit_documents]
-[src: file: backend/src/api/discussions/streaming.rs:5227-5249#validation_documents]
+[src: file: backend/src/api/discussions/streaming.rs:5231-5253#validation_documents]
 [src: file: backend/src/db/sql/260_audit_document_fingerprints.sql:1-3#final_doc_fingerprints_json]
 
 The explicit re-anchor action sends `deterministic_only: true`. It returns the

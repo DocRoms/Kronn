@@ -247,7 +247,7 @@ assignees. The role is optional (`owner` | `reviewer`).
 6. **Project workspace — implemented** — project cards expose their linked
    tasks, quick creation/completion and direct navigation to each task's global
    Planning detail without duplicating task state.
-   `[src: file: frontend/src/components/ProjectCard.tsx:2441-2452#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:88-121#createTask]`
+   `[src: file: frontend/src/components/ProjectCard.tsx:2443-2454#ProjectTasksPanel]` `[src: file: frontend/src/components/ProjectTasksPanel.tsx:88-121#createTask]`
    `[src: file: frontend/src/components/ProjectTasksPanel.tsx:167-176#onOpenPlanning]` `[src: file: frontend/src/routes/ProjectsRoute.tsx:51-58#toPlanningTask]`
 7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.

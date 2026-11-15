@@ -19,12 +19,12 @@ override.
   `ProjectCommitSettings` shape): name, e-mail and sign-off (Auto / Always / Never).
   Validated on save (`WorkersConfig::validate`) and published to the process by
   `config::save` and at boot (`commit_policy::set_global_settings`).
-  [src: file: backend/src/models/setup.rs:163#commit]
+  [src: file: backend/src/models/setup.rs:170#commit]
   [src: file: backend/src/core/commit_policy.rs:222#set_global_settings]
 - **Project — the card** (Dashboard › project › *Identité et signoff des commits*)
   saves `ProjectCommitSettings` inside the project workspace
   (`PUT /api/projects/{id}/workspace`, stored in `workspace_json` next to the
-  worktree hooks). [src: file: backend/src/models/projects.rs:55#ProjectCommitSettings]
+  worktree hooks). [src: file: backend/src/models/projects.rs:61-67#ProjectCommitSettings]
   Its sign-off defaults to *Hériter* (`auto`) and its name / e-mail fields to empty.
 - **Name and e-mail**: both or neither (the API refuses half an identity). Empty
   means *inherit*.
@@ -96,5 +96,5 @@ published to the process by `config::save` and at boot
   [src: file: backend/src/core/worktree.rs:1577#ensure_os_junk_excluded]
 - A checkout that holds only junk is not dirty: delivery and cleanup go through.
   A *tracked* junk file that changed is still work.
-  [src: file: backend/src/core/worktree.rs:4186#worktree_dirty_files]
+  [src: file: backend/src/core/worktree.rs:4308-4314#worktree_dirty_files]
 - A type change (`T`, a file replaced by a symlink) is delivered as *Modified*.

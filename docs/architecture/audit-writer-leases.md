@@ -28,14 +28,14 @@ that applies the resulting filesystem changes.
 Linked-repository updates hold the source project's lease and acquire each reverse
 target's lease before syncing its `linked-repos.md`. A busy reverse target keeps
 its existing file; the existing best-effort synchronization logs that refusal.
-[src: file: backend/src/api/projects/crud.rs:745-906#set_linked_repos]
+[src: file: backend/src/api/projects/crud.rs:762-923#set_linked_repos]
 
 Validation admission checks the lease even when no audit progress exists. A
 claimed validation job is returned to the queue without consuming an attempt.
 After preflight, cancellation-token registration and a second lease check share
 the tracker mutex, so a writer can either reject that admission or cancel its
 registered token. A dispatch already stopped by a writer cannot start afterward.
-[src: file: backend/src/api/discussions/runtime.rs:1539-1598#hold_validation_during_audit]
+[src: file: backend/src/api/discussions/runtime.rs:1825-1884#hold_validation_during_audit]
 [src: file: backend/src/api/audit/docs_write.rs:57-96#validation_cancel_guard]
 
 Human audit validation is deliberately different: it takes the lease first but

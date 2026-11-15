@@ -148,7 +148,7 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4236-4282#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:4240-4286#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:1369-1399#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:1651-1681#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -217,8 +217,8 @@ adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13928-13945#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:14060-14091#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13932-13949#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14064-14095#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
 [src: file: backend/src/agents/runner.rs:5212-5240#adapter_task_worker_args]
@@ -276,8 +276,8 @@ that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
 [src: file: frontend/src/components/settings/AgentsSection.tsx:233-278#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:939-968#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:937-942#supportsEffort]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:955-984#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:953-958#supportsEffort]
 
 ## Migration and test invariants
 

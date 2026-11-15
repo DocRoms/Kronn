@@ -1753,6 +1753,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_workers_config).post(api::setup::save_workers_config),
         )
         .route(
+            "/api/config/workers/first-build-env-secs",
+            get(api::setup::get_first_build_env_secs),
+        )
+        .route(
             "/api/config/scan-depth",
             get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
         )

@@ -659,7 +659,7 @@ pub async fn set_default_skills(
 }
 
 /// GET/PUT /api/projects/{id}/workspace. A null body clears the inherited
-/// worktree preparation hooks.
+/// worktree preparation hooks and managed worktree roots.
 pub async fn get_project_workspace(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -701,38 +701,55 @@ pub async fn set_project_workspace(
             }
         }
     }
+    if let Some(workspace) = payload.as_ref() {
+        if let Err(reason) =
+            crate::models::validate_managed_worktree_roots(&workspace.managed_worktree_roots)
+        {
+            return Json(ApiResponse::err(reason));
+        }
+        // KT-1742 — the project's lane warm-up settings are refused or stored whole,
+        // like the hooks: a first-build command runs on the host.
+        if let Err(reason) = workspace.lane_warm.validate() {
+            return Json(ApiResponse::err(reason));
+        }
+    }
     let payload = match payload {
         Some(mut workspace) => {
             workspace.commit = match workspace.commit.normalized() {
                 Ok(commit) => commit,
                 Err(reason) => return Json(ApiResponse::err(reason)),
             };
+            workspace.lane_warm = workspace.lane_warm.normalized();
             Some(workspace)
         }
         None => None,
     };
     let stored = payload.filter(|workspace| !workspace.is_empty());
+    let lane_warm = stored.as_ref().map(|workspace| workspace.lane_warm.clone());
     let registered = stored
         .as_ref()
         .map(|workspace| workspace.commit.clone())
         .unwrap_or_default();
-    let project_id = id.clone();
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::projects::update_project_workspace(conn, &id, stored.as_ref())
+            let project_path =
+                crate::db::projects::get_project(conn, &id)?.map(|project| project.path);
+            crate::db::projects::update_project_workspace(conn, &id, stored.as_ref())?;
+            Ok(project_path)
         })
         .await
     {
-        Ok(()) => {
-            // The merge and worker-commit code reads the setting without a database.
-            if let Ok(Some(project)) = state
-                .db
-                .with_read_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
-                .await
-            {
+        Ok(project_path) => {
+            if let Some(path) = project_path {
+                // Published at once: the next lane of this project reads it.
+                crate::core::task_worker_lane_settings::set_project(
+                    std::path::Path::new(&path),
+                    lane_warm.as_ref(),
+                );
+                // The merge and worker-commit code reads the setting without a database.
                 crate::core::commit_policy::register_project(
-                    &crate::core::scanner::resolve_host_path(&project.path),
+                    &crate::core::scanner::resolve_host_path(&path),
                     &registered,
                 );
             }
@@ -1690,3 +1707,7 @@ mod bidirectional_link_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "lane_warm_workspace_test.rs"]
+mod lane_warm_workspace_test;

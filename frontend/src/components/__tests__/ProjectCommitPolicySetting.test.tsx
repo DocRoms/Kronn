@@ -118,10 +118,34 @@ describe('ProjectCommitPolicySetting (KT-1750)', () => {
 
     await waitFor(() => expect(setWorkspaceMock).toHaveBeenCalledWith('p1', {
       hooks: { after_create: 'make setup' },
+      lane_warm: {},
       commit: { name: 'Bot', email: 'bot@corp.example', signoff: 'always' },
     }));
     await waitFor(() => expect(screen.getByTestId('project-commit-policy-name')).toHaveValue('Bot'));
     expect(screen.getByTestId('project-commit-policy-signoff-always')).toBeChecked();
+  });
+
+  it('keeps the lane warm-up and the managed roots when it saves the identity', async () => {
+    policyMock.mockResolvedValue(view());
+    workspaceMock.mockResolvedValue({
+      hooks: {},
+      lane_warm: { seed_alignment: false },
+      managed_worktree_roots: ['/srv/worktrees'],
+    });
+    setWorkspaceMock.mockResolvedValue(true);
+    render(<ProjectCommitPolicySetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-commit-policy-name')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('project-commit-policy-name'), { target: { value: 'Bot' } });
+    fireEvent.change(screen.getByTestId('project-commit-policy-email'), { target: { value: 'bot@corp.example' } });
+    fireEvent.click(screen.getByTestId('project-commit-policy-save'));
+
+    await waitFor(() => expect(setWorkspaceMock).toHaveBeenCalledWith('p1', {
+      hooks: {},
+      lane_warm: { seed_alignment: false },
+      managed_worktree_roots: ['/srv/worktrees'],
+      commit: { name: 'Bot', email: 'bot@corp.example', signoff: 'auto' },
+    }));
   });
 
   it('refuses half an identity and goes back to the inherited values on request', async () => {
@@ -138,6 +162,7 @@ describe('ProjectCommitPolicySetting (KT-1750)', () => {
     fireEvent.click(screen.getByTestId('project-commit-policy-reset'));
     await waitFor(() => expect(setWorkspaceMock).toHaveBeenCalledWith('p1', {
       hooks: {},
+      lane_warm: {},
       commit: { name: null, email: null, signoff: 'auto' },
     }));
   });
@@ -190,6 +215,7 @@ describe('ProjectCommitPolicySetting (KT-1750)', () => {
       fireEvent.click(screen.getByTestId('project-commit-policy-save'));
       await waitFor(() => expect(setWorkspaceMock).toHaveBeenCalledWith('p1', {
         hooks: { after_create: 'make setup' },
+        lane_warm: {},
         commit: { name: null, email: null, signoff: 'always' },
       }));
       // Read back fails again: what was saved stays shown, with the same message.

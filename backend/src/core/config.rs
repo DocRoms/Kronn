@@ -468,6 +468,7 @@ pub async fn load() -> Result<Option<AppConfig>> {
                     "it is valid TOML but not a configuration this Kronn understands"
                 };
                 let aside = set_aside_unreadable_config(&dir, &path)?;
+                let schema_error = super::redact::toml_error_summary(&content, &schema_error);
                 // How the notices name what became of the file.
                 let kept = aside.describe();
                 let key = salvage_key_line(&content);
@@ -490,6 +491,11 @@ pub async fn load() -> Result<Option<AppConfig>> {
                          once you have checked them.",
                         if parseable { "holds" } else { "may hold" }
                     ),
+                    (config_copies::Aside::KeptAsIs(name), true) => format!(
+                        " {name} {} credentials in clear (readable only by you): delete it once \
+                         you have checked it and its encryption key line.",
+                        if parseable { "holds" } else { "may hold" }
+                    ),
                     (config_copies::Aside::Deferred(name), true) => format!(
                         " {name} {} credentials in clear until it is encrypted at the next start: \
                          restart once the encryption key can be read.",
@@ -504,8 +510,7 @@ pub async fn load() -> Result<Option<AppConfig>> {
                 });
                 let Some(salvaged) = salvaged else {
                     let mut config = default_config_without_key();
-                    // Credentials of a parseable file join the credential boot
-                    // (the file wins, as in the migration).
+                    // A parseable file's credentials join the credential boot (the file wins).
                     let recovered = salvage_credentials(&content, &mut config);
                     tracing::error!(
                         "config.toml {kept}: {cause} ({schema_error}). Kronn \
@@ -681,6 +686,10 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     crate::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
     // KT-1750 — Settings > Workers: the commit identity and sign-off projects inherit.
     crate::core::commit_policy::set_global_settings(&config.workers.commit);
+    // KT-1748 — Settings > Workers: the extra roots of Kronn-managed worktrees.
+    crate::core::worktree::set_global_managed_worktree_roots(&config.workers);
+    // KT-1742 — Settings > Workers: how every project's lane is warmed.
+    crate::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())
@@ -1217,16 +1226,129 @@ fn set_aside_unreadable_config(
     Ok(aside)
 }
 
-/// A top-level `encryption_secret = "..."` line that parses on its own.
+/// The top-level `encryption_secret` of `content` for the boot recovery: see
+/// [`read_key`] (the value it finds, whatever it says about the rest).
 pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        let table: toml::Table = line.trim().parse().ok()?;
-        table
-            .get("encryption_secret")
-            .and_then(|v| v.as_str())
-            .filter(|k| !k.is_empty())
-            .map(str::to_string)
-    })
+    read_key(content).value
+}
+
+/// What a text says about its top-level `encryption_secret`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct KeyRead {
+    /// The key line's string, when the text gives one ([`read_key`]).
+    pub value: Option<String>,
+    /// The text mentions the key where it was not read (see [`read_key`]): it may
+    /// hold the only copy of a live key, so a copy of it is never dropped nor cut
+    /// down.
+    pub unreadable: bool,
+}
+
+/// The name of the key's line in config.toml.
+const KEY_NAME: &str = "encryption_secret";
+
+/// The most a damaged text is read for its key: lines, and bytes. Kronn's own
+/// config is far smaller (a few dozen lines) and writes the key near its top, so a
+/// damaged file of its own still recovers within the cap. Every damaged file
+/// reaches the cap and each line re-parses the growing prefix, so the cost is
+/// quadratic in the cap and the shape of the text decides it: a few tens of
+/// milliseconds for ordinary lines, but about a second in release for 500 lines of
+/// pathological shapes (36-segment dotted keys, deeply nested arrays), hence these
+/// low caps. Past the cap nothing is read: the text after it is the rest, so a key
+/// there is not recovered, it stays in the copy that is kept, reported (fail
+/// closed).
+const PREFIX_MAX_LINES: usize = 200;
+const PREFIX_MAX_BYTES: usize = 32 * 1024;
+
+/// The top-level `encryption_secret` of `content`, decided by toml itself:
+/// 1. a text that parses: its top-level string value (a number, an array or a
+///    value under a table is not the key);
+/// 2. else the LONGEST prefix of WHOLE lines that parses (every prefix up to the
+///    cap is tried and the last one that parses is kept: a multi-line array, string
+///    or inline table before the key does not hide it, though the prefixes inside
+///    it do not parse): its top-level `encryption_secret`, when it is a real key
+///    ([`crypto::canonical_secret`]);
+/// 3. else nothing is read: `value` is `None`.
+///
+/// Nothing else is ever offered (no line is read on its own, no region or table
+/// header is guessed at): a key that sits after that prefix is not recovered
+/// here, it stays in the copy that is kept. `unreadable` says so: the part of the
+/// text that was not read (all of it when no prefix parses) spells the name
+/// `encryption_secret`, or an escape (`\u`, `\U`, `\x`) that could spell it another
+/// way, so the text may hold a key it could not read; or the prefix's own
+/// top-level `encryption_secret` is a non-blank string that is no key. A name
+/// that only sits in the prefix (blank, a number, a comment, under a table) is
+/// read by toml and holds no key. A text that parses has no unread part.
+pub(crate) fn read_key(content: &str) -> KeyRead {
+    if let Ok(table) = content.parse::<toml::Table>() {
+        return KeyRead {
+            value: top_level_key(&table),
+            unreadable: false,
+        };
+    }
+    let (prefix, rest) = longest_parsing_prefix(content);
+    let Some(prefix) = prefix else {
+        // Nothing parses: all of the text is unread.
+        return KeyRead {
+            value: None,
+            unreadable: may_spell_key(content),
+        };
+    };
+    let own = top_level_key(&prefix);
+    match own
+        .clone()
+        .filter(|k| super::crypto::canonical_secret(k).is_ok())
+    {
+        Some(key) => KeyRead {
+            value: Some(key),
+            unreadable: may_spell_key(rest),
+        },
+        None => KeyRead {
+            value: None,
+            // A string that is no key is kept and reported, never cut away.
+            unreadable: own.is_some() || may_spell_key(rest),
+        },
+    }
+}
+
+/// The top-level `encryption_secret` of `table`, when it is a string that is not
+/// blank.
+fn top_level_key(table: &toml::Table) -> Option<String> {
+    table
+        .get(KEY_NAME)
+        .and_then(|v| v.as_str())
+        .filter(|k| !k.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// The longest prefix of whole lines of `content` that parses (a byte-order mark
+/// on its first line ignored), with the table it gives and the text after it.
+/// Every prefix up to the cap is tried, and a prefix that does not parse (it ends
+/// inside an array, a string or an inline table) does not end the search: the
+/// last one that parses wins. No prefix parses (or the cap is reached at once): no
+/// table, and all of `content` is the rest.
+fn longest_parsing_prefix(content: &str) -> (Option<toml::Table>, &str) {
+    let text = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+    let mut best: Option<(toml::Table, usize)> = None;
+    let mut end = 0;
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        end += line.len();
+        if n >= PREFIX_MAX_LINES || end > PREFIX_MAX_BYTES {
+            break;
+        }
+        if let Ok(table) = text[..end].parse::<toml::Table>() {
+            best = Some((table, end));
+        }
+    }
+    match best {
+        Some((table, end)) => (Some(table), &text[end..]),
+        None => (None, content),
+    }
+}
+
+/// Whether `text` could spell the key's name: it contains it, or an escape that a
+/// quoted key can spell it with.
+fn may_spell_key(text: &str) -> bool {
+    text.contains(KEY_NAME) || ["\\u", "\\U", "\\x"].iter().any(|e| text.contains(e))
 }
 
 /// `default_config()` without a key: a missing config.toml must not offer a
@@ -1240,7 +1362,13 @@ pub fn default_config_without_key() -> AppConfig {
 /// `Some(key)` when `content` holds no settings, only (optionally) the key:
 /// the file a reset writes when config.toml carries a needed copy of the key.
 fn key_only_file(content: &str) -> Result<Option<Option<String>>> {
-    let table: toml::Table = content.parse().context("Failed to parse config file")?;
+    // The summary, not the error: its message quotes the offending source line.
+    let table: toml::Table = content.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse config file: {}",
+            super::redact::toml_error_summary(content, &e)
+        )
+    })?;
     // Only an empty file or one holding just the key: anything else (a
     // `[tokens]` table, say) is a real config whose content must not be dropped.
     if !table.keys().all(|k| k == "encryption_secret") {
@@ -1279,7 +1407,12 @@ pub fn write_key_copy_now(dir: &std::path::Path, config: &AppConfig) -> Result<(
 /// The `encryption_secret` config.toml in `dir` holds, if any.
 pub fn read_disk_key(dir: &std::path::Path) -> Result<Option<String>> {
     let text = std::fs::read_to_string(dir.join(CONFIG_FILE)).context("read config.toml")?;
-    let table: toml::Table = text.parse().context("parse config.toml")?;
+    let table: toml::Table = text.parse().map_err(|e| {
+        anyhow::anyhow!(
+            "parse config.toml: {}",
+            super::redact::toml_error_summary(&text, &e)
+        )
+    })?;
     Ok(table
         .get("encryption_secret")
         .and_then(|v| v.as_str())
@@ -2261,6 +2394,119 @@ image_family = "flux9_future"
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// KT-1528 — a toml parse error prints the offending source line; the log of
+    /// an unreadable config.toml (stdout and kronn.log) must carry its kind and
+    /// position only, never the key line nor a credential line.
+    #[tokio::test]
+    #[serial]
+    async fn a_damaged_key_or_token_line_never_reaches_the_log_or_the_notice() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Sink {
+            type Writer = Sink;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let _lock = ENV_LOCK.lock().await;
+        let key = crate::core::crypto::generate_secret();
+        let texts = [
+            // A missing closing quote on the key line.
+            format!("encryption_secret = \"{key}\nlanguage = \"fr\"\n[tokens]\nanthropic = \"sk-clear-one\"\n"),
+            // Trailing text after the key.
+            format!("encryption_secret = \"{key}\" x\n[tokens]\nanthropic = \"sk-clear-two\"\n"),
+            // A damaged token line.
+            "language = \"fr\"\n[tokens]\nanthropic = \"sk-clear-three\n".to_string(),
+            // An unreadable key next to a credential line.
+            format!("encryption_secret = 5\n[tokens]\nanthropic = \"sk-clear-four\"\n# {key}\n"),
+            // A secret pasted into a field that is not a credential: serde quotes
+            // the value in its message, so the notice and the log must not.
+            // (The parse path: the file reads, minus that value.)
+            "[server]\nport = \"sk-clear-five\"\n".to_string(),
+            // (The schema-error path: an unreadable key sets the file aside.)
+            "encryption_secret = 5\n[server]\nport = \"sk-clear-six\"\n".to_string(),
+            // A value holding the separator serde puts before the expected type.
+            "[server]\nport = \"sk-clear-seven, expected u16\"\n".to_string(),
+        ];
+        for (i, text) in texts.iter().enumerate() {
+            let tmp = scratch_dir(&format!("log-leak-{i}"));
+            crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+            std::fs::write(tmp.join(CONFIG_FILE), text).unwrap();
+
+            let sink = Sink::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(sink.clone())
+                .finish();
+            let guard = tracing::subscriber::set_default(subscriber);
+            load().await.unwrap().expect("first run");
+            drop(guard);
+
+            let log = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+            let notice = set_aside_notice(&tmp).expect("recorded");
+            assert!(log.contains("config.toml"), "{i}: {log}");
+            if text.contains("[server]") {
+                // The case really went through the salvage that names the field.
+                assert!(notice.contains("server.port"), "{i}: {notice}");
+            }
+            for shown in [&log, &notice] {
+                assert!(!shown.contains(&key), "{i}: {shown}");
+                assert!(!shown.contains("sk-clear"), "{i}: {shown}");
+                assert!(!shown.contains("anthropic ="), "{i}: {shown}");
+                assert!(!shown.contains(" | "), "no source excerpt: {i}: {shown}");
+            }
+
+            crate::core::child_env::remove_var("KRONN_DATA_DIR");
+            release_disk_key(&tmp);
+            preserve(&tmp, Default::default());
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+
+    /// The shared summary: a kind and a position, whatever the error carries.
+    #[test]
+    fn a_toml_error_is_summarised_by_kind_and_position_only() {
+        let cases = [
+            ("a = 1\nkey = \"sk-clear-a\n", "invalid TOML at line 2"),
+            ("a = 1\nkey = \"sk-clear-b\" x\n", "invalid TOML at line 2"),
+            ("a = 1\na = \"sk-clear-c\"\n", "invalid TOML at line 2"),
+        ];
+        for (text, expected) in cases {
+            let error = text.parse::<toml::Table>().unwrap_err();
+            let summary = crate::core::redact::toml_error_summary(text, &error);
+            assert!(summary.starts_with(expected), "{summary}");
+            assert!(!summary.contains("sk-clear"), "{summary}");
+        }
+        // A serde error names the value that broke the schema: it is dropped.
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct Port {
+            port: u16,
+        }
+        let text = "port = \"sk-clear-d\"\n";
+        let error = toml::from_str::<Port>(text).unwrap_err();
+        assert!(error.to_string().contains("sk-clear-d"), "the premise");
+        let summary = crate::core::redact::toml_error_summary(text, &error);
+        assert!(!summary.contains("sk-clear"), "{summary}");
+        assert!(
+            summary.starts_with("a value of the wrong type"),
+            "{summary}"
+        );
+    }
+
     /// KT-1513 — an unreadable encryption key is the one damage that still
     /// sets the file aside, and the other settings are still recovered.
     #[tokio::test]
@@ -2520,6 +2766,32 @@ image_family = "flux9_future"
             None
         );
         assert_eq!(key_only_file("language = \"fr\"\n").unwrap(), None);
+    }
+
+    /// KT-1528 — the errors of `key_only_file` and `read_disk_key` never carry the
+    /// source line of a damaged file, however they are formatted (`{:#}`, `{:?}`):
+    /// that line is the key or a token.
+    #[test]
+    fn a_damaged_file_errors_without_its_source_line() {
+        let key = "0123456789abcdef".repeat(4);
+        let damaged = [
+            format!("encryption_secret = \"{key}\nlanguage = \"fr\"\n"),
+            "[tokens]\nanthropic = \"sk-clear-d\n".to_string(),
+        ];
+        let tmp = scratch_dir("damaged-errors");
+        for text in &damaged {
+            let shown = |e: anyhow::Error| format!("{e:#} {e:?}");
+            let err = key_only_file(text).unwrap_err();
+            let shown_key_only = shown(err);
+            std::fs::write(tmp.join(CONFIG_FILE), text).unwrap();
+            let shown_disk = shown(read_disk_key(&tmp).unwrap_err());
+            for shown in [&shown_key_only, &shown_disk] {
+                assert!(!shown.contains(&key), "{shown}");
+                assert!(!shown.contains("sk-clear"), "{shown}");
+                assert!(shown.contains("line"), "kept the position: {shown}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

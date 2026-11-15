@@ -15,7 +15,7 @@
 // (default 2): builds, not agent processes, load the machine, so a launch beyond
 // the cap waits `Queued` and starts when a slot frees.
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Bot } from 'lucide-react';
+import { AlertTriangle, Bot, Flame } from 'lucide-react';
 import { config as configApi } from '../../lib/api';
 import type { WorkersConfig } from '../../types/generated';
 import { userError } from '../../lib/userError';
@@ -44,6 +44,16 @@ import {
   MAX_BASH_TIMEOUT_MIN,
   MIN_BASH_TIMEOUT_MIN,
 } from '../../lib/workerShellTimeouts';
+import {
+  MAX_MANAGED_WORKTREE_ROOTS,
+  parseManagedRoots,
+  validManagedRoots,
+} from '../../lib/managedWorktreeRoots';
+import { LaneWarmFields } from '../LaneWarmFields';
+import {
+  EMPTY_LANE_WARM_DRAFT, configOf, draftOf, draftProblem, sameDraft,
+  type LaneWarmDraft,
+} from '../../lib/laneWarm';
 import '../../pages/SettingsPage.css';
 
 interface Props {
@@ -65,6 +75,10 @@ export function WorkersSection({ t }: Props) {
   const [commitName, setCommitName] = useState('');
   const [commitEmail, setCommitEmail] = useState('');
   const [commitSignoff, setCommitSignoff] = useState<SignoffSetting>('auto');
+  // KT-1748 — one absolute folder per line; the built-in roots are always included.
+  const [managedRoots, setManagedRoots] = useState('');
+  // KT-1742 — how every project's lane is warmed (a project may override it).
+  const [laneWarm, setLaneWarm] = useState<LaneWarmDraft>(EMPTY_LANE_WARM_DRAFT);
   // The generation limit (Settings > Server) cuts the whole turn whatever a command is
   // allowed, so it is shown next to the per-command cap. Read-only here.
   const [generationMin, setGenerationMin] = useState<number | null>(null);
@@ -99,6 +113,8 @@ export function WorkersSection({ t }: Props) {
         setCommitName(fields.name);
         setCommitEmail(fields.email);
         setCommitSignoff(fields.signoff);
+        setManagedRoots((value.managed_worktree_roots ?? []).join('\n'));
+        setLaneWarm(draftOf(value.lane_warm));
       })
       .catch(cause => { if (live) setError(userError(cause)); });
     return () => { live = false; };
@@ -125,20 +141,28 @@ export function WorkersSection({ t }: Props) {
   const validJunk = junkProblem === null;
   const commitFieldsNow = { name: commitName, email: commitEmail, signoff: commitSignoff };
   const halfCommit = isHalfIdentity(commitName, commitEmail);
+  const validLaneWarm = draftProblem(laneWarm) === null;
+  const rootList = parseManagedRoots(managedRoots);
+  const validRoots = validManagedRoots(rootList);
+  const savedRoots = saved?.managed_worktree_roots ?? [];
+  const rootsUnchanged = rootList.length === savedRoots.length
+    && rootList.every((root, index) => root === savedRoots[index]);
   const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validJunk
-    && !halfCommit;
+    && !halfCommit && validRoots && validLaneWarm;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
     && (unlimited || count === saved.default_max_review_rounds);
   const unchanged = roundsUnchanged
+    && rootsUnchanged
     && saved !== null && workerCap === saved.max_concurrent_task_workers
     && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)
     && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
     && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN)
     && formatOsJunkPatterns(junkList)
       === formatOsJunkPatterns(saved.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS)
-    && sameCommitSettings(commitFieldsNow, saved.commit);
+    && sameCommitSettings(commitFieldsNow, saved.commit)
+    && sameDraft(laneWarm, draftOf(saved.lane_warm));
 
   const save = useAsyncGuard(async () => {
     if (!saved || !valid) return;
@@ -155,6 +179,8 @@ export function WorkersSection({ t }: Props) {
         os_junk_patterns: junkList,
         // Nothing set is no key at all, as the backend stores it.
         ...(commitSettingsOf(commitFieldsNow) ? { commit: commitSettingsOf(commitFieldsNow) } : {}),
+        managed_worktree_roots: rootList,
+        lane_warm: configOf(laneWarm),
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));
@@ -169,6 +195,8 @@ export function WorkersSection({ t }: Props) {
       setCommitName(fields.name);
       setCommitEmail(fields.email);
       setCommitSignoff(fields.signoff);
+      setManagedRoots((next.managed_worktree_roots ?? []).join('\n'));
+      setLaneWarm(draftOf(next.lane_warm));
     } catch (cause) {
       setError(userError(cause));
     }
@@ -455,6 +483,39 @@ export function WorkersSection({ t }: Props) {
             </label>
           ))}
         </div>
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.managedRoots')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-roots-hint">{t('config.workers.managedRootsHint')}</p>
+        <textarea
+          className="set-input"
+          rows={3}
+          spellCheck={false}
+          aria-label={t('config.workers.managedRoots')}
+          placeholder={t('config.workers.managedRootsPlaceholder')}
+          value={managedRoots}
+          disabled={saved === null}
+          onChange={event => setManagedRoots(event.target.value)}
+          data-testid="workers-roots-input"
+        />
+        {!validRoots && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-roots-invalid">
+            {t('config.workers.managedRootsInvalid', MAX_MANAGED_WORKTREE_ROOTS)}
+          </p>
+        )}
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }} data-testid="workers-lane-warm">
+          <Flame size={14} className="text-accent" />
+          <span className="label">{t('laneWarm.title')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4">{t('laneWarm.help')}</p>
+        <LaneWarmFields
+          draft={laneWarm}
+          onChange={setLaneWarm}
+          scope="global"
+          disabled={saved === null}
+          idPrefix="workers-lane-warm"
+          t={t}
+        />
         {error && <p role="alert" className="default-docs-dir-error" data-testid="workers-error">{error}</p>}
       </div>
     </div>

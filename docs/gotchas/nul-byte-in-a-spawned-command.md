@@ -19,7 +19,7 @@ into a C string, it substitutes the literal `<string-with-nul>`. Only
 
 A byte scan alone — the obvious implementation — therefore detects the
 environment case and stays blind to the other three, with nothing to signal it.
-Both checks are needed. [src: file: backend/src/agents/runner.rs:14507-14516#NUL_BEARING_PLACEHOLDER]
+Both checks are needed. [src: file: backend/src/agents/runner.rs:14514-14523#NUL_BEARING_PLACEHOLDER]
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
@@ -74,8 +74,8 @@ existing hard preflight refusal rather than being silently repaired.
 [src: file: backend/src/api/disc_prompts.rs:187-260#build_synthesis_prompt]
 [src: file: backend/src/api/disc_prompts.rs:387-398#build_agent_prompt]
 [src: file: backend/src/api/disc_prompts.rs:400-420#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:2733#build_agent_delta_prompt]
-[src: file: backend/src/api/discussions/streaming.rs:4138#build_agent_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:2737#build_agent_delta_prompt]
+[src: file: backend/src/api/discussions/streaming.rs:4142#build_agent_prompt]
 
 The new HTTP regressions use the real Router and SQLite with temporary config
 and files: upload preserves exact disk bytes, and export/import/re-export keeps

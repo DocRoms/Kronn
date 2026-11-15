@@ -52,7 +52,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     let data_dir_lock = config::acquire_data_dir_lock()?;
 
     // Load config before tracing init so `debug_mode` can influence the
-    // tracing filter's default level; `config::load()` emits no logs.
+    // tracing filter's default level; `config::load()` logs no config text (kind and position only).
     // Also arms the process timezone and anti-hallucination mode, shared with the desktop boot.
     let mut app_config = kronn::load_startup_config().await?;
 
@@ -452,6 +452,25 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         kronn::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
         // KT-1750 — the commit identity and sign-off every project inherits.
         kronn::core::commit_policy::set_global_settings(&config.workers.commit);
+        // KT-1748 — the managed worktree roots, before the first launch of this boot.
+        kronn::core::worktree::set_global_managed_worktree_roots(&config.workers);
+        // KT-1742 — how lanes are warmed: the global entry now, each project's own
+        // below, before the first lane of this boot.
+        kronn::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
+    }
+    match state.db.with_conn(kronn::db::projects::list_projects).await {
+        Ok(projects) => {
+            for project in projects {
+                kronn::core::task_worker_lane_settings::set_project(
+                    std::path::Path::new(&project.path),
+                    project
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| &workspace.lane_warm),
+                );
+            }
+        }
+        Err(error) => tracing::warn!("project lane settings not loaded: {error}"),
     }
     // KT-1633 — ask the host once whether its priority launcher runs, off the
     // async path, before recovery can dispatch a worker. A spawn only reads the answer.

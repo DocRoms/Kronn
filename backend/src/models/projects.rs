@@ -21,6 +21,14 @@ use super::AgentType;
 pub struct ProjectWorkspace {
     #[serde(default)]
     pub hooks: crate::models::WorkspaceHooks,
+    /// KT-1742 — this project's lane warm-up settings; a field left unset
+    /// inherits the global `[workers.lane_warm]` entry.
+    #[serde(default)]
+    pub lane_warm: crate::models::LaneWarmConfig,
+    /// KT-1748 — absolute directories whose worktrees Kronn manages for this
+    /// project, added to the global Settings > Workers list and the built-in roots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_worktree_roots: Vec<String>,
     /// KT-1750 — who Kronn's commits are attributed to and whether they are
     /// signed off, when the owner decided it rather than leaving it detected.
     #[serde(default, skip_serializing_if = "ProjectCommitSettings::is_default")]
@@ -28,9 +36,13 @@ pub struct ProjectWorkspace {
 }
 
 impl ProjectWorkspace {
-    /// A workspace that says nothing is stored as no workspace at all.
+    /// Nothing to store: no hook, no managed root, no lane warm-up setting and
+    /// no commit setting.
     pub fn is_empty(&self) -> bool {
-        self.hooks.is_empty() && self.commit.is_default()
+        self.hooks.is_empty()
+            && self.managed_worktree_roots.is_empty()
+            && self.lane_warm.is_empty()
+            && self.commit.is_default()
     }
 }
 

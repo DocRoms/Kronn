@@ -151,16 +151,27 @@ pub struct WorkersConfig {
     /// means none.
     #[serde(default = "default_workers_os_junk_patterns")]
     pub os_junk_patterns: Vec<String>,
+    /// KT-1748 — absolute directories whose worktrees Kronn manages, on top of the
+    /// built-in roots (`<repo>/.kronn/worktrees`, `~/.kronn/autocode-worktrees`). A
+    /// branch checked out under one may be an integration target; the owner's own
+    /// checkout never is. A project can name more of its own.
+    #[serde(default)]
+    pub managed_worktree_roots: Vec<String>,
     /// KT-1750 — who the commits Kronn makes are attributed to, and whether they
     /// carry a `Signed-off-by`, for every project that neither sets its own in
     /// its card nor has a repository that says (its own `user.name` /
     /// `user.email`, a DCO file or hook, a signed history). Nothing set: the
-    /// machine's git identity, reported, and no sign-off.
+    /// machine's git identity, reported, and no sign-off. A TOML table: after the
+    /// plain values.
     #[serde(
         default,
         skip_serializing_if = "super::ProjectCommitSettings::is_default"
     )]
     pub commit: super::ProjectCommitSettings,
+    /// KT-1742 — how every project's lane is warmed unless the project says
+    /// otherwise. Last field: a TOML table goes after the plain values.
+    #[serde(default)]
+    pub lane_warm: LaneWarmConfig,
 }
 
 impl Default for WorkersConfig {
@@ -174,7 +185,9 @@ impl Default for WorkersConfig {
             bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
             bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
             os_junk_patterns: default_workers_os_junk_patterns(),
+            managed_worktree_roots: Vec::new(),
             commit: super::ProjectCommitSettings::default(),
+            lane_warm: LaneWarmConfig::default(),
         }
     }
 }
@@ -225,6 +238,53 @@ pub fn os_junk_pattern_problem(pattern: &str) -> Option<String> {
         return Some(format!("`{pattern}` would match too much"));
     }
     None
+}
+
+/// Most managed worktree roots one list (global or per project) may hold.
+pub const MAX_MANAGED_WORKTREE_ROOTS: usize = 32;
+
+/// Refuse a list of managed worktree roots the forms must never persist: each
+/// entry an absolute path with no `..`, and never the filesystem root (which
+/// would make every checkout on the machine Kronn's).
+pub fn validate_managed_worktree_roots(roots: &[String]) -> Result<(), String> {
+    if roots.len() > MAX_MANAGED_WORKTREE_ROOTS {
+        return Err(format!(
+            "managed_worktree_roots holds at most {MAX_MANAGED_WORKTREE_ROOTS} paths"
+        ));
+    }
+    for root in roots {
+        let path = std::path::Path::new(root.trim());
+        if root.trim().is_empty() || root.contains('\0') || !path.is_absolute() {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` is not an absolute path"
+            ));
+        }
+        if path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` must not contain `..`"
+            ));
+        }
+        if path.parent().is_none() {
+            return Err(format!(
+                "managed_worktree_roots: `{root}` is the filesystem root; name the directory \
+                 that holds the worktrees"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The usable roots of a stored list, whatever a hand-edited file holds: only
+/// absolute paths without `..`, and never the filesystem root.
+pub fn effective_managed_worktree_roots(roots: &[String]) -> Vec<std::path::PathBuf> {
+    roots
+        .iter()
+        .filter(|root| validate_managed_worktree_roots(std::slice::from_ref(root)).is_ok())
+        .map(|root| std::path::PathBuf::from(root.trim()))
+        .collect()
 }
 
 fn default_workers_review_rounds() -> u32 {
@@ -293,6 +353,7 @@ impl WorkersConfig {
                 return Err(format!("os_junk_patterns: {problem}"));
             }
         }
+        validate_managed_worktree_roots(&self.managed_worktree_roots)?;
         if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
             return Err(format!(
                 "bash_max_timeout_min must be between 1 and {MAX_BASH_TIMEOUT_MIN_LIMIT}"
@@ -320,8 +381,214 @@ impl WorkersConfig {
                 "default_max_review_rounds must be between 1 and {MAX_REVIEW_ROUNDS_INTEGER}"
             ));
         }
+        self.lane_warm.validate()
+    }
+}
+
+/// KT-1742 — how a worker lane is warmed: its compiler environment, whether the
+/// seed it is cloned from is aligned with that environment, the command that
+/// builds it, and the time that build may take.
+///
+/// Set once globally (`[workers.lane_warm]`, Settings > Workers) and optionally
+/// per project (`ProjectWorkspace::lane_warm`, stored with the project). A field
+/// left `None` inherits: the project from the global entry, the global entry
+/// from what Kronn detects in the repository. Nothing here is specific to one
+/// language or repository.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LaneWarmConfig {
+    /// Build the seed (the project's own main-checkout target) once with the
+    /// lane's compiler environment, so a lane cloned from it reuses it. Default:
+    /// on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub seed_alignment: Option<bool>,
+    /// The environment the lane's builds run with for the C compiler, one
+    /// `NAME=value` per entry. `None` = detected (on macOS, the target-scoped
+    /// `CFLAGS_<triple>=-save-temps=obj` when the project builds C through the
+    /// `cc` crate, nothing otherwise); an empty list = none at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compiler_env: Option<Vec<String>>,
+    /// A shell command that replaces the detected first build (run in the
+    /// worktree root, same bound, same event). The way to warm a project that is
+    /// not a Cargo one: `composer install`, `npm ci`. `None` = detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_build_command: Option<String>,
+    /// The first build's time limit, in minutes. `None` = 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_build_timeout_min: Option<u32>,
+    /// Which Rust workspace roots of the project to warm, as directories
+    /// relative to the repository (`.` for the root itself). `None` = every root
+    /// found from the manifests. A project's own setting only: the global entry
+    /// cannot name directories of a repository it does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rust_roots: Option<Vec<String>>,
+}
+
+/// KT-1742 — default bound of a lane's first build, in minutes (measured: the
+/// `kronn` crate's own two compiles take 33 min at host load 14).
+pub const DEFAULT_LANE_FIRST_BUILD_TIMEOUT_MIN: u32 = 60;
+/// Largest first-build bound the settings accept (a day).
+pub const MAX_LANE_FIRST_BUILD_TIMEOUT_MIN: u32 = 1_440;
+const MAX_LANE_ENV_ENTRIES: usize = 32;
+const MAX_LANE_ENV_BYTES: usize = 2_000;
+const MAX_LANE_COMMAND_BYTES: usize = 4_000;
+const MAX_LANE_ROOTS: usize = 16;
+/// Variables a lane owns: letting a setting move them would break its sandbox,
+/// its target or its isolation.
+const LANE_OWNED_ENV: [&str; 6] = [
+    "CARGO_TARGET_DIR",
+    "CARGO_HOME",
+    "CARGO_BUILD_JOBS",
+    "CARGO_NET_OFFLINE",
+    "TMPDIR",
+    "PATH",
+];
+
+impl LaneWarmConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `compiler_env` as `(name, value)` pairs, `None` when it is left to
+    /// detection. An entry that is not `NAME=value` is skipped (validation
+    /// refuses it before it is stored).
+    pub fn compiler_env_pairs(&self) -> Option<Vec<(String, String)>> {
+        self.compiler_env.as_ref().map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| parse_lane_env_entry(entry).ok())
+                .collect()
+        })
+    }
+
+    /// The stored shape: a blank command is no command, a blank entry no entry.
+    pub fn normalized(mut self) -> Self {
+        self.first_build_command = self
+            .first_build_command
+            .map(|command| command.trim().to_string())
+            .filter(|command| !command.is_empty());
+        self.compiler_env = self.compiler_env.map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect()
+        });
+        // A blank list is « every detected root », not « no root ».
+        self.rust_roots = self
+            .rust_roots
+            .map(|roots| {
+                let mut kept: Vec<String> = Vec::new();
+                for root in roots {
+                    let root = normalize_lane_root(&root);
+                    if !root.is_empty() && !kept.contains(&root) {
+                        kept.push(root);
+                    }
+                }
+                kept
+            })
+            .filter(|roots| !roots.is_empty());
+        self
+    }
+
+    /// Refuse what the settings forms must never persist.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(minutes) = self.first_build_timeout_min {
+            if !(1..=MAX_LANE_FIRST_BUILD_TIMEOUT_MIN).contains(&minutes) {
+                return Err(format!(
+                    "first_build_timeout_min must be between 1 and \
+                     {MAX_LANE_FIRST_BUILD_TIMEOUT_MIN}"
+                ));
+            }
+        }
+        if let Some(command) = &self.first_build_command {
+            if command.len() > MAX_LANE_COMMAND_BYTES || command.contains('\0') {
+                return Err(format!(
+                    "first_build_command is limited to {MAX_LANE_COMMAND_BYTES} characters \
+                     and cannot hold a NUL byte; put a long recipe in a script it calls"
+                ));
+            }
+        }
+        if let Some(roots) = &self.rust_roots {
+            if roots.len() > MAX_LANE_ROOTS {
+                return Err(format!("rust_roots is limited to {MAX_LANE_ROOTS} entries"));
+            }
+            for root in roots.iter().filter(|root| !root.trim().is_empty()) {
+                validate_lane_root(root)?;
+            }
+        }
+        if let Some(entries) = &self.compiler_env {
+            if entries.len() > MAX_LANE_ENV_ENTRIES {
+                return Err(format!(
+                    "compiler_env is limited to {MAX_LANE_ENV_ENTRIES} entries"
+                ));
+            }
+            for entry in entries.iter().filter(|entry| !entry.trim().is_empty()) {
+                parse_lane_env_entry(entry)?;
+            }
+        }
         Ok(())
     }
+}
+
+/// `./redis-flush/` → `redis-flush`; the repository root stays `.`.
+pub fn normalize_lane_root(root: &str) -> String {
+    let trimmed = root.trim().trim_end_matches('/');
+    trimmed.strip_prefix("./").unwrap_or(trimmed).to_string()
+}
+
+/// A root names a directory inside the repository: relative, no `..`, no NUL.
+fn validate_lane_root(root: &str) -> Result<(), String> {
+    let root = normalize_lane_root(root);
+    let escapes = std::path::Path::new(&root).components().any(|part| {
+        !matches!(
+            part,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if root.is_empty() || escapes || root.contains('\0') || root.len() > 300 {
+        return Err(format!(
+            "rust_roots entry `{root}` must be a directory inside the repository \
+             (relative, no `..`)"
+        ));
+    }
+    Ok(())
+}
+
+/// `NAME=value` → `(NAME, value)`: a portable variable name, a value without a
+/// NUL byte, and not one of the variables a lane owns.
+pub fn parse_lane_env_entry(entry: &str) -> Result<(String, String), String> {
+    let (name, value) = entry
+        .trim()
+        .split_once('=')
+        .ok_or_else(|| format!("compiler_env entry `{entry}` is not NAME=value"))?;
+    let name = name.trim();
+    let portable = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !portable {
+        return Err(format!(
+            "compiler_env name `{name}` must be letters, digits and underscores"
+        ));
+    }
+    if name.starts_with("KRONN_") || LANE_OWNED_ENV.contains(&name) {
+        return Err(format!(
+            "compiler_env cannot set `{name}`: the lane owns it"
+        ));
+    }
+    if value.len() > MAX_LANE_ENV_BYTES || value.contains('\0') {
+        return Err(format!(
+            "compiler_env value of `{name}` is too long or holds a NUL byte"
+        ));
+    }
+    Ok((name.to_string(), value.to_string()))
 }
 
 /// KT-1525 — default size (KB) above which a step output is flagged heavy.
@@ -916,7 +1183,6 @@ pub struct AgentsConfig {
     /// video mode of ComfyUI) when its provider cannot serve a request. Kept apart
     /// from the agents' `mode_fallbacks`: a connection is not an `AgentType`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[ts(skip)]
     pub connection_fallbacks: Vec<ConnectionFallback>,
 }
 
@@ -1238,6 +1504,22 @@ impl FallbackMode {
             FallbackMode::Video => "video",
         }
     }
+}
+
+/// What a fallback cannot give that the agent it replaces could: a stable code,
+/// so the UI translates the warning instead of showing an English sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum FallbackGap {
+    /// No MCP tools.
+    NoMcpTools,
+    /// Cannot write in the worktree.
+    NoWriteAccess,
+    /// Images are not guaranteed.
+    NoImageInput,
+    /// A capped context window.
+    CappedContext,
 }
 
 /// How an agent is reached; shown as a badge on every fallback pill.

@@ -74,14 +74,20 @@ export function ProjectCommitPolicySetting({ projectId, t }: Props) {
     setSaving(true);
     setError(null);
     try {
-      // The workspace is saved whole: the worktree hooks go back as they were.
+      // The workspace is saved whole: every other part (hooks, lane warm-up,
+      // managed roots) goes back as it is now.
       const current = await projectsApi.workspace(projectId);
       const commit = {
         name: next.name.trim() === '' ? null : next.name.trim(),
         email: next.email.trim() === '' ? null : next.email.trim(),
         signoff: next.signoff,
       };
-      await projectsApi.setWorkspace(projectId, { hooks: current?.hooks ?? {}, commit });
+      await projectsApi.setWorkspace(projectId, {
+        ...current,
+        hooks: current?.hooks ?? {},
+        lane_warm: current?.lane_warm ?? {},
+        commit,
+      });
       try {
         show(await projectsApi.commitPolicy(projectId));
       } catch {

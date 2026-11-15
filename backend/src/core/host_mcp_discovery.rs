@@ -286,7 +286,13 @@ fn scan_codex(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
     let value: toml::Table = match raw.parse() {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("host_mcp_discovery: cannot parse {}: {}", path.display(), e);
+            // Never `{e}`: a toml error's Display prints the offending source
+            // line, which may hold an env token of this file.
+            tracing::warn!(
+                "host_mcp_discovery: cannot parse {}: {}",
+                path.display(),
+                crate::core::redact::toml_error_summary(&raw, &e)
+            );
             return Vec::new();
         }
     };
@@ -636,6 +642,59 @@ ATLASSIAN_TOKEN = "x"
         assert_eq!(result[0].name, "atlassian");
         assert_eq!(result[0].env_keys, vec!["ATLASSIAN_TOKEN"]);
         assert_eq!(result[0].scope, HostScope::Codex);
+    }
+
+    /// KT-1528 — a toml parse error prints the offending source line; the warning
+    /// of an unreadable ~/.codex/config.toml (stdout, kronn.log) carries its kind
+    /// and position only, never an env token of the file.
+    #[test]
+    fn an_unreadable_codex_config_never_logs_its_env_tokens() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Sink {
+            type Writer = Sink;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        for broken in [
+            "[mcp_servers.gh.env]\nGITHUB_TOKEN = \"ghp_secret\n",
+            "[mcp_servers.gh.env]\nGITHUB_TOKEN = \"ghp_secret\" x\n",
+            "[mcp_servers.gh.env]\nGITHUB_TOKEN = \"ghp_secret\"\nGITHUB_TOKEN = \"ghp_secret\"\n",
+        ] {
+            let tmp = TempDir::new().unwrap();
+            fs::create_dir_all(tmp.path().join(".codex")).unwrap();
+            fs::write(tmp.path().join(".codex/config.toml"), broken).unwrap();
+
+            let sink = Sink::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(sink.clone())
+                .finish();
+            let result = tracing::subscriber::with_default(subscriber, || {
+                scan_codex(tmp.path(), &empty_index())
+            });
+            assert!(result.is_empty());
+
+            let log = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+            assert!(log.contains("cannot parse"), "{log}");
+            assert!(log.contains("at line "), "{log}");
+            assert!(!log.contains("ghp_secret"), "{log}");
+            assert!(!log.contains("GITHUB_TOKEN"), "{log}");
+        }
     }
 
     #[test]

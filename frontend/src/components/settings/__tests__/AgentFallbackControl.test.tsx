@@ -1,8 +1,8 @@
-// KT-1693 — the fallback of each mode of an agent, as proposal B draws it: one row
-// per mode, the current model, then → fallback pills with their transport badge,
-// then → the inherited fallback in a dashed pill; « + Add a fallback » opens a
-// menu filtered by kind of mode and grouped by agent. The same row serves the
-// override of a discussion or a step.
+// KT-1693 / KT-1757 — the fallback of each mode of an agent, as proposal A draws it: one row
+// per mode, the current model, « If unavailable: », then ONE numbered column of fallbacks
+// (transport badge, tier tag, ↑ ↓ ✕), the inherited ones dashed after the own one;
+// « + Add a fallback » opens a menu filtered by kind of mode and grouped by agent. The same
+// row serves the override of a discussion or a step.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
@@ -104,7 +104,7 @@ describe('the fallback rows of an agent card', () => {
     for (const [mode, model] of [['eco', 'haiku'], ['standard', 'sonnet'], ['advanced', 'opus']]) {
       const row = screen.getByTestId(ROW(mode));
       expect(within(row).getByTestId(`${ROW(mode)}-current`).textContent).toContain(model);
-      expect(within(row).getByText('Aucun repli')).toBeTruthy();
+      expect(within(row).getByTestId(`${ROW(mode)}-none`).textContent).toBe('Aucun repli : Kronn s’arrête si ce modèle est indisponible');
       expect(within(row).getByTestId(`${ROW(mode)}-add`)).toBeTruthy();
     }
     expect(screen.queryByTestId(ROW('image'))).toBeNull();
@@ -120,15 +120,15 @@ describe('the fallback rows of an agent card', () => {
     const inherited = within(row).getByTestId(`${ROW('standard')}-inherited-0`);
     expect(inherited.getAttribute('data-tone')).toBe('inherited');
     expect(within(inherited).getByTestId('fallback-transport-local').textContent).toBe('Local');
-    expect(inherited.querySelector('.fbp-main')?.getAttribute('title')).toContain('Défini sur la carte de Codex');
+    expect(within(inherited).getByTestId(`${ROW('standard')}-inherited-0-via`).getAttribute('title')).toContain('Défini sur la carte de Codex');
     expect(row.textContent).not.toMatch(/paid/i);
   });
 
-  it('opens the card that holds an inherited fallback when its pill is clicked', async () => {
+  it('opens the card that holds an inherited fallback when its « via » is clicked', async () => {
     const onOpenAgent = vi.fn();
     await mountControl({ chains: [CODEX_STANDARD], onOpenAgent });
     await act(async () => {
-      fireEvent.click(within(screen.getByTestId(`${ROW('standard')}-inherited-0`)).getByRole('button'));
+      fireEvent.click(within(screen.getByTestId(`${ROW('standard')}-inherited-0`)).getByRole('button', { name: 'via Codex' }));
     });
     expect(onOpenAgent).toHaveBeenCalledWith('Codex');
   });
@@ -239,12 +239,12 @@ describe('the fallback rows of an agent card', () => {
     const chain = view({
       agent: 'ClaudeCode',
       mode: 'standard',
-      links: [{ agent: 'Ollama', model: 'qwen3', mode: 'standard', transport: 'local', gaps: ['no MCP tools', 'capped context window'] }],
+      links: [{ agent: 'Ollama', model: 'qwen3', mode: 'standard', transport: 'local', gaps: ['no_mcp_tools', 'capped_context'] }],
     });
     const cooldown: Cooldown = { agent: 'ClaudeCode', until: '2026-11-10T14:00:00Z', reason: 'quota_exhausted' };
     await mountControl({ chains: [chain], cooldown });
     const pill = screen.getByTestId(`${ROW('standard')}-link-0`);
-    expect(pill.querySelector('.fbp-gap')?.getAttribute('title')).toContain('no MCP tools, capped context window');
+    expect(pill.querySelector('.fbp-gap')?.getAttribute('title')).toContain('pas d’outils MCP, fenêtre de contexte réduite');
     expect(screen.getByTestId('agent-fallback-cooldown-ClaudeCode').textContent).toContain('quota exhausted');
   });
 });

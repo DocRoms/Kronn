@@ -3946,6 +3946,10 @@ pub async fn start_agent(
 pub const NATIVE_ACP_TASK_WORKER_REFUSAL: &str =
     "this agent runs on its native ACP transport, which cannot carry the task-worker delivery context or permission scope; use Claude Code, Codex, an HTTP model or an exact joined CLI session";
 
+/// KT-1758 — how a task worker's route refusal starts. A refusal that waiting
+/// cannot change: the launch path words it, the dispatch runtime recognises it.
+pub const TASK_WORKER_REFUSED_PREFIX: &str = "Task worker refused:";
+
 /// Prefix of the refusal of a native ACP launch without full access.
 pub const NATIVE_FULL_ACCESS_REQUIRED: &str = "native_full_access_required";
 
@@ -4087,7 +4091,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         native || config.full_access,
         config.task_worker_context.is_some(),
     )
-    .map_err(|reason| format!("Task worker refused: {reason}"))?;
+    .map_err(|reason| format!("{TASK_WORKER_REFUSED_PREFIX} {reason}"))?;
     // Read MCP context: use override if provided (general discussions),
     // otherwise read from project filesystem.
     let mcp_context = if let Some(override_ctx) = config.mcp_context_override {

@@ -73,8 +73,11 @@ Work in a dedicated worktree instead (git worktree add <dir> <rev>), or ask the 
 Nothing was changed.
 ```
 
-A linked worktree (an agent's own checkout, a task worker's lane, a review) and
-every other git command go straight to the real git. `-C <dir>` and git's global
+A linked worktree (an agent's own checkout, a task worker's lane, a review), a
+throwaway repository under the agent's own `$TMPDIR` (a test fixture made with
+`tempfile`, KT-1719: a worker can run the git-based test suites) and every other
+git command go straight to the real git. A `$TMPDIR` that is `/`, the home folder
+or a folder above it exempts nothing. `-C <dir>` and git's global
 options are followed, so `git -C /main checkout` from a worktree is refused too.
 
 The human's confirmation is `KRONN_MAIN_CHECKOUT_GIT_CONFIRMED=1` in the launch
