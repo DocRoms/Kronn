@@ -33,9 +33,9 @@ accepted and refused catalogue sizes, common-directory deduplication and
 path-free diagnostics, and separately preserves the write boundary: an
 unmanaged worktree is the only write root, a managed one adds only its lane
 target.
-[src: file: backend/src/agents/runner_test.rs:11356-11555#synthetic_git_worktree_catalogue]
-[src: file: backend/src/agents/runner_test.rs:10694-10744#claude_task_worker_uses_fail_closed_workspace_sandbox]
-[src: file: backend/src/agents/runner_test.rs:10758-10799#claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain]
+[src: file: backend/src/agents/runner_test.rs:11370-11569#synthetic_git_worktree_catalogue]
+[src: file: backend/src/agents/runner_test.rs:10711-10761#claude_task_worker_uses_fail_closed_workspace_sandbox]
+[src: file: backend/src/agents/runner_test.rs:10775-10816#claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain]
 
 ## Build and test policy (KT-1246)
 

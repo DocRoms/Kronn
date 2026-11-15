@@ -35,10 +35,10 @@ Every git command Kronn runs on a worker's worktree is built by
   (`<repo>/.kronn/worktrees/<lane>`), its git directory is read from that
   checkout, and the `<lane>` entry is the one git itself registered for this
   worktree (`<admin>/gitdir`)
-  ([src: file: backend/src/core/lane_git.rs:135-137#registered_admin_dir]). Neither
+  ([src: file: backend/src/core/lane_git.rs:138-140#registered_admin_dir]). Neither
   the worktree's `.git` file nor a `commondir` is consulted.
 - **The pointer is verified before every command**
-  ([src: file: backend/src/core/lane_git.rs:495-497#verify]). If `<worktree>/.git`
+  ([src: file: backend/src/core/lane_git.rs:593-595#verify]). If `<worktree>/.git`
   no longer reads `gitdir: <that admin dir>` (absolute or Kronn's portable
   relative form), nothing runs and the operation fails with
   `WorktreeTampered: …` — the text `task_exec_commit` returns to the worker, and
@@ -53,7 +53,7 @@ Every git command Kronn runs on a worker's worktree is built by
 - A path that is not a managed worktree is the owner's own checkout: it keeps
   git's discovery and gets the same switches. A **push** keeps the owner's hooks
   there (`pre-push`)
-  ([src: file: backend/src/core/lane_git.rs:612-615#git_keeping_owner_hooks]); from a
+  ([src: file: backend/src/core/lane_git.rs:765-768#git_keeping_owner_hooks]); from a
   managed worktree it is pinned and hook-less like the rest
   ([src: file: backend/src/api/git_ops.rs:1686#run_git_push]), and the token-bearing
   authenticated push therefore reads the registered repository's configuration
@@ -63,7 +63,7 @@ Every git command Kronn runs on a worker's worktree is built by
 Call sites: the commit/merge commit, staging and identity of `task_exec_commit` /
 `git_commit` ([src: file: backend/src/api/git_ops.rs:1247#run_commit_command]),
 the candidate merge, its abort and its commits
-([src: file: backend/src/core/worktree.rs:2530-2540#build_candidate_with_hooks]), the doc
+([src: file: backend/src/core/worktree.rs:2532-2542#build_candidate_with_hooks]), the doc
 citations settling (`git checkout`, `add`, `grep`, `show`, `diff`), the worktree
 inspections (`worktree_dirty_files`, `committed_file_changes`, `git_head`, …), the
 HTTP agent's `git_status` / `git_diff` / `git_log`, the sub-task diff, the
@@ -152,7 +152,7 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
   `branch.*.remote|merge`, `user.*` (so no `filter.*`, `core.fsmonitor`,
   `include.*`, `gpg.*`), or a `.git` file that does not point into the registered
   repository's own git directory
-  ([src: file: backend/src/core/lane_git.rs:393-399#check_nested_repos]);
+  ([src: file: backend/src/core/lane_git.rs:454-460#check_nested_repos]);
 - Kronn never stages a NEW embedded repository a worker created (it would become
   a gitlink whose configuration the worker wrote)
   ([src: file: backend/src/api/git_ops.rs:1177#refuse_new_embedded_repository]).
@@ -170,7 +170,7 @@ argument that is a file the worktree holds), passes
 `-c filter.<x>.clean= -c filter.<x>.smudge= -c filter.<x>.process= -c filter.<x>.required=false`
 (`merge.<x>.driver=false`, `diff.<x>.textconv=`/`command=` likewise), and logs it
 once per key
-([src: file: backend/src/core/lane_git.rs:237-241#neutralised_programs]). An absolute
+([src: file: backend/src/core/lane_git.rs:240-244#neutralised_programs]). An absolute
 program (`/usr/bin/git-lfs`) or a bare command name (`git-lfs clean -- %f`) is the
 owner's own and is left alone.
 
@@ -190,7 +190,7 @@ cover it.
   ([src: file: backend/src/core/task_worker_sandbox.rs:518#seatbelt_profile_read_only]);
   bubblewrap binds the pointer and every nested `.git` that exists at launch
   read-only
-  ([src: file: backend/src/core/task_worker_sandbox.rs:584#bubblewrap_args_read_only]);
+  ([src: file: backend/src/core/task_worker_sandbox.rs:598-601#bubblewrap_args_read_only]);
 - Claude's task-worker settings carry `sandbox.filesystem.denyWrite` for the
   pointer and for each existing nested `.git` (and its content), and
   `Edit/Write/MultiEdit/NotebookEdit` permission denies

@@ -19,11 +19,11 @@ into a C string, it substitutes the literal `<string-with-nul>`. Only
 
 A byte scan alone — the obvious implementation — therefore detects the
 environment case and stays blind to the other three, with nothing to signal it.
-Both checks are needed. [src: file: backend/src/agents/runner.rs:14499-14508#NUL_BEARING_PLACEHOLDER]
+Both checks are needed. [src: file: backend/src/agents/runner.rs:14504-14513#NUL_BEARING_PLACEHOLDER]
 
 A test pins that library behaviour, so a future Rust release that stops
 substituting the placeholder fails there instead of quietly blinding the
-detection. [src: file: backend/src/agents/runner_test.rs:11857-11891#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
+detection. [src: file: backend/src/agents/runner_test.rs:11870-11904#the_standard_library_still_masks_nul_bearing_values_it_cannot_encode]
 
 ## Report the carrier, never the value
 
@@ -31,7 +31,7 @@ These fields hold API keys and tokens. The refusal names the environment
 variable by key, or the argument by the flag it follows — positions shift
 between agents — and never the content, matching the invocation receipt's own
 rule that no argument content is logged.
-[src: file: backend/src/agents/runner_test.rs:11789-11855#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
+[src: file: backend/src/agents/runner_test.rs:11802-11868#a_nul_byte_is_named_by_its_carrier_never_by_its_value]
 
 ## It is settled before anything runs
 
