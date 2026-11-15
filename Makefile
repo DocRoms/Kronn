@@ -1,4 +1,4 @@
-.PHONY: install start start-build start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff docs-reanchor test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
+.PHONY: typegen typegen-check install start start-build start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff docs-reanchor test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -351,12 +351,24 @@ check:
 	@command -v pnpm   >/dev/null 2>&1 && echo "  ✓ pnpm" || echo "  ✗ pnpm (optional, for dev)"
 
 ## Generate TypeScript types from Rust models
+## backend/bindings/ is owned by this target: it is wiped first so a type that
+## was renamed or removed (or an older run's files) can never leak into the output.
 typegen:
-	@echo "$(GREEN)▸ Generating ts-rs bindings from Rust models...$(RESET)"
+	@echo "$(GREEN)▸ Generating ts-rs bindings from Rust models (clean bindings dir)...$(RESET)"
+	rm -rf backend/bindings
 	cd backend && cargo test --lib export_bindings -- --nocapture
 	@echo "$(GREEN)▸ Assembling frontend/src/types/generated.ts from the bindings...$(RESET)"
 	@node frontend/scripts/assemble-generated-types.mjs
 	@echo "$(GREEN)▸ generated.ts regenerated — commit it with your Rust model change.$(RESET)"
+
+## Fail when the committed generated.ts differs from a fresh regeneration. The
+## export goes to a brand-new temp dir (TS_RS_EXPORT_DIR), so a stale
+## backend/bindings cannot influence the result; nothing is written to the tree.
+typegen-check:
+	@echo "$(CYAN)▸ Regenerating bindings into a fresh dir and comparing with generated.ts...$(RESET)"
+	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/kronn-typegen.XXXXXX") && trap 'rm -rf "$$tmp"' EXIT && \
+	  (cd backend && TS_RS_EXPORT_DIR="$$tmp" cargo test --lib export_bindings) && \
+	  node frontend/scripts/assemble-generated-types.mjs --bindings "$$tmp" --check
 
 ## Run the backend suite CI runs, with the runner CI uses (cargo-nextest,
 ## backend/.config/nextest.toml): every test in its own process, then the
@@ -535,6 +547,7 @@ help:
 	@echo "  make check          Verify prerequisites"
 	@echo "  make kiro-login     Kiro OAuth login (device flow in container)"
 	@echo "  make typegen        Sync Rust → TS types"
+	@echo "  make typegen-check  Fail if generated.ts differs from a fresh regeneration"
 	@echo "  make test-backend   Backend tests (cargo-nextest, as CI)"
 	@echo "  make test-backend-cov  Backend coverage gate (as CI)"
 	@echo "  make install-dev-tools  Install cargo-nextest and cargo-llvm-cov"

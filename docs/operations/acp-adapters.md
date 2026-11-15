@@ -49,8 +49,8 @@ temporary files. It removes inherited worker context from ordinary turns and
 the permissive container marker from workers.
 [src: file: backend/src/agents/runner.rs:5212-5240#adapter_task_worker_args]
 [src: file: backend/src/agents/runner.rs:4014-4032#task_worker_route_policy]
-[src: file: backend/src/agents/runner.rs:4623#acp_resume_id]
-[src: file: backend/src/agents/runner.rs:15133-15143#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:4627#acp_resume_id]
+[src: file: backend/src/agents/runner.rs:15137-15147#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/tests/adapter_worker_policy.rs:335-446#worker]
 
 Each adapter permits one active prompt at a time; sequential turns still resume
@@ -62,7 +62,7 @@ redacted runner diagnostic as prompt failures, never as a clean success.
 [src: file: backend/src/acp/adapter_process.rs:171-232#AdapterTurn]
 [src: file: backend/src/acp/adapter_process.rs:235-254#install]
 [src: file: backend/src/acp/adapter_process.rs:292-302#cancel]
-[src: file: backend/src/agents/runner.rs:6157-6173#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:6225-6241#acp_failure_diagnostic]
 [src: file: backend/src/agents/runner.rs:6171-6181#acp_failure_diagnostic]
 
 ## Packaged desktop bridge
@@ -90,7 +90,7 @@ with a specific diagnostic; this does not disable ordinary Claude discussions
 or relax worker isolation. Workers run through WSL instead; the boundary
 (`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
 [`windows-wsl-agents.md`](windows-wsl-agents.md).
-[src: file: backend/src/agents/runner.rs:13467-13518#claude_task_worker_platform_check]
+[src: file: backend/src/agents/runner.rs:13538-13589#claude_task_worker_platform_check]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 
 After replacing a frozen bridge, reconnect the MCP session. Frozen and Windows
@@ -169,8 +169,8 @@ When the adapter route is taken, the backend logs an `info`-level line
 (`"Starting shared ACP adapter session…"`) naming the agent and worker mode;
 the direct compatibility override is also logged. The actual route is visible
 in the logs without inspecting code.
-[src: file: backend/src/agents/runner.rs:4613-4617#acp_route]
-[src: file: backend/src/agents/runner.rs:4674-4680#AdaptedAcp]
+[src: file: backend/src/agents/runner.rs:4617-4621#acp_route]
+[src: file: backend/src/agents/runner.rs:4678-4684#AdaptedAcp]
 
 Every permission decision — live, for a native ACP agent's
 `session/request_permission`, or the adapters' static pre-session policy — is
@@ -189,7 +189,7 @@ re-seeds the adapter and resumes the same CLI conversation, but a different
 project path never reuses that identifier.
 [src: file: backend/src/db/acp_runtime_sessions.rs:7-13#SessionKey]
 [src: file: backend/src/agents/runner.rs:2932-2948#session_key]
-[src: file: backend/src/agents/runner.rs:5848-5857#persist]
+[src: file: backend/src/agents/runner.rs:3012-3021#persist]
 [src: file: backend/src/acp/codex_adapter.rs:566-570#NativeSessionId]
 
 ## Security model

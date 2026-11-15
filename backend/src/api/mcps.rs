@@ -2460,7 +2460,15 @@ fn read_host_entry_env(
         }
         HostScope::Codex => {
             // toml 1.x: parse Document into Table directly.
-            let v: toml::Table = raw.parse()?;
+            // Not `?`: a toml error's Display prints the offending source line
+            // (an env token), and this error reaches the API response.
+            let v: toml::Table = raw.parse().map_err(|e: toml::de::Error| {
+                anyhow::anyhow!(
+                    "Cannot parse {}: {}",
+                    source_file,
+                    crate::core::redact::toml_error_summary(&raw, &e)
+                )
+            })?;
             let entry = v
                 .get("mcp_servers")
                 .and_then(|o| o.get(name))
@@ -2890,6 +2898,30 @@ ATL_USER = "alice"
             read_host_entry_env(codex.to_str().unwrap(), &HostScope::Codex, "atlassian").unwrap();
         assert_eq!(env.get("ATL_TOKEN"), Some(&"tok-1".to_string()));
         assert_eq!(env.get("ATL_USER"), Some(&"alice".to_string()));
+    }
+
+    /// KT-1528 — a half-written ~/.codex/config.toml: the adopt error reaches the
+    /// API response, so it must say where the file is broken, not print the
+    /// offending line (an env token).
+    #[test]
+    fn an_unreadable_codex_toml_error_never_echoes_its_env_tokens() {
+        let tmp = TempDir::new().unwrap();
+        let codex = tmp.path().join("config.toml");
+        for broken in [
+            "[mcp_servers.gh.env]\nGITHUB_TOKEN = \"ghp_secret\n",
+            "[mcp_servers.gh.env]\nGITHUB_TOKEN = \"ghp_secret\" x\n",
+        ] {
+            fs::write(&codex, broken).unwrap();
+            let error =
+                read_host_entry_env(codex.to_str().unwrap(), &HostScope::Codex, "gh").unwrap_err();
+            let shown = format!("Adopt failed: {error}");
+            let chain = format!("{error:?}");
+            for text in [&shown, &chain] {
+                assert!(text.contains("line 2"), "{text}");
+                assert!(!text.contains("ghp_secret"), "{text}");
+                assert!(!text.contains("GITHUB_TOKEN"), "{text}");
+            }
+        }
     }
 
     #[test]

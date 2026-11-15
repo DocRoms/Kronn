@@ -19,9 +19,9 @@ the sandbox to enumerate. Any other unreadable Git root still fails closed with
 (never its path).
 [src: file: backend/src/agents/runner.rs:13303-13333#ClaudeSandboxCatalogueReceipt]
 [src: file: backend/src/agents/runner.rs:13367-13416#claude_sandbox_catalogue_receipt]
-[src: file: backend/src/agents/runner.rs:13416-13445#claude_sandbox_catalogue_roots]
+[src: file: backend/src/agents/runner.rs:13422-13451#claude_sandbox_catalogue_roots]
 [src: file: backend/src/agents/runner.rs:13449-13456#claude_task_worker_catalogue_preflight]
-[src: file: backend/src/api/orchestration.rs:12205-12215#worker_project_refusal]
+[src: file: backend/src/api/orchestration.rs:12284-12294#worker_project_refusal]
 
 The worker remains fail-closed: sandbox availability is mandatory,
 unsandboxed commands are disabled, and the explicit write roots are the

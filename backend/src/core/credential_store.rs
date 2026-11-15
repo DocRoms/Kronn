@@ -772,6 +772,12 @@ fn protect_copies_without_key(dir: &Path) {
             report.failures.join("; ")
         );
     }
+    if report.deferred > 0 {
+        tracing::warn!(
+            "credentials: {} copy(ies) of config.toml stay in clear until a key can encrypt them",
+            report.deferred
+        );
+    }
 }
 
 /// Encrypt (or cut down to their key line) the clear copies of config.toml in

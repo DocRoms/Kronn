@@ -1824,8 +1824,9 @@ pub(crate) fn merge_vibe_config(
             Err(e) => {
                 backup_before_refusal(project_path, file)?;
                 return Err(format!(
-                    "Invalid existing Vibe config {}: {e}; refusing overwrite",
-                    file.display()
+                    "Invalid existing Vibe config {}: {}; refusing overwrite",
+                    file.display(),
+                    crate::core::redact::toml_error_summary(&raw, &e)
                 ));
             }
         }
@@ -2160,7 +2161,7 @@ pub(crate) fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutco
             tracing::error!(
                 "Failed to parse Codex config {} ({}). Backed up to {} and aborting sync to preserve user data.",
                 codex_config.display(),
-                e,
+                crate::core::redact::toml_error_summary(&content, &e),
                 backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<no-backup>".to_string())
             );
             CodexLoadOutcome::Aborted

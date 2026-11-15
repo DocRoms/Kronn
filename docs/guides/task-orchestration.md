@@ -63,12 +63,23 @@ never `main` by default:
   does not fall back to `main`.
 - **The checkout holding the target must be Kronn's.** A target checked out
   nowhere is advanced by a ref compare-and-swap that touches no checkout. One
-  checked out in a Kronn-owned worktree (under `<repo>/.kronn/worktrees`) is
-  advanced inside it. One checked out in the project's own working checkout is
-  refused with `integration_target_owner_checkout`, and one checked out in any
-  other worktree with `integration_target_foreign_worktree`. Those checkouts
-  hold files the owner is working on, and fast-forwarding `main` there would
-  also land a change without going through the pull request.
+  checked out in a Kronn-owned worktree is advanced inside it. A worktree is
+  Kronn's when it sits under `<repo>/.kronn/worktrees`, under Kronn's autoCode
+  root (`~/.kronn/autocode-worktrees`), under a folder listed in Settings >
+  Workers (`managed_worktree_roots`, absolute paths) or in the project's
+  workspace settings, or when Kronn's workspace registry records it (a managed
+  discussion workspace or a workflow run). One checked out in the project's own
+  working checkout is refused with `integration_target_owner_checkout`, even if
+  the registry knows the path, and one checked out in any other worktree with
+  `integration_target_foreign_worktree`. Those checkouts hold files the owner
+  is working on, and fast-forwarding `main` there would also land a change
+  without going through the pull request.
+- **A managed worktree in use is not advanced.** If a run still uses the
+  worktree that holds the target (an unfinished workflow run, an unfinished task
+  execution, or a pending or running agent dispatch of its discussion), the
+  integration is refused with `integration_target_busy_worktree`, naming the
+  run, and nothing is changed. The execution parks like any refused
+  integration; resume it once the run has finished.
 - **The refusal comes at preflight and launch.** `task_exec_prepare` accepts the
   `base_rev` you will launch with (or checks the room's declared branch) and
   answers `launchable: false` with the same code; `task_exec_launch` refuses it
@@ -198,10 +209,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:11263-11267#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:11269-11318#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:9506-9530#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:40827-40928#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:11342-11346#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:11350-11399#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:9575-9599#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration.rs:41018-41119#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -209,7 +220,7 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:552-568#agent_handoff_paid_limit]
+[src: file: backend/src/models/setup.rs:818-834#agent_handoff_paid_limit]
 [src: file: backend/src/db/discussions.rs:1702-1703#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1711-1746#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
@@ -224,7 +235,7 @@ clock (KT-1247) does not run during them (KT-1689).
 | Phase | Execution status | What shows in the status | Clock |
 | --- | --- | --- | --- |
 | Worktree creation, lane provisioning, seed clone, lane seeds | `Provisioning` | `phase: warming`, the `warming_steps` | None: the activity clock only expires a `Working` execution. |
-| Build-slot wait (`gate_wait`, up to 30 min) and lane first build (`first_build`, up to the first-build timeout) | `Provisioning` | `warming_steps` with their durations | None, same reason. A 30-min wait or a 24-min build never counts as inactivity. |
+| Build-slot wait (`gate_wait`, up to the first-build timeout, 60 min by default) and lane first build (`first_build`, up to the first-build timeout) | `Provisioning` | `warming_steps` with their durations | None, same reason. A long wait or a 24-min build never counts as inactivity. |
 | Toolchain smoke check, brief, dispatch | `Provisioning` → `Working` | `smoke_check` step | None until the dispatch exists. |
 | Queued for a worker slot (task-worker cap, agent or host caps) | `Working`, dispatch `Pending` | `phase: queued`, reason `task_worker_limit:<running>/<cap>`, queue position | **Queue deadline** only (below). The activity clock is suspended while the dispatch is `Pending`. |
 | Worker's turn: claimed, agent started, tool calls, messages, commits | `Working`, dispatch `Running` | `launching`, `tool_activity`, `upstream_wait` | **Activity clock**: 20 min without a tool call, message, commit or delivery interrupts the execution (`activity_timeout`, resumable). It starts at the claim of the dispatch, not at its creation, and a single tool call in flight counts as activity up to its cap. |
@@ -233,7 +244,7 @@ The activity clock default is 20 minutes
 (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
 wins). A tool call in flight (a cold build run by the worker itself) is activity
 up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
-[src: file: backend/src/db/orchestration.rs:8148#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8206-8211#DEFAULT_ACTIVITY_TIMEOUT_SECS]
 
 **Queue deadline.** An execution queued longer than the queue deadline is
 reported, never interrupted: the principal room receives one orchestration
@@ -244,8 +255,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8177#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8205#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8237-8240#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8266-8268#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -279,8 +290,8 @@ delivery manifest and diff, then choose one of:
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
   [src: file: backend/src/core/worktree.rs:2639-2667#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:3210-3230#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:3155-3208#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:3338-3358#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:3283-3336#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -607,6 +618,8 @@ for the mechanism.
 | Dirty target worktree | Intentionally preserve or commit changes in the selected target branch's checkout, then retry integration. Do not move unrelated files from another checkout. |
 | Target checked out in several worktrees, or not a local branch | Leave at most one checkout of the pinned local target branch, and make sure the target is a branch, not a tag or SHA, before retrying; Kronn does not choose or switch a branch for you. |
 | `integration_target_undeclared`, `integration_target_owner_checkout` or `integration_target_foreign_worktree` at preflight or launch | Name an integration branch (`base_rev`) or declare one on the room's campaign, and pick one that is checked out nowhere or in a Kronn-owned worktree. Kronn never integrates into the owner's checkout or defaults to `main`. |
+| `integration_target_busy_worktree` at integration | The named run still uses the worktree that holds the target. Let it finish (or cancel it), then resume the integration; nothing was moved. |
+| `integration_target_foreign_worktree` for a worktree Kronn itself created elsewhere | Add its parent folder to Settings > Workers > Managed worktree folders (or to the project's workspace settings). |
 | Missing workspace | Restore/register the project workspace; do not edit execution rows manually. |
 | Interrupted after restart | Read the persisted reason, verify the worker/worktree, then use the guarded resume/reassign action. |
 | Initial CLI offer never accepted | Resume/reassign do not apply to `Blocked` from `Provisioning`. The principal may cancel with workspace preservation, verify the old execution is terminal, set the task back to `todo` (`task_update status=todo`; the cancel keeps its status, usually `in_progress`, and the launch preflight refuses any other status), then select the exact available CLI and prepare a new execution for the same task. Launch only after a fresh launchable preflight confirms no active duplicate. Do not silently substitute a different CLI identity. |

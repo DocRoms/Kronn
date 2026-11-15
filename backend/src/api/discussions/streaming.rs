@@ -1289,6 +1289,10 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
         AgentType::LiteLlm | AgentType::Nvidia | AgentType::Ollama | AgentType::Custom
     ) || error.starts_with("Project path not found:")
         || error.starts_with("Copilot task worker cannot start:")
+        // KT-1758 — the launch path refuses this agent as a task worker (a
+        // native ACP agent): waiting never changes that. It was deferred every
+        // 30 s for 1h35 as if the runtime were about to come back.
+        || error.starts_with(crate::agents::runner::TASK_WORKER_REFUSED_PREFIX)
         || error.starts_with(crate::agents::acp_start::ACP_START_FAILED)
         || non_retryable_http_status
         || deterministic_nul_byte
@@ -9709,6 +9713,30 @@ for line in sys.stdin:
             agent_start_failure_outcome(&AgentType::OpenCode, &refused),
             AgentExecutionOutcome::PreflightFailed { .. }
         ));
+        assert!(matches!(
+            agent_start_failure_outcome(&AgentType::OpenCode, "OpenCode ACP spawn failed: x"),
+            AgentExecutionOutcome::RuntimeUnavailable { .. }
+        ));
+    }
+
+    /// KT-1758 — the launch path's refusal of a native ACP agent as a task
+    /// worker never changes by waiting: it is settled, not deferred (it used to
+    /// be deferred every 30 s for 1h35 on the live run). A runtime that is only
+    /// absent for now still defers.
+    #[test]
+    fn a_task_worker_refusal_is_settled_not_deferred() {
+        let refusal = format!(
+            "{} {}",
+            crate::agents::runner::TASK_WORKER_REFUSED_PREFIX,
+            crate::agents::runner::NATIVE_ACP_TASK_WORKER_REFUSAL
+        );
+        assert_eq!(
+            agent_start_failure_outcome(&AgentType::OpenCode, &refusal),
+            AgentExecutionOutcome::PreflightFailed {
+                diagnostic: refusal.clone()
+            },
+            "the whole sentence reaches the rooms"
+        );
         assert!(matches!(
             agent_start_failure_outcome(&AgentType::OpenCode, "OpenCode ACP spawn failed: x"),
             AgentExecutionOutcome::RuntimeUnavailable { .. }
