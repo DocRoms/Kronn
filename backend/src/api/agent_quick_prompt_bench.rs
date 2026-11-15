@@ -279,8 +279,17 @@ async fn bench_quick_prompt_native_catalogue() {
     let model = crate::core::child_env::var("KRONN_BENCH_MODEL").expect("explicit model required");
     // Read-only: config::load can migrate and save a config as a side effect.
     let config: crate::models::AppConfig = match crate::core::child_env::var("KRONN_BENCH_CONFIG") {
-        Ok(path) => toml::from_str(&std::fs::read_to_string(path).expect("read config"))
-            .expect("parse config"),
+        Ok(path) => {
+            let text = std::fs::read_to_string(path).expect("read config");
+            // Not `.expect`: a toml error's Debug prints the offending source
+            // line, which may be a credential of this real config.
+            toml::from_str(&text).unwrap_or_else(|e| {
+                panic!(
+                    "parse config: {}",
+                    crate::core::redact::toml_error_summary(&text, &e)
+                )
+            })
+        }
         Err(_) => crate::core::config::default_config(),
     };
     let agent = if crate::core::child_env::var("KRONN_BENCH_CONFIG").is_ok() {

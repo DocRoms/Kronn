@@ -52,7 +52,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     let data_dir_lock = config::acquire_data_dir_lock()?;
 
     // Load config before tracing init so `debug_mode` can influence the
-    // tracing filter's default level; `config::load()` emits no logs.
+    // tracing filter's default level; `config::load()` logs no config text (kind and position only).
     // Also arms the process timezone and anti-hallucination mode, shared with the desktop boot.
     let mut app_config = kronn::load_startup_config().await?;
 

@@ -137,19 +137,203 @@ enum Seg {
     Idx(usize),
 }
 
+/// The longest key name that is looked at: past it a name is masked without any
+/// pattern running on it (a setting's name is a few words; a name this long is a
+/// token, a blob or an attack on the matcher). Every other rule of
+/// [`secret_name`] therefore runs on at most this many characters, so the whole
+/// matcher is bounded (linear in the input past the cap).
+const NAME_MAX_CHARS: usize = 256;
+
+/// A key name that is itself a secret: it is printed as a placeholder and treated
+/// as a credential on save, like a credential's value. ONE rule, on a name of
+/// [`NAME_MAX_CHARS`] at most, every clause judging the WHOLE name except where
+/// said:
+/// (a) a name longer than that is a secret;
+/// (c) a vendor token shape anywhere in it, unanchored
+///     ([`super::redact::name_embeds_vendor_token`]): `old_sk-…`, `myAKIA…`,
+///     `AKIA…_old`, `sk-<uuid>`;
+/// (d) `bearer` / `basic` (any case) followed by white space, `:` or `=` and a run
+///     of 12 token characters or more, anywhere (`hdr: bearer\tmy-secret-token`,
+///     `hdrbearer my-secret-token`, `bearer -<uuid>`); `bearer token` and
+///     `basic auth` are words;
+/// (e) an instance key ([`super::crypto::canonical_secret`]) as the whole name or
+///     as any piece of it, a run of 24 hex digits or more, or a run of 32 base64
+///     characters or more with at least 4 digits, 4 capitals and 4 lower-case
+///     letters (a setting name in camelCase or with `OAuth2` in it has too few
+///     digits);
+/// (b) with every non-alphanumeric character removed, the lengths of the maximal
+///     hex runs that hold at least one DECIMAL digit add up to 32 or more (an
+///     instance key written whole, in groups, `0x`-prefixed or behind a label,
+///     `<uuid>_<uuid>`; plain words made of `a`-`f` such as `default`, `face` or
+///     `added` never count; a dashless UUID and a SHA-1 are hidden too, the safe
+///     side), EXCEPT a name that is exactly one canonical dashed UUID (8-4-4-4-12,
+///     any case), alone or after a `<label>_` / `<label>-` whose own such runs add
+///     up to fewer than 8 (an identifier, `proj_<uuid>`). The exemption waives (b),
+///     and when the label is too short to hold a key (no run of key characters of
+///     [`LABEL_KEY_RUN`] or more) (e) judges the label only, so `PROJ_<uuid>` and
+///     `MCP_SERVER_<uuid>` are shown; a longer label is judged with its UUID, the
+///     safe side (`<key>_<uuid>`). (a), (c) and (d) judge the whole name.
+/// (c) retries every start (a rejected `sk-` inside a word never hides a later
+/// match), so it is quadratic in the worst case, bounded by [`NAME_MAX_CHARS`].
+/// A text a pattern of the free-text redactor catches (a connection string, a
+/// JSON credential field) is a secret too.
+fn secret_name(name: &str) -> bool {
+    // (a) `nth` stops at the 257th character: no pass over a huge name.
+    if name.chars().nth(NAME_MAX_CHARS).is_some() {
+        return true;
+    }
+    match identifier_label(name) {
+        // A short label holds no key and the UUID is never one: (e) on the label
+        // (`PROJ_<uuid>` would otherwise make one base64 run with 4 capitals).
+        Some(label) if longest_key_run(label) < LABEL_KEY_RUN => {
+            token_shaped(name) || embeds_instance_key(label)
+        }
+        Some(_) => token_shaped(name) || embeds_instance_key(name),
+        None => token_shaped(name) || embeds_instance_key(name) || hex_digit_total(name) >= 32,
+    }
+}
+
+/// The shortest run of key characters a label must hold for its UUID to be
+/// judged with it by (e): below it no instance key, 24-hex run or 32-character
+/// base64 run fits.
+const LABEL_KEY_RUN: usize = 20;
+
+/// The longest run of the characters (e) reads as one key piece.
+fn longest_key_run(text: &str) -> usize {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')))
+        .map(str::len)
+        .max()
+        .unwrap_or(0)
+}
+
+/// (c) and (d) of [`secret_name`] on `text`, a name of at most [`NAME_MAX_CHARS`].
+fn token_shaped(text: &str) -> bool {
+    super::redact::name_embeds_vendor_token(text)
+        || super::redact::looks_like_secret(text)
+        || embeds_authorization(text)
+}
+
+/// (b) of [`secret_name`]: with every non-alphanumeric character removed, the sum
+/// of the lengths of the maximal `[0-9A-Fa-f]` runs that contain at least one
+/// decimal digit.
+fn hex_digit_total(text: &str) -> usize {
+    let squeezed: Vec<u8> = text.bytes().filter(u8::is_ascii_alphanumeric).collect();
+    squeezed
+        .split(|b| !b.is_ascii_hexdigit())
+        .filter(|run| run.iter().any(u8::is_ascii_digit))
+        .map(<[u8]>::len)
+        .sum()
+}
+
+/// When `name` is one canonical dashed UUID, or `<label>_<uuid>` / `<label>-<uuid>`
+/// with a label whose [`hex_digit_total`] is under 8 (an identifier, not a
+/// secret: (b) is waived and (e) judges the label only), that label: empty for a
+/// bare UUID. `<uuid>_<uuid>`, `<16 hex>_<uuid>` and `0123_4567_89ab_cdef_<uuid>`
+/// are not identifiers: their label alone reaches 8.
+fn identifier_label(name: &str) -> Option<&str> {
+    const UUID_LEN: usize = 36;
+    let is_uuid = |s: &str| {
+        s.len() == UUID_LEN
+            && s.bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+    };
+    if is_uuid(name) {
+        return Some("");
+    }
+    let cut = name.len().checked_sub(UUID_LEN + 1)?;
+    let (head, tail) = (name.get(..cut)?, name.get(cut + 1..)?);
+    (is_uuid(tail) && matches!(name.as_bytes()[cut], b'_' | b'-') && hex_digit_total(head) < 8)
+        .then_some(head)
+}
+
+/// (d): `bearer` or `basic` (any ASCII case) anywhere in `text`, then one or more
+/// of white space (any Unicode White_Space), `:` or `=`, then 12 token characters
+/// (`[A-Za-z0-9._~+/=-]`) or more.
+fn embeds_authorization(text: &str) -> bool {
+    let token =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '~' | '+' | '/' | '=' | '-');
+    let bytes = text.as_bytes();
+    ["bearer", "basic"].iter().any(|word| {
+        (0..bytes.len().saturating_sub(word.len() - 1)).any(|at| {
+            if !bytes[at..at + word.len()].eq_ignore_ascii_case(word.as_bytes()) {
+                return false;
+            }
+            // `at + word.len()` follows ASCII bytes: a character boundary.
+            let after = &text[at + word.len()..];
+            let rest =
+                after.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '='));
+            rest.len() < after.len() && rest.chars().take_while(|c| token(*c)).count() >= 12
+        })
+    })
+}
+
+/// (e): an instance key as the whole name or a piece of it, a hex run of 24 or
+/// more, a base64 run of 32 or more with at least 4 digits, 4 capitals and 4
+/// lower-case letters, or a run of 40 or more with 4 capitals and 4 lower-case
+/// letters whatever its digits (a 32-byte key in base64, 43-44 characters, can
+/// hold three digits or none).
+fn embeds_instance_key(text: &str) -> bool {
+    if super::crypto::canonical_secret(text).is_ok() {
+        return true;
+    }
+    let key_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_');
+    text.split(|c: char| !key_char(c)).any(|run| {
+        if run.len() < 24 {
+            return false;
+        }
+        let count = |class: fn(&u8) -> bool| run.bytes().filter(class).count();
+        let hex_run = run
+            .as_bytes()
+            .split(|b| !b.is_ascii_hexdigit())
+            .any(|h| h.len() >= 24);
+        hex_run
+            || super::crypto::canonical_secret(run).is_ok()
+            || (run.len() >= 32
+                && count(u8::is_ascii_digit) >= 4
+                && count(u8::is_ascii_uppercase) >= 4
+                && count(u8::is_ascii_lowercase) >= 4)
+            || (run.len() >= 40
+                && count(u8::is_ascii_uppercase) >= 4
+                && count(u8::is_ascii_lowercase) >= 4)
+    }) || text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|piece| piece.len() >= 24 && super::crypto::canonical_secret(piece).is_ok())
+}
+
+/// A key name as notices and logs may print it: itself, unless it looks like a
+/// secret (a token pasted as a key name), then a placeholder for its position.
+fn shown_key(name: &str, position: usize) -> String {
+    if secret_name(name) {
+        format!("<key #{}>", position + 1)
+    } else {
+        name.to_string()
+    }
+}
+
 fn show(path: &[Seg]) -> String {
     let mut out = String::new();
-    for seg in path {
+    for (at, seg) in path.iter().enumerate() {
         match seg {
-            Seg::Key(k) if out.is_empty() => out.push_str(k),
+            Seg::Key(k) if out.is_empty() => out.push_str(&shown_key(k, at)),
             Seg::Key(k) => {
                 out.push('.');
-                out.push_str(k);
+                out.push_str(&shown_key(k, at));
             }
             Seg::Idx(i) => out.push_str(&format!("[{i}]")),
         }
     }
     out
+}
+
+/// [`show`] for a path of key names.
+fn show_keys(keys: &[String]) -> String {
+    keys.iter()
+        .enumerate()
+        .map(|(at, k)| shown_key(k, at))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn get_at<'a>(root: &'a Value, path: &[Seg]) -> Option<&'a Value> {
@@ -224,6 +408,66 @@ fn key_names(path: &[Seg]) -> Option<Vec<String>> {
         .collect()
 }
 
+/// Why a value was refused, from a deserialisation message, without the value:
+/// serde quotes it (`invalid type: string "sk-…", expected u16`), and whatever
+/// sits in a field may be a secret. Only what the message says is expected is
+/// kept (a type, a variant list), or a missing field's name; anything else is
+/// `unreadable value`.
+fn describe_failure(message: &str) -> Option<String> {
+    if message.starts_with("missing field ") {
+        // Names a field of the schema, quotes no value.
+        return Some(message.lines().next()?.to_string());
+    }
+    // An enum field: the message quotes the offending variant, and the list that
+    // follows is not told from a value written to look like one, so neither is
+    // kept.
+    if message.starts_with("unknown variant ") {
+        return Some("not one of the allowed values".to_string());
+    }
+    // The text after the LAST ", expected " is kept only when it is a known type
+    // name: a value that itself contains that text (a custom error quotes it
+    // after the real one, or the message ends with it) must not be echoed.
+    Some(match message.rsplit_once(", expected ") {
+        Some((_, expected)) if EXPECTED_TYPES.contains(&expected) => {
+            format!("expected {expected}")
+        }
+        _ => "unreadable value".to_string(),
+    })
+}
+
+/// What serde names as the expected type of a refused value: the whole text
+/// after `, expected `, none of it a value.
+const EXPECTED_TYPES: &[&str] = &[
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "u128",
+    "usize",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "i128",
+    "isize",
+    "f32",
+    "f64",
+    "a boolean",
+    "a string",
+    "a borrowed string",
+    "a character",
+    "a sequence",
+    "a map",
+    "a table",
+    "an array",
+    "an integer",
+    "a float",
+    "a unit value",
+    "unit",
+    "a nonnegative integer",
+    "a positive integer",
+];
+
 /// Read `table` as an `AppConfig`, dropping every value this build cannot
 /// read. `None` when nothing in it is a Kronn setting, or when a value cannot
 /// be dropped without guessing.
@@ -281,19 +525,10 @@ pub fn read(table: &toml::Table) -> Option<Reading> {
         if path == [Seg::Key("encryption_secret".into())] {
             key_unreadable = true;
         }
-        // The message quotes the offending value: never when it may be a secret.
-        let owner = match path.last()? {
-            Seg::Idx(_) => &path[..path.len() - 1],
-            Seg::Key(_) => path,
-        };
-        let why = if holds_credential(&key_names(owner).unwrap_or_default(), &original) {
-            match message.split(", expected ").nth(1) {
-                Some(expected) => format!("expected {}", expected.lines().next()?),
-                None => "unreadable value".to_string(),
-            }
-        } else {
-            message.lines().next()?.to_string()
-        };
+        // The message quotes the offending value, and a secret pasted into the
+        // wrong field (a token in `server.port`) is as much a secret as one in
+        // a credential field: the value is never quoted, for any path.
+        let why = describe_failure(&message)?;
         ignored.push(format!("{} ({why})", show(path)));
         match (path.last()?, get_at(&defaults, path)) {
             (Seg::Key(_), Some(default)) => {
@@ -337,7 +572,7 @@ pub fn read(table: &toml::Table) -> Option<Reading> {
         }
         if ignores_every_value(&root, &path, &baseline) {
             let value = get_at(&root, &path)?.clone();
-            unknown.push(keys.join("."));
+            unknown.push(show_keys(&keys));
             credential_left |= holds_credential(&keys, &value);
             preserved.push(Preserved::Value(keys, value));
         }
@@ -464,6 +699,13 @@ fn credential_name(name: &str) -> bool {
     .any(|word| name == *word || name.ends_with(&format!("_{word}")))
 }
 
+/// A key that holds a credential by its name ([`credential_name`]), or that IS a
+/// secret (a token pasted as a key name, [`secret_name`]): its entry is kept out
+/// of the clear file like a credential's value, and the name is never printed.
+fn credential_key(name: &str) -> bool {
+    credential_name(name) || secret_name(name)
+}
+
 /// A string that is an authorization header value, whatever key holds it.
 fn secret_string(text: &str) -> bool {
     let text = text.trim_start().to_ascii_lowercase();
@@ -496,7 +738,7 @@ fn whole_credential(path: &[String], value: &Value) -> bool {
         || path
             .iter()
             .enumerate()
-            .any(|(at, name)| !(at == 0 && name == "tokens") && credential_name(name))
+            .any(|(at, name)| !(at == 0 && name == "tokens") && credential_key(name))
         || matches!(value, Value::String(text) if secret_string(text))
 }
 
@@ -508,7 +750,7 @@ fn scrub(value: &Value) -> Value {
             table
                 .iter()
                 .filter(|(k, v)| {
-                    !credential_name(k) && !matches!(v, Value::String(t) if secret_string(t))
+                    !credential_key(k) && !matches!(v, Value::String(t) if secret_string(t))
                 })
                 .map(|(k, v)| (k.clone(), scrub(v)))
                 .collect(),
@@ -879,7 +1121,14 @@ fn sheltered_entries(entries: &[Preserved]) -> Vec<Sheltered> {
 fn decode_shelter(encrypted: &str, key_hex: &str) -> Result<Vec<Sheltered>> {
     let key = crypto::parse_secret(key_hex).map_err(anyhow::Error::msg)?;
     let text = crypto::decrypt(encrypted.trim(), &key).map_err(anyhow::Error::msg)?;
-    let file: ShelterFile = toml::from_str(&text).context("parse the preserved values")?;
+    // The decrypted text holds credentials: the parse error is reduced to its
+    // kind and position, as its own Display would print the offending line.
+    let file: ShelterFile = toml::from_str(&text).map_err(|e| {
+        anyhow::anyhow!(
+            "parse the preserved values: {}",
+            super::redact::toml_error_summary(&text, &e)
+        )
+    })?;
     Ok(file.entries)
 }
 
@@ -957,6 +1206,590 @@ pub fn write_shelter(dir: &Path, key_hex: &str, entries: &[Preserved]) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// KT-1528 — a value refused by the schema is never quoted, whatever the
+    /// field: a secret pasted into `server.port` is a secret all the same.
+    #[test]
+    fn a_refused_value_is_never_quoted_for_any_path() {
+        let text = "encryption_secret = 5\n[server]\nport = \"sk-clear-d\"\n\
+                    [tokens]\nanthropic = \"sk-clear-e\"\n";
+        let table: toml::Table = text.parse().unwrap();
+        let reading = read(&table).expect("the sections still read");
+        let notice = reading.notice().expect("something was ignored");
+        assert!(notice.contains("server.port (expected u16)"), "{notice}");
+        assert!(!notice.contains("sk-clear"), "{notice}");
+
+        // The value holds the separator serde puts before the expected type, and
+        // spans lines: nothing of it survives, only the real expectation.
+        for value in [
+            "sk-clear-f, expected u16",
+            "sk-clear-g\\n, expected a\\nsk-clear-h",
+        ] {
+            let text = format!("[server]\nport = \"{value}\"\n");
+            let table: toml::Table = text.parse().unwrap();
+            let reading = read(&table).expect("reads");
+            let notice = reading.notice().unwrap();
+            assert!(notice.contains("server.port (expected u16)"), "{notice}");
+            assert!(!notice.contains("sk-clear"), "{notice}");
+        }
+
+        assert_eq!(
+            describe_failure("missing field `name`").as_deref(),
+            Some("missing field `name`")
+        );
+        assert_eq!(
+            describe_failure("invalid type: string \"sk-x\", expected u16").as_deref(),
+            Some("expected u16")
+        );
+        assert_eq!(
+            describe_failure("some message quoting \"sk-x\"").as_deref(),
+            Some("unreadable value")
+        );
+    }
+
+    /// KT-1528 — only a known type name is kept after `, expected `: a message
+    /// that ends with the value's own `, expected …` text, or that quotes a
+    /// variant, says nothing of the value.
+    #[test]
+    fn only_a_known_type_name_is_kept_after_expected() {
+        for (message, shown) in [
+            ("invalid type: string \"x\", expected u16", "expected u16"),
+            (
+                "invalid type: string \"x\", expected a boolean",
+                "expected a boolean",
+            ),
+            // The value itself ends the message with a believable expectation.
+            (
+                "custom: sk-clear-i, expected sk-clear-j",
+                "unreadable value",
+            ),
+            (
+                "custom: sk-clear-k, expected u16 sk-clear-l",
+                "unreadable value",
+            ),
+            (
+                "custom: sk-clear-m, expected `sk-clear-n`",
+                "unreadable value",
+            ),
+            (
+                "unknown variant `sk-clear-o`, expected one of `a`, `b`",
+                "not one of the allowed values",
+            ),
+            ("custom: sk-clear-p", "unreadable value"),
+        ] {
+            let why = describe_failure(message).unwrap();
+            assert_eq!(why, shown, "{message}");
+            assert!(!why.contains("sk-clear"), "{why}");
+        }
+    }
+
+    /// KT-1528 — a secret used as a key name (pasted as one) reaches neither the
+    /// ignored nor the unknown list of a notice; an ordinary name still does.
+    #[test]
+    fn a_secret_used_as_a_key_name_is_not_printed() {
+        let secret = "sk-clear-abcdefghijklmnopqrstuvwxyz0123456789";
+        // Unknown: a key this build has no field for.
+        let text = format!("[server]\nport = 3140\n\"{secret}\" = \"v\"\nfuture_flag = true\n");
+        let reading = read(&table(&text)).expect("reads");
+        let notice = reading.notice().expect("something is unknown");
+        assert!(!notice.contains(secret), "{notice}");
+        assert!(!notice.contains("sk-clear"), "{notice}");
+        assert!(notice.contains("server.<key #2>"), "{notice}");
+        assert!(notice.contains("server.future_flag"), "{notice}");
+
+        // Ignored: a value of the wrong type under such a key.
+        let shown = show(&[
+            Seg::Key("server".into()),
+            Seg::Key(secret.into()),
+            Seg::Idx(3),
+        ]);
+        assert_eq!(shown, "server.<key #2>[3]");
+        assert_eq!(
+            show(&[Seg::Key(secret.into()), Seg::Key("port".into())]),
+            "<key #1>.port"
+        );
+        assert_eq!(show_keys(&path("server.port")), "server.port");
+        assert_eq!(
+            show_keys(&["tokens".to_string(), secret.to_string()]),
+            "tokens.<key #2>"
+        );
+    }
+
+    /// KT-1528 — an opaque token with no vendor prefix used as a key name (a
+    /// Kronn instance key, any case, or a long hex / base64 run) is not printed
+    /// either; a setting's name, however long, still is.
+    #[test]
+    fn a_kronn_key_used_as_a_key_name_is_not_printed() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let upper = hex.to_uppercase();
+        let short_hex = "0123456789abcdef01234567";
+        let b64 = "q83vEjRWeJq83vEjRWeJq83vEjRWeJq83vEjRWeJ+/8=";
+        for name in [hex, upper.as_str(), short_hex, b64] {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = 1\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            assert!(!notice.contains(name), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+            assert_eq!(
+                show_keys(&["tokens".to_string(), name.to_string()]),
+                "tokens.<key #2>"
+            );
+        }
+        for name in [
+            "future_flag",
+            "a_rather_long_setting_name_made_of_words_only",
+            "deadbeef",
+        ] {
+            assert_eq!(shown_key(name, 0), name);
+        }
+    }
+
+    /// KT-1528 — a token embedded in a longer key name (a suffix, a label, a
+    /// neighbour, two halves) is as much a token as one that is the whole name.
+    #[test]
+    fn a_token_inside_a_longer_key_name_is_not_printed() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let half = "0123456789abcdef0123456789abcdef";
+        let names = [
+            format!("{hex}.old"),
+            format!("encryption_secret: {hex}"),
+            format!("key {hex}"),
+            format!("{half}:{half}"),
+            format!("backup-of-{hex}"),
+            "label q83vEjRWeJq83vEjRWeJq83vEjRWeJq83vEjRWeJ+/8= copy".to_string(),
+        ];
+        for name in &names {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"\"\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            assert!(!notice.contains(half), "{name}: {notice}");
+            assert!(!notice.contains("q83vEjRWeJ"), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+            assert_eq!(
+                show_keys(&["tokens".to_string(), name.clone()]),
+                "tokens.<key #2>"
+            );
+        }
+    }
+
+    /// KT-1528 — an instance key written in groups of fewer than 24 digits (spaces,
+    /// dashes, colons between groups of 16 or 8) is masked too, and a 32-hex or
+    /// 40-hex name (a dashless UUID, a SHA) is hidden on the safe side. An ordinary
+    /// setting name is not.
+    #[test]
+    fn a_key_name_written_in_short_groups_is_not_printed() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let groups = |sep: &str, n: usize| {
+            hex.as_bytes()
+                .chunks(n)
+                .map(|c| std::str::from_utf8(c).unwrap())
+                .collect::<Vec<_>>()
+                .join(sep)
+        };
+        let names = [
+            groups(" ", 16),
+            groups("-", 16),
+            groups(":", 8),
+            groups("_", 4),
+            format!("key {}", groups(" ", 16)),
+            "0123456789abcdef0123456789abcdef".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+            // Not a canonical UUID: two of them side by side, or one plus more.
+            "01234567-89ab-cdef-0123-456789abcdef 01234567-89ab-cdef-0123-456789abcdef".to_string(),
+            "01234567-89ab-cdef-0123-456789abcdef0123".to_string(),
+            "key_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef_\
+             01234567-89ab-cdef-0123-456789abcdef"
+                .to_string(),
+        ];
+        for name in &names {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"\"\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            assert!(!notice.contains("0123"), "{name}: {notice}");
+            assert!(!notice.contains("89ab"), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+        }
+        for plain in ["theme", "default_agent_timeout_seconds", "acbd-fade-cafe"] {
+            assert!(!secret_name(plain), "{plain}");
+        }
+    }
+
+    /// KT-1528 — a canonical dashed UUID (8-4-4-4-12), alone or after a
+    /// `<prefix>_`, is an identifier, not a secret: it is shown, and not a
+    /// credential on save. A prefix that is itself a token is still masked.
+    #[test]
+    fn a_canonical_uuid_key_name_is_shown() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for name in [
+            uuid.to_string(),
+            uuid.to_uppercase(),
+            format!("proj_{uuid}"),
+            format!("agent_profile_{uuid}"),
+        ] {
+            assert!(!secret_name(&name), "{name}");
+            assert!(!secret_name(&name), "{name}");
+            assert_eq!(shown_key(&name, 0), name);
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"\"\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            assert!(notice.contains(&name), "{name}: {notice}");
+        }
+        for name in [format!("{hex}_{uuid}"), format!("{uuid}.{uuid}")] {
+            assert!(secret_name(&name), "{name}");
+            assert!(!shown_key(&name, 0).contains("550e"), "{name}");
+        }
+    }
+
+    /// KT-1528 — the UUID exemption is for a name that is exactly one canonical
+    /// UUID or `<label>_<uuid>`: hex before the UUID (another UUID, 16 or 15 digits)
+    /// adds up to a key, so those names take the squeeze and are masked, shown
+    /// nowhere and a credential on save.
+    #[test]
+    fn a_uuid_after_hex_is_not_an_identifier() {
+        let uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        for name in [
+            format!("{uuid}_{uuid}"),
+            format!("0123456789abcdef_{uuid}"),
+            format!("0123456789abcdef-0123456789abcde_{uuid}"),
+            format!("a1b2c3d4_{uuid}"),
+        ] {
+            assert!(secret_name(&name), "{name}");
+            assert!(credential_key(&name), "{name}");
+            let text = format!("[server]\nport = 3140\n\"{name}\" = 1\n");
+            let reading = read(&table(&text)).expect("reads");
+            assert!(reading.credential_left, "{name}");
+            let notice = reading.notice().expect("something is unknown");
+            assert!(!notice.contains("0123"), "{name}: {notice}");
+            assert!(!notice.contains("89ab"), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+        }
+        // A label with no hex run of 8 is still an identifier's prefix.
+        for name in [
+            format!("proj_{uuid}"),
+            format!("dead_{uuid}"),
+            uuid.to_string(),
+        ] {
+            assert!(!secret_name(&name), "{name}");
+        }
+    }
+
+    /// KT-1528 — a vendor token or authorization header that follows a label in a
+    /// key name (`_` is a word character, so `\b` does not see it) is masked and a
+    /// credential on save; ordinary setting names are not.
+    #[test]
+    fn a_token_after_a_label_in_a_key_name_is_not_printed() {
+        let names = [
+            "old_sk-clear-abcdefghijklmnopqrstuvwxyz0123456789",
+            "my_AKIAIOSFODNN7EXAMPLE",
+            "bot_xoxb-123456789012-123456789012",
+            "hdr: bearer my-secret-token",
+            "x-Basic dXNlcjpwYXNz",
+        ];
+        for name in names {
+            assert!(secret_name(name), "{name}");
+            assert!(credential_key(name), "{name}");
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"v\"\n");
+            let reading = read(&table(&text)).expect("reads");
+            assert!(reading.credential_left, "{name}");
+            let notice = reading.notice().expect("something is unknown");
+            for secret in [
+                "sk-clear",
+                "AKIAIOSFODNN7",
+                "xoxb-1234",
+                "my-secret-token",
+                "dXNlcjpwYXNz",
+            ] {
+                assert!(!notice.contains(secret), "{name}: {notice}");
+            }
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+        }
+        for plain in [
+            "port",
+            "max_tokens",
+            "model_id",
+            "skip_tls",
+            "task_basic_info",
+            "bearer_policy",
+            "old_basic_auth_mode",
+            "sk_rate",
+        ] {
+            assert!(!secret_name(plain), "{plain}");
+            assert_eq!(shown_key(plain, 0), plain);
+        }
+    }
+
+    /// KT-1528 — an authorization header value used as a key name is masked in
+    /// a notice, whatever its case, like the value `secret_string` knows, once a
+    /// token of 12 characters or more follows it. `Bearer abc` is words.
+    #[test]
+    fn an_authorization_header_used_as_a_key_name_is_not_printed() {
+        for name in ["bearer my-secret-token", "BASIC dXNlcjpwYXNz"] {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"v\"\n");
+            let notice = read(&table(&text))
+                .expect("reads")
+                .notice()
+                .expect("something is unknown");
+            let secret = name.split(' ').nth(1).unwrap();
+            assert!(!notice.contains(secret), "{name}: {notice}");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+        }
+        for name in ["Bearer abc", "bearer token", "basic auth"] {
+            assert!(!secret_name(name), "{name}");
+        }
+    }
+
+    /// KT-1528 round 16 — the whole key-name rule over every name of the review
+    /// (masked and shown) and the inputs of rounds 12-15.
+    #[test]
+    fn the_key_name_rule_over_every_reviewed_name() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid2 = "01234567-89ab-cdef-0123-456789abcdef";
+        let aws = "AKIAIOSFODNN7EXAMPLE";
+        let masked: Vec<String> = vec![
+            // (a) over-long
+            "x".repeat(257),
+            "port_".repeat(60),
+            // (b) hex squeeze
+            hex.to_string(),
+            hex.to_uppercase(),
+            format!("{hex}.old"),
+            format!("encryption_secret: {hex}"),
+            format!("key {hex}"),
+            format!("{}:{}", &hex[..32], &hex[32..]),
+            hex.as_bytes()
+                .chunks(16)
+                .map(|c| std::str::from_utf8(c).unwrap())
+                .collect::<Vec<_>>()
+                .join(" "),
+            "0123_4567_89ab_cdef_0123_4567_89ab_cdef_0123_4567_89ab_cdef_0123_4567_89ab_cdef"
+                .to_string(),
+            format!("{uuid2}_{uuid2}"),
+            format!("0123456789abcdef_{uuid2}"),
+            format!("0123456-789abcd-0123456-789abcd-0123456-789abcd-0123456_{uuid2}"),
+            format!("a1b2c3d4_{uuid}"),
+            // round 17, (b) is a TOTAL of the digit-bearing hex runs, not one run
+            "0x0123456789abcdef_0x0123456789abcdef_0x0123456789abcdef_0x0123456789abcdef"
+                .to_string(),
+            "0x0123456789abcdef_0x0123456789abcdef".to_string(),
+            "k1_0123456789abcdef_k2_0123456789abcdef".to_string(),
+            "0123456789abcdef0123456789abcdef".to_string(),
+            // (c) vendor shapes, anywhere
+            "old_sk-clear-abcdefghijklmnopqrstuvwxyz0123456789".to_string(),
+            "oldsk-clear-abcdefghijklmnopqrstuvwxyz0123456789".to_string(),
+            format!("{aws}_old"),
+            format!("my_{aws}"),
+            format!("my{aws}"),
+            format!("my_{aws}_old"),
+            format!("{aws}_{uuid}"),
+            // round 17: the UUID exemption waives (b) ONLY, a token before it is
+            // judged on the whole name
+            format!("sk-{uuid}"),
+            format!("old_sk-{uuid}"),
+            format!("xoxb-{uuid}"),
+            format!("glpat-{uuid}"),
+            format!("p8e-{uuid}"),
+            format!("bearer -{uuid}"),
+            format!("bearer:_{uuid}"),
+            // round 17: the name shapes keep the vendors' own minimum lengths
+            "old_p8e-12345678".to_string(),
+            "old_glpat-abcdefghijklmnop".to_string(),
+            "myglpat-abcdefghijklmnop".to_string(),
+            // round 22: a 32-byte base64 key with three digits or fewer
+            "J3GBqgtdTdHqtRpygAMtiXimewPRHDDsoe6ngumYD8k=".to_string(),
+            "u/h/A/tywu8mlpkmiHsTIzcNEzXPhq0sEGLcPXXFnKU=".to_string(),
+            "qbvEjRWeJqXvEjRWeJqYvEjRWeJqZvEjRWeJqWvEjR=".to_string(),
+            // round 21: a key with few digits behind a UUID is judged with it
+            "qbvEjRWeJqXvEjRWeJqYvEjRWeJqZvEjRWeJqWvEjR=_550e8400-e29b-41d4-a716-446655440000"
+                .to_string(),
+            "AbCdEfGhIjKlMnOpQrStUvWxYz01234_550e8400-e29b-41d4-a716-446655440000".to_string(),
+            "q83vEjRWeJq83vEjRWeJq83vE_550e8400-e29b-41d4-a716-446655440000".to_string(),
+            "myAKIAIOSFODNNXEXAMPLE".to_string(),
+            "myhf_aBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgH".to_string(),
+            "bot_xoxb-123456789012-123456789012".to_string(),
+            "botxoxb-123456789012-123456789012".to_string(),
+            "xoxb-123456789012-123456789012_old".to_string(),
+            "sk_live_abcdefghij1234567890_old".to_string(),
+            "kbt_abcdefghijklmnop_old".to_string(),
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789_old".to_string(),
+            // (d) authorization, any white space
+            "hdr: bearer my-secret-token".to_string(),
+            "hdr: bearer\tmy-secret-token".to_string(),
+            "hdr: bearer\u{a0}my-secret-token".to_string(),
+            "hdrbearer my-secret-token".to_string(),
+            "BASIC dXNlcjpwYXNz".to_string(),
+            "bearer=my-secret-token".to_string(),
+            "Authorization: Basic dXNlcjpwYXNzd29yZA==".to_string(),
+            // (e) instance key pieces, base64
+            "q83vEjRWeJq83vEjRWeJq83vEjRWeJq83vEjRWeJ+/8=".to_string(),
+            "0123456789abcdef01234567".to_string(),
+        ];
+        for name in &masked {
+            assert!(secret_name(name), "{name}");
+            assert!(credential_key(name), "{name}");
+            assert!(shown_key(name, 1).starts_with("<key #"), "{name}");
+        }
+        let shown = [
+            "port",
+            "max_tokens",
+            "model_id",
+            "skip_tls",
+            "task_basic_info",
+            "bearer_policy",
+            "old_basic_auth_mode",
+            "sk_rate",
+            "auth_basic_realm",
+            "basic_auth_enabled",
+            "bearer_token_ttl",
+            "theme",
+            "default_agent_timeout_seconds",
+            "acbd-fade-cafe",
+            "future_flag",
+            "a_rather_long_setting_name_made_of_words_only",
+            "deadbeef",
+            uuid,
+            "proj_550e8400-e29b-41d4-a716-446655440000",
+            "agent_profile_550e8400-e29b-41d4-a716-446655440000",
+            "proj-550e8400-e29b-41d4-a716-446655440000",
+            "PROJ_550E8400-E29B-41D4-A716-446655440000",
+            // round 19: a capital label beside a lower-case UUID, and a vendor
+            // prefix inside an ordinary word
+            "PROJ_550e8400-e29b-41d4-a716-446655440000",
+            "TEAM-550e8400-e29b-41d4-a716-446655440000",
+            "AGENT_550e8400-e29b-41d4-a716-446655440000",
+            "MCP_SERVER_550e8400-e29b-41d4-a716-446655440000",
+            "disk-cache-max-size-bytes",
+            "task-runner-max-concurrency",
+            "mask-sensitive-headers-in-logs",
+            "risk-assessment-threshold-ms",
+            "kiosk-mode-refresh-interval-seconds",
+            "ask-before-running-shell-commands",
+            // round 17: a label of plain `a`-`f` words holds no digit-bearing run
+            "default_agent_profile_550e8400-e29b-41d4-a716-446655440000",
+            "deadbee_cafebab_01234567-89ab-cdef-0123-456789abcdef",
+            // round 17: long setting names with a digit or two and capitals are
+            // not base64 blobs (4 digits, 4 capitals, 4 lower-case letters needed)
+            "enable_OAuth2_authorization_code_flow",
+            "default_ClaudeCode_http2_timeout_secs",
+            "enableOAuth2AuthorizationCodeFlow",
+        ];
+        for name in shown {
+            assert!(!secret_name(name), "{name}");
+            assert!(!credential_key(name), "{name}");
+            assert_eq!(shown_key(name, 1), name);
+        }
+        // Words, not a header (`bearer token` is a credential NAME by the existing
+        // name policy, `credential_name`, a different question).
+        for name in ["bearer token", "basic auth"] {
+            assert!(!secret_name(name), "{name}");
+        }
+        // The two outcomes reach the notice.
+        for name in &masked {
+            let text = format!("[server]\nport = 3140\n\"{name}\" = 1\n");
+            let reading = read(&table(&text)).expect("reads");
+            assert!(reading.credential_left, "{name}");
+            let notice = reading.notice().expect("something is unknown");
+            assert!(notice.contains("server.<key #2>"), "{name}: {notice}");
+            for secret in [
+                "0123456789ab",
+                "AKIAIOSFODNN7",
+                "my-secret-token",
+                "xoxb-1234",
+                "550e8400",
+                "p8e-1234",
+                "glpat-abcdef",
+            ] {
+                assert!(!notice.contains(secret), "{name}: {notice}");
+            }
+        }
+    }
+
+    /// KT-1528 round 16 — the matcher is linear: a huge name is masked by its
+    /// length alone, and the longest name that is still judged stays fast, for
+    /// shapes that were quadratic (`port_` x N, `bearer=` x N).
+    #[test]
+    fn the_key_name_rule_is_linear() {
+        let limit = if cfg!(debug_assertions) { 100 } else { 10 };
+        for unit in ["port_", "bearer=", "a-", "sk-", "0", "A1b", "\u{a0}"] {
+            let huge = unit.repeat(64 * 1024 / unit.len());
+            let started = std::time::Instant::now();
+            assert!(secret_name(&huge), "{unit}");
+            assert!(
+                started.elapsed().as_millis() < limit,
+                "{unit} took {:?}",
+                started.elapsed()
+            );
+            // Just under the cap: judged by the clauses, still bounded.
+            let near: String = unit
+                .repeat(NAME_MAX_CHARS)
+                .chars()
+                .take(NAME_MAX_CHARS)
+                .collect();
+            let started = std::time::Instant::now();
+            let _ = secret_name(&near);
+            assert!(
+                started.elapsed().as_millis() < limit,
+                "{unit} (near the cap) took {:?}",
+                started.elapsed()
+            );
+        }
+        assert!(secret_name(&"x".repeat(NAME_MAX_CHARS + 1)));
+        assert!(!secret_name(&"x".repeat(NAME_MAX_CHARS)));
+    }
+
+    /// KT-1528 — a secret used as a key name is a credential on the save path
+    /// too: the entry is flagged, sheltered and never written back to
+    /// config.toml with that name in clear.
+    #[test]
+    fn a_secret_key_name_is_a_credential_on_save() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for name in [
+            "sk-clear-abcdefghijklmnopqrstuvwxyz0123456789".to_string(),
+            "bearer my-secret-token".to_string(),
+            hex.to_string(),
+            format!("{hex}.old"),
+        ] {
+            assert!(credential_key(&name), "{name}");
+            assert!(whole_credential(
+                &["server".into(), name.clone()],
+                &Value::Integer(1)
+            ));
+            let text = format!("[server]\nport = 3140\n\"{name}\" = \"v\"\n");
+            let reading = read(&table(&text)).expect("reads");
+            assert!(reading.credential_left, "{name}");
+            let entry = reading
+                .kept
+                .entries
+                .iter()
+                .find(|e| e.path().contains(&name))
+                .unwrap_or_else(|| panic!("{name}: an entry is kept"));
+            // Nothing of it is written to config.toml once the store holds the
+            // credentials, and the name is scrubbed from a table that holds it.
+            assert!(written(entry, true).is_none(), "{name}");
+            let holder: Value = Value::Table(table(&text));
+            let scrubbed = scrub(&holder);
+            assert!(
+                !toml::to_string(&scrubbed).unwrap().contains(&name),
+                "{name}"
+            );
+        }
+        // A setting's name, however long, is not one.
+        for name in [
+            "future_flag",
+            "a_rather_long_setting_name_made_of_words_only",
+        ] {
+            assert!(!credential_key(name), "{name}");
+        }
+    }
 
     /// A header that lost its closing bracket keeps its lines: they belong to
     /// the table it names.
