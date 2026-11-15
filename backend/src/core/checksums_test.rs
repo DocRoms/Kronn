@@ -1090,3 +1090,27 @@ fn a_huge_sparse_file_never_stalls_the_fingerprint() {
         .expect("the fingerprint read a 1 TiB sparse file");
     assert!(fingerprint.is_some());
 }
+
+/// KT-1595 round 15: a file past the read cap is fingerprinted by its content
+/// (size + hash of its first bytes), never by its time: the same bytes written
+/// again, or another clone, give the same fingerprint.
+#[test]
+fn a_large_file_keeps_its_fingerprint_when_only_its_time_changes() {
+    use crate::core::cmd::hostile_git::{git, repo};
+    let dir = repo();
+    let big = dir.path().join("big.bin");
+    fs::File::create(&big)
+        .unwrap()
+        .set_len(FINGERPRINT_CONTENT_MAX + 1)
+        .unwrap();
+    git(dir.path(), &["add", "big.bin"]);
+    git(dir.path(), &["commit", "-q", "-m", "big"]);
+    let before = git_source_tree_fingerprint(dir.path()).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&big)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(git_source_tree_fingerprint(dir.path()).unwrap(), before);
+}

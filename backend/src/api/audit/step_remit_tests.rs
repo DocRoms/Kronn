@@ -1179,6 +1179,30 @@ fn an_intent_to_add_never_stages_what_the_agent_put_at_its_path() {
     );
 }
 
+/// KT-1595 round 15: a user's intent-to-add on a SYMLINK comes back as it was
+/// when the agent staged it during the step.
+#[cfg(unix)]
+#[test]
+fn a_users_intent_to_add_symlink_comes_back() {
+    let dir = repo();
+    let rel = "docs/tech-debt/link.md";
+    std::os::unix::fs::symlink("TD-1.md", dir.path().join(rel)).unwrap();
+    git(dir.path(), &["add", "-N", "--", rel]);
+    let before = git(dir.path(), &["ls-files", "-s", "--", rel]);
+    let remit = StepRemit::capture_blocking(dir.path(), &root(".ai")).unwrap();
+    git(dir.path(), &["add", "--", rel]);
+    let report = remit.settle_blocking();
+    assert_eq!(
+        git(dir.path(), &["ls-files", "-s", "--", rel]),
+        before,
+        "{report:?}"
+    );
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("not a file")),
+        "{report:?}"
+    );
+}
+
 /// KT-1595 round 13: a file too large to keep still has its index compared: a
 /// flag the agent sets on it is reported and put back.
 #[test]

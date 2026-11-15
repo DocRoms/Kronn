@@ -574,9 +574,9 @@ const AGENT_GIT_MAX_OFF: usize = 1024;
 /// How long listing an agent-touched checkout's configuration may take.
 pub const AGENT_GIT_CONFIG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A checkout where the configuration listing or an attribute / ignore query
-/// ran out of time (a FIFO) gets no git call for this long: a blocking checkout
-/// costs one wait per pass, not one per call.
+/// A checkout where a git call other than `status` ran out of time (a FIFO
+/// configuration, attributes or ignore file) gets no git call for this long: a
+/// blocking checkout costs one wait per pass, not one per call.
 const AGENT_GIT_CONFIG_RETRY: std::time::Duration = std::time::Duration::from_secs(600);
 
 static CONFIG_TIMED_OUT: std::sync::LazyLock<
@@ -620,19 +620,16 @@ fn agent_git_output_within<S: AsRef<OsStr>>(
     cmd.arg("-C").arg(repo).args(args);
     let started = std::time::Instant::now();
     let output = run_bounded(&mut cmd, input, timeout);
-    // Only a query that reads attribute or ignore files (a FIFO blocks it) marks
-    // the checkout: a legitimately slow `status` on a huge repository must not
-    // turn git off for the callers that read "unknown" as "no".
-    let quick_query = args
+    // Every call that ran out of time marks the checkout (a FIFO attributes or
+    // ignore file blocks diff, check-ignore, ls-files…), except `status`, which
+    // is legitimately slow on a huge repository: it must not turn git off for
+    // the callers that read "unknown" as "no".
+    let may_be_slow = args
         .iter()
         .map(AsRef::as_ref)
         .find(|arg| !arg.to_string_lossy().starts_with('-'))
-        .is_some_and(|sub| {
-            ["check-ignore", "check-attr", "ls-files"]
-                .iter()
-                .any(|q| sub == *q)
-        });
-    if output.is_none() && quick_query && started.elapsed() >= timeout {
+        .is_some_and(|sub| sub == "status");
+    if output.is_none() && !may_be_slow && started.elapsed() >= timeout {
         remember_git_timeout(repo);
     }
     output
@@ -947,6 +944,33 @@ mod tests {
         assert!(
             again.elapsed() < Duration::from_secs(5),
             "the second call waited again: {:?}",
+            again.elapsed()
+        );
+    }
+
+    /// KT-1595 round 15: a `diff` blocked by an attributes file that is a FIFO
+    /// is waited for once; the next call on that checkout is refused at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_diff_blocked_by_a_fifo_is_not_waited_for_again() {
+        use hostile_git::{git, repo};
+        use std::os::unix::ffi::OsStrExt;
+        use std::time::{Duration, Instant};
+        let dir = repo();
+        std::fs::write(dir.path().join("a.txt"), "b\n").unwrap();
+        git(dir.path(), &["commit", "-q", "-am", "b"]);
+        let attributes = dir.path().join(".gitattributes");
+        let path = std::ffi::CString::new(attributes.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let diff = ["diff", "--unified=0", "HEAD~", "HEAD", "--", "a.txt"];
+        let wait = Duration::from_millis(300);
+        assert!(agent_git_output_within(dir.path(), &diff, &[], wait).is_none());
+        let again = Instant::now();
+        assert!(agent_git_output(dir.path(), &diff, &[]).is_none());
+        assert!(
+            again.elapsed() < Duration::from_secs(5),
+            "the second diff waited again: {:?}",
             again.elapsed()
         );
     }

@@ -49,11 +49,12 @@ pub fn compute_sha256(path: &Path) -> Option<String> {
     Some(sha256_of_bytes(&data))
 }
 
-/// The SHA-256 of a regular file, read in chunks (memory stays bounded,
-/// whatever the file's size). `None` when it cannot be opened or read.
-fn sha256_of_file(path: &Path) -> Option<String> {
+/// The SHA-256 of the first `limit` bytes of a regular file, read in chunks
+/// (memory stays bounded, whatever the file's size). `None` when it cannot be
+/// opened or read.
+fn sha256_of_file(path: &Path, limit: u64) -> Option<String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).ok()?;
+    let mut file = std::fs::File::open(path).ok()?.take(limit);
     let mut hasher = Sha256::new();
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
@@ -73,9 +74,9 @@ fn sha256_of_file(path: &Path) -> Option<String> {
     )
 }
 
-/// The largest file the fingerprint reads. A larger one (a sparse file an agent
-/// left, a media file) is recorded by its size and modification time: reading
-/// it could take hours.
+/// The largest file the fingerprint reads whole. A larger one (a sparse file an
+/// agent left, a media file) is recorded by its size and the hash of its first
+/// bytes: reading it all could take hours, and its time differs per clone.
 const FINGERPRINT_CONTENT_MAX: u64 = 64 * 1024 * 1024;
 
 /// The largest root agent context file read as text.
@@ -413,14 +414,12 @@ fn git_source_tree_fingerprint_with(
             // opened (a FIFO blocks the open, a device never ends).
             "special".to_string()
         } else if meta.len() > FINGERPRINT_CONTENT_MAX {
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |since| since.as_nanos());
-            format!("large {} {modified}", meta.len())
+            let Some(head_hash) = sha256_of_file(&full, FINGERPRINT_CONTENT_MAX) else {
+                continue;
+            };
+            format!("large {} {head_hash}", meta.len())
         } else {
-            let Some(content_hash) = sha256_of_file(&full) else {
+            let Some(content_hash) = sha256_of_file(&full, u64::MAX) else {
                 continue;
             };
             #[cfg(unix)]

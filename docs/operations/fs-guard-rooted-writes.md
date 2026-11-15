@@ -141,11 +141,11 @@ by path, found by the round-3 review and the Argon addendum):
   pinned to git's defaults; every call runs under `cmd::run_bounded` (120 s, the
   whole process group killed on a timeout), so an include or a config file that
   is a FIFO fails the call instead of hanging. The configuration listing gets
-  30 s, and a checkout where the listing or an attribute / ignore query
-  (`check-ignore`, `check-attr`, `ls-files`: an ignore file that is a FIFO blocks
-  them) ran out of time gets no git call for ten minutes: a blocking checkout
-  costs one wait per pass, not one per call, while a legitimately slow `status`
-  on a huge repository never turns git off (rounds 12-14). Submodules are not
+  30 s, and a checkout where a git call other than `status` ran out of time
+  (a configuration, attributes or ignore file that is a FIFO blocks `diff`,
+  `check-ignore`, `ls-files`…) gets no git call for ten minutes: a blocking
+  checkout costs one wait per pass, not one per call, while a legitimately slow
+  `status` on a huge repository never turns git off (rounds 12-15). Submodules are not
   looked into by default (`diff.ignoreSubmodules=all`; their own configuration is
   not in the listing), and the citation line map passes
   `--ignore-submodules=all`, which `.gitmodules` cannot override (rounds 13-14). A configuration that cannot be read in time, or that declares
@@ -165,11 +165,13 @@ by path, found by the round-3 review and the Argon addendum):
   in every case; a refused entry has its index compared and put back too, and
   its fingerprint holds the change time, inode and device, so a same-size edit
   with its time put back is still seen (round 13). An intent-to-add is put back
-  only on a regular file: a folder or a link the agent left at that path is never
-  staged (round 14). The `checksums` source-tree
+  only on the kind of entry the user had (a file, or a link for a `120000`
+  entry): a folder or a link the agent left at that path is never staged
+  (rounds 14-15). The `checksums` source-tree
   fingerprint hashes regular files only, in chunks, records a file past 64 MiB
-  by its size and modification time without reading it (a sparse file of a
-  petabyte would take days), and reads a root AGENTS.md / CLAUDE.md only when it
+  by its size and the hash of its first 64 MiB (a sparse file of a petabyte
+  would take days to read whole; the content, not the time, keeps clones equal),
+  and reads a root AGENTS.md / CLAUDE.md only when it
   is (or links to) a regular file of at most 4 MiB: a FIFO, a device or a huge
   file left by the agent never blocks it (rounds 13-14). The
   settle reports a git failure, a capture that could not be read (an unreadable

@@ -1158,11 +1158,18 @@ impl StepRemit {
         )
         .ok_or_else(failed)?;
         if before.intent_to_add {
-            // `add -N` stages what is at the path: never a folder or a link the
-            // agent left there.
-            let regular = std::fs::symlink_metadata(self.project.join(rel))
-                .is_ok_and(|meta| meta.file_type().is_file());
-            if !regular {
+            // `add -N` stages what is at the path: only the kind of entry the
+            // user had (a file, or a link for a `120000` entry), never a folder
+            // or a link the agent left there.
+            let was_link = before.lines.iter().any(|line| line.starts_with("120000 "));
+            let same_kind = std::fs::symlink_metadata(self.project.join(rel)).is_ok_and(|meta| {
+                if was_link {
+                    meta.file_type().is_symlink()
+                } else {
+                    meta.file_type().is_file()
+                }
+            });
+            if !same_kind {
                 return Err(format!(
                     "`{rel}` was an intent-to-add, but the agent replaced it with something that is not a file; it was not staged again (`git add -N -- {rel}` once the file is back)"
                 ));
