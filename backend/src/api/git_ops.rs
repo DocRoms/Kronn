@@ -277,7 +277,10 @@ fn run_git_status_impl(
     let is_default_branch = !default_branch.is_empty() && branch == default_branch;
 
     // Parse porcelain v1 status
-    let status_output = run(&["status", "--porcelain=v1", "-u"])?;
+    let status_output = run(&crate::core::lane_git::with_ignore_submodules(
+        repo_path,
+        &["status", "--porcelain=v1", "-u"],
+    ))?;
     let files: Vec<GitFileStatus> = status_output
         .lines()
         .filter(|l| l.len() >= 3)
@@ -587,7 +590,13 @@ pub fn run_git_switch_branch(
         .find(|candidate| candidate.name == branch)
         .ok_or_else(|| "Branche introuvable. Actualisez la liste puis réessayez.".to_string())?;
 
-    let dirty = git_output(repo_path, &["status", "--porcelain=v1", "-uall"])?;
+    let dirty = git_output(
+        repo_path,
+        &crate::core::lane_git::with_ignore_submodules(
+            repo_path,
+            &["status", "--porcelain=v1", "-uall"],
+        ),
+    )?;
     if !dirty.is_empty() {
         return Err(
             "Le changement de branche est bloqué : le projet contient des modifications locales. Committez ou mettez-les de côté explicitement, puis réessayez."
@@ -757,9 +766,15 @@ pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse
     };
 
     // Unstaged diff
-    let unstaged = run_diff(&["diff", "--", file_path]);
+    let unstaged = run_diff(&crate::core::lane_git::with_ignore_submodules(
+        repo_path,
+        &["diff", "--", file_path],
+    ));
     // Staged diff
-    let staged = run_diff(&["diff", "--cached", "--", file_path]);
+    let staged = run_diff(&crate::core::lane_git::with_ignore_submodules(
+        repo_path,
+        &["diff", "--cached", "--", file_path],
+    ));
 
     // For untracked or newly added files, git diff returns nothing.
     let untracked_diff = if unstaged.is_empty() && staged.is_empty() {
@@ -1120,6 +1135,12 @@ fn stage_explicit_paths(
         if file_abs.exists() {
             if worker {
                 refuse_new_embedded_repository(repo_path, clean_file, &file_abs)?;
+                // A submodule is staged by its sha: `git add` would compare its
+                // working tree, which starts a `git status` inside it.
+                if stage_gitlink_by_sha(repo_path, clean_file, &file_abs)? {
+                    added += 1;
+                    continue;
+                }
             }
             let add_output = git_in(repo_path, worker)?
                 .args(["add", "--", clean_file])
@@ -1144,6 +1165,63 @@ fn stage_explicit_paths(
         }
     }
     Ok(added)
+}
+
+/// When `clean_file` is itself a gitlink of the worktree's index, stage the
+/// submodule's current `HEAD` with `update-index --cacheinfo` and return `true`
+/// (`git add` would run `git status` inside the submodule, where a program its
+/// configuration names would run). A gitlink whose submodule is not materialised has
+/// nothing to stage: `true` too. Any other path returns `false`.
+fn stage_gitlink_by_sha(
+    repo_path: &Path,
+    clean_file: &str,
+    file_abs: &Path,
+) -> Result<bool, String> {
+    let wanted = clean_file.trim_end_matches('/');
+    let listed = git_in(repo_path, true)?
+        .args(["ls-files", "--stage", "-z", "--", wanted])
+        .output()
+        .map_err(|e| format!("Failed to run git ls-files: {e}"))?;
+    let is_gitlink = listed.stdout.split(|byte| *byte == 0).any(|entry| {
+        let entry = String::from_utf8_lossy(entry);
+        entry
+            .split_once('\t')
+            .is_some_and(|(meta, path)| meta.starts_with("160000 ") && path == wanted)
+    });
+    if !is_gitlink {
+        return Ok(false);
+    }
+    if std::fs::symlink_metadata(file_abs.join(".git")).is_err() {
+        return Ok(true);
+    }
+    // The submodule's own lane: vetted, pinned, and refused when it is not one.
+    let head = crate::core::lane_git::git(file_abs)?
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()
+        .map_err(|e| format!("Failed to read the submodule HEAD: {e}"))?;
+    let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if !head.status.success() || sha.len() < 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "cannot read the HEAD of the submodule `{wanted}`: {}",
+            String::from_utf8_lossy(&head.stderr).trim()
+        ));
+    }
+    let update = git_in(repo_path, true)?
+        .args([
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{sha},{wanted}"),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run git update-index: {e}"))?;
+    if update.status.success() {
+        Ok(true)
+    } else {
+        Err(format!(
+            "git update-index failed for `{wanted}`: {}",
+            String::from_utf8_lossy(&update.stderr).trim()
+        ))
+    }
 }
 
 /// The first nested git repository at or under `path` (a `.git` entry), looking a
@@ -1416,6 +1494,9 @@ fn git_path_list(repo_path: &Path, args: &[&str]) -> Result<Vec<String>, String>
     if let Some((subcommand, rest)) = args.split_first() {
         git.arg(subcommand)
             .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(crate::core::lane_git::ignore_submodules(
+                repo_path, subcommand,
+            ))
             .args(rest);
     }
     let output = git

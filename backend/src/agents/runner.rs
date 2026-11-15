@@ -4876,6 +4876,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if task_worker && *config.agent_type == AgentType::ClaudeCode {
         probe_claude_task_worker_auth(binary, npx_pkg, &work_dir).await?;
     }
+    if task_worker && *config.agent_type == AgentType::CopilotCli {
+        probe_copilot_task_worker_auth(binary, npx_pkg, &work_dir).await?;
+    }
 
     // Invalidate before spawning, not when an init event happens to arrive.
     // Failure must stop here: retaining an old frontier after a new provider
@@ -13679,6 +13682,34 @@ fn parse_copilot_task_worker_preflight(
     }
 }
 
+fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
+    let failure_kind = status
+        .reason_code()
+        .expect("unusable Copilot preflight has a stable reason code");
+    let detail = match status {
+        CopilotTaskWorkerPreflight::AuthInvalid => {
+            "the bounded `copilot -p /user show` preflight rejected the effective authentication"
+        }
+        CopilotTaskWorkerPreflight::Malformed => {
+            "the bounded `copilot -p /user show` preflight returned no account response"
+        }
+        CopilotTaskWorkerPreflight::SpawnFailed => {
+            "the bounded `copilot -p /user show` preflight could not be invoked"
+        }
+        CopilotTaskWorkerPreflight::TimedOut => {
+            "the bounded `copilot -p /user show` preflight did not finish before its deadline"
+        }
+        CopilotTaskWorkerPreflight::FullAccessOff => {
+            "Copilot runs only with full access (Config › Agents › GitHub Copilot › Full access)"
+        }
+        CopilotTaskWorkerPreflight::Usable => unreachable!("usable Copilot preflight has no error"),
+    };
+    format!(
+        "Copilot task worker cannot start: phase=preflight; failure_kind={failure_kind}; {detail}. Run `copilot login` or use \
+         `task_exec_reassign` to move this execution to another available worker."
+    )
+}
+
 const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
 
 async fn run_copilot_task_worker_preflight(
@@ -13822,6 +13853,18 @@ pub(crate) async fn probe_copilot_task_worker_preflight(
         }
     };
     parse_copilot_task_worker_preflight(&output.stdout, output.status.success())
+}
+
+async fn probe_copilot_task_worker_auth(
+    binary: &str,
+    npx_package: Option<&str>,
+    work_dir: &Path,
+) -> Result<(), String> {
+    let status = probe_copilot_task_worker_preflight(binary, npx_package, work_dir).await;
+    match status {
+        CopilotTaskWorkerPreflight::Usable => Ok(()),
+        other => Err(copilot_task_worker_preflight_error(other)),
+    }
 }
 
 fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {

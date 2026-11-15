@@ -1093,4 +1093,319 @@ mod unix {
         let error = LaneGit::resolve(&sub).unwrap_err();
         assert!(error.starts_with(NESTED_PREFIX), "{error}");
     }
+
+    // ── Round 4 review: nested repositories fail closed, level by level ──────
+
+    fn append_bytes(path: &Path, bytes: &[u8]) {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(bytes).unwrap();
+    }
+
+    /// What the worker plants in the submodule `lib` so that a Kronn `git` that
+    /// looks inside it runs a program: a clean filter, the attribute naming it,
+    /// and a changed tracked file.
+    fn plant_submodule_filter(world: &World, config: &Path, before: &[u8]) {
+        let mut bytes = before.to_vec();
+        bytes.extend_from_slice(
+            format!(
+                "[filter \"evil\"]\n\tclean = {}; cat\n\trequired = false\n",
+                world.touch("SUBMODULE_FILTER")
+            )
+            .as_bytes(),
+        );
+        append_bytes(config, &bytes);
+        fs::write(world.worktree.join("lib/.gitattributes"), "* filter=evil\n").unwrap();
+        fs::write(world.worktree.join("lib/code.txt"), "changed").unwrap();
+    }
+
+    /// Every path Kronn takes through a worker's worktree: stage + commit, the
+    /// dirty-files check and the Git panel. None may run what the submodule names.
+    fn every_kronn_path_leaves_the_worker_nothing_to_run(world: &World) {
+        let _ = run_git_commit_for_worker(
+            &world.worktree,
+            &["lib".to_string()],
+            "bump lib",
+            false,
+            false,
+            None,
+            WorkerCommitHooks::Off,
+        );
+        let _ = crate::core::worktree::worktree_dirty_files(&world.worktree);
+        let _ = crate::api::git_ops::run_git_status_page_without_pr_lookup(&world.worktree, 0, 5);
+        for args in [vec!["add", "-A"], vec!["diff-index", "HEAD"]] {
+            let _ = crate::core::lane_git::git(&world.worktree)
+                .map(|mut command| command.args(&args).output());
+        }
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn a_non_utf8_submodule_config_is_refused_and_runs_nothing() {
+        let world = world_with_submodule();
+        assert!(LaneGit::resolve(&world.worktree).is_ok());
+        // One byte that is not UTF-8 in a comment: git still parses the file.
+        plant_submodule_filter(&world, &world.worktree.join("lib/.git/config"), b"; \xff\n");
+        let error = LaneGit::resolve(&world.worktree).expect_err("not trusted");
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        every_kronn_path_leaves_the_worker_nothing_to_run(&world);
+    }
+
+    #[test]
+    fn a_submodule_commondir_is_refused_and_runs_nothing() {
+        let world = world_with_submodule();
+        // A copy of the submodule's git directory whose configuration names the
+        // filter; `commondir` makes git read `<commondir>/config`.
+        let evil = world.root().join("evil-common");
+        let status = std::process::Command::new("cp")
+            .args(["-R"])
+            .arg(world.worktree.join("lib/.git"))
+            .arg(&evil)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        plant_submodule_filter(&world, &evil.join("config"), b"");
+        fs::write(
+            world.worktree.join("lib/.git/commondir"),
+            format!("{}\n", evil.display()),
+        )
+        .unwrap();
+        let error = LaneGit::resolve(&world.worktree).expect_err("not trusted");
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        assert!(error.contains("commondir"), "{error}");
+        every_kronn_path_leaves_the_worker_nothing_to_run(&world);
+    }
+
+    #[test]
+    fn a_submodule_config_worktree_file_or_include_is_refused() {
+        let world = world_with_submodule();
+        fs::write(world.worktree.join("lib/.git/config.worktree"), "").unwrap();
+        let error = LaneGit::resolve(&world.worktree).expect_err("not trusted");
+        assert!(error.contains("config.worktree"), "{error}");
+        fs::remove_file(world.worktree.join("lib/.git/config.worktree")).unwrap();
+        append_bytes(
+            &world.worktree.join("lib/.git/config"),
+            b"[include]\n\tpath = ../evil\n",
+        );
+        let error = LaneGit::resolve(&world.worktree).expect_err("not trusted");
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+    }
+
+    #[test]
+    fn a_gitlink_is_staged_by_its_sha_and_git_never_looks_into_the_submodule() {
+        let world = world_with_submodule();
+        // The submodule's HEAD moves: a pointer change is work to keep.
+        let sub = world.worktree.join("lib");
+        git(&sub, &["config", "user.email", "t@t.test"]);
+        git(&sub, &["config", "user.name", "T"]);
+        fs::write(sub.join("more.txt"), "more").unwrap();
+        git(&sub, &["add", "."]);
+        git(&sub, &["commit", "-q", "-m", "more"]);
+        let head = git(&sub, &["rev-parse", "HEAD"]);
+        // A dirty file inside the submodule is not part of the pointer.
+        fs::write(sub.join("code.txt"), "dirty").unwrap();
+        run_git_commit_for_worker(
+            &world.worktree,
+            &["lib".to_string()],
+            "bump lib",
+            false,
+            false,
+            None,
+            WorkerCommitHooks::Off,
+        )
+        .unwrap();
+        let tree = git(&world.worktree, &["ls-tree", "HEAD", "lib"]);
+        assert!(tree.starts_with("160000 commit "), "{tree}");
+        assert!(tree.contains(&head), "{tree} must carry {head}");
+    }
+
+    #[test]
+    fn the_lane_command_never_starts_a_diff_inside_a_submodule() {
+        let world = World::new();
+        let command = crate::core::lane_git::git(&world.worktree).unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.contains(&"diff.submodule=short".to_string()),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn kronn_status_and_diff_carry_ignore_submodules_on_the_command_line_in_a_lane_only() {
+        let world = World::new();
+        for subcommand in ["status", "diff", "diff-index"] {
+            assert_eq!(
+                crate::core::lane_git::ignore_submodules(&world.worktree, subcommand),
+                &["--ignore-submodules=dirty"],
+                "{subcommand}"
+            );
+        }
+        assert!(crate::core::lane_git::ignore_submodules(&world.worktree, "log").is_empty());
+        // The owner's own checkout keeps its own submodule view.
+        assert!(crate::core::lane_git::ignore_submodules(&world.root(), "status").is_empty());
+    }
+
+    #[test]
+    fn a_gitmodules_ignore_none_does_not_make_status_look_into_the_submodule() {
+        let world = world_with_submodule();
+        fs::write(
+            world.worktree.join(".gitmodules"),
+            "[submodule \"lib\"]\n\tpath = lib\n\turl = ./upstream-lib\n\tignore = none\n",
+        )
+        .unwrap();
+        git(&world.worktree, &["add", ".gitmodules"]);
+        git(&world.worktree, &["commit", "-q", "-m", "add lib"]);
+        fs::write(world.worktree.join("lib/code.txt"), "dirty").unwrap();
+        // Control: plain git, with `ignore = none`, reports the submodule modified.
+        let plain = git(&world.worktree, &["status", "--porcelain=v1"]);
+        assert!(plain.contains("M lib"), "plain git saw: {plain:?}");
+        // Kronn's dirty-files check does not.
+        let dirty = crate::core::worktree::worktree_dirty_files(&world.worktree).unwrap();
+        assert!(
+            dirty.iter().all(|file| !file.path.contains("lib")),
+            "status looked inside the submodule: {dirty:?}"
+        );
+    }
+
+    /// `lib/deps/x`: a repository with a gitlink in `lib`'s own index.
+    fn add_second_level_submodule(world: &World) -> String {
+        let lib = world.worktree.join("lib");
+        git(&lib, &["config", "user.email", "t@t.test"]);
+        git(&lib, &["config", "user.name", "T"]);
+        let upstream = world.root().join("upstream-x");
+        git(
+            world.root().as_path(),
+            &["init", "-q", "-b", "main", upstream.to_str().unwrap()],
+        );
+        git(&upstream, &["config", "user.email", "t@t.test"]);
+        git(&upstream, &["config", "user.name", "T"]);
+        fs::write(upstream.join("x.txt"), "x").unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-q", "-m", "x"]);
+        let x_sha = git(&upstream, &["rev-parse", "HEAD"]);
+        fs::create_dir_all(lib.join("deps")).unwrap();
+        git(
+            &lib,
+            &[
+                "clone",
+                "-q",
+                "--no-local",
+                upstream.to_str().unwrap(),
+                "deps/x",
+            ],
+        );
+        git(
+            &lib,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{x_sha},deps/x"),
+            ],
+        );
+        x_sha
+    }
+
+    #[test]
+    fn a_submodule_of_a_submodule_resolves_level_by_level() {
+        let world = world_with_submodule();
+        let x_sha = add_second_level_submodule(&world);
+        let lib = world.worktree.join("lib");
+
+        let lane = LaneGit::resolve(&world.worktree).expect("the worktree");
+        assert!(lane.is_pinned());
+        let lib_lane = LaneGit::resolve(&lib).expect("level one");
+        assert_eq!(lib_lane.work_dir(), lib.canonicalize().unwrap());
+        let x = lib.join("deps/x");
+        let x_lane = LaneGit::resolve(&x).expect("level two is a gitlink of level one");
+        assert_eq!(x_lane.work_dir(), x.canonicalize().unwrap());
+        let output = x_lane
+            .command()
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), x_sha);
+        // Re-provisioning asks the same of the nested checkout.
+        crate::core::worktree::verify_worktree_head(&x, &x_sha).unwrap();
+
+        // A repository the worker made next to it is still refused, with the
+        // right reason.
+        let stray = lib.join("deps/stray");
+        fs::create_dir_all(&stray).unwrap();
+        git(&stray, &["init", "-q"]);
+        let error = LaneGit::resolve(&stray).unwrap_err();
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        assert!(error.contains("not a submodule"), "{error}");
+    }
+
+    /// A PR checkout under `<wt>/.kronn/` is a linked worktree of the same
+    /// repository: git registered it, so it is its own pinned lane, not a refusal.
+    #[test]
+    fn a_registered_worktree_nested_in_the_lane_is_its_own_pinned_lane() {
+        let world = World::new();
+        let nested = world.worktree.join(".kronn/pr-1995");
+        git(
+            &world.worktree,
+            &["worktree", "add", "-b", "pr-1995", nested.to_str().unwrap()],
+        );
+        let nested = nested.canonicalize().unwrap();
+        git(&nested, &["config", "user.email", "t@t"]);
+        let nested_head = git(&nested, &["rev-parse", "HEAD"]);
+
+        let lane = LaneGit::resolve(&nested).expect("a registered worktree is not refused");
+        assert!(lane.is_pinned());
+        assert_eq!(lane.work_dir(), nested);
+        let output = lane
+            .command()
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "pr-1995");
+        let output = lane.command().args(["rev-parse", "HEAD"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), nested_head);
+
+        // Its own pointer is verified like any managed worktree's.
+        fs::write(nested.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        let error = LaneGit::resolve(&nested).expect_err("a redirected pointer");
+        assert!(error.starts_with(TAMPER_PREFIX), "{error}");
+
+        // A directory the worker made, with a `.git` of its own, is not registered.
+        let stray = world.worktree.join(".kronn/stray");
+        fs::create_dir_all(&stray).unwrap();
+        git(&stray, &["init", "-q"]);
+        let error = LaneGit::resolve(&stray).unwrap_err();
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+    }
+
+    #[test]
+    fn a_config_a_worker_wrote_in_a_second_level_submodule_is_refused_from_the_top() {
+        let world = world_with_submodule();
+        add_second_level_submodule(&world);
+        assert!(LaneGit::resolve(&world.worktree).is_ok());
+        append_bytes(
+            &world.worktree.join("lib/deps/x/.git/config"),
+            format!(
+                "[core]\n\tfsmonitor = {}\n",
+                world.marker("X_FSMONITOR").display()
+            )
+            .as_bytes(),
+        );
+        let error = LaneGit::resolve(&world.worktree).expect_err("level two is vetted too");
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn a_reftable_clone_is_not_refused() {
+        assert!(nested_key_is_plain("extensions.refstorage"));
+        let world = world_with_submodule();
+        append_bytes(
+            &world.worktree.join("lib/.git/config"),
+            b"[extensions]\n\trefStorage = reftable\n",
+        );
+        assert!(LaneGit::resolve(&world.worktree).is_ok());
+    }
 }

@@ -153,6 +153,7 @@ impl<'a> DiffMap<'a> {
                 .args([
                     "diff",
                     "--unified=0",
+                    "--ignore-submodules=dirty",
                     "--no-ext-diff",
                     "--no-textconv",
                     "--no-color",

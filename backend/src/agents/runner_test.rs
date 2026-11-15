@@ -11286,7 +11286,17 @@ Suite de la réponse.";
         .iter()
         .map(|path| 2 * (path.as_os_str().len() + 24))
         .sum();
-        assert!(receipt.settings_bytes < 4096 + stores);
+        // KT-1745 — the worktree's `.git` pointer is named once in `denyWrite` and
+        // once per file-editing tool rule (`Edit`, `Write`, `MultiEdit`,
+        // `NotebookEdit`): five copies of the worktree path, so the budget grows
+        // with that path (a deep temp directory is common), never with the catalogue.
+        let pointer_rules = 5 * (worktree.path().canonicalize().unwrap().as_os_str().len() + 32);
+        assert!(
+            receipt.settings_bytes < 4096 + stores + pointer_rules,
+            "settings are {} bytes, budget {}",
+            receipt.settings_bytes,
+            4096 + stores + pointer_rules
+        );
         assert!(receipt.max_argument_bytes < MAX_SINGLE_ARG_BYTES);
         assert_eq!(receipt.validate_single_argument_limit(), Ok(()));
         assert!(
@@ -11613,10 +11623,20 @@ Suite de la réponse.";
             super::super::parse_copilot_task_worker_preflight(b"", true),
             CopilotTaskWorkerPreflight::Malformed
         );
+        let error = super::super::copilot_task_worker_preflight_error(
+            CopilotTaskWorkerPreflight::Malformed,
+        );
+        assert!(error.contains("task_exec_reassign"));
+        assert!(!error.contains("auth error"));
     }
 
     #[test]
     fn copilot_task_worker_preflight_spawn_failure_is_actionable_and_secret_free() {
+        let error = super::super::copilot_task_worker_preflight_error(
+            CopilotTaskWorkerPreflight::SpawnFailed,
+        );
+        assert!(error.contains("could not be invoked"));
+        assert!(error.contains("task_exec_reassign"));
         assert_eq!(
             CopilotTaskWorkerPreflight::SpawnFailed.reason_code(),
             Some("copilot_preflight_spawn_failed")

@@ -212,10 +212,11 @@ fn pinned_git_env(lane: &LaneGit) -> Vec<(&'static str, std::ffi::OsString)> {
 /// hook's lint errors printed on the other stream and flatten the rest. The
 /// hook's exit status is the wrapper's.
 const HOOK_WRAPPER: &str =
-    "out=$(mktemp \"${TMPDIR:-/tmp}/kronn-hook.XXXXXX\" 2>/dev/null) || out=/dev/null; \
+    "nocapture=; out=$(mktemp \"${TMPDIR:-/tmp}/kronn-hook.XXXXXX\" 2>/dev/null) || { out=/dev/null; nocapture=1; }; \
 \"$0\" >\"$out\" 2>&1; code=$?; \
 tail -c 8192 \"$out\" 2>/dev/null | tr '\\n' '\\036'; \
-rm -f \"$out\" 2>/dev/null; exit $code";
+[ -z \"$nocapture\" ] || printf 'kronn could not capture the hook output (mktemp failed in %s)' \"${TMPDIR:-/tmp}\"; \
+[ -n \"$nocapture\" ] || rm -f \"$out\" 2>/dev/null; exit $code";
 
 /// What stands for a line break in a confined hook's output (ASCII record
 /// separator: not whitespace to Rust, so the runner's collapsing keeps it).

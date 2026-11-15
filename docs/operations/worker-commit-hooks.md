@@ -135,27 +135,47 @@ when its `.git` is a directory inside the worktree (Kronn clones them that way).
 `status`, `diff`, `add -A`, `add -u`, `commit -a` and `diff-index` recurse into it
 and would run a `filter.*.clean` it names, as the host. Three layers:
 
-- the builder sets `diff.ignoreSubmodules=dirty`, `submodule.recurse=false` and
-  `status.submoduleSummary=false`: `status` and `diff` still show a moved gitlink
-  but never run `git status` inside the submodule;
+- the builder sets `diff.ignoreSubmodules=dirty`, `submodule.recurse=false`,
+  `status.submoduleSummary=false` and `diff.submodule=short` (a host
+  `diff.submodule=diff` would start a diff inside the submodule). Kronn's own
+  `status`, `diff` and `diff-index` also carry `--ignore-submodules=dirty` ON THE
+  COMMAND LINE inside a managed worktree, which beats a worker-written
+  `.gitmodules` `ignore = none`
+  ([src: file: backend/src/core/lane_git.rs:859#ignore_submodules]): they still show a
+  moved gitlink but never run `git status` inside the submodule;
+- a gitlink is staged by its sha (`update-index --cacheinfo 160000,<sha>,<path>`,
+  the sha read through the submodule's own pinned lane), never with `git add`, which
+  would compare the submodule's working tree
+  ([src: file: backend/src/api/git_ops.rs:1175#stage_gitlink_by_sha]);
 - a directory inside a materialised submodule (`<wt>/lib`, `<wt>/lib/pkg`) is the
   SUBMODULE's own pinned repository (`--git-dir=<its git directory>`,
-  `--work-tree=<it>`), vouched for by the worktree's registration and the check
+  `--work-tree=<it>`), vouched for by the enclosing lane's registration and the check
   below; it is not pinned to the parent, so `HEAD` there is the submodule's (what
   re-provisioning compares with its pin). A repository that is not a gitlink of the
-  worktree is one the worker made: Kronn runs no git command in it
-  ([src: file: backend/src/core/lane_git.rs:568#into_nested]);
+  enclosing lane's index is one the worker made: Kronn runs no git command in it.
+  Levels are vetted one by one (a submodule of a submodule is accepted when it is a
+  gitlink of the already vetted submodule; at most 6 levels). A LINKED WORKTREE of the
+  same repository inside the worktree (a PR checkout under `<wt>/.kronn/`) is not a
+  submodule: git registered it, so it is pinned to its own registration and its own
+  pointer is verified like any managed worktree's; a directory the worker made is not
+  registered and stays refused
+  ([src: file: backend/src/core/lane_git.rs:621#child]);
 - before every command the builder lists the index's gitlinks (from the worktree's
   root, whatever directory the command starts in) and refuses
-  (`NestedRepoUnsafe`) while one carries a configuration it does not trust: a
-  nested `.git/config` with any key outside `core.*` plumbing, `remote.*.url|fetch`,
+  (`NestedRepoUnsafe`) while one carries something it does not trust
+  ([src: file: backend/src/core/lane_git.rs:539#check_nested_repos],
+  [src: file: backend/src/core/lane_git.rs:451#vet_nested_dot_git]): a nested
+  `.git/config` with any key outside `core.*` plumbing, `extensions.objectformat` /
+  `extensions.refstorage` (a reftable clone), `remote.*.url|fetch`,
   `branch.*.remote|merge`, `user.*` (so no `filter.*`, `core.fsmonitor`,
-  `include.*`, `gpg.*`), or a `.git` file that does not point into the registered
-  repository's own git directory
-  ([src: file: backend/src/core/lane_git.rs:454-460#check_nested_repos]);
+  `include.*`, `gpg.*`); a config that is unreadable or not valid UTF-8 (git can
+  parse bytes Kronn cannot read as text, so it fails closed); a `.git/commondir` or
+  `.git/config.worktree` (git would read a configuration Kronn does not vet); or a
+  `.git` file that does not point into the registered repository's own git
+  directory;
 - Kronn never stages a NEW embedded repository a worker created (it would become
   a gitlink whose configuration the worker wrote)
-  ([src: file: backend/src/api/git_ops.rs:1177#refuse_new_embedded_repository]).
+  ([src: file: backend/src/api/git_ops.rs:1255#refuse_new_embedded_repository]).
 
 And the worker cannot write a nested `.git` in the first place, see below.
 

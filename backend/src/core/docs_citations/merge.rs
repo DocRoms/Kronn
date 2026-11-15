@@ -138,6 +138,7 @@ fn lane_command(root: &Path, args: &[&str]) -> Result<std::process::Command, Str
         command
             .arg(subcommand)
             .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(crate::core::lane_git::ignore_submodules(root, subcommand))
             .args(rest);
     }
     Ok(command)

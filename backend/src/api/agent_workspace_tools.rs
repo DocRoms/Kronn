@@ -476,6 +476,7 @@ fn git_read(root: &Path, args: &[&str]) -> Result<String, String> {
         command
             .arg(subcommand)
             .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(crate::core::lane_git::ignore_submodules(root, subcommand))
             .args(rest);
     }
     let output = command

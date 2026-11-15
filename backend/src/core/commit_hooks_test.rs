@@ -421,3 +421,25 @@ fn the_hook_wrapper_bounds_what_a_chatty_hook_prints() {
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.len() <= 8192, "{}", output.stdout.len());
 }
+
+#[cfg(unix)]
+#[test]
+fn the_hook_wrapper_says_so_when_it_cannot_capture_the_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let hook = dir.path().join("pre-commit");
+    write_hook(&hook, "echo 'lint: 3 errors'; exit 2");
+    // A TMPDIR that does not exist: `mktemp` fails.
+    let missing = dir.path().join("no-such-dir");
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", HOOK_WRAPPER])
+        .arg(&hook)
+        .env("TMPDIR", &missing)
+        .output()
+        .unwrap();
+    // The hook's exit status is still the wrapper's, and the reason is named
+    // instead of an empty answer ("printed nothing").
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("could not capture the hook output"), "{text}");
+    assert!(text.contains("mktemp failed"), "{text}");
+}

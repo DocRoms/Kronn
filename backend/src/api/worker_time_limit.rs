@@ -166,7 +166,14 @@ fn checkpoint_message(reference: &str, files: usize, elapsed: Duration, limit: D
 fn diff_patch(root: &Path) -> Option<(String, bool)> {
     let output = crate::core::lane_git::git(root)
         .ok()?
-        .args(["diff", "--no-ext-diff", "--no-textconv", "HEAD", "--binary"])
+        .args([
+            "diff",
+            "--ignore-submodules=dirty",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+            "--binary",
+        ])
         .output()
         .ok()
         .filter(|output| output.status.success())?;

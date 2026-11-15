@@ -253,7 +253,7 @@ pub fn verify_checkpoint(worktree: &Path, sha: &str) -> Result<(), String> {
         ));
     }
     let st = git_cmd(worktree)
-        .args(["status", "--porcelain"])
+        .args(["status", "--ignore-submodules=dirty", "--porcelain"])
         .output()
         .map_err(|e| format!("git status spawn failed: {e}"))?;
     if !st.status.success() {

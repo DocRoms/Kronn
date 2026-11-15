@@ -305,7 +305,11 @@ fn nested_key_is_plain(key: &str) -> bool {
         "core.symlinks",
         "core.worktree",
     ];
-    if CORE.contains(&key) || matches!(key, "user.name" | "user.email" | "extensions.objectformat")
+    if CORE.contains(&key)
+        || matches!(
+            key,
+            "user.name" | "user.email" | "extensions.objectformat" | "extensions.refstorage"
+        )
     {
         return true;
     }
@@ -398,15 +402,99 @@ fn gitlink_paths(lane: &LaneGit, pinned: &Pinned) -> Vec<String> {
     paths
 }
 
-/// The closest directory from `start` up to (not including) `root` that holds a
-/// `.git` entry: the repository git would discover from `start` instead of the
-/// worktree.
-fn nested_repo_root(root: &Path, start: &Path) -> Option<PathBuf> {
-    start
+/// The directories from `root` (excluded) down to `start` that hold a `.git`
+/// entry, outermost first: the repositories git would discover from `start` instead
+/// of the worktree, and the chain of them it would cross.
+fn nested_repo_roots(root: &Path, start: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = start
         .ancestors()
         .take_while(|dir| *dir != root)
-        .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
+        .filter(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
         .map(Path::to_path_buf)
+        .collect();
+    roots.reverse();
+    roots
+}
+
+/// A nested repository's file as UTF-8 text. A file git can parse but Kronn cannot
+/// read as text is not vetted: it says why, so the caller refuses.
+fn read_vetted_text(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("cannot be read ({error})"))?;
+    String::from_utf8(bytes).map_err(|_| "is not valid UTF-8".to_string())
+}
+
+/// What a `.git` FILE of a submodule points at, absolute, from `nested_dir`.
+fn gitfile_target(dot_git: &Path, nested_dir: &Path) -> Result<PathBuf, String> {
+    let text = read_vetted_text(dot_git).map_err(|why| format!("has a `.git` file that {why}"))?;
+    let target = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .unwrap_or_default();
+    if target.is_empty() {
+        return Err("has a `.git` file that is not a `gitdir:` line".to_string());
+    }
+    let target = PathBuf::from(target);
+    Ok(canonical(&if target.is_absolute() {
+        target
+    } else {
+        nested_dir.join(target)
+    }))
+}
+
+/// Vet the `.git` of the nested repository `nested_dir`: a `.git` file must point
+/// into the registered repository's own git directory; a `.git` directory must hold
+/// only a configuration of plain keys, read as bytes, and nothing that makes git read
+/// another one (`commondir`, `config.worktree`, `include*`). `Ok` when the
+/// submodule is not materialised. The `Err` is the reason.
+fn vet_nested_dot_git(nested_dir: &Path, pinned: &Pinned) -> Result<(), String> {
+    let dot_git = nested_dir.join(".git");
+    let Ok(metadata) = std::fs::symlink_metadata(&dot_git) else {
+        return Ok(()); // not materialised: nothing to recurse into
+    };
+    if metadata.is_file() {
+        let target = gitfile_target(&dot_git, nested_dir)?;
+        if !target.starts_with(&pinned.common_dir) {
+            return Err(format!(
+                "has a `.git` file pointing at {}, outside the repository's own git directory",
+                target.display()
+            ));
+        }
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err("has a `.git` that is neither a directory nor a file".to_string());
+    }
+    // Files that make git read a configuration Kronn does not vet.
+    for name in ["commondir", "config.worktree"] {
+        if std::fs::symlink_metadata(dot_git.join(name)).is_ok() {
+            return Err(format!(
+                "has a `.git/{name}`: git would read a configuration Kronn does not vet"
+            ));
+        }
+    }
+    let config = dot_git.join("config");
+    let text = match std::fs::symlink_metadata(&config) {
+        Ok(m) if m.is_file() => {
+            read_vetted_text(&config).map_err(|why| format!("has a `.git/config` that {why}"))?
+        }
+        Ok(_) => return Err("has a `.git/config` that is not a regular file".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("has a `.git/config` that cannot be read ({error})")),
+    };
+    let unknown: Vec<String> = config_keys(&text)
+        .into_iter()
+        .filter(|key| !nested_key_is_plain(key))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "has a `.git/config` with settings Kronn does not trust: {}",
+            unknown.join(", ")
+        ))
+    }
 }
 
 /// The git directory of the submodule at `nested`: its `.git` directory, or what
@@ -423,46 +511,38 @@ fn nested_git_dir(nested: &Path, pinned: &Pinned) -> Result<PathBuf, String> {
     if metadata.is_dir() {
         return Ok(canonical(&dot_git));
     }
-    let text = if metadata.is_file() {
-        std::fs::read_to_string(&dot_git).unwrap_or_default()
+    let outside =
+        |why: String| format!("{NESTED_PREFIX}: the `.git` of {} {why}", nested.display());
+    let target = if metadata.is_file() {
+        gitfile_target(&dot_git, nested).map_err(outside)?
     } else {
-        String::new()
+        return Err(outside("is neither a directory nor a file".to_string()));
     };
-    let target = text
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("gitdir:"))
-        .map(str::trim)
-        .unwrap_or_default();
-    let target = PathBuf::from(target);
-    let target = canonical(&if target.is_absolute() {
-        target
-    } else {
-        nested.join(target)
-    });
     if target.starts_with(&pinned.common_dir) {
         Ok(target)
     } else {
-        Err(format!(
-            "{NESTED_PREFIX}: the `.git` of {} does not point into the repository's own git directory",
-            nested.display()
+        Err(outside(
+            "does not point into the repository's own git directory".to_string(),
         ))
     }
 }
 
+/// How many levels of submodules Kronn vets. Deeper ones are refused.
+const MAX_NESTING: usize = 6;
+
 impl LaneGit {
-    /// Every submodule of the worktree is a repository Kronn would trust the
-    /// configuration of when a command recurses into it (`add`, `commit -a`,
-    /// `diff-index` override `diff.ignoreSubmodules`). Refuse while one carries a
-    /// configuration the worker could have written: a nested `.git` directory
-    /// with a key outside [`nested_key_is_plain`], or a `.git` file that does not
-    /// point into the registered repository's own git directory.
+    /// Every submodule of the worktree, and of each submodule in turn, is a
+    /// repository whose configuration a command that recurses into it would trust
+    /// (`add`, `commit -a` and `diff-index` override `diff.ignoreSubmodules`). Refuse
+    /// while one carries a configuration the worker could have written: see
+    /// [`vet_nested_dot_git`].
     fn check_nested_repos(&self, pinned: &Pinned) -> Result<(), String> {
+        self.check_gitlinks(pinned, 0)
+    }
+
+    fn check_gitlinks(&self, pinned: &Pinned, depth: usize) -> Result<(), String> {
         for path in gitlink_paths(self, pinned) {
-            let nested = self.work_dir.join(&path).join(".git");
-            let Ok(metadata) = std::fs::symlink_metadata(&nested) else {
-                continue; // not materialised: nothing to recurse into
-            };
+            let nested = self.work_dir.join(&path);
             let refuse = |why: String| {
                 tracing::warn!(
                     "{NESTED_PREFIX}: submodule `{path}` of {} — {why}",
@@ -475,47 +555,19 @@ impl LaneGit {
                     self.work_dir.display()
                 ))
             };
-            if metadata.is_file() {
-                let text = std::fs::read_to_string(&nested).unwrap_or_default();
-                let target = text
-                    .lines()
-                    .next()
-                    .and_then(|line| line.strip_prefix("gitdir:"))
-                    .map(str::trim)
-                    .unwrap_or_default();
-                let target = PathBuf::from(target);
-                let target = canonical(&if target.is_absolute() {
-                    target
-                } else {
-                    nested.parent().unwrap_or(&self.work_dir).join(target)
-                });
-                if !target.starts_with(&pinned.common_dir) {
-                    return refuse(format!(
-                        "has a `.git` file pointing at {}, outside the repository's own git directory",
-                        target.display()
-                    ));
-                }
-            } else if metadata.is_dir() {
-                let config = nested.join("config");
-                let text = match std::fs::symlink_metadata(&config) {
-                    Ok(m) if m.is_file() => std::fs::read_to_string(&config).unwrap_or_default(),
-                    Ok(_) => {
-                        return refuse("has a `.git/config` that is not a regular file".into())
-                    }
-                    Err(_) => String::new(),
-                };
-                let unknown: Vec<String> = config_keys(&text)
-                    .into_iter()
-                    .filter(|key| !nested_key_is_plain(key))
-                    .collect();
-                if !unknown.is_empty() {
-                    return refuse(format!(
-                        "has a `.git/config` with settings Kronn does not trust: {}",
-                        unknown.join(", ")
-                    ));
-                }
-            } else {
-                return refuse("has a `.git` that is neither a directory nor a file".into());
+            if let Err(why) = vet_nested_dot_git(&nested, pinned) {
+                return refuse(why);
+            }
+            if std::fs::symlink_metadata(nested.join(".git")).is_err() {
+                continue; // not materialised
+            }
+            // The submodules of this submodule are vetted by the same rule.
+            if depth + 1 >= MAX_NESTING {
+                return refuse(format!("is nested more than {MAX_NESTING} levels deep"));
+            }
+            let child = self.child(nested.clone(), nested)?;
+            if let Some(child_pinned) = child.pinned.clone() {
+                child.check_gitlinks(&child_pinned, depth + 1)?;
             }
         }
         Ok(())
@@ -554,27 +606,43 @@ impl LaneGit {
         lane.verify()?;
         // A directory inside a submodule is the submodule's, not the worktree's:
         // git finds the closest `.git`, and so does the HEAD a caller asks for.
-        match nested_repo_root(&lane.work_dir, &start) {
-            None => Ok(lane),
-            Some(nested) => lane.into_nested(nested, start),
+        // Level by level: each root must be a gitlink of the lane enclosing it.
+        let mut lane = lane;
+        for nested in nested_repo_roots(&lane.work_dir, &start) {
+            lane = lane.child(nested, start.clone())?;
         }
+        Ok(lane)
     }
 
-    /// The lane of the submodule `nested` of this worktree: its own git
-    /// directory, vouched for by this worktree's registration and by
-    /// [`Self::check_nested_repos`] (which `verify` ran). A repository that is not
-    /// a gitlink of the worktree's index is one the worker made: Kronn runs
-    /// nothing in it.
-    fn into_nested(self, nested: PathBuf, start: PathBuf) -> Result<Self, String> {
+    /// The lane of the submodule `nested` of this lane: its own git directory,
+    /// vouched for by this lane's registration and by [`Self::check_nested_repos`]
+    /// (which `verify` ran). A repository that is not a gitlink of this lane's index
+    /// is one the worker made: Kronn runs nothing in it.
+    fn child(&self, nested: PathBuf, start: PathBuf) -> Result<Self, String> {
         let Some(pinned) = self.pinned.clone() else {
-            return Ok(self);
+            return Ok(self.clone());
         };
         let relative = nested
             .strip_prefix(&self.work_dir)
             .unwrap_or(&nested)
             .to_string_lossy()
             .replace('\\', "/");
-        if !gitlink_paths(&self, &pinned).contains(&relative) {
+        if !gitlink_paths(self, &pinned).contains(&relative) {
+            // A linked worktree of the same repository inside this one (a PR checkout
+            // under `<wt>/.kronn/`): git registered it, so it is pinned to its own
+            // registration and its own pointer is verified like any managed worktree.
+            // A directory the worker made, or one whose registration names another
+            // path, is not registered and stays refused.
+            if let Ok(git_dir) = registered_admin_dir(&pinned.common_dir, &nested) {
+                let lane = Self {
+                    work_dir: nested,
+                    start,
+                    pinned: Some(Pinned { git_dir, ..pinned }),
+                    parent: None,
+                };
+                lane.verify()?;
+                return Ok(lane);
+            }
             return Err(format!(
                 "{NESTED_PREFIX}: `{relative}` of {} is a repository that is not a submodule of \
                  the worktree; Kronn runs no git command in it",
@@ -586,7 +654,7 @@ impl LaneGit {
             work_dir: nested,
             start,
             pinned: Some(Pinned { git_dir, ..pinned }),
-            parent: Some(Box::new(self)),
+            parent: Some(Box::new(self.clone())),
         })
     }
 
@@ -685,6 +753,8 @@ impl LaneGit {
             "diff.ignoreSubmodules=dirty".to_string(),
             "submodule.recurse=false".to_string(),
             "status.submoduleSummary=false".to_string(),
+            // `diff.submodule=diff` would start a diff inside the submodule.
+            "diff.submodule=short".to_string(),
         ];
         if let Some(pinned) = &self.pinned {
             settings.extend(neutralised_programs(&pinned.common_dir, &self.work_dir));
@@ -794,6 +864,34 @@ pub fn git_or_refuse(work_dir: &Path) -> Command {
             command
         }
     }
+}
+
+/// `--ignore-submodules=dirty` for the subcommands that compare a worktree with
+/// the index or a commit (`status`, `diff`, `diff-index`) when `work_dir` is (inside)
+/// a managed worktree. On the command line it beats a worker-written `.gitmodules`
+/// `ignore = none`, so git never starts a `git status` INSIDE a submodule. A pointer
+/// that moved is still reported. The owner's own checkout is left alone.
+pub fn ignore_submodules(work_dir: &Path, subcommand: &str) -> &'static [&'static str] {
+    if !matches!(subcommand, "status" | "diff" | "diff-index") {
+        return &[];
+    }
+    let start = canonical(work_dir);
+    if start.ancestors().any(|dir| managed_parts(dir).is_some()) {
+        &["--ignore-submodules=dirty"]
+    } else {
+        &[]
+    }
+}
+
+/// [`ignore_submodules`] applied to a whole argument list.
+pub fn with_ignore_submodules<'a>(work_dir: &Path, args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::with_capacity(args.len() + 1);
+    if let Some((subcommand, rest)) = args.split_first() {
+        out.push(*subcommand);
+        out.extend_from_slice(ignore_submodules(work_dir, subcommand));
+        out.extend_from_slice(rest);
+    }
+    out
 }
 
 /// `args` that keep a diff-like subcommand from running a program the

@@ -1894,7 +1894,12 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
     }
 
     let status = crate::core::lane_git::git(path)?
-        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .args([
+            "status",
+            "--ignore-submodules=dirty",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ])
         .output()
         .map_err(|e| format!("git status failed: {e}"))?;
     if !status.status.success() {
@@ -2576,9 +2581,15 @@ pub fn build_candidate_with_hooks(
         crate::core::lane_git::git(path)
             .ok()
             .and_then(|mut git| {
-                git.args(["diff", "--name-only", "--diff-filter=U", "--no-ext-diff"])
-                    .output()
-                    .ok()
+                git.args([
+                    "diff",
+                    "--ignore-submodules=dirty",
+                    "--name-only",
+                    "--diff-filter=U",
+                    "--no-ext-diff",
+                ])
+                .output()
+                .ok()
             })
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
@@ -3877,6 +3888,7 @@ fn write_uncommitted_patches(
     let diff = |from: &str, to: &str| {
         vec![
             "diff".to_string(),
+            "--ignore-submodules=dirty".to_string(),
             "--binary".to_string(),
             "--no-ext-diff".to_string(),
             "--no-textconv".to_string(),
@@ -4243,8 +4255,10 @@ fn parse_porcelain(stdout: &str) -> Vec<DirtyFile> {
 /// dirty, unlocking it would lose the changes. We surface the list so the UI
 /// can block with a "commit first" CTA rather than a blind refusal.
 pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, String> {
+    // `--ignore-submodules=dirty` on the command line: a `.gitmodules` the worker
+    // wrote (`ignore = none`) must not make git run `status` inside a submodule.
     let output = crate::core::lane_git::git(worktree_path)?
-        .args(["status", "--porcelain=v1"])
+        .args(["status", "--ignore-submodules=dirty", "--porcelain=v1"])
         .output()
         .map_err(|e| format!("git status failed in worktree: {}", e))?;
     if !output.status.success() {
