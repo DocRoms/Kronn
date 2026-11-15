@@ -292,9 +292,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:2449-2477#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:3084-3104#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:3029-3082#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2456-2484#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:3097-3117#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:3042-3095#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -308,7 +308,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:2851-2858#integration_target]
+[src: file: backend/src/core/worktree.rs:2864-2871#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -357,8 +357,8 @@ integration branch stays green on the strict `docs_citations_resolve_in_the_repo
 test without a release-time sweep. A citation the lane breaks for good (symbol
 removed or renamed) is the lane's to fix; the worker brief says so. The merge a
 worker finishes with `task_exec_commit` runs the same settlement.
-[src: file: backend/src/core/worktree.rs:2492-2596#build_candidate_detailed]
-[src: file: backend/src/core/worktree.rs:2702-2765#settle_branch_docs]
+[src: file: backend/src/core/worktree.rs:2499-2603#build_candidate_detailed]
+[src: file: backend/src/core/worktree.rs:2715-2778#settle_branch_docs]
 [src: file: backend/src/core/docs_citations/merge.rs:317-333#resolve_anchor_only_conflicts]
 [src: file: backend/src/core/docs_citations/merge.rs:746-806#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]

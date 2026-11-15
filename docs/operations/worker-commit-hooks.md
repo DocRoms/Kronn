@@ -26,7 +26,7 @@ does run the program).
 ## The rule: one builder, pinned to the registration
 
 Every git command Kronn runs on a worker's worktree is built by
-[src: file: backend/src/core/lane_git.rs:601-603#git]
+[src: file: backend/src/core/lane_git.rs:790-792#git]
 ([src: file: backend/src/core/lane_git.rs:63#LaneGit]), never by `git_cmd()`:
 
 - **The repository is pinned, not discovered.** The command carries
@@ -38,7 +38,7 @@ Every git command Kronn runs on a worker's worktree is built by
   ([src: file: backend/src/core/lane_git.rs:138-140#registered_admin_dir]). Neither
   the worktree's `.git` file nor a `commondir` is consulted.
 - **The pointer is verified before every command**
-  ([src: file: backend/src/core/lane_git.rs:593-595#verify]). If `<worktree>/.git`
+  ([src: file: backend/src/core/lane_git.rs:661-663#verify]). If `<worktree>/.git`
   no longer reads `gitdir: <that admin dir>` (absolute or Kronn's portable
   relative form), nothing runs and the operation fails with
   `WorktreeTampered: …` — the text `task_exec_commit` returns to the worker, and
@@ -53,17 +53,17 @@ Every git command Kronn runs on a worker's worktree is built by
 - A path that is not a managed worktree is the owner's own checkout: it keeps
   git's discovery and gets the same switches. A **push** keeps the owner's hooks
   there (`pre-push`)
-  ([src: file: backend/src/core/lane_git.rs:765-768#git_keeping_owner_hooks]); from a
+  ([src: file: backend/src/core/lane_git.rs:835-838#git_keeping_owner_hooks]); from a
   managed worktree it is pinned and hook-less like the rest
-  ([src: file: backend/src/api/git_ops.rs:1686#run_git_push]), and the token-bearing
+  ([src: file: backend/src/api/git_ops.rs:1764-1767#run_git_push]), and the token-bearing
   authenticated push therefore reads the registered repository's configuration
-  only ([src: file: backend/src/api/git_ops.rs:1650#authenticated_push_command]).
+  only ([src: file: backend/src/api/git_ops.rs:1727-1731#authenticated_push_command]).
   A task worker never pushes (only a human does, from the UI).
 
 Call sites: the commit/merge commit, staging and identity of `task_exec_commit` /
-`git_commit` ([src: file: backend/src/api/git_ops.rs:1247#run_commit_command]),
+`git_commit` ([src: file: backend/src/api/git_ops.rs:1316-1325#run_commit_command]),
 the candidate merge, its abort and its commits
-([src: file: backend/src/core/worktree.rs:2532-2542#build_candidate_with_hooks]), the doc
+([src: file: backend/src/core/worktree.rs:2537-2547#build_candidate_with_hooks]), the doc
 citations settling (`git checkout`, `add`, `grep`, `show`, `diff`), the worktree
 inspections (`worktree_dirty_files`, `committed_file_changes`, `git_head`, …), the
 HTTP agent's `git_status` / `git_diff` / `git_log`, the sub-task diff, the
@@ -91,14 +91,14 @@ Also pinned, because a worker's worktree can be their argument:
   redirected pointer is refused before git reads it), in the owner's checkout plain
   git. Every lane command also sets `GIT_NO_LAZY_FETCH=1`, so a promisor remote
   the worker wrote can never make a read fetch with its transport program
-  ([src: file: backend/src/core/worktree.rs:2317#resolve_commit]). The ratchet of
+  ([src: file: backend/src/core/worktree.rs:2317-2322#resolve_commit]). The ratchet of
   the guard counts DIRECT spawns only: a plain helper handed a worktree path is
   not seen, so such a helper belongs in the function list of the guard test;
 - `gh` and `glab` (`host_cli_command`: `gh pr create` runs `git status` itself)
   get the pin through the environment — `GIT_DIR`, `GIT_WORK_TREE`,
   `GIT_CONFIG_*` for hooks off, no file-system monitor — and, in a worktree whose
   pointer was redirected, a `GIT_DIR` that does not exist, so they run nothing
-  ([src: file: backend/src/core/lane_git.rs:732#pin_foreign_command]);
+  ([src: file: backend/src/core/lane_git.rs:796-802#pin_foreign_command]);
 - the Git panel of a workspace Kronn refuses to run git in says why (an
   unregistered directory under `.kronn/worktrees`, a redirected pointer, a
   submodule whose configuration was rewritten) instead of showing an empty answer
@@ -141,7 +141,7 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
   `status`, `diff` and `diff-index` also carry `--ignore-submodules=dirty` ON THE
   COMMAND LINE inside a managed worktree, which beats a worker-written
   `.gitmodules` `ignore = none`
-  ([src: file: backend/src/core/lane_git.rs:859#ignore_submodules]): they still show a
+  ([src: file: backend/src/core/lane_git.rs:869-874#ignore_submodules]): they still show a
   moved gitlink but never run `git status` inside the submodule;
 - a gitlink is staged by its sha (`update-index --cacheinfo 160000,<sha>,<path>`,
   the sha read through the submodule's own pinned lane), never with `git add`, which
@@ -214,7 +214,7 @@ cover it.
 - Claude's task-worker settings carry `sandbox.filesystem.denyWrite` for the
   pointer and for each existing nested `.git` (and its content), and
   `Edit/Write/MultiEdit/NotebookEdit` permission denies
-  ([src: file: backend/src/agents/runner.rs:13226#claude_task_worker_settings]);
+  ([src: file: backend/src/agents/runner.rs:13219-13229#claude_task_worker_settings]);
 - the HTTP agents' write tools refuse any path with a `.git` component
   (compared without regard to case, explicitly) and a symlink to one
   ([src: file: backend/src/api/agent_workspace_tools.rs:434#resolve_writable_in_workspace]);
@@ -272,7 +272,7 @@ output (20 lines / 2 000 characters), never a conflict
 - `task_exec_commit` / `git_commit` fail with `HookRefused (pre-commit): <output>`
   and commit nothing;
 - the candidate build returns `CandidateOutcome::HookRefused { hook, output }`
-  ([src: file: backend/src/core/worktree.rs:2445#HookRefused]), undoes the merge
+  ([src: file: backend/src/core/worktree.rs:2450#HookRefused]), undoes the merge
   and is reported to the principal and worker with the hook's output.
 
 A `git merge` refused before it starts (a dirty tree, unrelated histories) is an

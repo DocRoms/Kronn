@@ -17,10 +17,10 @@ path does not exist is skipped with a warning: it has no worktree catalogue for
 the sandbox to enumerate. Any other unreadable Git root still fails closed with
 `claude_sandbox_catalogue_unreadable`, naming the project or linked repository
 (never its path).
-[src: file: backend/src/agents/runner.rs:13332-13362#ClaudeSandboxCatalogueReceipt]
-[src: file: backend/src/agents/runner.rs:13396-13445#claude_sandbox_catalogue_receipt]
-[src: file: backend/src/agents/runner.rs:13447-13476#claude_sandbox_catalogue_roots]
-[src: file: backend/src/agents/runner.rs:13478-13485#claude_task_worker_catalogue_preflight]
+[src: file: backend/src/agents/runner.rs:13340-13370#ClaudeSandboxCatalogueReceipt]
+[src: file: backend/src/agents/runner.rs:13404-13453#claude_sandbox_catalogue_receipt]
+[src: file: backend/src/agents/runner.rs:13455-13484#claude_sandbox_catalogue_roots]
+[src: file: backend/src/agents/runner.rs:13486-13493#claude_task_worker_catalogue_preflight]
 [src: file: backend/src/api/orchestration.rs:12247-12257#worker_project_refusal]
 
 The worker remains fail-closed: sandbox availability is mandatory,
@@ -33,7 +33,7 @@ accepted and refused catalogue sizes, common-directory deduplication and
 path-free diagnostics, and separately preserves the write boundary: an
 unmanaged worktree is the only write root, a managed one adds only its lane
 target.
-[src: file: backend/src/agents/runner_test.rs:11370-11569#synthetic_git_worktree_catalogue]
+[src: file: backend/src/agents/runner_test.rs:11380-11579#synthetic_git_worktree_catalogue]
 [src: file: backend/src/agents/runner_test.rs:10711-10761#claude_task_worker_uses_fail_closed_workspace_sandbox]
 [src: file: backend/src/agents/runner_test.rs:10775-10816#claude_task_worker_sandbox_allows_loopback_and_its_lane_without_a_network_domain]
 

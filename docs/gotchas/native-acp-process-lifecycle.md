@@ -67,7 +67,7 @@ asserted on all three outcomes rather than read off the source — and a failing
 cleanup never replaces the failure that caused it.
 [src: file: backend/src/agents/runner.rs:6254-6263#acp_start_failure]
 [src: file: backend/src/agents/runner.rs:6254-6265#acp_start_failure]
-[src: file: backend/src/agents/runner.rs:5745-5753#acp_start_failure]
+[src: file: backend/src/agents/runner.rs:6257-6265#acp_start_failure]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:80-120#discover_with_transport]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:287-298#ScriptedTransport]
 [src: file: backend/src/core/model_catalog/acp_discovery.rs:382-422#discovery_shuts_the_transport_down_when_initialize_fails]
