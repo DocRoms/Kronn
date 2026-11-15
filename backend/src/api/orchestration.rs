@@ -39129,6 +39129,17 @@ pub(crate) mod tests {
         )
     }
 
+    /// KT-1758 — a task-worker refusal raised at spawn for an agent the KT-1749
+    /// selection let through (it never picks a native ACP agent, whose refusal
+    /// `native_acp_refusal` is): the launch route the agent resolves to changed
+    /// between the choice and the launch. Same prefix, same permanence.
+    fn late_route_refusal() -> String {
+        format!(
+            "{} the agent's launch route changed after the fallback was chosen; use Claude Code, an HTTP model or an exact joined CLI session",
+            crate::agents::runner::TASK_WORKER_REFUSED_PREFIX
+        )
+    }
+
     /// KT-1758 — the campaign of `exec_id` opts into the quota fallback among `agents`.
     async fn opt_into_fallback_among(db: &Database, exec_id: &str, agents: &[AgentType]) {
         let (id, allowed) = (exec_id.to_string(), serde_json::to_string(agents).unwrap());
@@ -39173,12 +39184,13 @@ pub(crate) mod tests {
         .expect("the dispatch is claimable")
     }
 
-    /// KT-1758 — the live 14:36 shape. Claude is quota-limited, the execution
-    /// falls back to OpenCode (native ACP), and the launch path refuses it as a
-    /// task worker. That refusal cannot change by waiting: the dispatch fails at
-    /// once with the reason (it used to be deferred every 30 s, forever), the
-    /// next link of the campaign's fallback (Codex) takes the execution, its new
-    /// dispatch is due now and the parent room is told why.
+    /// KT-1758 — the live 14:36 shape, on an agent KT-1749's selection accepts.
+    /// Claude is quota-limited, the execution falls back to Codex, and the
+    /// launch path refuses it as a task worker for a reason the selection could
+    /// not know (`late_route_refusal`). That refusal cannot change by waiting:
+    /// the dispatch fails at once with the reason (it used to be deferred every
+    /// 30 s, forever), the next link of the campaign's fallback (Ollama) takes
+    /// the execution, its new dispatch is due now and the parent room is told why.
     #[tokio::test]
     async fn a_fallback_refused_at_spawn_fails_fast_and_the_next_link_is_tried() {
         let repo = init_repo();
@@ -39188,7 +39200,7 @@ pub(crate) mod tests {
             .remove(0);
         let state = quota_test_state(&db);
         let limits = default_dispatch_limits(&state).await;
-        let available = [AgentType::ClaudeCode, AgentType::OpenCode, AgentType::Codex];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         opt_into_fallback_among(&db, &was.id, &available).await;
         let claude = was.dispatch_job_id.clone().unwrap();
         assert!(run_then_refuse(&db, &limits, &claude, true).await);
@@ -39201,23 +39213,30 @@ pub(crate) mod tests {
                 &available
             )
             .await,
-            Some(AgentType::OpenCode)
+            Some(AgentType::Codex)
         );
-        let on_opencode = exec_of(&db, &was.id).await;
-        let refused = on_opencode.dispatch_job_id.clone().unwrap();
+        let on_codex = exec_of(&db, &was.id).await;
+        let refused = on_codex.dispatch_job_id.clone().unwrap();
         assert!(run_then_refuse(&db, &limits, &refused, false).await);
 
         let job = dispatch_of(&db, refused.clone()).await;
+        // The live refusal (a native ACP agent) and a late one are the same
+        // kind: permanent, not deferred.
         assert!(
             crate::api::discussions::runtime::is_permanent_task_worker_refusal(
                 &native_acp_refusal()
             )
         );
         assert!(
+            crate::api::discussions::runtime::is_permanent_task_worker_refusal(
+                &late_route_refusal()
+            )
+        );
+        assert!(
             crate::api::discussions::runtime::settle_worker_launch_refusal_among(
                 &state,
                 &job,
-                &native_acp_refusal(),
+                &late_route_refusal(),
                 Some(available.to_vec()),
             )
             .await
@@ -39233,13 +39252,13 @@ pub(crate) mod tests {
         let error = failed.last_error.clone().unwrap_or_default();
         assert!(
             error.starts_with(
-                "launch_refused: Task worker refused: this agent runs on its native ACP transport"
+                "launch_refused: Task worker refused: the agent's launch route changed"
             ),
             "{error}"
         );
 
         let next = exec_of(&db, &was.id).await;
-        assert_eq!(next.worker_agent_type.as_deref(), Some("Codex"));
+        assert_eq!(next.worker_agent_type.as_deref(), Some("Ollama"));
         let replacement = next.dispatch_job_id.clone().unwrap();
         assert_ne!(replacement, refused);
         let queued = dispatch_of(&db, replacement.clone()).await;
@@ -39291,7 +39310,7 @@ pub(crate) mod tests {
             !db.with_conn(
                 |conn| crate::db::orchestration::provider_quota_unavailable_at(
                     conn,
-                    "OpenCode",
+                    "Codex",
                     None,
                     chrono::Utc::now()
                 )
@@ -39308,9 +39327,9 @@ pub(crate) mod tests {
         )
         .await
         .expect("the parent room says why the execution moved on");
-        assert!(notice.contains("native ACP transport"), "{notice}");
-        assert!(notice.contains("OpenCode"), "{notice}");
+        assert!(notice.contains("launch route changed"), "{notice}");
         assert!(notice.contains("Codex"), "{notice}");
+        assert!(notice.contains("Ollama"), "{notice}");
     }
 
     /// KT-1758 — the refused fallback has no next link: it stops, loudly. Both
@@ -39325,7 +39344,7 @@ pub(crate) mod tests {
             .remove(0);
         let state = quota_test_state(&db);
         let limits = default_dispatch_limits(&state).await;
-        let available = [AgentType::ClaudeCode, AgentType::OpenCode];
+        let available = [AgentType::ClaudeCode, AgentType::Codex];
         opt_into_fallback_among(&db, &was.id, &available).await;
         let parent = was.parent_discussion_id.clone();
         db.with_conn(move |conn| {
@@ -39348,7 +39367,7 @@ pub(crate) mod tests {
                 &available
             )
             .await,
-            Some(AgentType::OpenCode)
+            Some(AgentType::Codex)
         );
         let refused = exec_of(&db, &was.id).await.dispatch_job_id.unwrap();
         assert!(run_then_refuse(&db, &limits, &refused, false).await);
@@ -39358,7 +39377,7 @@ pub(crate) mod tests {
             crate::api::discussions::runtime::settle_worker_launch_refusal_among(
                 &state,
                 &job,
-                &native_acp_refusal(),
+                &late_route_refusal(),
                 Some(available.to_vec()),
             )
             .await
@@ -39393,7 +39412,7 @@ pub(crate) mod tests {
         .await
         .expect("the principal's room is told");
         assert!(
-            parent_notice.contains("native ACP transport"),
+            parent_notice.contains("launch route changed"),
             "{parent_notice}"
         );
         assert!(
@@ -39409,7 +39428,7 @@ pub(crate) mod tests {
         .await
         .expect("the worker's room is told");
         assert!(
-            child_notice.contains("native ACP transport"),
+            child_notice.contains("launch route changed"),
             "{child_notice}"
         );
     }
@@ -39435,15 +39454,13 @@ pub(crate) mod tests {
                 model: None,
                 mode: None,
             };
+            // KT-1749: the links a task worker's chain offers are the ones the
+            // launch accepts, which leaves the HTTP agents.
             config.agents.claude_code.fallback_chain =
-                vec![link(AgentType::OpenCode), link(AgentType::GeminiCli)];
+                vec![link(AgentType::Ollama), link(AgentType::LiteLlm)];
             crate::core::agent_fallback::migrate_legacy_chains(&mut config.agents);
         }
-        let usable = vec![
-            AgentType::ClaudeCode,
-            AgentType::OpenCode,
-            AgentType::GeminiCli,
-        ];
+        let usable = vec![AgentType::ClaudeCode, AgentType::Ollama, AgentType::LiteLlm];
         let claude = was.dispatch_job_id.clone().unwrap();
         assert!(run_then_refuse(&db, &limits, &claude, true).await);
         let quota_job = dispatch_of(&db, claude).await;
@@ -39458,9 +39475,9 @@ pub(crate) mod tests {
             .unwrap(),
             "the chain moves the quota-refused worker to its first link"
         );
-        let on_opencode = exec_of(&db, &was.id).await;
-        assert_eq!(on_opencode.worker_agent_type.as_deref(), Some("OpenCode"));
-        let refused = on_opencode.dispatch_job_id.clone().unwrap();
+        let on_ollama = exec_of(&db, &was.id).await;
+        assert_eq!(on_ollama.worker_agent_type.as_deref(), Some("Ollama"));
+        let refused = on_ollama.dispatch_job_id.clone().unwrap();
         assert!(run_then_refuse(&db, &limits, &refused, false).await);
         let job = dispatch_of(&db, refused.clone()).await;
 
@@ -39468,14 +39485,14 @@ pub(crate) mod tests {
             crate::api::discussions::runtime::settle_worker_launch_refusal_among(
                 &state,
                 &job,
-                &native_acp_refusal(),
+                &late_route_refusal(),
                 Some(usable),
             )
             .await
         );
 
         let next = exec_of(&db, &was.id).await;
-        assert_eq!(next.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(next.worker_agent_type.as_deref(), Some("LiteLlm"));
         assert_ne!(next.dispatch_job_id.as_deref(), Some(refused.as_str()));
         assert_eq!(
             next.status,
@@ -39499,13 +39516,13 @@ pub(crate) mod tests {
         assert!(
             db.with_conn(|conn| crate::core::agent_fallback::active_cooldown(
                 conn,
-                &AgentType::OpenCode,
+                &AgentType::Ollama,
                 chrono::Utc::now()
             ))
             .await
             .unwrap()
             .is_none(),
-            "OpenCode cannot be a task worker, it is not unavailable"
+            "Ollama was refused as a task worker, it is not unavailable for rooms"
         );
         let notice = room_message(
             &db,
@@ -39514,8 +39531,8 @@ pub(crate) mod tests {
         )
         .await
         .expect("the parent room says the chain moved on");
-        assert!(notice.contains("native ACP transport"), "{notice}");
-        assert!(notice.contains("Gemini"), "{notice}");
+        assert!(notice.contains("launch route changed"), "{notice}");
+        assert!(notice.contains("LiteLLM"), "{notice}");
         assert!(
             !notice.contains(" until "),
             "no cooldown to announce: {notice}"
@@ -39681,13 +39698,15 @@ pub(crate) mod tests {
         drop(returned);
         assert!(run_then_refuse(&db, &limits, &returned_dispatch, false).await);
 
-        let mut gemini = crate::models::MessageTarget::agent(AgentType::GeminiCli);
-        gemini.tier = None;
+        // The next link the hand-over had picked (one the launch accepts: the
+        // move is refused for staleness, not for the agent).
+        let mut next_link = crate::models::MessageTarget::agent(AgentType::Codex);
+        next_link.tier = None;
         let error = reassign_native_execution_for_dispatch(
             &state,
             &was.id,
             crate::models::CampaignWorkerSelection {
-                target: gemini,
+                target: next_link,
                 model: None,
                 profile_id: None,
             },
@@ -39728,7 +39747,7 @@ pub(crate) mod tests {
             .remove(0);
         let state = quota_test_state(&db);
         let limits = default_dispatch_limits(&state).await;
-        let available = [AgentType::ClaudeCode, AgentType::OpenCode];
+        let available = [AgentType::ClaudeCode, AgentType::Codex];
         opt_into_fallback_among(&db, &was.id, &available).await;
         let claude = was.dispatch_job_id.clone().unwrap();
         assert!(run_then_refuse(&db, &limits, &claude, true).await);
@@ -39741,7 +39760,7 @@ pub(crate) mod tests {
                 &available
             )
             .await,
-            Some(AgentType::OpenCode)
+            Some(AgentType::Codex)
         );
         let refused = exec_of(&db, &was.id).await.dispatch_job_id.unwrap();
         assert!(run_then_refuse(&db, &limits, &refused, false).await);
@@ -39766,7 +39785,7 @@ pub(crate) mod tests {
             crate::api::discussions::runtime::settle_worker_launch_refusal_among(
                 &state,
                 &job,
-                &native_acp_refusal(),
+                &late_route_refusal(),
                 Some(available.to_vec()),
             )
             .await,
@@ -39876,32 +39895,50 @@ pub(crate) mod tests {
                 model: None,
                 mode: None,
             };
-            config.agents.claude_code.fallback_chain =
-                vec![link(AgentType::OpenCode), link(AgentType::GeminiCli)];
+            // The campaign's hop leaves no chain origin, so the chain that
+            // follows is the failing agent's own.
+            config.agents.codex.fallback_chain = vec![link(AgentType::Ollama)];
             crate::core::agent_fallback::migrate_legacy_chains(&mut config.agents);
         }
-        let usable = vec![
-            AgentType::ClaudeCode,
-            AgentType::OpenCode,
-            AgentType::GeminiCli,
-        ];
+        // A CLI agent (the transient causes are a CLI's: an HTTP agent's start
+        // failure is a refusal, not an unavailability) that the campaign's own
+        // quota fallback moved the execution to; the chain is what follows it.
+        let usable = vec![AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
+        // The campaign allows Ollama (the chain may take it) but its own quota
+        // fallback names only Codex, so the campaign has nothing after Codex.
+        opt_into_fallback_among(&db, &was.id, &usable).await;
+        let (id, only_codex) = (
+            was.id.clone(),
+            serde_json::to_string(&[AgentType::ClaudeCode, AgentType::Codex]).unwrap(),
+        );
+        db.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE orchestration_runs SET quota_fallback_agents_json = ?2 \
+                 WHERE id = (SELECT orchestration_run_id FROM task_executions WHERE id = ?1)",
+                rusqlite::params![id, only_codex],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         let claude = was.dispatch_job_id.clone().unwrap();
         assert!(run_then_refuse(&db, &limits, &claude, true).await);
-        let quota_job = dispatch_of(&db, claude).await;
-        assert!(
-            crate::api::discussions::agent_fallback::worker_after_quota_among(
+        assert_eq!(
+            refuse_through_the_fallback(
                 &state,
-                &quota_job,
-                "quota_exhausted: You've hit your 5-hour limit",
-                Some(usable.clone()),
+                &db,
+                &was.id,
+                chrono::Utc::now() + chrono::Duration::hours(2),
+                &usable
             )
-            .await
-            .unwrap()
+            .await,
+            Some(AgentType::Codex)
         );
-        let on_opencode = exec_of(&db, &was.id).await;
-        let dispatch = on_opencode.dispatch_job_id.clone().unwrap();
+        let on_codex = exec_of(&db, &was.id).await;
+        assert_eq!(on_codex.worker_agent_type.as_deref(), Some("Codex"));
+        let dispatch = on_codex.dispatch_job_id.clone().unwrap();
         let bound = crate::api::discussions::runtime::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
-        let reason = "OpenCode ACP spawn failed: connection refused";
+        let reason = "Codex app-server spawn failed: connection refused";
         for _ in 0..=bound {
             let job = claim_when_due(&db, &dispatch).await;
             crate::api::discussions::runtime::defer_or_stop_runtime_unavailable_among(
@@ -39914,7 +39951,7 @@ pub(crate) mod tests {
         }
 
         let next = exec_of(&db, &was.id).await;
-        assert_eq!(next.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(next.worker_agent_type.as_deref(), Some("Ollama"));
         let line = room_message(
             &db,
             next.parent_discussion_id.clone(),
@@ -40205,11 +40242,7 @@ pub(crate) mod tests {
             .remove(0);
         let state = quota_test_state(&db);
         let limits = default_dispatch_limits(&state).await;
-        let available = [
-            AgentType::ClaudeCode,
-            AgentType::Codex,
-            AgentType::GeminiCli,
-        ];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         opt_into_fallback_among(&db, &was.id, &available).await;
         let claude = was.dispatch_job_id.clone().unwrap();
         assert!(run_then_refuse(&db, &limits, &claude, true).await);
@@ -40248,7 +40281,7 @@ pub(crate) mod tests {
             Some("launch_refused: Binary 'codex' not found")
         );
         let next = exec_of(&db, &was.id).await;
-        assert_eq!(next.worker_agent_type.as_deref(), Some("GeminiCli"));
+        assert_eq!(next.worker_agent_type.as_deref(), Some("Ollama"));
         assert_eq!(next.status, TaskExecutionStatus::Working);
         let notice = room_message(
             &db,
@@ -40258,7 +40291,7 @@ pub(crate) mod tests {
         .await
         .expect("the parent room says why the execution moved on");
         assert!(notice.contains("Binary 'codex' not found"), "{notice}");
-        assert!(notice.contains("GeminiCli"), "{notice}");
+        assert!(notice.contains("Ollama"), "{notice}");
     }
 
     /// KT-1758 — the `PreflightFailed` outcome a launch refusal settles as, from
@@ -40275,7 +40308,7 @@ pub(crate) mod tests {
             .remove(0);
         let state = quota_test_state(&db);
         let limits = default_dispatch_limits(&state).await;
-        let available = [AgentType::ClaudeCode, AgentType::OpenCode, AgentType::Codex];
+        let available = [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama];
         opt_into_fallback_among(&db, &was.id, &available).await;
         let claude = was.dispatch_job_id.clone().unwrap();
         assert!(run_then_refuse(&db, &limits, &claude, true).await);
@@ -40288,7 +40321,7 @@ pub(crate) mod tests {
                 &available
             )
             .await,
-            Some(AgentType::OpenCode)
+            Some(AgentType::Codex)
         );
         let refused = exec_of(&db, &was.id).await.dispatch_job_id.unwrap();
         assert!(run_then_refuse(&db, &limits, &refused, false).await);
@@ -40312,7 +40345,7 @@ pub(crate) mod tests {
         .await;
         assert_eq!(
             exec_of(&db, &was.id).await.worker_agent_type.as_deref(),
-            Some("OpenCode"),
+            Some("Codex"),
             "the work's own failure is not a reason to change worker"
         );
         assert_eq!(
@@ -40320,7 +40353,7 @@ pub(crate) mod tests {
             crate::db::agent_dispatch::DispatchStatus::Failed
         );
 
-        // The native ACP refusal, through the same channel, on a fresh worker.
+        // A task-worker route refusal, through the same channel, on a fresh worker.
         let repo = init_repo();
         let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
         let was = economy_claude_executions(&db, repo.path(), 1)
@@ -40343,7 +40376,7 @@ pub(crate) mod tests {
         assert!(run_then_refuse(&db, &limits, &refused, false).await);
         let job = dispatch_of(&db, refused.clone()).await;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        finish_tracked_preflight(&mut Some(tx), &native_acp_refusal());
+        finish_tracked_preflight(&mut Some(tx), &late_route_refusal());
         let AgentExecutionOutcome::PreflightFailed { diagnostic } = rx.await.unwrap() else {
             panic!("a refused preflight settles as PreflightFailed");
         };
@@ -40356,7 +40389,7 @@ pub(crate) mod tests {
         .await;
         assert_eq!(
             exec_of(&db, &was.id).await.worker_agent_type.as_deref(),
-            Some("Codex")
+            Some("Ollama")
         );
         assert_eq!(
             dispatch_of(&db, refused).await.failure_kind.as_deref(),

@@ -163,7 +163,9 @@ async fn a_rate_limited_or_unauthenticated_worker_continues_on_the_fallback_too(
 #[tokio::test]
 async fn an_outage_move_neither_parks_the_worker_nor_spends_the_undelivered_notice() {
     let (_repo, db, was, job) = the_economy_worker().await;
-    let state = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+    // KT-1749: a task worker's chain only offers links the launch accepts (no
+    // native ACP agent, no Codex), so the take-over is exercised on an HTTP one.
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
     let undelivered = format!("orch-worker-undelivered:{}", was.id);
     let notice = |db: std::sync::Arc<Database>, parent: String, id: String| async move {
         messages_of(&db, &parent)
@@ -184,7 +186,7 @@ async fn an_outage_move_neither_parks_the_worker_nor_spends_the_undelivered_noti
     );
 
     let after = exec_of(&db, &was.id).await;
-    assert_eq!(after.worker_agent_type.as_deref(), Some("GeminiCli"));
+    assert_eq!(after.worker_agent_type.as_deref(), Some("Ollama"));
     assert_eq!(
         after.status,
         TaskExecutionStatus::Working,
@@ -242,7 +244,7 @@ async fn an_outage_move_neither_parks_the_worker_nor_spends_the_undelivered_noti
 #[tokio::test]
 async fn an_outage_hand_over_beaten_by_the_quota_return_moves_nothing_and_parks_nothing() {
     let (_repo, db, was, job) = the_economy_worker().await;
-    let state = state_with_chain(&db, Some(link(AgentType::GeminiCli)));
+    let state = state_with_chain(&db, Some(link(AgentType::Ollama)));
     let child = was.sub_discussion_id.clone().unwrap();
     let failed = job.id.clone();
     db.with_conn(move |conn| {
