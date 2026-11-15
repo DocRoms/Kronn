@@ -530,11 +530,28 @@ pub(crate) fn seatbelt_profile_read_only(
         }
         profile.push_str(")\n");
     }
+    // The `.git` of the worktree and of each repository that EXISTS in it when the
+    // sandbox starts (a submodule: its configuration is what Kronn's git commands
+    // would read). A repository the worker creates later (`git init vendor/pkg`,
+    // terraform git modules, Composer source installs, Bundler git gems) is not
+    // denied: Kronn's own checks refuse to stage or run git in a new one.
+    // `.git`, whatever its case (a case-insensitive volume).
+    let mut parents: Vec<PathBuf> = Vec::new();
     for root in git_under {
-        // `.git`, whatever its case (a case-insensitive volume), at any depth.
+        let root = real_path(root);
+        parents.push(root.clone());
+        parents.extend(
+            nested_git_entries(&root)
+                .into_iter()
+                .filter_map(|entry| entry.parent().map(Path::to_path_buf)),
+        );
+    }
+    parents.sort();
+    parents.dedup();
+    for parent in parents {
         profile.push_str(&format!(
-            "(deny file-write* (regex #\"^{}/(.*/)?\\.[gG][iI][tT](/.*)?$\"))\n",
-            seatbelt_regex_escape(&real_path(root))
+            "(deny file-write* (regex #\"^{}/\\.[gG][iI][tT](/.*)?$\"))\n",
+            seatbelt_regex_escape(&parent)
         ));
     }
     profile

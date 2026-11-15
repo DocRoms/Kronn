@@ -205,6 +205,27 @@ fn pinned_git_env(lane: &LaneGit) -> Vec<(&'static str, std::ffi::OsString)> {
     }
 }
 
+/// How the confined hook is started (`sh -c <this> <hook>`): both of its streams
+/// are kept, in order, bounded to their last 8 KiB, and handed back on STDOUT with
+/// the line breaks written as [`LINE_BREAK`]: the probe runner reports one stream
+/// of a failure (stderr first), with its whitespace collapsed, which would drop a
+/// hook's lint errors printed on the other stream and flatten the rest. The
+/// hook's exit status is the wrapper's.
+const HOOK_WRAPPER: &str =
+    "out=$(mktemp \"${TMPDIR:-/tmp}/kronn-hook.XXXXXX\" 2>/dev/null) || out=/dev/null; \
+\"$0\" >\"$out\" 2>&1; code=$?; \
+tail -c 8192 \"$out\" 2>/dev/null | tr '\\n' '\\036'; \
+rm -f \"$out\" 2>/dev/null; exit $code";
+
+/// What stands for a line break in a confined hook's output (ASCII record
+/// separator: not whitespace to Rust, so the runner's collapsing keeps it).
+const LINE_BREAK: char = '\u{1e}';
+
+/// The output of [`HOOK_WRAPPER`] as the hook printed it, line breaks restored.
+fn decode_hook_output(detail: &str) -> String {
+    detail.replace(LINE_BREAK, "\n").trim().to_string()
+}
+
 /// The hook under the lane's OS sandbox: it reads the filesystem, writes only the
 /// lane's roots (never its own `.git` pointer), and has no network.
 fn run_confined(hook: &Path, lane: &LaneGit) -> Result<(), String> {
@@ -213,8 +234,12 @@ fn run_confined(hook: &Path, lane: &LaneGit) -> Result<(), String> {
     let confinement = crate::core::task_worker_sandbox::Confinement::for_worktree(work_dir)
         .map_err(|reason| format!("not run: {reason}"))?;
     let probe = ProbeCommand {
-        program: hook.to_string_lossy().into_owned(),
-        args: Vec::new(),
+        program: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            HOOK_WRAPPER.to_string(),
+            hook.to_string_lossy().into_owned(),
+        ],
         cwd: work_dir.to_path_buf(),
         env: pinned_git_env(lane)
             .into_iter()
@@ -228,7 +253,7 @@ fn run_confined(hook: &Path, lane: &LaneGit) -> Result<(), String> {
     if outcome.success {
         Ok(())
     } else {
-        Err(outcome.detail)
+        Err(decode_hook_output(&outcome.detail))
     }
 }
 

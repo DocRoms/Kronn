@@ -65,6 +65,9 @@ pub struct LaneGit {
     /// Where the commands start: `work_dir`, or a directory inside it.
     start: PathBuf,
     pinned: Option<Pinned>,
+    /// For a submodule of a managed worktree: the worktree it lives in, whose
+    /// registration and pointer vouch for it.
+    parent: Option<Box<LaneGit>>,
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -371,7 +374,13 @@ fn gitlink_paths(lane: &LaneGit, pinned: &Pinned) -> Vec<String> {
             return known.2;
         }
     }
-    let output = lane.command().args(["ls-files", "--stage", "-z"]).output();
+    // From the worktree's root, whatever directory `lane` started in: `ls-files`
+    // lists what is below where it runs.
+    let output = lane
+        .command()
+        .current_dir(&lane.work_dir)
+        .args(["ls-files", "--stage", "-z"])
+        .output();
     let mut paths = Vec::new();
     if let Ok(output) = output {
         for entry in output.stdout.split(|byte| *byte == 0) {
@@ -387,6 +396,58 @@ fn gitlink_paths(lane: &LaneGit, pinned: &Pinned) -> Vec<String> {
         cache.insert(pinned.git_dir.clone(), (key.0, key.1, paths.clone()));
     }
     paths
+}
+
+/// The closest directory from `start` up to (not including) `root` that holds a
+/// `.git` entry: the repository git would discover from `start` instead of the
+/// worktree.
+fn nested_repo_root(root: &Path, start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .take_while(|dir| *dir != root)
+        .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
+        .map(Path::to_path_buf)
+}
+
+/// The git directory of the submodule at `nested`: its `.git` directory, or what
+/// its `.git` file points at, which must be inside the registered repository's own
+/// git directory.
+fn nested_git_dir(nested: &Path, pinned: &Pinned) -> Result<PathBuf, String> {
+    let dot_git = nested.join(".git");
+    let metadata = std::fs::symlink_metadata(&dot_git).map_err(|error| {
+        format!(
+            "{NESTED_PREFIX}: cannot read {}: {error}",
+            dot_git.display()
+        )
+    })?;
+    if metadata.is_dir() {
+        return Ok(canonical(&dot_git));
+    }
+    let text = if metadata.is_file() {
+        std::fs::read_to_string(&dot_git).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let target = text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .unwrap_or_default();
+    let target = PathBuf::from(target);
+    let target = canonical(&if target.is_absolute() {
+        target
+    } else {
+        nested.join(target)
+    });
+    if target.starts_with(&pinned.common_dir) {
+        Ok(target)
+    } else {
+        Err(format!(
+            "{NESTED_PREFIX}: the `.git` of {} does not point into the repository's own git directory",
+            nested.display()
+        ))
+    }
 }
 
 impl LaneGit {
@@ -475,21 +536,58 @@ impl LaneGit {
                 work_dir: start.clone(),
                 start,
                 pinned: None,
+                parent: None,
             });
         };
         let common_dir = registered_common_dir(&repo)?;
         let git_dir = registered_admin_dir(&common_dir, &work_dir)?;
         let lane = Self {
             work_dir,
-            start,
+            start: start.clone(),
             pinned: Some(Pinned {
                 repo,
                 common_dir,
                 git_dir,
             }),
+            parent: None,
         };
         lane.verify()?;
-        Ok(lane)
+        // A directory inside a submodule is the submodule's, not the worktree's:
+        // git finds the closest `.git`, and so does the HEAD a caller asks for.
+        match nested_repo_root(&lane.work_dir, &start) {
+            None => Ok(lane),
+            Some(nested) => lane.into_nested(nested, start),
+        }
+    }
+
+    /// The lane of the submodule `nested` of this worktree: its own git
+    /// directory, vouched for by this worktree's registration and by
+    /// [`Self::check_nested_repos`] (which `verify` ran). A repository that is not
+    /// a gitlink of the worktree's index is one the worker made: Kronn runs
+    /// nothing in it.
+    fn into_nested(self, nested: PathBuf, start: PathBuf) -> Result<Self, String> {
+        let Some(pinned) = self.pinned.clone() else {
+            return Ok(self);
+        };
+        let relative = nested
+            .strip_prefix(&self.work_dir)
+            .unwrap_or(&nested)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !gitlink_paths(&self, &pinned).contains(&relative) {
+            return Err(format!(
+                "{NESTED_PREFIX}: `{relative}` of {} is a repository that is not a submodule of \
+                 the worktree; Kronn runs no git command in it",
+                self.work_dir.display()
+            ));
+        }
+        let git_dir = nested_git_dir(&nested, &pinned)?;
+        Ok(Self {
+            work_dir: nested,
+            start,
+            pinned: Some(Pinned { git_dir, ..pinned }),
+            parent: Some(Box::new(self)),
+        })
     }
 
     /// The pointer of a pinned worktree still reads the registered git
@@ -498,6 +596,18 @@ impl LaneGit {
         let Some(pinned) = &self.pinned else {
             return Ok(());
         };
+        if let Some(parent) = &self.parent {
+            // The worktree's pointer and every submodule's configuration first,
+            // then that this submodule still reads the git directory seen at resolve.
+            parent.verify()?;
+            return match nested_git_dir(&self.work_dir, pinned) {
+                Ok(dir) if dir == pinned.git_dir => Ok(()),
+                _ => Err(format!(
+                    "{NESTED_PREFIX}: the `.git` of {} changed while Kronn was using it",
+                    self.work_dir.display()
+                )),
+            };
+        }
         let pointer = self.work_dir.join(".git");
         let refuse = |why: String| {
             tracing::warn!(
@@ -557,17 +667,9 @@ impl LaneGit {
         &self.work_dir
     }
 
-    /// A `git` command for this worktree, in front of which stand the pinned
-    /// repository and the switches that turn off everything the worktree or the
-    /// worker could name for git to run. Starts in the worktree.
-    pub fn command(&self) -> Command {
-        // lane-git-allow: this is the builder.
-        let mut command = crate::core::cmd::git_cmd();
-        if let Some(pinned) = &self.pinned {
-            command
-                .arg(format!("--git-dir={}", pinned.git_dir.display()))
-                .arg(format!("--work-tree={}", self.work_dir.display()));
-        }
+    /// The `-c` settings that turn off everything the worktree or the worker
+    /// could name for git to run.
+    fn settings(&self) -> Vec<String> {
         let mut settings = vec![
             format!("core.hooksPath={NO_HOOKS}"),
             "core.fsmonitor=false".to_string(),
@@ -587,11 +689,28 @@ impl LaneGit {
         if let Some(pinned) = &self.pinned {
             settings.extend(neutralised_programs(&pinned.common_dir, &self.work_dir));
         }
-        for setting in settings {
+        settings
+    }
+
+    /// A `git` command for this worktree, in front of which stand the pinned
+    /// repository and the switches that turn off everything the worktree or the
+    /// worker could name for git to run. Starts in the worktree.
+    pub fn command(&self) -> Command {
+        // lane-git-allow: this is the builder.
+        let mut command = crate::core::cmd::git_cmd();
+        if let Some(pinned) = &self.pinned {
+            command
+                .arg(format!("--git-dir={}", pinned.git_dir.display()))
+                .arg(format!("--work-tree={}", self.work_dir.display()));
+        }
+        for setting in self.settings() {
             command.arg("-c").arg(setting);
         }
         command
             .env("GIT_ATTR_NOSYSTEM", "1")
+            // A partial clone's missing object is fetched with the remote's
+            // transport program (`core.sshCommand`): never from a Kronn command.
+            .env("GIT_NO_LAZY_FETCH", "1")
             .env_remove("GIT_EXTERNAL_DIFF")
             .current_dir(&self.start);
         command
@@ -602,6 +721,40 @@ impl LaneGit {
 /// module documentation; this is the entry point of every call site.
 pub fn git(work_dir: &Path) -> Result<Command, String> {
     LaneGit::resolve(work_dir).map(|lane| lane.command())
+}
+
+/// Pin a program that starts git ITSELF in `work_dir` (`gh`, `glab`: `gh pr create`
+/// runs `git status`, which runs `core.fsmonitor`) to the same registered
+/// repository, with the same switches, through the environment. In a managed
+/// worktree whose pointer was redirected, git is aimed at a directory that does
+/// not exist: the program fails and runs nothing. The owner's own checkout is left
+/// alone.
+pub fn pin_foreign_command(command: &mut Command, work_dir: &Path) {
+    match LaneGit::resolve(work_dir) {
+        Ok(lane) => {
+            let Some(pinned) = lane.pinned() else {
+                return;
+            };
+            command
+                .env("GIT_DIR", &pinned.git_dir)
+                .env("GIT_WORK_TREE", lane.work_dir())
+                .env("GIT_ATTR_NOSYSTEM", "1")
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .env_remove("GIT_EXTERNAL_DIFF");
+            let settings = lane.settings();
+            command.env("GIT_CONFIG_COUNT", settings.len().to_string());
+            for (index, setting) in settings.iter().enumerate() {
+                let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
+                command
+                    .env(format!("GIT_CONFIG_KEY_{index}"), key)
+                    .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+            }
+        }
+        Err(error) => {
+            tracing::warn!("lane git refused {}: {error}", work_dir.display());
+            command.env("GIT_DIR", "/dev/null/kronn-refused");
+        }
+    }
 }
 
 /// [`git`] for tokio.

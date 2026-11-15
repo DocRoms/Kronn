@@ -371,3 +371,53 @@ fn first_lines_bounds_what_travels_with_a_refusal() {
     assert!(first_lines(&"x".repeat(10_000)).chars().count() <= REFUSAL_CHARS + 1);
     assert_eq!(first_lines("\n\n"), "");
 }
+
+#[cfg(unix)]
+#[test]
+fn the_hook_wrapper_keeps_both_streams_with_their_line_breaks_and_the_exit_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let hook = dir.path().join("pre-commit");
+    write_hook(
+        &hook,
+        "echo 'lint: 3 errors' >&2; echo 'second line'; echo 'third' >&2; exit 3",
+    );
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", HOOK_WRAPPER])
+        .arg(&hook)
+        .env("TMPDIR", dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    // What the probe runner does to a failure's stream: collapse whitespace.
+    let collapsed = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        decode_hook_output(&collapsed),
+        "lint: 3 errors\nsecond line\nthird"
+    );
+    // Nothing is left behind in the temp directory but the hook itself.
+    let left: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().collect();
+    assert_eq!(left.len(), 1, "{left:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_hook_wrapper_bounds_what_a_chatty_hook_prints() {
+    let dir = tempfile::tempdir().unwrap();
+    let hook = dir.path().join("pre-commit");
+    write_hook(
+        &hook,
+        "yes 'a long chatty line of lint output' | head -n 5000; exit 1",
+    );
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", HOOK_WRAPPER])
+        .arg(&hook)
+        .env("TMPDIR", dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.len() <= 8192, "{}", output.stdout.len());
+}

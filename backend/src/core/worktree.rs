@@ -2316,9 +2316,11 @@ pub fn reject_option_like_rev(rev: &str) -> Result<(), String> {
 /// builds on. Returns an error the saga surfaces as a refusal (never a guess).
 pub fn resolve_commit(repo_path: &Path, rev: &str) -> Result<String, String> {
     reject_option_like_rev(rev)?;
-    let out = crate::core::cmd::git_cmd()
+    // A worker's worktree is pinned and its pointer checked (KT-1745): git never
+    // discovers the repository, and so never fetches lazily or runs a program,
+    // from what the worker wrote. The owner's checkout keeps plain git.
+    let out = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?
         .args(["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git rev-parse failed: {e}"))?;
     if !out.status.success() {
@@ -3107,9 +3109,8 @@ pub fn fast_forward_target_to(
 pub fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
     reject_option_like_rev(ancestor)?;
     reject_option_like_rev(descendant)?;
-    let out = crate::core::cmd::git_cmd()
+    let out = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git merge-base failed: {e}"))?;
     match out.status.code() {
@@ -3141,9 +3142,11 @@ fn task_submodule_head(path: &Path) -> Result<Option<String>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let top_level = crate::core::cmd::git_cmd()
+    // The closest repository from `path`, pinned when it is (or is inside) a
+    // managed worktree: a submodule is its own repository, an empty placeholder
+    // is the parent worktree's directory.
+    let top_level = crate::core::lane_git::git_keeping_owner_hooks(path)?
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(path)
         .output()
         .map_err(|error| format!("cannot inspect task submodule {}: {error}", path.display()))?;
     let is_root = top_level.status.success()

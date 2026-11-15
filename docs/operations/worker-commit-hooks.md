@@ -84,6 +84,25 @@ Also pinned, because a worker's worktree can be their argument:
 
 - a directory *inside* a managed worktree (`<wt>/pkg/deep`) resolves to the
   worktree's pin, so a subdirectory is never a way back to git's discovery;
+- `resolve_commit` and `is_ancestor` (the first git call of the Git panel, of
+  `run_integration`, of the send-back and of the checkpoint, handed a worker's
+  worktree) and the `rev-parse --show-toplevel` of the submodule re-provisioning
+  go through `git_keeping_owner_hooks`: in a managed worktree they are pinned (a
+  redirected pointer is refused before git reads it), in the owner's checkout plain
+  git. Every lane command also sets `GIT_NO_LAZY_FETCH=1`, so a promisor remote
+  the worker wrote can never make a read fetch with its transport program
+  ([src: file: backend/src/core/worktree.rs:2317#resolve_commit]). The ratchet of
+  the guard counts DIRECT spawns only: a plain helper handed a worktree path is
+  not seen, so such a helper belongs in the function list of the guard test;
+- `gh` and `glab` (`host_cli_command`: `gh pr create` runs `git status` itself)
+  get the pin through the environment — `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_CONFIG_*` for hooks off, no file-system monitor — and, in a worktree whose
+  pointer was redirected, a `GIT_DIR` that does not exist, so they run nothing
+  ([src: file: backend/src/core/lane_git.rs:732#pin_foreign_command]);
+- the Git panel of a workspace Kronn refuses to run git in says why (an
+  unregistered directory under `.kronn/worktrees`, a redirected pointer, a
+  submodule whose configuration was rewritten) instead of showing an empty answer
+  ([src: file: backend/src/api/disc_git.rs:305#git_allowed_in]);
 - the read helpers of the Git panel and the discussion routes (`run_git_status`,
   `run_git_diff`, `run_git_blame`, `run_git_commit_patch`, the commit and range
   pages, `disc_pr_template`, `disc_workspace`'s `git_value`) use
@@ -119,7 +138,15 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
 - the builder sets `diff.ignoreSubmodules=dirty`, `submodule.recurse=false` and
   `status.submoduleSummary=false`: `status` and `diff` still show a moved gitlink
   but never run `git status` inside the submodule;
-- before every command the builder lists the index's gitlinks and refuses
+- a directory inside a materialised submodule (`<wt>/lib`, `<wt>/lib/pkg`) is the
+  SUBMODULE's own pinned repository (`--git-dir=<its git directory>`,
+  `--work-tree=<it>`), vouched for by the worktree's registration and the check
+  below; it is not pinned to the parent, so `HEAD` there is the submodule's (what
+  re-provisioning compares with its pin). A repository that is not a gitlink of the
+  worktree is one the worker made: Kronn runs no git command in it
+  ([src: file: backend/src/core/lane_git.rs:568#into_nested]);
+- before every command the builder lists the index's gitlinks (from the worktree's
+  root, whatever directory the command starts in) and refuses
   (`NestedRepoUnsafe`) while one carries a configuration it does not trust: a
   nested `.git/config` with any key outside `core.*` plumbing, `remote.*.url|fetch`,
   `branch.*.remote|merge`, `user.*` (so no `filter.*`, `core.fsmonitor`,
@@ -150,18 +177,22 @@ owner's own and is left alone.
 ## The worker cannot write its pointer
 
 The pointer is the one file the pinned commands trust, so it is read-only to the
-worker wherever it writes, and so is every nested `.git` (any depth, any case):
+worker wherever it writes, and so is the `.git` of every nested repository that
+EXISTS when the sandbox starts (a submodule; any case). A repository the worker
+creates LATER (`git init vendor/pkg`, terraform git modules, Composer source
+installs, Bundler git gems, SwiftPM checkouts) is not denied on any platform: the
+nested-repository check above and the refusal to stage a new embedded repository
+cover it.
 
-- Kronn's Seatbelt profile denies writes to it and, by a case-insensitive regular
-  expression, to every `.git` below the worktree
+- Kronn's Seatbelt profile denies writes to the pointer and, by a case-insensitive
+  regular expression per directory, to the `.git` of the worktree and of each
+  nested repository found at launch
   ([src: file: backend/src/core/task_worker_sandbox.rs:518#seatbelt_profile_read_only]);
   bubblewrap binds the pointer and every nested `.git` that exists at launch
   read-only
   ([src: file: backend/src/core/task_worker_sandbox.rs:584#bubblewrap_args_read_only]);
-  a bind cannot stop a NEW nested `.git` from being created on Linux, which the
-  nested-repository check above covers;
 - Claude's task-worker settings carry `sandbox.filesystem.denyWrite` for the
-  pointer and for `<worktree>/**/.git` and `<worktree>/**/.git/**`, and
+  pointer and for each existing nested `.git` (and its content), and
   `Edit/Write/MultiEdit/NotebookEdit` permission denies
   ([src: file: backend/src/agents/runner.rs:13226#claude_task_worker_settings]);
 - the HTTP agents' write tools refuse any path with a `.git` component
@@ -195,7 +226,11 @@ A stored `main_checkout` is read as `sandboxed`
 hook runs confined or not at all.
 
 The confined hook is bounded by the lane's 10-minute probe limit; a hook still
-running then is killed and refuses the commit.
+running then is killed and refuses the commit. Both of its streams are kept: a
+small wrapper (`sh -c`) collects stdout and stderr in order, bounded to the last
+8 KiB, and hands them back with their line breaks, so a linter that prints its
+errors on stdout is not lost
+([src: file: backend/src/core/commit_hooks.rs:214#HOOK_WRAPPER]).
 
 **Not run under any value**: `commit-msg` (commitlint), `prepare-commit-msg`,
 `post-commit`, `post-merge`, `reference-transaction`… Only the gating hook is
@@ -217,7 +252,7 @@ output (20 lines / 2 000 characters), never a conflict
 - `task_exec_commit` / `git_commit` fail with `HookRefused (pre-commit): <output>`
   and commit nothing;
 - the candidate build returns `CandidateOutcome::HookRefused { hook, output }`
-  ([src: file: backend/src/core/worktree.rs:2443#HookRefused]), undoes the merge
+  ([src: file: backend/src/core/worktree.rs:2445#HookRefused]), undoes the merge
   and is reported to the principal and worker with the hook's output.
 
 A `git merge` refused before it starts (a dirty tree, unrelated histories) is an
@@ -243,12 +278,21 @@ holds the integration for the child worktree; it is never an empty
   write tools refuse the pointer.
 - `backend/src/core/docs_citations/merge_tests.rs`: restoring staged docs fires no
   `post-checkout`.
+- `backend/src/core/lane_git_test.rs` (round 4): `resolve_commit` / `is_ancestor` on
+  a worktree redirected to a partial clone whose `ext::` transport is a worker
+  program run nothing (control: plain `rev-parse` fires it); a materialised
+  submodule is its own repository, not the parent's (`verify_worktree_head` on it);
+  a submodule check also runs from a subdirectory; a program that starts git itself
+  is pinned; an unregistered directory gets a clear message; the owner's own
+  `pre-commit` still runs for their own commit.
 - `backend/src/core/commit_hooks_test.rs`: a relative-hooksPath hook writing a
   marker outside the worktree is never run by a worker commit nor a candidate
   merge; a failing hook is `HookRefused` with its output and commits nothing; DCO
   sign-off stays enforced; a stored `main_checkout` reads as `sandboxed`;
-  `sandboxed` cannot write outside the worktree.
-- `backend/src/core/task_worker_sandbox_test.rs` and
+  `sandboxed` cannot write outside the worktree; the wrapper keeps both streams,
+  their line breaks and the exit status.
+- `backend/src/core/task_worker_sandbox_test.rs` (also: only existing nested
+  repositories are denied, a confined command can create a nested repository) and
   `backend/src/agents/runner_test.rs`: the pointer is read-only in the profile
   (and, where the OS sandbox can be applied, to a real confined command) and in
   Claude's settings.
@@ -264,8 +308,9 @@ holds the integration for the child worktree; it is never an empty
   lane's Cargo target.
 - `commit-msg` hooks (commitlint) are not run for a worker's commit under any
   policy; only the DCO sign-off is enforced.
-- A nested `.git` created after a Linux (bubblewrap) sandbox started cannot be
-  denied by a bind; Kronn's nested-repository check refuses it before any command.
+- A nested `.git` created after the sandbox started is not denied on any platform
+  (so `git init vendor/pkg` works); Kronn's nested-repository check and the refusal
+  to stage a new embedded repository cover it.
 - `fast_forward_to` and the integration target's checks run in the target
   checkout with the owner's hooks, as the owner's own git does; the target is not a
   worker lane.

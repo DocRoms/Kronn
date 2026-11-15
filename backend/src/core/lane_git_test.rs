@@ -840,4 +840,257 @@ mod unix {
         assert!(profile.contains("[gG][iI][tT]"), "{profile}");
         assert!(profile.contains("deny file-write*"), "{profile}");
     }
+    /// A `.git` pointer redirected to a partial clone whose HEAD names an object
+    /// it does not have: any command that reads it makes git fetch it lazily,
+    /// through the `core.sshCommand` the worker wrote.
+    fn redirect_to_promisor_repo(world: &World) -> String {
+        let evil = world.worktree.join("evil-repo");
+        git(
+            evil.parent().unwrap(),
+            &["init", "-q", "-b", "main", evil.to_str().unwrap()],
+        );
+        let ssh = evil.join("ssh.sh");
+        script(&ssh, &world.touch("LAZY_FETCH"));
+        for (key, value) in [
+            ("core.repositoryformatversion", "1"),
+            ("extensions.partialclone", "origin"),
+            // The transport is a program the worker names: `ext::` runs it.
+            ("protocol.ext.allow", "always"),
+            ("remote.origin.promisor", "true"),
+            ("core.sshCommand", ssh.to_str().unwrap()),
+        ] {
+            git(&evil, &["config", key, value]);
+        }
+        git(
+            &evil,
+            &[
+                "config",
+                "remote.origin.url",
+                &format!("ext::{}", ssh.display()),
+            ],
+        );
+        let missing = "1234567890abcdef1234567890abcdef12345678";
+        fs::write(evil.join(".git/refs/heads/main"), format!("{missing}\n")).unwrap();
+        fs::write(
+            world.worktree.join(".git"),
+            format!("gitdir: {}/.git\n", evil.display()),
+        )
+        .unwrap();
+        missing.to_string()
+    }
+
+    #[test]
+    fn a_plain_rev_parse_in_a_redirected_worktree_lazy_fetches_through_the_workers_ssh_command() {
+        // Control: the fixture is the attack, or the test below proves nothing.
+        let world = World::new();
+        redirect_to_promisor_repo(&world);
+        let _ = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD^{commit}"])
+            .current_dir(&world.worktree)
+            .output()
+            .unwrap();
+        assert!(
+            world.marker("LAZY_FETCH").exists(),
+            "a plain `git rev-parse` fetches lazily with the redirected configuration"
+        );
+    }
+
+    #[test]
+    fn resolve_commit_and_is_ancestor_on_a_redirected_worktree_run_nothing() {
+        let world = World::new();
+        let missing = redirect_to_promisor_repo(&world);
+        let error = crate::core::worktree::resolve_commit(&world.worktree, "HEAD").unwrap_err();
+        assert!(is_tamper(&error), "{error}");
+        let error =
+            crate::core::worktree::is_ancestor(&world.worktree, &missing, "HEAD").unwrap_err();
+        assert!(is_tamper(&error), "{error}");
+        // From a subdirectory too.
+        let sub = world.worktree.join("pkg");
+        fs::create_dir_all(&sub).unwrap();
+        assert!(crate::core::worktree::resolve_commit(&sub, "HEAD").is_err());
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn resolve_commit_on_a_healthy_worktree_and_on_the_checkout_still_works() {
+        let world = World::new();
+        let main_head = git(&world.root(), &["rev-parse", "main"]);
+        assert_eq!(
+            crate::core::worktree::resolve_commit(&world.worktree, "HEAD").unwrap(),
+            main_head
+        );
+        assert_eq!(
+            crate::core::worktree::resolve_commit(&world.root(), "main").unwrap(),
+            main_head
+        );
+        assert!(crate::core::worktree::is_ancestor(&world.worktree, &main_head, "HEAD").unwrap());
+    }
+
+    #[test]
+    fn the_lane_command_never_fetches_lazily() {
+        let world = World::new();
+        let command = crate::core::lane_git::git(&world.worktree).unwrap();
+        let no_lazy = command
+            .get_envs()
+            .find(|(key, _)| *key == "GIT_NO_LAZY_FETCH")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned());
+        assert_eq!(no_lazy.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn a_materialised_submodule_is_its_own_repository_not_the_parent_worktree() {
+        let world = world_with_submodule();
+        let sub = world.worktree.join("lib");
+        let sub_head = git(&sub, &["rev-parse", "HEAD"]);
+        let parent_head = git(&world.worktree, &["rev-parse", "HEAD"]);
+        assert_ne!(sub_head, parent_head);
+
+        let lane = LaneGit::resolve(&sub).unwrap();
+        assert_eq!(lane.work_dir(), sub.canonicalize().unwrap());
+        let output = lane.command().args(["rev-parse", "HEAD"]).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            sub_head,
+            "{output:?}"
+        );
+        // What re-provisioning asks, without removing the submodule first.
+        crate::core::worktree::verify_worktree_head(&sub, &sub_head).unwrap();
+        assert_eq!(
+            crate::core::worktree::resolve_commit(&sub, "HEAD").unwrap(),
+            sub_head
+        );
+        // And a directory inside it is the submodule too.
+        let deeper = sub.join("pkg");
+        fs::create_dir_all(&deeper).unwrap();
+        assert_eq!(
+            crate::core::worktree::resolve_commit(&deeper, "HEAD").unwrap(),
+            sub_head
+        );
+        // The parent is still the parent.
+        crate::core::worktree::verify_worktree_head(&world.worktree, &parent_head).unwrap();
+    }
+
+    #[test]
+    fn a_submodule_the_worker_reconfigured_is_still_refused_when_asked_for_directly() {
+        let world = world_with_submodule();
+        let config = world.worktree.join("lib/.git/config");
+        let mut text = fs::read_to_string(&config).unwrap();
+        text.push_str(&format!(
+            "[core]\n\tfsmonitor = {}\n",
+            world.marker("SUB_FSMONITOR").display()
+        ));
+        fs::write(&config, text).unwrap();
+        let error = LaneGit::resolve(&world.worktree.join("lib")).unwrap_err();
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn a_repository_the_worker_made_inside_the_worktree_is_not_pinned_to_the_parent() {
+        let world = World::new();
+        let nested = world.worktree.join("vendor/pkg");
+        fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q"]);
+        // Not a gitlink of the lane: Kronn runs nothing in it.
+        let error = LaneGit::resolve(&nested).unwrap_err();
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        // The worktree itself is unaffected (the embedded repository is refused
+        // at staging time, not here).
+        assert!(LaneGit::resolve(&world.worktree).is_ok());
+    }
+
+    #[test]
+    fn a_program_that_starts_git_itself_is_pinned_and_a_redirected_pointer_runs_nothing() {
+        let world = World::new();
+        // Healthy: the environment pins the registered repository and turns off
+        // the file-system monitor and the hooks, as `gh`'s own `git status` sees.
+        let mut command = std::process::Command::new("git");
+        command
+            .args(["config", "--get", "core.fsmonitor"])
+            .current_dir(&world.worktree);
+        pin_foreign_command(&mut command, &world.worktree);
+        let output = command.output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "false");
+        let mut command = std::process::Command::new("git");
+        command
+            .args(["config", "--get", "core.hooksPath"])
+            .current_dir(&world.worktree);
+        pin_foreign_command(&mut command, &world.worktree);
+        let output = command.output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "/dev/null");
+
+        // Redirected: control, then the pinned command.
+        let evil = world.worktree.join("evil-repo");
+        world.redirect_pointer_to(&evil);
+        let _ = git_status(&world.worktree, &["status", "--porcelain"]);
+        assert!(
+            world.marker("FSMONITOR").exists(),
+            "a plain `git status` runs the redirected fsmonitor"
+        );
+        fs::remove_file(world.marker("FSMONITOR")).unwrap();
+        let mut command = std::process::Command::new("git");
+        command
+            .args(["status", "--porcelain"])
+            .current_dir(&world.worktree);
+        pin_foreign_command(&mut command, &world.worktree);
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn a_directory_under_worktrees_that_git_never_registered_gets_a_clear_message() {
+        let world = World::new();
+        let stray = world.root().join(".kronn/worktrees/not-a-worktree");
+        fs::create_dir_all(&stray).unwrap();
+        let error = crate::api::disc_git::git_allowed_in(&stray).unwrap_err();
+        assert!(error.contains("does not run git"), "{error}");
+        assert!(error.contains("not a worktree registered"), "{error}");
+        // A registered worktree and the owner's checkout are fine.
+        crate::api::disc_git::git_allowed_in(&world.worktree).unwrap();
+        crate::api::disc_git::git_allowed_in(&world.root()).unwrap();
+        // A redirected pointer says so too.
+        let evil = world.worktree.join("evil-repo");
+        world.redirect_pointer_to(&evil);
+        let error = crate::api::disc_git::git_allowed_in(&world.worktree).unwrap_err();
+        assert!(error.contains(TAMPER_PREFIX), "{error}");
+        world.assert_no_marker();
+    }
+
+    #[test]
+    fn a_commit_the_user_asks_for_in_their_own_checkout_still_runs_their_pre_commit_hook() {
+        let world = World::new();
+        // The owner's own hook, in the checkout they work in: it keeps running.
+        script(
+            &world.root().join(".git/hooks/pre-commit"),
+            &world.touch("OWNER_PRE_COMMIT"),
+        );
+        fs::write(world.root().join("owner.txt"), "mine").unwrap();
+        crate::api::git_ops::run_git_commit(
+            &world.root(),
+            &["owner.txt".to_string()],
+            "owner commit",
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(
+            world.marker("OWNER_PRE_COMMIT").exists(),
+            "the owner's pre-commit hook must run for their own commit"
+        );
+    }
+
+    #[test]
+    fn a_submodule_check_also_runs_from_a_subdirectory_of_the_worktree() {
+        let world = world_with_submodule();
+        let config = world.worktree.join("lib/.git/config");
+        let mut text = fs::read_to_string(&config).unwrap();
+        text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+        fs::write(&config, text).unwrap();
+        let sub = world.worktree.join("pkg");
+        fs::create_dir_all(&sub).unwrap();
+        let error = LaneGit::resolve(&sub).unwrap_err();
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+    }
 }

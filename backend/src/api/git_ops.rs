@@ -2041,6 +2041,10 @@ fn host_cli_command(
         crate::core::github_connection::apply_launch_env(&mut command, github_env);
     }
     child_env::seal(&mut command, ChildRoute::GitHost, child_env::GITHUB_ENV);
+    // They start git themselves (`gh pr create` runs `git status`): in a managed
+    // worktree that git is pinned to the registered repository, with no hook and
+    // no file-system monitor (KT-1745), never to what the worker's `.git` names.
+    crate::core::lane_git::pin_foreign_command(&mut command, repo_path);
     command
 }
 

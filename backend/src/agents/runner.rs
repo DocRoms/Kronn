@@ -13238,14 +13238,19 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     // (the shell through `denyWrite`, the file tools through a permission rule).
     let git_pointer = lane.worktree.join(".git");
     let mut permission_deny = crate::core::vault_guard::claude_permission_deny();
-    // …and so is every nested repository's `.git` (a submodule's configuration is
-    // read by commands that look inside it), whatever its case.
-    let nested_git = [
-        format!("{}/**/.git", lane.worktree.to_string_lossy()),
-        format!("{}/**/.git/**", lane.worktree.to_string_lossy()),
-        format!("{}/**/.[gG][iI][tT]", lane.worktree.to_string_lossy()),
-        format!("{}/**/.[gG][iI][tT]/**", lane.worktree.to_string_lossy()),
-    ];
+    // …and so is the `.git` of every repository that EXISTS in the worktree now (a
+    // submodule: its configuration is read by commands that look inside it). A
+    // repository the worker creates later (`git init vendor/pkg`, terraform git
+    // modules, Composer source installs, Bundler git gems) stays possible: Kronn
+    // refuses to stage or to run git in a new one.
+    let mut nested_git: Vec<String> = Vec::new();
+    for entry in crate::core::task_worker_sandbox::nested_git_entries(&lane.worktree) {
+        let text = entry.to_string_lossy().into_owned();
+        nested_git.push(format!("{text}/**"));
+        nested_git.push(text);
+    }
+    nested_git.sort();
+    nested_git.dedup();
     for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
         permission_deny.push(format!("{tool}(/{})", git_pointer.to_string_lossy()));
         for pattern in &nested_git {

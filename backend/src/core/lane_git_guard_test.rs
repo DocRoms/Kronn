@@ -139,6 +139,11 @@ fn the_functions_that_run_git_on_a_worktree_never_use_a_plain_git_command() {
                 "committed_file_changes",
                 "file_at_revision",
                 "committer_identity",
+                // Called with a worker's worktree (`resolve_commit(child, "HEAD")`),
+                // and with a submodule of it by the re-provisioning.
+                "resolve_commit",
+                "is_ancestor",
+                "task_submodule_head",
             ],
         ),
         (
@@ -203,7 +208,10 @@ fn production_files() -> Vec<String> {
 }
 
 /// Files with plain git commands that do not run on a worker's worktree, and how
-/// many each may keep. A file that is not listed keeps none; a listed file may
+/// many each may keep. This ratchet counts DIRECT spawns only: a plain helper that
+/// is handed a worktree path (`resolve_commit(child, "HEAD")` was one) is not seen
+/// here, so a helper that can be called with a worker's path belongs in the
+/// function list of `the_functions_that_run_git_on_a_worktree_...` above. A file that is not listed keeps none; a listed file may
 /// not gain one. Each entry claims that its commands run in the REGISTERED
 /// project checkout, the owner's own checkout, a repository Kronn creates or a
 /// throw-away one, never in a directory a worker writes. A command that does run
@@ -237,7 +245,7 @@ const PLAIN_GIT_ALLOWED: &[(&str, usize)] = &[
     ("core/scanner.rs", 2),
     ("core/task_worker_lane_seeds.rs", 1),
     ("core/upstream_mirror.rs", 5),
-    ("core/worktree.rs", 48),
+    ("core/worktree.rs", 45),
     ("workflows/batch_step.rs", 1),
     ("workflows/workspace.rs", 8),
 ];

@@ -10,6 +10,26 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
+    /// The vault's permission denies come first and untouched; what a task worker's
+    /// settings add after them is only the `.git` entries (KT-1745: the worktree's
+    /// pointer and the nested repositories that exist, which the worker never writes).
+    fn assert_vault_deny_list_untouched(settings: &serde_json::Value) {
+        let deny: Vec<String> = settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_string())
+            .collect();
+        let vault = crate::core::vault_guard::claude_permission_deny();
+        assert_eq!(deny[..vault.len()], vault[..]);
+        for added in &deny[vault.len()..] {
+            assert!(
+                added.ends_with("/.git)") || added.ends_with("/.git/**)"),
+                "only `.git` entries are added to the vault's list: {added}"
+            );
+        }
+    }
+
     #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
@@ -10630,10 +10650,7 @@ Suite de la réponse.";
             settings["sandbox"]["filesystem"]["denyRead"],
             serde_json::json!(crate::core::vault_guard::claude_sandbox_deny_read())
         );
-        assert_eq!(
-            settings["permissions"]["deny"],
-            serde_json::json!(crate::core::vault_guard::claude_permission_deny())
-        );
+        assert_vault_deny_list_untouched(&settings);
         assert_eq!(
             crate::core::vault_guard::launch_sandbox("claude", None, &args),
             crate::core::vault_guard::LaunchSandbox::Own,
@@ -10979,10 +10996,7 @@ Suite de la réponse.";
         // The data directory stays refused by `permissions.deny`, which Claude
         // checks before it ever asks (so before the hook): the hook adds no
         // path of its own to it, and the deny list is the vault's, untouched.
-        assert_eq!(
-            settings["permissions"]["deny"],
-            serde_json::json!(crate::core::vault_guard::claude_permission_deny())
-        );
+        assert_vault_deny_list_untouched(&settings);
         assert!(
             settings["permissions"].get("allow").is_none(),
             "no allow rule is added: {settings}"
