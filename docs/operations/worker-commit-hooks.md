@@ -26,7 +26,7 @@ does run the program).
 ## The rule: one builder, pinned to the registration
 
 Every git command Kronn runs on a worker's worktree is built by
-[src: file: backend/src/core/lane_git.rs:790-792#git]
+[src: file: backend/src/core/lane_git.rs:793-795#git]
 ([src: file: backend/src/core/lane_git.rs:63#LaneGit]), never by `git_cmd()`:
 
 - **The repository is pinned, not discovered.** The command carries
@@ -38,7 +38,7 @@ Every git command Kronn runs on a worker's worktree is built by
   ([src: file: backend/src/core/lane_git.rs:138-140#registered_admin_dir]). Neither
   the worktree's `.git` file nor a `commondir` is consulted.
 - **The pointer is verified before every command**
-  ([src: file: backend/src/core/lane_git.rs:661-663#verify]). If `<worktree>/.git`
+  ([src: file: backend/src/core/lane_git.rs:664-666#verify]). If `<worktree>/.git`
   no longer reads `gitdir: <that admin dir>` (absolute or Kronn's portable
   relative form), nothing runs and the operation fails with
   `WorktreeTampered: …` — the text `task_exec_commit` returns to the worker, and
@@ -53,7 +53,7 @@ Every git command Kronn runs on a worker's worktree is built by
 - A path that is not a managed worktree is the owner's own checkout: it keeps
   git's discovery and gets the same switches. A **push** keeps the owner's hooks
   there (`pre-push`)
-  ([src: file: backend/src/core/lane_git.rs:835-838#git_keeping_owner_hooks]); from a
+  ([src: file: backend/src/core/lane_git.rs:838-841#git_keeping_owner_hooks]); from a
   managed worktree it is pinned and hook-less like the rest
   ([src: file: backend/src/api/git_ops.rs:1764-1767#run_git_push]), and the token-bearing
   authenticated push therefore reads the registered repository's configuration
@@ -98,7 +98,7 @@ Also pinned, because a worker's worktree can be their argument:
   get the pin through the environment — `GIT_DIR`, `GIT_WORK_TREE`,
   `GIT_CONFIG_*` for hooks off, no file-system monitor — and, in a worktree whose
   pointer was redirected, a `GIT_DIR` that does not exist, so they run nothing
-  ([src: file: backend/src/core/lane_git.rs:796-802#pin_foreign_command]);
+  ([src: file: backend/src/core/lane_git.rs:799-805#pin_foreign_command]);
 - the Git panel of a workspace Kronn refuses to run git in says why (an
   unregistered directory under `.kronn/worktrees`, a redirected pointer, a
   submodule whose configuration was rewritten) instead of showing an empty answer
@@ -141,7 +141,7 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
   `status`, `diff` and `diff-index` also carry `--ignore-submodules=dirty` ON THE
   COMMAND LINE inside a managed worktree, which beats a worker-written
   `.gitmodules` `ignore = none`
-  ([src: file: backend/src/core/lane_git.rs:869-874#ignore_submodules]): they still show a
+  ([src: file: backend/src/core/lane_git.rs:872-877#ignore_submodules]): they still show a
   moved gitlink but never run `git status` inside the submodule;
 - a gitlink is staged by its sha (`update-index --cacheinfo 160000,<sha>,<path>`,
   the sha read through the submodule's own pinned lane), never with `git add`, which
