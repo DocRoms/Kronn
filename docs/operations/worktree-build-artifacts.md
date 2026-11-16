@@ -483,7 +483,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1777-1777#first_build_args]
-[src: file: backend/src/core/project_toolchains.rs:604#has_lib_target]
+[src: file: backend/src/core/project_toolchains.rs:609#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10913-10944#warm_failure_notice]
 
