@@ -91,6 +91,7 @@ fn the_global_entry_overrides_every_detected_default() {
         first_build_command: Some("  make deps  ".into()),
         first_build_timeout_min: Some(90),
         rust_roots: None,
+        dependency_dirs: None,
     };
 
     let effective = resolve(&global, None, never_detected);
@@ -128,6 +129,7 @@ fn a_project_field_wins_over_the_global_one_and_the_rest_is_inherited() {
         first_build_command: Some("make deps".into()),
         first_build_timeout_min: Some(90),
         rust_roots: None,
+        dependency_dirs: None,
     };
     let project = LaneWarmConfig {
         first_build_timeout_min: Some(20),
@@ -300,6 +302,7 @@ fn the_settings_are_validated_before_they_are_stored() {
         first_build_command: Some("composer install".into()),
         first_build_timeout_min: Some(45),
         rust_roots: None,
+        dependency_dirs: None,
         seed_alignment: Some(true),
     };
     assert_eq!(ok.validate(), Ok(()));
@@ -365,6 +368,7 @@ fn the_workers_config_carries_the_global_entry_and_it_survives_a_toml_round_trip
             first_build_command: Some("npm ci".into()),
             first_build_timeout_min: Some(30),
             rust_roots: None,
+            dependency_dirs: None,
         },
         ..WorkersConfig::default()
     };

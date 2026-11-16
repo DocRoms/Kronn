@@ -5657,7 +5657,15 @@ first_build_timeout_min?: number,
  * found from the manifests. A project's own setting only: the global entry
  * cannot name directories of a repository it does not know.
  */
-rust_roots?: Array<string>, };
+rust_roots?: Array<string>,
+/**
+ * KT-1747 — the dependency directories a lane layers read-only from the main
+ * checkout (`node_modules`, `vendor`, `Pods`, … at any depth), as
+ * directories relative to the repository. `None` = the ones detected from
+ * the manifests; a list = exactly those; an empty list = none. A project's
+ * own setting only, like `rust_roots`.
+ */
+dependency_dirs?: Array<string>, };
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**

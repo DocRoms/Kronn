@@ -359,7 +359,46 @@ impl WorkerLane {
         if let Some(source) = self.frontend_deps_source().filter(|path| path.is_dir()) {
             roots.push(source);
         }
+        for (path, _) in self.layered_dependency_dirs().0 {
+            if let Some(source) = self
+                .main_checkout
+                .as_ref()
+                .map(|root| root.join(&path))
+                .filter(|source| source.is_dir() && !roots.contains(source))
+            {
+                roots.push(source);
+            }
+        }
         roots
+    }
+
+    /// KT-1747 — the dependency directories this lane layers besides the
+    /// frontend's own (which keeps its dedicated link, see
+    /// [`WorkerLane::link_frontend_deps`]): the ones detected from the
+    /// worktree's manifests at any depth, or exactly the project's own list
+    /// ([`crate::core::task_worker_lane_settings`]). Each is paired with its
+    /// path relative to the repository; the second list holds the entries of
+    /// the project's list that name no directory inside the repository.
+    fn layered_dependency_dirs(&self) -> (Vec<(String, PathBuf)>, Vec<String>) {
+        let settings = crate::core::task_worker_lane_settings::effective_for(
+            &self.worktree,
+            self.main_checkout.as_deref(),
+        );
+        let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+        let (dirs, rejected) = crate::core::project_toolchains::dependency_dirs(
+            &profile,
+            settings.dependency_dirs.as_deref(),
+        );
+        let frontend = format!("{FRONTEND_DIR}/{NODE_MODULES}");
+        let dirs = dirs
+            .into_iter()
+            .filter(|dir| *dir != frontend)
+            .map(|dir| {
+                let destination = self.worktree.join(&dir);
+                (dir, destination)
+            })
+            .collect();
+        (dirs, rejected)
     }
 
     /// Environment a task worker gets so no env-prefixed command is needed.
@@ -499,8 +538,34 @@ impl WorkerLane {
                 warnings.push(format!("cannot ignore the node_modules link: {error}"));
             }
         }
+        let (layered, rejected) = self.layered_dependency_dirs();
+        warnings.extend(rejected.into_iter().map(|entry| {
+            format!(
+                "dependency_dirs entry `{entry}` is not a directory inside the repository: \
+                 ignored"
+            )
+        }));
+        let mut dependency_layers = Vec::new();
+        for (path, destination) in layered {
+            let source = self
+                .main_checkout
+                .as_ref()
+                .map(|root| root.join(&path))
+                .filter(|source| source.is_dir());
+            let state = self.link_deps_at(&destination, source);
+            if matches!(state, FrontendDeps::Linked(_)) && self.worktree.join(".git").exists() {
+                if let Err(error) = crate::core::worktree::ensure_local_git_exclude(
+                    &self.worktree,
+                    &format!("/{path}"),
+                ) {
+                    warnings.push(format!("cannot ignore the {path} layer: {error}"));
+                }
+            }
+            dependency_layers.push(DependencyLayer { path, state });
+        }
         Provisioned {
             frontend_deps,
+            dependency_layers,
             cargo_home_ready,
             shared_cargo_home,
             warnings,
@@ -541,6 +606,14 @@ impl WorkerLane {
         }
         let destination = frontend.join(NODE_MODULES);
         let source = self.frontend_deps_source().filter(|path| path.is_dir());
+        self.link_deps_at(&destination, source)
+    }
+
+    /// Make `destination` (a dependency directory of the worktree) available
+    /// from `source` (the main checkout's): layered entry by entry, never
+    /// replacing a directory the project has of its own.
+    fn link_deps_at(&self, destination: &Path, source: Option<PathBuf>) -> FrontendDeps {
+        let destination = destination.to_path_buf();
         match std::fs::symlink_metadata(&destination) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 // KT-1246 linked the whole directory, so Vite's config loader
@@ -652,10 +725,22 @@ fn private_cargo_home_requested() -> bool {
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
 }
 
+/// KT-1747 — how one dependency directory of the project (any toolchain, any
+/// depth) was made available to the lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyLayer {
+    /// The directory, relative to the repository, `/` separated.
+    pub path: String,
+    pub state: FrontendDeps,
+}
+
 /// What [`WorkerLane::provision`] managed to prepare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provisioned {
     pub frontend_deps: FrontendDeps,
+    /// Every other dependency directory the lane layers (KT-1747): `vendor/`,
+    /// `Pods/`, a nested package's `node_modules/`.
+    pub dependency_layers: Vec<DependencyLayer>,
     pub cargo_home_ready: bool,
     /// The host's own `CARGO_HOME`, when the lane runs with it rather than with
     /// its private one (see [`CARGO_HOME_ENV`]).
@@ -1416,3 +1501,7 @@ fn probe_writable(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 #[path = "task_worker_env_test.rs"]
 mod task_worker_env_test;
+
+#[cfg(test)]
+#[path = "task_worker_env_deps_test.rs"]
+mod task_worker_env_deps_test;

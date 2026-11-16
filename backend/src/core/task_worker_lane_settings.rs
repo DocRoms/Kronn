@@ -10,6 +10,7 @@
 //! | `first_build_command` | none: the detected cargo warm-up of every Rust root |
 //! | `first_build_timeout_min` | `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` when set on the host, else 60 (the variable only fills an unset config) |
 //! | `rust_roots` (a project's own only) | every Rust root found from the manifests |
+//! | `dependency_dirs` (a project's own only) | the dependency directory of every toolchain root found from the manifests (`node_modules`, `vendor`, `Pods`) |
 //!
 //! Every consumer of the lane's environment (the warm-up, the worker's launch,
 //! its sandbox) asks [`effective_for`], so a build the worker runs later sees the
@@ -45,6 +46,10 @@ pub struct EffectiveLaneSettings {
     /// The Rust roots to warm (directories relative to the repository), or
     /// `None` for every root found from the manifests. A project's own setting.
     pub rust_roots: Option<Vec<String>>,
+    /// KT-1747 — the dependency directories to layer (relative to the
+    /// repository), or `None` for the ones detected from the manifests. `Some`
+    /// of an empty list layers nothing. A project's own setting.
+    pub dependency_dirs: Option<Vec<String>>,
 }
 
 impl EffectiveLaneSettings {
@@ -112,6 +117,7 @@ pub fn resolve(
         first_build_timeout: Duration::from_secs(u64::from(minutes) * 60),
         first_build_timeout_configured: configured_minutes.is_some(),
         rust_roots: project.rust_roots.clone().filter(|roots| !roots.is_empty()),
+        dependency_dirs: project.dependency_dirs.clone(),
     }
 }
 
@@ -130,6 +136,7 @@ static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
         first_build_command: None,
         first_build_timeout_min: None,
         rust_roots: None,
+        dependency_dirs: None,
     },
     projects: BTreeMap::new(),
 });
@@ -207,3 +214,7 @@ fn intern(name: &str) -> &'static str {
 #[cfg(test)]
 #[path = "task_worker_lane_settings_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "task_worker_lane_settings_deps_test.rs"]
+mod deps_tests;

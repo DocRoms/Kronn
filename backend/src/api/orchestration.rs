@@ -12162,6 +12162,10 @@ fn worker_brief_markdown_in(
          supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
     };
     let ui_captures = crate::core::ui_captures::brief_section(lang);
+    let conventions = crate::core::project_toolchains::conventions_section(
+        std::path::Path::new(worktree_path),
+        fr,
+    );
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -12184,7 +12188,7 @@ fn worker_brief_markdown_in(
              - Stay within the DoD's scope.\n\
              {time_limit_rule}\n\
              {target_integration}\
-             {citations}{ui_captures}\
+             {citations}{ui_captures}{conventions}\
              ## Tests\n\
              {tests}\n\n\
              ## Workspace\n\
@@ -12226,7 +12230,7 @@ fn worker_brief_markdown_in(
          - Reste dans le périmètre de la DoD.\n\
          {time_limit_rule}\n\
          {target_integration}\
-         {citations}{ui_captures}\
+         {citations}{ui_captures}{conventions}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -21484,6 +21488,65 @@ pub(crate) mod tests {
             !no_shell.contains("## Intégrer la branche cible"),
             "{no_shell}"
         );
+    }
+
+    /// KT-1747 — the brief carries a "Project conventions" section composed from
+    /// the toolchains found in the worktree (any project), in the room's
+    /// language, and none for a worktree that has none.
+    #[test]
+    fn worker_brief_composes_project_conventions_from_the_detected_toolchains() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("composer.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.path().join("assets/front")).unwrap();
+        std::fs::write(dir.path().join("assets/front/package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("assets/front/yarn.lock"), "").unwrap();
+        std::fs::write(dir.path().join("Makefile"), "").unwrap();
+        let worktree = dir.path().to_string_lossy().into_owned();
+        let brief = |lang, path: &str| {
+            worker_brief_markdown_in(
+                lang,
+                "KT-1747",
+                "Conventions",
+                "Objective",
+                &[],
+                path,
+                "kronn/task/KT-1747",
+                "abc1234",
+                true,
+                true,
+                None,
+            )
+        };
+
+        let english = brief(RoomLang::En, &worktree);
+        assert!(english.contains("## Project conventions"), "{english}");
+        assert!(
+            english.contains("- composer at `.` (dependencies in `vendor/`)"),
+            "{english}"
+        );
+        assert!(
+            english.contains(
+                "- yarn at `assets/front` (dependencies in `assets/front/node_modules/`)"
+            ),
+            "{english}"
+        );
+        assert!(english.contains("- make at `.`"), "{english}");
+        // Placed before the tests the worker runs.
+        assert!(
+            english.find("## Project conventions") < english.find("## Tests"),
+            "{english}"
+        );
+
+        let french = brief(RoomLang::Fr, &worktree);
+        assert!(french.contains("## Conventions du projet"), "{french}");
+        assert!(
+            french.contains("- composer à `.` (dépendances dans `vendor/`)"),
+            "{french}"
+        );
+
+        let none = brief(RoomLang::En, "/wt/no-such-worktree");
+        assert!(!none.contains("Project conventions"), "{none}");
+        assert!(!brief(RoomLang::Fr, "/wt/no-such-worktree").contains("Conventions du projet"));
     }
 
     /// KT-1669 — the brief asks a lane to keep only its own citations green and

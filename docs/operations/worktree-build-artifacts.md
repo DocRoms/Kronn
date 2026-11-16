@@ -483,7 +483,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1777-1777#first_build_args]
-[src: file: backend/src/core/project_toolchains.rs:137-137#has_lib_target]
+[src: file: backend/src/core/project_toolchains.rs:456-456#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10913-10944#warm_failure_notice]
 
@@ -616,6 +616,29 @@ the one place KT-1747's generic toolchain detection reuses):
   under the same bound, journalled as the crate `command`, marked by a key over the
   command, the locks and the compiler environment): a `composer install`, an
   `npm ci`. KT-1747 provides the dependency directories such a command writes into.
+- **KT-1747 — every toolchain, at any depth** (`detect_toolchains` in
+  `core/project_toolchains.rs`): besides Cargo, a manifest finds a Node package
+  (`package.json`; npm, yarn or pnpm from `packageManager`, else the lock file),
+  a Composer one (`composer.json`), CocoaPods (`Podfile`), Xcode (`*.xcodeproj` /
+  `*.xcworkspace`) and a Makefile, up to four levels deep, never entering
+  `node_modules`, `vendor`, `Pods`, `target`, hidden directories or Xcode bundles.
+  Three consumers read this one profile:
+  1. **Dependency directories** — the lane layers each root's `node_modules/`,
+     `vendor/` or `Pods/` (entry by entry, read-only from the main checkout, never
+     replacing a directory the project commits, listed in the sandbox's read roots,
+     never a write root, locally git-excluded). `frontend/node_modules` keeps its
+     dedicated link (its Vitest capability probe); every other one is a
+     `Provisioned.dependency_layers` entry.
+  2. **Per-project override** — `dependency_dirs` of the project's lane-warm entry
+     (a project's own setting, like `rust_roots`): unset = the detected ones, a list
+     = exactly those, an empty list = none. An entry outside the repository (`/x`,
+     `..`) is refused on save and ignored with a warning if it ever reaches a lane.
+  3. **The worker brief** — a *Project conventions* section (in the room's language)
+     lists each toolchain, its directory and where its dependencies live; it is
+     absent when nothing was detected. It is composed from the worktree, so the
+     brief of another project never names Kronn's.
+  The settings screen has no field for `dependency_dirs` yet (the entry is set
+  through the project's workspace settings API); the form is a follow-up.
 
 **5. Per root, and only under the sandbox** (`core/task_worker_root_marks.rs`,
 `core/task_worker_lane_warm.rs`). Kronn's own repository has two roots, `backend/`

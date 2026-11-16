@@ -344,6 +344,14 @@ pub struct LaneWarmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub rust_roots: Option<Vec<String>>,
+    /// KT-1747 — the dependency directories a lane layers read-only from the main
+    /// checkout (`node_modules`, `vendor`, `Pods`, … at any depth), as
+    /// directories relative to the repository. `None` = the ones detected from
+    /// the manifests; a list = exactly those; an empty list = none. A project's
+    /// own setting only, like `rust_roots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dependency_dirs: Option<Vec<String>>,
 }
 
 /// KT-1742 — default bound of a lane's first build, in minutes (measured: the
@@ -410,6 +418,17 @@ impl LaneWarmConfig {
                 kept
             })
             .filter(|roots| !roots.is_empty());
+        // An empty list is kept: it says "layer nothing", not "detect".
+        self.dependency_dirs = self.dependency_dirs.map(|dirs| {
+            let mut kept: Vec<String> = Vec::new();
+            for dir in dirs {
+                let dir = normalize_lane_root(&dir);
+                if !dir.is_empty() && !kept.contains(&dir) {
+                    kept.push(dir);
+                }
+            }
+            kept
+        });
         self
     }
 
@@ -437,6 +456,25 @@ impl LaneWarmConfig {
             }
             for root in roots.iter().filter(|root| !root.trim().is_empty()) {
                 validate_lane_root(root)?;
+            }
+        }
+        if let Some(dirs) = &self.dependency_dirs {
+            if dirs.len() > MAX_LANE_ROOTS {
+                return Err(format!(
+                    "dependency_dirs is limited to {MAX_LANE_ROOTS} entries"
+                ));
+            }
+            for dir in dirs.iter().filter(|dir| !dir.trim().is_empty()) {
+                validate_lane_root(dir)
+                    .ok()
+                    .filter(|_| normalize_lane_root(dir) != ".")
+                    .ok_or_else(|| {
+                        format!(
+                            "dependency_dirs entry `{}` must be a directory inside the \
+                             repository (relative, no `..`, not the root itself)",
+                            normalize_lane_root(dir)
+                        )
+                    })?;
             }
         }
         if let Some(entries) = &self.compiler_env {
