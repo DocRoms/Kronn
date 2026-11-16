@@ -212,6 +212,12 @@ pub fn validation_executables_for(worktree: &Path) -> Vec<String> {
 /// checkout, or one of whose worktrees (as its own `git worktree list` says),
 /// contains `path`. Only projects with such a list are asked: the others would
 /// add nothing.
+///
+/// KT-1751 review — the most specific tree wins (a project registered inside
+/// another one owns its own files), and a repository nested between that tree
+/// and `path` owns `path` instead: a project without a list registered inside
+/// one with a list gets nothing, never the outer project's list. A nested
+/// repository can only narrow what runs, never widen it.
 fn project_listing(path: &Path) -> Option<PathBuf> {
     let candidates: Vec<PathBuf> = SNAPSHOT
         .read()
@@ -226,12 +232,28 @@ fn project_listing(path: &Path) -> Option<PathBuf> {
         })
         .map(|(project, _)| project.clone())
         .collect();
-    candidates.into_iter().find(|project| {
-        path.starts_with(project)
-            || crate::core::worktree::registered_worktree_paths(project)
-                .iter()
-                .any(|tree| path.starts_with(key_of(tree)))
-    })
+    let depth = |tree: &PathBuf| tree.components().count();
+    let (project, tree) = candidates
+        .into_iter()
+        .filter_map(|project| {
+            let mut trees = vec![project.clone()];
+            trees.extend(
+                crate::core::worktree::registered_worktree_paths(&project)
+                    .iter()
+                    .map(|tree| key_of(tree)),
+            );
+            let tree = trees
+                .into_iter()
+                .filter(|tree| path.starts_with(tree))
+                .max_by_key(depth)?;
+            Some((project, tree))
+        })
+        .max_by_key(|(_, tree)| depth(tree))?;
+    let nested = path
+        .ancestors()
+        .take_while(|dir| *dir != tree.as_path())
+        .any(|dir| dir.join(".git").exists());
+    (!nested).then_some(project)
 }
 
 /// KT-1751 — every project's listed executables, deduplicated: what the intake

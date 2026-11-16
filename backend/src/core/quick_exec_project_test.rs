@@ -173,8 +173,7 @@ fn a_listed_executable_of_a_layered_dependency_dir_is_admitted_and_nothing_wider
         "#!/bin/sh\necho jest\n",
     );
     std::fs::create_dir_all(main.join("node_modules/.bin")).unwrap();
-    std::os::unix::fs::symlink("../jest/bin/jest.js", main.join("node_modules/.bin/jest"))
-        .unwrap();
+    std::os::unix::fs::symlink("../jest/bin/jest.js", main.join("node_modules/.bin/jest")).unwrap();
     WorkerLane::for_worktree(&worktree)
         .unwrap()
         .provision(&SharedCaches::default());

@@ -174,3 +174,39 @@ fn a_worktree_outside_the_kronn_layout_gets_its_projects_executables() {
     assert_eq!(found, vec!["phpunit-outside".to_string()]);
     assert_eq!(from_sub, vec!["phpunit-outside".to_string()]);
 }
+
+/// KT-1751 review — a project registered inside another one (`mono/sub` in
+/// `mono`) is its own: without a list it gets nothing from the outer project,
+/// and with its own list it gets that list, whatever the map order.
+#[test]
+fn a_nested_project_never_inherits_the_outer_projects_executables() {
+    let root = tempfile::tempdir().unwrap();
+    let mono = root.path().canonicalize().unwrap().join("mono");
+    let sub = mono.join("sub");
+    std::fs::create_dir_all(sub.join("src")).unwrap();
+    git_in(&sub, &["init", "-q", "-b", "main"]);
+
+    set_project(
+        &mono,
+        Some(&LaneWarmConfig {
+            validation_executables: Some(vec!["outer-tool".into()]),
+            ..LaneWarmConfig::default()
+        }),
+    );
+    let without_list = validation_executables_for(&sub.join("src"));
+    let outer_itself = validation_executables_for(&mono);
+    set_project(
+        &sub,
+        Some(&LaneWarmConfig {
+            validation_executables: Some(vec!["inner-tool".into()]),
+            ..LaneWarmConfig::default()
+        }),
+    );
+    let with_list = validation_executables_for(&sub.join("src"));
+    set_project(&sub, None);
+    set_project(&mono, None);
+
+    assert!(without_list.is_empty(), "{without_list:?}");
+    assert_eq!(outer_itself, vec!["outer-tool".to_string()]);
+    assert_eq!(with_list, vec!["inner-tool".to_string()]);
+}

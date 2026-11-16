@@ -362,9 +362,11 @@ impl WorkersConfig {
             .as_ref()
             .is_some_and(|entries| !entries.is_empty())
         {
-            return Err("lane_warm.validation_executables is a project's own setting: set it \
+            return Err(
+                "lane_warm.validation_executables is a project's own setting: set it \
                  on the project card (Lane warm-up), not in Settings > Workers"
-                .to_string());
+                    .to_string(),
+            );
         }
         if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
             return Err(format!(
@@ -538,8 +540,7 @@ impl LaneWarmConfig {
             .map(|entries| {
                 let mut kept: Vec<String> = Vec::new();
                 for entry in entries {
-                    let entry = entry.trim();
-                    let entry = entry.strip_prefix("./").unwrap_or(entry).to_string();
+                    let entry = normalize_validation_executable(&entry);
                     if !entry.is_empty() && !kept.contains(&entry) {
                         kept.push(entry);
                     }
@@ -627,6 +628,8 @@ const MAX_LANE_EXECUTABLES: usize = 32;
 /// line of its own.
 fn validate_validation_executable(entry: &str) -> Result<(), String> {
     let entry = entry.trim();
+    // `./gradlew` is a repository path, `gradlew` a program on the PATH.
+    let is_path = entry.contains('/');
     let entry = entry.strip_prefix("./").unwrap_or(entry);
     let plain = entry
         .chars()
@@ -640,7 +643,7 @@ fn validate_validation_executable(entry: &str) -> Result<(), String> {
     if entry.is_empty() || entry.len() > 200 || !plain {
         return refused("holds characters a program name or path does not");
     }
-    if entry.contains('/') {
+    if is_path {
         let inside = !entry.starts_with('/')
             && entry
                 .split('/')
@@ -658,6 +661,18 @@ fn validate_validation_executable(entry: &str) -> Result<(), String> {
         return refused("runs a command line of its own, which a validation never does");
     }
     Ok(())
+}
+
+/// KT-1751 review — a stored validation executable: trimmed, and a leading
+/// `./` dropped only where the rest is still a path (`./vendor/bin/phpunit` →
+/// `vendor/bin/phpunit`). A single-segment repository file keeps it
+/// (`./gradlew`): without it, it would be a bare name, a program on the PATH.
+pub fn normalize_validation_executable(entry: &str) -> String {
+    let entry = entry.trim();
+    match entry.strip_prefix("./") {
+        Some(rest) if rest.contains('/') => rest.to_string(),
+        _ => entry.to_string(),
+    }
 }
 
 /// `./redis-flush/` → `redis-flush`; the repository root stays `.`.

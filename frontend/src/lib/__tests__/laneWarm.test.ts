@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { LaneWarmConfig } from '../../types/generated';
 import {
-  EMPTY_LANE_WARM_DRAFT, configOf, draftOf, draftProblem, sameDraft,
+  EMPTY_LANE_WARM_DRAFT, configOf, draftOf, draftProblem, executableLines, sameDraft,
 } from '../laneWarm';
 
 describe('laneWarm draft (KT-1742)', () => {
@@ -86,5 +86,13 @@ describe('laneWarm draft (KT-1742)', () => {
     expect(configOf(EMPTY_LANE_WARM_DRAFT, { dependency_dirs: [] })).toEqual({ dependency_dirs: [] });
     // Without a stored entry nothing is invented.
     expect(configOf(draft, null)).toEqual({ first_build_command: 'make warm', rust_roots: ['backend'] });
+  });
+});
+
+describe('validation executables (KT-1751 review)', () => {
+  it('keeps the ./ of a repository wrapper and drops it from a deeper path', () => {
+    expect(executableLines(' ./gradlew \ncomposer\n./vendor/bin/phpunit\nvendor/bin/phpunit\n./gradlew')).toEqual([
+      './gradlew', 'composer', 'vendor/bin/phpunit',
+    ]);
   });
 });

@@ -181,9 +181,12 @@ kronn_destructive() {
       restore:--pathspec-from-file*) kronn_whole=1 ;;
       restore:-s | restore:--source) kronn_skip=1 ;;
       restore:-*) ;;
-      # An exclude-only restore (`:!x`, `:^x`, `:(exclude)x`) covers the rest
-      # of the tree.
-      restore:':!'* | restore:':^'* | restore:':('*exclude*')'*) kronn_exclude=1 ;;
+      # An exclude-only restore (`:!x`, `:^x`, `:(exclude)x`, and the same
+      # behind the top-level magic: `:/!x`, `:/^x`) covers the rest of the tree.
+      restore:':!'* | restore:':^'* | restore:':/!'* | restore:':/^'* | \
+        restore:':('*exclude*')'*)
+        kronn_exclude=1
+        ;;
       restore:*)
         kronn_positive=1
         kronn_is_whole_tree "$kronn_a" && kronn_whole=1

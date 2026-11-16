@@ -311,6 +311,11 @@ fn declared_manager(dir: &Path) -> Option<NodeManager> {
         Some("npm") => return Some(NodeManager::Npm),
         _ => {}
     }
+    lock_file_manager(dir)
+}
+
+/// The manager a directory's own lock file names, if it has one.
+fn lock_file_manager(dir: &Path) -> Option<NodeManager> {
     if dir.join("pnpm-lock.yaml").is_file() {
         Some(NodeManager::Pnpm)
     } else if dir.join("yarn.lock").is_file() {
@@ -333,8 +338,12 @@ fn node_manager(dir: &Path, repo_root: &Path) -> NodeManager {
 
 /// KT-1747 review — the root of the Node workspace `dir` is a package of,
 /// relative to the repository: the nearest strict ancestor up to the
-/// repository root with `pnpm-workspace.yaml` or a `workspaces` field.
+/// repository root with `pnpm-workspace.yaml` or a `workspaces` field. A
+/// package with its own lock file is installed on its own, never hoisted.
 fn node_workspace_of(dir: &Path, repo_root: &Path) -> Option<PathBuf> {
+    if lock_file_manager(dir).is_some() {
+        return None;
+    }
     up_to_root(dir, repo_root)
         .skip(1)
         .find(|ancestor| {
@@ -431,9 +440,7 @@ fn collect_toolchains(repo_root: &Path, dir: &Path, depth: usize, found: &mut Ve
     let mut children: Vec<PathBuf> = entries
         .into_iter()
         // A real directory: a link is never followed (KT-1747 review).
-        .filter(|path| {
-            std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
-        })
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir()))
         .filter(|path| {
             let name = path
                 .file_name()
@@ -518,9 +525,7 @@ pub fn missing_dependency_notice(profile: &[PackageRoot], path: &str) -> String 
     let owner = match owner.and_then(|root| root.workspace.as_ref()) {
         Some(workspace) => profile
             .iter()
-            .find(|root| {
-                &root.rel_dir == workspace && matches!(root.kind, ToolchainKind::Node(_))
-            })
+            .find(|root| &root.rel_dir == workspace && matches!(root.kind, ToolchainKind::Node(_)))
             .or(owner),
         None => owner,
     };

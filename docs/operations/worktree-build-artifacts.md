@@ -672,7 +672,9 @@ the one place KT-1747's generic toolchain detection reuses):
     directory that declares one (`packageManager`, then the lock file), so a yarn or
     pnpm workspace is never reported as npm. Its dependencies are installed by the
     workspace root: its own missing `node_modules` is neither a launch warning nor a
-    blocker, and an install notice names the workspace root's command.
+    blocker, and an install notice names the workspace root's command. A package
+    with its own lock file (`e2e/package-lock.json` beside a root `workspaces`) is
+    not hoisted: it is its own root, and its missing `node_modules` warns and blocks.
   - Detection never enters `fixtures`, `examples`, `dist` or `build` directories and
     never follows a directory link.
   - The ignore rule of a dependency layer is written like the frontend link's: to the
@@ -698,10 +700,13 @@ decision, and only that list widens the allowlist, for that project:
   one project would widen every other): a save that carries one there is refused,
   and no agent tool writes it;
 - an entry is a plain program name (`composer`) or a path inside the repository
-  (`vendor/bin/phpunit`, a leading `./` ignored); a shell, an option, an absolute path,
-  a `..` or a character a shell would read is refused on save. A name and a path
-  never match each other: `composer` admits the program on the PATH, never a
-  repository file `./composer`;
+  (`vendor/bin/phpunit`, a leading `./` dropped on save where the rest is still a
+  path); a repository file at the root keeps its `./` (`./gradlew`, `./mvnw`), since
+  without it, it would be a name. A shell, an option, an absolute path, a `..` or a
+  character a shell would read is refused on save. A name and a path never match each
+  other: `composer` admits the program on the PATH, never a repository file
+  `./composer`, and `./gradlew` admits the repository's wrapper, never a `gradlew` on
+  the PATH;
 - a repository-relative executable is run from the worktree it was checked in: it must
   be listed exactly, resolve (links followed) to a file inside the worktree, and the
   process that starts is that resolved file;
@@ -717,7 +722,9 @@ decision, and only that list widens the allowlist, for that project:
   `<repo>/.kronn/worktrees/<name>` belongs to `<repo>`, and a tree anywhere else (a
   configured worktree root, an autoCode root, a sub-directory) to the registered
   project whose own `git worktree list` (asked of the registered checkout, never of
-  the lane) names it. The intake of a validation (campaign, swap, launch) has no
+  the lane) names it. The most specific tree wins, and a repository nested between it
+  and the worktree owns the worktree: a project registered inside another one gets its
+  own list, or nothing when it has none, never the outer project's. The intake of a validation (campaign, swap, launch) has no
   project, so it only keeps a name no project lists from being accepted, and the
   run's own refusal is the one that decides.
 

@@ -490,12 +490,19 @@ mod tests {
             vec!["restore", ":^README.md"],
             vec!["restore", "--", ":(exclude)README.md"],
             vec!["restore", "-s", "HEAD", ":!README.md"],
+            // The top-level magic in front of the exclude one.
+            vec!["restore", ":/!README.md"],
+            vec!["restore", ":/^README.md"],
+            vec!["restore", "--", ":/!README.md"],
             vec!["restore", "--pathspec-from-file=list.txt"],
             vec!["restore", "--pathspec-from-file", "list.txt"],
         ] {
             let out = guarded(&fx, &fx.main, &args, false);
             let message = refused(&out);
-            assert!(message.contains("refused 'git restore'"), "{args:?}: {message}");
+            assert!(
+                message.contains("refused 'git restore'"),
+                "{args:?}: {message}"
+            );
         }
         assert_eq!(
             std::fs::read_to_string(fx.main.join("a.txt")).unwrap(),

@@ -101,13 +101,13 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     expect(screen.getByTestId('project-lane-warm-executables')).toHaveValue('composer');
 
     fireEvent.change(screen.getByTestId('project-lane-warm-executables'), {
-      target: { value: 'composer\n./vendor/bin/phpunit\n' },
+      target: { value: 'composer\n./vendor/bin/phpunit\n./gradlew\n' },
     });
     fireEvent.click(screen.getByTestId('project-lane-warm-save'));
 
     await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', {
       hooks: {},
-      lane_warm: { validation_executables: ['composer', 'vendor/bin/phpunit'] },
+      lane_warm: { validation_executables: ['composer', 'vendor/bin/phpunit', './gradlew'] },
     }));
   });
 

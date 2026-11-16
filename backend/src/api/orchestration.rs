@@ -6773,12 +6773,30 @@ fn test_runner_failed(output: &str, lower: &str) -> bool {
             let pytest_summary = line.starts_with('=')
                 && line.contains(" in ")
                 && (line.contains(" failed") || line.contains(" error"));
-            let mocha = line
-                .strip_suffix(" failing")
-                .is_some_and(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()));
+            let mocha = line.strip_suffix(" failing").is_some_and(|count| {
+                !count.is_empty() && count.chars().all(|c| c.is_ascii_digit())
+            });
             let jest = line.starts_with("tests:") && line.contains(" failed");
             pytest_summary || mocha || jest
         })
+        || unittest_failed(lower)
+}
+
+/// Python unittest / Django: `Ran N test(s) in …`, then `FAILED (errors=1)`.
+fn unittest_failed(lower: &str) -> bool {
+    let mut ran = false;
+    lower.lines().any(|line| {
+        let line = line.trim();
+        if line
+            .strip_prefix("ran ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()))
+            && line.contains(" test")
+        {
+            ran = true;
+        }
+        ran && line.starts_with("failed (")
+    })
 }
 
 /// `Some` when `failure` comes from the host rather than the worker's code:
@@ -26337,6 +26355,19 @@ pub(crate) mod tests {
             ),
             // An application message that merely ends in `: not found`.
             failure(Some(1), "lookup failed: route /x: not found"),
+            // Python unittest / Django: `Ran N test(s)`, then `FAILED (…)`.
+            failure(
+                Some(1),
+                "ERROR: test_write (app.tests.FileTest)\nPermissionError: [Errno 1] Operation not permitted: '/x'\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nFAILED (errors=1)",
+            ),
+            failure(
+                Some(1),
+                "OSError: [Errno 30] Read-only file system: '/x'\nRan 12 tests in 0.300s\n\nFAILED (failures=1, errors=2)",
+            ),
+            failure(
+                Some(1),
+                "socket.gaierror: [Errno 8] nodename nor servname provided, or not known\nTemporary failure in name resolution\nRan 3 tests in 0.020s\nFAILED (errors=1)",
+            ),
         ] {
             assert!(
                 environment_cause(Sandbox, None, &red).is_none(),

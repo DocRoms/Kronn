@@ -309,6 +309,24 @@ fn a_workspace_package_uses_the_workspaces_manager_and_installs_nothing_itself()
     let profile = detect_toolchains(plain.path());
     assert_eq!(kinds(&profile), ["yarn@.", "npm@tools/x"]);
     assert_eq!(profile[1].workspace, None);
+
+    // KT-1747 review (blue) — a package with its own lock file beside a
+    // workspace root is not hoisted: it resolves to itself and installs itself.
+    let own = tempfile::tempdir().unwrap();
+    write(
+        own.path(),
+        "package.json",
+        r#"{"workspaces":["packages/*"],"packageManager":"yarn@4.1.0"}"#,
+    );
+    write(own.path(), "yarn.lock", "");
+    write(own.path(), "e2e/package.json", r#"{"name":"e2e"}"#);
+    write(own.path(), "e2e/package-lock.json", "{}");
+    let profile = detect_toolchains(own.path());
+    assert_eq!(kinds(&profile), ["yarn@.", "npm@e2e"]);
+    assert_eq!(profile[1].workspace, None);
+    let notice = missing_dependency_notice(&profile, "e2e/node_modules");
+    assert!(notice.contains("npm ci"), "{notice}");
+    assert!(!notice.contains("the repository root"), "{notice}");
 }
 
 /// KT-1747 review (blue) — a manifest under test fixtures, examples or build

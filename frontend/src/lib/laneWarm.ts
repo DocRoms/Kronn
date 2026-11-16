@@ -72,13 +72,17 @@ export function rootLines(text: string): string[] {
 
 /**
  * KT-1751 — the validation executables of a draft: one bare name or
- * repository-relative path per line, a leading `./` dropped.
+ * repository-relative path per line, a leading `./` dropped where the rest
+ * is still a path.
  */
 export function executableLines(text: string): string[] {
   const entries: string[] = [];
   for (const line of envLines(text)) {
-    const entry = line.replace(/^\.\//, '');
-    if (entry !== '' && !entries.includes(entry)) entries.push(entry);
+    // `./vendor/bin/x` is stored as `vendor/bin/x`, but `./gradlew` keeps its
+    // `./`: without it, it would be a bare name, a program on the PATH.
+    const rest = line.replace(/^\.\//, '');
+    const entry = rest.includes('/') ? rest : line;
+    if (rest !== '' && !entries.includes(entry)) entries.push(entry);
   }
   return entries;
 }
