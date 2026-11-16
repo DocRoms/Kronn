@@ -1398,6 +1398,139 @@ mod unix {
         world.assert_no_marker();
     }
 
+    /// The round-5 repro: git accepts a second section header on the same line, so
+    /// `[remote "origin"][filter "a.url=b"]clean = …` is `filter.a.url=b.clean` for
+    /// git while a line parser that cuts at the first `]` sees a `remote` url.
+    #[test]
+    fn a_second_section_header_on_one_line_cannot_hide_a_filter() {
+        let world = world_with_submodule();
+        assert!(LaneGit::resolve(&world.worktree).is_ok());
+        append_bytes(
+            &world.worktree.join("lib/.git/config"),
+            format!(
+                "[remote \"origin\"][filter \"a.url=b\"]clean = {}; cat\n",
+                world.touch("HEADER_AFTER_HEADER")
+            )
+            .as_bytes(),
+        );
+        fs::write(
+            world.worktree.join("lib/.gitattributes"),
+            "* filter=a.url=b\n",
+        )
+        .unwrap();
+        fs::write(world.worktree.join("lib/code.txt"), "changed").unwrap();
+        let error = LaneGit::resolve(&world.worktree).expect_err("git reads a filter here");
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        assert!(error.contains("filter.a.url=b.clean"), "{error}");
+        every_kronn_path_leaves_the_worker_nothing_to_run(&world);
+    }
+
+    /// What `git config --list` shows for `text`, listed with the same flags the
+    /// vetting uses, in a scratch directory.
+    fn keys_of(text: &str) -> Result<Vec<String>, String> {
+        let dir = tempfile::Builder::new()
+            .prefix("kronn-lane-cfg")
+            .tempdir()
+            .unwrap();
+        let config = dir.path().join("config");
+        fs::write(&config, text).unwrap();
+        nested_config_keys(&config)
+    }
+
+    fn classified(text: &str) -> Vec<(String, bool)> {
+        keys_of(text)
+            .expect("git parses it")
+            .into_iter()
+            .map(|key| {
+                let plain = nested_key_is_plain(&key);
+                (key, plain)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nested_config_keys_are_classified_exactly_as_git_lists_them() {
+        // A second header on the same line: the key is a filter's.
+        assert_eq!(
+            classified("[remote \"origin\"][filter \"a.url=b\"]clean = x\n"),
+            [("filter.a.url=b.clean".to_string(), false)]
+        );
+        // A quoted sub-section holding `]` and `=`: still a remote's url, or a filter's.
+        assert_eq!(
+            classified("[remote \"o]=k\"]\n\turl = u\n[filter \"x]\"]\n\tclean = c\n"),
+            [
+                ("remote.o]=k.url".to_string(), true),
+                ("filter.x].clean".to_string(), false)
+            ]
+        );
+        // An old-style `[section.sub]` header, whatever its case.
+        assert_eq!(
+            classified("[Branch.Main]\n\tRemote = origin\n[FILTER.evil]\n\tClean = c\n"),
+            [
+                ("branch.main.remote".to_string(), true),
+                ("filter.evil.clean".to_string(), false)
+            ]
+        );
+        // A backslash-continued value swallows the next line: no `[filter]` there.
+        assert_eq!(
+            classified("[user]\n\tname = a \\\n[filter \"z\"]\n[core]\n\tbare = false\n"),
+            [
+                ("user.name".to_string(), true),
+                ("core.bare".to_string(), true)
+            ]
+        );
+        // An include is a key, and not a plain one.
+        assert_eq!(
+            classified("[include]\n\tpath = ../evil\n"),
+            [("include.path".to_string(), false)]
+        );
+        // A key with no value.
+        assert_eq!(
+            classified("[core]\n\tbare\n"),
+            [("core.bare".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn an_ordinary_submodule_config_is_not_refused() {
+        let world = world_with_submodule();
+        append_bytes(
+            &world.worktree.join("lib/.git/config"),
+            b"[remote \"upstream\"]\n\turl = https://example.test/lib.git\n\
+              \tfetch = +refs/heads/*:refs/remotes/upstream/*\n\
+              [branch \"main\"]\n\tremote = upstream\n\tmerge = refs/heads/main\n\
+              [core]\n\tfilemode = false\n",
+        );
+        assert!(LaneGit::resolve(&world.worktree).is_ok());
+        let keys = keys_of(&fs::read_to_string(world.worktree.join("lib/.git/config")).unwrap())
+            .expect("git parses it");
+        assert!(keys.iter().all(|key| nested_key_is_plain(key)), "{keys:?}");
+        assert!(
+            keys.contains(&"remote.upstream.fetch".to_string()),
+            "{keys:?}"
+        );
+    }
+
+    #[test]
+    fn a_submodule_config_git_cannot_parse_is_refused() {
+        let world = world_with_submodule();
+        assert!(keys_of("[core\n\tbare = false\n").is_err());
+        append_bytes(
+            &world.worktree.join("lib/.git/config"),
+            format!(
+                "[filter \"bad\"\n\tclean = {}; cat\n",
+                world.touch("UNPARSEABLE")
+            )
+            .as_bytes(),
+        );
+        fs::write(world.worktree.join("lib/.gitattributes"), "* filter=bad\n").unwrap();
+        fs::write(world.worktree.join("lib/code.txt"), "changed").unwrap();
+        let error = LaneGit::resolve(&world.worktree).expect_err("git cannot parse it");
+        assert!(error.starts_with(NESTED_PREFIX), "{error}");
+        assert!(error.contains("could not be parsed by git"), "{error}");
+        every_kronn_path_leaves_the_worker_nothing_to_run(&world);
+    }
+
     #[test]
     fn a_reftable_clone_is_not_refused() {
         assert!(nested_key_is_plain("extensions.refstorage"));

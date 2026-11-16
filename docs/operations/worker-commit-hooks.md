@@ -159,17 +159,24 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
   submodule: git registered it, so it is pinned to its own registration and its own
   pointer is verified like any managed worktree's; a directory the worker made is not
   registered and stays refused
-  ([src: file: backend/src/core/lane_git.rs:621#child]);
+  ([src: file: backend/src/core/lane_git.rs:624#child]);
 - before every command the builder lists the index's gitlinks (from the worktree's
   root, whatever directory the command starts in) and refuses
   (`NestedRepoUnsafe`) while one carries something it does not trust
-  ([src: file: backend/src/core/lane_git.rs:539#check_nested_repos],
-  [src: file: backend/src/core/lane_git.rs:451#vet_nested_dot_git]): a nested
+  ([src: file: backend/src/core/lane_git.rs:542#check_nested_repos],
+  [src: file: backend/src/core/lane_git.rs:453#vet_nested_dot_git]): a nested
   `.git/config` with any key outside `core.*` plumbing, `extensions.objectformat` /
   `extensions.refstorage` (a reftable clone), `remote.*.url|fetch`,
   `branch.*.remote|merge`, `user.*` (so no `filter.*`, `core.fsmonitor`,
-  `include.*`, `gpg.*`); a config that is unreadable or not valid UTF-8 (git can
-  parse bytes Kronn cannot read as text, so it fails closed); a `.git/commondir` or
+  `include.*`, `gpg.*`). The keys are listed BY GIT, not by a parser of Kronn's
+  (`git --git-dir=/dev/null config --file <config> --no-includes --null --name-only --list`,
+  no system or global configuration, no repository discovery)
+  ([src: file: backend/src/core/lane_git.rs:332#nested_config_keys]): git accepts
+  a second `[section]` header on one line (`[remote "origin"][filter "a.url=b"]clean = …`
+  is `filter.a.url=b.clean`), a quoted sub-section holding `]` or `=`, an old-style
+  `[section.sub]` and a backslash-continued value, and a line parser that disagrees
+  with git on any of them lets a filter through. A config git cannot parse is
+  refused too, as is one that is unreadable or not valid UTF-8 (it fails closed); a `.git/commondir` or
   `.git/config.worktree` (git would read a configuration Kronn does not vet); or a
   `.git` file that does not point into the registered repository's own git
   directory;

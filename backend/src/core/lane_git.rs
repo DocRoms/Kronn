@@ -320,42 +320,44 @@ fn nested_key_is_plain(key: &str) -> bool {
     }
 }
 
-/// The keys of a git configuration file's text, lower-cased
-/// (`section.subsection.name`, section and name case-insensitive).
-fn config_keys(text: &str) -> Vec<String> {
-    let mut keys = Vec::new();
-    let mut section = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        let mut rest = line;
-        if let Some(header) = line.strip_prefix('[') {
-            let Some(end) = header.find(']') else {
-                keys.push(format!("?malformed:{line}"));
-                continue;
-            };
-            let head = &header[..end];
-            section = match head.split_once('"') {
-                Some((name, sub)) => format!(
-                    "{}.{}",
-                    name.trim().to_lowercase(),
-                    sub.trim_end_matches('"')
-                ),
-                None => head.trim().to_lowercase(),
-            };
-            rest = header[end + 1..].trim();
-            if rest.is_empty() {
-                continue;
-            }
-        }
-        let name = rest.split('=').next().unwrap_or_default().trim();
-        if !name.is_empty() {
-            keys.push(format!("{section}.{}", name.to_lowercase()));
-        }
+/// The keys a nested repository's configuration file holds, as GIT reads them
+/// (`section.subsection.name`, section and name lower-cased), listed by git itself:
+/// a line parser here would have to agree with git on every corner of the format
+/// (a second `[section]` header on the same line, a quoted sub-section holding `]`
+/// or `=`, an old-style `[section.sub]`, a backslash-continued value), and the
+/// first place it disagrees is a filter the worker hides from the vetting. Git
+/// reads the file alone: no repository (`--git-dir=/dev/null`), no `include`
+/// followed (`--no-includes`: the `include.*` key is listed, and is not plain), no
+/// system or global configuration. `Err` when git cannot parse the file.
+fn nested_config_keys(config: &Path) -> Result<Vec<String>, String> {
+    // lane-git-allow: reads one configuration file (`config --file`), not a worktree.
+    let output = crate::core::cmd::git_cmd()
+        .arg("--git-dir=/dev/null")
+        .args(["config", "--file"])
+        .arg(config)
+        .args(["--no-includes", "--null", "--name-only", "--list"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .current_dir(config.parent().unwrap_or_else(|| Path::new("/")))
+        .output()
+        .map_err(|error| format!("could not be listed by git ({error})"))?;
+    if !output.status.success() {
+        let why = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("could not be parsed by git ({})", why.trim()));
     }
-    keys
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+        .map(|key| String::from_utf8_lossy(key).into_owned())
+        .collect())
 }
 
 /// The gitlink paths of the worktree's index, cached by the index's size and
@@ -475,15 +477,16 @@ fn vet_nested_dot_git(nested_dir: &Path, pinned: &Pinned) -> Result<(), String> 
         }
     }
     let config = dot_git.join("config");
-    let text = match std::fs::symlink_metadata(&config) {
+    let keys = match std::fs::symlink_metadata(&config) {
         Ok(m) if m.is_file() => {
-            read_vetted_text(&config).map_err(|why| format!("has a `.git/config` that {why}"))?
+            read_vetted_text(&config).map_err(|why| format!("has a `.git/config` that {why}"))?;
+            nested_config_keys(&config).map_err(|why| format!("has a `.git/config` that {why}"))?
         }
         Ok(_) => return Err("has a `.git/config` that is not a regular file".to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(format!("has a `.git/config` that cannot be read ({error})")),
     };
-    let unknown: Vec<String> = config_keys(&text)
+    let unknown: Vec<String> = keys
         .into_iter()
         .filter(|key| !nested_key_is_plain(key))
         .collect();
