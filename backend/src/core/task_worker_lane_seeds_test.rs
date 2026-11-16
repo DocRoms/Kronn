@@ -1189,3 +1189,195 @@ fn unreadable_suggestions_are_an_error_not_an_empty_list() {
     let result = effective_seeds(policy(true, true), None, || Err("git failed".into()));
     assert_eq!(result.unwrap_err(), "git failed");
 }
+
+// ─── KT-1595 round 5 (NEW-2): the lane's `.git` pointer is not trusted ─────
+
+/// What an agent that rewrote `<lane>/.git` to name another repository would
+/// find written there afterwards: a second repository, untouched by Kronn.
+#[cfg(unix)]
+mod moved_pointer {
+    use super::*;
+
+    /// A second repository the lane's `.git` file is pointed at.
+    fn victim() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap().join("victim");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        (dir, repo)
+    }
+
+    fn point_lane_at(worktree: &Path, git_dir: &Path) {
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
+    }
+
+    fn victim_is_untouched(repo: &Path) {
+        let git_dir = repo.join(".git");
+        assert!(
+            !git_dir.join(MARKER_FILE).exists(),
+            "the seed marker must not be written into another repository"
+        );
+        let exclude = std::fs::read_to_string(git_dir.join("info/exclude")).unwrap_or_default();
+        assert!(
+            !exclude.contains(".kronn-"),
+            "no rule may be appended to another repository's exclude: {exclude}"
+        );
+    }
+
+    #[test]
+    fn a_lane_pointed_at_another_repository_seeds_nothing_and_writes_nothing_there() {
+        let fx = fixture();
+        let (_keep, victim) = victim();
+        point_lane_at(&fx.worktree, &victim.join(".git"));
+
+        let record = seed_worktree(
+            &fx.main,
+            &fx.worktree,
+            &seeds(&["public/images"]),
+            &clone_tree,
+        );
+
+        assert!(
+            matches!(only(&record).status, SeedStatus::Skipped { .. }),
+            "{record:?}"
+        );
+        assert!(skipped_reason(only(&record)).contains("pointer was moved"));
+        victim_is_untouched(&victim);
+        assert!(!fx.worktree.join("public/images").exists());
+    }
+
+    #[test]
+    fn a_lane_pointed_at_a_sibling_registration_is_refused_too() {
+        // A real admin dir of the same checkout, but not the one registered
+        // for this lane.
+        let fx = fixture();
+        let other = fx.main.join(".kronn/worktrees/task-kt-2");
+        run_git(
+            &fx.main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "other-branch",
+                other.to_str().unwrap(),
+            ],
+        );
+        let sibling = fx.main.join(".git/worktrees/task-kt-2");
+        point_lane_at(&fx.worktree, &sibling);
+
+        let record = seed_worktree(
+            &fx.main,
+            &fx.worktree,
+            &seeds(&["public/images"]),
+            &clone_tree,
+        );
+
+        assert!(skipped_reason(only(&record)).contains("pointer was moved"));
+        assert!(!sibling.join(MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn a_rewritten_back_pointer_leaves_the_lane_unregistered_and_unwritten() {
+        // The agent may write its own admin dir: rewriting `gitdir` there makes
+        // the registry stop naming the lane, which is a refusal, not a fallback
+        // to git's answer.
+        let fx = fixture();
+        let admin =
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).unwrap();
+        std::fs::write(admin.join("gitdir"), "/elsewhere/.git\n").unwrap();
+
+        assert!(
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).is_err()
+        );
+        let record = seed_worktree(
+            &fx.main,
+            &fx.worktree,
+            &seeds(&["public/images"]),
+            &clone_tree,
+        );
+        assert!(matches!(only(&record).status, SeedStatus::Skipped { .. }));
+        assert!(!admin.join(MARKER_FILE).exists());
+    }
+
+    #[test]
+    fn a_relative_back_pointer_still_names_the_lane() {
+        // `git worktree add --relative-paths` (or `worktree.useRelativePaths`)
+        // records the lane relative to the registry entry.
+        let fx = fixture();
+        let admin =
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).unwrap();
+        let lane = fx.worktree.strip_prefix(&fx.main).unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("../../../{}/.git\n", lane.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).unwrap(),
+            admin
+        );
+    }
+
+    #[test]
+    fn a_marker_planted_as_a_link_is_replaced_never_written_through() {
+        let fx = fixture();
+        let external = tempfile::tempdir().unwrap();
+        let outside = external.path().join("victim.json");
+        std::fs::write(&outside, "precious").unwrap();
+        let admin =
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).unwrap();
+        std::os::unix::fs::symlink(&outside, admin.join(MARKER_FILE)).unwrap();
+
+        seed_worktree(
+            &fx.main,
+            &fx.worktree,
+            &seeds(&["public/images"]),
+            &clone_tree,
+        );
+
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "precious");
+    }
+
+    #[test]
+    fn the_admin_dir_swapped_for_a_link_before_the_marker_write_writes_nothing_outside() {
+        use crate::core::fs_guard::swap_probe;
+        let fx = fixture();
+        let external = tempfile::tempdir().unwrap();
+        let admin =
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).unwrap();
+        swap_probe::arm_after(&admin, external.path(), 2);
+
+        seed_worktree(
+            &fx.main,
+            &fx.worktree,
+            &seeds(&["public/images"]),
+            &clone_tree,
+        );
+
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(
+            !external.path().join(MARKER_FILE).exists(),
+            "the marker must not land in the swapped-in folder"
+        );
+    }
+
+    #[test]
+    fn an_untouched_lane_keeps_its_marker_in_the_registered_directory() {
+        let fx = fixture();
+        let admin =
+            crate::core::worktree::registered_worktree_git_dir(&fx.main, &fx.worktree).unwrap();
+        assert!(admin.starts_with(fx.main.join(".git/worktrees")));
+        let record = seed_worktree(
+            &fx.main,
+            &fx.worktree,
+            &seeds(&["public/images"]),
+            &clone_tree,
+        );
+        assert!(matches!(only(&record).status, SeedStatus::Seeded { .. }));
+        assert!(admin.join(MARKER_FILE).is_file(), "the marker is kept");
+    }
+}

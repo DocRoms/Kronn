@@ -1224,7 +1224,7 @@ pub fn lint_assertions(text: &str) -> LintReport {
 /// Hard caps to bound work at message-finalize time.
 const MAX_SOURCES_VERIFIED: usize = 50;
 /// Skip line-count verification above this file size (existence still checked).
-const LINE_COUNT_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const LINE_COUNT_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Extract every `[src: …]` marker from the prose, skipping fenced code blocks
 /// AND inline-backtick spans (those are [`extract_quoted_source_markers`]),
@@ -1639,28 +1639,30 @@ fn untracked_claim(reference: &str, roots: &[&Path]) -> bool {
 /// Whether git tracks `rel` in the repository at `root`. Outside a repository,
 /// or without git, nothing is tracked.
 pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
-    crate::core::cmd::git_cmd()
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "--error-unmatch", "--", rel])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    agent_git_succeeds(
+        root,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            rel,
+        ],
+    )
+}
+
+/// A git query on a checkout an agent may have reconfigured: no program its
+/// configuration names runs, and a blocking configuration (a FIFO) fails the
+/// query in bounded time (`false`).
+fn agent_git_succeeds(root: &Path, args: &[&str]) -> bool {
+    crate::core::cmd::agent_git_output(root, args, &[]).is_some()
 }
 
 /// Whether git ignores `rel` in the repository at `root` (a vendored or generated
 /// path, absent from a clone), whether or not the file is on disk. Outside a
 /// repository, or without git, nothing is ignored.
 pub(crate) fn is_git_ignored(root: &Path, rel: &str) -> bool {
-    crate::core::cmd::git_cmd()
-        .arg("-C")
-        .arg(root)
-        .args(["check-ignore", "-q", "--", rel])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    agent_git_succeeds(root, &["check-ignore", "-q", "--", rel])
 }
 
 /// The en and em dash, which models write where a line range wants a hyphen.
@@ -2006,7 +2008,7 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 }
 
 /// Bytes sniffed to tell a binary file from a text one.
-const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+pub(crate) const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// A file with no lines to cite (.docx, .pdf, images), told apart by content,
 /// not extension: a NUL byte, invalid UTF-8, or a PDF header in the first
@@ -2024,11 +2026,18 @@ pub(crate) fn is_binary_file(path: &Path) -> bool {
     {
         return false;
     }
+    is_binary_content(&head)
+}
+
+/// [`is_binary_file`] on content already read: only its first
+/// [`BINARY_SNIFF_BYTES`] are judged.
+pub(crate) fn is_binary_content(content: &[u8]) -> bool {
+    let head = &content[..content.len().min(BINARY_SNIFF_BYTES)];
     if head.starts_with(b"%PDF-") || head.contains(&0) {
         return true;
     }
     // A multi-byte character cut by the sniff window is not invalid UTF-8.
-    std::str::from_utf8(&head).is_err_and(|e| e.error_len().is_some())
+    std::str::from_utf8(head).is_err_and(|e| e.error_len().is_some())
 }
 
 /// Percent-decoded relative form of a cited or linked path (`My%20File.docx`),
@@ -2073,14 +2082,6 @@ fn count_lines_capped(path: &Path) -> Option<(usize, usize)> {
     }
     let content = std::fs::read_to_string(path).ok()?;
     Some((content.lines().count(), last_citable_line(&content)))
-}
-
-/// [`last_citable_line`] of a file on disk; 0 when it cannot be read.
-pub(crate) fn last_citable_line_of(path: &Path) -> usize {
-    if crate::acp::secret_files::is_secret_path(path) {
-        return 0;
-    }
-    std::fs::read_to_string(path).map_or(0, |content| last_citable_line(&content))
 }
 
 /// Verify one `[src: …]` marker against the project root.
@@ -3184,6 +3185,16 @@ pub fn finalize_lint_report(
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
+
+    /// KT-1595 round 12: a cited path is taken literally: a glob never counts
+    /// as a tracked file.
+    #[test]
+    fn a_glob_is_never_a_tracked_path() {
+        let dir = crate::core::cmd::hostile_git::repo();
+        assert!(is_git_tracked(dir.path(), "a.txt"));
+        assert!(!is_git_tracked(dir.path(), "*"));
+        assert!(!is_git_tracked(dir.path(), "a.*"));
+    }
 
     #[test]
     fn truncate_outside_markers_never_cuts_a_marker() {

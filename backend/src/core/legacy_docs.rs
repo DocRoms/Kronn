@@ -86,7 +86,12 @@ pub fn is_kronn_managed_docs(docs_dir: &Path) -> bool {
     let Ok(content) = fs::read_to_string(&agents) else {
         return false;
     };
-    let first_line = first_content_line(&content);
+    is_kronn_signature(&content)
+}
+
+/// Whether `content` (an `AGENTS.md`) opens with Kronn's signature line.
+pub fn is_kronn_signature(content: &str) -> bool {
+    let first_line = first_content_line(content);
     KRONN_SIGNATURE_LINES
         .iter()
         .any(|s| first_line.trim() == *s)

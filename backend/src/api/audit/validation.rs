@@ -58,12 +58,23 @@ pub enum TargetSnapshot {
     Present(String),
 }
 
+/// KT-1595: a UTF-8 file read through the rooted primitive from `project_path`
+/// (a link at the file or in a parent is refused, never followed). A missing
+/// file is `NotFound`, a refusal is `PermissionDenied`, non-UTF-8 is `InvalidData`.
+fn read_text(project_path: &Path, path: &Path) -> std::io::Result<String> {
+    match crate::core::fs_guard::guarded_read(project_path, path)? {
+        Some(bytes) => String::from_utf8(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        None => Err(std::io::ErrorKind::NotFound.into()),
+    }
+}
+
 /// Take the snapshot of `target_file` under `project_path`. ONLY a true
 /// NotFound maps to `Missing` — any other read error (permissions, invalid
 /// UTF-8, a directory at the path) is an `Err` the caller must turn into a
 /// FAILED step: the rewrite proof cannot equate "absent" and "unreadable".
 pub fn target_snapshot(project_path: &Path, target_file: &str) -> Result<TargetSnapshot, String> {
-    match std::fs::read_to_string(project_path.join(target_file)) {
+    match read_text(project_path, &project_path.join(target_file)) {
         Ok(content) => Ok(TargetSnapshot::Present(normalized_content_hash(&content))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TargetSnapshot::Missing),
         Err(e) => Err(format!("target unreadable for rewrite proof: {e}")),
@@ -137,7 +148,7 @@ pub(crate) fn unfilled_companion(project_path: &Path, target_file: &str) -> Opti
     let root = DocsRoot::of(project_path);
     let within = root.strip(target_file)?;
     for companion in companion_docs(within) {
-        let Ok(content) = std::fs::read_to_string(root.file(project_path, companion)) else {
+        let Ok(content) = read_text(project_path, &root.file(project_path, companion)) else {
             continue;
         };
         let names = raw_placeholder_names(&content);
@@ -325,7 +336,7 @@ pub fn validate_step_output(
     // rules preserve the detail files and just finalize the index. So
     // we keep the detection binary — partial progress is recovered by
     // the resume layer, not by relaxing the leak check here.
-    if let Ok(content) = std::fs::read_to_string(&dst_path) {
+    if let Ok(content) = read_text(project_path, &dst_path) {
         let leaked_names = raw_placeholder_names(&content);
         let leaked = leaked_names.len();
         if leaked > 0 {
@@ -435,19 +446,23 @@ pub struct DispositionGap {
 /// read only when `count_fallback` is set, to verify a section just written.
 fn step8_surface(project_path: &Path, count_fallback: bool) -> (String, Vec<String>) {
     let docs_root = DocsRoot::of(project_path);
-    let mut index_content =
-        std::fs::read_to_string(docs_root.file(project_path, "inconsistencies-tech-debt.md"))
-            .unwrap_or_default();
+    let mut index_content = read_text(
+        project_path,
+        &docs_root.file(project_path, "inconsistencies-tech-debt.md"),
+    )
+    .unwrap_or_default();
     if !count_fallback {
         index_content = crate::core::audit_detectors::without_unaddressed_section(&index_content);
     }
     let listed_ids = super::reconciliation::parse_index_td_ids(&index_content);
     let mut sheets = Vec::new();
     let td_dir = docs_root.file(project_path, "tech-debt");
-    if let Ok(entries) = std::fs::read_dir(&td_dir) {
-        for e in entries.flatten() {
-            let p = e.path();
-            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+    // KT-1595: listed and read through the rooted primitive; a linked folder
+    // or sheet is refused (no sheet), never followed to an outside file.
+    if let Ok(Some(entries)) = crate::core::fs_guard::guarded_list(project_path, &td_dir) {
+        for entry in entries {
+            let p = td_dir.join(&entry);
+            let Some(name) = entry.to_str() else {
                 continue;
             };
             if !name.starts_with("TD-") || !name.ends_with(".md") {
@@ -457,7 +472,7 @@ fn step8_surface(project_path: &Path, count_fallback: bool) -> (String, Vec<Stri
             if !listed_ids.contains(id) {
                 continue; // orphan history — not part of this run's output
             }
-            if let Ok(body) = std::fs::read_to_string(&p) {
+            if let Ok(body) = read_text(project_path, &p) {
                 sheets.push(body);
             }
         }
@@ -626,12 +641,15 @@ pub fn settle_unaddressed_signals(
         return None;
     }
     let index = DocsRoot::of(project_path).file(project_path, "inconsistencies-tech-debt.md");
-    let content = std::fs::read_to_string(&index).ok()?;
+    // Read and written through the rooted primitive: this runs right after the
+    // agent, which may have left a link where the index or its folder was.
+    let content =
+        String::from_utf8(crate::core::fs_guard::guarded_read(project_path, &index).ok()??).ok()?;
     let kept = crate::core::audit_detectors::without_unaddressed_section(&content);
     let section = crate::core::audit_detectors::render_unaddressed_section(&undisposed);
     let written = format!("{}\n\n{section}", kept.trim_end());
     if written != content {
-        crate::core::mcp_scanner::atomic_write(&index, &written).ok()?;
+        crate::core::fs_guard::guarded_replace(project_path, &index, written.as_bytes()).ok()?;
     }
     // The listing must actually dispose of them, or the failure stands.
     unaddressed_in_output(project_path, signals, true)
@@ -739,25 +757,44 @@ pub(crate) fn fill_kronn_owned_placeholders(content: &str, today: &str) -> Strin
 }
 
 /// Apply [`fill_kronn_owned_placeholders`] to this step's own target file.
+///
+/// Runs right after the agent, which can leave a swap behind (KT-1595): the
+/// read and the replace go through the rooted primitive under the project, so
+/// a link at the name or in a parent (swapped in or pre-planted) is refused,
+/// never read nor written through. The replace is optimistic on the bytes read.
 pub(crate) fn fill_step_owned_placeholders(project_path: &Path, target_file: &str, today: &str) {
     if !DocsRoot::of(project_path).contains(target_file) {
         return;
     }
     let path = project_path.join(target_file);
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        // Only a document the agent otherwise finished: filling the date of an
-        // untouched template would pass it off as rewritten.
-        if raw_placeholder_names(&content)
-            .iter()
-            .any(|name| name != "DATE")
-        {
+    let bytes = match crate::core::fs_guard::guarded_read(project_path, &path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(target_file, %error, "could not read the document to fill Kronn-owned placeholders");
             return;
         }
-        let filled = fill_kronn_owned_placeholders(&content, today);
-        if filled != content {
-            if let Err(error) = std::fs::write(&path, filled) {
-                tracing::warn!(target_file, %error, "could not fill Kronn-owned placeholders");
-            }
+    };
+    let Ok(content) = std::str::from_utf8(&bytes) else {
+        return;
+    };
+    // Only a document the agent otherwise finished: filling the date of an
+    // untouched template would pass it off as rewritten.
+    if raw_placeholder_names(content)
+        .iter()
+        .any(|name| name != "DATE")
+    {
+        return;
+    }
+    let filled = fill_kronn_owned_placeholders(content, today);
+    if filled != content {
+        if let Err(error) = crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+            project_path,
+            &path,
+            &filled,
+            &bytes,
+        ) {
+            tracing::warn!(target_file, %error, "could not fill Kronn-owned placeholders");
         }
     }
 }
@@ -1040,13 +1077,16 @@ pub(crate) fn repair_coverage_rows(project_path: &Path, target_file: &str) -> bo
         return false;
     }
     let path = project_path.join(target_file);
-    let Ok(content) = std::fs::read_to_string(&path) else {
+    let Ok(Some(bytes)) = crate::core::fs_guard::guarded_read(project_path, &path) else {
+        return false;
+    };
+    let Ok(content) = String::from_utf8(bytes) else {
         return false;
     };
     let Some(repaired) = repaired_coverage_matrix(&content) else {
         return false;
     };
-    match crate::core::mcp_scanner::atomic_write(&path, &repaired) {
+    match crate::core::fs_guard::guarded_replace(project_path, &path, repaired.as_bytes()) {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(target_file, %error, "could not repair the coverage matrix rows");
@@ -1765,6 +1805,25 @@ mod tests {
         assert!(!repair_coverage_rows(&project, "docs/decisions.md"));
     }
 
+    /// KT-1595 — the repair runs right after the agent; an index folder swapped
+    /// for a link between the walk and the write never receives the rewrite.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_repaired_index() {
+        use crate::core::fs_guard::swap_probe;
+        let target = "docs/inconsistencies-tech-debt.md";
+        let (_tmp, project) = fixture(target, 0, 512);
+        std::fs::write(project.join(target), node_service_matrix()).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        swap_probe::arm(&project.join("docs"), external.path());
+        let repaired = repair_coverage_rows(&project, target);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(!repaired, "a write refused is not reported as done");
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+    }
+
     /// KT-1295 — the retry feedback carries the accepted forms.
     #[test]
     #[serial]
@@ -2041,6 +2100,113 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(docs.join("b.md")).unwrap(),
             "{{TASK_1}} reviewed {{DATE}}"
+        );
+    }
+
+    /// KT-1595 — the date fill runs right after the agent: a docs folder
+    /// swapped for a link between the read and the write never receives it.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_docs_folder_swapped_after_the_read_never_receives_the_filled_date() {
+        use crate::core::fs_guard::swap_probe;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "done, reviewed {{DATE}}").unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), "outside {{DATE}}").unwrap();
+        swap_probe::arm_after(&docs, external.path(), 1);
+        fill_step_owned_placeholders(tmp.path(), "docs/a.md", "2026-10-03");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("a.md")).unwrap(),
+            "outside {{DATE}}",
+            "the file behind the link is untouched"
+        );
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+
+    /// KT-1595 round 5 (NEW-3): the validation reads after an agent are no
+    /// oracle on an outside file a planted link points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_target_is_an_unreadable_snapshot_not_the_outside_content() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), "outside").unwrap();
+        std::os::unix::fs::symlink(external.path().join("a.md"), tmp.path().join("docs/a.md"))
+            .unwrap();
+        assert!(target_snapshot(tmp.path(), "docs/a.md").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_companion_is_not_read_for_placeholders() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = DocsRoot::of(tmp.path());
+        let companion = root.file(tmp.path(), "workflow/commits.md");
+        std::fs::create_dir_all(companion.parent().unwrap()).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            external.path().join("c.md"),
+            "**TEMPLATE FILE.** {{OUTSIDE_NAME}}",
+        )
+        .unwrap();
+        // Control: the same content as a plain file is reported.
+        std::fs::copy(external.path().join("c.md"), &companion).unwrap();
+        assert!(unfilled_companion(tmp.path(), "docs/coding-rules.md").is_some());
+        std::fs::remove_file(&companion).unwrap();
+        std::os::unix::fs::symlink(external.path().join("c.md"), &companion).unwrap();
+        assert_eq!(unfilled_companion(tmp.path(), "docs/coding-rules.md"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_tech_debt_folder_contributes_no_sheet_to_the_step8_surface() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "| TD-20260603-linked-sheet | x |\n",
+        )
+        .unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            external.path().join("TD-20260603-linked-sheet.md"),
+            "OUTSIDE SHEET",
+        )
+        .unwrap();
+        // Control: the same sheet in a real folder is part of the surface.
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::copy(
+            external.path().join("TD-20260603-linked-sheet.md"),
+            docs.join("tech-debt/TD-20260603-linked-sheet.md"),
+        )
+        .unwrap();
+        assert_eq!(step8_surface(tmp.path(), false).1.len(), 1);
+        std::fs::remove_dir_all(docs.join("tech-debt")).unwrap();
+        std::os::unix::fs::symlink(external.path(), docs.join("tech-debt")).unwrap();
+        let (_, sheets) = step8_surface(tmp.path(), false);
+        assert!(sheets.is_empty(), "{sheets:?}");
+    }
+
+    /// KT-1595 — no race needed: a link already at the target name is not
+    /// read through nor rewritten.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_target_name_is_not_filled_through() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), "outside {{DATE}}").unwrap();
+        std::os::unix::fs::symlink(external.path().join("a.md"), docs.join("a.md")).unwrap();
+        fill_step_owned_placeholders(tmp.path(), "docs/a.md", "2026-10-03");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("a.md")).unwrap(),
+            "outside {{DATE}}"
         );
     }
 

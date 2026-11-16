@@ -63,7 +63,7 @@ Every git command Kronn runs on a worker's worktree is built by
 Call sites: the commit/merge commit, staging and identity of `task_exec_commit` /
 `git_commit` ([src: file: backend/src/api/git_ops.rs:1295-1305#run_commit_command]),
 the candidate merge, its abort and its commits
-([src: file: backend/src/core/worktree.rs:2537-2547#build_candidate_with_hooks]), the doc
+([src: file: backend/src/core/worktree.rs:2845-2855#build_candidate_with_hooks]), the doc
 citations settling (`git checkout`, `add`, `grep`, `show`, `diff`), the worktree
 inspections (`worktree_dirty_files`, `committed_file_changes`, `git_head`, …), the
 HTTP agent's `git_status` / `git_diff` / `git_log`, the sub-task diff, the
@@ -91,7 +91,7 @@ Also pinned, because a worker's worktree can be their argument:
   redirected pointer is refused before git reads it), in the owner's checkout plain
   git. Every lane command also sets `GIT_NO_LAZY_FETCH=1`, so a promisor remote
   the worker wrote can never make a read fetch with its transport program
-  ([src: file: backend/src/core/worktree.rs:2352-2357#resolve_commit]). The ratchet of
+  ([src: file: backend/src/core/worktree.rs:2625-2630#resolve_commit]). The ratchet of
   the guard counts DIRECT spawns only: a plain helper handed a worktree path is
   not seen, so such a helper belongs in the function list of the guard test;
 - `gh` and `glab` (`host_cli_command`: `gh pr create` runs `git status` itself)
@@ -279,7 +279,7 @@ output (20 lines / 2 000 characters), never a conflict
 - `task_exec_commit` / `git_commit` fail with `HookRefused (pre-commit): <output>`
   and commit nothing;
 - the candidate build returns `CandidateOutcome::HookRefused { hook, output }`
-  ([src: file: backend/src/core/worktree.rs:2485#HookRefused]), undoes the merge
+  ([src: file: backend/src/core/worktree.rs:2758#HookRefused]), undoes the merge
   and is reported to the principal and worker with the hook's output.
 
 A `git merge` refused before it starts (a dirty tree, unrelated histories) is an

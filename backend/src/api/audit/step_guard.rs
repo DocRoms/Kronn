@@ -77,9 +77,19 @@ fn contained_path(project_path: &Path, target: &str) -> Result<PathBuf, String> 
 
 /// The target as it is now: `None` when the file is absent.
 pub(crate) fn read_target(project_path: &Path, target: &str) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(contained_path(project_path, target)?) {
-        Ok(content) => Ok(Some(content)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+    // Read through the project's directory fds (KT-1595): the content is
+    // written back (`mark_partial`, `clear_partial_marker`, `save_aside`), so a
+    // parent swapped for a link after the walk must not make Kronn copy an
+    // outside file into the project. A link is an error, never followed.
+    let path = contained_path(project_path, target)?;
+    match crate::core::fs_guard::guarded_read(project_path, &path) {
+        Ok(Some(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| format!("target `{target}` unreadable: {e}")),
+        Ok(None) => Ok(None),
+        Err(e) if crate::core::fs_guard::is_link_refusal(&e) => {
+            Err(format!("target `{target}` refused: {e}"))
+        }
         Err(e) => Err(format!("target `{target}` unreadable: {e}")),
     }
 }
@@ -2344,5 +2354,100 @@ mod swap_tests {
             std::fs::read_to_string(external.join("stack.md")).unwrap(),
             "KEEP"
         );
+    }
+
+    /// KT-1595 (N1) — the target is read through the project's fds: a parent
+    /// swapped for a link after the walk yields the folder that was held (the
+    /// agent's file), never the outside file the link points at.
+    #[test]
+    fn a_target_is_never_read_through_a_parent_swapped_after_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/stack.md"), "agent content").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let read = read_target(&root, "docs/stack.md");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(read.unwrap().as_deref(), Some("agent content"));
+    }
+
+    /// KT-1595 (N1) — `mark_partial` writes the content it read back into the
+    /// project: with the folder swapped for a link meanwhile, the outside file
+    /// is neither copied into the project nor touched.
+    #[test]
+    fn a_partial_marker_never_copies_an_outside_file_after_a_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/stack.md"), "agent content").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let marked = mark_partial(&root, "docs/stack.md", 3, "agent died");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(marked.is_err(), "{marked:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.join("stack.md")).unwrap(),
+            "OUTSIDE SECRET"
+        );
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        let held = std::fs::read_to_string(root.join("docs.moved/stack.md")).unwrap();
+        assert!(!held.contains("OUTSIDE SECRET"), "{held}");
+    }
+
+    /// KT-1595 (N1) — the same for the marker removal.
+    #[test]
+    fn a_partial_marker_is_never_cleared_with_the_content_of_an_outside_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        let marked = format!("{}body", partial_banner(2, "why"));
+        std::fs::write(root.join("docs/stack.md"), &marked).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let cleared = clear_partial_marker(&root, "docs/stack.md");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(cleared.is_err(), "{cleared:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.join("stack.md")).unwrap(),
+            "OUTSIDE SECRET"
+        );
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+    }
+
+    /// KT-1595 (N1) — a displaced target is kept aside from what is read through
+    /// the fds: a swapped parent never makes Kronn keep an outside file's bytes.
+    #[test]
+    fn a_displaced_target_is_never_kept_from_a_swapped_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/stack.md"), "agent content").unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("stack.md"), "OUTSIDE SECRET").unwrap();
+        swap_probe::arm(&root.join("docs"), &external);
+        let outcome = settle_killed(
+            &root,
+            "docs/stack.md",
+            Some("before"),
+            None,
+            StopKind::Cancelled,
+            4,
+        );
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_ne!(outcome.outcome, KilledOutcome::Restored, "{outcome:?}");
+        assert_eq!(std::fs::read_dir(&external).unwrap().count(), 1);
+        let leaked = std::fs::read_dir(root.join("docs.moved"))
+            .unwrap()
+            .flatten()
+            .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|c| c.contains("OUTSIDE SECRET")));
+        assert!(!leaked, "no outside byte was copied into the project");
     }
 }

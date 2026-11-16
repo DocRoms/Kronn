@@ -989,23 +989,21 @@ const WALK_SKIPPED_DIRS: &[&str] = &[
 
 /// `git ls-files` (tracked and untracked-not-ignored), `None` outside git.
 fn git_files(project: &Path) -> Option<Vec<String>> {
-    let out = crate::core::cmd::git_cmd()
-        .arg("-C")
-        .arg(project)
-        .args([
+    // KT-1595: no program the repository's configuration names runs, and a
+    // blocking `.gitignore` or include fails the listing in bounded time.
+    let out = crate::core::cmd::agent_git_output(
+        project,
+        &[
             "ls-files",
             "-z",
             "--cached",
             "--others",
             "--exclude-standard",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
+        ],
+        &[],
+    )?;
     Some(
-        String::from_utf8_lossy(&out.stdout)
+        String::from_utf8_lossy(&out)
             .split('\0')
             .filter(|f| !f.is_empty())
             .map(str::to_string)
@@ -1084,14 +1082,7 @@ fn is_generated_output(path: &str) -> bool {
 }
 
 fn is_git_ignored(project: &Path, path: &str) -> bool {
-    crate::core::cmd::git_cmd()
-        .arg("-C")
-        .arg(project)
-        .args(["check-ignore", "-q", "--", path])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    crate::core::anti_halluc::is_git_ignored(project, path)
 }
 
 /// Decides whether a path a doc names is really gone. The file index is built

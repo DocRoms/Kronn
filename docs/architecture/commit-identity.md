@@ -89,12 +89,12 @@ The list is **Settings › Workers › OS junk files** (`workers.os_junk_pattern
 validated on save (`WorkersConfig::validate`, `os_junk_pattern_problem`) and
 published to the process by `config::save` and at boot
 (`worktree::set_os_junk_patterns`).
-[src: file: backend/src/core/worktree.rs:1557-1558#set_os_junk_patterns]
+[src: file: backend/src/core/worktree.rs:1830-1831#set_os_junk_patterns]
 
 - Each lane Kronn creates excludes the patterns in the repository's local exclude
   (`ensure_os_junk_excluded`), without touching a tracked `.gitignore`.
-  [src: file: backend/src/core/worktree.rs:1601-1603#ensure_os_junk_excluded]
+  [src: file: backend/src/core/worktree.rs:1874-1876#ensure_os_junk_excluded]
 - A checkout that holds only junk is not dirty: delivery and cleanup go through.
   A *tracked* junk file that changed is still work.
-  [src: file: backend/src/core/worktree.rs:4409-4415#worktree_dirty_files]
+  [src: file: backend/src/core/worktree.rs:4682-4688#worktree_dirty_files]
 - A type change (`T`, a file replaced by a symlink) is delivered as *Modified*.

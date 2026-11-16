@@ -405,30 +405,40 @@ pub fn decision_record(content: &str) -> Option<String> {
 /// run started.
 pub type Records = BTreeSet<(String, String)>;
 
-/// Every `<docs>/tech-debt/TD-*.md` sheet, sorted by id.
-fn td_sheets(docs_dir: &Path) -> Vec<(String, std::path::PathBuf)> {
-    let Ok(entries) = std::fs::read_dir(docs_dir.join("tech-debt")) else {
-        return Vec::new();
+/// Every `<docs>/tech-debt/TD-*.md` sheet, sorted by id, listed through the
+/// project's directory fds (KT-1595): a link at `tech-debt/` or in a parent —
+/// planted, or swapped in after an agent ran — is an ERROR, never "no sheets"
+/// (a sheet must live in the repository, and a refusal must not read as a clean
+/// project). A missing folder lists nothing.
+fn td_sheets_guarded(
+    root: &Path,
+    docs_dir: &Path,
+) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let td_dir = docs_dir.join("tech-debt");
+    let names = match crate::core::fs_guard::guarded_list(root, &td_dir) {
+        Ok(Some(names)) => names,
+        Ok(None) => return Ok(Vec::new()),
+        Err(e) => return Err(format!("list {}: {e}", td_dir.display())),
     };
-    let mut sheets: Vec<(String, std::path::PathBuf)> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
-            let id = name.strip_suffix(".md")?.to_string();
-            crate::core::td_index::is_td_id(&id).then(|| (id, e.path()))
+    let mut sheets: Vec<(String, std::path::PathBuf)> = names
+        .iter()
+        .filter_map(|name| {
+            let id = name.to_str()?.strip_suffix(".md")?.to_string();
+            crate::core::td_index::is_td_id(&id).then(|| (id, td_dir.join(name)))
         })
         .collect();
     sheets.sort();
-    sheets
+    Ok(sheets)
 }
 
 /// The `Decision record` lines of the TD sheets as they are now, one
 /// `TD-id ADR-id` per line: what a run stores at its start.
-pub fn capture_records(docs_dir: &Path) -> String {
+/// Read through the rooted primitive from the project `root` (KT-1595): a
+/// linked `tech-debt/`, sheet or folder above them is no sheet.
+pub fn capture_records(root: &Path, docs_dir: &Path) -> String {
     let mut out = String::new();
-    for (id, path) in td_sheets(docs_dir) {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+    for (id, path) in td_sheets_guarded(root, docs_dir).unwrap_or_default() {
+        let Ok(Some(content)) = read_guarded(root, &path) else {
             continue;
         };
         if let Some(adr) = decision_record(&content) {
@@ -582,10 +592,10 @@ pub struct StartOfRun {
 }
 
 impl StartOfRun {
-    pub fn capture(docs_dir: &Path) -> Self {
+    pub fn capture(root: &Path, docs_dir: &Path) -> Self {
         Self {
-            decisions: read_decisions(docs_dir),
-            records: capture_records(docs_dir),
+            decisions: read_decisions(root, docs_dir),
+            records: capture_records(root, docs_dir),
         }
     }
 
@@ -673,13 +683,16 @@ pub fn downgrade(content: &str, ids: &[String], date: &str) -> String {
 }
 
 /// The text of `<docs>/decisions.md`, empty when absent or not a regular file.
-pub fn read_decisions(docs_dir: &Path) -> String {
-    let path = docs_dir.join(DECISIONS_FILE);
-    if regular_file(&path) {
-        std::fs::read_to_string(&path).unwrap_or_default()
-    } else {
-        String::new()
-    }
+/// `root` is the project: the text ends up in a step prompt, so it is read
+/// through the rooted primitive from there (KT-1595), and a link at
+/// `decisions.md`, at the docs folder or at any folder between them and the
+/// project reads as empty, never as an outside file.
+pub fn read_decisions(root: &Path, docs_dir: &Path) -> String {
+    crate::core::fs_guard::guarded_read(root, &docs_dir.join(DECISIONS_FILE))
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -695,21 +708,37 @@ pub struct AdrSettleOutcome {
     pub downgraded: Vec<String>,
 }
 
-fn regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+/// `path` read through the rooted primitive as text (KT-1595): a link in a
+/// parent folder or at the name is refused, never followed. `None` when missing.
+fn read_guarded(root: &Path, path: &Path) -> Result<Option<String>, String> {
+    match crate::core::fs_guard::guarded_read(root, path) {
+        Ok(Some(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| format!("read {}: {e}", path.display())),
+        Ok(None) => Ok(None),
+        // A folder (or another non-plain entry) is no file: nothing to read.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Ok(None),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
 }
 
 /// Settles every `<docs>/tech-debt/TD-*.md` sheet an ADR in force covers.
 /// Rejected sheets stay as they are; a sheet already settled by the same ADR
-/// is not rewritten.
-pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleOutcome, String> {
+/// is not rewritten. `root` is the project the folder belongs to: the sheets
+/// and `decisions.md` are read and written through the rooted primitive under
+/// it, so a parent swapped for a link after an agent ran never takes a write
+/// outside (KT-1595); a `docs_dir` outside `root` is refused.
+pub fn settle_covered_sheets(
+    root: &Path,
+    docs_dir: &Path,
+    trust: Trust,
+) -> Result<AdrSettleOutcome, String> {
+    crate::core::fs_guard::assert_contained_no_symlink(root, docs_dir)?;
     let decisions_path = docs_dir.join(DECISIONS_FILE);
-    let decisions = if regular_file(&decisions_path) {
-        std::fs::read_to_string(&decisions_path)
-            .map_err(|e| format!("read {}: {e}", decisions_path.display()))?
-    } else {
-        String::new()
-    };
+    // No check by path first (KT-1595): the guarded read decides. A missing
+    // file is no decision; a link at the name or in a parent (a swapped `docs`
+    // folder reads as ENOENT by path) fails closed with an error.
+    let decisions = read_guarded(root, &decisions_path)?.unwrap_or_default();
     let current = parse(&decisions);
     let (adrs, late) = trusted(&current, trust);
     let (records, ignored) = match trust {
@@ -723,16 +752,24 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
     if !late.is_empty() {
         let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let lowered = downgrade(&decisions, &late, &date);
-        crate::core::mcp_scanner::atomic_write(&decisions_path, &lowered)?;
+        crate::core::fs_guard::guarded_replace(root, &decisions_path, lowered.as_bytes())?;
         outcome.downgraded = current
             .iter()
             .filter(|a| late.contains(&a.id))
             .map(Adr::reference)
             .collect();
     }
-    for (id, path) in td_sheets(docs_dir) {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
+    for (id, path) in td_sheets_guarded(root, docs_dir)? {
+        // A link at a sheet (or a swapped folder) is an error; a sheet that is
+        // a folder, or not text, is skipped.
+        let content = match crate::core::fs_guard::guarded_read(root, &path) {
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(content) => content,
+                Err(_) => continue,
+            },
+            Ok(None) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => continue,
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
         };
         match coverage(&id, &content, &adrs, Some(&records)) {
             Coverage::Covered(adr) => {
@@ -756,7 +793,7 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
                         1,
                     );
                 }
-                crate::core::mcp_scanner::atomic_write(&path, &settled)?;
+                crate::core::fs_guard::guarded_replace(root, &path, settled.as_bytes())?;
                 outcome.settled.push(format!("{id} → {}", adr.reference()));
             }
             Coverage::NotInForce(adr_id) => outcome.not_in_force.push(format!("{id} → {adr_id}")),
@@ -771,8 +808,8 @@ pub fn settle_covered_sheets(docs_dir: &Path, trust: Trust) -> Result<AdrSettleO
 
 /// The decisions that may settle a TD in this run (in force since before it
 /// started), for the prompt of a step that writes TDs. Empty when there is none.
-pub fn in_force_prompt_block(docs_dir: &Path, baseline: &str) -> String {
-    let current = parse(&read_decisions(docs_dir));
+pub fn in_force_prompt_block(root: &Path, docs_dir: &Path, baseline: &str) -> String {
+    let current = parse(&read_decisions(root, docs_dir));
     let (force, _) = trusted(
         &current,
         Trust::RunBaseline {

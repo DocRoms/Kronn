@@ -481,7 +481,13 @@ fn write(project_path: &Path, file: &mut CitationsFile) -> Result<(), String> {
     drop_secret_fingerprints(project_path, file);
     file.readme = CITATIONS_README.to_string();
     let json = serde_json::to_string_pretty(file).map_err(|e| format!("JSON error: {e}"))?;
-    crate::core::mcp_scanner::atomic_write(&citations_path(project_path), &json)
+    // Through the rooted primitive (KT-1595): the docs folder may have been
+    // swapped for a link since the agent ran.
+    crate::core::fs_guard::guarded_replace(
+        project_path,
+        &citations_path(project_path),
+        json.as_bytes(),
+    )
 }
 
 /// Markdown docs under the docs dir, as paths relative to the project root.

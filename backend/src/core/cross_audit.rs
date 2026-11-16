@@ -262,8 +262,15 @@ pub fn verify_citation(root: &Path, citation: &Citation) -> Result<(), String> {
             citation.line
         ));
     }
-    let text = std::fs::read_to_string(root.join(&file))
-        .map_err(|e| format!("`{file}` is not readable as text: {e}"))?;
+    // KT-1595: rooted read, a linked file or parent is refused (the quote check
+    // would otherwise be an oracle on an outside file).
+    let text = crate::core::fs_guard::guarded_read(root, &root.join(&file))
+        .map_err(|e| format!("`{file}` is not readable as text: {e}"))?
+        .ok_or_else(|| format!("`{file}` is not readable as text: not found"))
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|_| format!("`{file}` is not readable as text: not valid UTF-8"))
+        })?;
     let lines: Vec<&str> = text.lines().collect();
     let from = (citation.line as usize).saturating_sub(1 + LINE_TOLERANCE);
     let to = (end as usize + LINE_TOLERANCE).min(lines.len());
