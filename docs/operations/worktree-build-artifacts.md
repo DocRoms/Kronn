@@ -690,6 +690,17 @@ decision, and only that list widens the allowlist, for that project:
   (campaign, swap, launch) has no project, so it only keeps a name no project lists
   from being accepted, and the run's own refusal is the one that decides.
 
+**4c. Per-lane package-manager caches (KT-1751).** A lane may write only its
+worktree and its target, so a package manager that caches in the user's home
+(`~/.npm`, `~/.cache/yarn`, `~/.composer`) would fail its first install. The lane's
+environment (`WorkerLane::env`) moves the download cache of each manager the
+project's manifests show, at any depth, to `<worktree>/.kronn/data/cache/<name>`:
+`npm_config_cache` (npm), `YARN_CACHE_FOLDER` (yarn), `COMPOSER_CACHE_DIR`
+(composer) (`ToolchainKind::cache_env`, `project_toolchains::cache_env`). pnpm keeps
+the host's read-only store, Cargo its `CARGO_HOME`; a project that uses none of the
+three (Kronn's own: Cargo and pnpm) gets no new variable, so nothing it cached is
+invalidated. The opt-in sandbox profiles of the ticket are not done.
+
 **5. Per root, and only under the sandbox** (`core/task_worker_root_marks.rs`,
 `core/task_worker_lane_warm.rs`). Kronn's own repository has two roots, `backend/`
 and `desktop/src-tauri/`, and they do not warm alike: the desktop one needs system

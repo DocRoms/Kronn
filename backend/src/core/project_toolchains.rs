@@ -196,6 +196,26 @@ impl ToolchainKind {
         }
     }
 
+    /// KT-1751 — the variable that moves this package manager's download cache
+    /// out of the user's home, with the name of its folder under the lane's
+    /// cache directory. A lane may write only its worktree and its target, so a
+    /// manager that caches in `~/.npm`, `~/.cache/yarn` or `~/.composer` would
+    /// fail on the first install and could never share a cache with the owner's
+    /// real one. `None` for a toolchain with no home cache to move: pnpm's store
+    /// is the host's read-only one by design, Cargo's is the lane's `CARGO_HOME`.
+    pub fn cache_env(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Node(NodeManager::Npm) => Some(("npm_config_cache", "npm")),
+            Self::Node(NodeManager::Yarn) => Some(("YARN_CACHE_FOLDER", "yarn")),
+            Self::Composer => Some(("COMPOSER_CACHE_DIR", "composer")),
+            Self::Node(NodeManager::Pnpm)
+            | Self::Cargo
+            | Self::CocoaPods
+            | Self::Xcode
+            | Self::Make => None,
+        }
+    }
+
     /// Order inside one directory; build tools come after package managers.
     fn rank(self) -> u8 {
         match self {
@@ -420,6 +440,20 @@ pub fn dependency_dirs(
 /// the command that installs it, in the toolchain's own directory. The command
 /// comes from the detected toolchain that owns `path`; a directory the project
 /// named itself gets the generic wording.
+/// KT-1751 — the cache variables of a project's package managers, once per
+/// variable, in the profile's order (see [`ToolchainKind::cache_env`]).
+pub fn cache_env(profile: &[PackageRoot]) -> Vec<(&'static str, &'static str)> {
+    let mut found: Vec<(&'static str, &'static str)> = Vec::new();
+    for root in profile {
+        if let Some(entry) = root.kind.cache_env() {
+            if !found.contains(&entry) {
+                found.push(entry);
+            }
+        }
+    }
+    found
+}
+
 pub fn missing_dependency_notice(profile: &[PackageRoot], path: &str) -> String {
     let owner = profile
         .iter()

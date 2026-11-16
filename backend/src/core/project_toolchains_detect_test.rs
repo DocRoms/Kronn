@@ -208,3 +208,61 @@ fn the_conventions_lines_describe_the_profile_and_stay_empty_without_one() {
     );
     assert!(conventions_lines(&[]).is_empty());
 }
+
+// ── KT-1751: a package manager's download cache lives in the lane ─────────
+
+#[test]
+fn a_package_manager_that_caches_in_the_home_names_the_variable_that_moves_it() {
+    assert_eq!(
+        ToolchainKind::Node(NodeManager::Npm).cache_env(),
+        Some(("npm_config_cache", "npm"))
+    );
+    assert_eq!(
+        ToolchainKind::Node(NodeManager::Yarn).cache_env(),
+        Some(("YARN_CACHE_FOLDER", "yarn"))
+    );
+    assert_eq!(
+        ToolchainKind::Composer.cache_env(),
+        Some(("COMPOSER_CACHE_DIR", "composer"))
+    );
+    // pnpm's store is the host's, read-only by design; Cargo's cache is the
+    // lane's CARGO_HOME; the others cache nothing in a home.
+    for kind in [
+        ToolchainKind::Node(NodeManager::Pnpm),
+        ToolchainKind::Cargo,
+        ToolchainKind::Xcode,
+        ToolchainKind::Make,
+    ] {
+        assert_eq!(kind.cache_env(), None, "{}", kind.name());
+    }
+}
+
+#[test]
+fn the_caches_of_a_project_follow_its_detected_toolchains_once_each() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    write(repo, "package.json", "{}");
+    write(repo, "package-lock.json", "{}");
+    write(repo, "admin/package.json", "{}");
+    write(repo, "admin/package-lock.json", "{}");
+    write(repo, "application/composer.json", "{}");
+    write(repo, "Makefile", "test:\n\ttrue\n");
+
+    assert_eq!(
+        cache_env(&detect_toolchains(repo)),
+        [
+            ("npm_config_cache", "npm"),
+            ("COMPOSER_CACHE_DIR", "composer")
+        ]
+    );
+    // Kronn's own shape (Cargo + pnpm): nothing is added to its lanes.
+    let kronn = tempfile::tempdir().unwrap();
+    write(
+        kronn.path(),
+        "backend/Cargo.toml",
+        "[package]\nname = \"x\"\n",
+    );
+    write(kronn.path(), "frontend/package.json", "{}");
+    write(kronn.path(), "frontend/pnpm-lock.yaml", "");
+    assert!(cache_env(&detect_toolchains(kronn.path())).is_empty());
+}

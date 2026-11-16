@@ -411,3 +411,57 @@ fn a_node_workspace_package_in_a_layered_node_modules_resolves_to_the_lanes_own_
         repo.main.join("node_modules/@types")
     );
 }
+
+#[test]
+fn a_package_manager_cache_is_the_lanes_own_and_inside_a_write_root() {
+    let repo = repo();
+    write(&repo.worktree, "package.json", "{}");
+    write(&repo.worktree, "package-lock.json", "{}");
+    write(&repo.worktree, "application/composer.json", "{}");
+    let lane = repo.lane();
+    let provisioned = lane.provision(&SharedCaches::default());
+
+    let env = lane.env(&provisioned);
+    let value = |name: &str| {
+        env.iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| PathBuf::from(value))
+    };
+    for (name, sub) in [
+        ("npm_config_cache", "npm"),
+        ("COMPOSER_CACHE_DIR", "composer"),
+    ] {
+        let path = value(name).unwrap_or_else(|| panic!("{name} is not set"));
+        assert_eq!(path, lane.data_dir.join("cache").join(sub));
+        assert!(
+            lane.write_roots().iter().any(|root| path.starts_with(root)),
+            "{name} -> {} is outside every write root",
+            path.display()
+        );
+    }
+    // A toolchain the project does not use is not given a cache.
+    assert!(value("YARN_CACHE_FOLDER").is_none());
+}
+
+#[test]
+fn a_project_with_no_such_package_manager_has_its_lane_environment_unchanged() {
+    let repo = repo();
+    write(
+        &repo.worktree,
+        "backend/Cargo.toml",
+        "[package]\nname = \"x\"\n",
+    );
+    write(&repo.worktree, "frontend/package.json", "{}");
+    write(&repo.worktree, "frontend/pnpm-lock.yaml", "");
+    let lane = repo.lane();
+    let provisioned = lane.provision(&SharedCaches::default());
+    let env = lane.env(&provisioned);
+    let names: Vec<&str> = env.iter().map(|(name, _)| *name).collect();
+    for cache in [
+        "npm_config_cache",
+        "YARN_CACHE_FOLDER",
+        "COMPOSER_CACHE_DIR",
+    ] {
+        assert!(!names.contains(&cache), "{cache} leaked into {names:?}");
+    }
+}

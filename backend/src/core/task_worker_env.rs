@@ -427,10 +427,29 @@ impl WorkerLane {
         ));
         env.push((E2E_CHROMIUM_SINGLE_PROCESS_ENV, OsString::from("1")));
         env.extend(self.compiler_temp_env());
+        env.extend(self.package_manager_cache_env());
         if let Some(home) = self.effective_cargo_home(provisioned) {
             env.push((CARGO_HOME_ENV, home.into_os_string()));
         }
         env
+    }
+
+    /// KT-1751 — the download cache of each package manager the project uses
+    /// (npm, yarn, composer, found from the manifests at any depth), moved to
+    /// `<data dir>/cache/<name>`: inside the lane, so inside a write root, instead
+    /// of the user's home, which a lane may not write. Nothing is added for a
+    /// project that uses none of them (Kronn's own lanes are unchanged).
+    fn package_manager_cache_env(&self) -> Vec<(&'static str, OsString)> {
+        let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+        crate::core::project_toolchains::cache_env(&profile)
+            .into_iter()
+            .map(|(variable, folder)| {
+                (
+                    variable,
+                    self.data_dir.join("cache").join(folder).into_os_string(),
+                )
+            })
+            .collect()
     }
 
     /// The C compiler's environment of this lane (KT-1736, KT-1742): what keeps
