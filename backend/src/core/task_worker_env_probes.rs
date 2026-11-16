@@ -29,17 +29,31 @@ pub(super) fn check_rust(
         priority: Priority::Normal,
         clean_env: false,
     };
-    let nextest = runner.run(&probe(
-        &first.manifest_dir,
-        &["nextest", "--version"],
-        NEXTEST_TIMEOUT,
-    ));
-    if !nextest.success {
-        return Capability::no(format!(
-            "`cargo nextest --version` failed: {}",
-            nextest.detail
+    // KT-1747 review: nextest is probed only for a project that configures it;
+    // one that tests with `cargo test` must not be marked red on a host
+    // without nextest (the offline fetch below proves cargo itself runs).
+    let uses_nextest = roots
+        .iter()
+        .any(|root| configures_nextest(&root.manifest_dir))
+        || configures_nextest(&lane.worktree);
+    if uses_nextest {
+        let nextest = runner.run(&probe(
+            &first.manifest_dir,
+            &["nextest", "--version"],
+            NEXTEST_TIMEOUT,
         ));
+        if !nextest.success {
+            return Capability::no(format!(
+                "`cargo nextest --version` failed: {}",
+                nextest.detail
+            ));
+        }
     }
+    let runner_name = if uses_nextest {
+        "cargo nextest"
+    } else {
+        "cargo test"
+    };
     // A cold `cargo check` would compile the whole dependency graph; resolving
     // it offline from the cache proves the part a sandbox actually breaks.
     // One root that cannot is named; the others stay usable.
@@ -64,7 +78,7 @@ pub(super) fn check_rust(
         ));
     }
     let mut reason = format!(
-        "cargo nextest and the offline dependency cache work; lane target {}",
+        "{runner_name} and the offline dependency cache work; lane target {}",
         lane.cargo_target_dir.display()
     );
     if !failed.is_empty() {
@@ -74,6 +88,12 @@ pub(super) fn check_rust(
         ));
     }
     Capability::yes(reason)
+}
+
+/// Does `dir` configure cargo-nextest (`.config/nextest.toml`, nextest's own
+/// configuration file)?
+fn configures_nextest(dir: &Path) -> bool {
+    dir.join(".config").join("nextest.toml").is_file()
 }
 
 /// Does the `package.json` in `dir` name vitest as a dependency?
@@ -116,7 +136,15 @@ pub(crate) fn check_frontend(
         let path = root
             .dependency_path()
             .unwrap_or_else(|| NODE_MODULES.into());
+        // A workspace package's dependencies are hoisted to its workspace
+        // root: its own missing directory is not a blocker, and its vitest
+        // may be the root's.
+        let workspace_dir = root
+            .workspace
+            .as_ref()
+            .map(|workspace| lane.worktree.join(workspace));
         match state_of(&path) {
+            Some(FrontendDeps::SourceMissing) if workspace_dir.is_some() => {}
             Some(FrontendDeps::SourceMissing) => {
                 blockers.push(format!(
                     "the main checkout has no {path} to reuse and a worker never installs from \
@@ -130,7 +158,11 @@ pub(crate) fn check_frontend(
             }
             _ => {}
         }
-        let vitest = dir.join(NODE_MODULES).join(".bin").join("vitest");
+        let bin_vitest = |base: &Path| base.join(NODE_MODULES).join(".bin").join("vitest");
+        let vitest = std::iter::once(bin_vitest(&dir))
+            .chain(workspace_dir.as_deref().map(bin_vitest))
+            .find(|candidate| candidate.exists())
+            .unwrap_or_else(|| bin_vitest(&dir));
         if !vitest.exists() {
             if declares_vitest(&dir) {
                 missing_vitest.push(format!("{path}/.bin/vitest is missing"));

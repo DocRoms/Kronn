@@ -163,7 +163,7 @@ fn a_nested_crate_gets_its_rust_line_and_a_vitest_root_its_frontend_line() {
     let section = toolchain_brief_section_in(&caps, Some(&profile), RoomLang::En);
 
     assert!(
-        section.contains("Rust tests (`cargo nextest`): ✅"),
+        section.contains("Rust tests (`cargo`): ✅"),
         "{section}"
     );
     assert!(

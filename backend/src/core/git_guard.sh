@@ -160,6 +160,8 @@ kronn_destructive() {
   kronn_dry=0
   kronn_force=0
   kronn_skip=0
+  kronn_exclude=0
+  kronn_positive=0
   kronn_top=
   if [ "$kronn_want" = restore ]; then
     kronn_top=$(cd "$kronn_dir" 2>/dev/null && "$real_git" rev-parse --show-toplevel 2>/dev/null) || kronn_top=
@@ -174,7 +176,18 @@ kronn_destructive() {
     case "$kronn_want:$kronn_a" in
       restore:--staged | restore:-S) kronn_staged=1 ;;
       restore:--worktree | restore:-W) kronn_worktree=1 ;;
-      restore:*) kronn_is_whole_tree "$kronn_a" && kronn_whole=1 ;;
+      # Pathspecs read from a file cannot be judged here: treated as the
+      # whole tree. `-s <tree>` takes a value that is not a pathspec.
+      restore:--pathspec-from-file*) kronn_whole=1 ;;
+      restore:-s | restore:--source) kronn_skip=1 ;;
+      restore:-*) ;;
+      # An exclude-only restore (`:!x`, `:^x`, `:(exclude)x`) covers the rest
+      # of the tree.
+      restore:':!'* | restore:':^'* | restore:':('*exclude*')'*) kronn_exclude=1 ;;
+      restore:*)
+        kronn_positive=1
+        kronn_is_whole_tree "$kronn_a" && kronn_whole=1
+        ;;
       clean:--dry-run) kronn_dry=1 ;;
       clean:--*) ;;
       clean:-*n*) kronn_dry=1 ;;
@@ -188,6 +201,9 @@ kronn_destructive() {
       branch:-*f* | branch:-*D* | branch:-*M* | branch:-*C*) kronn_force=1 ;;
     esac
   done
+  if [ "$kronn_exclude" = 1 ] && [ "$kronn_positive" = 0 ]; then
+    kronn_whole=1
+  fi
   case "$kronn_want" in
     restore)
       [ "$kronn_whole" = 1 ] && { [ "$kronn_staged" = 0 ] || [ "$kronn_worktree" = 1 ]; }

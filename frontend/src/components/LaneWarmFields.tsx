@@ -139,6 +139,31 @@ export function LaneWarmFields({ draft, onChange, scope, disabled = false, idPre
         </div>
       )}
 
+      {scope === 'project' && (
+        <div className="lane-warm-group">
+          <label className="lane-warm-field" htmlFor={`${idPrefix}-executables`}>
+            <span className="label">{t('laneWarm.executables')}</span>
+            <textarea
+              id={`${idPrefix}-executables`}
+              className="set-input"
+              rows={2}
+              spellCheck={false}
+              placeholder={t('laneWarm.executablesPlaceholder')}
+              value={draft.executablesText}
+              disabled={disabled}
+              onChange={event => set({ executablesText: event.target.value })}
+              data-testid={`${idPrefix}-executables`}
+            />
+          </label>
+          <p className="text-sm text-faint">{t('laneWarm.executablesHelp')}</p>
+          {problem === 'executables' && (
+            <p role="alert" className="default-docs-dir-error" data-testid={`${idPrefix}-executables-invalid`}>
+              {t('laneWarm.executablesInvalid')}
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="lane-warm-group">
         <label className="lane-warm-field" htmlFor={`${idPrefix}-timeout`}>
           <span className="label">{t('laneWarm.timeout')}</span>

@@ -38,6 +38,16 @@ impl Fixture {
         std::fs::write(self.worktree.join("frontend").join("package.json"), "{}").unwrap();
         std::fs::create_dir_all(self.worktree.join("backend")).unwrap();
         std::fs::write(self.worktree.join("backend").join("Cargo.toml"), "").unwrap();
+        // Kronn's own shape: its backend configures nextest.
+        std::fs::create_dir_all(self.worktree.join("backend").join(".config")).unwrap();
+        std::fs::write(
+            self.worktree
+                .join("backend")
+                .join(".config")
+                .join("nextest.toml"),
+            "",
+        )
+        .unwrap();
     }
 
     fn lane(&self) -> WorkerLane {
@@ -989,6 +999,44 @@ fn a_failing_nextest_marks_rust_unavailable_and_says_why() {
     // The offline fetch is not attempted once nextest is known missing.
     // nextest, then the frontend's two probes; never the offline fetch.
     assert_eq!(runner.calls.lock().unwrap().len(), 3);
+}
+
+/// KT-1747 review — a Cargo project that does not configure nextest tests with
+/// `cargo test`: a host without nextest must not turn its Rust line red (the
+/// brief would then tell the worker to skip tests that run).
+#[test]
+fn a_cargo_project_that_does_not_configure_nextest_is_probed_for_cargo_test() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(
+        fx.worktree.join("redis-flush").join("Cargo.toml"),
+        "[package]\nname = \"redis-flush\"\n",
+    )
+    .unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::failing_on("nextest");
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(
+        capabilities.rust_tests.available,
+        "{:?}",
+        capabilities.rust_tests
+    );
+    assert!(
+        capabilities.rust_tests.reason.contains("cargo test"),
+        "{}",
+        capabilities.rust_tests.reason
+    );
+    let calls = runner.calls.lock().unwrap();
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.args.iter().any(|arg| arg == "nextest")),
+        "nextest was probed for a project that does not use it"
+    );
 }
 
 #[test]

@@ -658,11 +658,26 @@ the one place KT-1747's generic toolchain detection reuses):
      one only when a Node root depends on a UI framework or a dev server, the cargo
      gate only when a Cargo root is detected (any other project, one Kronn does not
      recognise included, gets the generic gate). The launch probes follow the same
-     profile: `cargo nextest` and `cargo fetch --offline --locked` run in each
-     detected Cargo root (a crate in `redis-flush/` is probed there, and a failing
-     root is named), vitest in the first Node root that has it; a Node root that does
+     profile: `cargo fetch --offline --locked` runs in each detected Cargo root (a
+     crate in `redis-flush/` is probed there, and a failing root is named), and
+     `cargo nextest --version` only when the project configures nextest
+     (`.config/nextest.toml` in a Cargo root or at the repository root, Kronn's own
+     `backend/.config/nextest.toml`); a project that tests with `cargo test` is never
+     marked red on a host without nextest. vitest runs in the first Node root that
+     has it (a workspace package may use its workspace root's); a Node root that does
      not use vitest is "not applicable", never "unavailable", and the worker is told
      to run the project's own test commands.
+  - A package of a Node workspace (an ancestor up to the repository root with a
+    `workspaces` field or `pnpm-workspace.yaml`) takes its manager from the nearest
+    directory that declares one (`packageManager`, then the lock file), so a yarn or
+    pnpm workspace is never reported as npm. Its dependencies are installed by the
+    workspace root: its own missing `node_modules` is neither a launch warning nor a
+    blocker, and an install notice names the workspace root's command.
+  - Detection never enters `fixtures`, `examples`, `dist` or `build` directories and
+    never follows a directory link.
+  - The ignore rule of a dependency layer is written like the frontend link's: to the
+    REGISTERED checkout's `info/exclude` (`ensure_local_git_exclude_pinned_for`),
+    never to wherever the lane's agent-writable `.git` pointer says (KT-1595).
   The settings screen has no field for `dependency_dirs` yet (the entry is set
   through the project's workspace settings API); the form is a follow-up. A save of
   the other lane-warm fields carries it through unchanged (`configOf(draft, stored)`
@@ -677,18 +692,34 @@ the **project's own** `validation_executables` (the lane-warm entry of its works
 settings, a list of bare program names or repository-relative paths) is the human's
 decision, and only that list widens the allowlist, for that project:
 
+- the human sets it on the project card, block Lane warm-up, field "Validation
+  executables" (one entry per line), which is where a refusal sends them;
 - the global Settings > Workers entry is never read for it (what one owner trusts for
-  one project would widen every other), and no agent tool writes it;
+  one project would widen every other): a save that carries one there is refused,
+  and no agent tool writes it;
 - an entry is a plain program name (`composer`) or a path inside the repository
   (`vendor/bin/phpunit`, a leading `./` ignored); a shell, an option, an absolute path,
-  a `..` or a character a shell would read is refused on save;
+  a `..` or a character a shell would read is refused on save. A name and a path
+  never match each other: `composer` admits the program on the PATH, never a
+  repository file `./composer`;
 - a repository-relative executable is run from the worktree it was checked in: it must
   be listed exactly, resolve (links followed) to a file inside the worktree, and the
   process that starts is that resolved file;
-- the run checks the list of the project that owns the worktree (a managed
-  `<repo>/.kronn/worktrees/<name>` belongs to `<repo>`); the intake of a validation
-  (campaign, swap, launch) has no project, so it only keeps a name no project lists
-  from being accepted, and the run's own refusal is the one that decides.
+- one exception, for a lane's layered dependency directories (section 4): their
+  entries link to the main checkout, so a listed `vendor/phpunit/phpunit/phpunit` or
+  `node_modules/.bin/jest` resolves outside the worktree. It is admitted when the
+  listed path lies in a dependency directory the lane takes from the main checkout
+  AND resolves into the main checkout's copy of that same directory, the main
+  checkout being the one the lane's path names (`<repo>/.kronn/worktrees/<name>`).
+  Nothing wider: a layer entry re-pointed elsewhere is still refused. Composer's
+  `vendor/bin/*` is a lane-owned copy and resolves inside the worktree anyway;
+- the run checks the list of the project that owns the worktree: a managed
+  `<repo>/.kronn/worktrees/<name>` belongs to `<repo>`, and a tree anywhere else (a
+  configured worktree root, an autoCode root, a sub-directory) to the registered
+  project whose own `git worktree list` (asked of the registered checkout, never of
+  the lane) names it. The intake of a validation (campaign, swap, launch) has no
+  project, so it only keeps a name no project lists from being accepted, and the
+  run's own refusal is the one that decides.
 
 **4c. Per-lane package-manager caches (KT-1751).** A lane may write only its
 worktree and its target, so a package manager that caches in the user's home

@@ -195,15 +195,43 @@ pub fn effective_for(worktree: &Path, main_checkout: Option<&Path>) -> Effective
 }
 
 /// KT-1751 — the executables the project that owns `worktree` lists for its
-/// validations. The project is found like the lane's is: a managed worktree
-/// (`<repo>/.kronn/worktrees/<name>`) belongs to `<repo>`; any other directory
-/// is its own project, so a tree of no registered project gets nothing.
+/// validations. A managed worktree (`<repo>/.kronn/worktrees/<name>`) belongs
+/// to `<repo>`; a tree anywhere else (a configured worktree root, an autoCode
+/// root, a sub-directory) belongs to the registered project whose own worktree
+/// list names it. A tree of no registered project gets nothing.
 pub fn validation_executables_for(worktree: &Path) -> Vec<String> {
     let worktree = key_of(worktree);
     let main_checkout = crate::core::task_worker_env::WorkerLane::for_worktree(&worktree)
         .ok()
-        .and_then(|lane| lane.main_checkout);
+        .and_then(|lane| lane.main_checkout)
+        .or_else(|| project_listing(&worktree));
     effective_for(&worktree, main_checkout.as_deref()).validation_executables
+}
+
+/// The registered project that lists validation executables and whose
+/// checkout, or one of whose worktrees (as its own `git worktree list` says),
+/// contains `path`. Only projects with such a list are asked: the others would
+/// add nothing.
+fn project_listing(path: &Path) -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = SNAPSHOT
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .projects
+        .iter()
+        .filter(|(_, config)| {
+            config
+                .validation_executables
+                .as_ref()
+                .is_some_and(|list| !list.is_empty())
+        })
+        .map(|(project, _)| project.clone())
+        .collect();
+    candidates.into_iter().find(|project| {
+        path.starts_with(project)
+            || crate::core::worktree::registered_worktree_paths(project)
+                .iter()
+                .any(|tree| path.starts_with(key_of(tree)))
+    })
 }
 
 /// KT-1751 — every project's listed executables, deduplicated: what the intake

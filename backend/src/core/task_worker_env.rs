@@ -401,6 +401,16 @@ impl WorkerLane {
         (dirs, rejected)
     }
 
+    /// KT-1751 review — every dependency directory this lane takes from the
+    /// main checkout (relative to the repository, `/` separated): the layered
+    /// ones and the frontend's own link.
+    pub(crate) fn dependency_paths(&self) -> Vec<String> {
+        let (layered, _) = self.layered_dependency_dirs();
+        std::iter::once(format!("{FRONTEND_DIR}/{NODE_MODULES}"))
+            .chain(layered.into_iter().map(|(path, _)| path))
+            .collect()
+    }
+
     /// Environment a task worker gets so no env-prefixed command is needed.
     /// `CARGO_HOME` is set only when its registry link is in place; otherwise
     /// Cargo keeps the host's default and the smoke check reports what happens.
@@ -585,10 +595,18 @@ impl WorkerLane {
                 .filter(|source| source.is_dir());
             let state = self.link_deps_at(&destination, source);
             if matches!(state, FrontendDeps::Linked(_)) && self.worktree.join(".git").exists() {
-                if let Err(error) = crate::core::worktree::ensure_local_git_exclude(
-                    &self.worktree,
-                    &format!("/{path}"),
-                ) {
+                // KT-1595, as for the frontend link above: judged from the
+                // lane, written to the REGISTERED checkout's exclude, never to
+                // wherever the lane's (agent-writable) `.git` pointer says.
+                let written = match self.main_checkout.as_deref() {
+                    Some(root) => crate::core::worktree::ensure_local_git_exclude_pinned_for(
+                        &self.worktree,
+                        root,
+                        &format!("/{path}"),
+                    ),
+                    None => Err("the lane has no registered checkout".to_string()),
+                };
+                if let Err(error) = written {
                     warnings.push(format!("cannot ignore the {path} layer: {error}"));
                 }
             }
@@ -608,9 +626,22 @@ impl WorkerLane {
                 .collect();
         if !missing.is_empty() {
             let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
-            warnings.extend(missing.iter().map(|path| {
-                crate::core::project_toolchains::missing_dependency_notice(&profile, path)
-            }));
+            // A package of a Node workspace has no install of its own (its
+            // dependencies are hoisted to the workspace root, whose own layer
+            // carries the warning when it is missing).
+            let workspace_package = |path: &str| {
+                profile.iter().any(|root| {
+                    root.workspace.is_some() && root.dependency_path().as_deref() == Some(path)
+                })
+            };
+            warnings.extend(
+                missing
+                    .iter()
+                    .filter(|path| !workspace_package(path))
+                    .map(|path| {
+                        crate::core::project_toolchains::missing_dependency_notice(&profile, path)
+                    }),
+            );
         }
         Provisioned {
             frontend_deps,

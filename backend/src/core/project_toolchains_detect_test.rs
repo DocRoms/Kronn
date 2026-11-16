@@ -266,3 +266,67 @@ fn the_caches_of_a_project_follow_its_detected_toolchains_once_each() {
     write(kronn.path(), "frontend/pnpm-lock.yaml", "");
     assert!(cache_env(&detect_toolchains(kronn.path())).is_empty());
 }
+
+/// KT-1747 review — a package of a yarn or pnpm workspace uses the workspace's
+/// manager (lock and `packageManager` live at the root), and its dependencies
+/// are installed by the workspace root, never by the package itself.
+#[test]
+fn a_workspace_package_uses_the_workspaces_manager_and_installs_nothing_itself() {
+    let yarn = tempfile::tempdir().unwrap();
+    write(
+        yarn.path(),
+        "package.json",
+        r#"{"workspaces":["packages/*"],"packageManager":"yarn@4.1.0"}"#,
+    );
+    write(yarn.path(), "yarn.lock", "");
+    write(yarn.path(), "packages/a/package.json", r#"{"name":"a"}"#);
+    let profile = detect_toolchains(yarn.path());
+    assert_eq!(kinds(&profile), ["yarn@.", "yarn@packages/a"]);
+    assert_eq!(profile[0].workspace, None);
+    assert_eq!(profile[1].workspace, Some(PathBuf::new()));
+    // No npm cache for a project that never uses npm.
+    assert_eq!(cache_env(&profile), [("YARN_CACHE_FOLDER", "yarn")]);
+    // The install is the workspace root's, run at the root.
+    let notice = missing_dependency_notice(&profile, "packages/a/node_modules");
+    assert!(notice.contains("yarn install"), "{notice}");
+    assert!(notice.contains("the repository root"), "{notice}");
+
+    let pnpm = tempfile::tempdir().unwrap();
+    write(pnpm.path(), "web/package.json", r#"{"name":"web"}"#);
+    write(pnpm.path(), "web/pnpm-workspace.yaml", "packages: [libs/*]");
+    write(pnpm.path(), "web/pnpm-lock.yaml", "");
+    write(pnpm.path(), "web/libs/ui/package.json", r#"{"name":"ui"}"#);
+    let profile = detect_toolchains(pnpm.path());
+    assert_eq!(kinds(&profile), ["pnpm@web", "pnpm@web/libs/ui"]);
+    assert_eq!(profile[1].workspace, Some(PathBuf::from("web")));
+
+    // A nested package with no workspace around it keeps its own manager.
+    let plain = tempfile::tempdir().unwrap();
+    write(plain.path(), "package.json", "{}");
+    write(plain.path(), "yarn.lock", "");
+    write(plain.path(), "tools/x/package.json", "{}");
+    write(plain.path(), "tools/x/package-lock.json", "{}");
+    let profile = detect_toolchains(plain.path());
+    assert_eq!(kinds(&profile), ["yarn@.", "npm@tools/x"]);
+    assert_eq!(profile[1].workspace, None);
+}
+
+/// KT-1747 review (blue) — a manifest under test fixtures, examples or build
+/// output is not a toolchain of the project, and a directory link is never
+/// followed (it may lead out of the repository or loop).
+#[cfg(unix)]
+#[test]
+fn fixtures_examples_build_output_and_directory_links_yield_no_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    write(repo, "package.json", "{}");
+    write(repo, "tests/fixtures/app/package.json", "{}");
+    write(repo, "examples/demo/composer.json", "{}");
+    write(repo, "dist/package.json", "{}");
+    write(repo, "build/package.json", "{}");
+    let elsewhere = tempfile::tempdir().unwrap();
+    write(elsewhere.path(), "composer.json", "{}");
+    std::os::unix::fs::symlink(elsewhere.path(), repo.join("linked")).unwrap();
+
+    assert_eq!(kinds(&detect_toolchains(repo)), ["npm@."]);
+}

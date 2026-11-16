@@ -2207,6 +2207,17 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
     }))
 }
 
+/// KT-1751 review — the worktrees git records for the REGISTERED checkout
+/// `repo_path` (itself first), whatever directory they live in. Asked of the
+/// registered checkout, never of a lane, so a lane's own `.git` pointer cannot
+/// make it claim another project.
+pub(crate) fn registered_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
+    worktree_entries(repo_path)
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect()
+}
+
 /// One `git worktree list --porcelain` entry.
 struct WorktreeEntry {
     path: PathBuf,

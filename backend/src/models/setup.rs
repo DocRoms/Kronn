@@ -354,6 +354,18 @@ impl WorkersConfig {
             }
         }
         validate_managed_worktree_roots(&self.managed_worktree_roots)?;
+        // KT-1751 review: a project's own setting; the global entry is never
+        // read for it, so storing one there would be silently ignored.
+        if self
+            .lane_warm
+            .validation_executables
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty())
+        {
+            return Err("lane_warm.validation_executables is a project's own setting: set it \
+                 on the project card (Lane warm-up), not in Settings > Workers"
+                .to_string());
+        }
         if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
             return Err(format!(
                 "bash_max_timeout_min must be between 1 and {MAX_BASH_TIMEOUT_MIN_LIMIT}"

@@ -6742,8 +6742,9 @@ const TEST_FAILURE_MARKERS: &[&str] = &[
     "tests failed",
     "failures:",
     "--- fail:",
-    // PHPUnit's summary line.
+    // PHPUnit's summary lines (failed assertions, errors).
     "failures!",
+    "errors!",
 ];
 
 /// A runner's own per-file failure line: vitest and jest print `FAIL path`.
@@ -6751,6 +6752,33 @@ fn reports_failed_file(output_lower: &str) -> bool {
     output_lower
         .lines()
         .any(|line| line.trim_start().starts_with("fail "))
+}
+
+/// KT-1753 review — did a test runner run and report a failure? The markers
+/// above, vitest / jest's `FAIL path`, pytest's `FAILED|ERROR path::test` and
+/// its `=== 1 failed in 0.1s ===` summary, mocha's `N failing` and jest's
+/// `Tests: 1 failed` summary. `output` is as printed (pytest's prefixes are
+/// upper-case), `lower` the same lower-cased.
+fn test_runner_failed(output: &str, lower: &str) -> bool {
+    TEST_FAILURE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+        || reports_failed_file(lower)
+        || output.lines().any(|line| {
+            let line = line.trim_start();
+            (line.starts_with("FAILED ") || line.starts_with("ERROR ")) && line.contains("::")
+        })
+        || lower.lines().any(|line| {
+            let line = line.trim();
+            let pytest_summary = line.starts_with('=')
+                && line.contains(" in ")
+                && (line.contains(" failed") || line.contains(" error"));
+            let mocha = line
+                .strip_suffix(" failing")
+                .is_some_and(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()));
+            let jest = line.starts_with("tests:") && line.contains(" failed");
+            pytest_summary || mocha || jest
+        })
 }
 
 /// `Some` when `failure` comes from the host rather than the worker's code:
@@ -6781,10 +6809,7 @@ fn environment_cause(
         .rev()
         .take(DOCKER_REFUSAL_TAIL_LINES)
         .collect();
-    let test_failed = TEST_FAILURE_MARKERS
-        .iter()
-        .any(|marker| output.contains(marker))
-        || reports_failed_file(&output);
+    let test_failed = test_runner_failed(&failure.output, &output);
     let Some(refusal) = tail
         .iter()
         .find(|line| DOCKER_REFUSALS.iter().any(|refusal| line.contains(refusal)))
@@ -6848,9 +6873,28 @@ const COMPOSE_MARKERS: &[&str] = &[
     "no configuration file provided",
 ];
 
-/// What a shell prints for a command it cannot find (lower-cased): bash and zsh
-/// say `command not found`, dash says `<tool>: not found`.
-const COMMAND_NOT_FOUND_MARKERS: &[&str] = &["command not found", ": not found"];
+/// The programs whose own `<name>: …` line reports a command they could not
+/// find: the shells, and `env` of a `#!/usr/bin/env tool` script.
+const NOT_FOUND_REPORTERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "env"];
+
+/// KT-1753 review — a shell's own report of a missing command, by its shape
+/// (lower-cased line): bash `bash: line 1: x: command not found`, zsh
+/// `zsh: command not found: x`, dash `/bin/sh: 1: x: not found`, env
+/// `env: 'x': no such file or directory`. A test's own `Not Found` (an HTTP
+/// 404, a missing route) is not one: its line does not start with a shell.
+fn shell_reported_not_found(line: &str) -> bool {
+    let Some((head, rest)) = line.split_once(':') else {
+        return false;
+    };
+    let program = head.rsplit('/').next().unwrap_or(head).trim();
+    if !NOT_FOUND_REPORTERS.contains(&program) {
+        return false;
+    }
+    let rest = rest.trim_end();
+    rest.contains("command not found")
+        || rest.ends_with(": not found")
+        || (program == "env" && rest.ends_with("no such file or directory"))
+}
 
 /// GNU make's own report of a recipe that exited 127 (`make: *** [t] Error 127`),
 /// not `Error 1270`.
@@ -6885,12 +6929,9 @@ fn lane_environment_cause(
     // A shell exits 127 for a command it cannot find; GNU make exits 2 and says
     // `Error 127`, and a runner may exit 1 after `command not found`.
     let missing_tool = exit_code == Some(127)
-        || tail.iter().any(|line| {
-            COMMAND_NOT_FOUND_MARKERS
-                .iter()
-                .any(|marker| line.contains(marker))
-                || make_reported_127(line)
-        });
+        || tail
+            .iter()
+            .any(|line| shell_reported_not_found(line) || make_reported_127(line));
     let fix = if missing_tool {
         "La commande de la validation (code 127) n'existe pas sur cette machine ou dans le PATH de la lane : installe l'outil (ou donne-le à la lane), puis reprends l'intégration."
     } else if any(SANDBOX_REFUSALS) {
@@ -10870,9 +10911,9 @@ fn toolchain_brief_section_in(
     if cargo {
         out.push_str(&line(
             if en {
-                "Rust tests (`cargo nextest`)"
+                "Rust tests (`cargo`)"
             } else {
-                "Tests Rust (`cargo nextest`)"
+                "Tests Rust (`cargo`)"
             },
             &toolchain.rust_tests,
         ));
@@ -26258,6 +26299,65 @@ pub(crate) mod tests {
         }
     }
 
+    /// KT-1753 review — a red run of pytest, mocha, jest or PHPUnit is the
+    /// worker's even when a failing test's own line says `Not Found`,
+    /// `Operation not permitted` or `Read-only file system`; only a shell's own
+    /// not-found report (or exit 127) means a missing tool.
+    #[test]
+    fn a_red_test_run_of_any_runner_never_reads_as_the_environment() {
+        use crate::models::ValidationsAccess::Sandbox;
+        for red in [
+            // pytest: the per-test line, then the summary.
+            failure(
+                Some(1),
+                "FAILED tests/test_api.py::test_get - requests.exceptions.HTTPError: 404 Client Error: Not Found for url: http://x/api\n=== 1 failed in 0.12s ===",
+            ),
+            failure(
+                Some(1),
+                "FAILED tests/test_io.py::test_write - PermissionError: [Errno 1] Operation not permitted: '/x'\n========== 1 failed, 3 passed in 0.40s ==========",
+            ),
+            failure(
+                Some(1),
+                "ERROR tests/test_io.py::test_tmp - OSError: [Errno 30] Read-only file system: '/x'\n=== 1 error in 0.10s ===",
+            ),
+            // mocha: `N failing`, then the failure with the server's answer.
+            failure(
+                Some(1),
+                "  3 passing (20ms)\n  1 failing\n\n  1) api\n       GET /x:\n     Error: expected 200 \"OK\", got 404 \"Not Found\"",
+            ),
+            // jest's summary line.
+            failure(
+                Some(1),
+                "Error: user: not found\nTests:       1 failed, 4 passed, 5 total",
+            ),
+            // PHPUnit's summary for errors (not only failures).
+            failure(
+                Some(2),
+                "1) App\\Tests\\FileTest::testWrite\nfile_put_contents(/x): Failed to open stream: Read-only file system\n\nERRORS!\nTests: 3, Assertions: 2, Errors: 1.",
+            ),
+            // An application message that merely ends in `: not found`.
+            failure(Some(1), "lookup failed: route /x: not found"),
+        ] {
+            assert!(
+                environment_cause(Sandbox, None, &red).is_none(),
+                "a real red test run stays the worker's: {}",
+                red.output
+            );
+        }
+        // The shells' own shapes still mean a missing tool.
+        for missing in [
+            "zsh: command not found: pnpm",
+            "/bin/sh: 1: yarn: not found",
+            "sh: phpunit: not found",
+            "bash: line 1: composer: command not found",
+            "env: 'node': No such file or directory",
+        ] {
+            let cause = environment_cause(Sandbox, None, &failure(Some(1), missing))
+                .unwrap_or_else(|| panic!("`{missing}` is a missing tool"));
+            assert!(cause.fix.contains("127"), "{}", cause.fix);
+        }
+    }
+
     /// The launch of a directory no test registered stays the plain one, and a
     /// registered mechanism is the one the confinement is built from.
     #[test]
@@ -33130,6 +33230,7 @@ pub(crate) mod tests {
         let root = |kind, dir: &str| crate::core::project_toolchains::PackageRoot {
             kind,
             rel_dir: dir.into(),
+            workspace: None,
         };
         use crate::core::project_toolchains::{NodeManager, ToolchainKind};
         let php = [root(ToolchainKind::Composer, "")];
@@ -33402,6 +33503,9 @@ pub(crate) mod tests {
             worktree::task_worktree_layout(repo, &task_ref, exec_short(&exec.id)).unwrap();
         std::fs::create_dir_all(worktree.join("backend")).unwrap();
         std::fs::write(worktree.join("backend").join("Cargo.toml"), "").unwrap();
+        // Kronn's shape: its backend configures nextest, so nextest is probed.
+        std::fs::create_dir_all(worktree.join("backend/.config")).unwrap();
+        std::fs::write(worktree.join("backend/.config/nextest.toml"), "").unwrap();
         std::fs::create_dir_all(worktree.join("frontend")).unwrap();
         std::fs::write(worktree.join("frontend").join("package.json"), "{}").unwrap();
         let bin = repo.join("frontend").join("node_modules").join(".bin");

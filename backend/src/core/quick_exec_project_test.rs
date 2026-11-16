@@ -147,3 +147,84 @@ fn a_listed_executable_that_resolves_outside_the_worktree_is_refused() {
     .expect_err("a missing executable was accepted");
     assert!(missing.0.contains("bin/missing"), "{}", missing.0);
 }
+
+/// KT-1751 review — in a lane, a dependency directory is layered from the main
+/// checkout (its entries link there), so a listed executable inside it
+/// (`vendor/phpunit/phpunit/phpunit`, `node_modules/.bin/jest`) resolves into
+/// the main checkout's matching dependency directory: admitted, and nothing
+/// wider (a layer entry a worker re-pointed elsewhere is still refused).
+#[cfg(unix)]
+#[test]
+fn a_listed_executable_of_a_layered_dependency_dir_is_admitted_and_nothing_wider() {
+    use crate::core::task_worker_env::{SharedCaches, WorkerLane};
+    let main = tempfile::tempdir().unwrap();
+    let main = main.path().canonicalize().unwrap();
+    let worktree = main.join(".kronn/worktrees/task-kt-1751-bbbb2222");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join("composer.json"), "{}").unwrap();
+    std::fs::write(worktree.join("package.json"), "{}").unwrap();
+    std::fs::write(worktree.join("package-lock.json"), "{}").unwrap();
+    write_executable(
+        &main.join("vendor/phpunit/phpunit/phpunit"),
+        "#!/bin/sh\necho phpunit\n",
+    );
+    write_executable(
+        &main.join("node_modules/jest/bin/jest.js"),
+        "#!/bin/sh\necho jest\n",
+    );
+    std::fs::create_dir_all(main.join("node_modules/.bin")).unwrap();
+    std::os::unix::fs::symlink("../jest/bin/jest.js", main.join("node_modules/.bin/jest"))
+        .unwrap();
+    WorkerLane::for_worktree(&worktree)
+        .unwrap()
+        .provision(&SharedCaches::default());
+    let roots = vec![worktree.clone()];
+    let listed = extra(&[
+        "vendor/phpunit/phpunit/phpunit",
+        "node_modules/.bin/jest",
+        "vendor/evil/tool",
+    ]);
+
+    let phpunit = validate_with(
+        &spec_in("vendor/phpunit/phpunit/phpunit", &[], &worktree),
+        &roots,
+        &listed,
+    )
+    .unwrap();
+    assert_eq!(
+        phpunit.local_executable,
+        Some(main.join("vendor/phpunit/phpunit/phpunit"))
+    );
+    let jest = validate_with(
+        &spec_in("node_modules/.bin/jest", &[], &worktree),
+        &roots,
+        &listed,
+    )
+    .unwrap();
+    assert_eq!(
+        jest.local_executable,
+        Some(main.join("node_modules/jest/bin/jest.js"))
+    );
+
+    // A layer entry re-pointed out of the main checkout's dependency dir.
+    let outside = tempfile::tempdir().unwrap();
+    write_executable(&outside.path().join("tool"), "#!/bin/sh\necho escaped\n");
+    std::os::unix::fs::symlink(outside.path(), worktree.join("vendor/evil")).unwrap();
+    let rejection = validate_with(
+        &spec_in("vendor/evil/tool", &[], &worktree),
+        &roots,
+        &listed,
+    )
+    .expect_err("a re-pointed layer entry was accepted");
+    assert!(rejection.0.contains("outside"), "{}", rejection.0);
+}
+
+/// KT-1751 review (blue) — a bare name the project lists (`composer`) is a
+/// program on the PATH, never a file of the repository called `./composer`.
+#[test]
+fn a_listed_bare_name_does_not_admit_a_repository_file_of_that_name() {
+    assert!(check_command_line_with("./composer install", &extra(&["composer"])).is_err());
+    assert!(check_command_line_with("composer install", &extra(&["./composer"])).is_err());
+    check_command_line_with("./composer install", &extra(&["./composer"])).unwrap();
+    check_command_line_with("composer install", &extra(&["composer"])).unwrap();
+}

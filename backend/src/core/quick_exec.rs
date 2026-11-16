@@ -292,7 +292,9 @@ pub fn validate_with(
 
 /// A repository-relative executable, resolved: a file of the working directory
 /// itself. Canonicalised on both sides, like [`validate_cwd`], so a link that
-/// leaves the repository is refused whatever it is called.
+/// leaves the repository is refused whatever it is called — except into the
+/// main checkout's own copy of a dependency directory a lane layers (see
+/// [`in_layered_dependency_dir`]).
 fn resolve_repo_executable(binary: &str, cwd: &Path) -> Result<PathBuf, Rejection> {
     let relative = binary.strip_prefix("./").unwrap_or(binary);
     let real = cwd.join(relative).canonicalize().map_err(|error| {
@@ -300,7 +302,7 @@ fn resolve_repo_executable(binary: &str, cwd: &Path) -> Result<PathBuf, Rejectio
             "`{relative}` cannot be resolved in the worktree: {error}"
         ))
     })?;
-    if !real.starts_with(cwd) {
+    if !real.starts_with(cwd) && !in_layered_dependency_dir(relative, cwd, &real) {
         return Err(Rejection(format!(
             "`{relative}` resolves to {}, outside the worktree it runs in",
             real.display()
@@ -310,6 +312,30 @@ fn resolve_repo_executable(binary: &str, cwd: &Path) -> Result<PathBuf, Rejectio
         return Err(Rejection(format!("`{relative}` is not a file")));
     }
     Ok(real)
+}
+
+/// KT-1751 review — in a task lane, a dependency directory (`vendor`,
+/// `node_modules`, …) is layered from the main checkout: its entries link
+/// there, so a listed `vendor/phpunit/phpunit/phpunit` or
+/// `node_modules/.bin/jest` resolves outside the worktree. It is admitted when
+/// `relative` lies in such a directory AND `real` lies in the main checkout's
+/// copy of that same directory: nothing wider (a layer entry re-pointed
+/// elsewhere is still refused). The main checkout comes from the lane's path
+/// (`<repo>/.kronn/worktrees/<name>`), never from anything inside the lane.
+fn in_layered_dependency_dir(relative: &str, cwd: &Path, real: &Path) -> bool {
+    let Ok(lane) = crate::core::task_worker_env::WorkerLane::for_worktree(cwd) else {
+        return false;
+    };
+    let Some(main) = lane.main_checkout.clone() else {
+        return false;
+    };
+    lane.dependency_paths().iter().any(|dir| {
+        relative.starts_with(&format!("{dir}/"))
+            && main
+                .join(dir)
+                .canonicalize()
+                .is_ok_and(|source| real.starts_with(source))
+    })
 }
 
 /// Decide whether a binary name may be spawned.
@@ -330,9 +356,14 @@ fn check_binary_with(binary: &str, allowlist: &[&str], extra: &[String]) -> Resu
     if binary.is_empty() {
         return Err(Rejection("no binary given".into()));
     }
-    let listed = extra
-        .iter()
-        .any(|entry| entry.trim().trim_start_matches("./") == binary.trim_start_matches("./"));
+    // A bare name the project lists (`composer`) is a program on the PATH and
+    // never a repository file `./composer`; a path entry never a bare name.
+    let is_path = |name: &str| name.contains('/') || name.contains('\\');
+    let listed = extra.iter().any(|entry| {
+        let entry = entry.trim();
+        is_path(entry) == is_path(binary)
+            && entry.trim_start_matches("./") == binary.trim_start_matches("./")
+    });
     if binary.contains('/') || binary.contains('\\') {
         // A path is an executable OF THE REPOSITORY, never any executable on the
         // machine (which is what the allowlist prevents): relative, inside, and
@@ -346,7 +377,7 @@ fn check_binary_with(binary: &str, allowlist: &[&str], extra: &[String]) -> Resu
         if !listed {
             return Err(Rejection(format!(
                 "`{binary}` is a repository path that the project has not listed: add it to \
-                 the project's validation executables (project settings, Workers) to run it"
+                 the project's Validation executables (project card, Lane warm-up) to run it"
             )));
         }
         return Ok(());

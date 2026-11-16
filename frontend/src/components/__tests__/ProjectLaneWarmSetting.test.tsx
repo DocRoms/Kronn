@@ -91,6 +91,37 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     }));
   });
 
+  // KT-1751 review — the executables a project's validations may run are set
+  // here, where Quick Exec's refusal sends the human.
+  it('lists the validation executables and stores them with the override', async () => {
+    getMock.mockResolvedValue({ hooks: {}, lane_warm: { validation_executables: ['composer'] } });
+    setMock.mockResolvedValue(true);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-executables')).not.toBeDisabled());
+    expect(screen.getByTestId('project-lane-warm-executables')).toHaveValue('composer');
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-executables'), {
+      target: { value: 'composer\n./vendor/bin/phpunit\n' },
+    });
+    fireEvent.click(screen.getByTestId('project-lane-warm-save'));
+
+    await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', {
+      hooks: {},
+      lane_warm: { validation_executables: ['composer', 'vendor/bin/phpunit'] },
+    }));
+  });
+
+  it('refuses a validation executable outside the repository before saving', async () => {
+    getMock.mockResolvedValue(null);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-executables')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-executables'), { target: { value: '/usr/bin/php' } });
+
+    expect(screen.getByTestId('project-lane-warm-executables-invalid')).toBeInTheDocument();
+    expect(screen.getByTestId('project-lane-warm-save')).toBeDisabled();
+  });
+
   it('refuses a root outside the repository before saving', async () => {
     getMock.mockResolvedValue(null);
     render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
@@ -157,7 +188,7 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     await waitFor(() => expect(screen.getByTestId('project-lane-warm-command')).not.toBeDisabled());
 
     const groups = screen.getByTestId('project-lane-warm-fields').querySelectorAll(':scope > .lane-warm-group');
-    expect(groups).toHaveLength(5);
+    expect(groups).toHaveLength(6);
     for (const group of Array.from(groups)) {
       expect(group.querySelectorAll('label')).toHaveLength(1);
       expect(group.querySelector('p.text-faint')).not.toBeNull();

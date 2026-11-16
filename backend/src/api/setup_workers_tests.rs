@@ -498,6 +498,15 @@ async fn the_lane_warm_settings_are_validated_stored_and_published() {
                 ..LaneWarmConfig::default()
             },
         ),
+        // KT-1751 review: a project's own setting, never read from the global
+        // entry, so it is refused there instead of stored and ignored.
+        (
+            "validation executables in the global entry",
+            LaneWarmConfig {
+                validation_executables: Some(vec!["composer".into()]),
+                ..LaneWarmConfig::default()
+            },
+        ),
     ] {
         let (status, body) =
             workers_reply(save_workers_config(State(state.clone()), Json(with(bad))).await).await;

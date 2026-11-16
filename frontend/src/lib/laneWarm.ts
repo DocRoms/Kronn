@@ -24,6 +24,8 @@ export interface LaneWarmDraft {
   timeout: string;
   /** KT-1742 — Rust roots to warm, one directory per line; blank = every detected root (a project's own). */
   rootsText: string;
+  /** KT-1751 — executables the project's validations may run, one per line (a project's own). */
+  executablesText: string;
 }
 
 export const EMPTY_LANE_WARM_DRAFT: LaneWarmDraft = {
@@ -33,6 +35,7 @@ export const EMPTY_LANE_WARM_DRAFT: LaneWarmDraft = {
   command: '',
   timeout: '',
   rootsText: '',
+  executablesText: '',
 };
 
 export function draftOf(config: LaneWarmConfig | null | undefined): LaneWarmDraft {
@@ -49,6 +52,7 @@ export function draftOf(config: LaneWarmConfig | null | undefined): LaneWarmDraf
       ? ''
       : String(config.first_build_timeout_min),
     rootsText: (config.rust_roots ?? []).join('\n'),
+    executablesText: (config.validation_executables ?? []).join('\n'),
   };
 }
 
@@ -66,8 +70,21 @@ export function rootLines(text: string): string[] {
   return roots;
 }
 
+/**
+ * KT-1751 — the validation executables of a draft: one bare name or
+ * repository-relative path per line, a leading `./` dropped.
+ */
+export function executableLines(text: string): string[] {
+  const entries: string[] = [];
+  for (const line of envLines(text)) {
+    const entry = line.replace(/^\.\//, '');
+    if (entry !== '' && !entries.includes(entry)) entries.push(entry);
+  }
+  return entries;
+}
+
 /** The first problem of a draft, as the part of the form it is in. */
-export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' | null {
+export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' | 'executables' | null {
   const raw = draft.timeout.trim();
   if (raw !== '') {
     const minutes = Number(raw);
@@ -80,12 +97,19 @@ export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' 
   }
   // A root is a directory inside the repository: relative, no `..`.
   if (rootLines(draft.rootsText).some(root => root.startsWith('/') || root.split('/').includes('..'))) return 'roots';
+  // An executable is a bare name or a path inside the repository (the server
+  // also refuses a shell).
+  if (executableLines(draft.executablesText).some(entry =>
+    entry.startsWith('/') || entry.startsWith('-') || entry.includes('\\') || entry.split('/').includes('..'))) {
+    return 'executables';
+  }
   return null;
 }
 
 /** The fields the form has an input for; everything else of a stored entry is carried through. */
 const FORM_FIELDS: ReadonlySet<string> = new Set([
   'seed_alignment', 'compiler_env', 'first_build_command', 'first_build_timeout_min', 'rust_roots',
+  'validation_executables',
 ]);
 
 /**
@@ -111,6 +135,8 @@ export function configOf(draft: LaneWarmDraft, stored?: LaneWarmConfig | null): 
   if (timeout !== '') config.first_build_timeout_min = Number(timeout);
   const roots = rootLines(draft.rootsText);
   if (roots.length > 0) config.rust_roots = roots;
+  const executables = executableLines(draft.executablesText);
+  if (executables.length > 0) config.validation_executables = executables;
   return config;
 }
 
@@ -120,5 +146,6 @@ export function sameDraft(a: LaneWarmDraft, b: LaneWarmDraft): boolean {
     && (a.envMode !== 'custom' || envLines(a.envText).join('\n') === envLines(b.envText).join('\n'))
     && a.command.trim() === b.command.trim()
     && a.timeout.trim() === b.timeout.trim()
-    && rootLines(a.rootsText).join('\n') === rootLines(b.rootsText).join('\n');
+    && rootLines(a.rootsText).join('\n') === rootLines(b.rootsText).join('\n')
+    && executableLines(a.executablesText).join('\n') === executableLines(b.executablesText).join('\n');
 }

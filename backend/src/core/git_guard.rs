@@ -475,6 +475,41 @@ mod tests {
         }
     }
 
+    /// KT-1753 review (blue) — a restore whose pathspecs only EXCLUDE paths
+    /// covers the rest of the tree, and one that reads its pathspecs from a file
+    /// cannot be judged: both are refused in the main checkout. An exclude next
+    /// to a real path stays a narrow restore.
+    #[test]
+    fn an_exclude_only_or_file_fed_restore_is_refused_in_the_main_checkout() {
+        let fx = fixture();
+        std::fs::write(fx.main.join("a.txt"), "uncommitted").unwrap();
+        std::fs::write(fx.main.join("list.txt"), ".\n").unwrap();
+
+        for args in [
+            vec!["restore", ":!README.md"],
+            vec!["restore", ":^README.md"],
+            vec!["restore", "--", ":(exclude)README.md"],
+            vec!["restore", "-s", "HEAD", ":!README.md"],
+            vec!["restore", "--pathspec-from-file=list.txt"],
+            vec!["restore", "--pathspec-from-file", "list.txt"],
+        ] {
+            let out = guarded(&fx, &fx.main, &args, false);
+            let message = refused(&out);
+            assert!(message.contains("refused 'git restore'"), "{args:?}: {message}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(fx.main.join("a.txt")).unwrap(),
+            "uncommitted"
+        );
+
+        let out = guarded(&fx, &fx.main, &["restore", "a.txt", ":!README.md"], false);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     /// KT-1753 — the same commands are an agent's own business in its linked
     /// worktree, and the human's confirmation lets them through in the main one.
     #[test]

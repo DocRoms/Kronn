@@ -122,3 +122,55 @@ fn the_executables_of_a_worktree_are_those_of_its_project() {
     set_project(project.path(), None);
     assert!(validation_executables_for(&worktree).is_empty());
 }
+
+fn git_in(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=kronn-test",
+            "-c",
+            "user.email=kronn-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// KT-1751 review — a worktree under a configured worktree root (or an
+/// autoCode root), outside `<repo>/.kronn/worktrees`, still gets its project's
+/// executables: the project is found from the registered checkouts' own
+/// worktree lists, whatever the layout.
+#[test]
+fn a_worktree_outside_the_kronn_layout_gets_its_projects_executables() {
+    let project = tempfile::tempdir().unwrap();
+    let project = project.path().canonicalize().unwrap();
+    git_in(&project, &["init", "-q", "-b", "main"]);
+    git_in(&project, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let roots = tempfile::tempdir().unwrap();
+    let worktree = roots.path().canonicalize().unwrap().join("lane-a");
+    let lane = worktree.to_str().unwrap();
+    git_in(&project, &["worktree", "add", "-q", "-b", "kt-1751", lane]);
+    std::fs::create_dir_all(worktree.join("sub")).unwrap();
+
+    set_project(
+        &project,
+        Some(&LaneWarmConfig {
+            validation_executables: Some(vec!["phpunit-outside".into()]),
+            ..LaneWarmConfig::default()
+        }),
+    );
+    let found = validation_executables_for(&worktree);
+    let from_sub = validation_executables_for(&worktree.join("sub"));
+    set_project(&project, None);
+
+    assert_eq!(found, vec!["phpunit-outside".to_string()]);
+    assert_eq!(from_sub, vec!["phpunit-outside".to_string()]);
+}

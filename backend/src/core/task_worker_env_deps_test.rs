@@ -465,3 +465,96 @@ fn a_project_with_no_such_package_manager_has_its_lane_environment_unchanged() {
         assert!(!names.contains(&cache), "{cache} leaked into {names:?}");
     }
 }
+
+fn git_in(dir: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=kronn-test",
+            "-c",
+            "user.email=kronn-test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// KT-1747 review (KT-1595): provisioning runs again after an agent, so the
+/// ignore rule of a dependency layer is written to the REGISTERED checkout's
+/// exclude, never to the repository a rewritten `<lane>/.git` names.
+#[cfg(unix)]
+#[test]
+fn a_dependency_layer_rule_never_follows_a_rewritten_git_pointer() {
+    let repo = repo();
+    write(&repo.main, ".gitignore", ".kronn/\n");
+    write(&repo.main, "composer.json", "{}");
+    git_in(&repo.main, &["init", "-q", "-b", "main"]);
+    git_in(&repo.main, &["add", "-A"]);
+    git_in(&repo.main, &["commit", "-q", "-m", "init"]);
+    std::fs::remove_dir_all(&repo.worktree).unwrap();
+    let lane_path = repo.worktree.to_str().unwrap();
+    git_in(
+        &repo.main,
+        &["worktree", "add", "-q", "-b", "kt-1747", lane_path],
+    );
+    write(&repo.main, "vendor/acme/lib/a.php", "<?php");
+    let victim = tempfile::tempdir().unwrap();
+    let victim = victim.path().canonicalize().unwrap();
+    git_in(&victim, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.worktree.join(".git"),
+        format!("gitdir: {}\n", victim.join(".git").display()),
+    )
+    .unwrap();
+
+    let provisioned = repo.lane().provision(&SharedCaches::default());
+
+    assert!(
+        matches!(
+            state_of(&provisioned, "vendor"),
+            Some(FrontendDeps::Linked(_))
+        ),
+        "{provisioned:?}"
+    );
+    let stolen = std::fs::read_to_string(victim.join(".git/info/exclude")).unwrap_or_default();
+    assert!(
+        !stolen.contains("vendor"),
+        "another repository's exclude was written: {stolen}"
+    );
+    let main_exclude = std::fs::read_to_string(repo.main.join(".git/info/exclude")).unwrap();
+    assert!(main_exclude.contains("/vendor"), "{main_exclude}");
+}
+
+/// KT-1747 review — a hoisted workspace package has no install of its own: a
+/// launch never asks to install it, only the workspace root.
+#[test]
+fn a_hoisted_workspace_package_is_never_asked_to_install() {
+    let repo = repo();
+    write(
+        &repo.worktree,
+        "package.json",
+        r#"{"workspaces":["packages/*"],"packageManager":"yarn@4.1.0"}"#,
+    );
+    write(&repo.worktree, "yarn.lock", "");
+    write(&repo.worktree, "packages/a/package.json", r#"{"name":"a"}"#);
+    write(&repo.main, "node_modules/left-pad/index.js", "x");
+
+    let provisioned = repo.lane().provision(&SharedCaches::default());
+
+    assert!(
+        !provisioned
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("packages/a") || warning.contains("npm ci")),
+        "{:?}",
+        provisioned.warnings
+    );
+}

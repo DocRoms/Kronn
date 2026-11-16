@@ -236,6 +236,11 @@ pub struct PackageRoot {
     /// The directory of its manifest, relative to the repository root (empty
     /// for the root itself).
     pub rel_dir: PathBuf,
+    /// KT-1747 review — for a package of a Node workspace (npm or yarn `workspaces`,
+    /// or `pnpm-workspace.yaml` in an ancestor up to the repository root), the
+    /// workspace root, relative to the repository: its dependencies are installed
+    /// there, never by the package itself. `None` otherwise.
+    pub workspace: Option<PathBuf>,
 }
 
 impl PackageRoot {
@@ -275,32 +280,73 @@ const MAX_PROFILE_ROOTS: usize = 40;
 /// Never entered when looking for a manifest, besides [`SKIPPED_DIRS`]: the
 /// CocoaPods dependency tree and Xcode's build output.
 const SKIPPED_DEPENDENCY_DIRS: [&str; 2] = ["Pods", "DerivedData"];
+/// Never entered either (KT-1747 review): test fixtures, examples and build
+/// output hold manifests that are not toolchains of the project.
+const SKIPPED_PROFILE_DIRS: [&str; 4] = ["fixtures", "examples", "dist", "build"];
 
-/// The package manager a `package.json` directory uses: the `packageManager`
-/// field, then the lock file that is there, else npm.
-fn node_manager(dir: &Path) -> NodeManager {
-    let declared = std::fs::read_to_string(dir.join("package.json"))
+fn package_json(dir: &Path) -> Option<serde_json::Value> {
+    std::fs::read_to_string(dir.join("package.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|value| {
-            value
-                .get("packageManager")
-                .and_then(|field| field.as_str())
-                .map(|field| field.split('@').next().unwrap_or_default().to_string())
-        });
+}
+
+/// `dir` and its ancestors up to `repo_root` (included), nearest first.
+fn up_to_root<'a>(dir: &'a Path, repo_root: &'a Path) -> impl Iterator<Item = &'a Path> {
+    dir.ancestors()
+        .take_while(move |ancestor| ancestor.starts_with(repo_root))
+}
+
+/// What one directory says about its package manager: the `packageManager`
+/// field of its `package.json`, then its lock file.
+fn declared_manager(dir: &Path) -> Option<NodeManager> {
+    let declared = package_json(dir).and_then(|value| {
+        value
+            .get("packageManager")
+            .and_then(|field| field.as_str())
+            .map(|field| field.split('@').next().unwrap_or_default().to_string())
+    });
     match declared.as_deref() {
-        Some("pnpm") => return NodeManager::Pnpm,
-        Some("yarn") => return NodeManager::Yarn,
-        Some("npm") => return NodeManager::Npm,
+        Some("pnpm") => return Some(NodeManager::Pnpm),
+        Some("yarn") => return Some(NodeManager::Yarn),
+        Some("npm") => return Some(NodeManager::Npm),
         _ => {}
     }
     if dir.join("pnpm-lock.yaml").is_file() {
-        NodeManager::Pnpm
+        Some(NodeManager::Pnpm)
     } else if dir.join("yarn.lock").is_file() {
-        NodeManager::Yarn
+        Some(NodeManager::Yarn)
+    } else if dir.join("package-lock.json").is_file() {
+        Some(NodeManager::Npm)
     } else {
-        NodeManager::Npm
+        None
     }
+}
+
+/// The package manager a `package.json` directory uses: what the nearest
+/// directory from it up to the repository root declares (a workspace keeps its
+/// lock and `packageManager` at its root), else npm.
+fn node_manager(dir: &Path, repo_root: &Path) -> NodeManager {
+    up_to_root(dir, repo_root)
+        .find_map(declared_manager)
+        .unwrap_or(NodeManager::Npm)
+}
+
+/// KT-1747 review — the root of the Node workspace `dir` is a package of,
+/// relative to the repository: the nearest strict ancestor up to the
+/// repository root with `pnpm-workspace.yaml` or a `workspaces` field.
+fn node_workspace_of(dir: &Path, repo_root: &Path) -> Option<PathBuf> {
+    up_to_root(dir, repo_root)
+        .skip(1)
+        .find(|ancestor| {
+            ancestor.join("pnpm-workspace.yaml").is_file()
+                || package_json(ancestor).is_some_and(|value| value.get("workspaces").is_some())
+        })
+        .map(|ancestor| {
+            ancestor
+                .strip_prefix(repo_root)
+                .unwrap_or(ancestor)
+                .to_path_buf()
+        })
 }
 
 fn has_make_file(dir: &Path) -> bool {
@@ -329,6 +375,7 @@ pub fn detect_toolchains(repo_root: &Path) -> Vec<PackageRoot> {
         .map(|root| PackageRoot {
             kind: ToolchainKind::Cargo,
             rel_dir: root.rel_dir,
+            workspace: None,
         })
         .collect();
     collect_toolchains(repo_root, repo_root, 0, &mut found);
@@ -353,13 +400,18 @@ fn collect_toolchains(repo_root: &Path, dir: &Path, depth: usize, found: &mut Ve
     let entries: Vec<PathBuf> = read.flatten().map(|entry| entry.path()).collect();
     let rel_dir = dir.strip_prefix(repo_root).unwrap_or(dir).to_path_buf();
     let mut push = |kind: ToolchainKind| {
+        let workspace = match kind {
+            ToolchainKind::Node(_) => node_workspace_of(dir, repo_root),
+            _ => None,
+        };
         found.push(PackageRoot {
             kind,
             rel_dir: rel_dir.clone(),
+            workspace,
         });
     };
     if dir.join("package.json").is_file() {
-        push(ToolchainKind::Node(node_manager(dir)));
+        push(ToolchainKind::Node(node_manager(dir, repo_root)));
     }
     if dir.join("composer.json").is_file() {
         push(ToolchainKind::Composer);
@@ -378,7 +430,10 @@ fn collect_toolchains(repo_root: &Path, dir: &Path, depth: usize, found: &mut Ve
     }
     let mut children: Vec<PathBuf> = entries
         .into_iter()
-        .filter(|path| path.is_dir())
+        // A real directory: a link is never followed (KT-1747 review).
+        .filter(|path| {
+            std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+        })
         .filter(|path| {
             let name = path
                 .file_name()
@@ -387,6 +442,7 @@ fn collect_toolchains(repo_root: &Path, dir: &Path, depth: usize, found: &mut Ve
             !name.starts_with('.')
                 && !SKIPPED_DIRS.contains(&name.as_str())
                 && !SKIPPED_DEPENDENCY_DIRS.contains(&name.as_str())
+                && !SKIPPED_PROFILE_DIRS.contains(&name.as_str())
                 && !name.ends_with(".xcodeproj")
                 && !name.ends_with(".xcworkspace")
         })
@@ -458,6 +514,16 @@ pub fn missing_dependency_notice(profile: &[PackageRoot], path: &str) -> String 
     let owner = profile
         .iter()
         .find(|root| root.dependency_path().as_deref() == Some(path));
+    // A workspace package is installed by its workspace root.
+    let owner = match owner.and_then(|root| root.workspace.as_ref()) {
+        Some(workspace) => profile
+            .iter()
+            .find(|root| {
+                &root.rel_dir == workspace && matches!(root.kind, ToolchainKind::Node(_))
+            })
+            .or(owner),
+        None => owner,
+    };
     match owner.and_then(|root| root.kind.install_command().map(|cmd| (cmd, root.label()))) {
         Some((command, dir)) => {
             let place = if dir == "." {
