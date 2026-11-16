@@ -49,9 +49,13 @@ export function ProjectLaneWarmSetting({ projectId, t }: Props) {
     setSaving(true);
     setError(null);
     try {
-      // The whole workspace is replaced: its hooks go back as they were read.
+      // The whole workspace is replaced: every other part (hooks, commit identity,
+      // managed roots) goes back as it is now, read again in case another card
+      // saved since this one loaded.
+      const current = await projectsApi.workspace(projectId);
       const next: ProjectWorkspace = {
-        hooks: workspace?.hooks ?? {},
+        ...current,
+        hooks: current?.hooks ?? {},
         lane_warm: configOf(draft),
       };
       await projectsApi.setWorkspace(projectId, next);

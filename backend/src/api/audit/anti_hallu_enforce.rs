@@ -176,6 +176,33 @@ pub fn stamp_curated_audit_dates(content: &str, today: &str) -> Option<String> {
     Some(out)
 }
 
+/// [`stamp_curated_audit_dates`] applied to the file `target_path` under
+/// `project_path`, run right after an agent (KT-1595): the read and the
+/// replace go through the rooted primitive, so a link at the name or in a
+/// parent (swapped in after the agent, or pre-planted) is refused, never read
+/// nor written through. The replace is optimistic on the bytes read. `Ok(true)`
+/// when dates were stamped, `Ok(false)` when there was nothing to stamp.
+pub fn stamp_target_audit_dates(
+    project_path: &Path,
+    target_path: &Path,
+    today: &str,
+) -> Result<bool, String> {
+    let bytes = crate::core::fs_guard::guarded_read(project_path, target_path)
+        .map_err(|e| format!("target unreadable: {e}"))?
+        .ok_or_else(|| "target missing".to_string())?;
+    let written = String::from_utf8(bytes).map_err(|_| "target is not UTF-8".to_string())?;
+    let Some(stamped) = stamp_curated_audit_dates(&written, today) else {
+        return Ok(false);
+    };
+    crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+        project_path,
+        target_path,
+        &stamped,
+        written.as_bytes(),
+    )?;
+    Ok(true)
+}
+
 /// One human-owned section whose content an audit step changed (or deleted)
 /// between the pre- and post-agent snapshot of the same file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1378,5 +1405,72 @@ mod enforce_gate_tests {
             }
             _ => panic!("an absent deps row must be retried"),
         }
+    }
+}
+
+/// KT-1595 — the audit-date stamp runs right after the agent; these tests are
+/// not behind `full-tests` because they are the swap guarantee.
+#[cfg(all(test, unix))]
+mod stamp_target_tests {
+    use super::*;
+
+    const SECTION: &str = "<!-- kronn:section id=\"a\" owner=\"audit\" -->\nbody\n";
+
+    #[test]
+    fn a_docs_folder_swapped_after_the_read_never_receives_the_stamp() {
+        use crate::core::fs_guard::swap_probe;
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), SECTION).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), SECTION).unwrap();
+        swap_probe::arm_after(&docs, external.path(), 1);
+        let _ = stamp_target_audit_dates(project.path(), &docs.join("a.md"), "2026-11-13");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("a.md")).unwrap(),
+            SECTION,
+            "the file behind the link is untouched"
+        );
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_link_at_the_target_name_is_refused_not_stamped_through() {
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let external = tempfile::TempDir::new().unwrap();
+        std::fs::write(external.path().join("a.md"), SECTION).unwrap();
+        std::os::unix::fs::symlink(external.path().join("a.md"), docs.join("a.md")).unwrap();
+        let outcome = stamp_target_audit_dates(project.path(), &docs.join("a.md"), "2026-11-13");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("a.md")).unwrap(),
+            SECTION
+        );
+    }
+
+    #[test]
+    fn a_regular_target_is_stamped_and_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let project = tempfile::TempDir::new().unwrap();
+        let docs = project.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), SECTION).unwrap();
+        std::fs::set_permissions(docs.join("a.md"), std::fs::Permissions::from_mode(0o640))
+            .unwrap();
+        assert_eq!(
+            stamp_target_audit_dates(project.path(), &docs.join("a.md"), "2026-11-13"),
+            Ok(true)
+        );
+        let after = std::fs::read_to_string(docs.join("a.md")).unwrap();
+        assert!(after.contains("audit=\"2026-11-13\""), "{after}");
+        let mode = std::fs::metadata(docs.join("a.md"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o640);
     }
 }

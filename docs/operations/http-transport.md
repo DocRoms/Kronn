@@ -60,7 +60,7 @@ alongside the missing-output reason. Reaching a search ceiling alone does not
 fail an otherwise valid artifact (KT-951).
 [src: file: backend/src/agents/runner.rs:26-27#MAX_AUDIT_SEARCH_CALLS]
 [src: file: backend/src/agents/runner.rs:685-710#max_calls_for_tool]
-[src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
+[src: file: backend/src/api/audit/validation.rs:194-234#with_http_diagnostics]
 
 Hosted OpenAI-wire models (LiteLLM, NVIDIA, Custom, OpenRouter) send no
 `num_ctx`, so their context pressure is measured on a bounded step budget:
@@ -85,12 +85,12 @@ rewritten. Originals are saved by content hash under
 agent correction attempts, with existing human-section protection. Invalid
 paths and ranges still block validation. Retry usage is included in the step
 total (KT-952).
-[src: file: backend/src/api/audit/document_repair.rs:785-859#split_verified_citations]
-[src: file: backend/src/core/audit_state.rs:12#CITATION_ORIGINALS_DIR]
+[src: file: backend/src/api/audit/document_repair.rs:815-889#split_verified_citations]
+[src: file: backend/src/core/audit_state.rs:11#CITATION_ORIGINALS_DIR]
 [src: file: backend/src/api/audit/full.rs:2559-2589#check_attempt]
 [src: file: backend/src/api/audit/full.rs:1893-1897#max_attempts]
 [src: file: backend/src/api/audit/anti_hallu_enforce.rs:24#MAX_ATTEMPTS]
-[src: file: backend/src/api/audit/document_repair.rs:421-428#feedback]
+[src: file: backend/src/api/audit/document_repair.rs:439-446#feedback]
 
 An incomplete dimension-coverage matrix also receives targeted feedback in a
 Full audit after the agent exits successfully. This shares the same three-attempt
@@ -98,7 +98,7 @@ budget as documentary correction; it does not add another retry budget. Resume
 recomputes the matrix failure from the current index before its first attempt.
 Invalid tables remain blocking, provider errors do not trigger this correction,
 and existing TD files and human sections remain protected (KT-956).
-[src: file: backend/src/api/audit/validation.rs:96-117#coverage_repair_feedback]
+[src: file: backend/src/api/audit/validation.rs:107-128#coverage_repair_feedback]
 [src: file: backend/src/api/audit/full.rs:2450-2469#coverage_repair_feedback]
 
 A failed provider launch finalizes the step with its error and elapsed time.
@@ -113,7 +113,7 @@ this diagnostic; provider response bodies and endpoint URLs are excluded.
 Partial files remain in place. This failure does not automatically retry the
 request after tool execution or replay that effect (KT-955).
 [src: file: backend/src/agents/http_diagnostics.rs:39-53#failure_summary]
-[src: file: backend/src/api/audit/validation.rs:183-223#with_http_diagnostics]
+[src: file: backend/src/api/audit/validation.rs:194-234#with_http_diagnostics]
 [src: file: backend/src/agents/runner.rs:9233-9237#HTTP_PROVIDER_MAX_ATTEMPTS]
 
 The final gate also invalidates the relevant step rows so Resume names earlier
@@ -128,7 +128,7 @@ step (the baseline is taken before any write of the step, the cross-agent
 path's included); and a step is blocked only by diagnostics absent before it ran
 (`documentary_preexisting` reports the others) unless the recovery plan hands
 them to it (KT-1306).
-[src: file: backend/src/api/audit/document_repair.rs:282-318#recovery_plan]
+[src: file: backend/src/api/audit/document_repair.rs:303-339#recovery_plan]
 [src: file: backend/src/db/audit_runs.rs:1509-1527#invalidate_documentary_steps]
 
 A `TypedSchema` step sends its envelope schema as `response_format` with

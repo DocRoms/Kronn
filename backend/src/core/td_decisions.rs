@@ -44,37 +44,78 @@ pub struct RestoreOutcome {
     pub reverted: Vec<String>,
     /// `(new sheet, settled sheet it repeats)`.
     pub settled_duplicates: Vec<(String, String)>,
+    /// Decided sheets left alone because the name holds a link (or anything
+    /// but a plain file), or something appeared at a missing one meanwhile:
+    /// nothing was read, written nor deleted through it, and the other sheets
+    /// were still put back. `(sheet id, why)`.
+    pub refused: Vec<(String, String)>,
 }
 
 impl RestoreOutcome {
     pub fn is_empty(&self) -> bool {
-        self.restored.is_empty() && self.reverted.is_empty() && self.settled_duplicates.is_empty()
+        self.restored.is_empty()
+            && self.reverted.is_empty()
+            && self.settled_duplicates.is_empty()
+            && self.refused.is_empty()
     }
 }
 
-fn sheet_files(td_dir: &Path) -> Vec<(String, String)> {
-    let Ok(entries) = std::fs::read_dir(td_dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, String)> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
+/// The names of the `TD-*.md` sheets among `names`, with their ids.
+fn sheet_ids(names: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<String> {
+    let mut ids: Vec<String> = names
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.to_str()?;
             let id = name.strip_suffix(".md").filter(|id| is_td_id(id))?;
-            let content = std::fs::read_to_string(e.path()).ok()?;
-            Some((id.to_string(), content))
+            Some(id.to_string())
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// The `TD-*.md` sheets directly under `td_dir`, read with `read`; none when
+/// `td_dir` is a link (a sheet must live in the repository). `list` gives the
+/// ids found in the folder.
+fn sheet_files(
+    td_dir: &Path,
+    list: impl Fn(&Path) -> Vec<String>,
+    read: impl Fn(&Path) -> Option<String>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = list(td_dir)
+        .into_iter()
+        .filter_map(|id| {
+            let content = read(&td_dir.join(format!("{id}.md")))?;
+            Some((id, content))
         })
         .collect();
     out.sort();
     out
 }
 
+/// [`sheet_files`] listing by path, for the snapshot taken before the agent
+/// runs (a read-only view: nothing is written from it).
+fn list_by_path(td_dir: &Path) -> Vec<String> {
+    if !crate::core::td_index::is_real_dir(td_dir) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(td_dir) else {
+        return Vec::new();
+    };
+    sheet_ids(
+        entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .map(|e| e.file_name()),
+    )
+}
+
 /// Every sheet id, and the content of each decided one (a deferral is no
 /// decision: the human postponed it).
 pub fn snapshot(docs_dir: &Path) -> DecisionSnapshot {
     let mut snap = DecisionSnapshot::default();
-    for (id, content) in sheet_files(&docs_dir.join("tech-debt")) {
+    let read = |path: &Path| std::fs::read_to_string(path).ok();
+    for (id, content) in sheet_files(&docs_dir.join("tech-debt"), list_by_path, read) {
         snap.known_ids.insert(id.clone());
         if let Some(decision) = td_decision(&content).filter(|d| d.is_settled()) {
             snap.decided.push(Decided {
@@ -168,38 +209,107 @@ fn flag_duplicate(content: &str, settled: &TdSheet) -> Option<String> {
 /// a decided sheet whose decision changed gets it back (a confirmed sheet the
 /// run deleted stays deleted: reconciliation reports it as possibly fixed);
 /// a new active sheet repeating a settled one is flagged.
-pub fn restore(docs_dir: &Path, snap: &DecisionSnapshot) -> Result<RestoreOutcome, String> {
+///
+/// This runs seconds after the agent's last write, with a process it left
+/// behind possibly still alive: `root` is the project, and every read and
+/// write of a sheet goes through the rooted primitive under it, so a
+/// `tech-debt/` folder (or a parent) swapped for a link never takes a sheet
+/// outside the project (KT-1595). A `docs_dir` outside `root` is refused.
+pub fn restore(
+    root: &Path,
+    docs_dir: &Path,
+    snap: &DecisionSnapshot,
+) -> Result<RestoreOutcome, String> {
+    crate::core::fs_guard::assert_contained_no_symlink(root, docs_dir)?;
     let td_dir = docs_dir.join("tech-debt");
     let mut outcome = RestoreOutcome::default();
     for entry in &snap.decided {
         let path = td_dir.join(format!("{}.md", entry.id));
-        match std::fs::read_to_string(&path) {
-            Ok(current) => {
+        match crate::core::fs_guard::guarded_read(root, &path) {
+            Ok(Some(bytes)) => {
+                // A sheet that is no longer text cannot be put back by a
+                // surgical edit, and replacing it with the old content would
+                // destroy what is there: skip it, report it, and carry on with
+                // the other decided sheets.
+                let Ok(current) = String::from_utf8(bytes) else {
+                    outcome.refused.push((
+                        entry.id.clone(),
+                        format!("{} is not UTF-8; left as it is", path.display()),
+                    ));
+                    continue;
+                };
                 if td_decision(&current) == Some(entry.decision) {
                     continue;
                 }
                 let fixed = put_back_decision(&current, entry.decision)
                     .unwrap_or_else(|| entry.content.clone());
-                crate::core::mcp_scanner::atomic_write(&path, &fixed)?;
+                crate::core::fs_guard::guarded_replace(root, &path, fixed.as_bytes())?;
                 outcome.reverted.push(entry.id.clone());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None) => {
                 if !entry.decision.leaves_index() {
                     continue;
                 }
-                if std::fs::symlink_metadata(&path).is_ok() {
-                    continue;
+                // Create-only: nothing is overwritten, and an entry that
+                // appeared since the read (a link included) is left alone.
+                if crate::core::fs_guard::guarded_write_new(root, &path, entry.content.as_bytes())?
+                {
+                    outcome.restored.push(entry.id.clone());
+                } else {
+                    outcome.refused.push((
+                        entry.id.clone(),
+                        "an entry appeared at the deleted sheet's name; left as it is".into(),
+                    ));
                 }
-                std::fs::create_dir_all(&td_dir)
-                    .map_err(|e| format!("create {}: {e}", td_dir.display()))?;
-                crate::core::mcp_scanner::atomic_write(&path, &entry.content)?;
-                outcome.restored.push(entry.id.clone());
+            }
+            // A link at the sheet's own name (or anything but a plain file)
+            // is left alone, never followed, and reported: the other decided
+            // sheets are still put back. A `tech-debt/` folder (or a parent)
+            // that is itself a link is not one sheet's problem: it aborts.
+            Err(e)
+                if crate::core::fs_guard::is_link_refusal(&e)
+                    || e.kind() == std::io::ErrorKind::InvalidInput =>
+            {
+                crate::core::fs_guard::assert_contained_no_symlink(root, &td_dir)?;
+                outcome.refused.push((entry.id.clone(), e.to_string()));
             }
             Err(e) => return Err(format!("read {}: {e}", path.display())),
         }
     }
 
-    let files = sheet_files(&td_dir);
+    // Rooted listing and reads (KT-1595). A refused LISTING (a link at
+    // `tech-debt/` or in a parent) aborts: it is never "no sheets", which
+    // would let the pass below run on nothing. A link (or a non-file) at one
+    // sheet's name is skipped and reported, like a decided sheet's.
+    let ids = match crate::core::fs_guard::guarded_list(root, &td_dir) {
+        Ok(Some(names)) => sheet_ids(names),
+        Ok(None) => Vec::new(),
+        Err(e) => return Err(format!("list {}: {e}", td_dir.display())),
+    };
+    let mut files: Vec<(String, String)> = Vec::new();
+    for id in ids {
+        let path = td_dir.join(format!("{id}.md"));
+        match crate::core::fs_guard::guarded_read(root, &path) {
+            Ok(Some(bytes)) => {
+                // Not text: not a sheet this pass can read.
+                if let Ok(content) = String::from_utf8(bytes) {
+                    files.push((id, content));
+                }
+            }
+            Ok(None) => {}
+            Err(e)
+                if crate::core::fs_guard::is_link_refusal(&e)
+                    || e.kind() == std::io::ErrorKind::InvalidInput =>
+            {
+                // Already reported when it is a decided sheet.
+                if !outcome.refused.iter().any(|(refused, _)| *refused == id) {
+                    outcome.refused.push((id, e.to_string()));
+                }
+            }
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
+        }
+    }
+    files.sort();
     let sheets: Vec<TdSheet> = files.iter().map(|(id, c)| parse_sheet(id, c)).collect();
     for ((id, content), sheet) in files.iter().zip(&sheets) {
         if snap.known_ids.contains(id) || !sheet.is_active() {
@@ -209,7 +319,8 @@ pub fn restore(docs_dir: &Path, snap: &DecisionSnapshot) -> Result<RestoreOutcom
             continue;
         };
         if let Some(flagged) = flag_duplicate(content, settled) {
-            crate::core::mcp_scanner::atomic_write(&td_dir.join(format!("{id}.md")), &flagged)?;
+            let path = td_dir.join(format!("{id}.md"));
+            crate::core::fs_guard::guarded_replace(root, &path, flagged.as_bytes())?;
         }
         outcome
             .settled_duplicates

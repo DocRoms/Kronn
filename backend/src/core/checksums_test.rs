@@ -1002,3 +1002,115 @@ fn head_and_branch_are_read_from_git_and_unknown_outside() {
     assert_eq!(branch.as_deref(), Some("main"));
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// KT-1595: the baseline is published right after an agent ran; a docs folder
+/// swapped for a link between the walk and the write never receives it.
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+#[test]
+fn a_docs_folder_swapped_after_the_walk_never_receives_the_baseline() {
+    use crate::core::fs_guard::swap_probe;
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("repo");
+    fs::create_dir_all(project.join("docs")).unwrap();
+    let external = tempfile::tempdir().unwrap();
+    swap_probe::arm(&project.join("docs"), external.path());
+    let result = publish_checksums_file(&project, &[]);
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+    assert!(project.join("docs.moved/checksums.json").is_file());
+}
+
+/// KT-1595 round 12: the source-tree fingerprint, taken right after an agent
+/// ran in the project, never runs the file-system monitor its configuration
+/// names.
+#[cfg(unix)]
+#[test]
+fn the_source_tree_fingerprint_runs_no_program_the_repository_names() {
+    use crate::core::cmd::hostile_git::{git, marker_program, repo};
+    let dir = repo();
+    let (program, marker) = marker_program(dir.path());
+    git(dir.path(), &["config", "core.fsmonitor", &program]);
+    assert!(git_source_tree_fingerprint(dir.path()).is_some());
+    assert!(!marker.exists(), "the fsmonitor hook ran");
+}
+
+/// KT-1595 round 13: the fingerprint, taken right after an agent ran, never
+/// blocks on what the agent left: a tracked file replaced by a FIFO, a root
+/// AGENTS.md / CLAUDE.md that is a link to a FIFO.
+#[cfg(unix)]
+#[test]
+fn a_fifo_left_by_the_agent_never_blocks_the_fingerprint() {
+    use crate::core::cmd::hostile_git::{git, repo};
+    use std::os::unix::ffi::OsStrExt;
+    let dir = repo();
+    let mkfifo = |path: &Path| {
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path inside the test's folder.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    };
+    fs::write(dir.path().join("CLAUDE.md"), "# Claude\n").unwrap();
+    git(dir.path(), &["add", "CLAUDE.md"]);
+    git(dir.path(), &["commit", "-q", "-m", "claude"]);
+    fs::remove_file(dir.path().join("a.txt")).unwrap();
+    mkfifo(&dir.path().join("a.txt"));
+    mkfifo(&dir.path().join(".git/pipe"));
+    fs::remove_file(dir.path().join("CLAUDE.md")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join(".git/pipe"), dir.path().join("CLAUDE.md")).unwrap();
+    let project = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(git_source_tree_fingerprint(&project));
+    });
+    let fingerprint = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the fingerprint blocked on a FIFO");
+    assert!(fingerprint.is_some());
+}
+
+/// KT-1595 round 14: a huge sparse file the agent leaves (untracked, no disk
+/// space used) never stalls the fingerprint: past the size cap it is recorded
+/// by its size and time, never read.
+#[cfg(unix)]
+#[test]
+fn a_huge_sparse_file_never_stalls_the_fingerprint() {
+    use crate::core::cmd::hostile_git::repo;
+    let dir = repo();
+    fs::File::create(dir.path().join("big.bin"))
+        .unwrap()
+        .set_len(1 << 40)
+        .unwrap();
+    let project = dir.path().to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(git_source_tree_fingerprint(&project));
+    });
+    let fingerprint = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the fingerprint read a 1 TiB sparse file");
+    assert!(fingerprint.is_some());
+}
+
+/// KT-1595 round 15: a file past the read cap is fingerprinted by its content
+/// (size + hash of its first bytes), never by its time: the same bytes written
+/// again, or another clone, give the same fingerprint.
+#[test]
+fn a_large_file_keeps_its_fingerprint_when_only_its_time_changes() {
+    use crate::core::cmd::hostile_git::{git, repo};
+    let dir = repo();
+    let big = dir.path().join("big.bin");
+    fs::File::create(&big)
+        .unwrap()
+        .set_len(FINGERPRINT_CONTENT_MAX + 1)
+        .unwrap();
+    git(dir.path(), &["add", "big.bin"]);
+    git(dir.path(), &["commit", "-q", "-m", "big"]);
+    let before = git_source_tree_fingerprint(dir.path()).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&big)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(git_source_tree_fingerprint(dir.path()).unwrap(), before);
+}

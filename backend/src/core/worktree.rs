@@ -527,6 +527,11 @@ pub fn remove_ownerless_worktree(
             worktree_path.display()
         ));
     }
+    // Git refuses to remove a checkout holding an untracked file that is not
+    // ignored: a stale one's `.DS_Store` must not be that file.
+    if let Err(error) = ensure_os_junk_excluded(repo_path) {
+        tracing::warn!(path = %repo_path.display(), "cannot exclude OS junk files: {error}");
+    }
     let dirty = worktree_dirty_files(worktree_path)?;
     if !dirty.is_empty() {
         return Err(format!(
@@ -1447,19 +1452,14 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
 /// Ignore Kronn's machine-owned checkout directory without editing the user's
 /// tracked `.gitignore`. Provisioning must not make the target dirty itself — a
 /// dirty target is (correctly) refused later by the integration preflight.
+///
+/// The exclude file is the one git NAMES (`rev-parse --git-path`), which
+/// follows `.git/commondir` and a `.git` file's `gitdir:` — files an agent can
+/// write. Use this entry point only where no agent has touched the checkout yet
+/// (worktree provisioning, the worker environment). Code that runs after an
+/// agent uses [`ensure_local_git_exclude_pinned`].
 pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
-    // Already ignored (a committed rule, or a previous run): write nothing.
-    if crate::core::cmd::git_cmd()
-        .args([
-            "check-ignore",
-            "-q",
-            "--no-index",
-            pattern.trim_start_matches('/'),
-        ])
-        .current_dir(repo_path)
-        .status()
-        .is_ok_and(|status| status.success())
-    {
+    if already_ignored(repo_path, pattern) {
         return Ok(());
     }
     let output = crate::core::cmd::git_cmd()
@@ -1485,32 +1485,366 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
             repo_path.join(path)
         }
     };
-    if std::fs::symlink_metadata(&exclude).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(format!(
-            "{} is a symlink — refusing to update the local Git exclude",
-            exclude.display()
-        ));
-    }
-    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == pattern) {
+    // The git directory git itself named (`<git dir>/info/exclude`) is the
+    // root: a link at `exclude` or `info`, or swapped in for either, is refused.
+    let git_dir = exclude
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("{} is not inside a git directory", exclude.display()))?;
+    write_local_exclude(git_dir, &exclude, pattern)
+}
+
+/// Whether git already ignores `pattern` (a committed rule, or a previous run):
+/// then nothing is written.
+fn already_ignored(repo_path: &Path, pattern: &str) -> bool {
+    crate::core::cmd::git_cmd()
+        .args([
+            "check-ignore",
+            "-q",
+            "--no-index",
+            pattern.trim_start_matches('/'),
+        ])
+        .current_dir(repo_path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// [`ensure_local_git_exclude`] for code that runs AFTER an agent (every audit
+/// state write, the removal preflight): the agent can write `.git/commondir`
+/// and a `.git` file's `gitdir:`, so git's answer is not trusted. The exclude
+/// is `<repo>/.git/info/exclude` only, reached through the rooted primitive
+/// from the repo (a link at `.git`, `info` or `exclude`, planted or swapped in,
+/// is refused), and only when `.git` is a plain directory that holds no
+/// `commondir`. A linked worktree (a `.git` FILE) or a repo with a `commondir`
+/// is refused with an error, never followed: the exclude of a linked worktree
+/// is the main repository's, written when the worktree was provisioned.
+pub(crate) fn ensure_local_git_exclude_pinned(
+    repo_path: &Path,
+    pattern: &str,
+) -> Result<(), String> {
+    if already_ignored(repo_path, pattern) {
         return Ok(());
     }
-    let parent = exclude
-        .parent()
-        .ok_or_else(|| format!("{} has no parent", exclude.display()))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&exclude)
-        .map_err(|error| format!("cannot open {}: {error}", exclude.display()))?;
-    if !existing.is_empty() && !existing.ends_with('\n') {
-        writeln!(file).map_err(|error| format!("cannot update {}: {error}", exclude.display()))?;
+    let git_dir = repo_path.join(".git");
+    match std::fs::symlink_metadata(&git_dir) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => {
+            return Err(format!(
+                "{} is not a plain git directory (a link or a `gitdir:` file): its pointer is not trusted after an agent ran",
+                git_dir.display()
+            ))
+        }
+        Err(error) => return Err(format!("cannot inspect {}: {error}", git_dir.display())),
     }
-    writeln!(file, "{pattern}")
-        .map_err(|error| format!("cannot update {}: {error}", exclude.display()))?;
+    let commondir = git_dir.join("commondir");
+    match crate::core::fs_guard::guarded_read(repo_path, &commondir) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return Err(format!(
+                "{} exists: a main git directory has no `commondir`, its pointer is not trusted",
+                commondir.display()
+            ))
+        }
+        Err(error) => {
+            return Err(format!(
+                "refusing to inspect {}: {error}",
+                commondir.display()
+            ))
+        }
+    }
+    write_local_exclude(repo_path, &git_dir.join("info").join("exclude"), pattern)
+}
+
+/// [`ensure_local_git_exclude_pinned`] for a rule that concerns a LINKED
+/// worktree (a task lane): whether git already ignores `pattern` is judged
+/// from `judge` (the lane, where the file or link the rule hides exists), but
+/// the rule is written to the REGISTERED checkout `repo_path` — the
+/// `info/exclude` a linked worktree shares is the main repository's, so that
+/// is the file git would have named, reached without asking git (the lane's
+/// own `.git` pointer is agent-writable). `judge` only decides whether to
+/// write at all: a wrong answer from it skips a rule, it never moves one.
+///
+/// The git directory is resolved from the REGISTERED checkout `repo_path` (the
+/// project Kronn registered, never the lane): its common git directory, which is
+/// also where a registered checkout that is itself a linked worktree, or a
+/// project below the repository top, keeps `info/exclude`. The write is rooted
+/// at that directory, so a link at `info` or `exclude` is refused. A project
+/// below the repository top gets the rule anchored under its prefix; a path git
+/// does not know as a repository is left alone.
+pub(crate) fn ensure_local_git_exclude_pinned_for(
+    judge: &Path,
+    repo_path: &Path,
+    pattern: &str,
+) -> Result<(), String> {
+    if already_ignored(judge, pattern) {
+        return Ok(());
+    }
+    let Some((common_dir, prefix)) = registered_git_layout(repo_path)? else {
+        return Ok(());
+    };
+    write_local_exclude(
+        &common_dir,
+        &common_dir.join("info").join("exclude"),
+        &anchored_under_prefix(&prefix, pattern),
+    )
+}
+
+/// `(common git directory, prefix of repo_path below the repository top)` as
+/// the REGISTERED checkout `repo_path` answers, or `None` when it is not inside
+/// a git work tree. The directory must be a real folder, not a link.
+fn registered_git_layout(repo_path: &Path) -> Result<Option<(PathBuf, String)>, String> {
+    let output = crate::core::cmd::git_cmd()
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "--show-prefix",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("cannot resolve the git directory: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        return Err(format!(
+            "cannot resolve the git directory of {}: {}",
+            repo_path.display(),
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let common = lines.next().map(str::trim).unwrap_or_default();
+    let prefix = lines.next().map(str::trim).unwrap_or_default().to_string();
+    if common.is_empty() {
+        return Err("git returned an empty common git directory".into());
+    }
+    let common = PathBuf::from(common);
+    if !common.is_absolute() {
+        return Err(format!(
+            "git returned a relative common git directory {}",
+            common.display()
+        ));
+    }
+    match std::fs::symlink_metadata(&common) {
+        Ok(meta) if meta.file_type().is_dir() => Ok(Some((common, prefix))),
+        Ok(_) => Err(format!(
+            "{} is not a plain git directory (a link): nothing is written under it",
+            common.display()
+        )),
+        Err(error) => Err(format!("cannot inspect {}: {error}", common.display())),
+    }
+}
+
+/// A rule anchored with a leading `/` is relative to the repository top, so a
+/// project below it needs its prefix in the rule.
+fn anchored_under_prefix(prefix: &str, pattern: &str) -> String {
+    match pattern.strip_prefix('/') {
+        Some(rest) if !prefix.is_empty() => format!("/{prefix}{rest}"),
+        _ => pattern.to_string(),
+    }
+}
+
+/// The git administrative directory (`<main>/.git/worktrees/<id>`) the REGISTERED
+/// checkout `main_checkout` recorded for the linked worktree `worktree`, for
+/// code that writes into it after an agent ran (KT-1595).
+///
+/// The directory is found from the main repository's own record — the `gitdir`
+/// file of each `worktrees/<id>` entry names the worktree's `.git` file — and
+/// NOT from the worktree's `.git` pointer or from `git rev-parse`, both of
+/// which an agent can rewrite (`gitdir: /other/repo/.git`). Git's answer is
+/// still asked for, and a mismatch is refused: a worktree whose pointer was
+/// moved is never written for. Every read goes through the rooted primitive
+/// from `main_checkout`, so a link at `.git`, `worktrees` or an entry is
+/// refused. The returned path is under `main_checkout`: pass `main_checkout` as
+/// the root of the `guarded_*` calls that use it.
+pub(crate) fn registered_worktree_git_dir(
+    main_checkout: &Path,
+    worktree: &Path,
+) -> Result<PathBuf, String> {
+    use crate::core::fs_guard::{guarded_list, guarded_read};
+    let wanted = worktree
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve {}: {error}", worktree.display()))?;
+    let registry = main_checkout.join(".git").join("worktrees");
+    let entries = guarded_list(main_checkout, &registry)
+        .map_err(|error| format!("cannot read the worktree registry of the checkout: {error}"))?
+        .ok_or_else(|| "the checkout registers no linked worktree".to_string())?;
+    let mut found: Vec<PathBuf> = Vec::new();
+    for name in entries {
+        let entry = registry.join(&name);
+        let Ok(Some(raw)) = guarded_read(main_checkout, &entry.join("gitdir")) else {
+            continue;
+        };
+        let recorded = PathBuf::from(String::from_utf8_lossy(&raw).trim().to_string());
+        // `worktree.useRelativePaths` records it relative to the entry itself.
+        let recorded = if recorded.is_relative() {
+            entry.join(recorded)
+        } else {
+            recorded
+        };
+        let is_ours = recorded.file_name().is_some_and(|n| n == ".git")
+            && recorded
+                .parent()
+                .and_then(|parent| parent.canonicalize().ok())
+                .is_some_and(|parent| parent == wanted);
+        if is_ours {
+            found.push(entry);
+        }
+    }
+    let [registered] = found.as_slice() else {
+        return Err(if found.is_empty() {
+            "the checkout has no registered worktree entry for this lane".to_string()
+        } else {
+            "the checkout registers this lane more than once".to_string()
+        });
+    };
+    let answer = crate::core::cmd::git_cmd()
+        .args(["rev-parse", "--absolute-git-dir"])
+        .current_dir(worktree)
+        .output()
+        .map_err(|error| format!("cannot ask git for the worktree's git directory: {error}"))?;
+    if !answer.status.success() {
+        return Err(format!(
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&answer.stderr).trim()
+        ));
+    }
+    let answered = PathBuf::from(String::from_utf8_lossy(&answer.stdout).trim().to_string());
+    let same = match (answered.canonicalize(), registered.canonicalize()) {
+        (Ok(answered), Ok(registered)) => answered == registered,
+        _ => false,
+    };
+    if !same {
+        return Err(format!(
+            "git names {} for this worktree but the checkout registered {}: its `.git` pointer was moved, so nothing is written for it",
+            answered.display(),
+            registered.display()
+        ));
+    }
+    Ok(registered.clone())
+}
+
+/// Appends `pattern` to the exclude file `exclude` (created when missing)
+/// through the rooted primitive under `root` (KT-1595): nothing is read,
+/// created or appended outside `root`.
+fn write_local_exclude(root: &Path, exclude: &Path, pattern: &str) -> Result<(), String> {
+    let existing = match crate::core::fs_guard::guarded_read(root, exclude) {
+        Ok(existing) => existing,
+        Err(error) => {
+            return Err(format!(
+                "refusing to update the local Git exclude {}: {error}",
+                exclude.display()
+            ))
+        }
+    };
+    let Some(existing) = existing else {
+        // No exclude yet: create-only, so a file that appears meanwhile is
+        // never overwritten.
+        let created = crate::core::fs_guard::guarded_write_new(
+            root,
+            exclude,
+            format!("{pattern}\n").as_bytes(),
+        )
+        .map_err(|error| format!("cannot create {}: {error}", exclude.display()))?;
+        return if created {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} appeared while it was being created; left as it is",
+                exclude.display()
+            ))
+        };
+    };
+    let text = String::from_utf8(existing.clone())
+        .map_err(|_| format!("{} is not UTF-8; left as it is", exclude.display()))?;
+    if text.lines().any(|line| line.trim() == pattern) {
+        return Ok(());
+    }
+    let mut updated = text;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(pattern);
+    updated.push('\n');
+    // Optimistic on the bytes read: a concurrent change is refused, not lost.
+    crate::core::fs_guard::guarded_replace_if_unchanged_keeping_mode(
+        root, exclude, &updated, &existing,
+    )
+    .map_err(|error| format!("cannot update {}: {error}", exclude.display()))
+}
+
+/// Files an operating system or a file manager drops in any folder it opens:
+/// never work, never worth blocking a delivery or a cleanup (KT-1750). The
+/// default of Settings > Workers > OS junk (`workers.os_junk_patterns`).
+pub const OS_JUNK_PATTERNS: [&str; 4] = [".DS_Store", "Thumbs.db", "desktop.ini", "._*"];
+
+/// The Settings > Workers list, published by `config::save` and at boot. `None`
+/// until the config says otherwise, which reads as the defaults.
+static OS_JUNK_SETTING: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
+
+/// Publish the owner's Settings > Workers choice to this process.
+pub fn set_os_junk_patterns(patterns: &[String]) {
+    let mut setting = OS_JUNK_SETTING
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *setting = Some(patterns.to_vec());
+}
+
+/// The OS-junk patterns in force: the setting's, else the defaults.
+pub fn os_junk_patterns() -> Vec<String> {
+    OS_JUNK_SETTING
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .unwrap_or_else(default_os_junk_patterns)
+}
+
+/// [`OS_JUNK_PATTERNS`] as the owned list the setting holds.
+pub fn default_os_junk_patterns() -> Vec<String> {
+    OS_JUNK_PATTERNS.iter().map(|p| p.to_string()).collect()
+}
+
+/// Whether the last component of `path` is one of `patterns` (`*` stands for any
+/// run of characters).
+fn is_os_junk(path: &str, patterns: &[String]) -> bool {
+    let name = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
+    patterns.iter().any(|pattern| glob_matches(pattern, name))
+}
+
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == name,
+        Some((head, tail)) => {
+            name.len() >= head.len() + tail.len()
+                && name.starts_with(head)
+                && name[head.len()..].ends_with(tail)
+        }
+    }
+}
+
+/// Keep OS junk out of `git status` for the repository and every worktree of it
+/// (the local exclude is shared), without touching a tracked `.gitignore`.
+pub(crate) fn ensure_os_junk_excluded(repo_path: &Path) -> Result<(), String> {
+    for pattern in os_junk_patterns() {
+        ensure_local_git_exclude(repo_path, &pattern)?;
+    }
+    Ok(())
+}
+
+/// What every Kronn checkout needs ignored: its own `.kronn/` directory (an
+/// error when that fails) and OS junk (only logged: it never blocks a launch).
+pub(crate) fn ensure_managed_excludes(repo_path: &Path) -> Result<(), String> {
+    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    if let Err(error) = ensure_os_junk_excluded(repo_path) {
+        tracing::warn!(path = %repo_path.display(), "cannot exclude OS junk files: {error}");
+    }
     Ok(())
 }
 
@@ -1630,7 +1964,7 @@ pub fn create_discussion_worktree(
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
     // Ensure .kronn/worktrees/ is gitignored
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
     // Mark repo as safe directory (needed in Docker where mount owner differs)
     crate::core::git_global_config::ensure_safe_directory(repo_path);
@@ -1722,7 +2056,7 @@ pub fn create_review_worktree(
 
     std::fs::create_dir_all(worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
     crate::core::git_global_config::ensure_safe_directory(repo_path);
     crate::core::git_global_config::ensure_safe_directory(&worktree_path);
@@ -2025,7 +2359,7 @@ pub fn reattach_worktree(
     crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
     crate::core::git_global_config::ensure_safe_directory(repo_path);
     crate::core::git_global_config::ensure_safe_directory(&worktree_path);
@@ -2535,9 +2869,17 @@ pub fn build_candidate_detailed(
         abort_merge(worktree_path);
         return Ok(bounce);
     }
-    // Repositories that enforce DCO reject an unsigned merge commit.
+    // Signed only where the project signs off (a DCO repository rejects an
+    // unsigned merge commit; any other does not want the trailer), as the
+    // project's commit identity (KT-1750).
+    let policy = crate::core::commit_policy::CommitPolicy::for_repo(worktree_path);
     let mut commit = crate::core::cmd::git_cmd();
-    commit.args(["commit", "--signoff", "--cleanup=strip"]);
+    commit.arg("commit");
+    if policy.signoff {
+        commit.arg("--signoff");
+    }
+    commit.arg("--cleanup=strip");
+    policy.apply_identity(&mut commit, false);
     match docs.as_ref().and_then(|docs| docs.summary()) {
         Some(note) => commit.args(["-m", &merge_subject(worktree_path, base_sha), "-m", &note]),
         None => commit.arg("--no-edit"),
@@ -2630,10 +2972,15 @@ fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateB
     }
     let settled = docs.as_ref().and_then(|docs| docs.settlement());
     if let Some(note) = docs.as_ref().and_then(|docs| docs.summary()) {
-        let committed = crate::core::cmd::git_cmd()
+        let policy = crate::core::commit_policy::CommitPolicy::for_repo(worktree_path);
+        let mut commit = crate::core::cmd::git_cmd();
+        commit.arg("commit");
+        if policy.signoff {
+            commit.arg("--signoff");
+        }
+        policy.apply_identity(&mut commit, false);
+        let committed = commit
             .args([
-                "commit",
-                "--signoff",
                 "--cleanup=strip",
                 "-m",
                 "Re-anchor doc citations moved by the branch's code",
@@ -3498,7 +3845,7 @@ pub fn create_task_worktree(
 
     crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))?;
     assert_managed_task_worktree_path(repo_path, &worktree_path)?;
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
     crate::core::git_global_config::ensure_safe_directory(repo_path);
     crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
@@ -4234,7 +4581,43 @@ pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, Stri
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(parse_porcelain(&String::from_utf8_lossy(&output.stdout)))
+    // An untracked `.DS_Store` is the file manager's, not work: a checkout made
+    // before the local exclude carried it must not stay "dirty" for it (KT-1750).
+    let junk = os_junk_patterns();
+    Ok(parse_porcelain(&String::from_utf8_lossy(&output.stdout))
+        .into_iter()
+        .filter(|file| {
+            !(file.status == "??"
+                && (is_os_junk(&file.path, &junk)
+                    || (file.path.ends_with('/')
+                        && holds_only_os_junk(&worktree_path.join(&file.path), &junk))))
+        })
+        .collect())
+}
+
+/// An untracked directory is listed by git as one entry (`?? sub/`): it is junk
+/// when nothing in it, at any depth, is anything else.
+fn holds_only_os_junk(dir: &Path, patterns: &[String]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        let junk = if is_dir {
+            // A nested repository is somebody's work, whatever is inside.
+            !entry.path().join(".git").exists() && holds_only_os_junk(&entry.path(), patterns)
+        } else {
+            is_os_junk(&name, patterns)
+        };
+        if !junk {
+            return false;
+        }
+    }
+    true
 }
 
 /// Return the exact committed file changes between two revisions.
@@ -5662,6 +6045,114 @@ mod tests {
         assert!(paths.contains(&"new.txt"));
     }
 
+    // ── KT-1750 — OS junk never makes a checkout "dirty" ─────────────────────
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn os_junk_is_not_work_but_real_files_still_are() {
+        let repo = make_test_repo("dirty-junk");
+        fs::create_dir_all(repo.path().join("sub")).unwrap();
+        for junk in [
+            ".DS_Store",
+            "Thumbs.db",
+            "desktop.ini",
+            "._resource",
+            "sub/.DS_Store",
+        ] {
+            fs::write(repo.path().join(junk), "x").unwrap();
+        }
+        assert!(worktree_dirty_files(repo.path()).unwrap().is_empty());
+
+        fs::write(repo.path().join("sub/real.txt"), "work").unwrap();
+        fs::write(repo.path().join("DS_Store.txt"), "work").unwrap();
+        let paths: Vec<String> = worktree_dirty_files(repo.path())
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        // git lists an untracked directory as one entry.
+        assert_eq!(paths, ["DS_Store.txt", "sub/"]);
+    }
+
+    #[test]
+    fn a_tracked_os_junk_file_that_changed_is_still_work() {
+        let repo = make_test_repo("dirty-tracked-junk");
+        fs::write(repo.path().join(".DS_Store"), "v1").unwrap();
+        git(repo.path(), &["add", "-f", ".DS_Store"]);
+        git(repo.path(), &["commit", "-q", "-m", "track it"]);
+        fs::write(repo.path().join(".DS_Store"), "v2").unwrap();
+        let files = worktree_dirty_files(repo.path()).unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, ".DS_Store");
+    }
+
+    #[test]
+    fn the_os_junk_patterns_follow_the_global_setting() {
+        // The setting is process-wide and other tests rely on the defaults: this
+        // one only ever adds to them, then puts them back.
+        let mut patterns = default_os_junk_patterns();
+        assert_eq!(patterns, [".DS_Store", "Thumbs.db", "desktop.ini", "._*"]);
+        patterns.push("*.junk-setting".to_string());
+        set_os_junk_patterns(&patterns);
+        let published = os_junk_patterns();
+        assert!(is_os_junk("a/b/file.junk-setting", &published));
+        assert!(is_os_junk("._x", &published));
+        assert!(is_os_junk("sub/.DS_Store", &published));
+        assert!(!is_os_junk("file.junk-settings", &published));
+        set_os_junk_patterns(&default_os_junk_patterns());
+        assert!(!is_os_junk("a/file.junk-setting", &os_junk_patterns()));
+        // An empty list means none: nothing is junk.
+        assert!(!is_os_junk(".DS_Store", &[]));
+    }
+
+    #[test]
+    fn a_task_worktree_ignores_os_junk_from_its_creation() {
+        let repo = make_test_repo("junk-exclude");
+        let info =
+            create_task_worktree(repo.path(), "KT-1750", "junk", &head_sha(repo.path())).unwrap();
+        let worktree = Path::new(&info.path);
+        for junk in [".DS_Store", "Thumbs.db", "desktop.ini", "._x"] {
+            fs::write(worktree.join(junk), "x").unwrap();
+            let ignored = crate::core::cmd::git_cmd()
+                .args(["check-ignore", "-q", junk])
+                .current_dir(worktree)
+                .status()
+                .unwrap();
+            assert!(ignored.success(), "{junk} must be ignored");
+        }
+        let status = crate::core::cmd::git_cmd()
+            .args(["status", "--porcelain=v1"])
+            .current_dir(worktree)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
+        // No tracked file was touched to get there.
+        assert!(!repo.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn a_checkout_holding_only_a_ds_store_can_be_removed() {
+        let repo = make_test_repo("junk-remove");
+        let info =
+            create_task_worktree(repo.path(), "KT-1750", "stale", &head_sha(repo.path())).unwrap();
+        let worktree = PathBuf::from(&info.path);
+        // A checkout from before the exclude existed: the junk is not ignored.
+        let exclude = repo.path().join(".git/info/exclude");
+        fs::write(&exclude, "").unwrap();
+        fs::write(worktree.join(".DS_Store"), "x").unwrap();
+        remove_ownerless_worktree(repo.path(), &worktree)
+            .expect("a stale .DS_Store does not keep the checkout alive");
+        assert!(!worktree.exists());
+    }
+
     #[test]
     fn test_main_repo_state_on_named_branch() {
         let repo = make_test_repo("state-branch");
@@ -6381,6 +6872,169 @@ mod tests {
         assert!(!repo.path().join(".gitignore").exists());
         let exclude = fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
         assert!(exclude.lines().any(|line| line.trim() == ".kronn/"));
+    }
+
+    /// KT-1595 — `ensure_local_git_exclude` is reached from every audit-state
+    /// write, right after an agent. A `.git/info` folder or an `exclude` file
+    /// swapped for a link never makes Kronn create or append outside the
+    /// git directory.
+    #[cfg(unix)]
+    #[test]
+    fn the_local_exclude_is_never_updated_through_a_swapped_info_folder() {
+        use crate::core::fs_guard::swap_probe;
+        let repo = make_test_repo("exclude-swap");
+        let info = repo.path().join(".git/info");
+        let external = tempfile::tempdir().unwrap();
+        fs::write(external.path().join("exclude"), "outside\n").unwrap();
+
+        // The swap lands between the read of `exclude` and the write.
+        swap_probe::arm_after(&info, external.path(), 1);
+        let outcome = ensure_local_git_exclude(repo.path(), ".kronn/");
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(external.path().join("exclude")).unwrap(),
+            "outside\n",
+            "the file behind the link is untouched"
+        );
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_local_exclude_refuses_a_linked_info_folder_and_a_linked_exclude_file() {
+        let repo = make_test_repo("exclude-link");
+        let info = repo.path().join(".git/info");
+        let external = tempfile::tempdir().unwrap();
+
+        // A folder link: nothing is created in the folder it points at.
+        fs::rename(&info, repo.path().join(".git/info.aside")).unwrap();
+        std::os::unix::fs::symlink(external.path(), &info).unwrap();
+        let outcome = ensure_local_git_exclude(repo.path(), ".kronn/");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+
+        // A file link: the file it points at is not appended to.
+        fs::remove_file(&info).unwrap();
+        fs::rename(repo.path().join(".git/info.aside"), &info).unwrap();
+        fs::remove_file(info.join("exclude")).unwrap();
+        let victim = external.path().join("victim");
+        fs::write(&victim, "victim\n").unwrap();
+        std::os::unix::fs::symlink(&victim, info.join("exclude")).unwrap();
+        let outcome = ensure_local_git_exclude(repo.path(), ".kronn/");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "victim\n");
+    }
+
+    /// KT-1595 (N3) — after an agent, git's answer is not trusted: a planted
+    /// `.git/commondir` that names another repository's git directory makes
+    /// `rev-parse --git-path info/exclude` point there. The pinned writer
+    /// refuses; nothing is created or appended in the other repository.
+    #[cfg(unix)]
+    #[test]
+    fn the_pinned_exclude_refuses_a_planted_commondir() {
+        let repo = make_test_repo("exclude-commondir");
+        let victim = make_test_repo("exclude-commondir-victim");
+        let victim_exclude = victim.path().join(".git/info/exclude");
+        let before = fs::read_to_string(&victim_exclude).unwrap_or_default();
+        let own_before = fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+        fs::write(
+            repo.path().join(".git/commondir"),
+            victim.path().join(".git").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        let outcome = ensure_local_git_exclude_pinned(repo.path(), ".kronn/");
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert!(
+            outcome.unwrap_err().contains("commondir"),
+            "the refusal names the pointer"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim_exclude).unwrap_or_default(),
+            before,
+            "the other repository's exclude is untouched"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap(),
+            own_before,
+            "nor is its own exclude touched"
+        );
+    }
+
+    /// KT-1595 (N3) — the same for a `.git` FILE whose `gitdir:` the agent
+    /// rewrote (the form of a linked worktree or a submodule).
+    #[cfg(unix)]
+    #[test]
+    fn the_pinned_exclude_refuses_a_gitdir_pointer_file() {
+        let repo = make_test_repo("exclude-gitdir");
+        let victim = make_test_repo("exclude-gitdir-victim");
+        let victim_exclude = victim.path().join(".git/info/exclude");
+        let before = fs::read_to_string(&victim_exclude).unwrap_or_default();
+        let aside = repo.path().join(".git.aside");
+        fs::rename(repo.path().join(".git"), &aside).unwrap();
+        fs::write(
+            repo.path().join(".git"),
+            format!("gitdir: {}\n", victim.path().join(".git").display()),
+        )
+        .unwrap();
+
+        let outcome = ensure_local_git_exclude_pinned(repo.path(), ".kronn/");
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(&victim_exclude).unwrap_or_default(),
+            before,
+            "the other repository's exclude is untouched"
+        );
+    }
+
+    /// KT-1595 (N3) — a `.git` that is itself a link to another repository is
+    /// refused (the rooted walk never follows it, and neither does the lstat).
+    #[cfg(unix)]
+    #[test]
+    fn the_pinned_exclude_refuses_a_git_directory_that_is_a_link() {
+        let repo = make_test_repo("exclude-gitlink");
+        let victim = make_test_repo("exclude-gitlink-victim");
+        let victim_exclude = victim.path().join(".git/info/exclude");
+        let before = fs::read_to_string(&victim_exclude).unwrap_or_default();
+        fs::rename(repo.path().join(".git"), repo.path().join(".git.aside")).unwrap();
+        std::os::unix::fs::symlink(victim.path().join(".git"), repo.path().join(".git")).unwrap();
+
+        let outcome = ensure_local_git_exclude_pinned(repo.path(), ".kronn/");
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(&victim_exclude).unwrap_or_default(),
+            before
+        );
+    }
+
+    #[test]
+    fn the_pinned_exclude_keeps_its_lines_and_adds_the_pattern_once() {
+        let repo = make_test_repo("exclude-pinned");
+        let exclude = repo.path().join(".git/info/exclude");
+        fs::write(&exclude, "# mine\n*.log").unwrap();
+        ensure_local_git_exclude_pinned(repo.path(), ".kronn/").unwrap();
+        ensure_local_git_exclude_pinned(repo.path(), ".kronn/").unwrap();
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            "# mine\n*.log\n.kronn/\n"
+        );
+    }
+
+    #[test]
+    fn the_local_exclude_keeps_its_lines_and_adds_the_pattern_once() {
+        let repo = make_test_repo("exclude-append");
+        let exclude = repo.path().join(".git/info/exclude");
+        fs::write(&exclude, "# mine\n*.log").unwrap();
+        ensure_local_git_exclude(repo.path(), ".kronn/").unwrap();
+        ensure_local_git_exclude(repo.path(), ".kronn/").unwrap();
+        assert_eq!(
+            fs::read_to_string(&exclude).unwrap(),
+            "# mine\n*.log\n.kronn/\n"
+        );
     }
 
     #[test]
@@ -7710,66 +8364,79 @@ mod tests {
         }
     }
 
+    /// A task branch checked out in a linked worktree of `repo`, as Kronn runs
+    /// them (the main checkout is never switched), with one commit of its own.
+    fn child_worktree(repo: &Path, name: &str) -> PathBuf {
+        let child = repo.join(".kronn/worktrees").join(name);
+        let made = crate::core::cmd::git_cmd()
+            .args(["worktree", "add", "-q", "-b", "child"])
+            .arg(&child)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        commit_file(&child, "child.txt", "work", "child work");
+        child
+    }
+
+    fn head_message(dir: &Path, rev: &str) -> String {
+        let message = crate::core::cmd::git_cmd()
+            .args(["log", "-1", "--format=%B", rev])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&message.stdout).into_owned()
+    }
+
     /// Phase 1 brings the parent INTO the child, so the child ends up descending
     /// from the pinned tip — the precondition that lets phase 2 be a fast-forward.
+    /// The merge commit is signed only where the project signs off (KT-1750).
     #[test]
     fn building_the_candidate_makes_the_child_descend_from_the_parent() {
-        let repo = make_test_repo("candidate");
-        let base = commit_file(repo.path(), "shared.txt", "one", "base");
+        for signoff in [true, false] {
+            let repo = make_test_repo("candidate");
+            commit_file(repo.path(), "shared.txt", "one", "base");
+            let setting = if signoff { "true" } else { "false" };
+            let configured = crate::core::cmd::git_cmd()
+                .args(["config", "kronn.signoff", setting])
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(configured.status.success());
+            let child = child_worktree(repo.path(), "candidate");
+            // Meanwhile the parent moves on, untouched by the child.
+            let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
 
-        // A child branch that diverges on its own file.
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        commit_file(repo.path(), "child.txt", "work", "child work");
+            let outcome = build_candidate(&child, &parent_tip).unwrap();
+            let CandidateOutcome::Built { sha } = outcome else {
+                panic!("expected a clean candidate");
+            };
 
-        // Meanwhile the parent moves on, untouched by the child.
-        std::process::Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
-        assert_ne!(parent_tip, base);
+            // The candidate contains the parent tip, so the parent can fast-forward to it.
+            let merge_base = crate::core::cmd::git_cmd()
+                .args(["merge-base", "--is-ancestor", &parent_tip, &sha])
+                .current_dir(&child)
+                .output()
+                .unwrap();
+            assert!(
+                merge_base.status.success(),
+                "candidate must descend from the parent tip"
+            );
 
-        std::process::Command::new("git")
-            .args(["checkout", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let outcome = build_candidate(repo.path(), &parent_tip).unwrap();
-        let CandidateOutcome::Built { sha } = outcome else {
-            panic!("expected a clean candidate");
-        };
-
-        // The candidate contains the parent tip, so the parent can fast-forward to it.
-        let merge_base = crate::core::cmd::git_cmd()
-            .args(["merge-base", "--is-ancestor", &parent_tip, &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(
-            merge_base.status.success(),
-            "candidate must descend from the parent tip"
-        );
-
-        let message = crate::core::cmd::git_cmd()
-            .args(["log", "-1", "--format=%B", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&message.stdout).contains("Signed-off-by: "),
-            "the merge commit must carry a sign-off"
-        );
+            let message = head_message(&child, &sha);
+            assert_eq!(
+                message.contains("Signed-off-by: "),
+                signoff,
+                "the merge commit follows the project's sign-off ({setting}): {message}"
+            );
+        }
     }
 
     /// A repository that enforces the DCO rejects an unsigned merge commit at
     /// `commit-msg` time (KT-854: the merge Kronn made for KT-840 had no
-    /// `Signed-off-by`, so the release PR went red). The integration candidate must
-    /// be built, signed with the identity git is configured with.
+    /// `Signed-off-by`, so the release PR went red). The hook is how the
+    /// repository says so (KT-1750): the integration candidate is signed, with the
+    /// identity the repository commits as, and built.
     #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn the_integration_merge_commit_satisfies_a_dco_enforcing_repository() {
@@ -7777,23 +8444,8 @@ mod tests {
 
         let repo = make_test_repo("candidate-dco");
         commit_file(repo.path(), "shared.txt", "one", "base");
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        commit_file(repo.path(), "child.txt", "work", "child work");
-        std::process::Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let child = child_worktree(repo.path(), "candidate-dco");
         let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
-        std::process::Command::new("git")
-            .args(["checkout", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
 
         // `git merge` runs `commit-msg` for the merge commit it creates.
         let hook = repo.path().join(".git/hooks/commit-msg");
@@ -7804,24 +8456,19 @@ mod tests {
         .unwrap();
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let outcome = build_candidate(repo.path(), &parent_tip).unwrap();
+        let outcome = build_candidate(&child, &parent_tip).unwrap();
         let CandidateOutcome::Built { sha } = outcome else {
             panic!("a DCO-enforcing repository must accept the integration merge, got {outcome:?}");
         };
 
-        let message = crate::core::cmd::git_cmd()
-            .args(["log", "-1", "--format=%B", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let message = head_message(&child, &sha);
         assert!(
-            String::from_utf8_lossy(&message.stdout)
-                .contains("Signed-off-by: Test <test@test.com>"),
-            "the sign-off is the configured git identity"
+            message.contains("Signed-off-by: Test <test@test.com>"),
+            "the sign-off is the repository's identity: {message}"
         );
         let parents = crate::core::cmd::git_cmd()
             .args(["log", "-1", "--format=%P", &sha])
-            .current_dir(repo.path())
+            .current_dir(&child)
             .output()
             .unwrap();
         assert_eq!(

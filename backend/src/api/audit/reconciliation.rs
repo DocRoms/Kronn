@@ -591,6 +591,28 @@ where
     out
 }
 
+/// The text of `path`, read through the project's directory fds (KT-1595);
+/// `None` when it is missing, not text, a link, or outside `root`.
+pub(crate) fn read_text_under(root: &Path, path: &Path) -> Option<String> {
+    crate::core::fs_guard::guarded_read(root, path)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+}
+
+/// Like [`read_text_under`], but a refusal of a link (or of a path leaving the
+/// root) is an error: the caller stops instead of reading "nothing".
+pub(crate) fn read_text_strict(root: &Path, path: &Path) -> Result<Option<String>, String> {
+    match crate::core::fs_guard::guarded_read(root, path) {
+        Ok(Some(bytes)) => Ok(String::from_utf8(bytes).ok()),
+        Ok(None) => Ok(None),
+        Err(e) if crate::core::fs_guard::is_link_refusal(&e) => {
+            Err(format!("{}: {e}", path.display()))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Best-effort source-signature check: read the TD detail file, find
 /// every `path/to/file:line` pattern under a `## Where (pointers)`
 /// section, and grep the source for the surrounding line context.
@@ -603,7 +625,11 @@ where
 /// are safer than false negatives because they make the agent re-audit
 /// next time instead of silently dropping a real issue.
 pub fn check_signature_in_source(snap: &TdSnapshot, project_path: &Path) -> Option<bool> {
-    let content = std::fs::read_to_string(&snap.path).ok()?;
+    // Every read goes through the project's directory fds (KT-1595): the sheet
+    // and each pointed-at file are read after an agent ran, so a link planted
+    // or swapped in — or a pointer naming a path outside the project — is
+    // refused and counts as unreadable, never followed.
+    let content = read_text_under(project_path, &snap.path)?;
     let pointers = parse_pointers(&content);
     if pointers.is_empty() {
         return None;
@@ -612,11 +638,7 @@ pub fn check_signature_in_source(snap: &TdSnapshot, project_path: &Path) -> Opti
     let mut any_missing = false;
     for ptr in &pointers {
         let file_path = project_path.join(&ptr.file);
-        if !file_path.exists() {
-            any_missing = true;
-            continue;
-        }
-        let Ok(source) = std::fs::read_to_string(&file_path) else {
+        let Some(source) = read_text_under(project_path, &file_path) else {
             any_missing = true;
             continue;
         };
@@ -995,6 +1017,67 @@ also not interesting (this `path/that:1` should be ignored)
         // line 2 exists → signature present.
         assert_eq!(check_signature_in_source(&snap, &tmp), Some(true));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// KT-1595 (N4): a pointer's source is read through the project's fds. A
+    /// source that is a link (or sits behind one), or a pointer naming a path
+    /// outside the project, is unreadable: the outside content never counts as
+    /// "signature still present".
+    #[cfg(unix)]
+    #[test]
+    fn check_signature_never_reads_a_source_through_a_link_or_outside_the_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("docs/tech-debt")).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("secret.rs"), "line1\nline2\nline3\n").unwrap();
+        std::os::unix::fs::symlink(external.path().join("secret.rs"), root.join("src/foo.rs"))
+            .unwrap();
+        let outside_abs = external.path().join("secret.rs");
+        let td_path = root.join("docs/tech-debt/TD-sample.md");
+        std::fs::write(
+            &td_path,
+            format!(
+                "## Where (pointers)\n- `src/foo.rs:2` — line2\n- `{}:2` — line2\n- `../outside.rs:2` — line2\n",
+                outside_abs.display()
+            ),
+        )
+        .unwrap();
+        let snap = TdSnapshot {
+            path: td_path,
+            id: "TD-sample".into(),
+            content_hash: "h".into(),
+            mtime: Utc::now(),
+        };
+        // Every pointer is refused: none is found, so the answer is "gone".
+        assert_eq!(check_signature_in_source(&snap, &root), Some(false));
+    }
+
+    /// KT-1595 (N4): the sheet itself is read through the fds too.
+    #[cfg(unix)]
+    #[test]
+    fn check_signature_never_reads_a_sheet_that_is_a_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("docs/tech-debt")).unwrap();
+        std::fs::write(root.join("src/foo.rs"), "line1\nline2\nline3\n").unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external.path().join("sheet.md"),
+            "## Where (pointers)\n- `src/foo.rs:2` — line2\n",
+        )
+        .unwrap();
+        let td_path = root.join("docs/tech-debt/TD-sample.md");
+        std::os::unix::fs::symlink(external.path().join("sheet.md"), &td_path).unwrap();
+        let snap = TdSnapshot {
+            path: td_path,
+            id: "TD-sample".into(),
+            content_hash: "h".into(),
+            mtime: Utc::now(),
+        };
+        assert_eq!(check_signature_in_source(&snap, &root), None);
     }
 
     #[test]

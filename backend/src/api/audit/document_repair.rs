@@ -20,7 +20,15 @@ pub(super) fn snapshot(project: &Path) -> Result<Snapshot, String> {
                 .map_err(|e| e.to_string())?
                 .to_string_lossy()
                 .replace('\\', "/");
-            let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            // Through the project's fds (KT-1595): a snapshot is copied into
+            // `.kronn/audit` (`snapshot_for_recovery`), so a file swapped for a
+            // link after `document_paths` listed it is refused, never read.
+            let content = crate::core::fs_guard::guarded_read(project, &path)
+                .map_err(|e| format!("{relative}: {e}"))?
+                .ok_or_else(|| format!("{relative}: no such file"))
+                .and_then(|bytes| {
+                    String::from_utf8(bytes).map_err(|e| format!("{relative}: {e}"))
+                })?;
             Ok((relative, content))
         })
         .collect()
@@ -81,7 +89,11 @@ struct BlameEntry {
 }
 
 fn content_hash(project: &Path, relative: &str) -> Option<String> {
-    let bytes = std::fs::read(project.join(relative)).ok()?;
+    // KT-1595: through the rooted primitive, so a link planted by an agent is
+    // no oracle for the hash of a file outside the project.
+    let bytes = crate::core::fs_guard::guarded_read(project, &project.join(relative))
+        .ok()
+        .flatten()?;
     Some(crate::core::docs_merge::sha256_hex(&bytes))
 }
 
@@ -97,7 +109,13 @@ impl Blame {
     /// The attribution an earlier launch of the run left; none when absent or
     /// unreadable (recovery then falls back to the target-file mapping).
     pub(super) fn load(project: &Path) -> Self {
-        let Ok(raw) = std::fs::read_to_string(Self::file(project)) else {
+        // KT-1595: rooted read; a link at the ledger (or in a parent) is an
+        // absent ledger, never parsed and re-saved.
+        let Some(raw) = crate::core::fs_guard::guarded_read(project, &Self::file(project))
+            .ok()
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+        else {
             return Self::default();
         };
         let entries: Vec<BlameEntry> = serde_json::from_str(&raw).unwrap_or_default();
@@ -271,11 +289,11 @@ impl Blame {
                     .flatten(),
             })
             .collect();
-        let written = crate::core::audit_state::state_dir(project).and_then(|dir| {
-            let text = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
-            crate::core::mcp_scanner::atomic_write(&dir.join(BLAME_FILE), &text)
-                .map_err(|e| e.to_string())
-        });
+        let written = serde_json::to_string(&entries)
+            .map_err(|e| e.to_string())
+            .and_then(|text| {
+                crate::core::audit_state::write_state_file(project, BLAME_FILE, &text)
+            });
         if let Err(e) = written {
             tracing::warn!("Documentary blame of the run not recorded: {e}");
         }
@@ -681,7 +699,13 @@ pub(super) fn demote_last_attempt(
         if !document_optimization::kronn_owns(project, path) {
             return Ok(Vec::new());
         }
-        let original = std::fs::read_to_string(project.join(path)).map_err(|e| e.to_string())?;
+        // Read through the project's fds (KT-1595): `original` is written back
+        // (the undo path, the preserved copy), so a doc planted or swapped as a
+        // link must be refused, never copied from outside the project.
+        let original = crate::core::fs_guard::guarded_read(project, &project.join(path))
+            .map_err(|e| format!("{path}: {e}"))?
+            .ok_or_else(|| format!("{path}: no such file"))
+            .and_then(|bytes| String::from_utf8(bytes).map_err(|e| format!("{path}: {e}")))?;
         let Some(demotion) = document_optimization::demote_unverifiable(project, path, &original)
         else {
             return Ok(Vec::new());
@@ -698,8 +722,10 @@ pub(super) fn demote_last_attempt(
         writes.push((path, original, demotion.content));
     }
     let write = |path: &str, from: &str, to: &str| -> Result<(), String> {
-        crate::core::mcp_scanner::atomic_write(&project.join(path), to)
-            .map_err(|e| e.to_string())?;
+        // Rooted (KT-1595): the canonicalize check above is only a refusal,
+        // true at one instant; a folder swapped for a link after it must not
+        // take the write outside the project.
+        crate::core::fs_guard::guarded_replace(project, &project.join(path), to.as_bytes())?;
         if let Err(e) = crate::core::doc_provenance::note_write(
             project,
             path,
@@ -751,8 +777,12 @@ pub(super) fn changed_recovery_paths(
     recovery
         .iter()
         .filter(|d| {
-            std::fs::read_to_string(project.join(&d.path))
-                .is_ok_and(|after| before.get(&d.path).is_some_and(|prior| prior != &after))
+            // KT-1595: rooted read; a linked path is "not rewritten".
+            crate::core::fs_guard::guarded_read(project, &project.join(&d.path))
+                .ok()
+                .flatten()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .is_some_and(|after| before.get(&d.path).is_some_and(|prior| prior != &after))
         })
         .map(|d| d.path.clone())
         .collect()
@@ -868,7 +898,15 @@ fn split_verified_citations(project: &Path, content: &str) -> Option<String> {
                 if !resolved.starts_with(root) {
                     return false;
                 }
-                let Ok(source) = std::fs::read_to_string(resolved) else {
+                // KT-1595: the canonical path above only decides containment;
+                // the bytes are read through the rooted primitive from the
+                // project path, so a link swapped in meanwhile is refused.
+                let Some(source) =
+                    crate::core::fs_guard::guarded_read(project, &project.join(path.trim()))
+                        .ok()
+                        .flatten()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                else {
                     return false;
                 };
                 crate::core::anti_halluc::parse_line_bounds(range).is_some_and(|(a, b)| {
@@ -977,8 +1015,11 @@ pub(super) fn check_attempt(
                 return Err(format!("repair target escapes project: {path}"));
             }
             preserve_original(project, content)?;
-            crate::core::mcp_scanner::atomic_write(&project.join(path), &corrected)
-                .map_err(|e| e.to_string())?;
+            crate::core::fs_guard::guarded_replace(
+                project,
+                &project.join(path),
+                corrected.as_bytes(),
+            )?;
             if let Err(e) = crate::core::doc_provenance::note_write(
                 project,
                 path,
@@ -2014,6 +2055,7 @@ mod tests {
             "# Tech debt (index)\n\n## Current list\n\n| ID | Problem | Area | Severity |\n|----|---------|------|----------|\n| TD-20261001-a | Finding A | Backend | High |\n",
         );
         let outcome = crate::core::td_index::resync(
+            root,
             &root.join("docs"),
             crate::core::adr::Trust::RunBaseline {
                 decisions: "",
@@ -2276,6 +2318,158 @@ mod tests {
         assert!(demoted.is_empty());
         let written = std::fs::read_to_string(dir.path().join("docs/tech-debt.md")).unwrap();
         assert_eq!(written, text);
+    }
+
+    /// KT-1595: the demotion runs right after an agent; a docs folder swapped
+    /// for a link between the walk and the write never takes the document out.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_docs_folder_swapped_after_the_walk_never_receives_the_demotion() {
+        use crate::core::fs_guard::swap_probe;
+        let text = "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] in prod.\n";
+        let (dir, blocking) = docroms(text);
+        let external = tempfile::tempdir().unwrap();
+        // The document is read first (one guarded call under `docs`); the swap
+        // lands on the write.
+        swap_probe::arm_after(&dir.path().join("docs"), external.path(), 1);
+        let result = demote_last_attempt(dir.path(), &blocking, None, &|| true);
+        assert!(swap_probe::fired(), "the swap really happened");
+        // The write goes to the folder it held (moved, still inside the
+        // project), never through the link that took its name.
+        assert_eq!(std::fs::read_dir(external.path()).unwrap().count(), 0);
+        // The demotion really was written there: the document no longer
+        // carries the marker it started with.
+        let held = std::fs::read_to_string(dir.path().join("docs.moved/tech-debt.md")).unwrap();
+        assert_ne!(held, text, "the demotion landed in the folder it held");
+        assert!(
+            !held.contains("[src: file: config/packages/prod/monolog.yaml]"),
+            "{held}"
+        );
+        // The check after the write reads `docs/` through the link, where the
+        // blockers are no longer seen cleared, so no demotion is reported (the
+        // step fails as before); the rooted undo refuses the link too, so it
+        // cannot write the original back outside either.
+        let demoted = result.expect("a swapped folder is not an error of the demotion");
+        assert!(demoted.is_empty(), "{demoted:?}");
+    }
+
+    /// KT-1595 (N1): the document is read through the project's fds. With the
+    /// docs folder swapped for a link when it is opened, the demotion fails
+    /// closed: nothing of what the link points at is read into the project.
+    #[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+    #[test]
+    fn a_document_read_while_the_docs_folder_is_swapped_is_never_taken_from_outside() {
+        use crate::core::fs_guard::swap_probe;
+        let text = "# T\n\nLogs [src: file: config/packages/prod/monolog.yaml] in prod.\n";
+        let (dir, blocking) = docroms(text);
+        let external = tempfile::tempdir().unwrap();
+        let outside = "# OUTSIDE SECRET [src: file: nowhere/at/all.rs]\n";
+        std::fs::write(external.path().join("tech-debt.md"), outside).unwrap();
+        swap_probe::arm(&dir.path().join("docs"), external.path());
+        let result = demote_last_attempt(dir.path(), &blocking, None, &|| true);
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("tech-debt.md")).unwrap(),
+            outside
+        );
+        // Nothing of it was preserved inside the project either.
+        let preserved = dir.path().join(".kronn");
+        let leaked = walkdir::WalkDir::new(&preserved)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|c| c.contains("OUTSIDE SECRET")));
+        assert!(!leaked, "no outside byte reached the project");
+    }
+
+    /// KT-1595 (N1): the recovery snapshot is copied into `.kronn/audit`; a
+    /// link planted at a document is refused, never read.
+    #[cfg(unix)]
+    #[test]
+    fn a_snapshot_never_reads_a_document_that_is_a_link() {
+        let (dir, _blocking) = docroms("# T\n\nplain\n");
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("secret.md"), "# OUTSIDE SECRET\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("secret.md"),
+            dir.path().join("docs/linked.md"),
+        )
+        .unwrap();
+        let snap = snapshot(dir.path());
+        // A link is not a document (the listing skips it), and a read through
+        // one is refused: either way no outside byte is in the snapshot.
+        match snap {
+            Ok(map) => assert!(map.values().all(|c| !c.contains("OUTSIDE SECRET"))),
+            Err(e) => assert!(!e.contains("OUTSIDE SECRET")),
+        }
+    }
+
+    /// KT-1595 round 5 (NEW-3): the read-only helpers that run after an agent
+    /// are no oracle on a file a planted link points at.
+    #[cfg(unix)]
+    fn project_with_a_planted_link() -> (tempfile::TempDir, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(external.path().join("secret.md"), "OUTSIDE SECRET\n").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("secret.md"),
+            dir.path().join("docs/linked.md"),
+        )
+        .unwrap();
+        (dir, external)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_content_hash_of_a_linked_document_is_not_computed() {
+        let (dir, _external) = project_with_a_planted_link();
+        std::fs::write(dir.path().join("docs/plain.md"), "plain\n").unwrap();
+        assert!(content_hash(dir.path(), "docs/plain.md").is_some());
+        assert_eq!(content_hash(dir.path(), "docs/linked.md"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_blame_ledger_is_not_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let outside = external.path().join("ledger.json");
+        std::fs::write(
+            &outside,
+            r#"[{"code":"c","path":"docs/a.md","message":"OUTSIDE SECRET","step":1}]"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(Blame::file(dir.path()).parent().unwrap()).unwrap();
+        // Control: the same ledger as a plain file is parsed.
+        std::fs::copy(&outside, Blame::file(dir.path())).unwrap();
+        assert!(
+            format!("{:?}", Blame::load(dir.path())).contains("OUTSIDE SECRET"),
+            "the fixture ledger is valid"
+        );
+        std::fs::remove_file(Blame::file(dir.path())).unwrap();
+        std::os::unix::fs::symlink(&outside, Blame::file(dir.path())).unwrap();
+        let blame = Blame::load(dir.path());
+        assert!(
+            format!("{blame:?}").find("OUTSIDE SECRET").is_none(),
+            "a linked ledger is an absent one"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_recovery_document_is_not_reported_as_rewritten() {
+        let (dir, _external) = project_with_a_planted_link();
+        let recovery = vec![Diagnostic {
+            code: "x".into(),
+            path: "docs/linked.md".into(),
+            message: String::new(),
+            blocking: true,
+        }];
+        let mut before = Snapshot::new();
+        before.insert("docs/linked.md".into(), "before".into());
+        assert!(changed_recovery_paths(dir.path(), &before, &recovery).is_empty());
     }
 
     #[test]

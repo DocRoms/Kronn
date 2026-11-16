@@ -1127,3 +1127,26 @@ fn a_fingerprint_stored_under_a_directory_chain_alias_is_dropped() {
     record_after_audit(tmp.path(), &[]).unwrap();
     assert_chain_presence_only(tmp.path());
 }
+
+/// KT-1595: the record is written right after an agent may have run; a docs
+/// folder swapped for a link between the walk and the write never takes it out.
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+#[test]
+fn a_docs_folder_swapped_after_the_walk_never_receives_the_citations_record() {
+    use crate::core::fs_guard::swap_probe;
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("repo");
+    fs::create_dir_all(project.join("docs")).unwrap();
+    let external = tempfile::tempdir().unwrap();
+    swap_probe::arm(&project.join("docs"), external.path());
+    let result = write(&project, &mut CitationsFile::default());
+    assert!(swap_probe::fired(), "the swap really happened");
+    // The write goes to the folder it held (moved, still inside the project),
+    // never through the link that took its name.
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+    assert!(project
+        .join("docs.moved")
+        .join(CITATIONS_FILENAME)
+        .is_file());
+}

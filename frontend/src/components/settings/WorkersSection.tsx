@@ -24,6 +24,20 @@ import { MAX_REVIEW_ROUNDS, MIN_REVIEW_ROUNDS } from '../../lib/reviewRounds';
 import { DEFAULT_HEAVY_OUTPUT_KB, MAX_HEAVY_OUTPUT_KB, MIN_HEAVY_OUTPUT_KB } from '../../lib/heavyOutput';
 import { DEFAULT_TASK_WORKERS, MAX_TASK_WORKERS, MIN_TASK_WORKERS } from '../../lib/taskWorkers';
 import {
+  DEFAULT_OS_JUNK_PATTERNS,
+  formatOsJunkPatterns,
+  osJunkListProblem,
+  parseOsJunkPatterns,
+} from '../../lib/osJunk';
+import {
+  commitFields,
+  commitSettingsOf,
+  isHalfIdentity,
+  sameCommitSettings,
+  SIGNOFF_SETTINGS,
+} from '../../lib/commitSettings';
+import type { SignoffSetting } from '../../types/generated';
+import {
   commandOutlivesGeneration,
   DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
   DEFAULT_BASH_MAX_TIMEOUT_MIN,
@@ -55,6 +69,12 @@ export function WorkersSection({ t }: Props) {
   const [heavyKb, setHeavyKb] = useState(String(DEFAULT_HEAVY_OUTPUT_KB));
   const [bashDefault, setBashDefault] = useState(String(DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
   const [bashMax, setBashMax] = useState(String(DEFAULT_BASH_MAX_TIMEOUT_MIN));
+  // KT-1750 — comma-separated, an empty field meaning none.
+  const [junk, setJunk] = useState(formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS));
+  // KT-1750 — the commit identity and sign-off every project inherits.
+  const [commitName, setCommitName] = useState('');
+  const [commitEmail, setCommitEmail] = useState('');
+  const [commitSignoff, setCommitSignoff] = useState<SignoffSetting>('auto');
   // KT-1748 — one absolute folder per line; the built-in roots are always included.
   const [managedRoots, setManagedRoots] = useState('');
   // KT-1742 — how every project's lane is warmed (a project may override it).
@@ -88,6 +108,11 @@ export function WorkersSection({ t }: Props) {
         setHeavyKb(String(value.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
         setBashDefault(String(value.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
         setBashMax(String(value.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+        setJunk(formatOsJunkPatterns(value.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS));
+        const fields = commitFields(value.commit);
+        setCommitName(fields.name);
+        setCommitEmail(fields.email);
+        setCommitSignoff(fields.signoff);
         setManagedRoots((value.managed_worktree_roots ?? []).join('\n'));
         setLaneWarm(draftOf(value.lane_warm));
       })
@@ -111,14 +136,19 @@ export function WorkersSection({ t }: Props) {
   const validBashDefault = Number.isInteger(bashDefaultMin)
     && bashDefaultMin >= MIN_BASH_TIMEOUT_MIN && validBashMax && bashDefaultMin <= bashMaxMin;
   const validBash = validBashMax && validBashDefault;
+  const junkList = parseOsJunkPatterns(junk);
+  const junkProblem = osJunkListProblem(junkList);
+  const validJunk = junkProblem === null;
+  const commitFieldsNow = { name: commitName, email: commitEmail, signoff: commitSignoff };
+  const halfCommit = isHalfIdentity(commitName, commitEmail);
   const validLaneWarm = draftProblem(laneWarm) === null;
   const rootList = parseManagedRoots(managedRoots);
   const validRoots = validManagedRoots(rootList);
   const savedRoots = saved?.managed_worktree_roots ?? [];
   const rootsUnchanged = rootList.length === savedRoots.length
     && rootList.every((root, index) => root === savedRoots[index]);
-  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash
-    && validRoots && validLaneWarm;
+  const valid = (unlimited || validCount) && validWorkerCap && validHeavy && validBash && validJunk
+    && !halfCommit && validRoots && validLaneWarm;
   const roundsUnchanged = saved !== null
     && unlimited === saved.review_rounds_unlimited
     && background === (saved.background_priority !== false)
@@ -129,6 +159,9 @@ export function WorkersSection({ t }: Props) {
     && heavy === (saved.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB)
     && bashDefaultMin === (saved.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN)
     && bashMaxMin === (saved.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN)
+    && formatOsJunkPatterns(junkList)
+      === formatOsJunkPatterns(saved.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS)
+    && sameCommitSettings(commitFieldsNow, saved.commit)
     && sameDraft(laneWarm, draftOf(saved.lane_warm));
 
   const save = useAsyncGuard(async () => {
@@ -143,6 +176,9 @@ export function WorkersSection({ t }: Props) {
         heavy_output_kb: heavy,
         bash_default_timeout_min: bashDefaultMin,
         bash_max_timeout_min: bashMaxMin,
+        os_junk_patterns: junkList,
+        // Nothing set is no key at all, as the backend stores it.
+        ...(commitSettingsOf(commitFieldsNow) ? { commit: commitSettingsOf(commitFieldsNow) } : {}),
         managed_worktree_roots: rootList,
         lane_warm: configOf(laneWarm),
       });
@@ -154,6 +190,11 @@ export function WorkersSection({ t }: Props) {
       setHeavyKb(String(next.heavy_output_kb ?? DEFAULT_HEAVY_OUTPUT_KB));
       setBashDefault(String(next.bash_default_timeout_min ?? DEFAULT_BASH_DEFAULT_TIMEOUT_MIN));
       setBashMax(String(next.bash_max_timeout_min ?? DEFAULT_BASH_MAX_TIMEOUT_MIN));
+      setJunk(formatOsJunkPatterns(next.os_junk_patterns ?? DEFAULT_OS_JUNK_PATTERNS));
+      const fields = commitFields(next.commit);
+      setCommitName(fields.name);
+      setCommitEmail(fields.email);
+      setCommitSignoff(fields.signoff);
       setManagedRoots((next.managed_worktree_roots ?? []).join('\n'));
       setLaneWarm(draftOf(next.lane_warm));
     } catch (cause) {
@@ -360,6 +401,88 @@ export function WorkersSection({ t }: Props) {
             <span>{t('config.workers.shellTimeoutsOutlive')}</span>
           </div>
         )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.osJunk')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-junk-hint">{t('config.workers.osJunkHint')}</p>
+        <div className="flex-row gap-3">
+          <input
+            type="text"
+            className="set-input"
+            aria-label={t('config.workers.osJunk')}
+            placeholder={formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS)}
+            value={junk}
+            disabled={saved === null}
+            onChange={event => setJunk(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-junk-input"
+          />
+          <button
+            type="button"
+            className="set-icon-btn"
+            disabled={saved === null || junk === formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS)}
+            onClick={() => setJunk(formatOsJunkPatterns(DEFAULT_OS_JUNK_PATTERNS))}
+            data-testid="workers-junk-reset"
+          >
+            {t('config.workers.osJunkReset')}
+          </button>
+        </div>
+        {!validJunk && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-junk-invalid">
+            {t('config.workers.osJunkInvalid', junkProblem ?? '')}
+          </p>
+        )}
+
+        <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
+          <span className="label">{t('config.workers.commit')}</span>
+        </div>
+        <p className="text-sm text-faint mb-4" data-testid="workers-commit-hint">{t('config.workers.commitHint')}</p>
+        <div className="flex-row gap-3">
+          <input
+            type="text"
+            className="set-input"
+            aria-label={t('config.workers.commitName')}
+            placeholder={t('config.workers.commitName')}
+            value={commitName}
+            disabled={saved === null}
+            onChange={event => setCommitName(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-commit-name"
+          />
+          <input
+            type="email"
+            className="set-input"
+            aria-label={t('config.workers.commitEmail')}
+            placeholder={t('config.workers.commitEmail')}
+            value={commitEmail}
+            disabled={saved === null}
+            onChange={event => setCommitEmail(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Enter' && valid && !unchanged) void save(); }}
+            data-testid="workers-commit-email"
+          />
+        </div>
+        {halfCommit && (
+          <p role="alert" className="default-docs-dir-error" data-testid="workers-commit-incomplete">
+            {t('config.workers.commitIncomplete')}
+          </p>
+        )}
+        <div className="flex-row gap-4 mt-4">
+          <span className="text-sm">{t('config.workers.commitSignoff')}</span>
+          {SIGNOFF_SETTINGS.map(value => (
+            <label key={value} className="flex-row gap-3">
+              <input
+                type="radio"
+                name="workers-commit-signoff"
+                checked={commitSignoff === value}
+                disabled={saved === null}
+                onChange={() => setCommitSignoff(value)}
+                data-testid={`workers-commit-signoff-${value}`}
+              />
+              <span className="text-sm">{t(`config.workers.commitSignoff.${value}`)}</span>
+            </label>
+          ))}
+        </div>
         <div className="flex-row gap-4 mb-3" style={{ marginTop: 16 }}>
           <span className="label">{t('config.workers.managedRoots')}</span>
         </div>

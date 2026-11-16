@@ -244,7 +244,7 @@ fn settle_covered_sheets_writes_once_and_skips_rejected() {
     )
     .unwrap();
 
-    let first = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
+    let first = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR)).unwrap();
     assert_eq!(
         first.settled,
         vec![
@@ -259,7 +259,7 @@ fn settle_covered_sheets_writes_once_and_skips_rejected() {
     assert_eq!(fs::read_to_string(&rejected_path).unwrap(), rejected);
 
     let after_first = fs::read_to_string(&covered).unwrap();
-    let second = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
+    let second = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR)).unwrap();
     assert!(second.settled.is_empty(), "{second:?}");
     assert_eq!(fs::read_to_string(&covered).unwrap(), after_first);
 }
@@ -269,9 +269,9 @@ fn the_prompt_block_lists_only_decisions_in_force() {
     let dir = tempfile::tempdir().unwrap();
     let docs = dir.path().join("docs");
     fs::create_dir_all(&docs).unwrap();
-    assert_eq!(in_force_prompt_block(&docs, ""), "");
+    assert_eq!(in_force_prompt_block(dir.path(), &docs, ""), "");
     fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
-    let block = in_force_prompt_block(&docs, CI_LABEL_ADR);
+    let block = in_force_prompt_block(dir.path(), &docs, CI_LABEL_ADR);
     assert!(
         block.contains("- ADR-0001 — CI is label-triggered (covers: quality-gate-not-enforced)")
     );
@@ -281,10 +281,13 @@ fn the_prompt_block_lists_only_decisions_in_force() {
         CI_LABEL_ADR.replace("accepted", "proposed"),
     )
     .unwrap();
-    assert_eq!(in_force_prompt_block(&docs, CI_LABEL_ADR), "");
+    assert_eq!(in_force_prompt_block(dir.path(), &docs, CI_LABEL_ADR), "");
     // Accepted during the run: not in force for this run's steps.
     fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
-    assert_eq!(in_force_prompt_block(&docs, "# Decisions\n"), "");
+    assert_eq!(
+        in_force_prompt_block(dir.path(), &docs, "# Decisions\n"),
+        ""
+    );
 }
 
 /// A docs dir whose `decisions.md` is `decisions`, with one CI sheet.
@@ -309,7 +312,7 @@ fn run_fixture(decisions: &str, sheet_extra: &str) -> (tempfile::TempDir, std::p
 fn an_adr_accepted_during_the_run_settles_nothing_and_goes_back_to_proposed() {
     let baseline = "# Architecture decisions\n";
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "- **Decision record**: ADR-0001\n");
-    let outcome = settle_covered_sheets(&docs, run(baseline)).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(baseline)).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.downgraded,
@@ -329,7 +332,7 @@ fn an_adr_accepted_during_the_run_settles_nothing_and_goes_back_to_proposed() {
     assert!(decisions.contains("only a human accepts an ADR"));
     assert!(in_force(&parse(&decisions)).is_empty());
     // The next run starts from the downgraded file: still nothing settles.
-    let again = settle_covered_sheets(&docs, run(&decisions)).unwrap();
+    let again = settle_covered_sheets(docs.parent().unwrap(), &docs, run(&decisions)).unwrap();
     assert!(again.settled.is_empty() && again.downgraded.is_empty());
 }
 
@@ -338,7 +341,7 @@ fn a_covers_entry_added_during_the_run_does_not_count() {
     // ADR-0001 was accepted before the run, without the TD's slug.
     let baseline = CI_LABEL_ADR.replace("- **Covers**: quality-gate-not-enforced\n", "");
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
-    let outcome = settle_covered_sheets(&docs, run(&baseline)).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(&baseline)).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert!(
         outcome.downgraded.is_empty(),
@@ -349,7 +352,7 @@ fn a_covers_entry_added_during_the_run_does_not_count() {
 #[test]
 fn an_adr_accepted_before_the_run_still_settles() {
     let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
-    let outcome = settle_covered_sheets(&docs, run(CI_LABEL_ADR)).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR)).unwrap();
     assert_eq!(outcome.settled.len(), 1, "{outcome:?}");
     assert!(outcome.downgraded.is_empty());
     // Superseding it during the run only removes coverage (the safe side).
@@ -357,7 +360,8 @@ fn an_adr_accepted_before_the_run_still_settles() {
         &CI_LABEL_ADR.replace("**Status**: accepted", "**Status**: superseded by ADR-0002"),
         "",
     );
-    let outcome = settle_covered_sheets(&docs2, run(CI_LABEL_ADR)).unwrap();
+    let outcome =
+        settle_covered_sheets(docs2.parent().unwrap(), &docs2, run(CI_LABEL_ADR)).unwrap();
     assert!(outcome.settled.is_empty());
 }
 
@@ -373,7 +377,8 @@ fn a_card_settles_only_with_the_adrs_it_appended() {
     )
     .unwrap();
     let ids = vec!["ADR-0002".to_string()];
-    let outcome = settle_covered_sheets(&docs, Trust::CardAccepted(&ids)).unwrap();
+    let outcome =
+        settle_covered_sheets(docs.parent().unwrap(), &docs, Trust::CardAccepted(&ids)).unwrap();
     assert_eq!(
         outcome.settled,
         vec!["TD-20261011-other → ADR-0002 — Accept `TD-20261011-other`".to_string()]
@@ -417,7 +422,7 @@ fn a_record_line_the_run_writes_on_a_new_sheet_settles_nothing() {
     let docs = dir.path().join("docs");
     fs::create_dir_all(docs.join("tech-debt")).unwrap();
     fs::write(docs.join(DECISIONS_FILE), TWO_ADRS).unwrap();
-    let start = StartOfRun::capture(&docs);
+    let start = StartOfRun::capture(dir.path(), &docs);
     assert_eq!(start.records, "");
     // The TD step writes a real finding and cites an unrelated accepted ADR.
     write_sheet(
@@ -425,7 +430,7 @@ fn a_record_line_the_run_writes_on_a_new_sheet_settles_nothing() {
         "TD-20261011-sql-injection",
         "- **Decision record**: ADR-0001\n",
     );
-    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, start.trust()).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert_eq!(
         outcome.not_in_force,
@@ -449,7 +454,7 @@ fn a_record_line_the_run_adds_or_changes_on_an_existing_sheet_settles_nothing() 
         "TD-20261001-human",
         "- **Decision record**: ADR-0002\n",
     );
-    let start = StartOfRun::capture(&docs);
+    let start = StartOfRun::capture(dir.path(), &docs);
     assert_eq!(start.records, "TD-20261001-human ADR-0002\n");
     // The REVERIFY block rewrites both sheets during the run.
     write_sheet(
@@ -462,7 +467,7 @@ fn a_record_line_the_run_adds_or_changes_on_an_existing_sheet_settles_nothing() 
         "TD-20261001-human",
         "- **Decision record**: ADR-0001\n",
     );
-    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, start.trust()).unwrap();
     assert!(outcome.settled.is_empty(), "{outcome:?}");
     assert_eq!(outcome.not_in_force.len(), 2, "{outcome:?}");
     assert_eq!(status_of(&docs, "TD-20261001-no-record"), None);
@@ -476,8 +481,8 @@ fn a_record_line_present_before_the_run_still_settles() {
     fs::create_dir_all(docs.join("tech-debt")).unwrap();
     fs::write(docs.join(DECISIONS_FILE), TWO_ADRS).unwrap();
     write_sheet(&docs, "TD-20261001-human", "- **Decision record**: ADR-2\n");
-    let start = StartOfRun::capture(&docs);
-    let outcome = settle_covered_sheets(&docs, start.trust()).unwrap();
+    let start = StartOfRun::capture(dir.path(), &docs);
+    let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, start.trust()).unwrap();
     assert_eq!(
         outcome.settled,
         vec!["TD-20261001-human → ADR-0002 — No ORM".to_string()]
@@ -488,7 +493,7 @@ fn a_record_line_present_before_the_run_still_settles() {
     );
     // Settled lines are part of the next run's baseline.
     assert_eq!(
-        parse_records(&capture_records(&docs)),
+        parse_records(&capture_records(docs.parent().unwrap(), &docs)),
         Records::from([("TD-20261001-human".to_string(), "ADR-0002".to_string())])
     );
 }
@@ -547,7 +552,8 @@ fn a_card_ignores_a_record_line_naming_the_adr_it_creates() {
     let card = "## ADR-0005: Accept `TD-20261011-accepted` as an intentional trade-off\n\n- **Status**: accepted\n- **Date**: 2026-10-11\n- **Covers**: TD-20261011-accepted\n";
     fs::write(docs.join(DECISIONS_FILE), card).unwrap();
     let ids = vec!["ADR-0005".to_string()];
-    let outcome = settle_covered_sheets(&docs, Trust::CardAccepted(&ids)).unwrap();
+    let outcome =
+        settle_covered_sheets(docs.parent().unwrap(), &docs, Trust::CardAccepted(&ids)).unwrap();
     assert_eq!(
         outcome.settled,
         vec![
@@ -567,4 +573,184 @@ fn a_card_ignores_a_record_line_naming_the_adr_it_creates() {
         status_of(&docs, "TD-20261011-accepted"),
         Some(TdDecision::AcceptedDecision)
     );
+}
+
+/// KT-1595 round 5 (NEW-3): `decisions.md` ends up in a step prompt, so a link
+/// at it (or at the docs folder) must not bring an outside file into the prompt.
+#[cfg(unix)]
+#[test]
+fn a_linked_decisions_file_or_docs_folder_reads_as_empty() {
+    let project = tempfile::tempdir().unwrap();
+    let docs = project.path().join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let external = tempfile::tempdir().unwrap();
+    fs::write(external.path().join("decisions.md"), CI_LABEL_ADR).unwrap();
+    // Control: a plain file is read.
+    fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
+    assert!(read_decisions(project.path(), &docs).contains("ADR-0001"));
+    // A link at the file.
+    fs::remove_file(docs.join(DECISIONS_FILE)).unwrap();
+    std::os::unix::fs::symlink(
+        external.path().join("decisions.md"),
+        docs.join(DECISIONS_FILE),
+    )
+    .unwrap();
+    assert_eq!(read_decisions(project.path(), &docs), "");
+    assert!(in_force_prompt_block(project.path(), &docs, CI_LABEL_ADR).is_empty());
+    // A link at the docs folder itself.
+    fs::remove_dir_all(&docs).unwrap();
+    std::os::unix::fs::symlink(external.path(), &docs).unwrap();
+    assert_eq!(read_decisions(project.path(), &docs), "");
+}
+
+/// KT-1595 round 7: a nested docs root (`documentation/ai`) is read from the
+/// project, so a folder ABOVE the docs folder swapped for a link reads as empty.
+#[cfg(unix)]
+#[test]
+fn a_linked_folder_above_a_nested_docs_root_reads_as_empty() {
+    let project = tempfile::tempdir().unwrap();
+    let docs = project.path().join("documentation/ai");
+    fs::create_dir_all(&docs).unwrap();
+    fs::write(docs.join(DECISIONS_FILE), CI_LABEL_ADR).unwrap();
+    assert!(read_decisions(project.path(), &docs).contains("ADR-0001"));
+    let external = tempfile::tempdir().unwrap();
+    fs::create_dir_all(external.path().join("ai")).unwrap();
+    fs::write(
+        external.path().join("ai").join(DECISIONS_FILE),
+        CI_LABEL_ADR,
+    )
+    .unwrap();
+    fs::remove_dir_all(project.path().join("documentation")).unwrap();
+    std::os::unix::fs::symlink(external.path(), project.path().join("documentation")).unwrap();
+    assert_eq!(read_decisions(project.path(), &docs), "");
+    assert!(in_force_prompt_block(project.path(), &docs, CI_LABEL_ADR).is_empty());
+    assert_eq!(StartOfRun::capture(project.path(), &docs).decisions, "");
+}
+
+/// KT-1595: the settlement runs after an agent, so a folder swapped for a link
+/// between the walk and the write never takes a sheet or `decisions.md` out of
+/// the project.
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+mod swapped_folder {
+    use super::*;
+    use crate::core::fs_guard::swap_probe;
+
+    const SHEET: &str = "TD-20261011-quality-gate-not-enforced.md";
+
+    #[test]
+    fn a_settled_sheet_is_never_written_through_a_swapped_folder() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        // The sheet is read first (one guarded call), the swap lands on its write.
+        swap_probe::arm_after(&docs.join("tech-debt"), external.path(), 1);
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert_eq!(outcome.unwrap().settled.len(), 1);
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+        let held = fs::read_to_string(docs.join("tech-debt.moved").join(SHEET)).unwrap();
+        assert_eq!(td_decision(&held), Some(TdDecision::AcceptedDecision));
+    }
+
+    #[test]
+    fn decisions_md_is_never_downgraded_through_a_swapped_docs_folder() {
+        let baseline = "# Architecture decisions\n";
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        // `decisions.md` is read first, the swap lands on the downgrade write.
+        swap_probe::arm_after(&docs, external.path(), 1);
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(baseline));
+        assert!(swap_probe::fired(), "the swap really happened");
+        // The sheet listing that follows finds `docs` a link: refused (an
+        // error, never "no sheets"); the downgrade itself landed in the held
+        // folder.
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+        let moved = docs.parent().unwrap().join("docs.moved");
+        let held = fs::read_to_string(moved.join(DECISIONS_FILE)).unwrap();
+        assert!(held.contains("only a human accepts an ADR"), "{held}");
+    }
+
+    #[test]
+    fn a_linked_tech_debt_folder_is_not_settled() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        let foreign = sheet("TD-20261011-quality-gate-not-enforced", "foreign", "");
+        fs::write(external.path().join(SHEET), &foreign).unwrap();
+        fs::remove_dir_all(docs.join("tech-debt")).unwrap();
+        std::os::unix::fs::symlink(external.path(), docs.join("tech-debt")).unwrap();
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        // KT-1595 (Argon-1): a refused listing is an ERROR, never "no sheets".
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(external.path().join(SHEET)).unwrap(),
+            foreign
+        );
+    }
+
+    /// KT-1595 (Argon-1): the tech-debt folder swapped for a link right when
+    /// the listing opens it is refused too (the listing is rooted, not by path).
+    #[test]
+    fn a_tech_debt_folder_swapped_before_the_listing_is_an_error() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        let foreign = sheet("TD-20261011-quality-gate-not-enforced", "foreign", "");
+        fs::write(external.path().join(SHEET), &foreign).unwrap();
+        // `decisions.md` is read first (one call under `docs`), the swap lands
+        // on the listing of `tech-debt`.
+        swap_probe::arm_after(&docs, external.path(), 1);
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(swap_probe::fired(), "the swap really happened");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(external.path().join(SHEET)).unwrap(),
+            foreign
+        );
+    }
+
+    /// KT-1595 (Argon-1): a link planted at a sheet name is an error, not a
+    /// silent `continue` — and the file behind it is not rewritten.
+    #[test]
+    fn a_linked_sheet_is_an_error_not_a_skip() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        let victim = external.path().join("victim.md");
+        let foreign = sheet("TD-20261011-quality-gate-not-enforced", "foreign", "");
+        fs::write(&victim, &foreign).unwrap();
+        fs::remove_file(docs.join("tech-debt").join(SHEET)).unwrap();
+        std::os::unix::fs::symlink(&victim, docs.join("tech-debt").join(SHEET)).unwrap();
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(fs::read_to_string(&victim).unwrap(), foreign);
+    }
+
+    /// KT-1595 (Argon D): no check by path comes before the guarded read of
+    /// `decisions.md` — a link there fails closed, it does not read as "no
+    /// decisions" (which a swapped `docs` folder would also look like).
+    #[test]
+    fn a_link_at_decisions_md_fails_closed() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let external = tempfile::tempdir().unwrap();
+        fs::write(external.path().join("decisions.md"), CI_LABEL_ADR).unwrap();
+        fs::remove_file(docs.join(DECISIONS_FILE)).unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join("decisions.md"),
+            docs.join(DECISIONS_FILE),
+        )
+        .unwrap();
+        let outcome = settle_covered_sheets(docs.parent().unwrap(), &docs, run(CI_LABEL_ADR));
+        assert!(outcome.is_err(), "{outcome:?}");
+        let untouched = fs::read_to_string(docs.join("tech-debt").join(SHEET)).unwrap();
+        assert_ne!(td_decision(&untouched), Some(TdDecision::AcceptedDecision));
+        assert_eq!(
+            fs::read_to_string(external.path().join("decisions.md")).unwrap(),
+            CI_LABEL_ADR
+        );
+    }
+
+    #[test]
+    fn a_docs_folder_outside_the_root_is_refused() {
+        let (_dir, docs) = run_fixture(CI_LABEL_ADR, "");
+        let other = tempfile::tempdir().unwrap();
+        assert!(settle_covered_sheets(other.path(), &docs, run(CI_LABEL_ADR)).is_err());
+    }
 }

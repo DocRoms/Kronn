@@ -49,6 +49,56 @@ pub fn compute_sha256(path: &Path) -> Option<String> {
     Some(sha256_of_bytes(&data))
 }
 
+/// The SHA-256 of the first `limit` bytes of a regular file, read in chunks
+/// (memory stays bounded, whatever the file's size). `None` when it cannot be
+/// opened or read.
+fn sha256_of_file(path: &Path, limit: u64) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?.take(limit);
+    let mut hasher = Sha256::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&chunk[..read]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect(),
+    )
+}
+
+/// The largest file the fingerprint reads whole. A larger one (a sparse file an
+/// agent left, a media file) is recorded by its size and the hash of its first
+/// bytes: reading it all could take hours, and its time differs per clone.
+const FINGERPRINT_CONTENT_MAX: u64 = 64 * 1024 * 1024;
+
+/// The largest root agent context file read as text.
+const ROOT_AGENT_FILE_MAX: u64 = 4 * 1024 * 1024;
+
+/// The text of `path` when it is (or links to) a regular file of at most
+/// [`ROOT_AGENT_FILE_MAX`] bytes: a link to a FIFO or a device is never opened.
+fn read_small_text(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > ROOT_AGENT_FILE_MAX {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(ROOT_AGENT_FILE_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
 /// Inner helper that computes the hex SHA-256 of a byte slice. Exposed
 /// so tests can pin the exact byte-to-hex contract.
 fn sha256_of_bytes(data: &[u8]) -> String {
@@ -359,8 +409,17 @@ fn git_source_tree_fingerprint_with(
             // A directory in ls-files output is a gitlink (submodule) —
             // presence tracked, inner content out of scope.
             "gitlink".to_string()
+        } else if !meta.is_file() {
+            // A FIFO, socket or device an agent left at a tracked path: never
+            // opened (a FIFO blocks the open, a device never ends).
+            "special".to_string()
+        } else if meta.len() > FINGERPRINT_CONTENT_MAX {
+            let Some(head_hash) = sha256_of_file(&full, FINGERPRINT_CONTENT_MAX) else {
+                continue;
+            };
+            format!("large {} {head_hash}", meta.len())
         } else {
-            let Ok(content) = std::fs::read(&full) else {
+            let Some(content_hash) = sha256_of_file(&full, u64::MAX) else {
                 continue;
             };
             #[cfg(unix)]
@@ -370,11 +429,7 @@ fn git_source_tree_fingerprint_with(
             };
             #[cfg(not(unix))]
             let exec = false;
-            format!(
-                "{} {}",
-                if exec { "x" } else { "f" },
-                sha256_of_bytes(&content)
-            )
+            format!("{} {}", if exec { "x" } else { "f" }, content_hash)
         };
         let mut record = record_head.into_bytes();
         record.push(b' ');
@@ -382,7 +437,7 @@ fn git_source_tree_fingerprint_with(
         kept.push(record);
     }
     for &agent_file in ROOT_AGENT_CONTEXT_FILES {
-        let Ok(content) = std::fs::read_to_string(project_path.join(agent_file)) else {
+        let Some(content) = read_small_text(&project_path.join(agent_file)) else {
             continue;
         };
         let user_part = strip_kronn_regions(&content);
@@ -427,31 +482,17 @@ fn git_source_tree_fingerprint(project_path: &Path) -> Option<String> {
 /// Run a git command returning RAW stdout bytes. Needed where output can
 /// carry arbitrary path bytes (`ls-tree -z`): a lossy UTF-8 pass would
 /// silently alter non-UTF-8 names. Returns None on failure.
+///
+/// KT-1595: the baseline is taken right after an agent ran in the project: no
+/// program its configuration names (fsmonitor, filters) runs, and a blocking
+/// configuration fails the call in bounded time.
 fn run_git_bytes(project_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let mut cmd = crate::core::cmd::git_cmd();
-    cmd.arg("-C").arg(project_path);
-    for arg in args {
-        cmd.arg(arg);
-    }
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(output.stdout)
+    crate::core::cmd::agent_git_output(project_path, args, &[])
 }
 
 /// Run a git command in the given directory, returning stdout trimmed. Returns None on failure.
 fn run_git(project_path: &Path, args: &[&str]) -> Option<String> {
-    let mut cmd = crate::core::cmd::git_cmd();
-    cmd.arg("-C").arg(project_path);
-    for arg in args {
-        cmd.arg(arg);
-    }
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    run_git_bytes(project_path, args).map(|out| String::from_utf8_lossy(&out).trim().to_string())
 }
 
 const SOURCE_TREE_QUIET_PERIOD: Duration = Duration::from_millis(250);
@@ -639,7 +680,10 @@ fn publish_checksums_file(
     mappings: &[ChecksumMapping],
 ) -> Result<(PathBuf, Vec<u8>), String> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
-    std::fs::create_dir_all(&docs_dir)
+    // Every write of the baseline goes through the rooted primitive (KT-1595):
+    // it is published right after an agent ran, which may have left a link
+    // where the docs folder was.
+    crate::core::fs_guard::guarded_create_dir_all(project_path, &docs_dir)
         .map_err(|e| format!("Failed to create {} dir: {e}", docs_dir.display()))?;
 
     let file = ChecksumsFile {
@@ -656,22 +700,26 @@ fn publish_checksums_file(
     // instead of staying stale. On any failure here the previous valid
     // manifest stays byte-intact.
     let path = docs_dir.join("checksums.json");
-    crate::core::mcp_scanner::atomic_write_bytes(&path, &json)?;
+    crate::core::fs_guard::guarded_replace(project_path, &path, &json)?;
 
     Ok((path, json))
 }
 
 fn restore_checksums_bytes(
+    root: &Path,
     path: &Path,
     previous: Option<&[u8]>,
     published: &[u8],
 ) -> Result<(), String> {
-    let current = std::fs::read(path).map_err(|e| {
-        format!(
-            "Failed to verify published checksum baseline {}: {e}",
-            path.display()
-        )
-    })?;
+    let current = crate::core::fs_guard::guarded_read(root, path)
+        .map_err(|e| e.to_string())
+        .and_then(|read| read.ok_or_else(|| "no such file".to_string()))
+        .map_err(|e| {
+            format!(
+                "Failed to verify published checksum baseline {}: {e}",
+                path.display()
+            )
+        })?;
     if current != published {
         return Err(format!(
             "checksum baseline {} changed concurrently after publication; refusing to overwrite or delete it",
@@ -679,13 +727,13 @@ fn restore_checksums_bytes(
         ));
     }
     match previous {
-        Some(bytes) => crate::core::mcp_scanner::atomic_write_bytes(path, bytes).map_err(|e| {
+        Some(bytes) => crate::core::fs_guard::guarded_replace(root, path, bytes).map_err(|e| {
             format!(
                 "Failed to restore previous checksum baseline {}: {e}",
                 path.display()
             )
         }),
-        None => match std::fs::remove_file(path) {
+        None => match crate::core::fs_guard::guarded_remove_file(root, path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!(
@@ -712,9 +760,8 @@ where
     }
 
     let path = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
-    let previous = match std::fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+    let previous = match crate::core::fs_guard::guarded_read(project_path, &path) {
+        Ok(bytes) => bytes,
         Err(e) => {
             return Err(format!(
                 "Could not preserve previous checksum baseline {}: {e}",
@@ -728,7 +775,8 @@ where
     after_publish();
     let after = git_source_tree_fingerprint_observed(project_path, Some("post-publish"));
     if after.as_deref() != expected_source_tree {
-        let rollback = restore_checksums_bytes(&path, previous.as_deref(), &published);
+        let rollback =
+            restore_checksums_bytes(project_path, &path, previous.as_deref(), &published);
         return match rollback {
             Ok(()) => Err("source tree changed during checksum baseline publication; previous baseline restored".to_string()),
             Err(rollback_error) => Err(format!(
@@ -837,7 +885,7 @@ pub fn acknowledge_sections(project_path: &Path, ai_files: &[String]) -> Result<
     let json =
         serde_json::to_vec_pretty(&file).map_err(|e| format!("JSON serialize error: {e}"))?;
     let path = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
-    crate::core::mcp_scanner::atomic_write_bytes(&path, &json)?;
+    crate::core::fs_guard::guarded_replace(project_path, &path, &json)?;
     // The cache keys on the manifest mtime, which a same-second rewrite may keep.
     DRIFT_CACHE
         .lock()

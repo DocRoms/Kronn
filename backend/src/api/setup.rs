@@ -782,6 +782,10 @@ pub async fn save_workers_config(
     State(state): State<AppState>,
     Json(mut value): Json<WorkersConfig>,
 ) -> Response {
+    // KT-1750 — validated below; stored trimmed, an emptied field as unset.
+    if let Ok(commit) = value.commit.clone().normalized() {
+        value.commit = commit;
+    }
     // KT-1742 — a blank first-build command or compiler entry is none.
     value.lane_warm = value.lane_warm.normalized();
     if let Err(reason) = value.validate() {

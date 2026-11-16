@@ -2572,6 +2572,21 @@ downloadable: boolean, };
  */
 export type CommentDiscussionQuestionRequest = { idempotency_key: string, text: string, };
 
+/**
+ * One resolved policy, with where each half comes from.
+ */
+export type CommitPolicyView = { name: string, email: string,
+/**
+ * `setting`, `kronn_config`, `repository`, `conditional`, `kronn_global`, `global` or
+ * `fallback`.
+ */
+identity_source: string, signoff: boolean,
+/**
+ * `setting`, `kronn_config`, `briefing`, `dco_file`, `commit_msg_hook`,
+ * `history`, `kronn_global` or `default`.
+ */
+signoff_source: string, };
+
 export type CompareImprovementAvailability = "available" | "different_prompts" | "missing_prompt" | "no_shared_quick_prompt";
 
 export type ComparePromptCompatibility = "identical" | "different" | "missing";
@@ -8043,6 +8058,34 @@ outside_dir?: string,
  */
 cleaned?: Array<string>, };
 
+export type ProjectCommitPolicy = {
+/**
+ * What the card saved.
+ */
+settings: ProjectCommitSettings,
+/**
+ * What the project inherits when its card says nothing: the repository's
+ * own answers, then Settings > Workers', then the machine's git config.
+ */
+detected: CommitPolicyView,
+/**
+ * What Kronn commits with: the settings over the detection.
+ */
+effective: CommitPolicyView,
+/**
+ * The effective identity is the global git config's, which no project
+ * decided: a personal address on a repository that may not be personal.
+ */
+global_identity: boolean, };
+
+/**
+ * KT-1750 — the commit identity and sign-off of a project, set in its card.
+ * The identity is both fields or none: a name without an address (or the
+ * reverse) is refused when saved. Nothing set means "use what the repository
+ * itself says".
+ */
+export type ProjectCommitSettings = { name?: string | null, email?: string | null, signoff: SignoffSetting, };
+
 export type ProjectDockerAction = "start" | "stop" | "restart";
 
 export type ProjectDockerActionRequest = { action: ProjectDockerAction, service?: string | null, };
@@ -8388,7 +8431,12 @@ lane_warm: LaneWarmConfig,
  * KT-1748 — absolute directories whose worktrees Kronn manages for this
  * project, added to the global Settings > Workers list and the built-in roots.
  */
-managed_worktree_roots?: Array<string>, };
+managed_worktree_roots?: Array<string>,
+/**
+ * KT-1750 — who Kronn's commits are attributed to and whether they are
+ * signed off, when the owner decided it rather than leaving it detected.
+ */
+commit?: ProjectCommitSettings, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -10658,6 +10706,11 @@ export type SharedRunStatus = "preflight_failed" | "queued" | "running" | "succe
  * One gone path the stale block listed, in its doc's section.
  */
 export type ShownPath = { doc: string, section: string, path: string, };
+
+/**
+ * Whether the commits Kronn makes for a project carry a `Signed-off-by`.
+ */
+export type SignoffSetting = "auto" | "always" | "never";
 
 export type Skill = { id: string, name: string, description: string, icon: string, category: SkillCategory, content: string, is_builtin: boolean,
 /**
@@ -13050,12 +13103,30 @@ bash_default_timeout_min: number,
  */
 bash_max_timeout_min: number,
 /**
+ * KT-1750 — file names an operating system or a file manager drops in any
+ * folder (`.DS_Store`, `Thumbs.db`, …): they never count as a worker's
+ * changes, so they block neither a delivery nor the cleanup of a checkout,
+ * and are excluded from `git status` in every lane Kronn creates. A name,
+ * or a name with one `*` standing for any run of characters; an empty list
+ * means none.
+ */
+os_junk_patterns: Array<string>,
+/**
  * KT-1748 — absolute directories whose worktrees Kronn manages, on top of the
  * built-in roots (`<repo>/.kronn/worktrees`, `~/.kronn/autocode-worktrees`). A
  * branch checked out under one may be an integration target; the owner's own
  * checkout never is. A project can name more of its own.
  */
 managed_worktree_roots: Array<string>,
+/**
+ * KT-1750 — who the commits Kronn makes are attributed to, and whether they
+ * carry a `Signed-off-by`, for every project that neither sets its own in
+ * its card nor has a repository that says (its own `user.name` /
+ * `user.email`, a DCO file or hook, a signed history). Nothing set: the
+ * machine's git identity, reported, and no sign-off. A TOML table: after the
+ * plain values.
+ */
+commit?: ProjectCommitSettings,
 /**
  * KT-1742 — how every project's lane is warmed unless the project says
  * otherwise. Last field: a TOML table goes after the plain values.

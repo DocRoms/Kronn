@@ -285,7 +285,9 @@ pub struct KeptCheckout {
 /// (uncommitted work, a detached HEAD or a state git cannot read), or `None`
 /// when the whole set is clean. Kronn's own `.kronn/` files are not work.
 pub async fn work_to_keep(repo_path: &Path, worktree: &Path) -> Option<String> {
-    if let Err(error) = crate::core::worktree::ensure_local_git_exclude(repo_path, ".kronn/") {
+    // After the agents ran: git's agent-writable pointers are not followed.
+    if let Err(error) = crate::core::worktree::ensure_local_git_exclude_pinned(repo_path, ".kronn/")
+    {
         tracing::warn!(path = %repo_path.display(), "cannot exclude .kronn/: {error}");
     }
     let mut checkouts = nested_worktrees(repo_path, worktree).await;

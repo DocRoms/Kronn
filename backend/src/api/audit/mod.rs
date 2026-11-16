@@ -713,7 +713,7 @@ pub(crate) fn decisions_context_block(
     {
         return String::new();
     }
-    let block = crate::core::adr::in_force_prompt_block(&docs_root.dir(project), baseline);
+    let block = crate::core::adr::in_force_prompt_block(project, &docs_root.dir(project), baseline);
     if block.is_empty() {
         block
     } else {

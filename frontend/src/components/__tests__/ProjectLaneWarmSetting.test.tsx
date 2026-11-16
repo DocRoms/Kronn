@@ -45,6 +45,29 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     }));
   });
 
+  it('keeps the commit identity and the managed roots when it saves the warm-up', async () => {
+    const commit = { name: 'Bot', email: 'bot@corp.example', signoff: 'always' };
+    getMock.mockResolvedValue({
+      hooks: {},
+      lane_warm: { rust_roots: ['backend'] },
+      managed_worktree_roots: ['/srv/worktrees'],
+      commit,
+    });
+    setMock.mockResolvedValue(true);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-roots')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-roots'), { target: { value: 'backend\nredis-flush' } });
+    fireEvent.click(screen.getByTestId('project-lane-warm-save'));
+
+    await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', {
+      hooks: {},
+      lane_warm: { rust_roots: ['backend', 'redis-flush'] },
+      managed_worktree_roots: ['/srv/worktrees'],
+      commit,
+    }));
+  });
+
   it('refuses a root outside the repository before saving', async () => {
     getMock.mockResolvedValue(null);
     render(<ProjectLaneWarmSetting projectId="p1" t={t} />);

@@ -476,16 +476,9 @@ fn detect_tracked_repo_artifacts(root: &Path) -> Vec<DetectedSignal> {
 /// `git ls-files -z --cached`, shared by the detectors that judge tracked
 /// paths. A failure is reported once, by the tracked-artifacts signal.
 fn tracked_listing(root: &Path) -> Result<Vec<u8>, String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(["-C"])
-        .arg(root)
-        .args(["ls-files", "-z", "--cached"])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(format!("git ls-files exited with {}", output.status));
-    }
-    Ok(output.stdout)
+    // KT-1595: no program the repository's configuration names runs.
+    crate::core::cmd::agent_git_output(root, &["ls-files", "-z", "--cached"], &[])
+        .ok_or_else(|| "git ls-files failed or did not answer in time".to_string())
 }
 
 fn tracked_artifacts_from_listing(listing: &[u8], yarn_zero_install: bool) -> Vec<DetectedSignal> {
@@ -998,6 +991,19 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// KT-1595 round 12: the tracked listing never runs the file-system
+    /// monitor the repository's configuration names.
+    #[cfg(unix)]
+    #[test]
+    fn the_tracked_listing_runs_no_program_the_repository_names() {
+        use crate::core::cmd::hostile_git::{git, marker_program, repo};
+        let dir = repo();
+        let (program, marker) = marker_program(dir.path());
+        git(dir.path(), &["config", "core.fsmonitor", &program]);
+        assert_eq!(tracked_listing(dir.path()).unwrap(), b"a.txt\0");
+        assert!(!marker.exists(), "the fsmonitor hook ran");
+    }
+
     fn proj() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
@@ -1271,7 +1277,7 @@ mod tests {
         let signals = detect_tracked_repo_artifacts(t.path());
         assert_eq!(signals.len(), 1);
         assert!(signals[0].title.contains("could not be evaluated"));
-        assert!(signals[0].evidence.contains("git ls-files exited"));
+        assert!(signals[0].evidence.contains("git ls-files failed"));
         assert_eq!(
             disposition_anchor(&signals[0]).as_deref(),
             Some("tracked repository artifacts could not be evaluated")

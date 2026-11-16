@@ -755,3 +755,25 @@ fn an_anchored_doc_is_no_longer_re_read_for_lack_of_anchors() {
     .unwrap();
     assert!(plan(dir).unanchored_docs.is_empty());
 }
+
+/// KT-1595: the re-anchor rewrites a doc right after an agent may have run; a
+/// docs folder swapped for a link between the walk and the write never takes
+/// the rewritten doc outside the project.
+#[cfg(unix)] // swaps a folder for a symlink (std::os::unix)
+#[test]
+fn a_docs_folder_swapped_after_the_walk_never_receives_the_re_anchored_doc() {
+    use crate::core::fs_guard::swap_probe;
+    let tmp = drifted();
+    let dir = tmp.path();
+    let external = tempfile::tempdir().unwrap();
+    swap_probe::arm(&dir.join("docs"), external.path());
+    let result = apply_reanchors(dir);
+    assert!(swap_probe::fired(), "the swap really happened");
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+    let kept = fs::read_to_string(dir.join("docs.moved/coding-rules.md")).unwrap();
+    assert!(
+        kept.contains("Retries [src: file: src/lib.rs:2]."),
+        "{kept}"
+    );
+}

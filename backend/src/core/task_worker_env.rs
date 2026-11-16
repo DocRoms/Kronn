@@ -503,14 +503,17 @@ impl WorkerLane {
         // A lane target beside the repo must never make the main checkout look
         // dirty: the integration preflight refuses a dirty target. A project
         // that already ignores `/target/` writes nothing.
-        if let Some(root) = self
-            .main_checkout
-            .as_ref()
-            .filter(|root| root.join(".git").exists())
-        {
-            if let Err(error) =
-                crate::core::worktree::ensure_local_git_exclude(root, LANE_TARGET_EXCLUDE)
-            {
+        if let Some(root) = self.main_checkout.as_ref() {
+            // KT-1595: provisioning runs on every worker launch, correction
+            // rounds included, so after an agent: the rule goes to the exclude
+            // of the git directory resolved from the REGISTERED checkout (a
+            // linked worktree or a project below the repo top included),
+            // never from the lane's pointer.
+            if let Err(error) = crate::core::worktree::ensure_local_git_exclude_pinned_for(
+                root,
+                root,
+                LANE_TARGET_EXCLUDE,
+            ) {
                 warnings.push(format!(
                     "cannot ignore the lane target directories: {error}"
                 ));
@@ -531,10 +534,19 @@ impl WorkerLane {
         // show as an untracked file and the delivery would find the worktree
         // dirty. Judged from inside the worktree, where the link exists.
         if matches!(frontend_deps, FrontendDeps::Linked(_)) && self.worktree.join(".git").exists() {
-            if let Err(error) = crate::core::worktree::ensure_local_git_exclude(
-                &self.worktree,
-                FRONTEND_DEPS_EXCLUDE,
-            ) {
+            // KT-1595: judged from the lane, written to the registered
+            // checkout's exclude (the one a linked worktree shares). Without a
+            // registered checkout (an unmanaged layout) nothing is written:
+            // the lane's `.git` pointer is not trusted after an agent ran.
+            let written = match self.main_checkout.as_deref() {
+                Some(root) => crate::core::worktree::ensure_local_git_exclude_pinned_for(
+                    &self.worktree,
+                    root,
+                    FRONTEND_DEPS_EXCLUDE,
+                ),
+                None => Err("the lane has no registered checkout".to_string()),
+            };
+            if let Err(error) = written {
                 warnings.push(format!("cannot ignore the node_modules link: {error}"));
             }
         }

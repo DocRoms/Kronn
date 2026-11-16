@@ -143,12 +143,31 @@ pub struct WorkersConfig {
     /// which cuts the whole turn whatever a command is allowed.
     #[serde(default = "default_workers_bash_max_timeout_min")]
     pub bash_max_timeout_min: u32,
+    /// KT-1750 — file names an operating system or a file manager drops in any
+    /// folder (`.DS_Store`, `Thumbs.db`, …): they never count as a worker's
+    /// changes, so they block neither a delivery nor the cleanup of a checkout,
+    /// and are excluded from `git status` in every lane Kronn creates. A name,
+    /// or a name with one `*` standing for any run of characters; an empty list
+    /// means none.
+    #[serde(default = "default_workers_os_junk_patterns")]
+    pub os_junk_patterns: Vec<String>,
     /// KT-1748 — absolute directories whose worktrees Kronn manages, on top of the
     /// built-in roots (`<repo>/.kronn/worktrees`, `~/.kronn/autocode-worktrees`). A
     /// branch checked out under one may be an integration target; the owner's own
     /// checkout never is. A project can name more of its own.
     #[serde(default)]
     pub managed_worktree_roots: Vec<String>,
+    /// KT-1750 — who the commits Kronn makes are attributed to, and whether they
+    /// carry a `Signed-off-by`, for every project that neither sets its own in
+    /// its card nor has a repository that says (its own `user.name` /
+    /// `user.email`, a DCO file or hook, a signed history). Nothing set: the
+    /// machine's git identity, reported, and no sign-off. A TOML table: after the
+    /// plain values.
+    #[serde(
+        default,
+        skip_serializing_if = "super::ProjectCommitSettings::is_default"
+    )]
+    pub commit: super::ProjectCommitSettings,
     /// KT-1742 — how every project's lane is warmed unless the project says
     /// otherwise. Last field: a TOML table goes after the plain values.
     #[serde(default)]
@@ -165,10 +184,60 @@ impl Default for WorkersConfig {
             heavy_output_kb: DEFAULT_HEAVY_OUTPUT_KB,
             bash_default_timeout_min: DEFAULT_BASH_DEFAULT_TIMEOUT_MIN,
             bash_max_timeout_min: DEFAULT_BASH_MAX_TIMEOUT_MIN,
+            os_junk_patterns: default_workers_os_junk_patterns(),
             managed_worktree_roots: Vec::new(),
+            commit: super::ProjectCommitSettings::default(),
             lane_warm: LaneWarmConfig::default(),
         }
     }
+}
+
+/// The OS junk of the three desktop systems: macOS, Windows, and the AppleDouble
+/// files macOS leaves on foreign file systems.
+pub const DEFAULT_OS_JUNK_PATTERNS: [&str; 4] = [".DS_Store", "Thumbs.db", "desktop.ini", "._*"];
+/// Most patterns, and longest one, the Settings form accepts.
+pub const MAX_OS_JUNK_PATTERNS: usize = 50;
+pub const MAX_OS_JUNK_PATTERN_LEN: usize = 100;
+
+fn default_workers_os_junk_patterns() -> Vec<String> {
+    DEFAULT_OS_JUNK_PATTERNS
+        .iter()
+        .map(|pattern| pattern.to_string())
+        .collect()
+}
+
+/// Why `pattern` cannot be an OS-junk pattern, or `None` when it can. A pattern
+/// is written into the repository's local exclude, so what git would read as
+/// something else (a comment, a negation, a path, a character class) is refused.
+pub fn os_junk_pattern_problem(pattern: &str) -> Option<String> {
+    if pattern.is_empty() {
+        return Some("a pattern cannot be empty".into());
+    }
+    if pattern.len() > MAX_OS_JUNK_PATTERN_LEN {
+        return Some(format!(
+            "`{pattern}` is longer than {MAX_OS_JUNK_PATTERN_LEN} characters"
+        ));
+    }
+    if pattern != pattern.trim() || pattern.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some(format!(
+            "`{pattern}` must not contain spaces or control characters"
+        ));
+    }
+    if pattern.starts_with('#') || pattern.starts_with('!') {
+        return Some(format!("`{pattern}` cannot start with `#` or `!`"));
+    }
+    if pattern.contains(['/', '\\', '[', ']', '?']) {
+        return Some(format!(
+            "`{pattern}` must be a file name: no `/`, `\\`, `[`, `]` or `?`"
+        ));
+    }
+    if pattern.matches('*').count() > 1 {
+        return Some(format!("`{pattern}` may contain only one `*`"));
+    }
+    if pattern.chars().all(|c| c == '*' || c == '.') {
+        return Some(format!("`{pattern}` would match too much"));
+    }
+    None
 }
 
 /// Most managed worktree roots one list (global or per project) may hold.
@@ -270,6 +339,20 @@ impl WorkersConfig {
 
     /// Refuse what the Settings form must never persist.
     pub fn validate(&self) -> Result<(), String> {
+        self.commit
+            .clone()
+            .normalized()
+            .map_err(|problem| format!("commit: {problem}"))?;
+        if self.os_junk_patterns.len() > MAX_OS_JUNK_PATTERNS {
+            return Err(format!(
+                "os_junk_patterns holds at most {MAX_OS_JUNK_PATTERNS} patterns"
+            ));
+        }
+        for pattern in &self.os_junk_patterns {
+            if let Some(problem) = os_junk_pattern_problem(pattern) {
+                return Err(format!("os_junk_patterns: {problem}"));
+            }
+        }
         validate_managed_worktree_roots(&self.managed_worktree_roots)?;
         if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
             return Err(format!(

@@ -20,15 +20,15 @@ Briefing saves, reviewed briefing completion, and briefing/dispute card answers
 use the same guard. A card decision keeps its guard inside the database worker
 that applies the resulting filesystem changes.
 [src: file: backend/src/api/audit/briefing.rs:46-81#set_briefing]
-[src: file: backend/src/api/audit/briefing.rs:164-207#complete_reviewed_briefing]
-[src: file: backend/src/api/audit/briefing.rs:743-790#save_briefing_answers]
+[src: file: backend/src/api/audit/briefing.rs:194-237#complete_reviewed_briefing]
+[src: file: backend/src/api/audit/briefing.rs:770-817#save_briefing_answers]
 [src: file: backend/src/api/discussion_questions.rs:14-64#dispute_lease]
 [src: file: backend/src/api/discussion_questions.rs:201-239#answer]
 
 Linked-repository updates hold the source project's lease and acquire each reverse
 target's lease before syncing its `linked-repos.md`. A busy reverse target keeps
 its existing file; the existing best-effort synchronization logs that refusal.
-[src: file: backend/src/api/projects/crud.rs:747-908#set_linked_repos]
+[src: file: backend/src/api/projects/crud.rs:762-923#set_linked_repos]
 
 Validation admission checks the lease even when no audit progress exists. A
 claimed validation job is returned to the queue without consuming an attempt.
@@ -55,7 +55,7 @@ skip accepted commits pending integration.
 [src: file: backend/src/api/audit/full.rs:457-478#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:284-286#audit_launch_refusal]
 [src: file: backend/src/api/audit/drift.rs:533-559#audit_launch_refusal]
-[src: file: backend/src/api/audit/revalidate.rs:714-716#audit_launch_refusal]
+[src: file: backend/src/api/audit/revalidate.rs:721-723#audit_launch_refusal]
 [src: file: backend/src/api/audit/revalidate.rs:797-810#audit_launch_refusal]
 [src: file: frontend/src/hooks/useTemplateMergeOffer.ts:28-93#useTemplateMergeOffer]
 
