@@ -36,6 +36,26 @@ fn git_status(dir: &Path, args: &[&str]) -> bool {
         .success()
 }
 
+#[test]
+fn a_pinned_path_never_carries_the_windows_verbatim_prefix() {
+    let cases = [
+        (
+            r"\\?\C:\Users\runner\repo\.git",
+            r"C:\Users\runner\repo\.git",
+        ),
+        (r"\\?\UNC\server\share\repo", r"\\server\share\repo"),
+        (r"C:\Users\runner\repo", r"C:\Users\runner\repo"),
+        ("/private/tmp/repo/.git", "/private/tmp/repo/.git"),
+    ];
+    for (given, expected) in cases {
+        assert_eq!(
+            without_verbatim_prefix(PathBuf::from(given)),
+            PathBuf::from(expected),
+            "{given}"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn script(path: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;

@@ -3971,13 +3971,10 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
     if !req.url.starts_with("http://") && !req.url.starts_with("https://") {
         return Json(ApiResponse::err("Only http/https URLs are allowed"));
     }
-    // Test binaries (target/*/deps) must never launch a real browser: the
-    // integration suite exercises this endpoint's contract, and on macOS the
-    // real open() popped an example.com tab at every `cargo test` run.
-    let in_test_binary = std::env::current_exe()
-        .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
-        .unwrap_or(false);
-    if in_test_binary {
+    // Test binaries must never launch a real browser: the integration suite
+    // exercises this endpoint's contract, and on macOS the real open()
+    // popped an example.com tab at every `cargo test` run.
+    if crate::core::config::in_test_binary() {
         tracing::info!("open-url suppressed in a test binary: {}", req.url);
         return Json(ApiResponse::ok(()));
     }

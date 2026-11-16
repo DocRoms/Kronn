@@ -6503,6 +6503,11 @@ mod tests {
             .is_empty());
     }
 
+    /// A real path git accepts: no `\\?\` prefix on Windows.
+    fn for_git(path: &Path) -> PathBuf {
+        crate::core::lane_git::without_verbatim_prefix(path.canonicalize().unwrap())
+    }
+
     fn add_worktree(repo: &Path, path: &Path, branch: &str) {
         assert!(crate::core::cmd::git_cmd()
             .args(["worktree", "add"])
@@ -6571,7 +6576,7 @@ mod tests {
     fn integration_target_accepts_autocode_and_registered_worktrees_only() {
         let repo = make_test_repo("target-autocode");
         let kronn_home = tempfile::tempdir().unwrap();
-        let kronn_home_path = kronn_home.path().canonicalize().unwrap();
+        let kronn_home_path = for_git(kronn_home.path());
         let roots = managed_worktree_roots(repo.path(), Some(&kronn_home_path), &[]);
         let ownership = |branch: &str, registered: &dyn Fn(&Path) -> bool| {
             integration_target_ownership_in(repo.path(), branch, &roots, registered).unwrap()
@@ -6588,7 +6593,7 @@ mod tests {
 
         // A root the operator declared as managed makes its worktrees Kronn's too.
         let extra = tempfile::tempdir().unwrap();
-        let extra_path = extra.path().canonicalize().unwrap();
+        let extra_path = for_git(extra.path());
         make_branch(repo.path(), "feat/extra");
         add_worktree(repo.path(), &extra_path.join("wt"), "feat/extra");
         assert!(matches!(
@@ -6634,20 +6639,20 @@ mod tests {
 
     #[test]
     fn managed_roots_ignore_relative_extras_and_a_missing_home() {
-        let repo = Path::new("/repo");
-        let roots = managed_worktree_roots(repo, None, &[PathBuf::from("relative/root")]);
+        // Absolute on every platform: `/srv` has no drive on Windows.
+        let base = std::env::temp_dir();
+        let repo = base.join("repo");
+        let roots = managed_worktree_roots(&repo, None, &[PathBuf::from("relative/root")]);
         assert_eq!(roots, vec![repo.join(".kronn/worktrees")]);
-        let roots = managed_worktree_roots(
-            repo,
-            Some(Path::new("/home/u/.kronn")),
-            &[PathBuf::from("/srv/lanes")],
-        );
+        let home = base.join("home").join(".kronn");
+        let lanes = base.join("srv").join("lanes");
+        let roots = managed_worktree_roots(&repo, Some(&home), std::slice::from_ref(&lanes));
         assert_eq!(
             roots,
             vec![
                 repo.join(".kronn/worktrees"),
-                PathBuf::from("/home/u/.kronn/autocode-worktrees"),
-                PathBuf::from("/srv/lanes"),
+                home.join("autocode-worktrees"),
+                lanes,
             ]
         );
     }
@@ -6662,7 +6667,7 @@ mod tests {
         make_branch(repo.path(), "elsewhere");
         let owned = worktree_base_dir(repo.path());
         fs::create_dir_all(&owned).unwrap();
-        let held = owned.canonicalize().unwrap().join("integ");
+        let held = for_git(&owned).join("integ");
         add_worktree(repo.path(), &held, "integ");
 
         let busy = integration_target_idle(repo.path(), "integ", &|path| {

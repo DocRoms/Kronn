@@ -520,6 +520,16 @@ fn check_file_line(
     line: usize,
     end: Option<usize>,
 ) -> Result<(), String> {
+    // Refused before any lookup: whether a file outside exists is not told.
+    let escapes = Path::new(path).components().any(|part| {
+        !matches!(
+            part,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    });
+    if escapes {
+        return Err(format!("`{path}` is outside the working directory"));
+    }
     let root = work_dir
         .canonicalize()
         .map_err(|_| "the working directory cannot be read".to_string())?;
@@ -1147,7 +1157,14 @@ mod tests {
             (r#","evidence":"src/a.rs:0""#, "not inside the file"),
             (r#","evidence":"src/a.rs:15-30""#, "not inside the file"),
             (r#","evidence":"src/a.rs:12-3""#, "not inside the file"),
-            (r#","evidence":"../../etc/hosts:1""#, "does not exist"),
+            (
+                r#","evidence":"../../etc/hosts:1""#,
+                "outside the working directory",
+            ),
+            (
+                r#","evidence":"/etc/hosts:1""#,
+                "outside the working directory",
+            ),
             (r#","evidence":"src:1""#, "not a file"),
             (r#","evidence":"steps.ghost.output""#, "does not exist"),
             (

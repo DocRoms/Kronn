@@ -71,7 +71,17 @@ pub struct LaneGit {
 }
 
 fn canonical(path: &Path) -> PathBuf {
-    crate::core::task_worker_sandbox::real_path(path)
+    without_verbatim_prefix(crate::core::task_worker_sandbox::real_path(path))
+}
+
+/// `path` as git can open it: on Windows `canonicalize` gives `\\?\C:\…`,
+/// and git refuses a repository named that way.
+pub(crate) fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str() {
+        Some(text) if text.starts_with(r"\\?\UNC\") => PathBuf::from(format!(r"\\{}", &text[8..])),
+        Some(text) if text.starts_with(r"\\?\") => PathBuf::from(&text[4..]),
+        _ => path,
+    }
 }
 
 /// `(repo, lane)` of `<repo>/.kronn/worktrees/<lane>`.
