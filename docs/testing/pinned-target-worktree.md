@@ -11,8 +11,8 @@ the checkout's symbolic HEAD and shared Git directory, and refuses missing,
 ambiguous or foreign checkouts. It does not switch branches or create a target
 checkout on the user's behalf. Paths with spaces, Unicode and, on Unix,
 newlines are preserved.
-[src: file: backend/src/core/worktree.rs:2627-2659#target_branch_checkouts]
-[src: file: backend/src/core/worktree.rs:2661-2703#integration_target_worktree]
+[src: file: backend/src/core/worktree.rs:2638-2670#target_branch_checkouts]
+[src: file: backend/src/core/worktree.rs:2672-2714#integration_target_worktree]
 
 Normal integration, boot classification and Applying-origin recovery inspect
 the target checkout's uncommitted files. Immediately before fast-forwarding,
@@ -20,7 +20,7 @@ the target checkout's uncommitted files. Immediately before fast-forwarding,
 HEAD and cleanliness. A changed HEAD or dirty target is refused; unrelated
 files in the primary checkout are neither cleaned nor used as a blocker.
 Backup refs, review evidence and durable saga checkpoints remain unchanged.
-[src: file: backend/src/core/worktree.rs:3428-3448#fast_forward_target_to]
+[src: file: backend/src/core/worktree.rs:3439-3459#fast_forward_target_to]
 
 ## Regression evidence
 

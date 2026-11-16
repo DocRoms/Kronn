@@ -316,7 +316,7 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/task_worker_env.rs:849]
 [src: file: backend/src/core/task_worker_lane_warm.rs:843]
 [src: file: backend/src/agents/runner.rs:14726-14735#agent_launch_priority]
-[src: file: backend/src/core/quick_exec.rs:595-619#build_command]
+[src: file: backend/src/core/quick_exec.rs:626-650#build_command]
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
 [src: file: backend/src/core/config.rs:610-611]
@@ -478,12 +478,12 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 (`first_build.outcome`, `duration_ms`) and check the lane target for
 `.kronn-warm.json`.
 
-[src: file: backend/src/core/task_worker_env.rs:1293-1335#drain_output]
+[src: file: backend/src/core/task_worker_env.rs:1324-1366#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1777-1777#first_build_args]
-[src: file: backend/src/core/project_toolchains.rs:538#has_lib_target]
+[src: file: backend/src/core/project_toolchains.rs:604#has_lib_target]
 [src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
 [src: file: backend/src/api/orchestration.rs:10913-10944#warm_failure_notice]
 
@@ -969,7 +969,7 @@ load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:329-336#effective_bash_timeouts_ms]
-[src: file: backend/src/core/task_worker_env.rs:1005-1015#apply_bash_timeouts]
+[src: file: backend/src/core/task_worker_env.rs:1036-1046#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15182-15184#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:684-685#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
