@@ -563,7 +563,7 @@ fn a_fifo_copy_is_refused_and_does_not_block_the_pass() {
 /// A symbolic link is never read through, renamed over or removed (its target
 /// would keep the content in clear), and a file with another hard link is left
 /// alone: both are failures, with or without a key.
-#[cfg(unix)] // creates symlinks and hard links through std::os::unix
+#[cfg(unix)] // creates a symlink through std::os::unix
 #[test]
 fn a_linked_copy_is_refused_and_reported() {
     let (dir, key) = dir_with_key();

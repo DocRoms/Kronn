@@ -1071,7 +1071,7 @@ fn a_fifo_left_by_the_agent_never_blocks_the_fingerprint() {
 /// KT-1595 round 14: a huge sparse file the agent leaves (untracked, no disk
 /// space used) never stalls the fingerprint: past the size cap it is recorded
 /// by its size and time, never read.
-#[cfg(unix)] // makes a sparse file, which Windows has no set_len for
+#[cfg(unix)] // set_len leaves a sparse hole only on POSIX file systems
 #[test]
 fn a_huge_sparse_file_never_stalls_the_fingerprint() {
     use crate::core::cmd::hostile_git::repo;

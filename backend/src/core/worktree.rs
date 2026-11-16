@@ -7047,7 +7047,6 @@ mod tests {
     /// `.git/commondir` that names another repository's git directory makes
     /// `rev-parse --git-path info/exclude` point there. The pinned writer
     /// refuses; nothing is created or appended in the other repository.
-    #[cfg(unix)] // the pinned read is a rooted fd walk only on unix, see KT-1609
     #[test]
     fn the_pinned_exclude_refuses_a_planted_commondir() {
         let repo = make_test_repo("exclude-commondir");
@@ -7082,7 +7081,6 @@ mod tests {
 
     /// KT-1595 (N3) — the same for a `.git` FILE whose `gitdir:` the agent
     /// rewrote (the form of a linked worktree or a submodule).
-    #[cfg(unix)] // the pinned read is a rooted fd walk only on unix, see KT-1609
     #[test]
     fn the_pinned_exclude_refuses_a_gitdir_pointer_file() {
         let repo = make_test_repo("exclude-gitdir");

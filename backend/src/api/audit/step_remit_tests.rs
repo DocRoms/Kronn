@@ -1302,7 +1302,7 @@ fn a_file_the_agent_grew_past_the_limit_is_left_as_it_is() {
 /// KT-1595 round 11: a staged rename whose new name is not UTF-8 keeps the
 /// status fields paired: the origin is restored, nothing bogus is reported and
 /// no settle panics.
-#[cfg(unix)] // names a file with non-UTF-8 bytes
+#[cfg(unix)] // indexes a name with non-UTF-8 bytes
 #[test]
 fn a_rename_to_a_non_utf8_name_keeps_the_status_paired() {
     use std::io::Write;
