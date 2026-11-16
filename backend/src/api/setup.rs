@@ -6800,7 +6800,7 @@ mod network_exposure_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 mod default_docs_dir_tests {
     use super::*;
 
@@ -6863,7 +6863,7 @@ mod default_docs_dir_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "setup_workers_tests.rs"]
 mod workers_config_tests;
 

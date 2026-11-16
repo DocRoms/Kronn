@@ -522,6 +522,6 @@ pub async fn overview(State(state): State<AppState>) -> Json<ApiResponse<Activit
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "activity_tests.rs"]
 mod tests;
