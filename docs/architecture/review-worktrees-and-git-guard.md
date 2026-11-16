@@ -65,9 +65,13 @@ touching its tracked `.gitignore` — tested). The shim refuses
 `git checkout`, `git switch`, `git reset` and `git stash` (except `stash list` and
 `stash show`) when the repository is a **main checkout** (its git dir is its common
 git dir). KT-1753 adds the commands that discard the owner's work just as surely:
-`git restore` of the whole tree (`.`, `:/`; `--staged` alone is harmless), `git clean`
-unless it is a dry run (`-n`, `--dry-run`) and a forced `git branch` (`-f`, `--force`,
-`-D`; `-d` and listing pass). The agent sees:
+`git restore` of the whole tree (`.` in any spelling such as `./` or `./.`, the
+top-level pathspecs `:/`, `:/*` and `:(top)`, a path that resolves to the top level
+itself, `..` from a sub-directory; `--staged` alone is harmless), `git clean` unless it
+is a dry run (`-n`, `--dry-run`) and a forced `git branch` (`-f`, `--force`, `-D`, and
+the forced rename or copy `-M`, `-C`, `--move --force`, `--copy --force`; `-d`, a plain
+`-m` and listing pass, and the value of an option such as `--sort -refname` is not read
+as an option). The agent sees:
 
 ```
 kronn: refused 'git checkout' in /path/to/project, the project's main checkout.
