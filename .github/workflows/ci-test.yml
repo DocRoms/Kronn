@@ -33,6 +33,10 @@ on:
 # ship Node 24-compatible entrypoints — this just flips the runtime selector.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Cargo 1.100 builds test binaries under build/<pkg>/<hash>/out/; the coverage
+  # report of the nextest archive then misses most objects (32 % instead of 83+).
+  # Keep the previous layout until KT-1788 handles both.
+  __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: "1"
   # 0.8.11 — onnxruntime-node's postinstall downloads CUDA GPU binaries from
   # api.nuget.org on linux-x64: never used in CI (browser app → onnxruntime-web,
   # CPU binaries bundled in the npm package) and api.nuget.org regularly times
