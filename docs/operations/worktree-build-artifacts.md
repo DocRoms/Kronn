@@ -628,7 +628,20 @@ the one place KT-1747's generic toolchain detection reuses):
      replacing a directory the project commits, listed in the sandbox's read roots,
      never a write root, locally git-excluded). `frontend/node_modules` keeps its
      dedicated link (its Vitest capability probe); every other one is a
-     `Provisioned.dependency_layers` entry.
+     `Provisioned.dependency_layers` entry. Two things must not link back to the
+     main checkout, or a test run in the lane runs the MAIN checkout's code (a false
+     green): a Composer `vendor/autoload.php`, `vendor/composer/` and `vendor/bin/`
+     are real files of the lane (PHP resolves symlinks in `__DIR__`, and
+     `autoload_static.php` maps the project's namespace as `__DIR__ . '/../..' .
+     '/src'`; a `bin/` link to a PHP script becomes the proxy Composer writes, which
+     sets `$GLOBALS['_composer_autoload_path']` to the lane's autoloader), and a
+     Node workspace package (a relative `node_modules/<pkg>` or `@scope/<pkg>` link
+     to a package directory of the repository) is the same relative link, so it
+     resolves to the lane's own copy. Only third-party package directories stay links.
+     A launch **warns** for each layer the main checkout has not installed, naming
+     the command (`npm ci`, `yarn install --frozen-lockfile`, `pnpm install
+     --frozen-lockfile`, `composer install`, `pod install`) and where to run it; a
+     lane never installs.
   2. **Per-project override** — `dependency_dirs` of the project's lane-warm entry
      (a project's own setting, like `rust_roots`): unset = the detected ones, a list
      = exactly those, an empty list = none. An entry outside the repository (`/x`,

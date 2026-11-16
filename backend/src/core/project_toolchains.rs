@@ -182,6 +182,20 @@ impl ToolchainKind {
         }
     }
 
+    /// The command that fills [`ToolchainKind::dependency_dir`] from the lock
+    /// file, run in the toolchain's directory of the MAIN checkout (a lane never
+    /// installs: it has no network). `None` where nothing is installed.
+    pub fn install_command(self) -> Option<&'static str> {
+        match self {
+            Self::Node(NodeManager::Npm) => Some("npm ci"),
+            Self::Node(NodeManager::Yarn) => Some("yarn install --frozen-lockfile"),
+            Self::Node(NodeManager::Pnpm) => Some("pnpm install --frozen-lockfile"),
+            Self::Composer => Some("composer install"),
+            Self::CocoaPods => Some("pod install"),
+            Self::Cargo | Self::Xcode | Self::Make => None,
+        }
+    }
+
     /// Order inside one directory; build tools come after package managers.
     fn rank(self) -> u8 {
         match self {
@@ -399,6 +413,35 @@ pub fn dependency_dirs(
     }
     chosen.sort();
     (chosen, rejected)
+}
+
+/// What a launch tells the owner when the main checkout has not installed the
+/// dependency directory `path` (relative to the repository): the directory and
+/// the command that installs it, in the toolchain's own directory. The command
+/// comes from the detected toolchain that owns `path`; a directory the project
+/// named itself gets the generic wording.
+pub fn missing_dependency_notice(profile: &[PackageRoot], path: &str) -> String {
+    let owner = profile
+        .iter()
+        .find(|root| root.dependency_path().as_deref() == Some(path));
+    match owner.and_then(|root| root.kind.install_command().map(|cmd| (cmd, root.label()))) {
+        Some((command, dir)) => {
+            let place = if dir == "." {
+                "the repository root".to_string()
+            } else {
+                format!("`{dir}`")
+            };
+            format!(
+                "`{path}` is not installed in the main checkout, so this lane has no \
+                 dependencies there: run `{command}` in {place} of the main checkout \
+                 (a lane never installs)"
+            )
+        }
+        None => format!(
+            "`{path}` is not installed in the main checkout, so this lane has no dependencies \
+             there: install the project's dependencies in the main checkout (a lane never installs)"
+        ),
+    }
 }
 
 /// One line per toolchain for the "Project conventions" section of a worker's

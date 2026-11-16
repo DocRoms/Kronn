@@ -575,6 +575,24 @@ impl WorkerLane {
             }
             dependency_layers.push(DependencyLayer { path, state });
         }
+        // KT-1747: a dependency directory the main checkout has not installed
+        // is a launch warning, not a silent gap: it names the command.
+        let missing: Vec<String> =
+            std::iter::once((format!("{FRONTEND_DIR}/{NODE_MODULES}"), &frontend_deps))
+                .chain(
+                    dependency_layers
+                        .iter()
+                        .map(|layer| (layer.path.clone(), &layer.state)),
+                )
+                .filter(|(_, state)| **state == FrontendDeps::SourceMissing)
+                .map(|(path, _)| path)
+                .collect();
+        if !missing.is_empty() {
+            let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+            warnings.extend(missing.iter().map(|path| {
+                crate::core::project_toolchains::missing_dependency_notice(&profile, path)
+            }));
+        }
         Provisioned {
             frontend_deps,
             dependency_layers,
@@ -697,25 +715,9 @@ impl WorkerLane {
     }
 }
 
-/// Link every entry of `source` into `destination`, except what a tool writes
-/// at run time (those stay the lane's own, in the real directory).
-fn link_entries(source: &Path, destination: &Path) -> Result<(), String> {
-    let entries = std::fs::read_dir(source)
-        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
-    // One entry that cannot be linked (a real directory the lane already has)
-    // must not leave the entries after it unlinked: go on, report the first.
-    let mut first_error = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if NODE_MODULES_LANE_OWNED.iter().any(|owned| name == *owned) {
-            continue;
-        }
-        if let Err(error) = ensure_symlink(&entry.path(), &destination.join(&name)) {
-            first_error.get_or_insert(error);
-        }
-    }
-    first_error.map_or(Ok(()), Err)
-}
+#[path = "task_worker_env_layers.rs"]
+mod layers;
+use layers::link_entries;
 
 /// How the worktree's frontend dependencies were made available.
 #[derive(Debug, Clone, PartialEq, Eq)]

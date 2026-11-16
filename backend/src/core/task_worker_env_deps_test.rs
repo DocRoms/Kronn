@@ -175,3 +175,239 @@ fn kronns_own_frontend_keeps_its_dedicated_link_and_is_not_layered_twice() {
     assert!(matches!(provisioned.frontend_deps, FrontendDeps::Linked(_)));
     assert_eq!(state_of(&provisioned, "frontend/node_modules"), None);
 }
+
+#[test]
+fn a_missing_dependency_dir_is_a_launch_warning_that_names_the_install_command() {
+    let repo = repo();
+    write(&repo.worktree, "composer.json", "{}");
+    write(&repo.worktree, "assets/front/package.json", "{}");
+    write(&repo.worktree, "assets/front/yarn.lock", "");
+    write(&repo.worktree, "Podfile", "");
+    let lane = repo.lane();
+
+    let provisioned = lane.provision(&SharedCaches::default());
+
+    let warning_for = |dir: &str| {
+        provisioned
+            .warnings
+            .iter()
+            .find(|warning| warning.contains(dir))
+            .cloned()
+            .unwrap_or_default()
+    };
+    // Each layer the main checkout has not installed says what installs it, and
+    // where: the lane never installs it itself.
+    let vendor = warning_for("`vendor`");
+    assert!(vendor.contains("composer install"), "{vendor}");
+    assert!(vendor.contains("main checkout"), "{vendor}");
+    let node = warning_for("assets/front/node_modules");
+    assert!(node.contains("yarn install --frozen-lockfile"), "{node}");
+    assert!(node.contains("assets/front"), "{node}");
+    assert!(warning_for("`Pods`").contains("pod install"));
+}
+
+#[test]
+fn kronns_own_frontend_missing_install_is_a_warning_too() {
+    let repo = repo();
+    write(&repo.worktree, "frontend/package.json", "{}");
+    let lane = repo.lane();
+
+    let provisioned = lane.provision(&SharedCaches::default());
+
+    assert_eq!(provisioned.frontend_deps, FrontendDeps::SourceMissing);
+    assert!(
+        provisioned
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("frontend/node_modules") && warning.contains("npm ci")),
+        "{:?}",
+        provisioned.warnings
+    );
+}
+
+/// A Composer `vendor/` the way Composer writes it: the generated autoloader
+/// maps the project's own namespace relative to `__DIR__`, and `bin/` holds a
+/// symlink to a PHP script of a package.
+#[cfg(unix)]
+fn composer_project(repo: &Repo) {
+    write(&repo.worktree, "composer.json", "{}");
+    write(
+        &repo.worktree,
+        "src/Foo.php",
+        "<?php function where() { return 'lane'; }",
+    );
+    write(
+        &repo.main,
+        "src/Foo.php",
+        "<?php function where() { return 'main'; }",
+    );
+    write(
+        &repo.main,
+        "vendor/autoload.php",
+        "<?php\nrequire __DIR__ . '/../src/Foo.php';\n",
+    );
+    write(
+        &repo.main,
+        "vendor/composer/autoload_static.php",
+        "<?php // static map",
+    );
+    write(&repo.main, "vendor/acme/lib/a.php", "<?php");
+    write(
+        &repo.main,
+        "vendor/phpunit/phpunit/phpunit",
+        "#!/usr/bin/env php\n<?php echo 'phpunit';\n",
+    );
+    std::fs::create_dir_all(repo.main.join("vendor/bin")).unwrap();
+    std::os::unix::fs::symlink(
+        "../phpunit/phpunit/phpunit",
+        repo.main.join("vendor/bin/phpunit"),
+    )
+    .unwrap();
+    write(&repo.main, "vendor/bin/tool.sh", "#!/bin/sh\necho hi\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_composer_vendor_layer_keeps_the_autoloader_and_bin_as_real_files_of_the_lane() {
+    let repo = repo();
+    composer_project(&repo);
+    let lane = repo.lane();
+
+    let provisioned = lane.provision(&SharedCaches::default());
+
+    assert!(matches!(
+        state_of(&provisioned, "vendor"),
+        Some(FrontendDeps::Linked(_))
+    ));
+    let vendor = repo.worktree.join("vendor");
+    let is_link = |rel: &str| {
+        std::fs::symlink_metadata(vendor.join(rel))
+            .unwrap()
+            .is_symlink()
+    };
+    // What decides which `src/` the project's classes load from is the lane's own.
+    assert!(!is_link("autoload.php"));
+    assert!(!is_link("composer"));
+    assert!(!is_link("composer/autoload_static.php"));
+    assert!(!is_link("bin"));
+    assert!(!is_link("bin/tool.sh"));
+    assert_eq!(
+        std::fs::read_to_string(vendor.join("autoload.php")).unwrap(),
+        std::fs::read_to_string(repo.main.join("vendor/autoload.php")).unwrap()
+    );
+    // A PHP bin is a proxy that tells the package where the LANE's autoloader is,
+    // instead of a link PHP resolves back into the main checkout.
+    assert!(!is_link("bin/phpunit"));
+    let proxy = std::fs::read_to_string(vendor.join("bin/phpunit")).unwrap();
+    assert!(proxy.contains("_composer_autoload_path"), "{proxy}");
+    assert!(proxy.contains("/../autoload.php"), "{proxy}");
+    assert!(proxy.contains("/../phpunit/phpunit/phpunit"), "{proxy}");
+    // The packages themselves are still the main checkout's, linked.
+    assert_eq!(
+        std::fs::read_link(vendor.join("acme")).unwrap(),
+        repo.main.join("vendor/acme")
+    );
+    assert_eq!(
+        std::fs::read_link(vendor.join("phpunit")).unwrap(),
+        repo.main.join("vendor/phpunit")
+    );
+    // Nothing was written into the main checkout.
+    assert!(!repo.main.join("vendor/.kronn-lane-layer").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_php_class_of_the_project_resolves_from_the_lanes_own_src() {
+    let probe = std::process::Command::new("php").arg("--version").output();
+    if probe.map(|out| !out.status.success()).unwrap_or(true) {
+        eprintln!("php is not installed: the file-level checks above carry this case");
+        return;
+    }
+    let repo = repo();
+    composer_project(&repo);
+    repo.lane().provision(&SharedCaches::default());
+
+    let out = std::process::Command::new("php")
+        .current_dir(&repo.worktree)
+        .args(["-r", "require 'vendor/autoload.php'; echo where();"])
+        .output()
+        .unwrap();
+
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "lane");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_re_provisioned_lane_keeps_the_workers_own_autoloader_and_replaces_an_old_link() {
+    let repo = repo();
+    composer_project(&repo);
+    let lane = repo.lane();
+    lane.provision(&SharedCaches::default());
+    let autoload = repo.worktree.join("vendor/autoload.php");
+    std::fs::write(&autoload, "<?php // dumped by the worker").unwrap();
+
+    lane.provision(&SharedCaches::default());
+
+    assert_eq!(
+        std::fs::read_to_string(&autoload).unwrap(),
+        "<?php // dumped by the worker"
+    );
+
+    // A lane laid out by the previous version (a link into the main checkout)
+    // is converted to the real copy.
+    std::fs::remove_file(&autoload).unwrap();
+    std::os::unix::fs::symlink(repo.main.join("vendor/autoload.php"), &autoload).unwrap();
+    lane.provision(&SharedCaches::default());
+    assert!(!std::fs::symlink_metadata(&autoload).unwrap().is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_node_workspace_package_in_a_layered_node_modules_resolves_to_the_lanes_own_copy() {
+    let repo = repo();
+    write(
+        &repo.worktree,
+        "package.json",
+        "{\"workspaces\":[\"packages/*\"]}",
+    );
+    write(&repo.worktree, "packages/pkg/index.js", "lane");
+    write(&repo.worktree, "packages/other/index.js", "lane");
+    write(&repo.main, "packages/pkg/index.js", "main");
+    write(&repo.main, "packages/other/index.js", "main");
+    write(&repo.main, "node_modules/left-pad/index.js", "x");
+    write(&repo.main, "node_modules/@types/node/index.d.ts", "x");
+    std::fs::create_dir_all(repo.main.join("node_modules/@acme")).unwrap();
+    std::os::unix::fs::symlink(
+        "../../packages/pkg",
+        repo.main.join("node_modules/@acme/pkg"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("../packages/other", repo.main.join("node_modules/other")).unwrap();
+    let lane = repo.lane();
+
+    let provisioned = lane.provision(&SharedCaches::default());
+
+    assert!(matches!(
+        state_of(&provisioned, "node_modules"),
+        Some(FrontendDeps::Linked(_))
+    ));
+    let modules = repo.worktree.join("node_modules");
+    let resolved = |rel: &str| modules.join(rel).canonicalize().unwrap();
+    let packages = repo.worktree.canonicalize().unwrap().join("packages");
+    assert_eq!(resolved("other"), packages.join("other"));
+    assert_eq!(resolved("@acme/pkg"), packages.join("pkg"));
+    assert_eq!(
+        std::fs::read_to_string(modules.join("@acme/pkg/index.js")).unwrap(),
+        "lane"
+    );
+    // A third-party package is still the main checkout's, linked as before.
+    assert_eq!(
+        std::fs::read_link(modules.join("left-pad")).unwrap(),
+        repo.main.join("node_modules/left-pad")
+    );
+    // A scope with no workspace link stays one link.
+    assert_eq!(
+        std::fs::read_link(modules.join("@types")).unwrap(),
+        repo.main.join("node_modules/@types")
+    );
+}
