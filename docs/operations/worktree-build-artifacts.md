@@ -478,7 +478,7 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 (`first_build.outcome`, `duration_ms`) and check the lane target for
 `.kronn-warm.json`.
 
-[src: file: backend/src/core/task_worker_env.rs:1161-1203#drain_output]
+[src: file: backend/src/core/task_worker_env.rs:1250-1292#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
 [src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
@@ -787,7 +787,7 @@ project, read each `lane_warm_start` (`seed.aligned`, `crates`,
 [src: file: backend/src/core/task_worker_root_marks.rs:131-131#cached_failure]
 [src: file: backend/src/core/task_worker_seed_align.rs:275-275#align_seed]
 [src: file: backend/src/core/task_worker_seed_align.rs:217-217#recent_failure]
-[src: file: backend/src/core/task_worker_lane_settings.rs:83-83#resolve]
+[src: file: backend/src/core/task_worker_lane_settings.rs:85-88#resolve]
 [src: file: backend/src/core/project_toolchains.rs:113-113#select_roots]
 [src: file: backend/src/core/project_toolchains.rs:72-72#rust_roots]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
@@ -861,7 +861,7 @@ load, not a performance guarantee.
 
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:260-267#effective_bash_timeouts_ms]
-[src: file: backend/src/core/task_worker_env.rs:883-893#apply_bash_timeouts]
+[src: file: backend/src/core/task_worker_env.rs:968-978#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15182-15184#apply_bash_timeouts]
 [src: file: backend/src/core/config.rs:684-685#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]

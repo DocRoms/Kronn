@@ -37,8 +37,8 @@ stack, not to start a task. Content verbatim.
   back up `config.toml` and restore `server.port = 3140` for the standard dev
   launcher; preserve all other settings and encryption keys. Install a fixed
   desktop build before switching back to desktop mode.
-  [src: file: backend/src/models/setup.rs:568-571#runtime_port]
-  [src: file: backend/src/models/setup.rs:860-863#listening_port]
+  [src: file: backend/src/models/setup.rs:606-609#runtime_port]
+  [src: file: backend/src/models/setup.rs:898-901#listening_port]
   [src: file: desktop/src-tauri/src/main.rs:583-588#configure_embedded_server]
 - After changing Rust models with `#[derive(TS)]`: run `make typegen` to regenerate `frontend/src/types/generated.ts`.
 - The project Docker tab reads the machine's hosts file to flag published

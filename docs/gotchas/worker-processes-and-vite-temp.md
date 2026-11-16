@@ -72,9 +72,9 @@ lane and no `--configLoader native` is needed. A whole-directory link from an
 earlier launch is replaced; packages installed in the main checkout since are
 linked at the next launch. An entry the lane already holds as a real directory
 is left alone and does not stop the entries after it.
-[src: file: backend/src/core/task_worker_env.rs:465-503#link_frontend_deps]
-[src: file: backend/src/core/task_worker_env.rs:577-612#layer_frontend_deps]
-[src: file: backend/src/core/task_worker_env.rs:591-609#link_entries]
+[src: file: backend/src/core/task_worker_env.rs:602-640#link_frontend_deps]
+[src: file: backend/src/core/task_worker_env.rs:650-685#layer_frontend_deps]
+[src: file: backend/src/core/task_worker_env.rs:688-706#link_entries]
 
 The smoke check also loads the config (`vitest run --passWithNoTests <no
 match>`), which `--version` never did. That executes the worker-authored
