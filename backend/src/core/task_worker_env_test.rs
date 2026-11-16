@@ -1093,6 +1093,112 @@ fn a_project_without_cargo_or_frontend_reports_not_applicable() {
     assert!(runner.calls.lock().unwrap().is_empty());
 }
 
+/// KT-1747 — the probes follow the project's own toolchain roots, not Kronn's
+/// layout. A root Node app (a front-end repository), a Cargo crate in a
+/// sub-directory (a PHP project with a Rust helper).
+#[test]
+fn a_root_node_app_has_its_vitest_probed_where_it_lives() {
+    let fx = fixture();
+    std::fs::write(fx.worktree.join("package.json"), "{}").unwrap();
+    std::fs::write(fx.worktree.join("yarn.lock"), "").unwrap();
+    std::fs::write(fx.worktree.join("Makefile"), "test:\n\ttrue\n").unwrap();
+    std::fs::create_dir_all(fx.worktree.join("application")).unwrap();
+    std::fs::write(fx.worktree.join("application/composer.json"), "{}").unwrap();
+    let bin = fx.repo.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("vitest"), "#!/bin/sh\n").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(capabilities.frontend_tests.available, "{capabilities:?}");
+    assert!(
+        capabilities
+            .frontend_tests
+            .reason
+            .contains("runs from node_modules"),
+        "{}",
+        capabilities.frontend_tests.reason
+    );
+    assert!(capabilities.rust_tests.is_not_applicable());
+    let calls = runner.calls.lock().unwrap();
+    assert_eq!(calls[0].cwd, fx.worktree);
+}
+
+#[test]
+fn a_node_app_that_does_not_use_vitest_is_not_told_its_tests_are_unavailable() {
+    let fx = fixture();
+    std::fs::write(fx.worktree.join("package.json"), "{}").unwrap();
+    let bin = fx.repo.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("jest"), "#!/bin/sh\n").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(
+        capabilities.frontend_tests.is_not_applicable(),
+        "{capabilities:?}"
+    );
+    assert!(runner.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_cargo_crate_in_a_sub_directory_is_probed_in_its_own_directory() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(fx.worktree.join("redis-flush/Cargo.toml"), "").unwrap();
+    std::fs::create_dir_all(fx.worktree.join("tools/second")).unwrap();
+    std::fs::write(fx.worktree.join("tools/second/Cargo.toml"), "").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(capabilities.rust_tests.available, "{capabilities:?}");
+    let calls = runner.calls.lock().unwrap();
+    let fetches: Vec<_> = calls
+        .iter()
+        .filter(|call| call.args.first().is_some_and(|arg| arg == "fetch"))
+        .map(|call| call.cwd.clone())
+        .collect();
+    assert_eq!(
+        fetches,
+        [
+            fx.worktree.join("redis-flush"),
+            fx.worktree.join("tools/second")
+        ]
+    );
+}
+
+#[test]
+fn an_unreachable_crate_among_several_names_itself() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(fx.worktree.join("redis-flush/Cargo.toml"), "").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::failing_on("fetch");
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(!capabilities.rust_tests.available);
+    assert!(
+        capabilities.rust_tests.reason.contains("redis-flush"),
+        "{}",
+        capabilities.rust_tests.reason
+    );
+}
+
 #[test]
 fn an_unpreparable_lane_is_unverified_not_an_error() {
     let scratch = tempfile::tempdir().unwrap();

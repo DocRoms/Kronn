@@ -10834,7 +10834,10 @@ fn toolchain_brief_section_in(
             &toolchain.rust_tests,
         ));
     }
-    if node {
+    // A Node project that does not test with vitest is not told its tests are
+    // "unavailable": it runs its own (see the project conventions).
+    let vitest_line = node && !toolchain.frontend_tests.is_not_applicable();
+    if vitest_line {
         out.push_str(&line(
             if en {
                 "Frontend tests (`vitest`)"
@@ -10888,7 +10891,7 @@ fn toolchain_brief_section_in(
              (`$CARGO_TARGET_DIR/debug`).\n"
         });
     }
-    if node {
+    if vitest_line {
         out.push_str(if en {
             "Vite and vitest run as they are (`vitest run`, `vite --port $VITE_DEV_PORT`): your \
              lane's `node_modules` is a writable folder, Vite writes its config bundle there. If \
@@ -10904,12 +10907,26 @@ fn toolchain_brief_section_in(
     out.push_str(if en {
         "Run only what is ✅. A ❌ validation is never asserted: report it `skipped` with the \
          reason above, the principal will run it. `tests_executed` states explicitly whether at \
-         least one test actually ran and which.\n\n"
+         least one test actually ran and which.\n"
     } else {
         "Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
          `skipped` avec la raison ci-dessus, le principal l'exécutera. `tests_executed` dit \
-         explicitement si au moins un test a réellement tourné et lesquels.\n\n"
+         explicitement si au moins un test a réellement tourné et lesquels.\n"
     });
+    // The checks above cover Rust and vitest only. A project's own test commands
+    // are not "unavailable": they are simply not probed.
+    if profile.is_some() {
+        out.push_str(if en {
+            "This check covers only the tests listed above. For any other toolchain, run the \
+             project's own test commands (see Project conventions): they are not unavailable, \
+             just not probed here.\n"
+        } else {
+            "Cette vérification ne couvre que les tests listés ci-dessus. Pour toute autre \
+             chaîne d'outils, lance les commandes de test propres au projet (voir Conventions du \
+             projet) : elles ne sont pas indisponibles, simplement non sondées ici.\n"
+        });
+    }
+    out.push('\n');
     out
 }
 
@@ -12013,15 +12030,14 @@ fn worker_brief_markdown_in(
     // (`worker_completed_without_delivery`, twice on KT-847). The long gates the
     // principal persisted are Kronn's to run at integration; the worker's job is the
     // targeted tests, then commit and deliver in the same turn.
-    // KT-1751 — the cargo lint gate is Kronn's own. A project whose manifests say
-    // it builds with something else is told to use its own tools; a worktree whose
-    // toolchains are unknown (no manifest found) keeps the cargo text.
-    let toolchains =
-        crate::core::project_toolchains::detect_toolchains(std::path::Path::new(worktree_path));
-    let cargo_gate = toolchains.is_empty()
-        || toolchains
-            .iter()
-            .any(|root| root.kind == crate::core::project_toolchains::ToolchainKind::Cargo);
+    // KT-1751 — the cargo lint gate is for a project that builds with Cargo. Any
+    // other project, one whose toolchain Kronn does not know included (Python,
+    // Go, Gradle), is told to use its own formatter, linter and tests.
+    let worktree_dir = std::path::Path::new(worktree_path);
+    let toolchains = crate::core::project_toolchains::detect_toolchains(worktree_dir);
+    let cargo_gate = toolchains
+        .iter()
+        .any(|root| root.kind == crate::core::project_toolchains::ToolchainKind::Cargo);
     let tests = if can_run_shell && !fr {
         format!(
             "Run the **targeted** tests that cover your change and report each result \
@@ -12413,7 +12429,10 @@ fn worker_brief_markdown_in(
     };
     // KT-1669 — a lane re-anchors only the citations its own gate reads; the
     // integration settles a citation-only conflict, never the lane.
-    let citations = if !fr {
+    // KT-1747 — only for a project whose docs carry `[src:]` citations.
+    let citations = if !crate::core::brief_conventions::has_doc_citations(worktree_dir) {
+        ""
+    } else if !fr {
         "## Doc citations\n\
          Keep the `[src:]` citations of the docs you edit resolving: that is your own \
          gate. Do not re-anchor the citations of docs you did not edit, nor the anchors a merge \
@@ -12432,8 +12451,13 @@ fn worker_brief_markdown_in(
          renvoyer ton travail. Une citation que ton changement casse pour de bon (symbole \
          supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
     };
-    let ui_captures = crate::core::ui_captures::brief_section(lang);
-    let conventions = crate::core::project_toolchains::conventions_section(&toolchains, fr);
+    // Screen captures are asked of a project that has a web UI, not of every one.
+    let ui_captures = if crate::core::brief_conventions::has_web_ui(worktree_dir, &toolchains) {
+        crate::core::ui_captures::brief_section(lang)
+    } else {
+        ""
+    };
+    let conventions = crate::core::brief_conventions::section(worktree_dir, &toolchains, fr);
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -21928,10 +21952,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// KT-1751 — the Rust lint gate (`cargo fmt`, `cargo clippy`) is Kronn's own:
-    /// a worker of a PHP/Node/iOS project is never told to run it. A worktree
-    /// whose toolchains are unknown keeps the text, and so does one with a Rust
-    /// root.
+    /// KT-1751 — the Rust lint gate (`cargo fmt`, `cargo clippy`) is for a
+    /// project that builds with Cargo: a worker of a PHP/Node/iOS project, or of
+    /// one whose toolchain Kronn does not know, is never told to run it.
     #[test]
     fn the_cargo_gate_text_is_only_for_projects_that_build_with_cargo() {
         let brief = |lang, path: &str| {
@@ -21969,10 +21992,13 @@ pub(crate) mod tests {
             assert!(other.contains("exit code") || other.contains("code de sortie"));
             assert!(other.contains("task_exec_deliver"), "{other}");
 
-            for kept in [brief(lang, &rust), brief(lang, "/wt/unknown")] {
-                assert!(kept.contains("cargo clippy --all-targets -- -D warnings"));
-                assert!(kept.contains("cargo fmt --check"));
-            }
+            let kept = brief(lang, &rust);
+            assert!(kept.contains("cargo clippy --all-targets -- -D warnings"));
+            assert!(kept.contains("cargo fmt --check"));
+            // Y2: a worktree whose toolchains Kronn does not know (Python, Go,
+            // Gradle) is not given the cargo gate either.
+            let unknown = brief(lang, "/wt/unknown");
+            assert!(!unknown.contains("cargo clippy"), "{unknown}");
         }
     }
 
@@ -22041,6 +22067,15 @@ pub(crate) mod tests {
     /// transport and language.
     #[test]
     fn worker_brief_leaves_citation_only_conflicts_to_the_integration() {
+        // KT-1747: carried by a project whose docs carry `[src:]` citations.
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(worktree.path().join("docs")).unwrap();
+        std::fs::write(
+            worktree.path().join("docs/guide.md"),
+            "The entry point [src: file: src/main.rs:1].\n",
+        )
+        .unwrap();
+        let worktree_path = worktree.path().to_string_lossy().into_owned();
         for lang in [RoomLang::Fr, RoomLang::En] {
             for (can_run_shell, projection) in [(true, true), (true, false), (false, true)] {
                 let brief = worker_brief_markdown_in(
@@ -22049,7 +22084,7 @@ pub(crate) mod tests {
                     "Citations",
                     "Objective",
                     &[],
-                    "/wt/kt1669",
+                    &worktree_path,
                     "kronn/task/KT-1669",
                     "abc1234",
                     can_run_shell,
@@ -25609,12 +25644,16 @@ pub(crate) mod tests {
     /// KT-1636 — the worker brief names the default gates and who owns the suite.
     #[test]
     fn shell_worker_brief_names_the_default_validations_and_the_ci_owned_suite() {
+        // The cargo gate is for a project that builds with Cargo (KT-1751).
+        let rust = tempfile::tempdir().unwrap();
+        std::fs::write(rust.path().join("Cargo.toml"), "").unwrap();
+        let rust_path = rust.path().to_string_lossy().into_owned();
         let brief = worker_brief_markdown(
             "KT-1636",
             "CI owns the suite",
             "Objective",
             &[],
-            "/wt/kt1636",
+            &rust_path,
             "kronn/task/KT-1636",
             "abc1234",
             true,
@@ -25629,13 +25668,16 @@ pub(crate) mod tests {
     /// exact lint gate and ask for its exit code, so a worker never guesses.
     #[test]
     fn worker_brief_names_the_exact_lint_gate_and_the_exit_code() {
+        let rust = tempfile::tempdir().unwrap();
+        std::fs::write(rust.path().join("Cargo.toml"), "").unwrap();
+        let rust_path = rust.path().to_string_lossy().into_owned();
         let en = worker_brief_markdown_in(
             RoomLang::En,
             "KT-1654",
             "Lint gate",
             "Objective",
             &[],
-            "/wt/kt1654",
+            &rust_path,
             "kronn/task/KT-1654",
             "abc1234",
             true,
@@ -25648,7 +25690,7 @@ pub(crate) mod tests {
             "Lint gate",
             "Objective",
             &[],
-            "/wt",
+            &rust_path,
             "b",
             "abc1234",
             true,
@@ -53519,3 +53561,7 @@ mod orchestration_trust_tests;
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "orchestration_ui_capture_tests.rs"]
 mod orchestration_ui_capture_tests;
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "orchestration_generic_brief_tests.rs"]
+mod orchestration_generic_brief_tests;

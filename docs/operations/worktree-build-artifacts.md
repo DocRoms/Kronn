@@ -647,9 +647,22 @@ the one place KT-1747's generic toolchain detection reuses):
      = exactly those, an empty list = none. An entry outside the repository (`/x`,
      `..`) is refused on save and ignored with a warning if it ever reaches a lane.
   3. **The worker brief** — a *Project conventions* section (in the room's language)
-     lists each toolchain, its directory and where its dependencies live; it is
-     absent when nothing was detected. It is composed from the worktree, so the
-     brief of another project never names Kronn's.
+     lists each toolchain, its directory and where its dependencies live, then the
+     project's own agent instructions (a pointer to `AGENTS.md`, `CLAUDE.md`,
+     `GEMINI.md`, `.github/copilot-instructions.md`, `ai/index.md`… with a short
+     excerpt that never quotes a line that looks like a credential) and the commit
+     format its history shows (`CommitFacts::brief_line`); it is absent when none is
+     known. It is composed from the worktree (`core/brief_conventions.rs`), so the
+     brief of another project never names Kronn's: the *Doc citations* section is
+     carried only when the project's docs hold `[src:]` citations, the *UI captures*
+     one only when a Node root depends on a UI framework or a dev server, the cargo
+     gate only when a Cargo root is detected (any other project, one Kronn does not
+     recognise included, gets the generic gate). The launch probes follow the same
+     profile: `cargo nextest` and `cargo fetch --offline --locked` run in each
+     detected Cargo root (a crate in `redis-flush/` is probed there, and a failing
+     root is named), vitest in the first Node root that has it; a Node root that does
+     not use vitest is "not applicable", never "unavailable", and the worker is told
+     to run the project's own test commands.
   The settings screen has no field for `dependency_dirs` yet (the entry is set
   through the project's workspace settings API); the form is a follow-up.
 

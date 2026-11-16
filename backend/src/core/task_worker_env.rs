@@ -718,6 +718,10 @@ impl WorkerLane {
 #[path = "task_worker_env_layers.rs"]
 mod layers;
 use layers::link_entries;
+#[path = "task_worker_env_probes.rs"]
+mod probes;
+pub(crate) use probes::check_frontend;
+use probes::check_rust;
 
 /// How the worktree's frontend dependencies were made available.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1013,6 +1017,12 @@ impl Capability {
             available: false,
             reason: reason.into(),
         }
+    }
+
+    /// The project has no such toolchain, or does not test with this tool: the
+    /// brief says nothing about it instead of calling it unavailable.
+    pub fn is_not_applicable(&self) -> bool {
+        !self.available && self.reason.starts_with("not applicable")
     }
 }
 
@@ -1370,123 +1380,6 @@ pub(crate) fn smoke_check_with(
 fn bind_loopback_port() -> std::io::Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     Ok(listener.local_addr()?.port())
-}
-
-fn check_rust(
-    lane: &WorkerLane,
-    env: &[(String, OsString)],
-    runner: &dyn ProbeRunner,
-) -> Capability {
-    let Some(manifest_dir) = [lane.worktree.clone(), lane.worktree.join("backend")]
-        .into_iter()
-        .find(|dir| dir.join("Cargo.toml").is_file())
-    else {
-        return Capability::no("not applicable: no Cargo.toml at the worktree root or in backend/");
-    };
-    if let Err(error) = probe_writable(&lane.cargo_target_dir) {
-        return Capability::no(format!(
-            "the lane target directory {} is not writable: {error}",
-            lane.cargo_target_dir.display()
-        ));
-    }
-    let probe = |args: &[&str], timeout: Duration| ProbeCommand {
-        program: "cargo".into(),
-        args: args.iter().map(|arg| arg.to_string()).collect(),
-        cwd: manifest_dir.clone(),
-        env: env.to_vec(),
-        timeout,
-        priority: Priority::Normal,
-        clean_env: false,
-    };
-    let nextest = runner.run(&probe(&["nextest", "--version"], NEXTEST_TIMEOUT));
-    if !nextest.success {
-        return Capability::no(format!(
-            "`cargo nextest --version` failed: {}",
-            nextest.detail
-        ));
-    }
-    // A cold `cargo check` would compile the whole dependency graph; resolving
-    // it offline from the cache proves the part a sandbox actually breaks.
-    let fetch = runner.run(&probe(
-        &["fetch", "--offline", "--locked"],
-        OFFLINE_FETCH_TIMEOUT,
-    ));
-    if !fetch.success {
-        return Capability::no(format!(
-            "offline dependency resolution failed (`cargo fetch --offline --locked`): {}",
-            fetch.detail
-        ));
-    }
-    Capability::yes(format!(
-        "cargo nextest and the offline dependency cache work; lane target {}",
-        lane.cargo_target_dir.display()
-    ))
-}
-
-pub(crate) fn check_frontend(
-    lane: &WorkerLane,
-    provisioned: &Provisioned,
-    env: &[(String, OsString)],
-    runner: &dyn ProbeRunner,
-) -> Capability {
-    match &provisioned.frontend_deps {
-        FrontendDeps::NotApplicable => {
-            Capability::no("not applicable: the worktree has no frontend/package.json")
-        }
-        FrontendDeps::SourceMissing => Capability::no(
-            "the main checkout has no frontend/node_modules to reuse and a worker never installs \
-             from the network",
-        ),
-        FrontendDeps::Failed(error) => Capability::no(format!(
-            "frontend/node_modules could not be linked: {error}"
-        )),
-        FrontendDeps::Linked(_) | FrontendDeps::AlreadyPresent => {
-            let frontend = lane.frontend_dir();
-            let vitest = frontend.join(NODE_MODULES).join(".bin").join("vitest");
-            if !vitest.exists() {
-                return Capability::no("frontend/node_modules/.bin/vitest is missing");
-            }
-            let outcome = runner.run(&ProbeCommand {
-                program: vitest.to_string_lossy().into_owned(),
-                args: vec!["--version".into()],
-                cwd: frontend,
-                env: env.to_vec(),
-                timeout: VITEST_TIMEOUT,
-                priority: Priority::Normal,
-                clean_env: false,
-            });
-            if !outcome.success {
-                return Capability::no(format!("`vitest --version` failed: {}", outcome.detail));
-            }
-            let version = outcome.detail;
-            // `--version` never loads the config, which is where Vite writes
-            // (`node_modules/.vite-temp`) and where a lane failed with EPERM
-            // (KT-1266): a run that selects no test file loads it and exits.
-            let config = runner.run(&ProbeCommand {
-                program: vitest.to_string_lossy().into_owned(),
-                args: vec![
-                    "run".into(),
-                    "--passWithNoTests".into(),
-                    VITEST_CONFIG_PROBE_FILTER.into(),
-                ],
-                cwd: lane.frontend_dir(),
-                env: env.to_vec(),
-                timeout: VITEST_CONFIG_TIMEOUT,
-                priority: Priority::Normal,
-                clean_env: false,
-            });
-            if config.success {
-                Capability::yes(format!(
-                    "vitest {version} runs from frontend/node_modules and loads its config in the lane"
-                ))
-            } else {
-                Capability::no(format!(
-                    "vitest cannot load its config in the lane (`vitest run --passWithNoTests`): {}",
-                    config.detail
-                ))
-            }
-        }
-    }
 }
 
 fn check_port_binding(

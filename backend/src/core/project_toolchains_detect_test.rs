@@ -47,19 +47,28 @@ fn a_node_project_names_its_package_manager_from_its_lock_file() {
 }
 
 #[test]
-fn a_front_euronews_like_repository_is_a_yarn_root_with_make() {
+fn a_front_euronews_like_repository_is_a_yarn_root_with_a_php_application_and_make() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     write(repo, "package.json", "{}");
     write(repo, "yarn.lock", "");
     write(repo, "Makefile", "test:\n\ttrue\n");
     write(repo, "src/index.ts", "");
+    write(repo, "application/composer.json", "{}");
+    write(repo, "application/composer.lock", "{}");
 
     let profile = detect_toolchains(repo);
 
-    assert_eq!(kinds(&profile), ["yarn@.", "make@."]);
+    assert_eq!(
+        kinds(&profile),
+        ["yarn@.", "composer@application", "make@."]
+    );
     assert_eq!(profile[0].dependency_dir(), Some("node_modules"));
-    assert_eq!(profile[1].dependency_dir(), None);
+    assert_eq!(
+        profile[1].dependency_path().as_deref(),
+        Some("application/vendor")
+    );
+    assert_eq!(profile[2].dependency_dir(), None);
 }
 
 #[test]
@@ -82,14 +91,24 @@ fn a_docroms_web_like_repository_has_composer_and_a_nested_node_root() {
 }
 
 #[test]
-fn a_front_api_like_repository_is_one_pnpm_root() {
+fn a_front_api_like_repository_is_a_pnpm_root_with_a_nested_rust_crate() {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     write(repo, "package.json", "{}");
     write(repo, "pnpm-lock.yaml", "");
     write(repo, "api/handlers/index.ts", "");
+    write(
+        repo,
+        "redis-flush/Cargo.toml",
+        "[package]\nname = \"flush\"\n",
+    );
+    write(repo, "redis-flush/src/main.rs", "fn main() {}\n");
 
-    assert_eq!(kinds(&detect_toolchains(repo)), ["pnpm@."]);
+    let profile = detect_toolchains(repo);
+
+    assert_eq!(kinds(&profile), ["pnpm@.", "cargo@redis-flush"]);
+    // The crate has no dependency directory to layer: its target is the lane's.
+    assert_eq!(profile[1].dependency_dir(), None);
 }
 
 #[test]

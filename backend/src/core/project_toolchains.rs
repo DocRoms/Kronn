@@ -476,7 +476,12 @@ pub fn conventions_lines_in(profile: &[PackageRoot], fr: bool) -> Vec<String> {
 /// where it keeps its dependencies, so a worker uses the project's own tools
 /// instead of assuming Kronn's. Empty when nothing was detected.
 pub fn conventions_section(profile: &[PackageRoot], fr: bool) -> String {
-    let lines = conventions_lines_in(profile, fr);
+    conventions_section_from(&conventions_lines_in(profile, fr), fr)
+}
+
+/// [`conventions_section`] from the lines already composed (toolchains, the
+/// project's own agent instructions, its commit format).
+pub fn conventions_section_from(lines: &[String], fr: bool) -> String {
     if lines.is_empty() {
         return String::new();
     }

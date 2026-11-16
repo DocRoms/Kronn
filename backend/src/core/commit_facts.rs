@@ -196,6 +196,43 @@ impl CommitFacts {
         .map(|(form, _)| form)
     }
 
+    /// One line for a worker's brief: the subject shape the history shows, the
+    /// ticket key, an example and what CI enforces. `None` when the history is
+    /// too short to show a pattern (then the project's own docs rule).
+    pub fn brief_line(&self) -> Option<String> {
+        if self.analysed() < MIN_HISTORY {
+            return None;
+        }
+        let shape = match self.dominant_form()? {
+            Form::ScopedColon => "`type(scope): subject`",
+            Form::ScopedPlain => "`type(scope) subject` (no colon)",
+            Form::BareColon => "`type: subject`",
+            Form::Free => "free-form subjects, no type prefix",
+        };
+        let mut line = format!("the history writes {shape}");
+        if let Some(ticket) = self.tickets.first() {
+            let place = if ticket.leading >= ticket.after_type {
+                "leading the subject"
+            } else {
+                "after the type"
+            };
+            line.push_str(&format!(", ticket key `{}` {place}", ticket.prefix));
+        }
+        if let Some((_, subject)) = self.examples.first() {
+            line.push_str(&format!(", e.g. `{subject}`"));
+        }
+        let enforced: Vec<&str> = self
+            .tooling
+            .iter()
+            .filter(|tool| matches!(tool.enforcement, Enforcement::Enforced(_)))
+            .map(|tool| tool.name.as_str())
+            .collect();
+        if !enforced.is_empty() {
+            line.push_str(&format!("; checked in CI by {}", enforced.join(", ")));
+        }
+        Some(line)
+    }
+
     /// The prompt block; `commits_doc` is the path of the commit-conventions
     /// document the step writes.
     pub fn render_block(&self, commits_doc: &str) -> String {
