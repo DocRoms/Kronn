@@ -771,9 +771,26 @@ killed `rustc` leaves no artifact), so the worker would pay it again.
 therefore 3600 s: the measured 32 min 56 s plus a margin of about 27 min for a
 slower or busier host; the per-project and global `first_build_timeout_min` override
 it, and `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` replaces it only when neither is set. The same bound limits
-the gate (queue) wait. Not done here, each its own ticket: stop compiling the lib
-twice for `cargo test --lib` (the self dev-dependency exists for the `it`
-integration binary, KT-1189); lower the gate's concurrency under load. The live
+the gate (queue) wait. Not done here, its own ticket: lower the gate's concurrency
+under load.
+
+**The lib is compiled once (KT-1744).** The package is no longer its own
+dev-dependency and the `test-support` feature is gone: the `it` integration binary
+arms the real-agent guard with one call
+(`kronn::core::cmd::arm_real_agent_guard_for_tests`, made before `main` by
+`backend/tests/it.rs`), so nothing in a `cargo test --lib` build asks for a second
+compile of the library. The guard still cannot be armed from a shipped binary,
+more strictly than before: no environment variable and no cargo feature arms it in
+any build (the old `KRONN_TEST_NO_REAL_AGENTS` is read nowhere), nothing under
+`backend/src` calls the function
+(`nothing_that_ships_arms_the_real_agent_guard`), and the manifest cannot grow the
+self dependency back (`the_package_is_not_its_own_dev_dependency`). `cargo test
+--lib --timings` after the change lists **one** `kronn` unit, `lib (test)`, 754 s on
+a loaded host (452 units in all, dependencies already cached); the figures above
+(a `lib` unit with `test-support` of 8 min 25 s, then the test binary, 32 min 56 s
+in all) were the same command before it. A before/after at identical load was not
+run: the `before` is the 13/11 measurement, not a second one. The live check, done
+by the principal after the restart, is: launch two tasks at once on a
 check, done by the principal after the restart, is: launch two tasks at once on a
 project, read each `lane_warm_start` (`seed.aligned`, `crates`,
 `first_build.outcome`, `duration_ms`, build_jobs, host load) and look for
