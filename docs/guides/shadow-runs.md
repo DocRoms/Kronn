@@ -168,7 +168,7 @@ rest of the workflow. Measured on the pull-request review above, two different
 first passes merged find more than either alone; but a shadow on a small local
 model may invent a finding, so the merge **verifies every point before it keeps
 it**.
-[src: file: backend/src/workflows/shadow_merge.rs:747#merge_step]
+[src: file: backend/src/workflows/shadow_merge.rs:757#merge_step]
 
 - **Which shadows merge**: one, several or all of the step's shadows
   (`shadows`, empty means all). The others still run and are compared.

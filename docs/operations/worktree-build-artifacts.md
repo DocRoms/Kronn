@@ -840,7 +840,7 @@ load, not a performance guarantee.
 [src: file: backend/src/models/setup.rs:329-336#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:895-905#apply_bash_timeouts]
 [src: file: backend/src/agents/runner.rs:15219-15221#apply_bash_timeouts]
-[src: file: backend/src/core/config.rs:684-685#set_bash_timeouts]
+[src: file: backend/src/core/config.rs:705-706#set_bash_timeouts]
 [src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]
 [src: file: backend/src/core/task_worker_lane_warm.rs:872]
