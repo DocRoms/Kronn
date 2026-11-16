@@ -6737,7 +6737,16 @@ const TEST_FAILURE_MARKERS: &[&str] = &[
     "tests failed",
     "failures:",
     "--- fail:",
+    // PHPUnit's summary line.
+    "failures!",
 ];
+
+/// A runner's own per-file failure line: vitest and jest print `FAIL path`.
+fn reports_failed_file(output_lower: &str) -> bool {
+    output_lower
+        .lines()
+        .any(|line| line.trim_start().starts_with("fail "))
+}
 
 /// `Some` when `failure` comes from the host rather than the worker's code:
 /// Docker unreachable, or a launch the sandbox refused. `None` means the
@@ -6769,7 +6778,8 @@ fn environment_cause(
         .collect();
     let test_failed = TEST_FAILURE_MARKERS
         .iter()
-        .any(|marker| output.contains(marker));
+        .any(|marker| output.contains(marker))
+        || reports_failed_file(&output);
     let Some(refusal) = tail
         .iter()
         .find(|line| DOCKER_REFUSALS.iter().any(|refusal| line.contains(refusal)))
@@ -6833,6 +6843,21 @@ const COMPOSE_MARKERS: &[&str] = &[
     "no configuration file provided",
 ];
 
+/// What a shell prints for a command it cannot find (lower-cased): bash and zsh
+/// say `command not found`, dash says `<tool>: not found`.
+const COMMAND_NOT_FOUND_MARKERS: &[&str] = &["command not found", ": not found"];
+
+/// GNU make's own report of a recipe that exited 127 (`make: *** [t] Error 127`),
+/// not `Error 1270`.
+fn make_reported_127(line: &str) -> bool {
+    line.match_indices("error 127").any(|(at, found)| {
+        !line[at + found.len()..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_ascii_digit())
+    })
+}
+
 /// KT-1753 — a failure the lane's environment caused, for any project: the
 /// command is not installed (exit 127), the OS sandbox refused an operation, the
 /// network is not there, or a compose service is down. Judged from the last
@@ -6852,7 +6877,16 @@ fn lane_environment_cause(
         tail.iter()
             .any(|line| markers.iter().any(|marker| line.contains(marker)))
     };
-    let fix = if exit_code == Some(127) {
+    // A shell exits 127 for a command it cannot find; GNU make exits 2 and says
+    // `Error 127`, and a runner may exit 1 after `command not found`.
+    let missing_tool = exit_code == Some(127)
+        || tail.iter().any(|line| {
+            COMMAND_NOT_FOUND_MARKERS
+                .iter()
+                .any(|marker| line.contains(marker))
+                || make_reported_127(line)
+        });
+    let fix = if missing_tool {
         "La commande de la validation (code 127) n'existe pas sur cette machine ou dans le PATH de la lane : installe l'outil (ou donne-le à la lane), puis reprends l'intégration."
     } else if any(SANDBOX_REFUSALS) {
         "Le bac à sable de la lane a refusé une opération (écriture hors de ses racines, par exemple). Ce n'est pas une erreur du code livré : ouvre ce chemin au profil du projet ou lance la validation sur l'hôte, puis reprends l'intégration."
@@ -26139,7 +26173,21 @@ pub(crate) mod tests {
         };
         // Exit 127: the tool is not installed or not on the lane's PATH.
         host(Some(127), "sh: composer: command not found", "127");
-        host(Some(127), "make: pnpm: No such file or directory", "127");
+        // GNU make never exits 127: a tool missing behind a recipe makes it print
+        // `Error 127` and exit 2.
+        host(
+            Some(2),
+            "make: pnpm: No such file or directory\nmake: *** [Makefile:4: test] Error 127",
+            "127",
+        );
+        host(
+            Some(2),
+            "/bin/sh: composer: command not found\nmake: *** [test] Error 127",
+            "127",
+        );
+        // Any runner that says the command is not found, with no test result.
+        host(Some(1), "bash: line 1: phpunit: command not found", "127");
+        host(Some(1), "/bin/sh: 1: yarn: not found", "127");
         // The OS sandbox refused an operation.
         host(
             Some(1),
@@ -26180,6 +26228,18 @@ pub(crate) mod tests {
             failure(Some(1), "error: operation not permitted was the expected message\nAssertionError"),
             failure(Some(101), "error[E0308]: mismatched types"),
             failure(Some(2), "make: *** [test] Error 1"),
+            // `Error 127` as the prefix of another number is not the missing-tool code.
+            failure(Some(2), "make: *** [test] Error 1270"),
+            // A test log that quotes the message and then reports a failed test
+            // (vitest / jest, PHPUnit).
+            failure(
+                Some(2),
+                "bash: x: command not found\nFAIL src/a.test.ts\nexpected 1 to be 2\nmake: *** [test] Error 1",
+            ),
+            failure(
+                Some(2),
+                "sh: tool: command not found\nFAILURES!\nTests: 3, Assertions: 4, Failures: 1.\nmake: *** [test] Error 1",
+            ),
         ] {
             assert!(
                 environment_cause(Sandbox, None, &red).is_none(),
