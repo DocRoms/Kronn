@@ -852,7 +852,6 @@ a loaded host (452 units in all, dependencies already cached); the figures above
 in all) were the same command before it. A before/after at identical load was not
 run: the `before` is the 13/11 measurement, not a second one. The live check, done
 by the principal after the restart, is: launch two tasks at once on a
-check, done by the principal after the restart, is: launch two tasks at once on a
 project, read each `lane_warm_start` (`seed.aligned`, `crates`,
 `first_build.outcome`, `duration_ms`, build_jobs, host load) and look for
 `.kronn-warm.json` in the lane target.

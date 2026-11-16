@@ -34752,6 +34752,61 @@ pub(crate) mod tests {
         );
     }
 
+    /// KT-1753 (B2) — `build_brief` itself hands the execution's agent type to the
+    /// Codex adjustment: a Codex execution's brief has no merge steps, any other
+    /// worker's keeps them. `brief_for_agent` alone cannot show that the launch
+    /// path passes the type.
+    #[test]
+    fn build_brief_gives_a_codex_execution_no_merge_section_and_keeps_it_for_the_others() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let repo = "/tmp/whatever";
+        crate::db::projects::insert_project(&conn, &test_project("p", repo)).unwrap();
+        crate::db::discussions::insert_discussion(&conn, &plain_discussion("parent", "p")).unwrap();
+        let task = create_todo_task(&conn, "p", "Task");
+        let mut launch = crate::models::LaunchSingleTaskInput::new(&task.summary.id, "parent");
+        launch.project_id = Some("p".into());
+        launch.worker_target_kind = Some(MessageTargetKind::Agent);
+        launch.worker_agent_type = Some("ClaudeCode".into());
+        let outcome =
+            crate::db::orchestration::launch_single_task(&conn, &launch, &test_actor()).unwrap();
+        let execution = advance_to_provisioning(&conn, outcome.execution, &test_actor()).unwrap();
+
+        let brief_of = |agent: &str, lang: RoomLang| {
+            let mut execution = execution.clone();
+            execution.worker_agent_type = Some(agent.to_string());
+            let prepared = Prepared {
+                execution,
+                project_id: "p".into(),
+                repo_path: repo.into(),
+                task_reference: task.summary.reference.clone(),
+                task_title: task.summary.title.clone(),
+                task_description: "x".into(),
+                dod: task.definition_of_done.clone(),
+                target_branch: "main".into(),
+                already_launched: false,
+            };
+            build_brief(
+                &prepared,
+                "/tmp/wt",
+                "kronn/task/kt-x",
+                "deadbeef",
+                None,
+                lang,
+            )
+            .content
+        };
+        for lang in [RoomLang::En, RoomLang::Fr] {
+            let codex = brief_of("Codex", lang);
+            assert!(!codex.contains("git merge"), "{codex}");
+            assert!(!codex.contains("MERGE_HEAD"), "{codex}");
+            let claude = brief_of("ClaudeCode", lang);
+            assert!(claude.contains("git merge"), "{claude}");
+            assert!(claude.contains("MERGE_HEAD"), "{claude}");
+        }
+    }
+
     // ── Direct sync test of the atomic checkpoint's rollback integrality ──
     #[test]
     fn checkpoint_rolls_back_when_task_is_not_todo() {
