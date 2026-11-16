@@ -91,8 +91,9 @@ jobs:
     needs: require-ci-label
     if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
-    # A cache miss compiles the instrumented tree from scratch.
-    timeout-minutes: 40
+    # A cache miss compiles the instrumented tree from scratch. Under rustc
+    # 1.100 with the previous build-dir layout it outgrew 40 min (KT-1788).
+    timeout-minutes: 75
     outputs:
       compiled_cache_hit: ${{ steps.verify-backend-cache.outputs.exact }}
       compiled_cache_state: ${{ steps.verify-backend-cache.outputs.state }}
@@ -238,6 +239,8 @@ jobs:
       # CARGO_TARGET_DIR keeps the instrumented tree where the hot cache
       # restores it. `eval`, not `source <(...)`: portable to any bash.
       - name: Build the instrumented test archive
+        # Below the job's limit: a step that times out keeps its log.
+        timeout-minutes: 70
         run: |
           export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-target"
           eval "$(cargo llvm-cov show-env --sh)"
