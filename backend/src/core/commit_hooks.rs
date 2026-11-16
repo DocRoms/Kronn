@@ -140,6 +140,14 @@ fn gating_hooks_dir(lane: &LaneGit, policy: WorkerCommitHooks) -> Option<PathBuf
     }
 }
 
+/// The directory the repository's hooks live in for `work_dir`, resolved as the
+/// gating hook's is: a managed worktree reads the registered checkout's
+/// configuration only. For a reader of a hook's text (the DCO check of KT-1750).
+pub fn repository_hooks_dir(work_dir: &Path) -> Option<PathBuf> {
+    let lane = LaneGit::resolve(work_dir).ok()?;
+    gating_hooks_dir(&lane, WorkerCommitHooks::Sandboxed)
+}
+
 fn is_runnable(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;

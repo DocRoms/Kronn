@@ -23,6 +23,17 @@ fn main() -> anyhow::Result<()> {
             println!("{}", kronn::core::cli_args::HELP);
             return Ok(());
         }
+        kronn::core::cli_args::CliAction::CleanGitConfig => {
+            let file = kronn::core::git_global_config::global_config_path()
+                .ok_or_else(|| anyhow::anyhow!("cannot locate the global git config"))?;
+            kronn::core::git_global_config::cleanup_interactive(
+                &file,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout(),
+            )
+            .map_err(anyhow::Error::msg)?;
+            return Ok(());
+        }
         kronn::core::cli_args::CliAction::Refuse(reason) => anyhow::bail!(reason),
     }
     // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
@@ -41,7 +52,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     let data_dir_lock = config::acquire_data_dir_lock()?;
 
     // Load config before tracing init so `debug_mode` can influence the
-    // tracing filter's default level; `config::load()` emits no logs.
+    // tracing filter's default level; `config::load()` logs no config text (kind and position only).
     // Also arms the process timezone and anti-hallucination mode, shared with the desktop boot.
     let mut app_config = kronn::load_startup_config().await?;
 
@@ -393,6 +404,26 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         Err(e) => tracing::warn!("Registry sync failed: {}", e),
     }
 
+    // KT-1750 — the commit identity and sign-off each project card set, before the
+    // first worker commit or merge of this boot reads them.
+    match state
+        .db
+        .with_read_conn(kronn::db::projects::list_projects)
+        .await
+    {
+        Ok(projects) => {
+            for project in projects {
+                if let Some(workspace) = project.workspace {
+                    kronn::core::commit_policy::register_project(
+                        &kronn::core::scanner::resolve_host_path(&project.path),
+                        &workspace.commit,
+                    );
+                }
+            }
+        }
+        Err(e) => tracing::warn!("project commit settings not loaded: {e}"),
+    }
+
     // Durable agent-dispatch recovery runs before the legacy awaiting scan.
     // A Running row means the process died mid-turn; return it to Pending so
     // the worker can either resume execution or observe an already-persisted
@@ -418,6 +449,28 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         kronn::core::background_priority::set_enabled(config.workers.background_priority);
         // KT-1718 — the shell limits of a Claude task worker, before the first one.
         kronn::core::task_worker_env::set_bash_timeouts(&config.workers);
+        kronn::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
+        // KT-1750 — the commit identity and sign-off every project inherits.
+        kronn::core::commit_policy::set_global_settings(&config.workers.commit);
+        // KT-1748 — the managed worktree roots, before the first launch of this boot.
+        kronn::core::worktree::set_global_managed_worktree_roots(&config.workers);
+        // KT-1742 — how lanes are warmed: the global entry now, each project's own
+        // below, before the first lane of this boot.
+        kronn::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
+    }
+    match state.db.with_conn(kronn::db::projects::list_projects).await {
+        Ok(projects) => {
+            for project in projects {
+                kronn::core::task_worker_lane_settings::set_project(
+                    std::path::Path::new(&project.path),
+                    project
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| &workspace.lane_warm),
+                );
+            }
+        }
+        Err(error) => tracing::warn!("project lane settings not loaded: {error}"),
     }
     // KT-1633 — ask the host once whether its priority launcher runs, off the
     // async path, before recovery can dispatch a worker. A spawn only reads the answer.

@@ -180,11 +180,70 @@ mod tests {
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
+            // The fixture's repositories are not under the agent's own $TMPDIR:
+            // they stand for the owner's checkout.
+            .env("TMPDIR", fx.shims.as_os_str())
             .env_remove(CONFIRM_ENV);
         if confirmed {
             command.env(CONFIRM_ENV, "1");
         }
         command.output().expect("shim runs")
+    }
+
+    /// `guarded` with the agent's `$TMPDIR` set to `tmpdir`.
+    fn guarded_with_tmpdir(fx: &Fixture, dir: &Path, args: &[&str], tmpdir: &Path) -> Output {
+        Command::new(fx.shims.join("git"))
+            .args(args)
+            .current_dir(dir)
+            .env(
+                "PATH",
+                path_with_front(&fx.shims, std::env::var_os("PATH").as_deref()),
+            )
+            .env("TMPDIR", tmpdir)
+            .env_remove(CONFIRM_ENV)
+            .output()
+            .expect("shim runs")
+    }
+
+    /// KT-1719 — a throwaway repository under the agent's own `$TMPDIR` (a
+    /// test fixture) is not the owner's checkout: checkout, switch, reset and
+    /// stash pass. A `$TMPDIR` that is `/`, the home folder or above it exempts
+    /// nothing.
+    #[test]
+    fn a_scratch_repository_under_the_agents_tmpdir_is_not_guarded() {
+        let fx = fixture();
+        let tmp = fx.main.parent().unwrap().to_path_buf();
+        let out = guarded_with_tmpdir(&fx, &fx.main, &["checkout", "--detach"], &tmp);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(symbolic_head(&fx.main), "", "HEAD detached");
+        for args in [
+            &["switch", "-c", "feature"][..],
+            &["reset", "--hard", "HEAD"],
+            &["stash"],
+        ] {
+            let out = guarded_with_tmpdir(&fx, &fx.main, args, &tmp);
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        for wide in [Path::new("/").to_path_buf(), dirs_home()] {
+            let out = guarded_with_tmpdir(&fx, &fx.main, &["checkout", "--detach"], &wide);
+            assert!(
+                refused(&out).contains("main checkout"),
+                "a $TMPDIR of {} must exempt nothing",
+                wide.display()
+            );
+        }
+    }
+
+    fn dirs_home() -> PathBuf {
+        std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
     }
 
     fn head(dir: &Path) -> String {
@@ -379,6 +438,8 @@ mod tests {
             .args(args)
             .current_dir(dir)
             .env("PATH", path)
+            // The fixture stands for the owner's checkout, not a scratch repo.
+            .env("TMPDIR", &first)
             .env_remove(CONFIRM_ENV)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

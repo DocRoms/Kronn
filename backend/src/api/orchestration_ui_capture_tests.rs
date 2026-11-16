@@ -20,6 +20,7 @@ fn briefs_ask_for_ui_captures_before_the_tests_section() {
                 can_run_shell,
                 projection,
                 None,
+                true,
             );
             let needles: &[&str] = match lang {
                 RoomLang::Fr => &[

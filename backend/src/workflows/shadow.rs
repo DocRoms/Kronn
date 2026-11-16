@@ -483,6 +483,20 @@ pub struct ShadowInput {
     /// The run's state before the main step consumed a Gate's feedback: the
     /// feedback reaches the shadows' prompts too.
     pub run_state: HashMap<String, String>,
+    /// The run's own cancellation token: stopping the run stops its shadows.
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
+/// The `cancel_registry` key of one shadow. Every shadow of a run starts with
+/// [`registry_prefix`], so cancelling a run tree finds them all, including
+/// those that outlive the run's runner.
+fn registry_key(run_id: &str, index: usize, shadow_id: &str) -> String {
+    format!("{}{index}:{shadow_id}", registry_prefix(run_id))
+}
+
+/// What the `cancel_registry` keys of every shadow of `run_id` start with.
+pub fn registry_prefix(run_id: &str) -> String {
+    format!("shadow:{run_id}:")
 }
 
 /// Starts the shadows of `step`, the main execution of which sits at
@@ -610,27 +624,94 @@ async fn run_step_shadows(
             step.clone(),
             input.clone(),
         );
+        // Registered before the task starts, so a cancel that lands right after
+        // this returns still finds the shadow. The guard leaves the registry
+        // when the shadow ends.
+        let stop = crate::CancelGuard::insert(
+            &state.cancel_registry,
+            registry_key(&run.id, index, &shadow.id),
+        );
         tokio::spawn(async move {
             // A panic in the shadow settles its row; it never reaches the step.
             let (failed_state, failed_run, failed_step, failed_shadow) =
                 (state.clone(), run.clone(), step.clone(), shadow.clone());
-            let attempt = tokio::spawn(async move {
+            let started = Instant::now();
+            let run_cancel = input.cancel.clone();
+            let mut attempt = tokio::spawn(async move {
                 run_one(&state, &workflow, &run, &step, index, &shadow, &input).await
             });
-            if let Err(join) = attempt.await {
-                let mut row = blank_row(&failed_run, &failed_step, index, &failed_shadow.id);
-                row.label = failed_shadow.display_label().to_string();
-                row.status = ShadowStatus::Failed;
-                row.stopped = Some(format!("The shadow crashed: {join}"));
-                row.finished_at = Some(now());
-                let _ = failed_state
-                    .db
-                    .with_conn(move |conn| step_shadows::finish(conn, &row))
+            // Stopping the run, or cancelling its tree, stops the shadow: the
+            // task is dropped where it stands, so nothing it was doing lands.
+            let joined = tokio::select! {
+                biased;
+                _ = stop.token.cancelled() => None,
+                _ = run_cancel.cancelled() => None,
+                joined = &mut attempt => Some(joined),
+            };
+            match joined {
+                None => {
+                    attempt.abort();
+                    let _ = (&mut attempt).await;
+                    settle_stopped(
+                        &failed_state,
+                        &failed_run,
+                        &failed_step,
+                        index,
+                        &failed_shadow,
+                        started,
+                    )
                     .await;
+                }
+                Some(Err(join)) => {
+                    let mut row = blank_row(&failed_run, &failed_step, index, &failed_shadow.id);
+                    row.label = failed_shadow.display_label().to_string();
+                    row.status = ShadowStatus::Failed;
+                    row.stopped = Some(format!("The shadow crashed: {join}"));
+                    row.finished_at = Some(now());
+                    let _ = failed_state
+                        .db
+                        .with_conn(move |conn| step_shadows::finish(conn, &row))
+                        .await;
+                }
+                Some(Ok(())) => {}
             }
         });
     }
     Ok(())
+}
+
+/// Settles the row of a shadow stopped with its run. It is the last write the
+/// shadow makes: what it had produced is dropped, only the identity it loaded
+/// is kept for the comparison.
+async fn settle_stopped(
+    state: &AppState,
+    run: &WorkflowRun,
+    step: &WorkflowStep,
+    index: usize,
+    shadow: &StepShadow,
+    started: Instant,
+) {
+    let mut row = blank_row(run, step, index, &shadow.id);
+    row.label = shadow.display_label().to_string();
+    row.status = ShadowStatus::Interrupted;
+    row.stopped = Some("Stopped with its run: the run was cancelled".into());
+    row.duration_ms = Some(started.elapsed().as_millis() as u64);
+    row.finished_at = Some(now());
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            let known = step_shadows::list_for_run(conn, &row.run_id)?
+                .into_iter()
+                .find(|known| {
+                    known.result_index == row.result_index && known.shadow_id == row.shadow_id
+                });
+            if let Some(known) = known {
+                row.identity = known.identity;
+                row.started_at = known.started_at;
+            }
+            step_shadows::finish(conn, &row)
+        })
+        .await;
 }
 
 /// What a shadow spent: tokens, and the cost of the attempts that report one.

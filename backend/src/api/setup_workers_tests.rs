@@ -365,3 +365,191 @@ fn the_bash_timeouts_default_are_bounded_and_clamped_at_spawn() {
         (30 * 60_000, 30 * 60_000)
     );
 }
+
+/// KT-1750 — the commit identity and sign-off of Settings > Workers: nothing set
+/// (and so nothing written) by default, kept by an older `[workers]` table, and
+/// refused when half an identity or not an address.
+#[test]
+fn the_commit_setting_defaults_to_unset_and_is_validated() {
+    use crate::models::{ProjectCommitSettings, SignoffSetting};
+    let defaults = WorkersConfig::default();
+    assert!(defaults.commit.is_default());
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert!(partial.commit.is_default());
+    assert!(
+        !toml::to_string(&defaults).unwrap().contains("commit"),
+        "an unset commit setting is not written"
+    );
+    let with = |name: &str, email: &str, signoff| WorkersConfig {
+        commit: ProjectCommitSettings {
+            name: (!name.is_empty()).then(|| name.to_string()),
+            email: (!email.is_empty()).then(|| email.to_string()),
+            signoff,
+        },
+        ..Default::default()
+    };
+    assert!(with("", "", SignoffSetting::Always).validate().is_ok());
+    assert!(with("Bot", "bot@corp.example", SignoffSetting::Never)
+        .validate()
+        .is_ok());
+    for (name, email) in [
+        ("Bot", ""),
+        ("", "bot@corp.example"),
+        ("Bot", "not-an-address"),
+        ("Bo<t", "bot@corp.example"),
+    ] {
+        assert!(
+            with(name, email, SignoffSetting::Auto).validate().is_err(),
+            "{name:?} {email:?} must be refused"
+        );
+    }
+    // It survives a round trip through the config file.
+    let saved = with("Bot", "bot@corp.example", SignoffSetting::Always);
+    let back: WorkersConfig = toml::from_str(&toml::to_string(&saved).unwrap()).unwrap();
+    assert_eq!(back, saved);
+}
+
+/// KT-1750 — the OS-junk list of Settings > Workers: the three systems' files by
+/// default, kept by an older `[workers]` table, and only names git's local
+/// exclude reads as names are accepted.
+#[test]
+fn the_os_junk_patterns_default_and_are_validated() {
+    let defaults = WorkersConfig::default();
+    assert_eq!(
+        defaults.os_junk_patterns,
+        [".DS_Store", "Thumbs.db", "desktop.ini", "._*"]
+    );
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert_eq!(partial.os_junk_patterns, defaults.os_junk_patterns);
+    let with = |patterns: &[&str]| WorkersConfig {
+        os_junk_patterns: patterns.iter().map(|p| p.to_string()).collect(),
+        ..Default::default()
+    };
+    assert!(with(&[]).validate().is_ok(), "an empty list means none");
+    assert!(with(&[".DS_Store", "*.swp", "._*"]).validate().is_ok());
+    for bad in [
+        "", " ", "a b", "#x", "!x", "a/b", "dir/", "a\\b", "[ab]", "a?", "a*b*", "*", "**", ".*.*",
+    ] {
+        assert!(with(&[bad]).validate().is_err(), "`{bad}` must be refused");
+    }
+    assert!(with(&[&"x".repeat(101)]).validate().is_err());
+    let too_many = WorkersConfig {
+        os_junk_patterns: (0..51).map(|i| format!("junk{i}")).collect(),
+        ..Default::default()
+    };
+    assert!(too_many.validate().is_err());
+}
+
+/// KT-1742 — the lane warm-up entry of Settings > Workers: validated like the
+/// rest, stored normalized, published to the lane code at once, and what was
+/// saved is what a reload reads back.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_lane_warm_settings_are_validated_stored_and_published() {
+    use crate::models::LaneWarmConfig;
+    let _restore =
+        crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
+    let data = tempfile::tempdir().unwrap();
+    crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+    let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+    let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
+    let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+    let with = |lane_warm: LaneWarmConfig| WorkersConfig {
+        lane_warm,
+        ..Default::default()
+    };
+    let (status, body) = workers_reply(
+        save_workers_config(
+            State(state.clone()),
+            Json(with(LaneWarmConfig {
+                seed_alignment: Some(false),
+                first_build_command: Some("  composer install  ".into()),
+                ..LaneWarmConfig::default()
+            })),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["data"]["lane_warm"]["first_build_command"], "composer install",
+        "a stored command has no stray blanks"
+    );
+    let reloaded = config::load().await.unwrap().expect("a saved config");
+    assert_eq!(reloaded.workers.lane_warm.seed_alignment, Some(false));
+    assert_eq!(
+        reloaded.workers.lane_warm.first_build_command.as_deref(),
+        Some("composer install")
+    );
+
+    for (label, bad) in [
+        (
+            "a zero bound",
+            LaneWarmConfig {
+                first_build_timeout_min: Some(0),
+                ..LaneWarmConfig::default()
+            },
+        ),
+        (
+            "a variable the lane owns",
+            LaneWarmConfig {
+                compiler_env: Some(vec!["KRONN_PORT=1".into()]),
+                ..LaneWarmConfig::default()
+            },
+        ),
+    ] {
+        let (status, body) =
+            workers_reply(save_workers_config(State(state.clone()), Json(with(bad))).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {body}");
+        assert_eq!(
+            state.config.read().await.workers.lane_warm.seed_alignment,
+            Some(false),
+            "{label}: a refused value leaves the saved one"
+        );
+    }
+    // The snapshot is process-wide: leave it as other tests expect it.
+    crate::core::task_worker_lane_settings::set_global(&LaneWarmConfig::default());
+}
+
+/// KT-1748 — the managed worktree roots are a validated Settings > Workers list:
+/// empty by default, absolute paths only, never `..` nor the filesystem root.
+#[test]
+fn managed_worktree_roots_are_validated_absolute_paths() {
+    assert!(WorkersConfig::default().managed_worktree_roots.is_empty());
+    let partial: WorkersConfig = toml::from_str("review_rounds_unlimited = true").unwrap();
+    assert!(partial.managed_worktree_roots.is_empty());
+
+    let with = |roots: &[&str]| WorkersConfig {
+        managed_worktree_roots: roots.iter().map(|root| root.to_string()).collect(),
+        ..Default::default()
+    };
+    assert!(with(&["/srv/lanes", "/Users/me/.kronn/autocode-worktrees"])
+        .validate()
+        .is_ok());
+    for bad in ["", "relative/lane", "/srv/../etc", "/", "/srv/\0lane"] {
+        assert!(with(&[bad]).validate().is_err(), "{bad:?} must be refused");
+    }
+    let too_many: Vec<String> = (0..=crate::models::MAX_MANAGED_WORKTREE_ROOTS)
+        .map(|n| format!("/srv/lane-{n}"))
+        .collect();
+    assert!(WorkersConfig {
+        managed_worktree_roots: too_many,
+        ..Default::default()
+    }
+    .validate()
+    .is_err());
+
+    // A hand-edited config.toml never widens the managed set past valid paths.
+    let hand_edited = with(&["/srv/ok", "relative", "/", "/a/../b"]);
+    assert_eq!(
+        crate::models::effective_managed_worktree_roots(&hand_edited.managed_worktree_roots),
+        vec![std::path::PathBuf::from("/srv/ok")]
+    );
+    let round_trip: WorkersConfig =
+        toml::from_str(&toml::to_string(&with(&["/srv/ok"])).unwrap()).unwrap();
+    assert_eq!(
+        round_trip.managed_worktree_roots,
+        vec!["/srv/ok".to_string()]
+    );
+}

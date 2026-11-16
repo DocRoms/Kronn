@@ -31,7 +31,7 @@ inference or an actual rendered image. The edit scenario checks the exact file
 bytes. List and resume checks prove the intended handler was reached, not the
 semantic completeness of the final prose. Create/update checks inspect persisted
 values, so a model claiming success after changing the wrong field fails.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:292#tempdir]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:301#tempdir]
 [src: file: backend/src/api/agent_quick_prompt_bench.rs:139-164#campaign_state]
 [src: file: backend/src/api/agent_quick_prompt_bench.rs:329-358#KronnToolExecutor]
 
@@ -40,7 +40,7 @@ Scenarios, in order: list accessible Quick Prompts and required variables; launc
 only “Résumé”'s description; enqueue an image using the saved connection; read and
 edit `status.txt` while preserving its newline; inspect pending background work
 and resumptions. Exact prompts are in the benchmark source.
-[src: file: backend/src/api/agent_quick_prompt_bench.rs:316-324#scenario]
+[src: file: backend/src/api/agent_quick_prompt_bench.rs:325-333#scenario]
 
 ## Observed action success
 

@@ -29,10 +29,47 @@ Failure modes, all ending in a (cold) dispatch:
   (`⚠️ préchauffage échoué : <cause>`) and the worker still starts;
 - on macOS a `.S` source (`aws-lc-sys`) fails under the lane's sandbox with
   `unable to make temporary file: Operation not permitted` unless clang keeps its
-  temp files in the lane: the lane environment sets `CFLAGS=-save-temps=obj`
-  (see `docs/operations/worktree-build-artifacts.md`, KT-1736);
+  temp files in the lane: the lane environment sets
+  `CFLAGS_aarch64_apple_darwin` / `CFLAGS_x86_64_apple_darwin` to
+  `-save-temps=obj` (see `docs/operations/worktree-build-artifacts.md`, KT-1736);
+- **the seed must carry the same value** (KT-1742): `cc` fingerprints the C flags
+  it read, so a main-checkout target built without them is invalid for
+  `aws-lc-sys`, `libsqlite3-sys` and their ~12 dependents and the warm-up runs into
+  its bound. This holds for any project that builds C through `cc`, so Kronn does
+  not rely on a file of the project: before cloning, it checks a stamp beside the
+  project's own seed (`<target>/.kronn-seed-env.json`: the lane's compiler
+  environment, the main checkout's `Cargo.lock` hash) and, when it is missing or
+  differs, runs ONE `cargo build --locked --offline` in the seed's own target with
+  that environment (outside the sandbox, behind the gate), writes the stamp, then
+  clones. A held Cargo lock (the owner is building) is waited for, bounded, and then
+  reported as `aligned: false` — the lane falls back to the current behaviour. Every
+  such outcome is in `lane_warm_start` (`seed.aligned`, per-crate `crates[]`). The
+  environment, the alignment switch, the first-build command and its bound are
+  settings with detected defaults: Settings > Workers (global) and the project card
+  (override). Even with an aligned seed the `kronn` crate's two compiles take ~33 min
+  at load 14 (measured in `docs/operations/worktree-build-artifacts.md`), which is
+  why the default bound is 60 min, not 30;
+- the warm-up is not Kronn-specific: every Rust workspace root found from the
+  manifests (any depth up to four, e.g. `redis-flush/Cargo.toml`) is warmed, seeded
+  from its own target directory (`cargo metadata`, run in the main checkout) and
+  aligned; a project with no Rust root is not warmed by Cargo (the record says why)
+  and may declare a first-build command instead (`composer install`, `npm ci`).
+  That command executes the worktree's own scripts, which the worker writes, so it
+  runs **only under the lane's OS sandbox** (the same runner as the cargo first
+  build; a runner that does not confine is refused by the engine, a host with no
+  sandbox refuses it: `lane_warm_start` says so, nothing is marked warm). It has no
+  network there;
+- what a root did is remembered **per root** (`.kronn-warm.json` `roots[]`, keyed on
+  the root's `Cargo.lock` hash and the compiler environment): a root that built stays
+  built when another fails, and a root that FAILED is cached beside its seed
+  (`<target>/.kronn-warm-failures.json`) and not rebuilt by a relaunch or by the next
+  lane until its lock or the environment changes — Kronn's own `desktop/src-tauri`
+  needs system libraries a host may lack, and used to be rebuilt by every lane. A
+  timeout, a cancellation or a build that never started is never cached. A project
+  can list the roots to warm (project card, `rust_roots`; default every detected
+  root);
 - a queue that does not drain is given up after
-  `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 30 min) and the worker
+  `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` (default 60 min) and the worker
   starts with the target it has;
 - a backend restart during the warm-up is the ordinary boot recovery
   (`ResumeProvisioning`): the saga skips what is persisted and warms again; the
@@ -42,9 +79,12 @@ Failure modes, all ending in a (cold) dispatch:
 
 ## Seeding rules
 
-The only source is the main checkout's `target/debug`, and only when the lane
-uses the host's `CARGO_HOME`. **A lane target (`target/wt-*`) is never a
-source.** Each worker's sandbox may write its own lane target (and the
+The only sources are the main checkout's own targets — one per Rust root, the
+`target_directory` that `cargo metadata` gives for the root's directory **in the
+main checkout** (KT-1742; not a hard-coded `<repo>/target`) — and only when the
+lane uses the host's `CARGO_HOME`. The lane has one `debug/`: the first source is
+cloned whole, further ones are merged into it entry by entry. **A lane target
+(`target/wt-*`) is never a source.** Each worker's sandbox may write its own lane target (and the
 `.kronn-warm.json` marker in it), and Kronn runs the seeded lane's first build
 OUTSIDE the sandbox: a worker that planted a proc-macro `.dylib` with a newer
 mtime in its `debug/` (Cargo trusts mtimes, not contents) would have it loaded
@@ -242,7 +282,7 @@ The clone itself takes 14-38 s and no disk space.
 | --- | --- | --- |
 | `KRONN_WORKER_CARGO_JOBS` | performance cores / 2 | `CARGO_BUILD_JOBS` of a worker, and the budget of its test and build tools (KT-1634) |
 | `KRONN_WORKER_MAX_CONCURRENT_BUILDS` | 2 | first builds running at once on this backend process |
-| `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 1800 | bound of the first build and of its queue wait |
+| `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` | 3600 (was 1800 until KT-1742) | bound of the first build and of its queue wait; used only when neither the project's nor the global `first_build_timeout_min` is set (project > global > this variable > default) |
 | `KRONN_WORKER_PRIVATE_CARGO_HOME` | unset | `1` keeps KT-1246's lane-private `CARGO_HOME` (no seeding) |
 
 ## Where the warming time goes (KT-1637)
@@ -289,7 +329,7 @@ check, so whatever `45.8 min - 6.8 min - queued_ms - clone_ms` leaves is not
 explained by that row, and it is not attributable to a step: the new steps are
 what cover it from now on. Reading that row is the only way to say whether the
 39 minutes were the gate wait (`queued_ms`, bounded by
-`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, 1800 s by default) or an uninstrumented
+`KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS`, 3600 s by default since KT-1742, 1800 s when that row was written) or an uninstrumented
 gap; this was not done from a sandboxed worker, which cannot read the Kronn
 database. Run the execution's `lane_warm_start` event through
 `WarmStartRecord::timed_steps` (`backend/src/core/task_worker_lane_warm.rs`) and

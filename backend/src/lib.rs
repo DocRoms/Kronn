@@ -1753,6 +1753,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_workers_config).post(api::setup::save_workers_config),
         )
         .route(
+            "/api/config/workers/first-build-env-secs",
+            get(api::setup::get_first_build_env_secs),
+        )
+        .route(
             "/api/config/scan-depth",
             get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
         )
@@ -2215,6 +2219,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/projects/{id}/workspace",
             get(api::projects::get_project_workspace).put(api::projects::set_project_workspace),
+        )
+        // KT-1750 — what the repository says about who commits and whether
+        // to sign off, and what Kronn commits with.
+        .route(
+            "/api/projects/{id}/commit-policy",
+            get(api::projects::commit_policy::get),
         )
         // 0.8.6 (#27) — autocomplete picker source for the
         // linked-repos drawer. Returns other Kronn-known projects

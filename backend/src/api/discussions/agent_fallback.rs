@@ -41,6 +41,10 @@ struct Plan {
     surface: Surface,
     tier: ModelTier,
     hops: u32,
+    /// KT-1758 — the refusal's own words, for a launch the engine refused: the
+    /// room says why the agent could not take the worker, not only that it
+    /// could not.
+    detail: Option<String>,
 }
 
 enum Surface {
@@ -192,8 +196,13 @@ async fn plan(
     let (until, selection) = state
         .db
         .with_conn(move |conn| {
-            let until =
-                fallback::set_cooldown(conn, &failing_for_db, trigger, announced, now)?;
+            // A launch refusal is about this agent as a task worker, not about
+            // its provider: no cooldown, so its rooms keep using it.
+            let until = if trigger.is_launch_stop() {
+                now
+            } else {
+                fallback::set_cooldown(conn, &failing_for_db, trigger, announced, now)?
+            };
             let cooling = fallback::cooling_lookup(conn, now)?;
             let lookup = |candidate: &AgentType| {
                 cooling
@@ -227,8 +236,15 @@ async fn plan(
         surface,
         tier,
         hops,
+        detail: trigger
+            .is_launch_stop()
+            .then(|| response.chars().take(LAUNCH_REFUSAL_DETAIL_CHARS).collect()),
     })
 }
+
+/// KT-1758 — how much of a refusal the rooms quote. The native ACP refusal is
+/// about 230 characters; the whole sentence is the point.
+pub(crate) const LAUNCH_REFUSAL_DETAIL_CHARS: usize = 600;
 
 pub(super) fn system_notice(
     content: String,
@@ -321,8 +337,17 @@ pub(crate) async fn intercept_failed_turn_among(
             settle_worker_failure(state, job, response, trigger).await;
             match apply_worker(state, job, &plan).await {
                 Ok(()) => true,
+                // Moved by someone else since the dispatch failed (the quota
+                // return): the execution is theirs now, nothing is parked.
+                Err(error) if crate::api::orchestration::is_execution_moved_on(&error) => {
+                    tracing::info!(dispatch_job_id = %job.id, "agent fallback skipped: {error}");
+                    true
+                }
                 Err(error) => {
                     tracing::warn!(dispatch_job_id = %job.id, "agent fallback of a task worker failed: {error}");
+                    // The settlement held the interruption back for the link
+                    // that was to take over; none did.
+                    park_undelivered_worker(state, job).await;
                     false
                 }
             }
@@ -376,6 +401,38 @@ pub(crate) async fn worker_after_quota_among(
             post_stop(state, job, &plan, why).await;
             Ok(false)
         }
+    }
+}
+
+/// KT-1758 — a task worker whose agent was refused at launch for good (a
+/// native ACP agent as a task worker, a missing binary): the agent's chain, the
+/// next link after the one that was refused. `Ok(true)`: the execution moved on.
+/// `Ok(false)`: nothing in the chain can take it (the stop is said in the
+/// caller's own words, in both rooms).
+///
+/// `trigger` says which stop it is, which is what the room line says:
+/// [`Trigger::LaunchRefused`] for a refusal, [`Trigger::LaunchUnavailable`] for
+/// retries that ran out.
+pub(crate) async fn worker_after_launch_refusal_among(
+    state: &AppState,
+    job: &AgentDispatchJob,
+    trigger: Trigger,
+    reason: &str,
+    usable: Option<Vec<AgentType>>,
+) -> anyhow::Result<bool> {
+    debug_assert!(trigger.is_launch_stop());
+    let Some(plan) = plan(state, job, trigger, reason, usable).await else {
+        return Ok(false);
+    };
+    if !matches!(plan.surface, Surface::Worker { .. }) {
+        return Ok(false);
+    }
+    match &plan.selection {
+        Selection::Switch(_) => {
+            apply_worker(state, job, &plan).await?;
+            Ok(true)
+        }
+        Selection::Stop { .. } => Ok(false),
     }
 }
 
@@ -603,7 +660,7 @@ async fn settle_worker_failure(
     let settled = state
         .db
         .with_conn(move |conn| {
-            super::runtime::persist_dispatch_settlement(
+            super::runtime::persist_dispatch_settlement_handing_over(
                 conn,
                 &id,
                 &discussion_id,
@@ -616,6 +673,21 @@ async fn settle_worker_failure(
         .await;
     if let Err(error) = settled {
         tracing::warn!(dispatch_job_id = %job.id, "unable to settle the dispatch before its fallback: {error}");
+    }
+}
+
+/// KT-1758 — no link took the worker over: the execution is parked and the
+/// principal told, which [`settle_worker_failure`] held back for the link.
+async fn park_undelivered_worker(state: &AppState, job: &AgentDispatchJob) {
+    let (id, discussion_id) = (job.id.clone(), job.discussion_id.clone());
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            super::runtime::interrupt_undelivered_after_failure(conn, &id, &discussion_id)
+        })
+        .await
+    {
+        tracing::warn!(dispatch_job_id = %job.id, "unable to park the worker no link took over: {error}");
     }
 }
 
@@ -632,29 +704,47 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
     else {
         anyhow::bail!("not a worker switch");
     };
-    let mut target = crate::models::MessageTarget::agent(link.agent.clone());
+    // KT-1749 — an HTTP link is a `discussion_agent`, a host CLI an `agent`.
+    let mut target = fallback::task_worker_target(&link.agent);
     target.tier = Some(plan.tier);
     let id = execution_id.clone();
     let origin = plan.origin.clone();
+    let failed_dispatch = job.id.clone();
     let profile_id = state
         .db
         .with_conn(move |conn| {
+            let execution = crate::db::orchestration::get_task_execution(conn, &id)?;
+            // KT-1758 — the execution may have been moved (the quota return)
+            // since this dispatch failed: it is then not this hand-over's, and
+            // the chain's memory of where it started is not touched either.
+            if execution.as_ref().is_some_and(|execution| {
+                execution.dispatch_job_id.as_deref() != Some(failed_dispatch.as_str())
+            }) {
+                return Err(
+                    crate::api::orchestration::ExecutionMovedOn { execution_id: id }.into(),
+                );
+            }
             // Where the worker started: the chain it keeps walking is this agent's.
             fallback::note_execution_origin(conn, &id, &origin)?;
-            Ok(crate::db::orchestration::get_task_execution(conn, &id)?
-                .and_then(|execution| execution.worker_profile_id))
+            Ok(execution.and_then(|execution| execution.worker_profile_id))
         })
         .await?;
+    // A launch refusal has no "until": the agent is not unavailable, it cannot
+    // be this kind of worker.
+    let until = (!plan.trigger.is_launch_stop()).then_some(plan.until);
     let notice = fallback::notice(
         &plan.failing,
         plan.from_model.as_deref(),
         plan.trigger,
-        Some(plan.until),
+        until,
         link,
         plan.tier,
     );
-    let notice = format!("Task worker execution {execution_id}: {notice}");
-    crate::api::orchestration::reassign_native_execution_as(
+    let notice = match &plan.detail {
+        Some(detail) => format!("Task worker execution {execution_id}: {notice} — {detail}"),
+        None => format!("Task worker execution {execution_id}: {notice}"),
+    };
+    if let Err(error) = crate::api::orchestration::reassign_native_execution_for_dispatch(
         state,
         execution_id,
         crate::models::CampaignWorkerSelection {
@@ -663,11 +753,25 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
             profile_id,
         },
         &format!("automatic agent fallback: {notice}"),
-        crate::api::orchestration::ReassignCause::QuotaFallback {
-            reset_at: Some(plan.until),
-        },
+        crate::api::orchestration::ReassignCause::QuotaFallback { reset_at: until },
+        Some(&job.id),
     )
-    .await?;
+    .await
+    {
+        // KT-1758 — the execution moved on meanwhile (the quota return won):
+        // nothing was changed and nothing is said.
+        if crate::api::orchestration::is_execution_moved_on(&error) {
+            return Err(error);
+        }
+        // KT-1749 — a refused reassignment is never only a log line: the
+        // execution stays on its worker and both rooms are told why.
+        let why = format!(
+            "{} could not take over: {error}",
+            fallback::display_name(&link.agent)
+        );
+        post_stop(state, job, plan, &why).await;
+        return Err(error);
+    }
     let message = crate::api::orchestration::orchestrator_message(
         format!("agent-fallback:{}", job.id),
         notice,
@@ -730,33 +834,59 @@ pub(crate) async fn offer_to_escalated_execution_among(
 
 /// A chain is configured and nothing in it can take over: say why, where the
 /// failure is read.
+///
+/// KT-1749 — for a task worker the reason goes to BOTH rooms, the principal's
+/// (the parent) and the worker's own (the dispatch's discussion), in the
+/// principal room's language: the execution stays where it is and nobody has to
+/// read a log to learn why no fallback took over.
 async fn post_stop(state: &AppState, job: &AgentDispatchJob, plan: &Plan, why: &str) {
-    let content = fallback::stop_notice(&plan.failing, plan.trigger, why);
-    let (room, message) = match &plan.surface {
-        Surface::Room => (
-            job.discussion_id.clone(),
-            system_notice(content, &plan.failing, plan.tier, &job.trigger_message_id),
-        ),
+    let mut posts: Vec<(String, DiscussionMessage)> = Vec::new();
+    match &plan.surface {
+        Surface::Room => {
+            let content = fallback::stop_notice(&plan.failing, plan.trigger, why);
+            posts.push((
+                job.discussion_id.clone(),
+                system_notice(content, &plan.failing, plan.tier, &job.trigger_message_id),
+            ));
+        }
         Surface::Worker {
             parent_room,
             execution_id,
-        } => (
-            parent_room.clone(),
-            crate::api::orchestration::orchestrator_message(
-                format!("agent-fallback-stop:{}", job.id),
-                format!("Task worker execution {execution_id}: {content}"),
-            ),
-        ),
-    };
-    if let Err(error) = state
-        .db
-        .with_conn(move |conn| {
-            crate::db::discussions::insert_message(conn, &room, &message)?;
-            Ok(())
-        })
-        .await
-    {
-        tracing::warn!(dispatch_job_id = %job.id, "agent fallback stop notice could not be persisted: {error}");
+        } => {
+            let room = parent_room.clone();
+            let lang = state
+                .db
+                .with_read_conn(move |conn| Ok(crate::db::discussions::room_lang(conn, &room)))
+                .await
+                .unwrap_or_default();
+            let content = fallback::stop_notice_in(&plan.failing, plan.trigger, why, lang);
+            let prefix = lang.pick("Exécution du worker de tâche", "Task worker execution");
+            posts.push((
+                parent_room.clone(),
+                crate::api::orchestration::orchestrator_message(
+                    format!("agent-fallback-stop:{}", job.id),
+                    format!("{prefix} {execution_id}: {content}"),
+                ),
+            ));
+            if job.discussion_id != *parent_room {
+                let mut message =
+                    system_notice(content, &plan.failing, plan.tier, &job.trigger_message_id);
+                message.id = format!("agent-fallback-stop-worker:{}", job.id);
+                posts.push((job.discussion_id.clone(), message));
+            }
+        }
+    }
+    for (room, message) in posts {
+        if let Err(error) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_message(conn, &room, &message)?;
+                Ok(())
+            })
+            .await
+        {
+            tracing::warn!(dispatch_job_id = %job.id, "agent fallback stop notice could not be persisted: {error}");
+        }
     }
 }
 

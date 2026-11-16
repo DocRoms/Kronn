@@ -12,13 +12,13 @@ the resolved npx executable and arguments. The version comes from that command's
 successful `--version` output; failed or empty output leaves it unknown. Settings
 shows the command and explicitly warns about npx fallback. Refreshing detection
 also clears cached fallback versions.
-[src: file: backend/src/models/setup.rs:1420-1423#fallback_command]
+[src: file: backend/src/models/setup.rs:1784-1787#fallback_command]
 [src: file: backend/src/agents/mod.rs:626-653#fallback_command]
 [src: file: backend/src/agents/mod.rs:1055-1125#probe_npx_invocation]
 [src: file: backend/src/agents/mod.rs:1420-1447#version_from_output]
 [src: file: backend/src/agents/mod.rs:367-374#detect_all_cached]
 [src: file: backend/src/agents/mod.rs:501-514#invalidate_detect_cache]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:1199-1212#fallback_command]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:1211-1224#fallback_command]
 
 A direct CLI spawn failure can also trigger npx. The launch records the fallback
 command and measured version in runtime provenance and emits a warning log;

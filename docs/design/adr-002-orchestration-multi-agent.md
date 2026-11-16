@@ -88,7 +88,7 @@ composition and one genuinely new capability (protected merge), not reinvention.
    anywhere in `backend/src`, and the git command runner still denies merge/rebase
    `[src: file: backend/src/api/git_ops.rs:1592-1601]`. Conflict detection + validation gate + cleanup for
    merge-back had to be built from scratch; the protected merge now lives in `core::worktree`
-   `[src: file: backend/src/core/worktree.rs:2487-2527#build_candidate]`.
+   `[src: file: backend/src/core/worktree.rs:2522-2562#build_candidate]`.
 5. **Versioned Brief + DeliveryManifest + ReviewDecision contracts** — everything at the discussion
    layer is Markdown today; the only structured, persisted message payload is `kronn-plan-action`.
 6. **Child worktree pinned at a base SHA + lineage columns** — the schema has no parent/base-SHA/lineage
@@ -311,11 +311,11 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
   while the human has uncommitted edits in the main checkout.
 - **Base SHA** — the target rev resolved server-side at provisioning to a **committed** SHA
   (`resolve_commit`, default the parent workspace's target branch tip,
-  `[src: file: backend/src/core/worktree.rs:2312-2333#resolve_commit]`) and **pinned** into `task_executions.base_sha`. The child is
+  `[src: file: backend/src/core/worktree.rs:2352-2373#resolve_commit]`) and **pinned** into `task_executions.base_sha`. The child is
   created from this exact SHA, not from a moving branch tip — and never from a dirty working tree,
   which is precisely why parent cleanliness is an apply-time concern, not a provisioning one. HEAD of
   the fresh child is verified to equal `base_sha` after creation
-  (`verify_worktree_head`, `[src: file: backend/src/core/worktree.rs:3137-3150#verify_worktree_head]`).
+  (`verify_worktree_head`, `[src: file: backend/src/core/worktree.rs:3313-3326#verify_worktree_head]`).
 - **Child branch + worktree** — a managed worktree under `.kronn/worktrees/`, created with
   `git worktree add -b kronn/task/<KT-ref>-<exec-short> <path> <base_sha>` (the SHA-arg variant the
   managed creator must gain, §0-Adapt). The branch carries a short **execution** id, not a review
@@ -335,7 +335,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      throwaway integration worktree/branch at `candidate_target_sha` (reusing the managed-worktree
      creator + teardown). Merge the child branch there (`--no-ff`). As implemented, no throwaway
      worktree is created: the pinned parent tip is merged into the child branch inside the child's own
-     worktree, and a conflicting merge is aborted `[src: file: backend/src/core/worktree.rs:2487-2527#build_candidate]`.
+     worktree, and a conflicting merge is aborted `[src: file: backend/src/core/worktree.rs:2522-2562#build_candidate]`.
      A conflict ends the phase → nothing is touched on the parent, the round is handed
      back to the worker with the conflict as feedback (matches "échec de merge → rien n'est clôturé,
      le worker est réactivé"). The successful merge commit is the **candidate** — pin its SHA as
@@ -345,11 +345,11 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
   3. **Apply phase — guarded fast-forward.** No advisory history lease is taken (the original design
      planned one). The mandatory backup ref is written earlier: `write_backup_ref` writes and reads back
      `refs/kronn-backup/<task-id>-<exec-short>` at `candidate_target_sha` before the candidate is built
-     `[src: file: backend/src/core/worktree.rs:2456-2484#write_backup_ref]`. `fast_forward_target_to`
+     `[src: file: backend/src/core/worktree.rs:2491-2519#write_backup_ref]`. `fast_forward_target_to`
      verifies that the parent tip is **still exactly `candidate_target_sha`** (a compare-and-swap) and
-     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:3097-3117#fast_forward_target_to]`
+     that the parent worktree is **clean** `[src: file: backend/src/core/worktree.rs:3273-3293#fast_forward_target_to]`
      (a target no worktree has checked out has no tree to keep clean: it advances by a `git update-ref`
-     compare-and-swap `[src: file: backend/src/core/worktree.rs:3042-3094#update_ref_target_to]`).
+     compare-and-swap `[src: file: backend/src/core/worktree.rs:3218-3270#update_ref_target_to]`).
   4. Advance the parent to `candidate_merge_sha` **fast-forward only** — a deterministic, short,
      verifiable mutation (the candidate already contains `candidate_target_sha` as an ancestor).
   5. **Never** `stash`, and **never** silently `update-ref` a checked-out branch. If the parent has
@@ -357,7 +357,7 @@ Integration is only ever toward an **explicitly pinned** target. No implicit bra
      rebuilt on the new tip (→ `Integrating`), never forced through.
 - **Cleanup** — on `Done`, the child worktree is torn down
   (`remove_integrated_task_worktree`, which ends in `remove_discussion_worktree`,
-  `[src: file: backend/src/core/worktree.rs:4062-4130#remove_integrated_task_worktree]`) and the sub-discussion
+  `[src: file: backend/src/core/worktree.rs:4220-4288#remove_integrated_task_worktree]`) and the sub-discussion
   archived. On `Cancelled`/`Failed`, the child branch is preserved for inspection and the worktree
   removed only if clean.
 
@@ -420,15 +420,15 @@ restart. Boot first quiesces due dispatches and moves non-terminal executions to
 same SQLite boundary, then classifies the checkpoint against discussions, worker availability,
 workspace ownership and the real Git refs. A pending decision survives a second crash and is consumed
 only by an explicit guarded resume `[src: file: backend/src/api/orchestration.rs:296-396#reconcile_at_boot]`
-`[src: file: backend/src/db/orchestration.rs:8312-8383#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
+`[src: file: backend/src/db/orchestration.rs:8375-8446#set_execution_recovery]`. The runtime watchdog uses four independent clocks — total
 duration, activity, review wait and human wait — so an acknowledged human gate is never mistaken for a
-dead worker `[src: file: backend/src/api/orchestration.rs:866-1037#start_resilience_watchdog]`.
+dead worker `[src: file: backend/src/api/orchestration.rs:1043-1214#start_resilience_watchdog]`.
 
 Cancellation and reassignment preserve the same lineage. Cancellation first cancels live processes and
 due dispatches, then applies the persisted cleanup policy; `remove_if_clean` removes only the proven
 managed checkout and preserves its branch. Reassignment keeps the task, sub-discussion, worktree,
 manifests, findings and SHAs while recording the exact typed worker identity and assignment generation
-`[src: file: backend/src/api/orchestration.rs:14469-14622#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9571-9617#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:15009-15198#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:9229-9536#reassign_execution_worker]`. Boot also
+`[src: file: backend/src/api/orchestration.rs:14513-14666#cancel_execution]` `[src: file: backend/src/db/orchestration.rs:9634-9680#cancel_execution_tree]` `[src: file: backend/src/api/orchestration.rs:15062-15251#reassign_execution]` `[src: file: backend/src/db/orchestration.rs:9292-9599#reassign_execution_worker]`. Boot also
 collects `managed` workspace rows orphaned by `ON DELETE SET NULL`; dirty or unverifiable worktrees are
 left visible for human action rather than silently deleted `[src: file: backend/src/api/orchestration.rs:388-485#list_orphaned_managed]`
 `[src: file: backend/src/db/discussion_workspaces.rs:439-464]`.
@@ -463,7 +463,7 @@ and/or a `kronn-delivery` fence):
 ```
 
 **ReviewDecision v1** (principal → backend, via a new `task_exec_review` MCP tool; reuses the
-`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4422-4445#GateDecision]`):
+`GateDecision` enum semantics `[src: file: backend/src/workflows/runner.rs:4360-4383#GateDecision]`):
 ```json
 { "version":"1", "task_ref":"KT-142", "decision":"approve|request_changes",
   "comment":"<required when request_changes>",
@@ -561,8 +561,8 @@ Explicitly deferred, to keep V1 = *one task → one worker → one sub-discussio
   explicit resume/cancel/reassign, independent timeout clocks and orphan-managed-workspace collection**
   is implemented by **KT-322** `[src: file: backend/src/api/orchestration.rs:293-393#reconcile_at_boot]`
   `[src: file: backend/src/api/orchestration.rs:866-1037#start_resilience_watchdog]`
-  `[src: file: backend/src/api/orchestration.rs:14469-14622#cancel_execution]`
-  `[src: file: backend/src/api/orchestration.rs:15009-15198#reassign_execution]`.
+  `[src: file: backend/src/api/orchestration.rs:14513-14666#cancel_execution]`
+  `[src: file: backend/src/api/orchestration.rs:15062-15251#reassign_execution]`.
 - **Actor-kind schema change** (`backend`/`system`) is a shared prerequisite, surfaced in KT-317.
 - The ADR began as a decision record; KT-317–KT-322 now implement its durable aggregate,
   provisioning, review, protected integration, coordination and recovery boundaries.

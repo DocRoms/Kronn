@@ -93,8 +93,21 @@ fn a_clean_worktree_needs_no_checkpoint() {
 }
 
 #[test]
+fn a_checkpoint_carries_no_sign_off_in_a_project_that_does_not_sign() {
+    let repo = repo();
+    std::fs::write(repo.path().join("a.txt"), "one\ntwo\n").unwrap();
+    checkpoint_worktree(repo.path(), "KT-1750", secs(120), secs(120), None)
+        .unwrap()
+        .expect("a dirty worktree is checkpointed");
+    let message = git(repo.path(), &["log", "-1", "--format=%B"]);
+    assert!(!message.contains("Signed-off-by"), "{message}");
+}
+
+#[test]
 fn a_dirty_worktree_is_checkpointed_as_a_signed_wip_commit() {
     let repo = repo();
+    // A project that signs off (KT-1750: the sign-off follows the project).
+    git(repo.path(), &["config", "kronn.signoff", "true"]);
     std::fs::write(repo.path().join("a.txt"), "one\ntwo\n").unwrap();
     std::fs::write(repo.path().join("new.txt"), "fresh\n").unwrap();
     let before = git(repo.path(), &["rev-parse", "HEAD"]);

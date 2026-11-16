@@ -55,13 +55,13 @@ Every git command Kronn runs on a worker's worktree is built by
   there (`pre-push`)
   ([src: file: backend/src/core/lane_git.rs:838-841#git_keeping_owner_hooks]); from a
   managed worktree it is pinned and hook-less like the rest
-  ([src: file: backend/src/api/git_ops.rs:1764-1767#run_git_push]), and the token-bearing
+  ([src: file: backend/src/api/git_ops.rs:1756-1759#run_git_push]), and the token-bearing
   authenticated push therefore reads the registered repository's configuration
-  only ([src: file: backend/src/api/git_ops.rs:1727-1731#authenticated_push_command]).
+  only ([src: file: backend/src/api/git_ops.rs:1719-1723#authenticated_push_command]).
   A task worker never pushes (only a human does, from the UI).
 
 Call sites: the commit/merge commit, staging and identity of `task_exec_commit` /
-`git_commit` ([src: file: backend/src/api/git_ops.rs:1316-1325#run_commit_command]),
+`git_commit` ([src: file: backend/src/api/git_ops.rs:1295-1305#run_commit_command]),
 the candidate merge, its abort and its commits
 ([src: file: backend/src/core/worktree.rs:2537-2547#build_candidate_with_hooks]), the doc
 citations settling (`git checkout`, `add`, `grep`, `show`, `diff`), the worktree
@@ -91,7 +91,7 @@ Also pinned, because a worker's worktree can be their argument:
   redirected pointer is refused before git reads it), in the owner's checkout plain
   git. Every lane command also sets `GIT_NO_LAZY_FETCH=1`, so a promisor remote
   the worker wrote can never make a read fetch with its transport program
-  ([src: file: backend/src/core/worktree.rs:2317-2322#resolve_commit]). The ratchet of
+  ([src: file: backend/src/core/worktree.rs:2352-2357#resolve_commit]). The ratchet of
   the guard counts DIRECT spawns only: a plain helper handed a worktree path is
   not seen, so such a helper belongs in the function list of the guard test;
 - `gh` and `glab` (`host_cli_command`: `gh pr create` runs `git status` itself)
@@ -146,7 +146,7 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
 - a gitlink is staged by its sha (`update-index --cacheinfo 160000,<sha>,<path>`,
   the sha read through the submodule's own pinned lane), never with `git add`, which
   would compare the submodule's working tree
-  ([src: file: backend/src/api/git_ops.rs:1175#stage_gitlink_by_sha]);
+  ([src: file: backend/src/api/git_ops.rs:1171-1176#stage_gitlink_by_sha]);
 - a directory inside a materialised submodule (`<wt>/lib`, `<wt>/lib/pkg`) is the
   SUBMODULE's own pinned repository (`--git-dir=<its git directory>`,
   `--work-tree=<it>`), vouched for by the enclosing lane's registration and the check
@@ -182,7 +182,7 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
   directory;
 - Kronn never stages a NEW embedded repository a worker created (it would become
   a gitlink whose configuration the worker wrote)
-  ([src: file: backend/src/api/git_ops.rs:1255#refuse_new_embedded_repository]).
+  ([src: file: backend/src/api/git_ops.rs:1252-1256#refuse_new_embedded_repository]).
 
 And the worker cannot write a nested `.git` in the first place, see below.
 
@@ -221,7 +221,7 @@ cover it.
 - Claude's task-worker settings carry `sandbox.filesystem.denyWrite` for the
   pointer and for each existing nested `.git` (and its content), and
   `Edit/Write/MultiEdit/NotebookEdit` permission denies
-  ([src: file: backend/src/agents/runner.rs:13219-13229#claude_task_worker_settings]);
+  ([src: file: backend/src/agents/runner.rs:13223-13233#claude_task_worker_settings]);
 - the HTTP agents' write tools refuse any path with a `.git` component
   (compared without regard to case, explicitly) and a symlink to one
   ([src: file: backend/src/api/agent_workspace_tools.rs:434#resolve_writable_in_workspace]);
@@ -257,7 +257,7 @@ running then is killed and refuses the commit. Both of its streams are kept: a
 small wrapper (`sh -c`) collects stdout and stderr in order, bounded to the last
 8 KiB, and hands them back with their line breaks, so a linter that prints its
 errors on stdout is not lost
-([src: file: backend/src/core/commit_hooks.rs:214#HOOK_WRAPPER]).
+([src: file: backend/src/core/commit_hooks.rs:222#HOOK_WRAPPER]).
 
 **Not run under any value**: `commit-msg` (commitlint), `prepare-commit-msg`,
 `post-commit`, `post-merge`, `reference-transaction`… Only the gating hook is
@@ -274,12 +274,12 @@ The policy type is
 
 A gating hook that exits non-zero is a `HookRefused`, with the first lines of its
 output (20 lines / 2 000 characters), never a conflict
-([src: file: backend/src/core/commit_hooks.rs:174#run_gating_hook]):
+([src: file: backend/src/core/commit_hooks.rs:182#run_gating_hook]):
 
 - `task_exec_commit` / `git_commit` fail with `HookRefused (pre-commit): <output>`
   and commit nothing;
 - the candidate build returns `CandidateOutcome::HookRefused { hook, output }`
-  ([src: file: backend/src/core/worktree.rs:2450#HookRefused]), undoes the merge
+  ([src: file: backend/src/core/worktree.rs:2485#HookRefused]), undoes the merge
   and is reported to the principal and worker with the hook's output.
 
 A `git merge` refused before it starts (a dirty tree, unrelated histories) is an

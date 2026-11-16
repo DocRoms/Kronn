@@ -3,11 +3,12 @@ import {
   type KeyboardEvent as ReactKeyboardEvent, type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertTriangle, ArrowRight, Plus, X } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowUp, Plus, X } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { AGENT_LABELS } from '../../lib/constants';
-import type { AgentFallback, AgentType, ChainView, FallbackMode, FallbackTransport } from '../../types/generated';
+import type { AgentFallback, AgentType, ChainView, FallbackGap, FallbackMode, FallbackTransport } from '../../types/generated';
 import {
+  MAX_FALLBACK_CHAIN,
   TRANSPORT_LABEL,
   chainProblem,
   linkMode,
@@ -25,6 +26,14 @@ import {
 import './FallbackRow.css';
 
 const label = (agent: AgentType) => AGENT_LABELS[agent] ?? agent;
+
+/** The warnings of a fallback, in the UI's language: the backend sends a stable code, never a sentence. */
+const gapText = (t: (key: string, ...args: string[]) => string, gaps: FallbackGap[]) =>
+  gaps.map((gap) => {
+    const text = t(`fallback.gap.${gap}`);
+    // A code this build does not know (a newer backend) is shown as it came rather than as a key.
+    return text === `fallback.gap.${gap}` ? gap : text;
+  }).join(', ');
 
 /** The badge every pill carries: how the model is reached. There is no « paid » badge. */
 export function TransportBadge({ transport }: { transport: FallbackTransport }) {
@@ -44,7 +53,7 @@ interface PillProps {
   transport: FallbackTransport;
   /** « eco », « advanced »…: shown when the model serves another mode than its row. */
   mode?: FallbackMode;
-  gaps?: string[];
+  gaps?: FallbackGap[];
   /** `current`: the model the mode runs on; `own`: a fallback set here; `inherited`: set on another card. */
   tone: 'current' | 'own' | 'inherited';
   title?: string;
@@ -67,7 +76,7 @@ export function FallbackPill({
       {mode && <span className="fbp-mode">{t(`fallback.mode.${mode}`)}</span>}
       <TransportBadge transport={transport} />
       {gaps.length > 0 && (
-        <span className="fbp-gap" title={t('fallback.gaps', label(agent), gaps.join(', '))}>
+        <span className="fbp-gap" title={t('fallback.gaps', label(agent), gapText(t, gaps))}>
           <AlertTriangle size={10} aria-hidden="true" />
         </span>
       )}
@@ -269,25 +278,163 @@ export function FallbackMenu({ testId, options, anchor, taken, selected, replace
   return createPortal(menu, document.body);
 }
 
+interface ItemProps {
+  testId: string;
+  /** 1-based place in the chain, in the order Kronn tries it. */
+  position: number;
+  /** `own`: stored on this row (editable); `inherited`: stored on another card's row (read-only here). */
+  tone: 'own' | 'inherited';
+  agent: AgentType;
+  /** The name shown in place of the agent's: a media source that is a named connection. */
+  name?: string;
+  model: string | null | undefined;
+  /** The tier tag (« advanced »): the mode the model runs in. */
+  mode: FallbackMode;
+  transport: FallbackTransport;
+  /** What this fallback may lack (reachability / capabilities): drawn beside it, never on another one. */
+  gaps?: FallbackGap[];
+  title?: string;
+  disabled?: boolean;
+  /** Own: opens the change menu. */
+  onClick?: () => void;
+  /** Inherited only: the card that holds this fallback, named next to its number; a click opens it. */
+  via?: { name: string; onOpen?: () => void };
+  /** Own only, drawn right beside the chip: × always; ↑ ↓ only when this item has a neighbour to
+   *  swap with (a control that could do nothing is not drawn); « Change » when there is no add button. */
+  controls?: {
+    onRemove: () => void;
+    onChange?: () => void;
+    up?: () => void;
+    down?: () => void;
+  };
+  /** The change menu is anchored on the item's main button. */
+  anchorRef?: (element: HTMLElement | null) => void;
+  children?: ReactNode;
+}
+
+/** One numbered entry of a fallback chain: `1 · Codex · gpt-5.6 · standard · CLI ⚠ … ↑ ↓ ✕`.
+ *  The same item on every card (CLI, Local, HTTP); an inherited one is dashed and has no controls. */
+export function FallbackChainItem({
+  testId, position, tone, agent, name, model, mode, transport, gaps = [], title, disabled, onClick, via, controls, anchorRef, children,
+}: ItemProps) {
+  const { t } = useT();
+  const shown = name ?? label(agent);
+  const body = (
+    <>
+      <span className="fbp-agent">{shown}</span>
+      <span className="fbp-model">{model ?? t('fallback.modelDefault')}</span>
+      <span className="fbp-mode">{t(`fallback.mode.${mode}`)}</span>
+      <TransportBadge transport={transport} />
+    </>
+  );
+  return (
+    <li className="fbc" data-tone={tone} data-testid={testId}>
+      <span className="fbc-n" aria-hidden="true" data-testid={`${testId}-position`}>{position}</span>
+      {via && (via.onOpen ? (
+        <button
+          type="button"
+          className="fbc-via fbc-via-link"
+          title={t('fallback.openCard', via.name)}
+          data-testid={`${testId}-via`}
+          onClick={via.onOpen}
+        >
+          {t('fallback.via', via.name)}
+        </button>
+      ) : (
+        <span className="fbc-via" title={t('fallback.setOn', via.name)} data-testid={`${testId}-via`}>{t('fallback.via', via.name)}</span>
+      ))}
+      <span className="fbc-anchor" ref={anchorRef}>
+        {onClick ? (
+          <button type="button" className="fbc-main" title={title} disabled={disabled} onClick={onClick}>{body}</button>
+        ) : (
+          <span className="fbc-main" title={title}>{body}</span>
+        )}
+        {controls?.onChange && (
+          <button
+            type="button"
+            className="fbc-change"
+            disabled={disabled}
+            title={t('fallback.change')}
+            data-testid={`${testId}-change`}
+            onClick={controls.onChange}
+          >
+            {t('fallback.changeShort')}
+          </button>
+        )}
+        {children}
+      </span>
+      {controls && (
+        <span className="fbc-controls">
+          {controls.up && (
+            <button
+              type="button"
+              className="fbc-btn"
+              disabled={disabled}
+              title={t('fallback.moveUp')}
+              aria-label={t('fallback.moveUp')}
+              data-testid={`${testId}-up`}
+              onClick={controls.up}
+            >
+              <ArrowUp size={11} aria-hidden="true" />
+            </button>
+          )}
+          {controls.down && (
+            <button
+              type="button"
+              className="fbc-btn"
+              disabled={disabled}
+              title={t('fallback.moveDown')}
+              aria-label={t('fallback.moveDown')}
+              data-testid={`${testId}-down`}
+              onClick={controls.down}
+            >
+              <ArrowDown size={11} aria-hidden="true" />
+            </button>
+          )}
+          <button
+            type="button"
+            className="fbc-btn fbc-remove"
+            disabled={disabled}
+            title={t('fallback.remove')}
+            aria-label={t('fallback.remove')}
+            data-testid={`${testId}-remove`}
+            onClick={controls.onRemove}
+          >
+            <X size={11} aria-hidden="true" />
+          </button>
+        </span>
+      )}
+      {gaps.length > 0 && (
+        <span className="fbp-gap" role="note" title={t('fallback.gaps', shown, gapText(t, gaps))} data-testid={`${testId}-warning`}>
+          <AlertTriangle size={11} aria-hidden="true" />
+          {gapText(t, gaps)}
+        </span>
+      )}
+    </li>
+  );
+}
+
 interface RowProps {
   /** Prefix of the test ids. */
   testId: string;
   mode: FallbackMode;
   /** The agent the row belongs to: shown first, never allowed in the chain. `null` for a discussion-wide row. */
   origin: AgentType | null;
-  /** The model this mode runs on today: the first pill of the row. */
+  /** The model this mode runs on today: shown first when the row has no model picker. */
   current?: { agent: AgentType; model: string | null } | null;
-  /** KT-1706 — the model picker of the mode: when given it IS the first element of the row,
-   *  in place of the read-only `current` pill (« Mode · [model ▾] → fallback »). */
+  /** KT-1706 — the model picker of the mode: when given it IS the first element of the row's
+   *  right-hand column, in place of the read-only `current` pill. */
   model?: ReactNode;
-  /** The fallbacks set here, in order (one per row; an override may carry more). */
+  /** The fallbacks set here, in order (an agent row stores one; an override may carry more). */
   links: AgentFallback[];
   /** What the backend resolved for them (gaps of each link, its own refusal). */
   view?: ChainView;
-  /** The fallbacks reached through the rows of the fallbacks, dashed. */
+  /** The fallbacks reached through the rows of the fallbacks: listed after the own ones, read-only. */
   inherited?: InheritedLink[];
   /** Every agent/model that could be a fallback, any mode; the menu keeps the kind of this row's mode. */
   options: FallbackOption[];
+  /** How many fallbacks this row can store itself (the engine keeps one per agent mode row). */
+  maxLinks?: number;
   disabled?: boolean;
   /** Shown when nothing is set here. */
   empty?: ReactNode;
@@ -295,16 +442,19 @@ interface RowProps {
   actions?: ReactNode;
   /** Applies the new list; a refusal (loop, depth, kind, access) rejects with its reason. */
   onChange: (next: AgentFallback[]) => Promise<void>;
-  /** A click on an inherited pill opens the card of the agent that holds it. */
+  /** A click on an inherited item opens the card of the agent that holds it. */
   onOpenAgent?: (agent: AgentType) => void;
 }
 
-/** One mode of an agent, or of a discussion or a step, as proposal B draws it:
- *  `[current model] → [fallback] → [inherited fallback, dashed] + Add a fallback`.
- *  Clicking a pill changes it, ✕ removes it; the menu is filtered by kind of
- *  mode, grouped by agent, and a model already in the chain is disabled. */
+/** One mode of an agent, or of a discussion or a step, as proposal A draws it:
+ *  the label on the left, and on the right ONE column — the model, « If
+ *  unavailable: », then the fallbacks numbered in the order Kronn tries them,
+ *  then « + Add a fallback ». The links stored here come first (↑ ↓ ✕ reorder,
+ *  remove, change them); those reached through the rows of the fallbacks follow,
+ *  dashed and read-only (they live on another card). The menu is filtered by
+ *  kind of mode, grouped by agent, and a model already in the chain is disabled. */
 export function FallbackRow({
-  testId, mode, origin, current, model, links, view, inherited = [], options, disabled, empty, actions, onChange, onOpenAgent,
+  testId, mode, origin, current, model, links, view, inherited = [], options, maxLinks = MAX_FALLBACK_CHAIN, disabled, empty, actions, onChange, onOpenAgent,
 }: RowProps) {
   const { t } = useT();
   const [menu, setMenu] = useState<null | { index: number }>(null);
@@ -343,11 +493,17 @@ export function FallbackRow({
     const link = toLink(option, mode);
     void apply(index >= links.length ? [...links, link] : links.map((existing, at) => (at === index ? link : existing)));
   };
+  const move = (index: number, by: -1 | 1) => {
+    const next = [...links];
+    [next[index], next[index + by]] = [next[index + by], next[index]];
+    void apply(next);
+  };
   const gapsOf = (index: number) => view?.links[index]?.gaps ?? [];
-  const modeLabel = t(`fallback.mode.${mode}`);
   const anchorFor = (index: number) => (element: HTMLElement | null) => {
     if (menu?.index === index && element) setAnchor((previous) => (previous === element ? previous : element));
   };
+  const full = links.length >= maxLinks;
+  const nothing = links.length === 0 && inherited.length === 0;
 
   return (
     <div
@@ -357,7 +513,7 @@ export function FallbackRow({
       data-kind={modeKind(mode)}
       data-with-model={model !== undefined ? 'true' : undefined}
     >
-      <span className="fbr-mode">{modeLabel}</span>
+      <span className="fbr-mode">{t(`fallback.mode.${mode}`)}</span>
       <div className="fbr-track">
         {model !== undefined && <span className="fbr-model" data-testid={`${testId}-model`}>{model}</span>}
         {model === undefined && current && (
@@ -370,83 +526,95 @@ export function FallbackRow({
             title={t('fallback.current', current.model ?? t('fallback.modelDefault'))}
           />
         )}
-        {links.map((link, index) => (
-          <span className="fbr-step" key={`${link.agent}-${link.model ?? ''}-${index}`}>
-            <ArrowRight size={11} className="fbr-arrow" aria-hidden="true" />
-            <span className="fbr-anchor" ref={anchorFor(index)}>
-              <FallbackPill
+        <span className="fbr-caption">{t('fallback.ifUnavailable')}</span>
+        {!nothing && (
+          <ol className="fbc-list" data-testid={`${testId}-chain`}>
+            {links.map((link, index) => (
+              <FallbackChainItem
+                key={`${link.agent}-${link.model ?? ''}-${index}`}
                 testId={`${testId}-link-${index}`}
+                position={index + 1}
                 tone="own"
                 agent={link.agent}
                 model={link.model}
-                mode={link.mode && link.mode !== mode ? link.mode : undefined}
+                mode={linkMode(link, mode)}
                 transport={transportOf(link.agent)}
                 gaps={gapsOf(index)}
                 title={t('fallback.change')}
                 disabled={locked}
-                removeLabel={t('fallback.remove')}
                 onClick={() => setMenu(menu?.index === index ? null : { index })}
-                onRemove={() => void apply(links.filter((_, at) => at !== index))}
+                anchorRef={anchorFor(index)}
+                controls={{
+                  onRemove: () => void apply(links.filter((_, at) => at !== index)),
+                  // Only a row that stores several links can reorder them, and only toward a neighbour.
+                  onChange: full && links.length === 1 ? () => setMenu(menu?.index === index ? null : { index }) : undefined,
+                  up: index > 0 ? () => move(index, -1) : undefined,
+                  down: index < links.length - 1 ? () => move(index, 1) : undefined,
+                }}
+              >
+                {menu?.index === index && (
+                  <FallbackMenu
+                    testId={`${testId}-menu`}
+                    options={offered}
+                    anchor={anchor}
+                    taken={taken}
+                    selected={link}
+                    replaced={mode}
+                    onPick={(option) => pick(index, option)}
+                    onClose={closeMenu}
+                  />
+                )}
+              </FallbackChainItem>
+            ))}
+            {inherited.map((entry, index) => (
+              <FallbackChainItem
+                key={`inherited-${entry.link.agent}-${index}`}
+                testId={`${testId}-inherited-${index}`}
+                position={links.length + index + 1}
+                tone="inherited"
+                agent={entry.link.agent}
+                model={entry.link.model}
+                mode={entry.link.mode}
+                transport={entry.link.transport}
+                gaps={entry.link.gaps}
+                title={t('fallback.inheritedHint')}
+                via={{ name: label(entry.source), onOpen: onOpenAgent ? () => onOpenAgent(entry.source) : undefined }}
               />
-              {menu?.index === index && (
-                <FallbackMenu
-                  testId={`${testId}-menu`}
-                  options={offered}
-                  anchor={anchor}
-                  taken={taken}
-                  selected={link}
-                  replaced={mode}
-                  onPick={(option) => pick(index, option)}
-                  onClose={closeMenu}
-                />
-              )}
-            </span>
-          </span>
-        ))}
-        {inherited.map((entry, index) => (
-          <span className="fbr-step" key={`inherited-${entry.link.agent}-${index}`}>
-            <ArrowRight size={11} className="fbr-arrow" aria-hidden="true" />
-            <FallbackPill
-              testId={`${testId}-inherited-${index}`}
-              tone="inherited"
-              agent={entry.link.agent}
-              model={entry.link.model}
-              mode={entry.link.mode !== mode ? entry.link.mode : undefined}
-              transport={entry.link.transport}
-              gaps={entry.link.gaps}
-              title={`${t('fallback.setOn', label(entry.source))} — ${t('fallback.inheritedHint')}`}
-              onClick={onOpenAgent ? () => onOpenAgent(entry.source) : undefined}
-            />
-          </span>
-        ))}
-        {links.length === 0 && empty !== undefined && empty}
-        {links.length === 0 && empty === undefined && <span className="fbr-off">{t('fallback.off')}</span>}
-        {links.length === 0 && (
-          <span className="fbr-anchor" ref={anchorFor(links.length)}>
-            <button
-              type="button"
-              className="fbr-add"
-              disabled={locked}
-              data-testid={`${testId}-add`}
-              onClick={() => setMenu(menu?.index === links.length ? null : { index: links.length })}
-            >
-              <Plus size={11} aria-hidden="true" />
-              {t('fallback.add')}
-            </button>
-            {menu?.index === links.length && (
-              <FallbackMenu
-                testId={`${testId}-menu`}
-                options={offered}
-                anchor={anchor}
-                taken={taken}
-                replaced={mode}
-                onPick={(option) => pick(links.length, option)}
-                onClose={closeMenu}
-              />
-            )}
-          </span>
+            ))}
+          </ol>
         )}
-        {actions}
+        {nothing && empty !== undefined && empty}
+        {nothing && empty === undefined && <span className="fbr-off" data-testid={`${testId}-none`}>{t('fallback.none')}</span>}
+        {(!full || actions) && (
+          <div className="fbr-foot">
+            {!full && (
+              <span className="fbr-anchor" ref={anchorFor(links.length)}>
+                <button
+                  type="button"
+                  className="fbr-add"
+                  disabled={locked}
+                  data-testid={`${testId}-add`}
+                  onClick={() => setMenu(menu?.index === links.length ? null : { index: links.length })}
+                >
+                  <Plus size={11} aria-hidden="true" />
+                  {t('fallback.add')}
+                </button>
+                {menu?.index === links.length && (
+                  <FallbackMenu
+                    testId={`${testId}-menu`}
+                    options={offered}
+                    anchor={anchor}
+                    taken={taken}
+                    replaced={mode}
+                    onPick={(option) => pick(links.length, option)}
+                    onClose={closeMenu}
+                  />
+                )}
+              </span>
+            )}
+            {actions}
+          </div>
+        )}
       </div>
       {(view?.error || refusal) && (
         <div className="fbr-error" role="alert" data-testid={`${testId}-refused`}>

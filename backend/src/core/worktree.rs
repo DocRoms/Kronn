@@ -528,6 +528,11 @@ pub fn remove_ownerless_worktree(
             worktree_path.display()
         ));
     }
+    // Git refuses to remove a checkout holding an untracked file that is not
+    // ignored: a stale one's `.DS_Store` must not be that file.
+    if let Err(error) = ensure_os_junk_excluded(repo_path) {
+        tracing::warn!(path = %repo_path.display(), "cannot exclude OS junk files: {error}");
+    }
     let dirty = worktree_dirty_files(worktree_path)?;
     if !dirty.is_empty() {
         return Err(format!(
@@ -1540,6 +1545,78 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
     Ok(())
 }
 
+/// Files an operating system or a file manager drops in any folder it opens:
+/// never work, never worth blocking a delivery or a cleanup (KT-1750). The
+/// default of Settings > Workers > OS junk (`workers.os_junk_patterns`).
+pub const OS_JUNK_PATTERNS: [&str; 4] = [".DS_Store", "Thumbs.db", "desktop.ini", "._*"];
+
+/// The Settings > Workers list, published by `config::save` and at boot. `None`
+/// until the config says otherwise, which reads as the defaults.
+static OS_JUNK_SETTING: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLock::new(None);
+
+/// Publish the owner's Settings > Workers choice to this process.
+pub fn set_os_junk_patterns(patterns: &[String]) {
+    let mut setting = OS_JUNK_SETTING
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *setting = Some(patterns.to_vec());
+}
+
+/// The OS-junk patterns in force: the setting's, else the defaults.
+pub fn os_junk_patterns() -> Vec<String> {
+    OS_JUNK_SETTING
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .unwrap_or_else(default_os_junk_patterns)
+}
+
+/// [`OS_JUNK_PATTERNS`] as the owned list the setting holds.
+pub fn default_os_junk_patterns() -> Vec<String> {
+    OS_JUNK_PATTERNS.iter().map(|p| p.to_string()).collect()
+}
+
+/// Whether the last component of `path` is one of `patterns` (`*` stands for any
+/// run of characters).
+fn is_os_junk(path: &str, patterns: &[String]) -> bool {
+    let name = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
+    patterns.iter().any(|pattern| glob_matches(pattern, name))
+}
+
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == name,
+        Some((head, tail)) => {
+            name.len() >= head.len() + tail.len()
+                && name.starts_with(head)
+                && name[head.len()..].ends_with(tail)
+        }
+    }
+}
+
+/// Keep OS junk out of `git status` for the repository and every worktree of it
+/// (the local exclude is shared), without touching a tracked `.gitignore`.
+pub(crate) fn ensure_os_junk_excluded(repo_path: &Path) -> Result<(), String> {
+    for pattern in os_junk_patterns() {
+        ensure_local_git_exclude(repo_path, &pattern)?;
+    }
+    Ok(())
+}
+
+/// What every Kronn checkout needs ignored: its own `.kronn/` directory (an
+/// error when that fails) and OS junk (only logged: it never blocks a launch).
+pub(crate) fn ensure_managed_excludes(repo_path: &Path) -> Result<(), String> {
+    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    if let Err(error) = ensure_os_junk_excluded(repo_path) {
+        tracing::warn!(path = %repo_path.display(), "cannot exclude OS junk files: {error}");
+    }
+    Ok(())
+}
+
 /// Maximum length of a single slug component (project / discussion).
 ///
 /// Windows MAX_PATH is 260 characters by default. A worktree path looks like:
@@ -1656,29 +1733,11 @@ pub fn create_discussion_worktree(
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
     // Ensure .kronn/worktrees/ is gitignored
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
     // Mark repo as safe directory (needed in Docker where mount owner differs)
-    if crate::core::env::is_docker() {
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &repo_path.to_string_lossy(),
-            ])
-            .output();
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &worktree_path.to_string_lossy(),
-            ])
-            .output();
-    }
+    crate::core::git_global_config::ensure_safe_directory(repo_path);
+    crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
     // Create the worktree with a new branch based on base_branch
     let output = crate::core::cmd::project_git_cmd()
@@ -1766,16 +1825,10 @@ pub fn create_review_worktree(
 
     std::fs::create_dir_all(worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
-    if crate::core::env::is_docker() {
-        for path in [repo_path, worktree_path.as_path()] {
-            let _ = crate::core::cmd::git_cmd()
-                .args(["config", "--global", "--add", "safe.directory"])
-                .arg(path)
-                .output();
-        }
-    }
+    crate::core::git_global_config::ensure_safe_directory(repo_path);
+    crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
     let output = crate::core::cmd::project_git_cmd()
         .args(["worktree", "add", "--detach"])
@@ -2077,28 +2130,10 @@ pub fn reattach_worktree(
     crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))
         .map_err(|e| format!("Failed to create workspaces dir: {}", e))?;
 
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
+    ensure_managed_excludes(repo_path)?;
 
-    if crate::core::env::is_docker() {
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &repo_path.to_string_lossy(),
-            ])
-            .output();
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &worktree_path.to_string_lossy(),
-            ])
-            .output();
-    }
+    crate::core::git_global_config::ensure_safe_directory(repo_path);
+    crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
     // Prune stale worktree entries first (old /data/workspaces/ refs)
     let _ = crate::core::cmd::git_cmd()
@@ -2644,7 +2679,9 @@ pub fn build_candidate_with_hooks(
         abort_merge(worktree_path);
         return Ok(bounce);
     }
-    // Repositories that enforce DCO reject an unsigned merge commit.
+    // Repositories that enforce DCO reject an unsigned merge commit: the gating
+    // hook runs under the project's policy (KT-1745), and the commit is signed
+    // only where the project signs off, as the project's identity (KT-1750).
     if let Err(refusal) =
         crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-merge-commit")
     {
@@ -2654,8 +2691,14 @@ pub fn build_candidate_with_hooks(
             output: refusal.output,
         }));
     }
+    let policy = crate::core::commit_policy::CommitPolicy::for_repo(worktree_path);
     let mut commit = crate::core::lane_git::git(worktree_path)?;
-    commit.args(["commit", "--signoff", "--no-gpg-sign", "--cleanup=strip"]);
+    commit.arg("commit");
+    if policy.signoff {
+        commit.arg("--signoff");
+    }
+    commit.args(["--no-gpg-sign", "--cleanup=strip"]);
+    policy.apply_identity(&mut commit, false);
     match docs.as_ref().and_then(|docs| docs.summary()) {
         Some(note) => commit.args(["-m", &merge_subject(worktree_path, base_sha), "-m", &note]),
         None => commit.arg("--no-edit"),
@@ -2769,10 +2812,15 @@ fn settle_branch_docs(
                 output: refusal.output,
             }));
         }
-        let committed = crate::core::lane_git::git(worktree_path)?
+        let policy = crate::core::commit_policy::CommitPolicy::for_repo(worktree_path);
+        let mut commit = crate::core::lane_git::git(worktree_path)?;
+        commit.arg("commit");
+        if policy.signoff {
+            commit.arg("--signoff");
+        }
+        policy.apply_identity(&mut commit, false);
+        let committed = commit
             .args([
-                "commit",
-                "--signoff",
                 "--no-gpg-sign",
                 "--cleanup=strip",
                 "-m",
@@ -2888,8 +2936,17 @@ pub enum IntegrationTargetRefusal {
     NoneDeclared,
     /// The branch is checked out in the project's own working checkout.
     OwnerCheckout { branch: String, path: PathBuf },
-    /// The branch is checked out in a worktree outside `<repo>/.kronn/worktrees`.
+    /// The branch is checked out in a worktree that is under no Kronn-managed
+    /// root and that Kronn has not recorded as a workspace.
     ForeignWorktree { branch: String, path: PathBuf },
+    /// The branch is checked out in a Kronn-managed worktree a run or a live agent
+    /// is using right now; advancing it would move files under that run. `holder`
+    /// names the run. The next integration attempt checks again.
+    BusyWorktree {
+        branch: String,
+        path: PathBuf,
+        holder: String,
+    },
 }
 
 impl IntegrationTargetRefusal {
@@ -2899,6 +2956,7 @@ impl IntegrationTargetRefusal {
             Self::NoneDeclared => "integration_target_undeclared",
             Self::OwnerCheckout { .. } => "integration_target_owner_checkout",
             Self::ForeignWorktree { .. } => "integration_target_foreign_worktree",
+            Self::BusyWorktree { .. } => "integration_target_busy_worktree",
         }
     }
 
@@ -2917,7 +2975,20 @@ impl IntegrationTargetRefusal {
             ),
             Self::ForeignWorktree { branch, path } => format!(
                 "`{branch}` is checked out in {}, a worktree Kronn does not own (Kronn-owned \
-                 worktrees live under <repo>/.kronn/worktrees); integration never writes into it",
+                 worktrees live under <repo>/.kronn/worktrees, ~/.kronn/autocode-worktrees or a \
+                 managed root listed in Settings > Workers or in the project's workspace \
+                 settings, or are recorded as a Kronn workspace); integration never writes \
+                 into it",
+                path.display()
+            ),
+            Self::BusyWorktree {
+                branch,
+                path,
+                holder,
+            } => format!(
+                "`{branch}` is checked out in {}, a Kronn-managed worktree in use right now \
+                 ({holder}); integrating would move its files under that run. Nothing was \
+                 changed: integrate again once it has finished",
                 path.display()
             ),
         }
@@ -2929,21 +3000,92 @@ impl IntegrationTargetRefusal {
     }
 }
 
+/// Directory, under Kronn's home (`~/.kronn`), where autoCode creates its worktrees.
+const AUTOCODE_WORKTREES_DIR: &str = "autocode-worktrees";
+
+/// Managed worktree roots of Settings > Workers, published by `config::save` and at
+/// boot (the same way the worker shell limits are), so the launch, status and
+/// integration paths read them without each carrying the config.
+static GLOBAL_MANAGED_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// Publish the owner's Settings > Workers managed roots to this process.
+pub fn set_global_managed_worktree_roots(workers: &crate::models::WorkersConfig) {
+    let roots = crate::models::effective_managed_worktree_roots(&workers.managed_worktree_roots);
+    *GLOBAL_MANAGED_ROOTS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = roots;
+}
+
+fn global_managed_worktree_roots() -> Vec<PathBuf> {
+    GLOBAL_MANAGED_ROOTS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// The directories whose worktrees are Kronn's own, for one repository: its lane
+/// root (`<repo>/.kronn/worktrees`), autoCode's root under `~/.kronn`, and the
+/// absolute roots the owner configured (global and per project).
+pub fn managed_worktree_roots(
+    repo_path: &Path,
+    kronn_home: Option<&Path>,
+    extra: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut roots = vec![worktree_base_dir(repo_path)];
+    if let Some(home) = kronn_home {
+        roots.push(home.join(AUTOCODE_WORKTREES_DIR));
+    }
+    roots.extend(extra.iter().filter(|root| root.is_absolute()).cloned());
+    roots
+}
+
+/// [`managed_worktree_roots`] for this machine: `~/.kronn`, the global roots of
+/// Settings > Workers and the project's own `project_roots`.
+fn host_managed_worktree_roots(repo_path: &Path, project_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".kronn"));
+    let mut extra = global_managed_worktree_roots();
+    extra.extend(project_roots.iter().cloned());
+    managed_worktree_roots(repo_path, home.as_deref(), &extra)
+}
+
 /// Refuse an integration target whose checkout is not Kronn's. A branch checked
 /// out nowhere is advanced by a ref compare-and-swap that touches no checkout;
-/// one checked out in a Kronn-owned worktree is advanced inside it.
+/// one checked out in a Kronn-managed worktree is advanced inside it.
+///
+/// A checkout is Kronn's when it sits under a managed root (task lanes, autoCode
+/// worktrees, the roots of Settings > Workers and the project's `project_roots`)
+/// or when `registered` says Kronn recorded it as a workspace (workflow runs,
+/// managed discussion workspaces). The owner's own checkout is refused first,
+/// whatever the registry says.
 pub fn integration_target_ownership(
     repo_path: &Path,
     branch: &str,
+    project_roots: &[PathBuf],
+    registered: &dyn Fn(&Path) -> bool,
 ) -> Result<Result<(), IntegrationTargetRefusal>, String> {
     #[cfg(test)]
     if !ownership_seam::enforced(repo_path) {
         return Ok(Ok(()));
     }
+    integration_target_ownership_in(
+        repo_path,
+        branch,
+        &host_managed_worktree_roots(repo_path, project_roots),
+        registered,
+    )
+}
+
+/// [`integration_target_ownership`] against explicit managed roots.
+pub fn integration_target_ownership_in(
+    repo_path: &Path,
+    branch: &str,
+    managed_roots: &[PathBuf],
+    registered: &dyn Fn(&Path) -> bool,
+) -> Result<Result<(), IntegrationTargetRefusal>, String> {
     let (branch, checkouts) = target_branch_checkouts(repo_path, branch)?;
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let owner = canonical(repo_path);
-    let managed_root = canonical(&worktree_base_dir(repo_path));
+    let roots: Vec<PathBuf> = managed_roots.iter().map(|root| canonical(root)).collect();
     for path in checkouts {
         let resolved = canonical(&path);
         if resolved == owner {
@@ -2952,10 +3094,37 @@ pub fn integration_target_ownership(
                 path,
             }));
         }
-        if !resolved.starts_with(&managed_root) {
+        let managed = roots.iter().any(|root| resolved.starts_with(root))
+            || registered(&resolved)
+            || registered(&path);
+        if !managed {
             return Ok(Err(IntegrationTargetRefusal::ForeignWorktree {
                 branch,
                 path,
+            }));
+        }
+    }
+    Ok(Ok(()))
+}
+
+/// Refuse to advance a target held by a Kronn-managed worktree that a run or a
+/// live agent is using right now (KT-1748). `holder` answers, for one checkout
+/// path, who is using it (`None`: idle). A target no worktree holds is advanced by
+/// a ref compare-and-swap that touches no checkout, so it is never busy. Nothing
+/// is changed on refusal: the next integration attempt asks again.
+pub fn integration_target_idle(
+    repo_path: &Path,
+    target: &str,
+    holder: &dyn Fn(&Path) -> Option<String>,
+) -> Result<Result<(), IntegrationTargetRefusal>, String> {
+    let (branch, checkouts) = target_branch_checkouts(repo_path, target)?;
+    for path in checkouts {
+        let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if let Some(holder) = holder(&resolved).or_else(|| holder(&path)) {
+            return Ok(Err(IntegrationTargetRefusal::BusyWorktree {
+                branch,
+                path,
+                holder,
             }));
         }
     }
@@ -2992,6 +3161,8 @@ pub(crate) mod ownership_seam {
 pub fn describe_integration_target(
     repo_path: &Path,
     branch: &str,
+    project_roots: &[PathBuf],
+    registered: &dyn Fn(&Path) -> bool,
 ) -> crate::models::TaskExecutionIntegrationTarget {
     use crate::models::IntegrationTargetState as State;
     let unresolved = || crate::models::TaskExecutionIntegrationTarget {
@@ -3011,16 +3182,21 @@ pub fn describe_integration_target(
     };
     // A refused checkout is the one to show: it is the path a wrong target
     // would have written into.
-    let (state, path) = match integration_target_ownership(repo_path, branch) {
-        Ok(Ok(())) => (State::KronnWorktree, first.clone()),
-        Ok(Err(IntegrationTargetRefusal::OwnerCheckout { path, .. })) => {
-            (State::OwnerCheckout, path)
-        }
-        Ok(Err(IntegrationTargetRefusal::ForeignWorktree { path, .. })) => {
-            (State::ForeignWorktree, path)
-        }
-        Ok(Err(IntegrationTargetRefusal::NoneDeclared)) | Err(_) => return unresolved(),
-    };
+    let (state, path) =
+        match integration_target_ownership(repo_path, branch, project_roots, registered) {
+            Ok(Ok(())) => (State::KronnWorktree, first.clone()),
+            Ok(Err(IntegrationTargetRefusal::OwnerCheckout { path, .. })) => {
+                (State::OwnerCheckout, path)
+            }
+            Ok(Err(IntegrationTargetRefusal::ForeignWorktree { path, .. })) => {
+                (State::ForeignWorktree, path)
+            }
+            Ok(Err(
+                IntegrationTargetRefusal::NoneDeclared
+                | IntegrationTargetRefusal::BusyWorktree { .. },
+            ))
+            | Err(_) => return unresolved(),
+        };
     crate::models::TaskExecutionIntegrationTarget {
         branch: resolved,
         worktree: Some(path.display().to_string()),
@@ -3515,27 +3691,9 @@ pub fn create_task_worktree(
 
     crate::core::fs_guard::guarded_create_dir_all(repo_path, &worktree_base_dir(repo_path))?;
     assert_managed_task_worktree_path(repo_path, &worktree_path)?;
-    ensure_local_git_exclude(repo_path, ".kronn/")?;
-    if crate::core::env::is_docker() {
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &repo_path.to_string_lossy(),
-            ])
-            .output();
-        let _ = crate::core::cmd::git_cmd()
-            .args([
-                "config",
-                "--global",
-                "--add",
-                "safe.directory",
-                &worktree_path.to_string_lossy(),
-            ])
-            .output();
-    }
+    ensure_managed_excludes(repo_path)?;
+    crate::core::git_global_config::ensure_safe_directory(repo_path);
+    crate::core::git_global_config::ensure_safe_directory(&worktree_path);
 
     // Create from the EXACT pinned commit (a SHA, not a branch name).
     let output = crate::core::cmd::project_git_cmd()
@@ -4268,7 +4426,43 @@ pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, Stri
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    Ok(parse_porcelain(&String::from_utf8_lossy(&output.stdout)))
+    // An untracked `.DS_Store` is the file manager's, not work: a checkout made
+    // before the local exclude carried it must not stay "dirty" for it (KT-1750).
+    let junk = os_junk_patterns();
+    Ok(parse_porcelain(&String::from_utf8_lossy(&output.stdout))
+        .into_iter()
+        .filter(|file| {
+            !(file.status == "??"
+                && (is_os_junk(&file.path, &junk)
+                    || (file.path.ends_with('/')
+                        && holds_only_os_junk(&worktree_path.join(&file.path), &junk))))
+        })
+        .collect())
+}
+
+/// An untracked directory is listed by git as one entry (`?? sub/`): it is junk
+/// when nothing in it, at any depth, is anything else.
+fn holds_only_os_junk(dir: &Path, patterns: &[String]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        let junk = if is_dir {
+            // A nested repository is somebody's work, whatever is inside.
+            !entry.path().join(".git").exists() && holds_only_os_junk(&entry.path(), patterns)
+        } else {
+            is_os_junk(&name, patterns)
+        };
+        if !junk {
+            return false;
+        }
+    }
+    true
 }
 
 /// Return the exact committed file changes between two revisions.
@@ -5695,6 +5889,114 @@ mod tests {
         assert!(paths.contains(&"new.txt"));
     }
 
+    // ── KT-1750 — OS junk never makes a checkout "dirty" ─────────────────────
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn os_junk_is_not_work_but_real_files_still_are() {
+        let repo = make_test_repo("dirty-junk");
+        fs::create_dir_all(repo.path().join("sub")).unwrap();
+        for junk in [
+            ".DS_Store",
+            "Thumbs.db",
+            "desktop.ini",
+            "._resource",
+            "sub/.DS_Store",
+        ] {
+            fs::write(repo.path().join(junk), "x").unwrap();
+        }
+        assert!(worktree_dirty_files(repo.path()).unwrap().is_empty());
+
+        fs::write(repo.path().join("sub/real.txt"), "work").unwrap();
+        fs::write(repo.path().join("DS_Store.txt"), "work").unwrap();
+        let paths: Vec<String> = worktree_dirty_files(repo.path())
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        // git lists an untracked directory as one entry.
+        assert_eq!(paths, ["DS_Store.txt", "sub/"]);
+    }
+
+    #[test]
+    fn a_tracked_os_junk_file_that_changed_is_still_work() {
+        let repo = make_test_repo("dirty-tracked-junk");
+        fs::write(repo.path().join(".DS_Store"), "v1").unwrap();
+        git(repo.path(), &["add", "-f", ".DS_Store"]);
+        git(repo.path(), &["commit", "-q", "-m", "track it"]);
+        fs::write(repo.path().join(".DS_Store"), "v2").unwrap();
+        let files = worktree_dirty_files(repo.path()).unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert_eq!(files[0].path, ".DS_Store");
+    }
+
+    #[test]
+    fn the_os_junk_patterns_follow_the_global_setting() {
+        // The setting is process-wide and other tests rely on the defaults: this
+        // one only ever adds to them, then puts them back.
+        let mut patterns = default_os_junk_patterns();
+        assert_eq!(patterns, [".DS_Store", "Thumbs.db", "desktop.ini", "._*"]);
+        patterns.push("*.junk-setting".to_string());
+        set_os_junk_patterns(&patterns);
+        let published = os_junk_patterns();
+        assert!(is_os_junk("a/b/file.junk-setting", &published));
+        assert!(is_os_junk("._x", &published));
+        assert!(is_os_junk("sub/.DS_Store", &published));
+        assert!(!is_os_junk("file.junk-settings", &published));
+        set_os_junk_patterns(&default_os_junk_patterns());
+        assert!(!is_os_junk("a/file.junk-setting", &os_junk_patterns()));
+        // An empty list means none: nothing is junk.
+        assert!(!is_os_junk(".DS_Store", &[]));
+    }
+
+    #[test]
+    fn a_task_worktree_ignores_os_junk_from_its_creation() {
+        let repo = make_test_repo("junk-exclude");
+        let info =
+            create_task_worktree(repo.path(), "KT-1750", "junk", &head_sha(repo.path())).unwrap();
+        let worktree = Path::new(&info.path);
+        for junk in [".DS_Store", "Thumbs.db", "desktop.ini", "._x"] {
+            fs::write(worktree.join(junk), "x").unwrap();
+            let ignored = crate::core::cmd::git_cmd()
+                .args(["check-ignore", "-q", junk])
+                .current_dir(worktree)
+                .status()
+                .unwrap();
+            assert!(ignored.success(), "{junk} must be ignored");
+        }
+        let status = crate::core::cmd::git_cmd()
+            .args(["status", "--porcelain=v1"])
+            .current_dir(worktree)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
+        // No tracked file was touched to get there.
+        assert!(!repo.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn a_checkout_holding_only_a_ds_store_can_be_removed() {
+        let repo = make_test_repo("junk-remove");
+        let info =
+            create_task_worktree(repo.path(), "KT-1750", "stale", &head_sha(repo.path())).unwrap();
+        let worktree = PathBuf::from(&info.path);
+        // A checkout from before the exclude existed: the junk is not ignored.
+        let exclude = repo.path().join(".git/info/exclude");
+        fs::write(&exclude, "").unwrap();
+        fs::write(worktree.join(".DS_Store"), "x").unwrap();
+        remove_ownerless_worktree(repo.path(), &worktree)
+            .expect("a stale .DS_Store does not keep the checkout alive");
+        assert!(!worktree.exists());
+    }
+
     #[test]
     fn test_main_repo_state_on_named_branch() {
         let repo = make_test_repo("state-branch");
@@ -5947,7 +6249,7 @@ mod tests {
         make_branch(repo.path(), "elsewhere");
 
         // `main` is checked out in the project's own working checkout.
-        let refusal = integration_target_ownership(repo.path(), "main")
+        let refusal = integration_target_ownership(repo.path(), "main", &[], &|_| false)
             .unwrap()
             .unwrap_err();
         assert!(matches!(
@@ -5961,7 +6263,7 @@ mod tests {
 
         // A branch no checkout holds is advanced by a ref swap: nothing to refuse.
         assert_eq!(
-            integration_target_ownership(repo.path(), "elsewhere").unwrap(),
+            integration_target_ownership(repo.path(), "elsewhere", &[], &|_| false).unwrap(),
             Ok(())
         );
 
@@ -5969,7 +6271,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         make_branch(repo.path(), "foreign");
         add_worktree(repo.path(), &outside.path().join("wt"), "foreign");
-        let refusal = integration_target_ownership(repo.path(), "foreign")
+        let refusal = integration_target_ownership(repo.path(), "foreign", &[], &|_| false)
             .unwrap()
             .unwrap_err();
         assert!(matches!(
@@ -5984,10 +6286,140 @@ mod tests {
         fs::create_dir_all(&owned).unwrap();
         add_worktree(repo.path(), &owned.join("integ"), "integ");
         assert_eq!(
-            integration_target_ownership(repo.path(), "integ").unwrap(),
+            integration_target_ownership(repo.path(), "integ", &[], &|_| false).unwrap(),
             Ok(())
         );
-        assert!(integration_target_ownership(repo.path(), "missing").is_err());
+        assert!(integration_target_ownership(repo.path(), "missing", &[], &|_| false).is_err());
+    }
+
+    /// KT-1748 — a target held by a worktree under Kronn's autoCode root is
+    /// Kronn's own, while the owner's checkout and an unknown worktree are not.
+    #[test]
+    fn integration_target_accepts_autocode_and_registered_worktrees_only() {
+        let repo = make_test_repo("target-autocode");
+        let kronn_home = tempfile::tempdir().unwrap();
+        let kronn_home_path = kronn_home.path().canonicalize().unwrap();
+        let roots = managed_worktree_roots(repo.path(), Some(&kronn_home_path), &[]);
+        let ownership = |branch: &str, registered: &dyn Fn(&Path) -> bool| {
+            integration_target_ownership_in(repo.path(), branch, &roots, registered).unwrap()
+        };
+
+        // `feat/EW-7704` held in `~/.kronn/autocode-worktrees/<project>/EW-7704`.
+        make_branch(repo.path(), "feat/EW-7704");
+        let autocode = kronn_home_path
+            .join(AUTOCODE_WORKTREES_DIR)
+            .join("front_euronews");
+        fs::create_dir_all(&autocode).unwrap();
+        add_worktree(repo.path(), &autocode.join("EW-7704"), "feat/EW-7704");
+        assert_eq!(ownership("feat/EW-7704", &|_| false), Ok(()));
+
+        // A root the operator declared as managed makes its worktrees Kronn's too.
+        let extra = tempfile::tempdir().unwrap();
+        let extra_path = extra.path().canonicalize().unwrap();
+        make_branch(repo.path(), "feat/extra");
+        add_worktree(repo.path(), &extra_path.join("wt"), "feat/extra");
+        assert!(matches!(
+            ownership("feat/extra", &|_| false),
+            Err(IntegrationTargetRefusal::ForeignWorktree { .. })
+        ));
+        let with_extra = managed_worktree_roots(
+            repo.path(),
+            Some(&kronn_home_path),
+            std::slice::from_ref(&extra_path),
+        );
+        assert_eq!(
+            integration_target_ownership_in(repo.path(), "feat/extra", &with_extra, &|_| false)
+                .unwrap(),
+            Ok(())
+        );
+
+        // The owner's own checkout stays protected, even if the registry knew it.
+        assert!(matches!(
+            ownership("main", &|_| true),
+            Err(IntegrationTargetRefusal::OwnerCheckout { .. })
+        ));
+
+        // An unknown worktree outside every root is refused...
+        let outside = tempfile::tempdir().unwrap();
+        make_branch(repo.path(), "feat/foreign");
+        let foreign = outside.path().canonicalize().unwrap().join("wt");
+        add_worktree(repo.path(), &foreign, "feat/foreign");
+        let refusal = ownership("feat/foreign", &|_| false).unwrap_err();
+        assert_eq!(refusal.code(), "integration_target_foreign_worktree");
+        assert!(refusal.detail().contains("autocode-worktrees"));
+
+        // ...unless Kronn's workspace registry recorded it (workflow run, managed workspace).
+        assert_eq!(
+            ownership("feat/foreign", &|path| path == foreign.as_path()),
+            Ok(())
+        );
+        assert!(matches!(
+            ownership("feat/foreign", &|path| path.ends_with("unrelated")),
+            Err(IntegrationTargetRefusal::ForeignWorktree { .. })
+        ));
+    }
+
+    #[test]
+    fn managed_roots_ignore_relative_extras_and_a_missing_home() {
+        let repo = Path::new("/repo");
+        let roots = managed_worktree_roots(repo, None, &[PathBuf::from("relative/root")]);
+        assert_eq!(roots, vec![repo.join(".kronn/worktrees")]);
+        let roots = managed_worktree_roots(
+            repo,
+            Some(Path::new("/home/u/.kronn")),
+            &[PathBuf::from("/srv/lanes")],
+        );
+        assert_eq!(
+            roots,
+            vec![
+                repo.join(".kronn/worktrees"),
+                PathBuf::from("/home/u/.kronn/autocode-worktrees"),
+                PathBuf::from("/srv/lanes"),
+            ]
+        );
+    }
+
+    /// KT-1748 — integrating into a managed worktree a run is using right now is
+    /// refused, naming the run; the same worktree idle is advanced; a target no
+    /// worktree holds is never busy.
+    #[test]
+    fn integration_target_idle_refuses_a_worktree_a_run_is_using() {
+        let repo = make_test_repo("target-idle");
+        make_branch(repo.path(), "integ");
+        make_branch(repo.path(), "elsewhere");
+        let owned = worktree_base_dir(repo.path());
+        fs::create_dir_all(&owned).unwrap();
+        let held = owned.canonicalize().unwrap().join("integ");
+        add_worktree(repo.path(), &held, "integ");
+
+        let busy = integration_target_idle(repo.path(), "integ", &|path| {
+            (path == held.as_path()).then(|| "workflow run r-42 is still active".to_string())
+        })
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(busy.code(), "integration_target_busy_worktree");
+        let text = busy.message();
+        assert!(text.starts_with("integration_target_busy_worktree: "));
+        assert!(text.contains("workflow run r-42"));
+        assert!(!text.contains("KRONN_MANAGED_WORKTREE_ROOTS"));
+
+        // Same worktree, nothing using it: idle, and the advance goes through.
+        assert_eq!(
+            integration_target_idle(repo.path(), "integ", &|_| None).unwrap(),
+            Ok(())
+        );
+        let (original, sha) = candidate_on_task_branch(repo.path());
+        assert_eq!(branch_tip(repo.path(), "integ"), original);
+        assert_eq!(
+            fast_forward_target_to(repo.path(), "integ", &original, &sha).unwrap(),
+            sha
+        );
+
+        // Held by nothing: there is no checkout to move, so no holder is asked.
+        assert_eq!(
+            integration_target_idle(repo.path(), "elsewhere", &|_| panic!("asked")).unwrap(),
+            Ok(())
+        );
     }
 
     #[test]
@@ -6001,7 +6433,7 @@ mod tests {
         fs::create_dir_all(&owned).unwrap();
         add_worktree(repo.path(), &owned.join("integ"), "integ");
 
-        let owner = describe_integration_target(repo.path(), "main");
+        let owner = describe_integration_target(repo.path(), "main", &[], &|_| false);
         assert_eq!(owner.state, State::OwnerCheckout);
         assert_eq!(owner.branch, "main");
         assert_eq!(
@@ -6011,16 +6443,16 @@ mod tests {
             repo.path().canonicalize().unwrap()
         );
 
-        let free = describe_integration_target(repo.path(), "elsewhere");
+        let free = describe_integration_target(repo.path(), "elsewhere", &[], &|_| false);
         assert_eq!(free.state, State::NotCheckedOut);
         assert_eq!(free.worktree, None);
 
-        let kronn = describe_integration_target(repo.path(), "integ");
+        let kronn = describe_integration_target(repo.path(), "integ", &[], &|_| false);
         assert_eq!(kronn.state, State::KronnWorktree);
         assert!(kronn.worktree.unwrap().ends_with("integ"));
 
         assert_eq!(
-            describe_integration_target(repo.path(), "nope").state,
+            describe_integration_target(repo.path(), "nope", &[], &|_| false).state,
             State::Unresolved
         );
     }
@@ -7613,66 +8045,79 @@ mod tests {
         }
     }
 
+    /// A task branch checked out in a linked worktree of `repo`, as Kronn runs
+    /// them (the main checkout is never switched), with one commit of its own.
+    fn child_worktree(repo: &Path, name: &str) -> PathBuf {
+        let child = repo.join(".kronn/worktrees").join(name);
+        let made = crate::core::cmd::git_cmd()
+            .args(["worktree", "add", "-q", "-b", "child"])
+            .arg(&child)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        commit_file(&child, "child.txt", "work", "child work");
+        child
+    }
+
+    fn head_message(dir: &Path, rev: &str) -> String {
+        let message = crate::core::cmd::git_cmd()
+            .args(["log", "-1", "--format=%B", rev])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&message.stdout).into_owned()
+    }
+
     /// Phase 1 brings the parent INTO the child, so the child ends up descending
     /// from the pinned tip — the precondition that lets phase 2 be a fast-forward.
+    /// The merge commit is signed only where the project signs off (KT-1750).
     #[test]
     fn building_the_candidate_makes_the_child_descend_from_the_parent() {
-        let repo = make_test_repo("candidate");
-        let base = commit_file(repo.path(), "shared.txt", "one", "base");
+        for signoff in [true, false] {
+            let repo = make_test_repo("candidate");
+            commit_file(repo.path(), "shared.txt", "one", "base");
+            let setting = if signoff { "true" } else { "false" };
+            let configured = crate::core::cmd::git_cmd()
+                .args(["config", "kronn.signoff", setting])
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(configured.status.success());
+            let child = child_worktree(repo.path(), "candidate");
+            // Meanwhile the parent moves on, untouched by the child.
+            let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
 
-        // A child branch that diverges on its own file.
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        commit_file(repo.path(), "child.txt", "work", "child work");
+            let outcome = build_candidate(&child, &parent_tip).unwrap();
+            let CandidateOutcome::Built { sha } = outcome else {
+                panic!("expected a clean candidate");
+            };
 
-        // Meanwhile the parent moves on, untouched by the child.
-        std::process::Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
-        assert_ne!(parent_tip, base);
+            // The candidate contains the parent tip, so the parent can fast-forward to it.
+            let merge_base = crate::core::cmd::git_cmd()
+                .args(["merge-base", "--is-ancestor", &parent_tip, &sha])
+                .current_dir(&child)
+                .output()
+                .unwrap();
+            assert!(
+                merge_base.status.success(),
+                "candidate must descend from the parent tip"
+            );
 
-        std::process::Command::new("git")
-            .args(["checkout", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        let outcome = build_candidate(repo.path(), &parent_tip).unwrap();
-        let CandidateOutcome::Built { sha } = outcome else {
-            panic!("expected a clean candidate");
-        };
-
-        // The candidate contains the parent tip, so the parent can fast-forward to it.
-        let merge_base = crate::core::cmd::git_cmd()
-            .args(["merge-base", "--is-ancestor", &parent_tip, &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(
-            merge_base.status.success(),
-            "candidate must descend from the parent tip"
-        );
-
-        let message = crate::core::cmd::git_cmd()
-            .args(["log", "-1", "--format=%B", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&message.stdout).contains("Signed-off-by: "),
-            "the merge commit must carry a sign-off"
-        );
+            let message = head_message(&child, &sha);
+            assert_eq!(
+                message.contains("Signed-off-by: "),
+                signoff,
+                "the merge commit follows the project's sign-off ({setting}): {message}"
+            );
+        }
     }
 
     /// A repository that enforces the DCO rejects an unsigned merge commit at
     /// `commit-msg` time (KT-854: the merge Kronn made for KT-840 had no
-    /// `Signed-off-by`, so the release PR went red). The integration candidate must
-    /// be built, signed with the identity git is configured with.
+    /// `Signed-off-by`, so the release PR went red). The hook is how the
+    /// repository says so (KT-1750): the integration candidate is signed, with the
+    /// identity the repository commits as, and built.
     #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[test]
     fn the_integration_merge_commit_satisfies_a_dco_enforcing_repository() {
@@ -7680,23 +8125,8 @@ mod tests {
 
         let repo = make_test_repo("candidate-dco");
         commit_file(repo.path(), "shared.txt", "one", "base");
-        std::process::Command::new("git")
-            .args(["checkout", "-b", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        commit_file(repo.path(), "child.txt", "work", "child work");
-        std::process::Command::new("git")
-            .args(["checkout", "main"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let child = child_worktree(repo.path(), "candidate-dco");
         let parent_tip = commit_file(repo.path(), "parent.txt", "moved", "parent moves");
-        std::process::Command::new("git")
-            .args(["checkout", "child"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
 
         // `git merge` runs `commit-msg` for the merge commit it creates.
         let hook = repo.path().join(".git/hooks/commit-msg");
@@ -7707,24 +8137,19 @@ mod tests {
         .unwrap();
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let outcome = build_candidate(repo.path(), &parent_tip).unwrap();
+        let outcome = build_candidate(&child, &parent_tip).unwrap();
         let CandidateOutcome::Built { sha } = outcome else {
             panic!("a DCO-enforcing repository must accept the integration merge, got {outcome:?}");
         };
 
-        let message = crate::core::cmd::git_cmd()
-            .args(["log", "-1", "--format=%B", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let message = head_message(&child, &sha);
         assert!(
-            String::from_utf8_lossy(&message.stdout)
-                .contains("Signed-off-by: Test <test@test.com>"),
-            "the sign-off is the configured git identity"
+            message.contains("Signed-off-by: Test <test@test.com>"),
+            "the sign-off is the repository's identity: {message}"
         );
         let parents = crate::core::cmd::git_cmd()
             .args(["log", "-1", "--format=%P", &sha])
-            .current_dir(repo.path())
+            .current_dir(&child)
             .output()
             .unwrap();
         assert_eq!(

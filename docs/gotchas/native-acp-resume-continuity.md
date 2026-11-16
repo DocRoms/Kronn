@@ -7,7 +7,7 @@ directory. The discussion layer selects the resume identity and delta together;
 A first turn, incomplete checkpoint, missing marker or delta without a size
 saving uses the ordinary bounded full prompt and no resume identity.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
-[src: file: backend/src/agents/runner.rs:4632-4636#acp_resume_id]
+[src: file: backend/src/agents/runner.rs:4636-4640#acp_resume_id]
 
 ## Two boundaries, one completed turn
 
@@ -27,7 +27,7 @@ summary/pinning indices. It never silently truncates unseen messages: if the
 complete delta is not smaller than the bounded full prompt, resume is declined.
 [src: file: backend/src/api/disc_prompts.rs:400-420#build_agent_delta_prompt]
 [src: file: backend/src/api/disc_prompts.rs:643-648#is_delta]
-[src: file: backend/src/api/discussions/streaming.rs:2553-2575#messages_not_yet_seen]
+[src: file: backend/src/api/discussions/streaming.rs:2559-2581#messages_not_yet_seen]
 [src: file: backend/src/api/discussions/streaming.rs:2670-2713#unseen]
 
 Migration 173 adds the output marker and an active turn identity, without
@@ -69,8 +69,8 @@ The safe fresh-session fallback is restricted to absent resume capability or a
 positively identified missing session before a prompt is sent. Authentication,
 timeouts and ambiguous transport errors fail visibly. Prompt, cancellation and
 persistence failures are not followed by an automatic fresh-session replay.
-[src: file: backend/src/agents/runner.rs:5738-5794#resume_refused]
-[src: file: backend/src/agents/runner.rs:6228-6293#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:5735-5791#resume_refused]
+[src: file: backend/src/agents/runner.rs:6235-6300#acp_failure_diagnostic]
 
 OpenCode v1.18.27 defines a structured missing-session error using code -32602,
 the exact message `session not found: <id>` and `data.sessionId`. The transport
@@ -91,7 +91,7 @@ discussion layer decides `new` and its reason; the runner reports a refused
 resume once the runtime answered it. Runtimes that never resume record nothing.
 [src: file: backend/src/api/discussions/streaming.rs:2626-2758#resume_with_delta_if_possible]
 [src: file: backend/src/api/discussions/streaming.rs:2759-2769#settle_turn_continuity]
-[src: file: backend/src/agents/runner.rs:6220-6235#resume_refused]
+[src: file: backend/src/agents/runner.rs:6217-6232#resume_refused]
 
 ## Deterministic qualification boundaries
 
@@ -111,8 +111,8 @@ cover capability absence, missing sessions, ambiguous errors, cancellation and
 redacted prompt/persistence failures.
 [src: file: backend/src/api/discussions/streaming.rs:8941-9260#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 [src: file: backend/src/db/acp_runtime_sessions.rs:402-531#completed_checkpoint_is_scoped_and_a_new_turn_invalidates_it_before_prompt]
-[src: file: backend/src/agents/runner.rs:16278-16379#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
-[src: file: backend/src/agents/runner.rs:16436-16640#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
+[src: file: backend/src/agents/runner.rs:16282-16383#cli_print_checkpoint_requires_the_same_turn_store_and_is_retired_before_init]
+[src: file: backend/src/agents/runner.rs:16440-16644#run_acp_session_uses_resume_and_keeps_the_existing_fallback]
 
 These tests do not launch a live provider or qualify real model behavior.
 Kronn normalizes ACP token counts but does not yet normalize optional cumulative

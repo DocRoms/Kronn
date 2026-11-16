@@ -258,8 +258,105 @@ Safe to interrupt at any point; a rerun converges:
    `config.toml.retired-key.<timestamp>`, and the temp files of the old
    writers): encrypted whole, the clear file removed only once the encrypted
    one is written and read back. A copy that cannot be written (full disk) is
-   left as it is, logged, and retried at the next start; one failure does not
-   stop the others. The key lookup tells three cases apart. A key is found:
+   cut down to its `encryption_secret` line (every credential lives in the
+   encrypted store, so only that key line is irreplaceable) and the encryption
+   is retried at the next start; if the cut-down write fails too, the file is
+   left as it is and logged once. A `config.toml.corrupt.<timestamp>` whose
+   encryption fails is not cut down: a config.toml that could never be read may
+   hold credentials that reached no encrypted store, so it is left whole and
+   reported until the encryption succeeds. The key of a copy is decided by toml
+   itself (`config::read_key`), with one rule and no guessing at a damaged file:
+   (1) a text that parses gives its top-level `encryption_secret` (a string; a
+   number, an array or a value under a table is not the key, and a closed
+   multi-line string that spells the name is a note); (2) otherwise the LONGEST
+   prefix of whole lines that parses is taken (every prefix up to the cap is
+   tried and the last one that parses wins, so a multi-line array, string or
+   inline table before the key, such as the `disabled_agents = [ … ]` older
+   builds wrote, does not hide it; a byte-order mark on line 1 is ignored; the
+   cap is 200 lines and 32 KiB, Kronn's own file being far smaller) and its
+   top-level `encryption_secret` is the key when it is a real key; (3) every
+   other case gives no key. No line of a damaged text is read on its own, and no
+   region, table header or glued header is guessed at. The key may be spelled `"encryption_secret"`
+   or with an escape: toml decodes it. A copy with no key read is kept whole,
+   byte-identical, and reported (never dropped, cut down or deferred) when the
+   part of the text that was not read (the text after the parsed prefix, or all of
+   it when no prefix parses) spells `encryption_secret` or an escape (`\u`, `\U`,
+   `\x`) that could spell it another way, and so does a copy whose top-level
+   `encryption_secret` is a non-blank string that is no key (a `retired-key` file
+   included). A name that only sits in the parsed prefix (blank, a number, a
+   comment, under a table) holds no key and keeps nothing. A damaged text that
+   never spells the name in its unread part holds no key and is dropped (or, with
+   a key, sealed); a readable key with such a text after it is cut down to its key
+   line. The consequence to accept: a key placed after the first damaged line (or
+   past the cap) is not recovered at boot; it stays in the kept copy, reported.
+   Kronn writes `encryption_secret` near the top of `config.toml` (after
+   `language`, `ui_language`, `stt_model`, `disabled_agents`), so the usual damaged
+   file still recovers its key. Two keys, or the same key written twice (a
+   duplicate key makes the text invalid TOML), keep the copy whole, reported.
+   A key name that is a secret is never printed in a notice, like a vendor-shaped
+   secret, and is a credential on the save path (its entry is sheltered and not
+   written back to `config.toml`, so the name does not stay in clear there). ONE
+   rule decides it (`config_salvage::secret_name`), on a name of 256 characters at
+   most, every clause judging the WHOLE name except where said ((c) retries every
+   start, bounded by the cap): (a) a
+   longer name is masked without any pattern running on it; (c) a vendor token
+   shape anywhere in the name with no word-boundary anchor (`old_sk-…`,
+   `myAKIA…`, `AKIA…_old`, `botxoxb-…`, `sk_live_…_old`, `sk-<uuid>`), DERIVED
+   mechanically from the vendor patterns of `redact::RAW_PATTERNS` (same bodies
+   and same minimum lengths, only the anchors dropped:
+   `redact::name_embeds_vendor_token`); one exception: `sk-` glued to a letter
+   on its left (inside an ordinary word) counts only when the match holds a decimal
+   digit or a capital, as every real `sk-` key does, so `disk-cache-max-size-bytes`
+   and `task-runner-max-concurrency` are shown while `oldsk-…0123…` is masked; every
+   other vendor shape counts glued or not, digits or not (`myAKIA…`, `myhf_…`); (d) `bearer` or `basic` in any case
+   followed by white space (any Unicode white space), `:` or `=` and 12 token
+   characters or more, anywhere (`bearer token` and `basic auth` are words and
+   are shown); (e) an instance key as the whole name or any piece of it, a run of
+   24 hex digits, a base64 run of 32 characters with at least 4 digits, 4
+   capitals and 4 lower-case letters (`enable_OAuth2_authorization_code_flow` is
+   a setting name, not a blob), or a run of 40 characters or more with 4 capitals
+   and 4 lower-case letters whatever its digits (a 32-byte key in base64 can hold
+   three digits or none; a long camelCase name is masked too, the safe side); (b) with every non-alphanumeric character
+   removed, the lengths of the hex runs that hold at least one DECIMAL digit add
+   up to 32 or more (an instance key whole, in groups, `0x`-prefixed or behind a
+   label, `<uuid>_<uuid>`; plain words made of `a` to `f` such as `default` or
+   `added` never count; a dashless UUID and a SHA-1 are hidden too, on the safe
+   side), except a name that is exactly one canonical dashed UUID (8-4-4-4-12,
+   any case), alone or after a `<label>_` or `<label>-` whose own such runs add
+   up to fewer than 8 in total: that is an identifier and is shown. The
+   exemption waives (b), and when the label is too short to hold a key (no run of
+   20 key characters) (e) judges the label only (`PROJ_<uuid>` and
+   `MCP_SERVER_<uuid>` are shown); a longer label is judged with its UUID, so a key
+   with few digits behind a UUID stays masked; (a), (c) and (d) still judge the whole name,
+   so `sk-<uuid>`, `xoxb-<uuid>`, `bearer -<uuid>` and `AKIA…_<uuid>` stay masked. A label whose hex runs hold no decimal digit
+   (`default_agent_profile_<uuid>`, `deadbee_cafebab_<uuid>`) keeps the exemption
+   of (b). The price of the unanchored shapes: a name holding
+   a vendor prefix after a separator or with digits (`sk-cache-max-size-bytes`,
+   `task-runner-v2-max-concurrency`) is masked and sheltered too, on the safe
+   side; Kronn's own settings are snake_case.
+   A symbolic link or Windows reparse point is reported too, as is a file that is
+   not a regular file (a FIFO would block the pass) or a file with several hard
+   links, which the pass never reads through, renames over or removes. An
+   unreadable `config.toml` set aside while no key exists follows the same
+   policy: when the key read leaves a mention it could not use, the whole content
+   is kept as `config.toml.corrupt.<timestamp>` (`0600`, reported at every start,
+   encrypted once a key exists); the key-only copy is for a readable key. A TOML parse
+   error of any config file is logged by kind and position only (`invalid TOML
+   at line 3, column 9`), never with the offending line, which would put a key
+   or a credential in the log (`redact::toml_error_summary`); that holds for
+   `~/.codex/config.toml` too (the host-MCP scan, and the adopt error returned
+   by the API), and for the errors `config::key_only_file` and
+   `config::read_disk_key` return. The notice and the log of a value this build
+   cannot read name the field and the type that was expected, never the value
+   (`server.port (expected u16)`), whatever the field: a secret pasted into a
+   field that is not a credential is a secret all the same
+   (`config_salvage::describe_failure`). Only a known type name is kept after
+   `expected` (a value containing `, expected …` echoes nothing, and a refused
+   enum value says only that it is not one of the allowed values), and a key
+   name that looks like a secret is shown as `<key #N>` in those notices. The pass reads
+   a copy then renames over it, once at start in the single process that owns
+   the data directory; a copy swapped in between is out of scope. One failure
+   does not stop the others. The key lookup tells three cases apart. A key is found:
    everything is encrypted under it. The lookup stops at the first store that
    cannot be read: a lower store (a key file left behind) may hold an older key
    than the locked one above it, so it never stands in for it; a value that is
@@ -340,7 +437,7 @@ all back, so local MCP secrets are never lost to a half import. GitHub
 connections are not exported; those of projects that come back by id are
 kept (the `projects` cascade no longer drops their tokens), and the report
 counts the ones whose project is gone.
-[src: file: backend/src/api/setup.rs:2558-2606#import_clear_statements]
+[src: file: backend/src/api/setup.rs:2574-2622#import_clear_statements]
 [src: file: backend/src/db/github_connections.rs:84-107#restore_rows]
 
 ## Reset

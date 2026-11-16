@@ -17,16 +17,16 @@ path does not exist is skipped with a warning: it has no worktree catalogue for
 the sandbox to enumerate. Any other unreadable Git root still fails closed with
 `claude_sandbox_catalogue_unreadable`, naming the project or linked repository
 (never its path).
-[src: file: backend/src/agents/runner.rs:13340-13370#ClaudeSandboxCatalogueReceipt]
-[src: file: backend/src/agents/runner.rs:13404-13453#claude_sandbox_catalogue_receipt]
-[src: file: backend/src/agents/runner.rs:13455-13484#claude_sandbox_catalogue_roots]
-[src: file: backend/src/agents/runner.rs:13486-13493#claude_task_worker_catalogue_preflight]
-[src: file: backend/src/api/orchestration.rs:12247-12257#worker_project_refusal]
+[src: file: backend/src/agents/runner.rs:13344-13374#ClaudeSandboxCatalogueReceipt]
+[src: file: backend/src/agents/runner.rs:13408-13457#claude_sandbox_catalogue_receipt]
+[src: file: backend/src/agents/runner.rs:13459-13488#claude_sandbox_catalogue_roots]
+[src: file: backend/src/agents/runner.rs:13490-13497#claude_task_worker_catalogue_preflight]
+[src: file: backend/src/api/orchestration.rs:12284-12294#worker_project_refusal]
 
 The worker remains fail-closed: sandbox availability is mandatory,
 unsandboxed commands are disabled, and the explicit write roots are the
 canonical managed task worktree and its lane's private Cargo target (see
-"Build and test policy" below). [src: file: backend/src/agents/runner.rs:13216-13252#claude_task_worker_settings]
+"Build and test policy" below). [src: file: backend/src/agents/runner.rs:13223-13259#claude_task_worker_settings]
 
 Regression coverage uses real synthetic Git common directories to exercise
 accepted and refused catalogue sizes, common-directory deduplication and

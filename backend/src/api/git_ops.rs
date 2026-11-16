@@ -1,6 +1,7 @@
 //! Shared git operation helpers used by both project and discussion endpoints.
 
 use crate::core::cmd::sync_cmd;
+use crate::core::commit_policy::CommitPolicy;
 use crate::models::*;
 use std::path::Path;
 
@@ -1291,45 +1292,26 @@ fn git_in(repo_path: &Path, worker: bool) -> Result<std::process::Command, Strin
     crate::core::lane_git::git_keeping_owner_hooks(repo_path)
 }
 
-/// Give the repository a fallback git identity when none is configured.
-fn ensure_git_identity(repo_path: &Path, worker: bool) {
-    let Ok(mut read) = git_in(repo_path, worker) else {
-        return;
-    };
-    let has_user = read
-        .args(["config", "user.name"])
-        .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false);
-    if !has_user {
-        for args in [
-            ["config", "user.name", "Kronn"],
-            ["config", "user.email", "kronn@localhost"],
-        ] {
-            if let Ok(mut write) = git_in(repo_path, worker) {
-                let _ = write.args(args).status();
-            }
-        }
-    }
-}
-
-/// Run `git commit <commit_args>` and return the new short HEAD, optionally
-/// retaining the backend's data-directory lock in Git and any hook descendants
-/// across backend death.
+/// Run `git commit <commit_args>` as the project's commit identity and return
+/// the new short HEAD, optionally retaining the backend's data-directory lock in
+/// Git and any hook descendants across backend death.
 ///
 /// `hooks` is `None` for a commit the user asked for in their own checkout (the
-/// repository's hooks run, as ever). `Some((policy, gate))` is a commit Kronn
-/// makes for a worker (KT-1745): git runs no hook that lives in the worktree, and
-/// the gating hook `gate` runs first as `policy` allows, its refusal being a
-/// `HookRefused`.
+/// repository's hooks run, as ever). `Some((hooks_policy, gate))` is a commit
+/// Kronn makes for a worker (KT-1745): git runs no hook that lives in the
+/// worktree, and the gating hook `gate` runs first as `hooks_policy` allows, its
+/// refusal being a `HookRefused`. The identity reaches git as `GIT_AUTHOR_*` /
+/// `GIT_COMMITTER_*`; no config is written (KT-1750).
 fn run_commit_command(
     repo_path: &Path,
     commit_args: &[&str],
     data_dir_lock: Option<&std::fs::File>,
     hooks: Option<(crate::models::WorkerCommitHooks, &str)>,
+    policy: &CommitPolicy,
+    amend: bool,
 ) -> Result<String, String> {
-    if let Some((policy, gate)) = hooks {
-        crate::core::commit_hooks::run_gating_hook(repo_path, policy, gate)
+    if let Some((hooks_policy, gate)) = hooks {
+        crate::core::commit_hooks::run_gating_hook(repo_path, hooks_policy, gate)
             .map_err(|refusal| refusal.to_string())?;
     }
     // Only `git commit` executes hooks. Keep the inherited descriptor alive
@@ -1342,6 +1324,7 @@ fn run_commit_command(
         })?;
     let mut commit_command = git_in(repo_path, hooks.is_some())?;
     commit_command.args(commit_args);
+    policy.apply_identity(&mut commit_command, amend);
     #[cfg(unix)]
     if let Some(child_lock) = child_lock.as_ref() {
         crate::core::config::inherit_data_dir_lock_on_command(&mut commit_command, child_lock);
@@ -1427,25 +1410,27 @@ fn commit_explicit_paths(
     amend: bool,
     sign: bool,
     data_dir_lock: Option<&std::fs::File>,
-    policy: Option<crate::models::WorkerCommitHooks>,
+    hooks_policy: Option<crate::models::WorkerCommitHooks>,
 ) -> Result<GitCommitResponse, String> {
     // git add each file individually, skip missing files gracefully
     let clean_files = files
         .iter()
         .map(|file| file.trim_matches('"'))
         .collect::<Vec<_>>();
-    let worker = policy.is_some();
+    let worker = hooks_policy.is_some();
     if stage_explicit_paths(repo_path, &clean_files, worker)? == 0 {
         return Err("No files could be staged".to_string());
     }
 
-    ensure_git_identity(repo_path, worker);
+    let policy = CommitPolicy::for_repo(repo_path);
 
     let mut commit_args = vec!["commit"];
     if amend {
         commit_args.push("--amend");
     }
-    commit_args.push("-s"); // signoff by default
+    if policy.signoff {
+        commit_args.push("-s");
+    }
     if sign {
         commit_args.push("-S");
     } else {
@@ -1465,7 +1450,9 @@ fn commit_explicit_paths(
         repo_path,
         &commit_args,
         data_dir_lock,
-        policy.map(|policy| (policy, "pre-commit")),
+        hooks_policy.map(|hooks_policy| (hooks_policy, "pre-commit")),
+        &policy,
+        amend,
     )?;
 
     Ok(GitCommitResponse {
@@ -1587,7 +1574,7 @@ pub fn run_git_merge_commit_for_worker(
     message: &str,
     sign: bool,
     data_dir_lock: Option<&std::fs::File>,
-    policy: crate::models::WorkerCommitHooks,
+    hooks_policy: crate::models::WorkerCommitHooks,
 ) -> Result<GitCommitResponse, String> {
     let clean_files = files
         .iter()
@@ -1681,16 +1668,21 @@ pub fn run_git_merge_commit_for_worker(
     };
     let message = message.as_str();
 
-    ensure_git_identity(repo_path, true);
+    let policy = CommitPolicy::for_repo(repo_path);
 
-    let mut commit_args = vec!["commit", "-s"];
+    let mut commit_args = vec!["commit"];
+    if policy.signoff {
+        commit_args.push("-s");
+    }
     commit_args.push(if sign { "-S" } else { "--no-gpg-sign" });
     commit_args.extend(["-m", message]);
     let hash = run_commit_command(
         repo_path,
         &commit_args,
         data_dir_lock,
-        Some((policy, "pre-merge-commit")),
+        Some((hooks_policy, "pre-merge-commit")),
+        &policy,
+        false,
     )?;
 
     let has_second_parent = git_in(repo_path, true)?
@@ -3031,31 +3023,161 @@ mod tests {
         );
     }
 
-    #[test]
-    fn commit_adds_signoff_by_default() {
-        let repo = make_test_repo("signoff");
-        std::fs::write(repo.path().join("file.txt"), "content").unwrap();
-        let result = run_git_commit(
-            repo.path(),
-            &["file.txt".into()],
-            "test signoff",
-            false,
-            false,
-        );
-        assert!(result.is_ok(), "commit failed: {:?}", result.err());
-
-        // Check that the commit message contains Signed-off-by
-        let log = std::process::Command::new("git")
-            .args(["log", "-1", "--format=%B"])
-            .current_dir(repo.path())
-            .output()
+    fn repo_git(repo: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
             .unwrap();
-        let msg = String::from_utf8_lossy(&log.stdout);
-        assert!(
-            msg.contains("Signed-off-by:"),
-            "Commit should have Signed-off-by, got: {}",
-            msg
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// `(full message, "author|committer")` of HEAD.
+    fn head_commit(repo: &Path) -> (String, String) {
+        let show = |format: &str| {
+            let out = std::process::Command::new("git")
+                .args(["log", "-1", format])
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        (show("--format=%B"), show("--format=%an <%ae>|%cn <%ce>"))
+    }
+
+    fn commit_file(repo: &Path, name: &str) {
+        std::fs::write(repo.join(name), "content").unwrap();
+        run_git_commit(repo, &[name.into()], "test commit", false, false).unwrap();
+    }
+
+    #[test]
+    fn commit_has_no_signoff_when_the_project_does_not_sign() {
+        let repo = make_test_repo("no-signoff");
+        commit_file(repo.path(), "file.txt");
+        let (message, identity) = head_commit(repo.path());
+        assert!(!message.contains("Signed-off-by:"), "{message}");
+        assert_eq!(
+            identity,
+            "Test User <test@test.com>|Test User <test@test.com>"
         );
+    }
+
+    #[test]
+    fn commit_signs_off_when_the_project_requires_it() {
+        let repo = make_test_repo("signoff");
+        repo_git(repo.path(), &["config", "kronn.signoff", "true"]);
+        commit_file(repo.path(), "file.txt");
+        let (message, _) = head_commit(repo.path());
+        assert!(
+            message.contains("Signed-off-by: Test User <test@test.com>"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn commit_signs_off_in_a_dco_repository_without_any_setting() {
+        let repo = make_test_repo("dco");
+        std::fs::write(repo.path().join("DCO"), "Developer Certificate of Origin").unwrap();
+        commit_file(repo.path(), "file.txt");
+        let (message, _) = head_commit(repo.path());
+        assert!(message.contains("Signed-off-by:"), "{message}");
+    }
+
+    #[test]
+    fn commit_uses_the_project_identity_for_author_committer_and_signoff() {
+        let repo = make_test_repo("identity");
+        repo_git(repo.path(), &["config", "kronn.signoff", "true"]);
+        repo_git(repo.path(), &["config", "kronn.commitName", "Corp Dev"]);
+        repo_git(
+            repo.path(),
+            &["config", "kronn.commitEmail", "dev@corp.example"],
+        );
+        commit_file(repo.path(), "file.txt");
+        let (message, identity) = head_commit(repo.path());
+        assert_eq!(
+            identity,
+            "Corp Dev <dev@corp.example>|Corp Dev <dev@corp.example>"
+        );
+        assert!(
+            message.contains("Signed-off-by: Corp Dev <dev@corp.example>"),
+            "{message}"
+        );
+        assert!(!message.contains("test@test.com"), "{message}");
+    }
+
+    #[test]
+    fn commit_with_only_a_global_identity_uses_it_and_writes_no_repository_config() {
+        // The harness's global config is the only identity there is.
+        crate::core::git_global_config::isolate_global_git_config_for_tests();
+        let dir = tempfile::tempdir().unwrap();
+        repo_git(dir.path(), &["init", "-q", "-b", "main"]);
+        commit_file(dir.path(), "file.txt");
+        let (_, identity) = head_commit(dir.path());
+        assert_eq!(
+            identity,
+            "Kronn Test <kronn-test@example.invalid>|Kronn Test <kronn-test@example.invalid>"
+        );
+        let config = std::fs::read_to_string(dir.path().join(".git/config")).unwrap();
+        assert!(!config.contains("[user]"), "{config}");
+    }
+
+    #[test]
+    fn a_merge_commit_follows_the_projects_sign_off_and_identity() {
+        for signoff in [false, true] {
+            let repo = make_test_repo("merge-policy");
+            let dir = repo.path();
+            repo_git(dir, &["config", "kronn.commitName", "Corp Dev"]);
+            repo_git(dir, &["config", "kronn.commitEmail", "dev@corp.example"]);
+            repo_git(
+                dir,
+                &[
+                    "config",
+                    "kronn.signoff",
+                    if signoff { "true" } else { "false" },
+                ],
+            );
+            // Two linked worktrees: the work happens in checkouts Kronn owns,
+            // never by switching the main one.
+            std::fs::write(dir.join("main.txt"), "main").unwrap();
+            repo_git(dir, &["add", "main.txt"]);
+            repo_git(dir, &["commit", "-q", "-m", "main work"]);
+            let side = dir.join(".kronn/worktrees/side");
+            repo_git(
+                dir,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "side",
+                    side.to_str().unwrap(),
+                    "HEAD~1",
+                ],
+            );
+            std::fs::write(side.join("side.txt"), "side").unwrap();
+            repo_git(&side, &["add", "side.txt"]);
+            repo_git(&side, &["commit", "-q", "-m", "side work"]);
+            repo_git(&side, &["merge", "-q", "--no-commit", "--no-ff", "main"]);
+
+            run_git_merge_commit_with_child_lock(
+                &side,
+                &["side.txt".to_string()],
+                "merge main",
+                false,
+                None,
+            )
+            .unwrap();
+            let (message, identity) = head_commit(&side);
+            assert_eq!(
+                message.contains("Signed-off-by: Corp Dev <dev@corp.example>"),
+                signoff,
+                "{message}"
+            );
+            assert_eq!(
+                identity,
+                "Corp Dev <dev@corp.example>|Corp Dev <dev@corp.example>"
+            );
+        }
     }
 
     // ── parse_committed_diff tests ───────────────────────────────────────────

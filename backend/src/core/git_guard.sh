@@ -6,8 +6,9 @@
 # working tree. In a repository's main checkout that is the owner's branch and
 # uncommitted work, so the command is refused there unless the human confirmed
 # it (KRONN_MAIN_CHECKOUT_GIT_CONFIRMED=1 in the launch environment). A linked
-# worktree (an agent's own checkout) and every other git command pass through to
-# the real git untouched.
+# worktree (an agent's own checkout), a throwaway repository under the agent's
+# $TMPDIR (a test fixture) and every other git command pass through to the real
+# git untouched.
 #
 # A safety net against accidents (a subagent running `git checkout --detach`),
 # not a sandbox: an absolute path to git or a git alias is not seen, and the
@@ -90,6 +91,31 @@ kronn_in_main_checkout() {
   )
 }
 
+# True when the repository holding $1 lies under the agent's own temporary
+# directory ($TMPDIR): a throwaway repository a test or a script just created,
+# never the owner's checkout. A $TMPDIR that is the filesystem root, the home
+# folder or a folder above it exempts nothing.
+kronn_in_scratch_repo() {
+  [ -n "${TMPDIR-}" ] || return 1
+  (
+    tmp=$(cd "$TMPDIR" 2>/dev/null && pwd -P) || exit 1
+    home=$(cd "${HOME:-/}" 2>/dev/null && pwd -P) || home=/
+    case "$tmp" in
+      / | "$home") exit 1 ;;
+    esac
+    case "$home/" in
+      "$tmp"/*) exit 1 ;;
+    esac
+    cd "$1" 2>/dev/null || exit 1
+    top=$("$real_git" rev-parse --show-toplevel 2>/dev/null) || exit 1
+    top=$(cd "$top" 2>/dev/null && pwd -P) || exit 1
+    case "$top/" in
+      "$tmp"/*) exit 0 ;;
+    esac
+    exit 1
+  )
+}
+
 kronn_scan "$@"
 
 guarded=
@@ -104,7 +130,7 @@ case "$kronn_sub" in
 esac
 
 if [ -n "$guarded" ] && [ "${KRONN_MAIN_CHECKOUT_GIT_CONFIRMED-}" != 1 ]; then
-  if kronn_in_main_checkout "$kronn_dir"; then
+  if kronn_in_main_checkout "$kronn_dir" && ! kronn_in_scratch_repo "$kronn_dir"; then
     top=$(cd "$kronn_dir" && "$real_git" rev-parse --show-toplevel 2>/dev/null || pwd)
     {
       echo "kronn: refused 'git $guarded' in $top, the project's main checkout."

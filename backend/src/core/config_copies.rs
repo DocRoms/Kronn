@@ -26,8 +26,32 @@
 //! one thing a later start needs to recover) or dropped; when the stores cannot
 //! be read, the copies are left exactly as they are and the next start or unlock
 //! retries. A clear copy found at start (written by 0.15.x) is converted once by
-//! [`protect_copies`]; a copy that cannot be written is left as it is and
-//! retried at the next start, never deleted for it (a key may sit in it).
+//! [`protect_copies`]; a copy that cannot be written is cut down to its key
+//! line (the one value that exists nowhere else) and sealed at the next start.
+//! Three kinds are left exactly as they are and listed in `failures` instead:
+//! a copy that holds an `encryption_secret` it cannot read as a key (a
+//! top-level non-blank string that is no key) or mentions the name in the part
+//! of a damaged text that was not read (never dropped nor deferred nor cut down);
+//! a `corrupt` copy whose seal failed (a config.toml that could never be
+//! read may hold credentials that reached no encrypted store); and a link
+//! (symbolic link, Windows reparse point), a non-regular file (a FIFO would block
+//! the pass) or a file with several hard links. What is proven harmless does not
+//! keep a copy in clear: an empty value, a number, a value under a table, or a
+//! damaged text that never spells the name.
+//!
+//! The key is the top-level `encryption_secret` ([`key_of`]), decided by toml
+//! itself ([`config::read_key`]): the parsed value of a text that parses, else
+//! the one of the longest prefix of whole lines that parses. No line of a damaged
+//! text is read on its own, so a key that sits after the first damaged line is
+//! not recovered: it stays in the copy that is kept, reported. An unreadable
+//! `config.toml` set aside while no key exists follows the same policy
+//! ([`set_aside_content`]): a mention the read could not use keeps the whole
+//! content, owner-only.
+//!
+//! The pass reads a copy, then writes and renames: a single pass at start, in
+//! the one process that owns the data directory, so a copy swapped between the
+//! read and the rename is out of scope (credentials live in `stored_credentials`
+//! since 0.14.3, KT-1007).
 
 use std::path::{Path, PathBuf};
 
@@ -264,18 +288,44 @@ pub fn stamp() -> String {
     chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ").to_string()
 }
 
-/// A top-level `encryption_secret` of `text`, whole or salvaged line by line,
-/// when it is a real key.
+/// What the top level of a copy says about its `encryption_secret`.
+struct KeyLines {
+    /// The real key read from the copy ([`config::read_key`]).
+    key: Option<String>,
+    /// The copy holds an `encryption_secret` it could not read as a key (a
+    /// non-blank string that is no key), or mentions the name in the part of a
+    /// damaged text that was not read: it may be the only trace of a key.
+    unreadable: bool,
+}
+
+/// What `text` says about its top-level `encryption_secret`, decided by toml
+/// itself ([`config::read_key`]): the parsed value of a text that parses, else
+/// the one of the longest prefix of whole lines that parses.
+fn key_lines(text: &str) -> KeyLines {
+    let read = config::read_key(text);
+    match read.value {
+        Some(value) => match crypto::canonical_secret(&value) {
+            Ok(key) => KeyLines {
+                key: Some(key),
+                unreadable: read.unreadable,
+            },
+            // A string that is no key: kept, never cut away.
+            Err(_) => KeyLines {
+                key: None,
+                unreadable: true,
+            },
+        },
+        None => KeyLines {
+            key: None,
+            unreadable: read.unreadable,
+        },
+    }
+}
+
+/// The top-level `encryption_secret` of `text`, when it is a real key
+/// ([`key_lines`]).
 pub fn key_of(text: &str) -> Option<String> {
-    text.parse::<toml::Table>()
-        .ok()
-        .and_then(|t| {
-            t.get("encryption_secret")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .or_else(|| config::salvage_key_line(text))
-        .and_then(|k| crypto::canonical_secret(&k).ok())
+    key_lines(text).key
 }
 
 /// The only content kept of a copy that cannot be sealed.
@@ -335,15 +385,16 @@ pub fn protect_copies(dir: &Path, sealing: &Sealing) -> Protected {
 /// Convert every clear copy of config.toml in `dir` once, idempotently: sealed
 /// under `key_hex` when there is one; else (`None`: the caller PROVED that no
 /// key exists, see [`protect_copies`]) cut down to its key line, or dropped when
-/// it has none. A copy whose conversion fails is left untouched and reported in
-/// `failures`; the next start retries.
+/// it has none. A copy that cannot be sealed while a key exists is cut down the
+/// same way (counted in `reduced`) and sealed at the next start; only when that
+/// cut-down fails too is it left untouched and reported in `failures`.
 pub fn protect_clear_copies(dir: &Path, key_hex: Option<&str>) -> Protected {
     let mut report = Protected::default();
     remove_old_temps(dir, &mut report);
     for copy in copies(dir).into_iter().filter(|c| !c.sealed) {
         match protect_one(dir, &copy, key_hex) {
             Ok(Done::Sealed) => report.sealed += 1,
-            Ok(Done::Reduced) => report.reduced += 1,
+            Ok(Done::Reduced | Done::Dropped) => report.reduced += 1,
             Ok(Done::Untouched) => {}
             Ok(Done::Deferred) => {
                 tracing::warn!(
@@ -367,12 +418,18 @@ pub fn protect_clear_copies(dir: &Path, key_hex: Option<&str>) -> Protected {
 
 enum Done {
     Sealed,
+    /// Cut down to its key line.
     Reduced,
+    /// Removed: it held nothing a later start needs.
+    Dropped,
     Untouched,
     Deferred,
 }
 
 fn protect_one(dir: &Path, copy: &ConfigCopy, key_hex: Option<&str>) -> Result<Done> {
+    // A link is never read through, renamed over or removed: the target (or the
+    // other name of a hard link) would keep the whole content in clear.
+    check_plain_file(&copy.path)?;
     let bytes = match std::fs::read(&copy.path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Done::Untouched),
@@ -381,25 +438,141 @@ fn protect_one(dir: &Path, copy: &ConfigCopy, key_hex: Option<&str>) -> Result<D
     // Looked at for a key line only; what is sealed is the raw bytes.
     let text = String::from_utf8_lossy(&bytes).into_owned();
     if let Some(key) = key_hex {
-        // The sealed name is free unless a crash left both forms: then the
-        // clear one is sealed under a name of its own.
-        let sealed_name = if dir
-            .join(format!("{}{SEALED_SUFFIX}", copy.name))
-            .symlink_metadata()
-            .is_ok()
-        {
-            free_name(dir, &format!("{}.{}", copy.name, stamp()), SEALED_SUFFIX)
-        } else {
-            format!("{}{SEALED_SUFFIX}", copy.name)
+        return match seal_and_remove(dir, copy, &bytes, key) {
+            Ok(()) => Ok(Done::Sealed),
+            // The seal failed (full disk, ...) while a key exists: the clear copy
+            // is not kept whole. Only its key line is irreplaceable (every
+            // credential lives in the encrypted store), so it is cut down exactly
+            // as when no key exists; the next start seals what is left. Anything
+            // but a real cut-down or drop (a copy that cannot be cut down, or has
+            // nothing left to cut) is a failure carrying the seal's cause.
+            Err(e) => {
+                // A copy of a config.toml that could never be read: its
+                // credentials may never have reached the encrypted store, so a
+                // transient failure must not cost it anything.
+                if copy.kind == Kind::Corrupt {
+                    return Err(e.context(
+                        "it is a config.toml that could not be read, whose content may exist \
+                         nowhere else: left as it is",
+                    ));
+                }
+                match reduce(dir, copy, &text) {
+                    Ok(Done::Reduced) => {
+                        tracing::warn!(
+                            "{} could not be encrypted ({e:#}); it was cut down to its key \
+                             line, the next start retries",
+                            copy.name
+                        );
+                        Ok(Done::Reduced)
+                    }
+                    Ok(Done::Dropped) => {
+                        tracing::warn!(
+                            "{} could not be encrypted ({e:#}); it held no key line and \
+                             nothing a later start needs, so it was removed",
+                            copy.name
+                        );
+                        Ok(Done::Dropped)
+                    }
+                    Ok(Done::Untouched) => {
+                        Err(e.context("it already holds nothing but its key line, left as it is"))
+                    }
+                    Ok(_) => {
+                        Err(e.context("it holds a value that is not a key and cannot be cut down"))
+                    }
+                    Err(cut) => Err(e.context(format!("and it could not be cut down: {cut:#}"))),
+                }
+            }
         };
-        let target = dir.join(&sealed_name);
-        write_sealed(dir, &target, &bytes, key)?;
-        remove(&copy.path)?;
-        return Ok(Done::Sealed);
     }
-    match key_of(&text) {
+    reduce(dir, copy, &text)
+}
+
+/// An error unless `path` is a regular file with a single name: a symbolic
+/// link, another kind of file, or a file with several hard links is left alone.
+fn check_plain_file(path: &Path) -> Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).context("stat"),
+    };
+    refuse_symlink(path).context("read")?;
+    // Before any read: a FIFO or a device would block the start pass.
+    anyhow::ensure!(meta.is_file(), "it is not a regular file; left as it is");
+    let links = hard_links(path, &meta)?;
+    anyhow::ensure!(
+        links <= 1,
+        "it has {links} hard links, another name would keep its content; left as it is"
+    );
+    Ok(())
+}
+
+/// How many names the regular file at `path` has.
+#[cfg(unix)]
+fn hard_links(_path: &Path, meta: &std::fs::Metadata) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(meta.nlink())
+}
+
+/// How many names the regular file at `path` has (the count is not in std's
+/// stable `Metadata` on Windows: asked of an open handle).
+#[cfg(windows)]
+fn hard_links(path: &Path, _meta: &std::fs::Metadata) -> Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = std::fs::File::open(path).context("open")?;
+    // SAFETY: an all-zero struct is a valid out-parameter; the handle stays open
+    // for the whole call.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let asked = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    if asked == 0 {
+        return Err(anyhow::Error::new(std::io::Error::last_os_error()))
+            .context("count its hard links");
+    }
+    Ok(u64::from(info.nNumberOfLinks))
+}
+
+/// Neither unix nor windows: the count is unknown, so the copy is left alone.
+#[cfg(not(any(unix, windows)))]
+fn hard_links(_path: &Path, _meta: &std::fs::Metadata) -> Result<u64> {
+    anyhow::bail!("its hard links cannot be counted on this platform; left as it is")
+}
+
+/// Encrypt the raw `bytes` of `copy` under `key` and remove the clear file once
+/// the encrypted one is written and read back.
+fn seal_and_remove(dir: &Path, copy: &ConfigCopy, bytes: &[u8], key: &str) -> Result<()> {
+    // The sealed name is free unless a crash left both forms: then the
+    // clear one is sealed under a name of its own.
+    let sealed_name = if dir
+        .join(format!("{}{SEALED_SUFFIX}", copy.name))
+        .symlink_metadata()
+        .is_ok()
+    {
+        free_name(dir, &format!("{}.{}", copy.name, stamp()), SEALED_SUFFIX)
+    } else {
+        format!("{}{SEALED_SUFFIX}", copy.name)
+    };
+    write_sealed(dir, &dir.join(&sealed_name), bytes, key)?;
+    remove(&copy.path)
+}
+
+/// Cut a clear copy down to its key line, or drop it when it has none.
+fn reduce(dir: &Path, copy: &ConfigCopy, text: &str) -> Result<Done> {
+    let lines = key_lines(text);
+    // An `encryption_secret` the copy cannot read may be the only trace of a key
+    // (a string that is no key, a mention past the first damaged line): never
+    // dropped, cut away or deferred, reported instead.
+    if lines.unreadable {
+        anyhow::bail!(
+            "it holds an encryption_secret that is not a readable key (or a damaged part of \
+             it mentions one); left as it is"
+        );
+    }
+    match lines.key.as_deref() {
         Some(key) => {
-            let only = key_only(&key);
+            let only = key_only(key);
             if text == only {
                 return Ok(Done::Untouched);
             }
@@ -415,7 +588,7 @@ fn protect_one(dir: &Path, copy: &ConfigCopy, key_hex: Option<&str>) -> Result<D
         // Nothing in it a later start needs: dropped rather than kept in clear.
         None => {
             remove(&copy.path)?;
-            Ok(Done::Reduced)
+            Ok(Done::Dropped)
         }
     }
 }
@@ -454,14 +627,34 @@ fn remove_old_temps(dir: &Path, report: &mut Protected) {
     }
 }
 
-/// An error when `path` is a symbolic link (dangling or not): a copy is never
-/// read through, renamed or written over a link. A missing path is fine.
+/// Whether `meta` is a link: a symbolic link, or on Windows any reparse point
+/// (junction, AppExecLink, cloud placeholder, ...), which `is_symlink` does not
+/// all cover, as the Windows move below does not trust it either.
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_symlink() || is_reparse_point(meta)
+}
+
+#[cfg(windows)]
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// An error when `path` is a symbolic link (dangling or not; on Windows, any
+/// reparse point): a copy is never read through, renamed or written over a link.
+/// A missing path is fine.
 pub fn refuse_symlink(path: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::new(
+        Ok(meta) if is_link(&meta) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "{} is a symbolic link; it is left where it is",
+                "{} is a symbolic link or a reparse point; it is left where it is",
                 path.display()
             ),
         )),
@@ -503,6 +696,11 @@ pub enum Aside {
     /// the file was moved as it was (clear, 0600) and is encrypted at the next
     /// start, once the stores read. The file name.
     Deferred(String),
+    /// No key exists, and the file holds an `encryption_secret` it cannot be cut
+    /// down to (several different keys, a line that cannot be read): kept whole in
+    /// clear (0600), reported at every start, encrypted once a key exists. The
+    /// file name.
+    KeptAsIs(String),
 }
 
 impl Aside {
@@ -513,6 +711,10 @@ impl Aside {
             Aside::Deferred(name) => format!(
                 "was kept as {name}, readable only by you, until the encryption key can be read \
                  and the copy encrypted (at the next start)"
+            ),
+            Aside::KeptAsIs(name) => format!(
+                "was kept as {name}, readable only by you: it holds an encryption key line that \
+                 could not be read or told from another, so nothing was cut away"
             ),
             Aside::KeyOnly(name) => {
                 format!("was removed; only the encryption key line it held is kept as {name}")
@@ -527,7 +729,8 @@ impl Aside {
 /// Keep what an unreadable config.toml held. `key_hex` is a key the stores hold
 /// independently of that file; without one the content is not kept (a copy
 /// sealed under a key it holds itself would protect nothing): only its key line
-/// is, so the key can still be recovered.
+/// is, so the key can still be recovered (the content is kept whole, owner-only,
+/// when it holds several keys or a key line that cannot be read: [`Aside::KeptAsIs`]).
 /// `content` is sealed as the raw bytes it is.
 pub fn set_aside_content(dir: &Path, content: &[u8], key_hex: Option<&str>) -> Result<Aside> {
     let base = format!("{CORRUPT_PREFIX}{}", stamp());
@@ -537,8 +740,21 @@ pub fn set_aside_content(dir: &Path, content: &[u8], key_hex: Option<&str>) -> R
         return Ok(Aside::Sealed(name));
     }
     let text = String::from_utf8_lossy(content);
-    let Some(key_line) = key_of(&text).map(|k| key_only(&k)) else {
-        return Ok(Aside::Nothing);
+    let lines = key_lines(&text);
+    // Same policy as a copy cut down ([`reduce`]): a key line may be the only
+    // copy of a live key, so a mention of it the read could not use is never cut
+    // away nor dropped: the content is kept as it is, owner-only, and reported at
+    // every start until a key encrypts it.
+    let key_line = match (&lines.key, lines.unreadable) {
+        (Some(key), false) => key_only(key),
+        (None, false) => return Ok(Aside::Nothing),
+        _ => {
+            let name = free_name(dir, &base, "");
+            let tmp = dir.join(format!(".{name}.tmp"));
+            keyvault::write_private_atomic(&tmp, &dir.join(&name), content)
+                .with_context(|| format!("write {name}"))?;
+            return Ok(Aside::KeptAsIs(name));
+        }
     };
     let name = free_name(dir, &base, "");
     let tmp = dir.join(format!(".{name}.tmp"));

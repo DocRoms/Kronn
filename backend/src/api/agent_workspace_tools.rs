@@ -3769,6 +3769,8 @@ mod tests {
             &["config", "user.email", "configured@example.com"],
         )
         .unwrap();
+        // KT-1750: the sign-off follows the project's setting, not a default.
+        git_read(repo.path(), &["config", "kronn.signoff", "true"]).unwrap();
         std::fs::write(repo.path().join("a.txt"), "changed a\n").unwrap();
 
         let committed = git_commit_payload(
@@ -3796,6 +3798,25 @@ mod tests {
         )
         .unwrap_err()
         .contains("empty"));
+    }
+
+    #[cfg(unix)] // creates symlinks through std::os::unix
+    #[test]
+    fn worker_commit_carries_no_sign_off_when_the_project_does_not_sign() {
+        let repo = tiny_repo();
+        std::fs::write(repo.path().join("a.txt"), "changed a\n").unwrap();
+
+        git_commit_payload(
+            repo.path(),
+            &["a.txt".into()],
+            "fix: change a\n\nSigned-off-by: Invented <invented@example.com>",
+        )
+        .unwrap();
+
+        let body = git_read(repo.path(), &["log", "-1", "--format=%B"]).unwrap();
+        assert!(!body.contains("Signed-off-by"), "{body}");
+        let author = git_read(repo.path(), &["log", "-1", "--format=%an <%ae>"]).unwrap();
+        assert_eq!(author.trim(), "T <t@t.t>");
     }
 
     #[cfg(unix)] // creates symlinks through std::os::unix
@@ -3869,6 +3890,8 @@ mod tests {
         let _ = git_read(repo.path(), &["merge", "--no-edit", "target"]);
         assert!(merge_head_exists(repo.path()));
         std::fs::write(repo.path().join("a.txt"), "main and target\n").unwrap();
+        // KT-1750: the sign-off follows the project's setting, not a default.
+        git_read(repo.path(), &["config", "kronn.signoff", "true"]).unwrap();
 
         let committed =
             git_commit_payload(repo.path(), &["a.txt".into()], "merge: integrate target").unwrap();
@@ -4042,6 +4065,8 @@ mod tests {
         let (repo, base) = cited_repo();
         let root = repo.path();
         shift_the_source(root);
+        // KT-1750: the sign-off follows the project's setting, not a default.
+        git_read(root, &["config", "kronn.signoff", "true"]).unwrap();
 
         let committed = git_commit_payload_reanchoring_docs(
             root,

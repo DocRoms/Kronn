@@ -80,6 +80,9 @@ pub async fn cancel_run_tree(
     for descendant in &descendant_run_ids {
         cancel_registered_token(state, descendant)?;
     }
+    // The step shadows of the run and of its descendants run detached from the
+    // runners: they stop here, or they would go on spending and writing.
+    cancel_step_shadows(state, run_id, &descendant_run_ids)?;
     let mut child_discs_cancelled = 0u32;
     for discussion_id in &child_disc_ids {
         child_discs_cancelled += u32::from(cancel_registered_token(state, discussion_id)?);
@@ -154,6 +157,30 @@ pub async fn cancel_run_tree(
         child_discs_cancelled,
         child_dispatches_settled,
     })
+}
+
+/// Cancels every registered step shadow of `run_id` and of `descendants`.
+fn cancel_step_shadows(state: &AppState, run_id: &str, descendants: &[String]) -> Result<()> {
+    let prefixes: Vec<String> = std::iter::once(run_id)
+        .chain(descendants.iter().map(String::as_str))
+        .map(super::shadow::registry_prefix)
+        .collect();
+    let tokens: Vec<_> = {
+        let mut registry = state
+            .cancel_registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("cancel registry poisoned"))?;
+        let keys: Vec<String> = registry
+            .keys()
+            .filter(|key| prefixes.iter().any(|prefix| key.starts_with(prefix)))
+            .cloned()
+            .collect();
+        keys.iter().filter_map(|key| registry.remove(key)).collect()
+    };
+    for token in tokens {
+        token.cancel();
+    }
+    Ok(())
 }
 
 fn cancel_registered_token(state: &AppState, key: &str) -> Result<bool> {

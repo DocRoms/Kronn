@@ -265,6 +265,8 @@ mod unix {
         git(lane.main.path(), &["add", "parent.txt"]);
         git(lane.main.path(), &["commit", "-m", "parent moves"]);
         let parent_tip = git(lane.main.path(), &["rev-parse", "HEAD"]);
+        // The project signs off: Kronn adds the trailer as its policy says (KT-1750).
+        git(lane.main.path(), &["config", "kronn.signoff", "true"]);
 
         let build = build_candidate_with_hooks(&lane.worktree, &parent_tip, WorkerCommitHooks::Off)
             .unwrap();

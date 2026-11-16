@@ -148,7 +148,7 @@ this is permission to attempt execution, not proof of account access. Missing CL
 authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
-[src: file: backend/src/api/discussions/streaming.rs:4236-4282#preflight_resolve]
+[src: file: backend/src/api/discussions/streaming.rs:4240-4286#preflight_resolve]
 [src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:1287-1317#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:1651-1681#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -218,10 +218,10 @@ is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
 [src: file: backend/src/agents/runner.rs:13969-13986#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:14106-14137#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14101-14132#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5219-5247#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5226-5254#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -230,7 +230,7 @@ durable catalog. Bootstrap failures are logged; an unavailable projection
 does not silently authorize an effort. Discussion preflight may refresh the
 catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
-[src: file: backend/src/main.rs:309-313#migrate_hardcoded_catalog_once]
+[src: file: backend/src/main.rs:320-324#migrate_hardcoded_catalog_once]
 [src: file: desktop/src-tauri/src/main.rs:716-720#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:156-276#refresh_runtime_cache]
 
@@ -276,8 +276,8 @@ that changes the model. Even without available modes, the control remains
 usable to clear an invalid saved effort. Other runtime cards state that effort
 is unsupported.
 [src: file: frontend/src/components/settings/AgentsSection.tsx:233-278#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:939-968#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:937-942#supportsEffort]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:955-984#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:953-958#supportsEffort]
 
 ## Migration and test invariants
 

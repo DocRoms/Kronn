@@ -151,7 +151,6 @@ fn the_functions_that_run_git_on_a_worktree_never_use_a_plain_git_command() {
             &[
                 "stage_explicit_paths",
                 "git_in",
-                "ensure_git_identity",
                 "run_commit_command",
                 "commit_explicit_paths",
                 "merge_in_progress",
@@ -245,9 +244,9 @@ const PLAIN_GIT_ALLOWED: &[(&str, usize)] = &[
     ("core/scanner.rs", 2),
     ("core/task_worker_lane_seeds.rs", 1),
     ("core/upstream_mirror.rs", 5),
-    ("core/worktree.rs", 45),
+    ("core/worktree.rs", 38),
     ("workflows/batch_step.rs", 1),
-    ("workflows/workspace.rs", 8),
+    ("workflows/workspace.rs", 6),
 ];
 
 #[test]

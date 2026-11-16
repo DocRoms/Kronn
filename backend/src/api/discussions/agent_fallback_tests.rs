@@ -5,7 +5,7 @@ use super::intercept_failed_turn_among;
 use crate::api::discussions::agent_fallback_start::start_on_fallback_among;
 use crate::core::agent_fallback as fallback;
 use crate::db::agent_dispatch::AgentDispatchJob;
-use crate::models::{AgentFallback, AgentType, FallbackMode, MessageRole, ModelTier};
+use crate::models::{AgentFallback, AgentType, FallbackGap, FallbackMode, MessageRole, ModelTier};
 use std::sync::Arc;
 
 const ROOM: &str = "d-fallback";
@@ -562,7 +562,7 @@ async fn the_discussion_settings_store_replace_cancel_and_remove_the_override_pe
     assert_eq!(chain[0].model.as_deref(), Some("sonnet"));
     assert!(saved.views[0].links[1]
         .gaps
-        .contains(&"capped context window".to_string()));
+        .contains(&FallbackGap::CappedContext));
     assert_eq!(
         overridden(&saved, FallbackMode::Eco),
         None,
