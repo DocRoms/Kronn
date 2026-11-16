@@ -6767,13 +6767,16 @@ fn environment_cause(
         .rev()
         .take(DOCKER_REFUSAL_TAIL_LINES)
         .collect();
-    let refusal = tail
+    let test_failed = TEST_FAILURE_MARKERS
         .iter()
-        .find(|line| DOCKER_REFUSALS.iter().any(|refusal| line.contains(refusal)))?;
-    if TEST_FAILURE_MARKERS
+        .any(|marker| output.contains(marker));
+    let Some(refusal) = tail
         .iter()
-        .any(|marker| output.contains(marker))
-    {
+        .find(|line| DOCKER_REFUSALS.iter().any(|refusal| line.contains(refusal)))
+    else {
+        return lane_environment_cause(failure.exit_code, &tail, test_failed);
+    };
+    if test_failed {
         return None;
     }
     let denied =
@@ -6800,6 +6803,73 @@ fn environment_cause(
             fix: "Docker ne répond pas. Démarre-le (OrbStack, Docker Desktop ou Colima), vérifie `docker info`, puis reprends l'intégration.".to_string(),
             docker_elevation: false,
         },
+    })
+}
+
+/// What the OS sandbox of a lane prints when it refuses an operation (lower-cased).
+const SANDBOX_REFUSALS: &[&str] = &[
+    "operation not permitted",
+    "deny file-write",
+    "read-only file system",
+];
+
+/// What a tool prints when the network is not there (lower-cased): the lane's
+/// sandbox opens no outbound connection.
+const OFFLINE_MARKERS: &[&str] = &[
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "getaddrinfo eai_again",
+    "getaddrinfo enotfound",
+    "failed to lookup address information",
+    "name or service not known",
+    "network is unreachable",
+];
+
+/// What `docker compose exec` / `run` prints when the service it targets is not
+/// up (lower-cased).
+const COMPOSE_MARKERS: &[&str] = &[
+    "no such service",
+    "no such container",
+    "no configuration file provided",
+];
+
+/// KT-1753 — a failure the lane's environment caused, for any project: the
+/// command is not installed (exit 127), the OS sandbox refused an operation, the
+/// network is not there, or a compose service is down. Judged from the last
+/// lines of the output and never when a test runner reported a failure, so a
+/// log that merely quotes such a message and then fails on an assertion stays
+/// the worker's. `tail` is the last non-empty output lines, lower-cased, last
+/// first.
+fn lane_environment_cause(
+    exit_code: Option<i32>,
+    tail: &[&str],
+    test_failed: bool,
+) -> Option<EnvironmentCause> {
+    if test_failed {
+        return None;
+    }
+    let any = |markers: &[&str]| {
+        tail.iter()
+            .any(|line| markers.iter().any(|marker| line.contains(marker)))
+    };
+    let fix = if exit_code == Some(127) {
+        "La commande de la validation (code 127) n'existe pas sur cette machine ou dans le PATH de la lane : installe l'outil (ou donne-le à la lane), puis reprends l'intégration."
+    } else if any(SANDBOX_REFUSALS) {
+        "Le bac à sable de la lane a refusé une opération (écriture hors de ses racines, par exemple). Ce n'est pas une erreur du code livré : ouvre ce chemin au profil du projet ou lance la validation sur l'hôte, puis reprends l'intégration."
+    } else if any(OFFLINE_MARKERS) {
+        "La validation a besoin du réseau, que la lane n'a pas (dépendances à récupérer, hôte à résoudre). Mets les dépendances en cache ou dans le dépôt, ou lance la validation sur l'hôte, puis reprends l'intégration."
+    } else if any(COMPOSE_MARKERS)
+        || tail
+            .iter()
+            .any(|line| line.contains("service \"") && line.contains("is not running"))
+    {
+        "La validation exécute une commande dans un service compose qui n'est pas démarré. Démarre la pile compose du projet, puis reprends l'intégration."
+    } else {
+        return None;
+    };
+    Some(EnvironmentCause {
+        fix: fix.to_string(),
+        docker_elevation: false,
     })
 }
 
@@ -25647,6 +25717,71 @@ pub(crate) mod tests {
             failure(Some(1), "FAILED tests/Unit/MediaObjectImageLinkTest.php"),
             failure(Some(101), "error[E0308]: mismatched types"),
             failure(None, "timed out after 600s"),
+        ] {
+            assert!(
+                environment_cause(Sandbox, None, &red).is_none(),
+                "a real red validation stays the worker's: {}",
+                red.output
+            );
+        }
+    }
+
+    /// KT-1753 — a validation that never reached the project's code because the
+    /// lane's environment stopped it (a missing tool, the sandbox, no network, a
+    /// compose service that is down) is the host's to fix, whatever the project
+    /// builds with; one that ran and failed stays the worker's.
+    #[test]
+    fn a_validation_stopped_by_the_lane_environment_is_not_the_workers_to_fix() {
+        use crate::models::ValidationsAccess::Sandbox;
+        let host = |code, output: &str, needle: &str| {
+            let cause = environment_cause(Sandbox, None, &failure(code, output))
+                .unwrap_or_else(|| panic!("`{output}` is the environment's"));
+            assert!(!cause.docker_elevation, "{}", cause.fix);
+            assert!(cause.fix.contains(needle), "{}", cause.fix);
+        };
+        // Exit 127: the tool is not installed or not on the lane's PATH.
+        host(Some(127), "sh: composer: command not found", "127");
+        host(Some(127), "make: pnpm: No such file or directory", "127");
+        // The OS sandbox refused an operation.
+        host(
+            Some(1),
+            "Error: EPERM: operation not permitted, mkdir '/Users/me/.cache/tool'",
+            "bac à sable",
+        );
+        // No network in the lane.
+        host(
+            Some(6),
+            "curl: (6) Could not resolve host: registry.example.com",
+            "réseau",
+        );
+        host(
+            Some(1),
+            "npm ERR! request to https://registry.npmjs.org/x failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org",
+            "réseau",
+        );
+        host(
+            Some(101),
+            "error: failed to get `serde` as a dependency\nCaused by: failed to lookup address information: nodename nor servname provided, or not known",
+            "réseau",
+        );
+        // A compose service the validation `exec`s into is not up.
+        host(Some(1), "service \"php\" is not running", "compose");
+        host(Some(1), "no such service: php", "compose");
+
+        for red in [
+            // The tool ran, the test failed — even if the log quotes an environment error.
+            failure(
+                Some(1),
+                "getaddrinfo EAI_AGAIN example.test\nAssertionError: expected the retry\n1 tests failed",
+            ),
+            failure(
+                Some(127),
+                "test result: FAILED. 1 passed; 1 failed\nfailures:\n  cmd::missing",
+            ),
+            failure(Some(1), "FAIL src/a.test.ts\nexpected 1 to be 2"),
+            failure(Some(1), "error: operation not permitted was the expected message\nAssertionError"),
+            failure(Some(101), "error[E0308]: mismatched types"),
+            failure(Some(2), "make: *** [test] Error 1"),
         ] {
             assert!(
                 environment_cause(Sandbox, None, &red).is_none(),

@@ -3,8 +3,10 @@
 # Kronn git guard (KT-1645) — put in front of `git` on an agent's PATH.
 #
 # `git checkout`, `git switch`, `git reset` and `git stash` move HEAD or the
-# working tree. In a repository's main checkout that is the owner's branch and
-# uncommitted work, so the command is refused there unless the human confirmed
+# working tree, and so do `git restore` of the whole tree (`.`, `:/`), `git clean`
+# (but for a dry run) and a forced `git branch` (-f, --force, -D) (KT-1753). In a
+# repository's main checkout that is the owner's branch and uncommitted work, so
+# the command is refused there unless the human confirmed
 # it (KRONN_MAIN_CHECKOUT_GIT_CONFIRMED=1 in the launch environment). A linked
 # worktree (an agent's own checkout), a throwaway repository under the agent's
 # $TMPDIR (a test fixture) and every other git command pass through to the real
@@ -116,6 +118,48 @@ kronn_in_scratch_repo() {
   )
 }
 
+# Succeeds when the arguments after the subcommand ($1, then the command line)
+# are the destructive form of that subcommand (KT-1753): `restore` of the whole
+# tree into the working tree, `clean` that is not a dry run, `branch` forced.
+kronn_destructive() {
+  kronn_want=$1
+  shift
+  # Drop git's global options and the subcommand itself.
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "$kronn_want" ]; then
+      shift
+      break
+    fi
+    shift
+  done
+  kronn_whole=0
+  kronn_staged=0
+  kronn_worktree=0
+  kronn_dry=0
+  kronn_force=0
+  for kronn_a in "$@"; do
+    case "$kronn_want:$kronn_a" in
+      restore:. | restore::/ | restore::/. | restore:\*) kronn_whole=1 ;;
+      restore:--staged | restore:-S) kronn_staged=1 ;;
+      restore:--worktree | restore:-W) kronn_worktree=1 ;;
+      clean:--dry-run) kronn_dry=1 ;;
+      clean:--*) ;;
+      clean:-*n*) kronn_dry=1 ;;
+      branch:--force) kronn_force=1 ;;
+      branch:--*) ;;
+      branch:-*f* | branch:-*D*) kronn_force=1 ;;
+    esac
+  done
+  case "$kronn_want" in
+    restore)
+      [ "$kronn_whole" = 1 ] && { [ "$kronn_staged" = 0 ] || [ "$kronn_worktree" = 1 ]; }
+      ;;
+    clean) [ "$kronn_dry" = 0 ] ;;
+    branch) [ "$kronn_force" = 1 ] ;;
+    *) return 1 ;;
+  esac
+}
+
 kronn_scan "$@"
 
 guarded=
@@ -126,6 +170,11 @@ case "$kronn_sub" in
       list | show) ;;
       *) guarded=stash ;;
     esac
+    ;;
+  restore | clean | branch)
+    if kronn_destructive "$kronn_sub" "$@"; then
+      guarded=$kronn_sub
+    fi
     ;;
 esac
 
