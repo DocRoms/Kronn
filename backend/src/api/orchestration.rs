@@ -10755,8 +10755,15 @@ fn build_brief(
         prepared.execution.worker_scope.as_ref(),
     );
     if let Some(toolchain) = toolchain {
-        content = insert_toolchain_section(content, toolchain, lang);
+        let profile =
+            crate::core::project_toolchains::detect_toolchains(std::path::Path::new(worktree_path));
+        content = insert_toolchain_section_in(content, toolchain, Some(&profile), lang);
     }
+    let content = brief_for_agent(
+        content,
+        prepared.execution.worker_agent_type.as_deref(),
+        lang,
+    );
     orchestrator_message(
         format!(
             "orch-brief:{}:{}",
@@ -10768,7 +10775,27 @@ fn build_brief(
 
 /// The brief's "what you can run" section (KT-1246), from the launch-time smoke
 /// check: the worker reads it instead of discovering a refusal mid-task.
+#[cfg(test)]
 fn toolchain_brief_section(toolchain: &ToolchainCapabilities, lang: RoomLang) -> String {
+    toolchain_brief_section_in(toolchain, None, lang)
+}
+
+/// [`toolchain_brief_section`] limited to the toolchains of `profile` (KT-1753): a
+/// project without Cargo is told nothing about `cargo nextest` or its target
+/// directory, one without Node nothing about Vite. `None` describes everything.
+/// The ports are named by the lane's variables, and no default port is free.
+fn toolchain_brief_section_in(
+    toolchain: &ToolchainCapabilities,
+    profile: Option<&[crate::core::project_toolchains::PackageRoot]>,
+    lang: RoomLang,
+) -> String {
+    use crate::core::project_toolchains::ToolchainKind;
+    let has = |wanted: fn(ToolchainKind) -> bool| {
+        profile.is_none_or(|roots| roots.iter().any(|root| wanted(root.kind)))
+    };
+    let cargo = has(|kind| kind == ToolchainKind::Cargo);
+    let node = has(|kind| matches!(kind, ToolchainKind::Node(_)));
+    let en = lang == RoomLang::En;
     let line = |label: &str, capability: &Capability| {
         format!(
             "- {label}{} {} — {}\n",
@@ -10781,57 +10808,150 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities, lang: RoomLang) ->
             capability.reason
         )
     };
-    if lang == RoomLang::En {
-        return format!(
-            "## Test capabilities (verified at launch)\n\
-             {rust}{frontend}{port}\
-             Servers: a Kronn backend or a Vite that you start listens on `$KRONN_PORT` / \
-             `$VITE_DEV_PORT` (already in your environment; Vite proxies to \
-             `$KRONN_VITE_BACKEND_URL`). Run your lane's binary (`$CARGO_TARGET_DIR/debug/kronn`). \
-             Never listen on 3140 or 5173: that is the host's Kronn, and you would hijack the UI \
-             and the other workers. What you start stops with your turn: Kronn ends every \
-             process launched by your session when the dispatch finishes.\n\
-             Vite and vitest run as they are (`vitest run`, `vite --port $VITE_DEV_PORT`): your \
+    let mut out = String::from(if en {
+        "## Test capabilities (verified at launch)\n"
+    } else {
+        "## Capacités de test (vérifiées au lancement)\n"
+    });
+    if cargo {
+        out.push_str(&line(
+            if en {
+                "Rust tests (`cargo nextest`)"
+            } else {
+                "Tests Rust (`cargo nextest`)"
+            },
+            &toolchain.rust_tests,
+        ));
+    }
+    if node {
+        out.push_str(&line(
+            if en {
+                "Frontend tests (`vitest`)"
+            } else {
+                "Tests frontend (`vitest`)"
+            },
+            &toolchain.frontend_tests,
+        ));
+    }
+    out.push_str(&line(
+        if en {
+            "Loopback port binding"
+        } else {
+            "Binding de port loopback"
+        },
+        &toolchain.port_binding,
+    ));
+    let ports = match (en, node) {
+        (true, true) => {
+            "`$KRONN_PORT` for a backend and `$VITE_DEV_PORT` for a front-end dev server (Vite \
+             proxies to `$KRONN_VITE_BACKEND_URL`)"
+        }
+        (false, true) => {
+            "`$KRONN_PORT` pour un backend et `$VITE_DEV_PORT` pour un serveur de dev front \
+             (Vite proxifie vers `$KRONN_VITE_BACKEND_URL`)"
+        }
+        (_, false) => "`$KRONN_PORT`",
+    };
+    out.push_str(&if en {
+        format!(
+            "Servers: anything you start (an API, a dev server, a preview) listens on a port of \
+             your environment: {ports}. Never listen on a default port (3140, 5173, 3000, \
+             8080…): those belong to the host's own services, and you would hijack them and the \
+             other workers. What you start stops with your turn: Kronn ends every process \
+             launched by your session when the dispatch finishes.\n"
+        )
+    } else {
+        format!(
+            "Serveurs : tout ce que tu démarres (une API, un serveur de dev, une prévisualisation) \
+             écoute sur un port de ton environnement : {ports}. N'écoute jamais sur un port par \
+             défaut (3140, 5173, 3000, 8080…) : ils sont ceux des services de l'hôte, et tu les \
+             détournerais, avec les autres workers. Ce que tu démarres s'arrête avec ton tour : \
+             Kronn termine tout processus lancé par ta session quand le dispatch finit.\n"
+        )
+    });
+    if cargo {
+        out.push_str(if en {
+            "A binary your build produces runs from your lane's target (`$CARGO_TARGET_DIR/debug`).\n"
+        } else {
+            "Un binaire que ton build produit se lance depuis la cible de ta lane \
+             (`$CARGO_TARGET_DIR/debug`).\n"
+        });
+    }
+    if node {
+        out.push_str(if en {
+            "Vite and vitest run as they are (`vitest run`, `vite --port $VITE_DEV_PORT`): your \
              lane's `node_modules` is a writable folder, Vite writes its config bundle there. If \
              you see `EPERM` on `node_modules/.vite-temp`, run again with \
-             `--configLoader native`.\n\
-             Run only what is ✅. A ❌ validation is never asserted: report it `skipped` with the \
-             reason above, the principal will run it. `tests_executed` states explicitly whether \
-             at least one test actually ran and which.\n\n",
-            rust = line("Rust tests (`cargo nextest`)", &toolchain.rust_tests),
-            frontend = line("Frontend tests (`vitest`)", &toolchain.frontend_tests),
-            port = line("Loopback port binding", &toolchain.port_binding),
-        );
+             `--configLoader native`.\n"
+        } else {
+            "Vite et vitest se lancent tels quels (`vitest run`, `vite --port $VITE_DEV_PORT`) : \
+             le `node_modules` de ta lane est un dossier inscriptible, Vite y écrit son bundle de \
+             configuration. Si tu vois `EPERM` sur `node_modules/.vite-temp`, relance avec \
+             `--configLoader native`.\n"
+        });
     }
-    format!(
-        "## Capacités de test (vérifiées au lancement)\n\
-         {rust}{frontend}{port}\
-         Serveurs : un backend Kronn ou un Vite que tu démarres écoute sur `$KRONN_PORT` / \
-         `$VITE_DEV_PORT` (déjà dans ton environnement ; Vite proxifie vers \
-         `$KRONN_VITE_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
-         N'écoute jamais sur 3140 ni 5173 : c'est le Kronn de l'hôte, et tu détournerais l'UI \
-         et les autres workers. Ce que tu démarres s'arrête avec ton tour : Kronn termine tout \
-         processus lancé par ta session quand le dispatch finit.\n\
-         Vite et vitest se lancent tels quels (`vitest run`, `vite --port $VITE_DEV_PORT`) : le \
-         `node_modules` de ta lane est un dossier inscriptible, Vite y écrit son bundle de \
-         configuration. Si tu vois `EPERM` sur `node_modules/.vite-temp`, relance avec \
-         `--configLoader native`.\n\
-         Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
+    out.push_str(if en {
+        "Run only what is ✅. A ❌ validation is never asserted: report it `skipped` with the \
+         reason above, the principal will run it. `tests_executed` states explicitly whether at \
+         least one test actually ran and which.\n\n"
+    } else {
+        "Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
          `skipped` avec la raison ci-dessus, le principal l'exécutera. `tests_executed` dit \
-         explicitement si au moins un test a réellement tourné et lesquels.\n\n",
-        rust = line("Tests Rust (`cargo nextest`)", &toolchain.rust_tests),
-        frontend = line("Tests frontend (`vitest`)", &toolchain.frontend_tests),
-        port = line("Binding de port loopback", &toolchain.port_binding),
-    )
+         explicitement si au moins un test a réellement tourné et lesquels.\n\n"
+    });
+    out
+}
+
+/// The brief of a task worker of `agent_type` (KT-1753). A Codex worker's sandbox
+/// cannot write the worktree's git directory, so the section that tells a worker
+/// to `git merge` the target is replaced by the line saying the principal does it.
+fn brief_for_agent(content: String, agent_type: Option<&str>, lang: RoomLang) -> String {
+    if agent_type != Some("Codex") {
+        return content;
+    }
+    let (heading, replacement) = if lang == RoomLang::En {
+        (
+            "## Integrate the target branch\n",
+            "## Integrate the target branch\n\
+             Your sandbox cannot write this worktree's git directory: the principal integrates \
+             the target branch into your branch when it is needed, you do not merge.\n\n",
+        )
+    } else {
+        (
+            "## Intégrer la branche cible\n",
+            "## Intégrer la branche cible\n\
+             Ta sandbox ne peut pas écrire le dossier git de ce worktree : le principal intègre \
+             la branche cible dans ta branche quand c'est nécessaire, tu ne fusionnes pas.\n\n",
+        )
+    };
+    let Some(start) = content.find(heading) else {
+        return content;
+    };
+    let after = start + heading.len();
+    let end = content[after..]
+        .find("\n## ")
+        .map_or(content.len(), |at| after + at + 1);
+    format!("{}{replacement}{}", &content[..start], &content[end..])
 }
 
 /// Put the capability section right before the brief's `## Tests` section.
+#[cfg(test)]
 fn insert_toolchain_section(
     content: String,
     toolchain: &ToolchainCapabilities,
     lang: RoomLang,
 ) -> String {
-    let section = toolchain_brief_section(toolchain, lang);
+    insert_toolchain_section_in(content, toolchain, None, lang)
+}
+
+/// [`insert_toolchain_section`] limited to the toolchains of `profile` (KT-1753).
+fn insert_toolchain_section_in(
+    content: String,
+    toolchain: &ToolchainCapabilities,
+    profile: Option<&[crate::core::project_toolchains::PackageRoot]>,
+    lang: RoomLang,
+) -> String {
+    let section = toolchain_brief_section_in(toolchain, profile, lang);
     match content.find("## Tests\n") {
         Some(at) => format!("{}{section}{}", &content[..at], &content[at..]),
         None => format!("{content}\n\n{section}"),
@@ -32651,7 +32771,102 @@ pub(crate) mod tests {
         assert!(brief.contains("`$VITE_DEV_PORT`"), "{brief}");
         assert!(brief.contains("--configLoader native"), "{brief}");
         assert!(brief.contains("s'arrête avec ton tour"), "{brief}");
-        assert!(brief.contains("jamais sur 3140 ni 5173"), "{brief}");
+        assert!(brief.contains("jamais sur un port par défaut"), "{brief}");
+    }
+
+    /// KT-1753 — the capability section describes the project, not Kronn: a PHP
+    /// project is told nothing about `cargo nextest`, Vite or Kronn's own binary,
+    /// ports are named by the lane's variables and no default port is free, and a
+    /// project that does build with Cargo and Node keeps its lines.
+    #[test]
+    fn the_capability_section_names_only_the_toolchains_the_project_has() {
+        let root = |kind, dir: &str| crate::core::project_toolchains::PackageRoot {
+            kind,
+            rel_dir: dir.into(),
+        };
+        use crate::core::project_toolchains::{NodeManager, ToolchainKind};
+        let php = [root(ToolchainKind::Composer, "")];
+        let full = [
+            root(ToolchainKind::Cargo, ""),
+            root(ToolchainKind::Node(NodeManager::Npm), "frontend"),
+        ];
+
+        for lang in [RoomLang::En, RoomLang::Fr] {
+            let section = toolchain_brief_section_in(&sample_toolchain(), Some(&php), lang);
+            for kronn_only in [
+                "cargo nextest",
+                "vitest",
+                "Vite",
+                "debug/kronn",
+                "Kronn backend",
+            ] {
+                assert!(!section.contains(kronn_only), "{kronn_only}: {section}");
+            }
+            assert!(section.contains("`$KRONN_PORT`"), "{section}");
+            assert!(
+                section.contains("3140") && section.contains("8080"),
+                "{section}"
+            );
+            assert!(section.contains("tests_executed"), "{section}");
+
+            let both = toolchain_brief_section_in(&sample_toolchain(), Some(&full), lang);
+            assert!(both.contains("cargo nextest"), "{both}");
+            assert!(both.contains("vitest"), "{both}");
+            assert!(both.contains("$VITE_DEV_PORT"), "{both}");
+            assert!(both.contains("$CARGO_TARGET_DIR/debug"), "{both}");
+        }
+    }
+
+    /// KT-1753 — a Codex worker cannot write the worktree's git directory, so a
+    /// brief that tells it to `git merge` the target sets it up to fail: it gets
+    /// no merge section, only the line saying the principal integrates the
+    /// target. Every other runtime keeps the section.
+    #[test]
+    fn a_codex_brief_has_no_merge_section() {
+        for lang in [RoomLang::En, RoomLang::Fr] {
+            let brief = worker_brief_markdown_in(
+                lang,
+                "KT-1",
+                "T",
+                "Objective",
+                &[],
+                "/wt",
+                "b",
+                "abc",
+                true,
+                true,
+                None,
+            );
+            let heading = if lang == RoomLang::En {
+                "## Integrate the target branch"
+            } else {
+                "## Intégrer la branche cible"
+            };
+            assert!(brief.contains(heading), "{brief}");
+
+            let codex = brief_for_agent(brief.clone(), Some("Codex"), lang);
+            assert_eq!(codex.matches(heading).count(), 1, "{codex}");
+            assert!(!codex.contains("git merge"), "{codex}");
+            assert!(!codex.contains("MERGE_HEAD"), "{codex}");
+            assert!(brief.contains("MERGE_HEAD"), "the other runtimes keep it");
+            assert!(
+                codex.contains(if lang == RoomLang::En {
+                    "the principal integrates the target branch"
+                } else {
+                    "le principal intègre la branche cible"
+                }),
+                "{codex}"
+            );
+            // The sections around it survive.
+            assert!(codex.contains("## Tests"), "{codex}");
+            assert!(codex.contains("## Workspace"), "{codex}");
+
+            assert_eq!(
+                brief_for_agent(brief.clone(), Some("ClaudeCode"), lang),
+                brief
+            );
+            assert_eq!(brief_for_agent(brief.clone(), None, lang), brief);
+        }
     }
 
     /// KT-1316 — every brief variant reads in the room's language: an English
