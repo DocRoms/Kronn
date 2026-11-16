@@ -68,6 +68,29 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     }));
   });
 
+  // KT-1747 — `dependency_dirs` is set through the workspace API (the form has no
+  // input for it yet): a save of the other fields must not delete it.
+  it('keeps the dependency directories the project names when it saves the warm-up', async () => {
+    getMock.mockResolvedValue({
+      hooks: {},
+      lane_warm: { rust_roots: ['backend'], dependency_dirs: ['vendor', 'assets/front/node_modules'] },
+    });
+    setMock.mockResolvedValue(true);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-roots')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-roots'), { target: { value: 'backend\nredis-flush' } });
+    fireEvent.click(screen.getByTestId('project-lane-warm-save'));
+
+    await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', {
+      hooks: {},
+      lane_warm: {
+        dependency_dirs: ['vendor', 'assets/front/node_modules'],
+        rust_roots: ['backend', 'redis-flush'],
+      },
+    }));
+  });
+
   it('refuses a root outside the repository before saving', async () => {
     getMock.mockResolvedValue(null);
     render(<ProjectLaneWarmSetting projectId="p1" t={t} />);

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import type { LaneWarmConfig } from '../../types/generated';
 import {
   EMPTY_LANE_WARM_DRAFT, configOf, draftOf, draftProblem, sameDraft,
 } from '../laneWarm';
@@ -59,5 +60,31 @@ describe('laneWarm draft (KT-1742)', () => {
     expect(sameDraft(a, b)).toBe(true);
     expect(sameDraft(a, { ...b, timeout: '5' })).toBe(false);
     expect(configOf({ ...a, command: '   ' })).toEqual({ compiler_env: ['CC=clang'] });
+  });
+
+  // KT-1747 — a field the form has no input for (`dependency_dirs`, set through
+  // the workspace API) must survive a save of the fields it does have.
+  it('carries the fields the form does not know through a save', () => {
+    const stored: LaneWarmConfig = {
+      dependency_dirs: ['vendor', 'assets/front/node_modules'],
+      first_build_command: 'make warm',
+      rust_roots: ['backend'],
+    };
+    const draft = draftOf(stored);
+
+    expect(configOf(draft, stored)).toEqual(stored);
+    // An edit of a known field leaves the unknown one alone…
+    expect(configOf({ ...draft, command: 'make other' }, stored)).toEqual({
+      ...stored,
+      first_build_command: 'make other',
+    });
+    // …and clearing a known field still clears it.
+    expect(configOf({ ...draft, command: '', rootsText: '' }, stored)).toEqual({
+      dependency_dirs: ['vendor', 'assets/front/node_modules'],
+    });
+    // An explicit empty list (« layer nothing ») is a choice, kept as it is.
+    expect(configOf(EMPTY_LANE_WARM_DRAFT, { dependency_dirs: [] })).toEqual({ dependency_dirs: [] });
+    // Without a stored entry nothing is invented.
+    expect(configOf(draft, null)).toEqual({ first_build_command: 'make warm', rust_roots: ['backend'] });
   });
 });

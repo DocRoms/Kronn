@@ -180,7 +180,7 @@ export function WorkersSection({ t }: Props) {
         // Nothing set is no key at all, as the backend stores it.
         ...(commitSettingsOf(commitFieldsNow) ? { commit: commitSettingsOf(commitFieldsNow) } : {}),
         managed_worktree_roots: rootList,
-        lane_warm: configOf(laneWarm),
+        lane_warm: configOf(laneWarm, saved.lane_warm),
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));

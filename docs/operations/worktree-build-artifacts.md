@@ -664,7 +664,10 @@ the one place KT-1747's generic toolchain detection reuses):
      not use vitest is "not applicable", never "unavailable", and the worker is told
      to run the project's own test commands.
   The settings screen has no field for `dependency_dirs` yet (the entry is set
-  through the project's workspace settings API); the form is a follow-up.
+  through the project's workspace settings API); the form is a follow-up. A save of
+  the other lane-warm fields carries it through unchanged (`configOf(draft, stored)`
+  in `frontend/src/lib/laneWarm.ts` keeps every field the form does not know), as
+  the commit identity is kept by the same save.
 
 **5. Per root, and only under the sandbox** (`core/task_worker_root_marks.rs`,
 `core/task_worker_lane_warm.rs`). Kronn's own repository has two roots, `backend/`

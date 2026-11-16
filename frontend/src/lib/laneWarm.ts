@@ -83,9 +83,25 @@ export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' 
   return null;
 }
 
-/** The entry to store; an untouched field is left out, so it keeps inheriting. */
-export function configOf(draft: LaneWarmDraft): LaneWarmConfig {
+/** The fields the form has an input for; everything else of a stored entry is carried through. */
+const FORM_FIELDS: ReadonlySet<string> = new Set([
+  'seed_alignment', 'compiler_env', 'first_build_command', 'first_build_timeout_min', 'rust_roots',
+]);
+
+/**
+ * The entry to store; an untouched field is left out, so it keeps inheriting.
+ *
+ * `stored` is the entry as it is now: a field the form has no input for
+ * (`dependency_dirs`, set through the workspace API) goes back as it was, so a
+ * save of the others never deletes it.
+ */
+export function configOf(draft: LaneWarmDraft, stored?: LaneWarmConfig | null): LaneWarmConfig {
   const config: LaneWarmConfig = {};
+  for (const [key, value] of Object.entries(stored ?? {})) {
+    if (!FORM_FIELDS.has(key) && value !== undefined) {
+      (config as Record<string, unknown>)[key] = value;
+    }
+  }
   if (draft.seedAlignment !== '') config.seed_alignment = draft.seedAlignment === 'on';
   if (draft.envMode === 'none') config.compiler_env = [];
   if (draft.envMode === 'custom') config.compiler_env = envLines(draft.envText);
