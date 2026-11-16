@@ -529,7 +529,7 @@ for a command that could never run; `task_exec_launch` refuses it the same way
 before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
-`[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:302-349#check_command_line]`
+`[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:385-432#check_command_line]`
 `[src: file: backend/src/api/orchestration.rs:12410-12420#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls
