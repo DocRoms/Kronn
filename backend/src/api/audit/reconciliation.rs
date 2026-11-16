@@ -1023,7 +1023,7 @@ also not interesting (this `path/that:1` should be ignored)
     /// source that is a link (or sits behind one), or a pointer naming a path
     /// outside the project, is unreadable: the outside content never counts as
     /// "signature still present".
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn check_signature_never_reads_a_source_through_a_link_or_outside_the_project() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1055,7 +1055,7 @@ also not interesting (this `path/that:1` should be ignored)
     }
 
     /// KT-1595 (N4): the sheet itself is read through the fds too.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn check_signature_never_reads_a_sheet_that_is_a_link() {
         let tmp = tempfile::tempdir().unwrap();

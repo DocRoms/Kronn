@@ -101,7 +101,7 @@ impl Lane {
     }
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs `#!/bin/sh` hook fixtures
 mod unix {
     use super::*;
 
@@ -374,7 +374,7 @@ fn first_lines_bounds_what_travels_with_a_refusal() {
     assert_eq!(first_lines("\n\n"), "");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a shell script through sh
 #[test]
 fn the_hook_wrapper_keeps_both_streams_with_their_line_breaks_and_the_exit_status() {
     let dir = tempfile::tempdir().unwrap();
@@ -405,7 +405,7 @@ fn the_hook_wrapper_keeps_both_streams_with_their_line_breaks_and_the_exit_statu
     assert_eq!(left.len(), 1, "{left:?}");
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a shell script through sh
 #[test]
 fn the_hook_wrapper_bounds_what_a_chatty_hook_prints() {
     let dir = tempfile::tempdir().unwrap();
@@ -424,7 +424,7 @@ fn the_hook_wrapper_bounds_what_a_chatty_hook_prints() {
     assert!(output.stdout.len() <= 8192, "{}", output.stdout.len());
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a shell script through sh
 #[test]
 fn the_hook_wrapper_says_so_when_it_cannot_capture_the_output() {
     let dir = tempfile::tempdir().unwrap();

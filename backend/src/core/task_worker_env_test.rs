@@ -736,7 +736,7 @@ fn the_lane_leaves_the_main_checkout_and_the_worktree_clean() {
 /// KT-1595 round 5 (NEW-2): provisioning runs on every worker launch, so after
 /// an agent. A worker that rewrote `<lane>/.git` to name another repository
 /// must not get Kronn's exclude rules appended there.
-#[cfg(unix)]
+#[cfg(unix)] // the pinned read is a rooted fd walk only on unix, see KT-1609
 #[test]
 fn a_lane_whose_git_pointer_was_moved_gets_no_exclude_written_elsewhere() {
     let fx = fixture();
@@ -1150,7 +1150,7 @@ fn the_process_runner_reports_success_failure_and_a_missing_program() {
 /// bytes of cargo's output (`… -c aes-xts-enc.S warning: build failed`): the
 /// compiler's own message, printed far above, was lost. The first error lines of
 /// the output are kept beside the tail.
-#[cfg(unix)]
+#[cfg(unix)] // runs a shell script through sh
 #[test]
 fn a_failed_probe_keeps_its_first_error_lines_beside_the_tail() {
     let dir = tempfile::tempdir().unwrap();

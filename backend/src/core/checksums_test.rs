@@ -1024,7 +1024,7 @@ fn a_docs_folder_swapped_after_the_walk_never_receives_the_baseline() {
 /// KT-1595 round 12: the source-tree fingerprint, taken right after an agent
 /// ran in the project, never runs the file-system monitor its configuration
 /// names.
-#[cfg(unix)]
+#[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
 #[test]
 fn the_source_tree_fingerprint_runs_no_program_the_repository_names() {
     use crate::core::cmd::hostile_git::{git, marker_program, repo};
@@ -1038,7 +1038,7 @@ fn the_source_tree_fingerprint_runs_no_program_the_repository_names() {
 /// KT-1595 round 13: the fingerprint, taken right after an agent ran, never
 /// blocks on what the agent left: a tracked file replaced by a FIFO, a root
 /// AGENTS.md / CLAUDE.md that is a link to a FIFO.
-#[cfg(unix)]
+#[cfg(unix)] // makes a FIFO through libc
 #[test]
 fn a_fifo_left_by_the_agent_never_blocks_the_fingerprint() {
     use crate::core::cmd::hostile_git::{git, repo};
@@ -1071,7 +1071,7 @@ fn a_fifo_left_by_the_agent_never_blocks_the_fingerprint() {
 /// KT-1595 round 14: a huge sparse file the agent leaves (untracked, no disk
 /// space used) never stalls the fingerprint: past the size cap it is recorded
 /// by its size and time, never read.
-#[cfg(unix)]
+#[cfg(unix)] // makes a sparse file, which Windows has no set_len for
 #[test]
 fn a_huge_sparse_file_never_stalls_the_fingerprint() {
     use crate::core::cmd::hostile_git::repo;

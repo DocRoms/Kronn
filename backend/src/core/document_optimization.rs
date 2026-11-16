@@ -2150,7 +2150,7 @@ mod tests {
 
     /// KT-1595 round 9: a folder citation through a link never stats the outside
     /// folder, and a text file past the size cap is never read whole.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_folder_through_a_link_and_a_huge_file_are_never_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -2171,7 +2171,7 @@ mod tests {
     /// KT-1595 round 7: an adapter under a linked folder (or a linked
     /// `<docs>/AGENTS.md` fallback) is skipped, never read, and does not fail the
     /// whole analysis.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn an_adapter_under_a_linked_folder_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
@@ -2200,7 +2200,7 @@ mod tests {
     /// the way, pointing inside or outside the project) is refused up front with
     /// its own message; nothing sniffs, counts or reads the target by path, and
     /// an empty outside file is never written into a document as `(empty)`.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_citation_through_a_link_is_refused_without_reading_the_target() {
         let dir = tempfile::tempdir().unwrap();
@@ -2259,7 +2259,7 @@ mod tests {
 
     /// KT-1595 round 5 (NEW-3): a document that is a planted link is not read
     /// (no measurement, no fragment of an outside file in a diagnostic).
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_linked_document_is_refused_by_the_analyzer_read() {
         let dir = tempfile::tempdir().unwrap();

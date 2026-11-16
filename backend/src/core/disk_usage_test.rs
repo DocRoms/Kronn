@@ -155,7 +155,7 @@ fn real_or_apparent_prefers_the_unique_figure() {
 /// KT-1691 — the 2026-11-11 incident: 33 lanes cloned from one seed each read
 /// ~190 GB, 1.85 TB in all, and deleting five of them freed 39 GB. The apparent
 /// size counts shared blocks in full; the unique one must not.
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")] // APFS clones (clonefile) exist only on macOS
 #[test]
 fn a_cloned_tree_reports_its_unique_bytes_not_the_blocks_it_shares() {
     use crate::core::task_worker_lane_warm::clone_tree;

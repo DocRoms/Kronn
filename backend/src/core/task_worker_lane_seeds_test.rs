@@ -1194,7 +1194,7 @@ fn unreadable_suggestions_are_an_error_not_an_empty_list() {
 
 /// What an agent that rewrote `<lane>/.git` to name another repository would
 /// find written there afterwards: a second repository, untouched by Kronn.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 mod moved_pointer {
     use super::*;
 

@@ -1286,7 +1286,7 @@ async fn a_tech_debt_folder_swapped_after_the_walk_never_receives_a_sheet_or_the
 /// ran, then written back into the project: they are read through the project's
 /// directory fds, so a folder swapped for a link never feeds an outside file
 /// into the index.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 mod read_after_the_agents {
     use super::*;
     use crate::core::fs_guard::swap_probe;

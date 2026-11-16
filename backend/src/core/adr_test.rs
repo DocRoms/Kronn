@@ -577,7 +577,7 @@ fn a_card_ignores_a_record_line_naming_the_adr_it_creates() {
 
 /// KT-1595 round 5 (NEW-3): `decisions.md` ends up in a step prompt, so a link
 /// at it (or at the docs folder) must not bring an outside file into the prompt.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_linked_decisions_file_or_docs_folder_reads_as_empty() {
     let project = tempfile::tempdir().unwrap();
@@ -605,7 +605,7 @@ fn a_linked_decisions_file_or_docs_folder_reads_as_empty() {
 
 /// KT-1595 round 7: a nested docs root (`documentation/ai`) is read from the
 /// project, so a folder ABOVE the docs folder swapped for a link reads as empty.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_linked_folder_above_a_nested_docs_root_reads_as_empty() {
     let project = tempfile::tempdir().unwrap();

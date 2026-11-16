@@ -274,7 +274,7 @@ mod tests {
 
     /// KT-1595 round 12: mapping lines never runs a textconv driver the
     /// repository's configuration names.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
     #[test]
     fn mapping_lines_runs_no_program_the_repository_names() {
         use crate::core::cmd::hostile_git::{append_config, git, marker_program, repo};
@@ -301,7 +301,7 @@ mod tests {
 
     /// KT-1595 round 14: a cited path that is a submodule never runs a driver of
     /// the submodule's own config, even when `.gitmodules` asks git to look in.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
     #[test]
     fn a_submodule_path_never_runs_its_driver_whatever_gitmodules_says() {
         use crate::core::cmd::hostile_git::{git, marker_program, repo};

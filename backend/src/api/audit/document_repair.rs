@@ -2385,7 +2385,7 @@ mod tests {
 
     /// KT-1595 (N1): the recovery snapshot is copied into `.kronn/audit`; a
     /// link planted at a document is refused, never read.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_snapshot_never_reads_a_document_that_is_a_link() {
         let (dir, _blocking) = docroms("# T\n\nplain\n");
@@ -2421,7 +2421,7 @@ mod tests {
         (dir, external)
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // plants a symlink through std::os::unix
     #[test]
     fn the_content_hash_of_a_linked_document_is_not_computed() {
         let (dir, _external) = project_with_a_planted_link();
@@ -2430,7 +2430,7 @@ mod tests {
         assert_eq!(content_hash(dir.path(), "docs/linked.md"), None);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_linked_blame_ledger_is_not_parsed() {
         let dir = tempfile::tempdir().unwrap();
@@ -2457,7 +2457,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // plants a symlink through std::os::unix
     #[test]
     fn a_linked_recovery_document_is_not_reported_as_rewritten() {
         let (dir, _external) = project_with_a_planted_link();

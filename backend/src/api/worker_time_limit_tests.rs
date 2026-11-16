@@ -163,7 +163,7 @@ fn refusing_main_checkout_with_worktree() -> (tempfile::TempDir, tempfile::TempD
     (main, parent, worktree)
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // runs a `#!/bin/sh` pre-commit hook
 #[test]
 fn a_refused_commit_leaves_a_patch_in_the_evidence() {
     let (_main, _parent, worktree) = refusing_main_checkout_with_worktree();
@@ -197,7 +197,7 @@ fn a_refused_commit_leaves_a_patch_in_the_evidence() {
 
 /// KT-1745: the default policy runs no hook, so a hook cannot stop the
 /// time-limit checkpoint from saving the worker's work.
-#[cfg(unix)]
+#[cfg(unix)] // runs a `#!/bin/sh` pre-commit hook
 #[test]
 fn the_default_policy_checkpoints_past_a_refusing_hook() {
     let (_main, _parent, worktree) = refusing_main_checkout_with_worktree();

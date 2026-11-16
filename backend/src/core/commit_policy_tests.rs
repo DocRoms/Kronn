@@ -198,7 +198,7 @@ fn a_signed_history_requires_the_sign_off_and_an_unsigned_one_does_not() {
     assert_eq!(policy.signoff_source, SignoffSource::History);
 }
 
-#[cfg(unix)] // writes an executable hook script
+#[cfg(unix)] // runs a `#!/bin/sh` commit-msg hook
 #[test]
 fn a_commit_msg_hook_checking_the_sign_off_requires_it() {
     use std::os::unix::fs::PermissionsExt;

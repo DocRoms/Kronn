@@ -21675,7 +21675,7 @@ pub(crate) mod tests {
 
     /// KT-1750 — a file turned into a symlink (git's `T`) is delivered as a
     /// modification, not refused as an unsupported status.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_file_turned_into_a_symlink_is_delivered_as_modified() {
         let repo = init_repo();
@@ -47530,7 +47530,7 @@ pub(crate) mod tests {
     /// KT-1691 — the 2026-11-11 measure: lanes cloned from the seed counted their
     /// shared blocks in full. The report and the pressure guard carry the real
     /// (unique) figure next to the apparent one.
-    #[cfg(target_os = "macos")]
+    #[cfg(target_os = "macos")] // APFS clones (clonefile) exist only on macOS
     #[tokio::test]
     async fn real_bytes_not_cloned_ones_are_reported_and_swept() {
         use crate::core::task_worker_lane_warm::clone_tree;

@@ -294,7 +294,7 @@ fn the_pointer_is_checked_every_time_and_a_restored_pointer_is_trusted_again() {
     lane.verify().unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks and runs `#!/bin/sh` fixtures
 mod unix {
     use super::*;
 

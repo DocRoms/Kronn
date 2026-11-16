@@ -6995,7 +6995,7 @@ mod tests {
     /// write, right after an agent. A `.git/info` folder or an `exclude` file
     /// swapped for a link never makes Kronn create or append outside the
     /// git directory.
-    #[cfg(unix)]
+    #[cfg(unix)] // the swap probe plants a symlink through std::os::unix
     #[test]
     fn the_local_exclude_is_never_updated_through_a_swapped_info_folder() {
         use crate::core::fs_guard::swap_probe;
@@ -7017,7 +7017,7 @@ mod tests {
         assert_eq!(fs::read_dir(external.path()).unwrap().count(), 1);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn the_local_exclude_refuses_a_linked_info_folder_and_a_linked_exclude_file() {
         let repo = make_test_repo("exclude-link");
@@ -7047,7 +7047,7 @@ mod tests {
     /// `.git/commondir` that names another repository's git directory makes
     /// `rev-parse --git-path info/exclude` point there. The pinned writer
     /// refuses; nothing is created or appended in the other repository.
-    #[cfg(unix)]
+    #[cfg(unix)] // the pinned read is a rooted fd walk only on unix, see KT-1609
     #[test]
     fn the_pinned_exclude_refuses_a_planted_commondir() {
         let repo = make_test_repo("exclude-commondir");
@@ -7082,7 +7082,7 @@ mod tests {
 
     /// KT-1595 (N3) — the same for a `.git` FILE whose `gitdir:` the agent
     /// rewrote (the form of a linked worktree or a submodule).
-    #[cfg(unix)]
+    #[cfg(unix)] // the pinned read is a rooted fd walk only on unix, see KT-1609
     #[test]
     fn the_pinned_exclude_refuses_a_gitdir_pointer_file() {
         let repo = make_test_repo("exclude-gitdir");
@@ -7109,7 +7109,7 @@ mod tests {
 
     /// KT-1595 (N3) — a `.git` that is itself a link to another repository is
     /// refused (the rooted walk never follows it, and neither does the lstat).
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn the_pinned_exclude_refuses_a_git_directory_that_is_a_link() {
         let repo = make_test_repo("exclude-gitlink");

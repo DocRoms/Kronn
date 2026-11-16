@@ -1406,7 +1406,7 @@ fn a_citation_beyond_the_shrunk_file_with_two_candidates_is_settled_by_the_diff(
 
 /// KT-1745 — putting staged docs back is `git checkout HEAD -- <docs>`, which
 /// fires `post-checkout`; in a worker's worktree that hook is the worker's.
-#[cfg(unix)]
+#[cfg(unix)] // runs a `#!/bin/sh` hook fixture
 #[test]
 fn restoring_staged_docs_fires_no_hook_of_the_worktree() {
     use std::os::unix::fs::PermissionsExt;
