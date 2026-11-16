@@ -327,7 +327,10 @@ mod tests {
         for (args, name) in [
             (vec!["restore", "."], "restore"),
             (vec!["restore", ":/"], "restore"),
-            (vec!["restore", "--source=HEAD", "--worktree", "."], "restore"),
+            (
+                vec!["restore", "--source=HEAD", "--worktree", "."],
+                "restore",
+            ),
             (vec!["-C", ".", "restore", "."], "restore"),
             (vec!["clean", "-fdx"], "clean"),
             (vec!["clean", "-fd"], "clean"),
