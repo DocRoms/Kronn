@@ -69,3 +69,18 @@ teardown() {
     assert_output --partial "No repositories directory configured"
     [ ! -e "$TEST_TMPDIR/calls" ]
 }
+
+@test "doctor with no repositories directory and no project reaches every section (Bash 3.2)" {
+    mkdir -p "$TEST_TMPDIR/svc/current/cli"
+    KRONN_DIR="$TEST_TMPDIR/svc/current/cli"   # service release CLI, no cli.toml
+    export KRONN_REPOS_DIR="" KRONN_EXTRA_REPOS=""
+    _kronn_env_value() { return 1; }
+    _doctor_project_paths() { return 0; }      # backend stopped: no project listed
+    _doctor_host_sync_labels() { return 0; }
+
+    run cmd_doctor
+    assert_output --partial "No repositories directory configured"
+    refute_output --partial "unbound variable"
+    assert_output --partial "Host CLI plugin sync"
+    assert_output --partial "Host cache permissions"
+}

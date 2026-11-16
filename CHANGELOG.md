@@ -491,7 +491,6 @@ Release notes for 0.9.3 and earlier are available in the
   CFB/OLE2 file (a legacy `.xls`), and Kronn reads untrusted spreadsheets in
   context files.
 
-
 ## [0.15.1] - 2026-10-22
 
 ### Added

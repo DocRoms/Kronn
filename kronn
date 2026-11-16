@@ -990,7 +990,9 @@ cmd_doctor() {
         printf "    ${DIM}Run 'kronn mcp sync' to create it, then fill the referenced values.${RESET}\n"
         mcp_issues=$((mcp_issues + 1))
     fi
-    for project_path in "${project_paths[@]}"; do
+    # Empty with no repositories directory and the backend stopped: Bash 3.2
+    # aborts on "${a[@]}" of an empty array under set -u.
+    for project_path in ${project_paths[@]+"${project_paths[@]}"}; do
         if [[ -f "$project_path/.mcp.json.example" ]]; then
             missing=$(mcp_missing_secrets_for_template "$project_path/.mcp.json.example" | tr '\n' ' ')
             if [[ -n "$missing" ]]; then

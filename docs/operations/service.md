@@ -162,7 +162,7 @@ CLI option does not need the port.
 ```bash
 kronn service update               # latest X.Y.Z tag
 kronn service update --check       # report only
-kronn service update --to 0.15.1   # a specific tag (downgrades are allowed)
+kronn service update --to X.Y.Z    # a specific tag (downgrades are allowed; a tag older than the service is refused)
 kronn service update --force       # do not wait for running work
 kronn service update --yes         # no questions
 ```
