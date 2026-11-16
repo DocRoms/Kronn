@@ -230,7 +230,7 @@ durable catalog. Bootstrap failures are logged; an unavailable projection
 does not silently authorize an effort. Discussion preflight may refresh the
 catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
-[src: file: backend/src/main.rs:320-324#migrate_hardcoded_catalog_once]
+[src: file: backend/src/main.rs:314-318#migrate_hardcoded_catalog_once]
 [src: file: desktop/src-tauri/src/main.rs:716-720#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:156-276#refresh_runtime_cache]
 
