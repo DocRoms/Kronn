@@ -435,6 +435,14 @@ pub struct LaneWarmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub dependency_dirs: Option<Vec<String>>,
+    /// KT-1751 — the executables this project's validations may run beyond
+    /// Kronn's own allowlist: a bare name (`composer`, `go`, `pytest`) or a
+    /// repository-relative path (`vendor/bin/phpunit`). The human's decision for
+    /// one project, set in its workspace settings: no agent tool writes it and the
+    /// global entry is not read for it. A shell is never accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub validation_executables: Option<Vec<String>>,
 }
 
 /// KT-1742 — default bound of a lane's first build, in minutes (measured: the
@@ -512,6 +520,21 @@ impl LaneWarmConfig {
             }
             kept
         });
+        // A blank list is no executable at all.
+        self.validation_executables = self
+            .validation_executables
+            .map(|entries| {
+                let mut kept: Vec<String> = Vec::new();
+                for entry in entries {
+                    let entry = entry.trim();
+                    let entry = entry.strip_prefix("./").unwrap_or(entry).to_string();
+                    if !entry.is_empty() && !kept.contains(&entry) {
+                        kept.push(entry);
+                    }
+                }
+                kept
+            })
+            .filter(|entries| !entries.is_empty());
         self
     }
 
@@ -560,6 +583,16 @@ impl LaneWarmConfig {
                     })?;
             }
         }
+        if let Some(entries) = &self.validation_executables {
+            if entries.len() > MAX_LANE_EXECUTABLES {
+                return Err(format!(
+                    "validation_executables is limited to {MAX_LANE_EXECUTABLES} entries"
+                ));
+            }
+            for entry in entries.iter().filter(|entry| !entry.trim().is_empty()) {
+                validate_validation_executable(entry)?;
+            }
+        }
         if let Some(entries) = &self.compiler_env {
             if entries.len() > MAX_LANE_ENV_ENTRIES {
                 return Err(format!(
@@ -572,6 +605,47 @@ impl LaneWarmConfig {
         }
         Ok(())
     }
+}
+
+const MAX_LANE_EXECUTABLES: usize = 32;
+
+/// KT-1751 — one entry of `validation_executables`: a bare program name or a
+/// path inside the repository, in plain characters (a validation is a literal
+/// argv, so nothing a shell would read), and never a program that runs a command
+/// line of its own.
+fn validate_validation_executable(entry: &str) -> Result<(), String> {
+    let entry = entry.trim();
+    let entry = entry.strip_prefix("./").unwrap_or(entry);
+    let plain = entry
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '@' | '/'));
+    let refused = |why: &str| {
+        Err(format!(
+            "validation_executables entry `{entry}` {why}: use a program name \
+             (`composer`) or a path inside the repository (`vendor/bin/phpunit`)"
+        ))
+    };
+    if entry.is_empty() || entry.len() > 200 || !plain {
+        return refused("holds characters a program name or path does not");
+    }
+    if entry.contains('/') {
+        let inside = !entry.starts_with('/')
+            && entry
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        return if inside {
+            Ok(())
+        } else {
+            refused("is not a path inside the repository")
+        };
+    }
+    if entry.starts_with('-') {
+        return refused("is an option, not a program");
+    }
+    if crate::core::quick_exec::DENIED_BINARIES.contains(&entry) {
+        return refused("runs a command line of its own, which a validation never does");
+    }
+    Ok(())
 }
 
 /// `./redis-flush/` → `redis-flush`; the repository root stays `.`.

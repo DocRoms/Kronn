@@ -137,8 +137,13 @@ pub(crate) fn validate_new_validation_specs(
             serde_json::to_string(bad).unwrap_or_default()
         ));
     }
+    // KT-1751: a name some project lists is not refused here; the run checks it
+    // against the project it runs in (that check is the authoritative one).
+    let listed = crate::core::task_worker_lane_settings::all_validation_executables();
     for spec in validations {
-        if let Err(rejection) = crate::core::quick_exec::check_command_line(&spec.command) {
+        if let Err(rejection) =
+            crate::core::quick_exec::check_command_line_with(&spec.command, &listed)
+        {
             return Err(format!(
                 "validation `{}` can never run: {rejection}",
                 spec.command
@@ -7534,11 +7539,15 @@ where
             _ => quick_exec::Summariser::Generic,
         },
     };
-    let validated = match quick_exec::validate(&quick, &[cwd.to_path_buf()]) {
-        Ok(v) => v,
-        // A refused command is a failed validation, never a silent skip.
-        Err(rejection) => return (None, 0, format!("refused: {rejection}")),
-    };
+    // KT-1751: what the project of this tree lists for its validations.
+    let project_executables =
+        crate::core::task_worker_lane_settings::validation_executables_for(cwd);
+    let validated =
+        match quick_exec::validate_with(&quick, &[cwd.to_path_buf()], &project_executables) {
+            Ok(v) => v,
+            // A refused command is a failed validation, never a silent skip.
+            Err(rejection) => return (None, 0, format!("refused: {rejection}")),
+        };
     let (code, duration, summary) = match run(validated).await {
         Ok(result) => (result.exit_code, result.duration_ms as i64, result.summary),
         Err(e) => (None, 0, format!("validation could not run: {e}")),

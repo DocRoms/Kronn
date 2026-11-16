@@ -11,6 +11,7 @@
 //! | `first_build_timeout_min` | `KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS` when set on the host, else 60 (the variable only fills an unset config) |
 //! | `rust_roots` (a project's own only) | every Rust root found from the manifests |
 //! | `dependency_dirs` (a project's own only) | the dependency directory of every toolchain root found from the manifests (`node_modules`, `vendor`, `Pods`) |
+//! | `validation_executables` (a project's own only) | none: Quick Exec's built-in list (KT-1751) |
 //!
 //! Every consumer of the lane's environment (the warm-up, the worker's launch,
 //! its sandbox) asks [`effective_for`], so a build the worker runs later sees the
@@ -50,6 +51,10 @@ pub struct EffectiveLaneSettings {
     /// repository), or `None` for the ones detected from the manifests. `Some`
     /// of an empty list layers nothing. A project's own setting.
     pub dependency_dirs: Option<Vec<String>>,
+    /// KT-1751 — the executables the project's validations may run beyond
+    /// Kronn's own allowlist (bare names, repository-relative paths). The
+    /// human's decision for this project: empty unless the project lists some.
+    pub validation_executables: Vec<String>,
 }
 
 impl EffectiveLaneSettings {
@@ -118,6 +123,9 @@ pub fn resolve(
         first_build_timeout_configured: configured_minutes.is_some(),
         rust_roots: project.rust_roots.clone().filter(|roots| !roots.is_empty()),
         dependency_dirs: project.dependency_dirs.clone(),
+        // The global entry never adds one: what is trusted for one project
+        // would widen every other.
+        validation_executables: project.validation_executables.clone().unwrap_or_default(),
     }
 }
 
@@ -137,6 +145,7 @@ static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
         first_build_timeout_min: None,
         rust_roots: None,
         dependency_dirs: None,
+        validation_executables: None,
     },
     projects: BTreeMap::new(),
 });
@@ -185,6 +194,35 @@ pub fn effective_for(worktree: &Path, main_checkout: Option<&Path>) -> Effective
     })
 }
 
+/// KT-1751 — the executables the project that owns `worktree` lists for its
+/// validations. The project is found like the lane's is: a managed worktree
+/// (`<repo>/.kronn/worktrees/<name>`) belongs to `<repo>`; any other directory
+/// is its own project, so a tree of no registered project gets nothing.
+pub fn validation_executables_for(worktree: &Path) -> Vec<String> {
+    let worktree = key_of(worktree);
+    let main_checkout = crate::core::task_worker_env::WorkerLane::for_worktree(&worktree)
+        .ok()
+        .and_then(|lane| lane.main_checkout);
+    effective_for(&worktree, main_checkout.as_deref()).validation_executables
+}
+
+/// KT-1751 — every project's listed executables, deduplicated: what the intake
+/// of a validation (a campaign, a swap, a launch that carries no project) is
+/// checked against. The authoritative check is the run's own, per project; this
+/// one only keeps a name no project lists from being accepted at all.
+pub fn all_validation_executables() -> Vec<String> {
+    let snapshot = SNAPSHOT.read().unwrap_or_else(|e| e.into_inner());
+    let mut all: Vec<String> = Vec::new();
+    for config in snapshot.projects.values() {
+        for entry in config.validation_executables.iter().flatten() {
+            if !all.contains(entry) {
+                all.push(entry.clone());
+            }
+        }
+    }
+    all
+}
+
 /// The lane's compiler environment as variables a command can carry. A name is
 /// interned: an environment is `&'static str`-named across the lane code, and
 /// the set of names an owner declares is tiny and fixed.
@@ -218,3 +256,7 @@ mod tests;
 #[cfg(test)]
 #[path = "task_worker_lane_settings_deps_test.rs"]
 mod deps_tests;
+
+#[cfg(test)]
+#[path = "task_worker_lane_settings_exec_test.rs"]
+mod exec_tests;

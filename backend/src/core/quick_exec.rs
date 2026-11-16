@@ -126,6 +126,9 @@ pub struct ValidatedSpec {
     timeout_secs: u64,
     stdin: Option<String>,
     summariser: Summariser,
+    /// KT-1751 — the resolved file of a repository-relative executable, so the
+    /// process that runs is the file that was checked.
+    local_executable: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -224,8 +227,21 @@ pub fn validate(
     spec: &QuickExecSpec,
     allowed_roots: &[PathBuf],
 ) -> Result<ValidatedSpec, Rejection> {
+    validate_with(spec, allowed_roots, &[])
+}
+
+/// [`validate`] with the executables the project's own settings add (KT-1751):
+/// a bare name (`composer`, `go`, `pytest`) or a repository-relative path
+/// (`vendor/bin/phpunit`), exactly as the human wrote it. The denylist still
+/// refuses a shell, and a path must resolve to a file inside the working
+/// directory it runs from.
+pub fn validate_with(
+    spec: &QuickExecSpec,
+    allowed_roots: &[PathBuf],
+    extra: &[String],
+) -> Result<ValidatedSpec, Rejection> {
     let binary = spec.binary.trim();
-    check_binary(binary, ALLOWED_BINARIES)?;
+    check_binary_with(binary, ALLOWED_BINARIES, extra)?;
 
     if spec.argv.len() > MAX_ARGV {
         return Err(Rejection(format!(
@@ -258,6 +274,11 @@ pub fn validate(
         Some(value) => value,
     };
 
+    let local_executable = if binary.contains('/') {
+        Some(resolve_repo_executable(binary, &cwd)?)
+    } else {
+        None
+    };
     Ok(ValidatedSpec {
         binary: binary.to_string(),
         argv: spec.argv.clone(),
@@ -265,7 +286,30 @@ pub fn validate(
         timeout_secs,
         stdin: spec.stdin.clone(),
         summariser: spec.summariser,
+        local_executable,
     })
+}
+
+/// A repository-relative executable, resolved: a file of the working directory
+/// itself. Canonicalised on both sides, like [`validate_cwd`], so a link that
+/// leaves the repository is refused whatever it is called.
+fn resolve_repo_executable(binary: &str, cwd: &Path) -> Result<PathBuf, Rejection> {
+    let relative = binary.strip_prefix("./").unwrap_or(binary);
+    let real = cwd.join(relative).canonicalize().map_err(|error| {
+        Rejection(format!(
+            "`{relative}` cannot be resolved in the worktree: {error}"
+        ))
+    })?;
+    if !real.starts_with(cwd) {
+        return Err(Rejection(format!(
+            "`{relative}` resolves to {}, outside the worktree it runs in",
+            real.display()
+        )));
+    }
+    if !real.is_file() {
+        return Err(Rejection(format!("`{relative}` is not a file")));
+    }
+    Ok(real)
 }
 
 /// Decide whether a binary name may be spawned.
@@ -274,30 +318,68 @@ pub fn validate(
 /// shell and still see the refusal. Without that seam, a test of the denylist
 /// passes for the wrong reason — the name is simply absent from the allowlist —
 /// and would keep passing if the denylist were deleted.
+#[cfg(all(test, feature = "full-tests"))]
 fn check_binary(binary: &str, allowlist: &[&str]) -> Result<(), Rejection> {
+    check_binary_with(binary, allowlist, &[])
+}
+
+/// [`check_binary`] plus the project's own entries (KT-1751). An entry matches
+/// the binary exactly, a leading `./` ignored on both sides: the human decided
+/// that name or that path, nothing around it.
+fn check_binary_with(binary: &str, allowlist: &[&str], extra: &[String]) -> Result<(), Rejection> {
     if binary.is_empty() {
         return Err(Rejection("no binary given".into()));
     }
-    // A name, not a path: an explicit path would let the caller pick any
-    // executable on the machine, which is the whole thing the allowlist prevents.
-    if binary.contains('/') || binary.contains('\\') || binary.starts_with('-') {
+    let listed = extra
+        .iter()
+        .any(|entry| entry.trim().trim_start_matches("./") == binary.trim_start_matches("./"));
+    if binary.contains('/') || binary.contains('\\') {
+        // A path is an executable OF THE REPOSITORY, never any executable on the
+        // machine (which is what the allowlist prevents): relative, inside, and
+        // named by the project's own list.
+        if !is_repo_relative(binary) {
+            return Err(Rejection(format!(
+                "`{binary}` is a path or a flag — Quick Exec takes a bare allowlisted name or \
+                 a repository-relative executable the project lists"
+            )));
+        }
+        if !listed {
+            return Err(Rejection(format!(
+                "`{binary}` is a repository path that the project has not listed: add it to \
+                 the project's validation executables (project settings, Workers) to run it"
+            )));
+        }
+        return Ok(());
+    }
+    if binary.starts_with('-') {
         return Err(Rejection(format!(
             "`{binary}` is a path or a flag — Quick Exec takes a bare allowlisted name"
         )));
     }
     // Before the allowlist, so a shell added to the allowlist by a later edit is
-    // still refused.
+    // still refused — and so is one a project lists.
     if DENIED_BINARIES.contains(&binary) {
         return Err(Rejection(format!(
             "`{binary}` can execute a command line of its own — Quick Exec runs a literal argv, never a shell"
         )));
     }
-    if !allowlist.contains(&binary) {
+    if !allowlist.contains(&binary) && !listed {
         return Err(Rejection(format!(
             "`{binary}` is not in the Quick Exec allowlist"
         )));
     }
     Ok(())
+}
+
+/// `vendor/bin/phpunit`, `./tools/lint`: relative, no `..`, no empty part.
+fn is_repo_relative(path: &str) -> bool {
+    let path = path.strip_prefix("./").unwrap_or(path);
+    !path.is_empty()
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// Check a persisted one-line command (an execution's validation) BEFORE it is
@@ -313,6 +395,12 @@ fn check_binary(binary: &str, allowlist: &[&str]) -> Result<(), Rejection> {
 /// The working directory is not part of the check: a validation always starts at
 /// the root of the execution's worktree.
 pub fn check_command_line(command: &str) -> Result<(), Rejection> {
+    check_command_line_with(command, &[])
+}
+
+/// [`check_command_line`] with the executables the project's own settings add
+/// (KT-1751).
+pub fn check_command_line_with(command: &str, extra: &[String]) -> Result<(), Rejection> {
     let words: Vec<&str> = command.split_whitespace().collect();
     let Some(&binary) = words.first() else {
         return Err(Rejection("the command is empty".into()));
@@ -335,7 +423,7 @@ pub fn check_command_line(command: &str) -> Result<(), Rejection> {
              start with it as its binary"
         )));
     }
-    check_binary(binary, ALLOWED_BINARIES).map_err(|rejection| form(rejection.0))?;
+    check_binary_with(binary, ALLOWED_BINARIES, extra).map_err(|rejection| form(rejection.0))?;
     if let Some((word, syntax)) = words
         .iter()
         .find_map(|word| shell_syntax(word).map(|syntax| (*word, syntax)))
@@ -750,6 +838,9 @@ fn spawn_failure(binary: &str, error: &str, duration_ms: u64) -> QuickExecResult
 /// can rewrite the main checkout's `node_modules`. The name still comes from the
 /// allowlist — this only decides where that name resolves.
 fn resolve_binary(spec: &ValidatedSpec) -> PathBuf {
+    if let Some(executable) = &spec.local_executable {
+        return executable.clone();
+    }
     let local = spec
         .cwd
         .join("node_modules")
@@ -1121,3 +1212,7 @@ pub fn prune_artifacts(dir: &Path, max_total_bytes: u64) -> Result<usize> {
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "quick_exec_test.rs"]
 mod quick_exec_test;
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "quick_exec_project_test.rs"]
+mod quick_exec_project_test;

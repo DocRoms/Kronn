@@ -5680,7 +5680,15 @@ rust_roots?: Array<string>,
  * the manifests; a list = exactly those; an empty list = none. A project's
  * own setting only, like `rust_roots`.
  */
-dependency_dirs?: Array<string>, };
+dependency_dirs?: Array<string>,
+/**
+ * KT-1751 — the executables this project's validations may run beyond
+ * Kronn's own allowlist: a bare name (`composer`, `go`, `pytest`) or a
+ * repository-relative path (`vendor/bin/phpunit`). The human's decision for
+ * one project, set in its workspace settings: no agent tool writes it and the
+ * global entry is not read for it. A shell is never accepted.
+ */
+validation_executables?: Array<string>, };
 
 export type LaunchAuditRequest = { agent: AgentType,
 /**

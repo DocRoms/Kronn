@@ -669,6 +669,27 @@ the one place KT-1747's generic toolchain detection reuses):
   in `frontend/src/lib/laneWarm.ts` keeps every field the form does not know), as
   the commit identity is kept by the same save.
 
+**4b. The executables a project's validations may run (KT-1751).** A persisted
+validation is one binary from Quick Exec's built-in list (`cargo`, `make`, `node`,
+`pnpm`, `npm`, …) followed by literal arguments. A PHP, Go or Python project needs
+more (`composer`, `go`, `pytest`, `vendor/bin/phpunit`), and Kronn does not guess:
+the **project's own** `validation_executables` (the lane-warm entry of its workspace
+settings, a list of bare program names or repository-relative paths) is the human's
+decision, and only that list widens the allowlist, for that project:
+
+- the global Settings > Workers entry is never read for it (what one owner trusts for
+  one project would widen every other), and no agent tool writes it;
+- an entry is a plain program name (`composer`) or a path inside the repository
+  (`vendor/bin/phpunit`, a leading `./` ignored); a shell, an option, an absolute path,
+  a `..` or a character a shell would read is refused on save;
+- a repository-relative executable is run from the worktree it was checked in: it must
+  be listed exactly, resolve (links followed) to a file inside the worktree, and the
+  process that starts is that resolved file;
+- the run checks the list of the project that owns the worktree (a managed
+  `<repo>/.kronn/worktrees/<name>` belongs to `<repo>`); the intake of a validation
+  (campaign, swap, launch) has no project, so it only keeps a name no project lists
+  from being accepted, and the run's own refusal is the one that decides.
+
 **5. Per root, and only under the sandbox** (`core/task_worker_root_marks.rs`,
 `core/task_worker_lane_warm.rs`). Kronn's own repository has two roots, `backend/`
 and `desktop/src-tauri/`, and they do not warm alike: the desktop one needs system
