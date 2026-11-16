@@ -225,7 +225,7 @@ managed workspaces that still name their worktree give the lane name Kronn would
 execution that owned it. It is then judged by the rules above (worktree gone, execution terminal, idle). A
 dir no managed workspace names, one that belongs to an unmanaged workspace, or a lane name two executions
 derive in common is attributed to nobody and stays `foreign`.
-[src: file: backend/src/core/worktree.rs:906-961#process_lane_target_idle]
+[src: file: backend/src/core/worktree.rs:1030-1085#process_lane_target_idle]
 [src: file: backend/src/core/worktree.rs:976-1012#lane_target_last_write]
 [src: file: backend/src/api/disk.rs:151-162#lane_entry_state]
 

@@ -682,6 +682,10 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     crate::core::background_priority::set_enabled(config.workers.background_priority);
     // KT-1718 — Settings > Workers: the shell limits of a Claude task worker.
     crate::core::task_worker_env::set_bash_timeouts(&config.workers);
+    // KT-1750 — Settings > Workers: the OS junk files that never count as work.
+    crate::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
+    // KT-1750 — Settings > Workers: the commit identity and sign-off projects inherit.
+    crate::core::commit_policy::set_global_settings(&config.workers.commit);
     // KT-1748 — Settings > Workers: the extra roots of Kronn-managed worktrees.
     crate::core::worktree::set_global_managed_worktree_roots(&config.workers);
     // KT-1742 — Settings > Workers: how every project's lane is warmed.

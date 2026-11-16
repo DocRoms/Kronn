@@ -27,6 +27,8 @@ fn scratch_repo() -> tempfile::TempDir {
         &["config", "user.email", "dev@example.com"],
         &["config", "user.name", "Dev"],
         &["config", "commit.gpgsign", "false"],
+        // KT-1750: the merge commits sign off only when the project does.
+        &["config", "kronn.signoff", "true"],
     ] {
         git(dir.path(), args);
     }

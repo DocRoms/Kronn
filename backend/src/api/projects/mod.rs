@@ -11,6 +11,7 @@ pub mod agent_files;
 pub mod anti_hallu_inject;
 pub mod bootstrap;
 pub mod clone;
+pub mod commit_policy;
 pub mod crud;
 pub mod dependencies;
 pub mod docker;

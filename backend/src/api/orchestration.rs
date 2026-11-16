@@ -8687,7 +8687,9 @@ fn delivery_git_facts_from_repo(
         .map(|change| {
             let kind = match change.kind {
                 'A' => FileChangeKind::Added,
-                'M' => FileChangeKind::Modified,
+                // `T` (a file turned into a symlink, or back) is the same path
+                // with other content: the manifest's closed model calls it modified.
+                'M' | 'T' => FileChangeKind::Modified,
                 'D' => FileChangeKind::Deleted,
                 other => return Err(format!("unsupported committed file status `{other}`")),
             };
@@ -8787,12 +8789,20 @@ fn foreign_identity_trailers(
     if trailers.is_empty() {
         return Ok(None);
     }
-    let identity = worktree::committer_identity(&facts.repo).map_err(|error| {
-        format!("cannot verify the identity trailers of the delivered commits: {error}")
-    })?;
+    // Either git's own identity (a worker that runs `git commit -s` itself) or
+    // the project's commit identity (a commit Kronn made for it, KT-1750).
+    let project = crate::core::commit_policy::CommitPolicy::for_repo(&facts.repo)
+        .identity
+        .display();
+    let identity = match worktree::committer_identity(&facts.repo) {
+        Ok(identity) => identity,
+        Err(_) => project.clone(),
+    };
     let foreign = trailers
         .into_iter()
-        .filter(|(_, _, value)| !same_git_identity(value, &identity))
+        .filter(|(_, _, value)| {
+            !same_git_identity(value, &identity) && !same_git_identity(value, &project)
+        })
         .map(|(sha, key, value)| format!("{} `{key}: {value}`", short_sha(sha)))
         .collect::<Vec<_>>();
     Ok((!foreign.is_empty()).then_some((identity, foreign)))
@@ -10683,6 +10693,7 @@ fn build_brief(
         can_run_shell,
         true,
         prepared.execution.worker_scope.as_ref(),
+        project_signs_off(worktree_path),
     );
     if let Some(toolchain) = toolchain {
         content = insert_toolchain_section(content, toolchain, lang);
@@ -11226,6 +11237,7 @@ fn build_cli_worker_brief(
         true,
         false,
         None,
+        project_signs_off(worktree_path),
     );
     orchestrator_message(format!("orch-brief:{exec_id}:{attempt_no}"), content)
 }
@@ -11463,6 +11475,12 @@ fn build_token_budget_escalation_message(
     )
 }
 
+/// Whether the project of the worktree signs its commits off (KT-1750): what the
+/// worker brief names, so it never asks for a trailer the project does not use.
+fn project_signs_off(worktree_path: &str) -> bool {
+    crate::core::commit_policy::CommitPolicy::for_repo(std::path::Path::new(worktree_path)).signoff
+}
+
 /// The French brief, which the existing brief tests pin.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -11490,6 +11508,7 @@ fn worker_brief_markdown(
         can_run_shell,
         native_delivery_projection,
         worker_scope,
+        true,
     )
 }
 
@@ -11512,9 +11531,40 @@ fn worker_brief_markdown_in(
     can_run_shell: bool,
     native_delivery_projection: bool,
     worker_scope: Option<&TaskWorkerScope>,
+    signoff: bool,
 ) -> String {
     let fr = lang == RoomLang::Fr;
     let mediated_host_commit = can_run_shell && native_delivery_projection;
+    // KT-1750 — the sign-off is named only where the project signs off.
+    let commit_cmd = if signoff {
+        "git commit -s"
+    } else {
+        "git commit"
+    };
+    let merge_cmd = if signoff {
+        "git merge --signoff"
+    } else {
+        "git merge"
+    };
+    let finish_merge_cmd = if signoff {
+        "git commit -s --no-edit"
+    } else {
+        "git commit --no-edit"
+    };
+    let en_and_signoff = if signoff { " and the sign-off" } else { "" };
+    let fr_and_signoff = if signoff { " et le sign-off" } else { "" };
+    let fr_clean_commit = format!("Crée un commit propre avec `{commit_cmd}` avant la livraison.");
+    let en_clean_commit = format!("Create a clean commit with `{commit_cmd}` before delivery.");
+    let en_identity = if signoff {
+        "it signs with the repository's git identity"
+    } else {
+        "it commits as the repository's git identity, without a sign-off (this project does not use one)"
+    };
+    let fr_identity = if signoff {
+        "il signe avec l'identité git du dépôt"
+    } else {
+        "il commite avec l'identité git du dépôt, sans sign-off (ce projet n'en utilise pas)"
+    };
     // A joined CLI retains the room tools exposed by the regular bridge. Spawned
     // native workers and HTTP workers receive their narrower task/workspace
     // surfaces, so their briefs must request a relay instead of naming a tool
@@ -11878,7 +11928,7 @@ fn worker_brief_markdown_in(
                      uniquement les fichiers explicites et le message. Kronn possède seul \
                      l'accès Git administratif."
                 } else {
-                    "Crée un commit propre avec `git commit -s` avant la livraison."
+                    &fr_clean_commit
                 }
             ),
             "Cherche le symbole cité dans l'objectif avec les outils natifs de ton CLI, \
@@ -11966,7 +12016,7 @@ fn worker_brief_markdown_in(
                          the explicit files and the message. Kronn alone owns administrative Git \
                          access."
                     } else {
-                        "Create a clean commit with `git commit -s` before delivery."
+                        &en_clean_commit
                     }
                 ),
                 "Search for the symbol cited in the objective with your CLI's native tools, \
@@ -12042,26 +12092,34 @@ fn worker_brief_markdown_in(
         "Before delivery, call `task_exec_commit` with only the relative paths actually \
          modified and a concise message. Do not use `git commit` in the shell: the shared \
          objects and refs are deliberately outside your sandbox."
+            .to_string()
     } else if !fr && can_run_shell {
-        "Create a clean commit in this worktree before delivery, with `git commit -s`: \
-         it signs with the repository's git identity. Never write an identity trailer \
-         (`Signed-off-by`, `Co-Authored-By`…) by hand: Kronn refuses the delivery if a \
-         trailer does not match that identity."
+        format!(
+            "Create a clean commit in this worktree before delivery, with `{commit_cmd}`: \
+             {en_identity}. Never write an identity trailer \
+             (`Signed-off-by`, `Co-Authored-By`…) by hand: Kronn refuses the delivery if a \
+             trailer does not match that identity."
+        )
     } else if !fr {
         "Before delivery, call `git_commit` with only the relative paths actually \
          modified and a concise message."
+            .to_string()
     } else if mediated_host_commit {
         "Avant la livraison, appelle `task_exec_commit` avec les seuls chemins relatifs réellement \
          modifiés et un message concis. N'utilise pas `git commit` dans le shell : les objets et \
          refs partagés restent volontairement hors de ta sandbox."
+            .to_string()
     } else if can_run_shell {
-        "Crée un commit propre dans ce worktree avant la livraison, avec `git commit -s` : \
-         il signe avec l'identité git du dépôt. N'écris jamais de trailer d'identité \
-         (`Signed-off-by`, `Co-Authored-By`…) à la main : Kronn refuse la livraison si un \
-         trailer ne correspond pas à cette identité."
+        format!(
+            "Crée un commit propre dans ce worktree avant la livraison, avec `{commit_cmd}` : \
+             {fr_identity}. N'écris jamais de trailer d'identité \
+             (`Signed-off-by`, `Co-Authored-By`…) à la main : Kronn refuse la livraison si un \
+             trailer ne correspond pas à cette identité."
+        )
     } else {
         "Avant la livraison, appelle `git_commit` avec les seuls chemins relatifs réellement \
          modifiés et un message concis."
+            .to_string()
     };
     // The one merge a worker is allowed: bringing the target branch INTO its own
     // branch when the principal asks. A worker that meets git's refusal of a
@@ -12088,57 +12146,61 @@ fn worker_brief_markdown_in(
     let target_integration = if !can_run_shell {
         String::new()
     } else if !fr && mediated_host_commit {
-        "## Integrate the target branch\n\
-         When the principal asks you to integrate the target branch into your branch, it is the \
-         only merge allowed (it goes in that direction: target → your branch, never the reverse).\n\
-         1. Run `git merge --no-commit --no-ff <target>` in your worktree.\n\
-         2. In case of a conflict, resolve it in the files.\n\
-         3. Call `task_exec_commit` with the resolved files and a message: Kronn completes \
-            the merge with both parents and the sign-off. Without a conflict, name at least one \
-            file the merge brings in or that you modify.\n\
-         Never delete `.git/MERGE_HEAD` and run neither `git merge --abort` nor `git reset` \
-         to re-commit by hand: a single-parent commit makes the target's files appear as \
-         \"added by both sides\" at integration. If `task_exec_commit` refuses (unresolved \
-         conflicts, foreign indexed path), it changed nothing: fix it then call it again.\n\n"
-            .to_string()
+        format!(
+            "## Integrate the target branch\n\
+             When the principal asks you to integrate the target branch into your branch, it is the \
+             only merge allowed (it goes in that direction: target → your branch, never the reverse).\n\
+             1. Run `git merge --no-commit --no-ff <target>` in your worktree.\n\
+             2. In case of a conflict, resolve it in the files.\n\
+             3. Call `task_exec_commit` with the resolved files and a message: Kronn completes \
+                the merge with both parents{en_and_signoff}. Without a conflict, name at least one \
+                file the merge brings in or that you modify.\n\
+             Never delete `.git/MERGE_HEAD` and run neither `git merge --abort` nor `git reset` \
+             to re-commit by hand: a single-parent commit makes the target's files appear as \
+             \"added by both sides\" at integration. If `task_exec_commit` refuses (unresolved \
+             conflicts, foreign indexed path), it changed nothing: fix it then call it again.\n\n"
+        )
     } else if !fr {
-        "## Integrate the target branch\n\
-         When the principal asks you to integrate the target branch into your branch, it is the \
-         only merge allowed (it goes in that direction: target → your branch, never the reverse).\n\
-         1. Run `git merge --signoff <target>` in your worktree.\n\
-         2. In case of a conflict, resolve it, `git add` the resolved files, then finish with \
-            `git commit -s --no-edit` — with no path and no `-m`: git refuses a path-limited \
-            commit during a merge.\n\
-         Never delete `.git/MERGE_HEAD` to re-commit by hand: a single-parent commit makes the \
-         target's files appear as \"added by both sides\" at integration.\n\n"
-            .to_string()
+        format!(
+            "## Integrate the target branch\n\
+             When the principal asks you to integrate the target branch into your branch, it is the \
+             only merge allowed (it goes in that direction: target → your branch, never the reverse).\n\
+             1. Run `{merge_cmd} <target>` in your worktree.\n\
+             2. In case of a conflict, resolve it, `git add` the resolved files, then finish with \
+                `{finish_merge_cmd}` — with no path and no `-m`: git refuses a path-limited \
+                commit during a merge.\n\
+             Never delete `.git/MERGE_HEAD` to re-commit by hand: a single-parent commit makes the \
+             target's files appear as \"added by both sides\" at integration.\n\n"
+        )
     } else if mediated_host_commit {
-        "## Intégrer la branche cible\n\
-         Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
-         seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
-         1. Lance `git merge --no-commit --no-ff <cible>` dans ton worktree.\n\
-         2. En cas de conflit, résous-le dans les fichiers.\n\
-         3. Appelle `task_exec_commit` avec les fichiers résolus et un message : Kronn termine \
-            la fusion avec ses deux parents et le sign-off. Sans conflit, nomme au moins un \
-            fichier que la fusion apporte ou que tu modifies.\n\
-         N'efface jamais `.git/MERGE_HEAD` et ne lance ni `git merge --abort` ni `git reset` \
-         pour recommiter à la main : un commit à un seul parent fait apparaître les fichiers de \
-         la cible comme « ajoutés des deux côtés » à l'intégration. Si `task_exec_commit` \
-         refuse (conflits non résolus, chemin indexé étranger), il n'a rien changé : corrige \
-         puis rappelle-le.\n\n"
-            .to_string()
+        format!(
+            "## Intégrer la branche cible\n\
+             Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
+             seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
+             1. Lance `git merge --no-commit --no-ff <cible>` dans ton worktree.\n\
+             2. En cas de conflit, résous-le dans les fichiers.\n\
+             3. Appelle `task_exec_commit` avec les fichiers résolus et un message : Kronn termine \
+                la fusion avec ses deux parents{fr_and_signoff}. Sans conflit, nomme au moins un \
+                fichier que la fusion apporte ou que tu modifies.\n\
+             N'efface jamais `.git/MERGE_HEAD` et ne lance ni `git merge --abort` ni `git reset` \
+             pour recommiter à la main : un commit à un seul parent fait apparaître les fichiers de \
+             la cible comme « ajoutés des deux côtés » à l'intégration. Si `task_exec_commit` \
+             refuse (conflits non résolus, chemin indexé étranger), il n'a rien changé : corrige \
+             puis rappelle-le.\n\n"
+        )
     } else {
-        "## Intégrer la branche cible\n\
-         Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
-         seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
-         1. Lance `git merge --signoff <cible>` dans ton worktree.\n\
-         2. En cas de conflit, résous-le, `git add` les fichiers résolus, puis termine avec \
-            `git commit -s --no-edit` — sans chemin ni `-m` : git refuse un commit limité à des \
-            chemins pendant une fusion.\n\
-         N'efface jamais `.git/MERGE_HEAD` pour recommiter à la main : un commit à un seul \
-         parent fait apparaître les fichiers de la cible comme « ajoutés des deux côtés » à \
-         l'intégration.\n\n"
-            .to_string()
+        format!(
+            "## Intégrer la branche cible\n\
+             Quand le principal te demande d'intégrer la branche cible dans ta branche, c'est le \
+             seul merge permis (il va dans ce sens : cible → ta branche, jamais l'inverse).\n\
+             1. Lance `{merge_cmd} <cible>` dans ton worktree.\n\
+             2. En cas de conflit, résous-le, `git add` les fichiers résolus, puis termine avec \
+                `{finish_merge_cmd}` — sans chemin ni `-m` : git refuse un commit limité à des \
+                chemins pendant une fusion.\n\
+             N'efface jamais `.git/MERGE_HEAD` pour recommiter à la main : un commit à un seul \
+             parent fait apparaître les fichiers de la cible comme « ajoutés des deux côtés » à \
+             l'intégration.\n\n"
+        )
     };
     // KT-1669 — a lane re-anchors only the citations its own gate reads; the
     // integration settles a citation-only conflict, never the lane.
@@ -12271,6 +12333,59 @@ async fn room_lang(db: &Database, parent_discussion_id: &str) -> RoomLang {
     db.with_conn(move |conn| Ok(crate::db::discussions::room_lang(conn, &id)))
         .await
         .unwrap_or_default()
+}
+
+/// The notice a project without a commit identity gets (KT-1750): the worker's
+/// commits carry the global git identity, a personal one on a repository that may
+/// not be personal.
+fn global_commit_identity_notice(lang: RoomLang, email: &str) -> String {
+    match lang {
+        RoomLang::Fr => format!(
+            "**Identité de commit à régler** — Ce projet n'a pas d'identité de commit : Kronn \
+             utilise {email}. Règle-la dans la carte du projet."
+        ),
+        RoomLang::En => format!(
+            "**Commit identity to set** — This project has no commit identity: Kronn uses \
+             {email}. Set it in the project card."
+        ),
+    }
+}
+
+/// Tell the worker room and the principal room, once per execution, that its
+/// commits are made with the global git identity (KT-1750). The ids are
+/// deterministic: a second commit, a resume or a restart cannot post it twice.
+/// Commits are never blocked: the point is that it is visible.
+async fn announce_global_commit_identity(
+    db: &Database,
+    execution_id: &str,
+    worker_room: &str,
+    principal_room: &str,
+    email: &str,
+) {
+    let lang = room_lang(db, principal_room).await;
+    for (kind, room) in [("worker", worker_room), ("principal", principal_room)] {
+        let message = orchestrator_message(
+            format!("orch-commit-identity:{execution_id}:{kind}"),
+            global_commit_identity_notice(lang, email),
+        );
+        let room = room.to_string();
+        let posted = db
+            .with_conn(move |conn| {
+                let already: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1)",
+                    [&message.id],
+                    |row| row.get(0),
+                )?;
+                if !already {
+                    crate::db::discussions::insert_message(conn, &room, &message)?;
+                }
+                Ok(())
+            })
+            .await;
+        if let Err(error) = posted {
+            tracing::warn!(execution_id, "commit identity notice not posted: {error}");
+        }
+    }
 }
 
 /// An orchestrator-authored discussion message (brief, control offer, attach notice):
@@ -18415,6 +18530,13 @@ pub async fn commit_spawned_worker(
     let data_dir_lock = state.data_dir_lock.clone();
     // The pinned base the doc citations are compared with (KT-1721).
     let base_sha = execution.base_sha.clone();
+    // For the notice a project without a commit identity gets (KT-1750).
+    let identity_notice_for = (
+        execution.id.clone(),
+        discussion_id.to_string(),
+        execution.parent_discussion_id.clone(),
+        root.clone(),
+    );
     let supervisor = spawn_spawned_commit_supervisor(
         state.db.clone(),
         execution.id,
@@ -18438,6 +18560,26 @@ pub async fn commit_spawned_worker(
     .await;
     match supervisor.await {
         Ok((committed, release_error)) => {
+            if matches!(committed, Ok(Ok(_))) {
+                let (execution_id, worker_room, principal_room, root) = identity_notice_for;
+                let policy = tokio::task::spawn_blocking(move || {
+                    crate::core::commit_policy::CommitPolicy::resolve(&root)
+                })
+                .await;
+                if let Some(policy) = policy
+                    .ok()
+                    .filter(crate::core::commit_policy::CommitPolicy::uses_global_identity)
+                {
+                    announce_global_commit_identity(
+                        &state.db,
+                        &execution_id,
+                        &worker_room,
+                        &principal_room,
+                        &policy.identity.email,
+                    )
+                    .await;
+                }
+            }
             spawned_commit_response(committed, release_error, time_limit)
         }
         Err(error) => Json(ApiResponse::err_coded(
@@ -21486,6 +21628,96 @@ pub(crate) mod tests {
         );
     }
 
+    /// KT-1750 — a file turned into a symlink (git's `T`) is delivered as a
+    /// modification, not refused as an unsupported status.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_turned_into_a_symlink_is_delivered_as_modified() {
+        let repo = init_repo();
+        let dir = repo.path();
+        std::fs::write(dir.join("config.txt"), "real file").unwrap();
+        std::fs::write(dir.join("target.txt"), "target").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", "base"]);
+        let base = git_rev(dir, "HEAD");
+
+        std::fs::remove_file(dir.join("config.txt")).unwrap();
+        std::os::unix::fs::symlink("target.txt", dir.join("config.txt")).unwrap();
+        git(dir, &["add", "config.txt"]);
+        git(dir, &["commit", "-m", "file becomes a symlink"]);
+        let raw = git(
+            dir,
+            &["diff", "--name-status", "--no-renames", &base, "HEAD"],
+        );
+        assert!(
+            String::from_utf8_lossy(&raw.stdout).starts_with("T\t"),
+            "the fixture must be a git type change: {raw:?}"
+        );
+
+        let facts = delivery_git_facts_from_repo(dir.to_path_buf(), &base, None)
+            .expect("a type change is a deliverable change");
+        assert_eq!(facts.files_touched.len(), 1);
+        assert_eq!(facts.files_touched[0].path, "config.txt");
+        assert_eq!(facts.files_touched[0].kind, FileChangeKind::Modified);
+    }
+
+    /// KT-1750 — an untracked `.DS_Store` does not stop a delivery.
+    #[tokio::test]
+    async fn an_untracked_ds_store_does_not_block_the_delivery_check() {
+        let repo = init_repo();
+        let dir = repo.path();
+        let base = git_rev(dir, "HEAD");
+        std::fs::write(dir.join("work.txt"), "work").unwrap();
+        git(dir, &["add", "work.txt"]);
+        git(dir, &["commit", "-m", "work"]);
+        std::fs::write(dir.join(".DS_Store"), "junk").unwrap();
+        assert!(worktree::worktree_dirty_files(dir).unwrap().is_empty());
+        let facts = delivery_git_facts_from_repo(dir.to_path_buf(), &base, None).unwrap();
+        assert_eq!(facts.files_touched.len(), 1);
+    }
+
+    /// KT-1750 — the brief names the sign-off only where the project signs off,
+    /// whatever the transport and language.
+    #[test]
+    fn worker_brief_names_the_sign_off_only_when_the_project_signs_off() {
+        for lang in [RoomLang::Fr, RoomLang::En] {
+            for (can_run_shell, projection) in [(true, true), (true, false)] {
+                let brief = |signoff: bool| {
+                    worker_brief_markdown_in(
+                        lang,
+                        "KT-1750",
+                        "Identity",
+                        "Objective",
+                        &[],
+                        "/wt/kt1750",
+                        "kronn/task/KT-1750",
+                        "abc1234",
+                        can_run_shell,
+                        projection,
+                        None,
+                        signoff,
+                    )
+                };
+                let case = format!("{lang:?} shell={can_run_shell} projection={projection}");
+                let signed = brief(true);
+                let unsigned = brief(false);
+                assert!(
+                    signed.contains("sign-off") || signed.contains("git commit -s"),
+                    "{case}: the signed brief names the sign-off: {signed}"
+                );
+                for forbidden in ["git commit -s", "--signoff", "sign-off"] {
+                    assert!(
+                        !unsigned
+                            .replace("sans sign-off (ce projet n'en utilise pas)", "")
+                            .replace("without a sign-off (this project does not use one)", "")
+                            .contains(forbidden),
+                        "{case}: the unsigned brief must not name `{forbidden}`: {unsigned}"
+                    );
+                }
+            }
+        }
+    }
+
     /// KT-1669 — the brief asks a lane to keep only its own citations green and
     /// says the integration settles a citation-only conflict, whatever the
     /// transport and language.
@@ -21505,6 +21737,7 @@ pub(crate) mod tests {
                     can_run_shell,
                     projection,
                     None,
+                    true,
                 );
                 let (heading, own_gate, not_target) = match lang {
                     RoomLang::Fr => (
@@ -25090,6 +25323,7 @@ pub(crate) mod tests {
             true,
             true,
             None,
+            true,
         );
         let fr = worker_brief_markdown(
             "KT-1654",
@@ -32436,6 +32670,7 @@ pub(crate) mod tests {
                         shell,
                         native,
                         scope.as_ref(),
+                        true,
                     )
                 };
                 let english = brief(RoomLang::En);
@@ -41971,6 +42206,50 @@ pub(crate) mod tests {
         count(db, "SELECT COUNT(*) FROM task_execution_deliveries").await
     }
 
+    /// KT-1750 — a project with no commit identity of its own commits with the
+    /// global git one: the worker room and the principal room are told so, once.
+    #[tokio::test]
+    async fn the_global_commit_identity_is_announced_once_in_both_rooms() {
+        let repo = init_repo();
+        let db = Database::open_in_memory().unwrap();
+        let (_task_ref, parent_id, child_id, exec_id) = attached_cli_worker(&db, repo.path()).await;
+        for _ in 0..2 {
+            announce_global_commit_identity(
+                &db,
+                &exec_id,
+                &child_id,
+                &parent_id,
+                "personal@example.com",
+            )
+            .await;
+        }
+        for room in [&child_id, &parent_id] {
+            let room = room.clone();
+            let notices = db
+                .with_conn(move |conn| {
+                    Ok(crate::db::discussions::list_messages(conn, &room)?
+                        .into_iter()
+                        .filter(|message| message.id.starts_with("orch-commit-identity:"))
+                        .map(|message| message.content)
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .unwrap();
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(
+                notices[0].contains("personal@example.com")
+                    && notices[0].contains("carte du projet"),
+                "{}",
+                notices[0]
+            );
+        }
+        assert!(global_commit_identity_notice(RoomLang::Fr, "a@b.c").contains(
+            "Ce projet n'a pas d'identité de commit : Kronn utilise a@b.c. Règle-la dans la carte du projet."
+        ));
+        assert!(global_commit_identity_notice(RoomLang::En, "a@b.c")
+            .contains("This project has no commit identity: Kronn uses a@b.c."));
+    }
+
     #[tokio::test]
     async fn deliver_refuses_an_invented_sign_off_then_accepts_git_commit_s() {
         let repo = init_repo();
@@ -48884,6 +49163,7 @@ pub(crate) mod tests {
                 shell,
                 projection,
                 None,
+                true,
             )
         };
         let en = brief(RoomLang::En, true, true);

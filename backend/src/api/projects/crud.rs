@@ -713,13 +713,23 @@ pub async fn set_project_workspace(
             return Json(ApiResponse::err(reason));
         }
     }
-    let stored = payload
-        .map(|mut workspace| {
+    let payload = match payload {
+        Some(mut workspace) => {
+            workspace.commit = match workspace.commit.normalized() {
+                Ok(commit) => commit,
+                Err(reason) => return Json(ApiResponse::err(reason)),
+            };
             workspace.lane_warm = workspace.lane_warm.normalized();
-            workspace
-        })
-        .filter(|workspace| !workspace.is_empty());
+            Some(workspace)
+        }
+        None => None,
+    };
+    let stored = payload.filter(|workspace| !workspace.is_empty());
     let lane_warm = stored.as_ref().map(|workspace| workspace.lane_warm.clone());
+    let registered = stored
+        .as_ref()
+        .map(|workspace| workspace.commit.clone())
+        .unwrap_or_default();
     match state
         .db
         .with_conn(move |conn| {
@@ -731,11 +741,16 @@ pub async fn set_project_workspace(
         .await
     {
         Ok(project_path) => {
-            // Published at once: the next lane of this project reads it.
             if let Some(path) = project_path {
+                // Published at once: the next lane of this project reads it.
                 crate::core::task_worker_lane_settings::set_project(
                     std::path::Path::new(&path),
                     lane_warm.as_ref(),
+                );
+                // The merge and worker-commit code reads the setting without a database.
+                crate::core::commit_policy::register_project(
+                    &crate::core::scanner::resolve_host_path(&path),
+                    &registered,
                 );
             }
             Json(ApiResponse::ok(true))

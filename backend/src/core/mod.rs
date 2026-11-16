@@ -32,6 +32,7 @@ pub mod comfyui;
 pub mod comfyui_klein;
 pub mod comfyui_references;
 pub mod commit_facts;
+pub mod commit_policy;
 pub mod config;
 pub mod config_copies;
 pub mod config_salvage;
