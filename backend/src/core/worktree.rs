@@ -6620,7 +6620,7 @@ mod tests {
         // An unknown worktree outside every root is refused...
         let outside = tempfile::tempdir().unwrap();
         make_branch(repo.path(), "feat/foreign");
-        let foreign = outside.path().canonicalize().unwrap().join("wt");
+        let foreign = for_git(outside.path()).join("wt");
         add_worktree(repo.path(), &foreign, "feat/foreign");
         let refusal = ownership("feat/foreign", &|_| false).unwrap_err();
         assert_eq!(refusal.code(), "integration_target_foreign_worktree");
