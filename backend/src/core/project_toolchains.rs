@@ -429,11 +429,11 @@ pub fn conventions_lines_in(profile: &[PackageRoot], fr: bool) -> Vec<String> {
 }
 
 /// The "Project conventions" section of a worker's brief (KT-1747), composed
-/// from the toolchains found in `worktree`: what the project builds with and
+/// from the toolchains detected in the worktree: what the project builds with and
 /// where it keeps its dependencies, so a worker uses the project's own tools
 /// instead of assuming Kronn's. Empty when nothing was detected.
-pub fn conventions_section(worktree: &Path, fr: bool) -> String {
-    let lines = conventions_lines_in(&detect_toolchains(worktree), fr);
+pub fn conventions_section(profile: &[PackageRoot], fr: bool) -> String {
+    let lines = conventions_lines_in(profile, fr);
     if lines.is_empty() {
         return String::new();
     }

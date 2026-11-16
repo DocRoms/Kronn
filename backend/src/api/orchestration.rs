@@ -11463,6 +11463,13 @@ fn build_token_budget_escalation_message(
     )
 }
 
+/// The validation gate of a project that builds with Cargo (Kronn's own CI gate).
+const RUST_GATE_EN: &str = "The default validations are fmt + clippy + targeted lib tests (`cargo test --lib <filter>`): the full suite is owned by the PR's CI, never by a local run. For a Rust change the lint gate is EXACTLY `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (the CI gate: `--lib`, `--lib --tests` or a filtered output do not lint `tests/`); report each exit code in the evidence of its `tests` entry.";
+const RUST_GATE_FR: &str = "Les validations par défaut sont fmt + clippy + tests lib ciblés (`cargo test --lib <filtre>`) : la suite complète appartient à la CI de la PR, jamais à un run local. Pour un changement Rust, le gate de lint est EXACTEMENT `cargo fmt --check` et `cargo clippy --all-targets -- -D warnings` (le gate de la CI : `--lib`, `--lib --tests` ou une sortie filtrée ne lintent pas `tests/`) ; reporte le code de sortie de chacun dans la preuve de son entrée `tests`.";
+/// The gate of any other project: its own formatter, linter and tests.
+const GENERIC_GATE_EN: &str = "The default validations are the project's own formatter, linter and targeted tests (see the project conventions): the full suite is owned by the PR's CI, never by a local run. Report each command you ran and its exit code in the evidence of its `tests` entry.";
+const GENERIC_GATE_FR: &str = "Les validations par défaut sont le formateur, le linter et les tests ciblés propres au projet (voir les conventions du projet) : la suite complète appartient à la CI de la PR, jamais à un run local. Reporte chaque commande lancée et son code de sortie dans la preuve de son entrée `tests`.";
+
 /// The French brief, which the existing brief tests pin.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -11766,15 +11773,21 @@ fn worker_brief_markdown_in(
     // (`worker_completed_without_delivery`, twice on KT-847). The long gates the
     // principal persisted are Kronn's to run at integration; the worker's job is the
     // targeted tests, then commit and deliver in the same turn.
+    // KT-1751 — the cargo lint gate is Kronn's own. A project whose manifests say
+    // it builds with something else is told to use its own tools; a worktree whose
+    // toolchains are unknown (no manifest found) keeps the cargo text.
+    let toolchains =
+        crate::core::project_toolchains::detect_toolchains(std::path::Path::new(worktree_path));
+    let cargo_gate = toolchains.is_empty()
+        || toolchains
+            .iter()
+            .any(|root| root.kind == crate::core::project_toolchains::ToolchainKind::Cargo);
     let tests = if can_run_shell && !fr {
-        "Run the **targeted** tests that cover your change and report each result \
+        format!(
+            "Run the **targeted** tests that cover your change and report each result \
          (`pass`/`fail`/`skipped` + non-empty evidence) in `tests`. A `pass` without a \
          verifiable command or output is refused.\n\
-         The default validations are fmt + clippy + targeted lib tests (`cargo test --lib \
-         <filter>`): the full suite is owned by the PR's CI, never by a local run. For a Rust \
-         change the lint gate is EXACTLY `cargo fmt --check` and `cargo clippy --all-targets -- \
-         -D warnings` (the CI gate: `--lib`, `--lib --tests` or a filtered output do not lint \
-         `tests/`); report each exit code in the evidence of its `tests` entry. The long \
+         {gate} The long \
          validations persisted by the principal are run by Kronn at integration, after the \
          review: do not replay them in full. The shell tool \
          cuts a command at the per-command cap of Settings > Workers (60 min by default). A cold \
@@ -11784,8 +11797,13 @@ fn worker_brief_markdown_in(
          one to wait for it later: your process ends as soon as you hand the turn back, takes \
          the build with it, and the execution ends without a delivery; if you must background \
          a command, wait for it in the same turn. Chain it all in the same turn: targeted \
-         tests, commit, then `task_exec_deliver`."
-            .to_string()
+         tests, commit, then `task_exec_deliver`.",
+            gate = if cargo_gate {
+                RUST_GATE_EN
+            } else {
+                GENERIC_GATE_EN
+            }
+        )
     } else if !fr {
         "You have no shell: never claim to have run `cargo`, `pnpm`, `make` or any other \
          command. You may write the tests that are needed, then report the commands the \
@@ -11794,15 +11812,11 @@ fn worker_brief_markdown_in(
          `ReviewDecision`."
             .to_string()
     } else if can_run_shell {
-        "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
+        format!(
+            "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
          (`pass`/`fail`/`skipped` + preuve non vide) dans `tests`. Un `pass` sans \
          commande ou sortie vérifiable est refusé.\n\
-         Les validations par défaut sont fmt + clippy + tests lib ciblés (`cargo test --lib \
-         <filtre>`) : la suite complète appartient à la CI de la PR, jamais à un run local. \
-         Pour un changement Rust, le gate de lint est EXACTEMENT `cargo fmt --check` et \
-         `cargo clippy --all-targets -- -D warnings` (le gate de la CI : `--lib`, `--lib \
-         --tests` ou une sortie filtrée ne lintent pas `tests/`) ; reporte le code de sortie \
-         de chacun dans la preuve de son entrée `tests`. Les validations longues persistées par le principal sont \
+         {gate} Les validations longues persistées par le principal sont \
          jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
          L'outil shell coupe une commande au plafond par commande de Settings > Workers \
          (60 min par défaut). Un build à froid du profil de test peut durer de nombreuses \
@@ -11812,8 +11826,13 @@ fn worker_brief_markdown_in(
          jamais une pour l'attendre plus tard : ton processus s'arrête dès que tu rends la \
          main, emporte le build, et l'exécution finit sans livraison ; si tu dois mettre une \
          commande en arrière-plan, attends sa fin dans le même tour. Enchaîne dans le même \
-         tour : tests ciblés, commit, puis `task_exec_deliver`."
-            .to_string()
+         tour : tests ciblés, commit, puis `task_exec_deliver`.",
+            gate = if cargo_gate {
+                RUST_GATE_FR
+            } else {
+                GENERIC_GATE_FR
+            }
+        )
     } else {
         "Tu n'as pas de shell : n'affirme jamais avoir exécuté `cargo`, `pnpm`, `make` \
          ou une autre commande. Tu peux écrire les tests nécessaires, puis reporte les \
@@ -12162,10 +12181,7 @@ fn worker_brief_markdown_in(
          supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
     };
     let ui_captures = crate::core::ui_captures::brief_section(lang);
-    let conventions = crate::core::project_toolchains::conventions_section(
-        std::path::Path::new(worktree_path),
-        fr,
-    );
+    let conventions = crate::core::project_toolchains::conventions_section(&toolchains, fr);
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -21488,6 +21504,53 @@ pub(crate) mod tests {
             !no_shell.contains("## Intégrer la branche cible"),
             "{no_shell}"
         );
+    }
+
+    /// KT-1751 — the Rust lint gate (`cargo fmt`, `cargo clippy`) is Kronn's own:
+    /// a worker of a PHP/Node/iOS project is never told to run it. A worktree
+    /// whose toolchains are unknown keeps the text, and so does one with a Rust
+    /// root.
+    #[test]
+    fn the_cargo_gate_text_is_only_for_projects_that_build_with_cargo() {
+        let brief = |lang, path: &str| {
+            worker_brief_markdown_in(
+                lang,
+                "KT-1751",
+                "Gate",
+                "Objective",
+                &[],
+                path,
+                "kronn/task/KT-1751",
+                "abc1234",
+                true,
+                true,
+                None,
+            )
+        };
+        let php = tempfile::tempdir().unwrap();
+        std::fs::write(php.path().join("composer.json"), "{}").unwrap();
+        std::fs::write(php.path().join("Makefile"), "").unwrap();
+        let rust = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rust.path().join("backend")).unwrap();
+        std::fs::write(rust.path().join("backend/Cargo.toml"), "").unwrap();
+        std::fs::write(rust.path().join("Makefile"), "").unwrap();
+        let php = php.path().to_string_lossy().into_owned();
+        let rust = rust.path().to_string_lossy().into_owned();
+
+        for lang in [RoomLang::En, RoomLang::Fr] {
+            let other = brief(lang, &php);
+            assert!(!other.contains("cargo clippy"), "{other}");
+            assert!(!other.contains("cargo fmt"), "{other}");
+            assert!(!other.contains("cargo test --lib"), "{other}");
+            // Still told how to evidence a result, and where the conventions are.
+            assert!(other.contains("exit code") || other.contains("code de sortie"));
+            assert!(other.contains("task_exec_deliver"), "{other}");
+
+            for kept in [brief(lang, &rust), brief(lang, "/wt/unknown")] {
+                assert!(kept.contains("cargo clippy --all-targets -- -D warnings"));
+                assert!(kept.contains("cargo fmt --check"));
+            }
+        }
     }
 
     /// KT-1747 — the brief carries a "Project conventions" section composed from
