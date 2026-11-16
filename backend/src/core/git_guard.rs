@@ -323,6 +323,7 @@ mod tests {
         std::fs::write(fx.main.join("a.txt"), "uncommitted").unwrap();
         std::fs::write(fx.main.join("u.txt"), "untracked").unwrap();
         git(&fx.main, &["branch", "other"]);
+        git(&fx.main, &["branch", "plain"]);
 
         for (args, name) in [
             (vec!["restore", "."], "restore"),
@@ -368,11 +369,107 @@ mod tests {
             vec!["branch", "--show-current"],
             vec!["branch", "-vv"],
             vec!["branch", "-d", "other"],
+            // KT-1753 (Y4): an option's value is not an option: `-refname` is a
+            // sort key, not `-f`.
+            vec!["branch", "--sort", "-refname"],
+            vec!["branch", "--sort=-committerdate"],
+            vec!["branch", "--format", "%(refname:short)"],
+            vec!["branch", "--contains", "HEAD"],
+            vec!["branch", "--merged", "main"],
+            vec!["branch", "-m", "plain", "renamed"],
         ] {
             let out = guarded(&fx, &fx.main, &args, false);
             assert!(
                 out.status.success(),
                 "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// KT-1753 (Y4) — the same whole-tree restore written another way: a trailing
+    /// slash, `./.`, the `:/*` and `:(top)` pathspecs, the top level's own path,
+    /// `..` from a sub-directory, and a forced rename or copy of a branch.
+    #[test]
+    fn the_other_spellings_of_the_destructive_forms_are_refused_too() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.main.join("sub/deep")).unwrap();
+        std::fs::write(fx.main.join("a.txt"), "uncommitted").unwrap();
+        git(&fx.main, &["branch", "other"]);
+        let top = fx.main.canonicalize().unwrap();
+        let top = top.to_str().unwrap();
+
+        for (dir, args, name) in [
+            (fx.main.clone(), vec!["restore", "./"], "restore"),
+            (fx.main.clone(), vec!["restore", "./."], "restore"),
+            (fx.main.clone(), vec!["restore", "--", "./"], "restore"),
+            (fx.main.clone(), vec!["restore", "--", "."], "restore"),
+            (fx.main.clone(), vec!["restore", ":/*"], "restore"),
+            (fx.main.clone(), vec!["restore", ":/."], "restore"),
+            (fx.main.clone(), vec!["restore", ":(top)"], "restore"),
+            (fx.main.clone(), vec!["restore", ":(top)*"], "restore"),
+            (fx.main.clone(), vec!["restore", top], "restore"),
+            (fx.main.clone(), vec!["restore", "sub/.."], "restore"),
+            (fx.main.join("sub"), vec!["restore", ".."], "restore"),
+            (fx.main.join("sub"), vec!["restore", "../"], "restore"),
+            (fx.main.join("sub"), vec!["restore", "../."], "restore"),
+            (
+                fx.main.join("sub/deep"),
+                vec!["restore", "../.."],
+                "restore",
+            ),
+            (
+                fx.main.join("sub"),
+                vec!["restore", "--source=HEAD", "--", ".."],
+                "restore",
+            ),
+            (fx.main.clone(), vec!["branch", "-M", "renamed"], "branch"),
+            (
+                fx.main.clone(),
+                vec!["branch", "-C", "other", "copy"],
+                "branch",
+            ),
+            (
+                fx.main.clone(),
+                vec!["branch", "--move", "--force", "other", "renamed"],
+                "branch",
+            ),
+            (
+                fx.main.clone(),
+                vec!["branch", "--copy", "--force", "other", "copy"],
+                "branch",
+            ),
+            (
+                fx.main.clone(),
+                vec!["branch", "-m", "-f", "other", "main"],
+                "branch",
+            ),
+        ] {
+            let out = guarded(&fx, &dir, &args, false);
+            let message = refused(&out);
+            assert!(
+                message.contains(&format!("refused 'git {name}'")),
+                "{args:?} in {}: {message}",
+                dir.display()
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(fx.main.join("a.txt")).unwrap(),
+            "uncommitted"
+        );
+
+        // A path under the top level, or a file above the sub-directory, is a
+        // narrower restore and passes.
+        for (dir, args) in [
+            (fx.main.join("sub"), vec!["restore", "../a.txt"]),
+            (fx.main.clone(), vec!["restore", "sub/../a.txt"]),
+            (fx.main.clone(), vec!["restore", "a.txt"]),
+        ] {
+            let out = guarded(&fx, &dir, &args, false);
+            assert!(
+                out.status.success(),
+                "{args:?} in {}: {}",
+                dir.display(),
                 String::from_utf8_lossy(&out.stderr)
             );
         }

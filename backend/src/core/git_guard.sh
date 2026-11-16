@@ -118,9 +118,31 @@ kronn_in_scratch_repo() {
   )
 }
 
+# True when the pathspec $1 of a `restore` stands for the whole working tree
+# (KT-1753): `.` in any spelling (`./`, `./.`), the top-level pathspecs (`:/`,
+# `:/.`, `:/*`, `:(top)`), a quoted `*`, or a path that resolves to the top
+# level itself (its own path, `..` from a sub-directory). $kronn_top is the
+# top level of the repository git runs in (empty when it is not one).
+kronn_is_whole_tree() {
+  case "$1" in
+    . | ./ | ./. | .// | \* | :/ | :/. | :/\* | ':(top)' | ':(top).' | ':(top)*' | ':(top)/' | ':(top)/*')
+      return 0
+      ;;
+    -* | :*) return 1 ;;
+  esac
+  [ -n "$kronn_top" ] || return 1
+  case "$1" in
+    /*) kronn_target=$1 ;;
+    *) kronn_target=$kronn_dir/$1 ;;
+  esac
+  kronn_resolved=$(cd "$kronn_target" 2>/dev/null && pwd -P) || return 1
+  [ "$kronn_resolved" = "$kronn_top" ]
+}
+
 # Succeeds when the arguments after the subcommand ($1, then the command line)
 # are the destructive form of that subcommand (KT-1753): `restore` of the whole
-# tree into the working tree, `clean` that is not a dry run, `branch` forced.
+# tree into the working tree, `clean` that is not a dry run, `branch` forced
+# (-f, -D, and the forced rename or copy -M, -C).
 kronn_destructive() {
   kronn_want=$1
   shift
@@ -137,17 +159,33 @@ kronn_destructive() {
   kronn_worktree=0
   kronn_dry=0
   kronn_force=0
+  kronn_skip=0
+  kronn_top=
+  if [ "$kronn_want" = restore ]; then
+    kronn_top=$(cd "$kronn_dir" 2>/dev/null && "$real_git" rev-parse --show-toplevel 2>/dev/null) || kronn_top=
+    [ -z "$kronn_top" ] || kronn_top=$(cd "$kronn_top" 2>/dev/null && pwd -P) || kronn_top=
+  fi
   for kronn_a in "$@"; do
+    # The value of an option that takes one (`--sort -refname`) is not an option.
+    if [ "$kronn_skip" = 1 ]; then
+      kronn_skip=0
+      continue
+    fi
     case "$kronn_want:$kronn_a" in
-      restore:. | restore::/ | restore::/. | restore:\*) kronn_whole=1 ;;
       restore:--staged | restore:-S) kronn_staged=1 ;;
       restore:--worktree | restore:-W) kronn_worktree=1 ;;
+      restore:*) kronn_is_whole_tree "$kronn_a" && kronn_whole=1 ;;
       clean:--dry-run) kronn_dry=1 ;;
       clean:--*) ;;
       clean:-*n*) kronn_dry=1 ;;
       branch:--force) kronn_force=1 ;;
+      branch:--sort | branch:--format | branch:--contains | branch:--no-contains | \
+        branch:--merged | branch:--no-merged | branch:--points-at | branch:--set-upstream-to | \
+        branch:-u | branch:--column)
+        kronn_skip=1
+        ;;
       branch:--*) ;;
-      branch:-*f* | branch:-*D*) kronn_force=1 ;;
+      branch:-*f* | branch:-*D* | branch:-*M* | branch:-*C*) kronn_force=1 ;;
     esac
   done
   case "$kronn_want" in
