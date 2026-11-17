@@ -104,7 +104,7 @@ fn version_check_path() {}
 #[allow(dead_code)]
 fn live_page_workflows_path() {}
 
-/// `GET /api/pages/{id}/publications` — the three newest successful refreshes.
+/// `GET /api/pages/{id}/publications` — the three newest refreshes that changed data.
 #[utoipa::path(
     get,
     path = "/api/pages/{id}/publications",

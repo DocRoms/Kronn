@@ -116,13 +116,16 @@ that configured relationship in both directions: a selected Page can be opened
 from the step, and the Page viewer lists every saved Workflow step that targets
 it. This is a configuration link; the publication ledger remains the source of
 truth for actual run provenance. A compact status control in the viewer header
-opens the three newest successful ledger entries as a vertical timeline without
+opens the three newest ledger entries as a vertical timeline without
 permanently reducing the report viewport. Each entry distinguishes datasets
 whose JSON actually changed from datasets that were checked but stayed
 identical, includes append/retention point counts, and links to the exact
-Workflow run when that provenance still exists. Operators can therefore tell a
-successful check from a meaningful data update without opening the complete
-Workflow history. Every enabled linked Workflow also exposes a compact run
+Workflow run when that provenance still exists. A publication that changes no
+dataset at all writes no ledger entry (KT-1819), so the timeline lists data
+updates; the "Synced" time next to it is the Page's `last_published_at`, which
+every successful publication moves, changed or not.
+`[src: file: frontend/src/pages/PagesPage.tsx:731-731#lastRefreshAt]`
+Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
 
@@ -175,7 +178,7 @@ The library's source link opens the discussion at that exact message. Removing
 the message clears only its source anchor and preserves the Artifact and its
 discussion link. Streamed previews without a persisted message id do not offer
 this action.
-[src: file: backend/src/api/live_pages.rs:501-513#source_message_id]
+[src: file: backend/src/api/live_pages.rs:540-552#source_message_id]
 [src: file: frontend/src/components/DocPreviewArtifact.tsx:22-33#create]
 [src: file: frontend/src/components/DocPreview.tsx:153#DocPreviewArtifact]
 
@@ -253,7 +256,7 @@ A dataset can be emptied, re-limited and deleted after creation:
   the publication ledger like any write, from the API or a `PublishPageData`
   step. Only `clear` may omit `value` (API) or `value_from` (step); the other
   operations still require them, an explicit `null` value included.
-  `[src: file: backend/src/db/live_pages.rs:892-908#Clear]`
+  `[src: file: backend/src/db/live_pages.rs:988-1004#Clear]`
 - **Limits.** `PATCH /api/pages/{id}/datasets/{name}` with `max_points` and/or
   `max_age_days` (`null` lifts the age limit) prunes the points beyond the new
   limits in the same transaction, then moves the Page to a new data revision
@@ -284,8 +287,8 @@ caller.
 None of these touch what a trusted button's approval fingerprint covers (the
 block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
-`[src: file: backend/src/api/live_pages.rs:654-664#delete_dataset]`
-`[src: file: backend/src/api/live_pages.rs:689-700#update_dataset]`
+`[src: file: backend/src/api/live_pages.rs:693-703#delete_dataset]`
+`[src: file: backend/src/api/live_pages.rs:728-739#update_dataset]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:8093-8100#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
@@ -296,7 +299,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:585-597#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:593-605#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -311,10 +314,58 @@ Custom theme names can use the Page's own fallback rules.
 A publish that changes a Page (API `POST /api/pages/{id}/publish` or a
 `PublishPageData` step) broadcasts the local WebSocket event
 `live_page_data_changed { page_id, data_revision }`. The Pages view and the
-standalone tab re-read that Page at once and post `kronn:page-data` to the
-open frame without rebuilding it; their 30 s poll stays as a fallback.
-`[src: file: backend/src/api/live_pages.rs:860-872#announce_page_data_changed]`
+standalone tab catch up at once and post `kronn:page-data` to the open frame
+without rebuilding it; their 30 s poll stays as a fallback. A publication that
+changes nothing broadcasts nothing.
+`[src: file: backend/src/api/live_pages.rs:907-919#announce_page_data_changed]`
 `[src: file: frontend/src/hooks/useLivePageDataPush.ts:9-13#useLivePageDataPush]`
+
+### Incremental read (KT-1819)
+
+An open view does not re-read the whole Page on each event or poll. It keeps
+its last snapshot and asks
+`GET /api/pages/{id}/data?since=<data_revision>&revision=<HTML revision id>`
+for what it misses. The answer is a `LivePageDataDelta`: `page` (the Page row,
+no HTML, no dataset), `datasets` (only the datasets changed since `since`,
+each one whole: a time series comes with all its retained points) and `full`
+(`null`, or the complete Page as `GET /api/pages/{id}` returns it).
+`[src: file: backend/src/models/live_pages.rs:128-132#LivePageDataDelta]`
+`[src: file: backend/src/api/live_pages.rs:146-172#data]`
+
+The changed datasets are the union of `changed_datasets_json` over the
+publication-ledger rows after `since`. With `since` equal to the current
+revision the answer carries no dataset value: that is what the 30 s poll
+costs. The route answers with the **full state** in `full`, and an empty
+`datasets`, whenever the ledger cannot account for every revision in between:
+
+- `since` is absent, is not a non-negative integer, or is ahead of the Page;
+- a revision after `since` has no ledger row. Only a publication that changes
+  data writes one, so this covers a dataset added, a dataset deleted, points
+  pruned by new retention limits, and a ledger row that is gone;
+- a ledger row names a dataset the Page no longer has;
+- `revision` is given and is not the Page's current HTML revision (the HTML
+  was updated). A caller that holds no HTML omits `revision`.
+
+`[src: file: backend/src/db/live_pages.rs:678-711#read_live_page_data]`
+`[src: file: backend/src/db/live_pages.rs:717-745#datasets_changed_since]`
+
+Adding a dataset therefore moves the Page to a new data revision, like
+deleting one; declaring an existing dataset again changes nothing. New limits
+that prune no point change no Page data and leave the revision alone: the
+limits shown for that dataset in another open tab stay as loaded until its
+next full read.
+`[src: file: backend/src/db/live_pages.rs:757-872#add_live_page_dataset]`
+
+The host merges the changed datasets into its snapshot, replaces the snapshot
+when `full` is present, and reads the whole Page again when the delta cannot
+be placed (another Page id, another HTML revision, a dataset it does not
+hold). It then posts the same complete `kronn:page-data` snapshot as before,
+so Page HTML needs no change. A late answer older than the snapshot shown is
+dropped. Opening a Page, and every explicit action in the Pages view, still
+reads the whole Page.
+`[src: file: frontend/src/lib/live-page-refresh.ts:14-26#mergeLivePageData]`
+`[src: file: frontend/src/lib/live-page-refresh.ts:33-37#refreshLivePageDetail]`
+`[src: file: frontend/src/lib/live-page-refresh.ts:40-42#newestLivePageDetail]`
 
 ## « Ma Todo », the default board (KT-1030)
 
@@ -411,8 +462,8 @@ are hints for the Page's own rendering, never an authorization input.
 The embedded viewer, standalone Page and mosaic skip automatic data
 publication when the Page id, slug, title, data revision and dataset count
 are unchanged. This preserves local state during quiet polling cycles.
-A newly loaded iframe always receives the current data. A real publication
-increments the data revision and still reaches the Page; preserving expanded
+A newly loaded iframe always receives the current data. A publication that
+changes data increments the data revision and still reaches the Page; preserving expanded
 rows or scroll position across that render is the Page's responsibility.
 `[src: file: frontend/src/hooks/useLivePageActions.ts:356-370#usePublishPageDataWhenChanged]`
 
@@ -453,8 +504,15 @@ project's GitHub token before it reaches the run record or a Page.
 `[src: file: backend/src/workflows/publish_page_step.rs:152-165#from_exec]`
 `[src: file: backend/src/workflows/publish_page_step.rs:180-226#exec_value]`
 
-Every successful publication increments the Page data revision once and stores
-its workflow run id when available. Dedupe keys make replayed append writes
+Every publication that changes at least one dataset increments the Page data
+revision once and writes one ledger row with its workflow run id when
+available. A publication that changes nothing succeeds, returns the current
+revision with `content_changed: false`, updates `last_published_at`, and
+leaves the revision, the ledger and the datasets (their `updated_at`
+included) untouched: a dataset's "last write" is the last write that changed
+it.
+`[src: file: backend/src/db/live_pages.rs:1056-1068#data_revision]`
+Dedupe keys make replayed append writes
 idempotent. Retention is enforced in the same transaction with `max_points`
 and optional `max_age_days`; the initial implementation deletes the oldest raw
 observations and deliberately does not aggregate them.
@@ -700,7 +758,7 @@ failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
 [src: file: backend/src/api/workflows.rs:5159-5167#create_live_page_in_transaction]
-[src: file: backend/src/db/live_pages.rs:128-130#create_live_page_in_transaction]
+[src: file: backend/src/db/live_pages.rs:129-131#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload
@@ -789,7 +847,7 @@ normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
 [src: file: backend/src/models/setup.rs:81-87#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
-[src: file: backend/src/api/live_pages.rs:965-967#change_embed_origins]
+[src: file: backend/src/api/live_pages.rs:1004-1006#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
 origin, see the exact value that will be saved, add it, or remove a
 permission. Every Page view, the import dialog and that section share one
@@ -799,7 +857,7 @@ the local WebSocket, with no origin in it (never relayed to a P2P peer); every
 open tab, a visible wall screen included, re-reads the list at once and a
 revoked site's players are unmounted. A tab also re-reads on WebSocket
 reconnect (for an event sent while it was disconnected) and on focus.
-[src: file: backend/src/api/live_pages.rs:879-883#announce_embed_origins_changed]
+[src: file: backend/src/api/live_pages.rs:918-922#announce_embed_origins_changed]
 Changes are sent one after the
 other, and a read that started before a change landed (or while one is in
 flight) is discarded, so a slow read can never bring back a revoked site or
@@ -873,8 +931,8 @@ governed by that site's document, not by Kronn's CSP, so an allowed site can
 itself embed other origins; Kronn controls only what the Page frames directly,
 redirects included.
 [src: file: backend/src/core/embed_origins.rs:254#frame_src_sources]
-[src: file: backend/src/api/live_pages.rs:841-842#embed_frame_src]
-[src: file: backend/src/api/live_pages.rs:895-899#document_frame_policy]
+[src: file: backend/src/api/live_pages.rs:880-881#embed_frame_src]
+[src: file: backend/src/api/live_pages.rs:934-938#document_frame_policy]
 [src: file: frontend/vite-frame-policy.ts:72#framePolicyMiddleware]
 [src: file: frontend/src/lib/served-frame-policy.ts:9#parseServedFrameSources]
 [src: file: .docker/nginx.conf:198-199#auth_request]
