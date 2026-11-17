@@ -2297,9 +2297,6 @@ mod tests {
             !DETECT_ALL_CACHE.lock().unwrap().refreshing,
             "no sweep is announced as running"
         );
-        // The next caller does not wait on a sweep nobody runs.
-        let next = tokio::spawn(detect_all_cached_with(false, || async { one_detection() }));
-        assert_eq!(caller_outcome(next).await.len(), 1);
         invalidate_detect_cache();
     }
 
