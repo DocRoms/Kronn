@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::models::{
-    CreateLivePageDataset, LivePage, LivePageDataset, LivePageDatasetKind, LivePageDatasetPoint,
-    LivePageDatasetView, LivePageDetail, LivePageDiscussionLink, LivePageDiscussionRelation,
-    LivePagePublication, LivePageRevision, LivePageRevisionSummary, LivePageWorkflowLink,
-    LivePageWriteOperation, LivePagesCapability, PublishLivePageRequest, PublishLivePageResult,
-    UpdateLivePageRequest,
+    CreateLivePageDataset, LivePage, LivePageDataDelta, LivePageDataset, LivePageDatasetKind,
+    LivePageDatasetPoint, LivePageDatasetView, LivePageDetail, LivePageDiscussionLink,
+    LivePageDiscussionRelation, LivePagePublication, LivePageRevision, LivePageRevisionSummary,
+    LivePageWorkflowLink, LivePageWriteOperation, LivePagesCapability, PublishLivePageRequest,
+    PublishLivePageResult, UpdateLivePageRequest,
 };
 
 #[path = "live_page_datasets.rs"]
@@ -52,7 +52,8 @@ pub fn list_live_page_workflows(
     Ok(Some(links))
 }
 
-/// Return the newest successful Page publications, newest data revision first.
+/// Return the newest Page publications that changed data, newest data
+/// revision first; one that changed nothing is not journaled.
 /// Resolving the Page first preserves the API distinction between an existing
 /// Page with no refresh yet and an unknown Page id/slug.
 pub fn list_live_page_publications(
@@ -616,16 +617,35 @@ pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePage
         map_revision,
     )?;
 
+    let views = dataset_views(conn, &page.id, None)?;
+    let slug_aliases = list_live_page_slug_aliases(conn, &page.id)?;
+    Ok(Some(LivePageDetail {
+        page,
+        revision,
+        datasets: views,
+        slug_aliases,
+    }))
+}
+
+/// The datasets of a Page with their points, by name; `only` keeps the named ones.
+fn dataset_views(
+    conn: &Connection,
+    page_id: &str,
+    only: Option<&HashSet<String>>,
+) -> Result<Vec<LivePageDatasetView>> {
     let mut stmt = conn.prepare(
         "SELECT id, page_id, name, kind, current_json, schema_json,
                 max_points, max_age_days, updated_at
            FROM live_page_datasets WHERE page_id = ?1 ORDER BY name COLLATE NOCASE",
     )?;
     let datasets = stmt
-        .query_map([&page.id], map_dataset)?
+        .query_map([page_id], map_dataset)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut views = Vec::with_capacity(datasets.len());
     for dataset in datasets {
+        if only.is_some_and(|names| !names.contains(&dataset.name)) {
+            continue;
+        }
         let points = if dataset.kind == LivePageDatasetKind::TimeSeries {
             list_dataset_points(conn, &dataset.id)?
         } else {
@@ -648,13 +668,80 @@ pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePage
             data_size_bytes,
         });
     }
-    let slug_aliases = list_live_page_slug_aliases(conn, &page.id)?;
-    Ok(Some(LivePageDetail {
-        page,
-        revision,
-        datasets: views,
-        slug_aliases,
+    Ok(views)
+}
+
+/// What a reader holding data revision `since` and showing HTML revision
+/// `html_revision` misses: the datasets changed since then, or the full
+/// state when the publication journal does not account for every revision in
+/// between. `html_revision: None` is a reader that holds no HTML.
+pub fn read_live_page_data(
+    conn: &Connection,
+    page_ref: &str,
+    since: Option<u64>,
+    html_revision: Option<&str>,
+) -> Result<Option<LivePageDataDelta>> {
+    // One snapshot: the revision, the journal and the datasets agree.
+    let tx = conn.unchecked_transaction()?;
+    let Some(page) = get_live_page_summary(&tx, page_ref)? else {
+        return Ok(None);
+    };
+    let same_html = html_revision.is_none_or(|held| held == page.current_revision_id);
+    let changed = match since {
+        Some(since) if same_html => datasets_changed_since(&tx, &page, since)?,
+        _ => None,
+    };
+    if let Some(changed) = changed {
+        let datasets = dataset_views(&tx, &page.id, Some(&changed))?;
+        // A journaled name with no dataset left: the journal no longer describes the Page.
+        if datasets.len() == changed.len() {
+            return Ok(Some(LivePageDataDelta {
+                page,
+                full: None,
+                datasets,
+            }));
+        }
+    }
+    let full = get_live_page(&tx, &page.id)?.ok_or_else(|| anyhow!("Page not found"))?;
+    Ok(Some(LivePageDataDelta {
+        page: full.page.clone(),
+        full: Some(full),
+        datasets: Vec::new(),
     }))
+}
+
+/// The datasets publications changed after revision `since`, or `None` when
+/// a revision in between has no journal row: a dataset added or deleted,
+/// points pruned by new limits, a journal row gone, or a `since` the Page
+/// never reached.
+fn datasets_changed_since(
+    conn: &Connection,
+    page: &LivePage,
+    since: u64,
+) -> Result<Option<HashSet<String>>> {
+    if since > page.data_revision {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT changed_datasets_json FROM live_page_publications
+          WHERE page_id = ?1 AND data_revision > ?2 AND data_revision <= ?3",
+    )?;
+    let rows = stmt
+        .query_map(
+            params![
+                page.id,
+                i64::try_from(since).context("Page data revision exceeds SQLite range")?,
+                i64::try_from(page.data_revision)
+                    .context("Page data revision exceeds SQLite range")?,
+            ],
+            |row| parse_string_vec_sql(row.get(0)?, 0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // `UNIQUE(page_id, data_revision)`: as many rows as revisions means none is missing.
+    if u64::try_from(rows.len())? != page.data_revision - since {
+        return Ok(None);
+    }
+    Ok(Some(rows.into_iter().flatten().collect()))
 }
 
 /// Attach one dataset to an already-created Page. `create_live_page` only
@@ -765,6 +852,8 @@ pub fn add_live_page_dataset(
             )?;
         }
     }
+    // No journal row describes an added dataset: readers take the full state.
+    datasets::bump_data_revision(&tx, &canonical_page_id)?;
     tx.commit()?;
 
     Ok(LivePageDataset {
@@ -840,10 +929,14 @@ pub fn publish_live_page(
                     );
                 }
                 let changed = dataset.current.as_ref() != Some(&write.value);
-                tx.execute(
-                    "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![dataset.id, serde_json::to_string(&write.value)?, published_at.to_rfc3339()],
-                )?;
+                // An equal value is not written: a reader that skips this
+                // dataset still holds every field of it.
+                if changed {
+                    tx.execute(
+                        "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![dataset.id, serde_json::to_string(&write.value)?, published_at.to_rfc3339()],
+                    )?;
+                }
                 changed
             }
             LivePageWriteOperation::Append => {
@@ -883,11 +976,14 @@ pub fn publish_live_page(
                     points_added += changed as u32;
                 }
                 points_removed += enforce_retention(&tx, &dataset)? as u32;
-                tx.execute(
-                    "UPDATE live_page_datasets SET updated_at = ?2 WHERE id = ?1",
-                    params![dataset.id, published_at.to_rfc3339()],
-                )?;
-                points_added > added_before || points_removed > removed_before
+                let changed = points_added > added_before || points_removed > removed_before;
+                if changed {
+                    tx.execute(
+                        "UPDATE live_page_datasets SET updated_at = ?2 WHERE id = ?1",
+                        params![dataset.id, published_at.to_rfc3339()],
+                    )?;
+                }
+                changed
             }
             LivePageWriteOperation::Clear => {
                 let removed = tx.execute(
@@ -901,14 +997,16 @@ pub fn publish_live_page(
                     _ => None,
                 };
                 let changed = removed > 0 || dataset.current != emptied;
-                tx.execute(
-                    "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![
-                        dataset.id,
-                        emptied.as_ref().map(serde_json::to_string).transpose()?,
-                        published_at.to_rfc3339()
-                    ],
-                )?;
+                if changed {
+                    tx.execute(
+                        "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![
+                            dataset.id,
+                            emptied.as_ref().map(serde_json::to_string).transpose()?,
+                            published_at.to_rfc3339()
+                        ],
+                    )?;
+                }
                 changed
             }
             LivePageWriteOperation::Upsert => {
@@ -923,10 +1021,12 @@ pub fn publish_live_page(
                 let current = dataset.current.unwrap_or_else(|| serde_json::json!([]));
                 let merged = upsert_collection(current.clone(), &write.value, key_field)?;
                 let changed = merged != current;
-                tx.execute(
-                    "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
-                    params![dataset.id, serde_json::to_string(&merged)?, published_at.to_rfc3339()],
-                )?;
+                if changed {
+                    tx.execute(
+                        "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![dataset.id, serde_json::to_string(&merged)?, published_at.to_rfc3339()],
+                    )?;
+                }
                 changed
             }
         };
@@ -951,34 +1051,42 @@ pub fn publish_live_page(
         .collect::<Vec<_>>();
     let content_changed = !changed_datasets.is_empty();
 
-    let data_revision = current_revision
-        .checked_add(1)
-        .ok_or_else(|| anyhow!("Page data revision overflow"))?;
+    // A publication that changes nothing dates the refresh and stops there:
+    // the revision and the journal only move with the data.
+    let data_revision = if content_changed {
+        current_revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("Page data revision overflow"))?
+    } else {
+        current_revision
+    };
     tx.execute(
         "UPDATE live_pages SET data_revision = ?2, updated_at = ?3, last_published_at = ?3
           WHERE id = ?1",
         params![canonical_page_id, data_revision, published_at.to_rfc3339()],
     )?;
-    tx.execute(
-        "INSERT INTO live_page_publications (
-             id, page_id, data_revision, workflow_id, workflow_run_id,
-             datasets_json, changed_datasets_json, unchanged_datasets_json,
-             points_added, points_removed, published_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![
-            Uuid::new_v4().to_string(),
-            canonical_page_id,
-            data_revision,
-            request.workflow_id,
-            request.workflow_run_id,
-            serde_json::to_string(&updated)?,
-            serde_json::to_string(&changed_datasets)?,
-            serde_json::to_string(&unchanged_datasets)?,
-            points_added,
-            points_removed,
-            published_at.to_rfc3339(),
-        ],
-    )?;
+    if content_changed {
+        tx.execute(
+            "INSERT INTO live_page_publications (
+                 id, page_id, data_revision, workflow_id, workflow_run_id,
+                 datasets_json, changed_datasets_json, unchanged_datasets_json,
+                 points_added, points_removed, published_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                Uuid::new_v4().to_string(),
+                canonical_page_id,
+                data_revision,
+                request.workflow_id,
+                request.workflow_run_id,
+                serde_json::to_string(&updated)?,
+                serde_json::to_string(&changed_datasets)?,
+                serde_json::to_string(&unchanged_datasets)?,
+                points_added,
+                points_removed,
+                published_at.to_rfc3339(),
+            ],
+        )?;
+    }
     tx.commit()?;
 
     Ok(PublishLivePageResult {
@@ -1438,6 +1546,10 @@ mod tests {
         assert!(!unchanged.content_changed);
         assert!(unchanged.changed_datasets.is_empty());
         assert_eq!(unchanged.unchanged_datasets, vec!["summary"]);
+        assert_eq!(
+            unchanged.data_revision, 4,
+            "nothing changed, no new revision"
+        );
 
         let publications = list_live_page_publications(&conn, &page.slug, 3)
             .unwrap()
@@ -1448,7 +1560,8 @@ mod tests {
                 .iter()
                 .map(|publication| publication.data_revision)
                 .collect::<Vec<_>>(),
-            vec![5, 4, 3]
+            vec![4, 3, 2],
+            "a publication that changed nothing is not journaled"
         );
         assert!(publications
             .iter()
@@ -1456,10 +1569,9 @@ mod tests {
         assert!(publications
             .iter()
             .all(|publication| publication.workflow_name.as_deref() == Some("Adobe refresh")));
-        assert!(!publications[0].content_changed);
-        assert_eq!(publications[0].unchanged_datasets, vec!["summary"]);
-        assert!(publications[1].content_changed);
-        assert_eq!(publications[1].changed_datasets, vec!["summary"]);
+        assert!(publications
+            .iter()
+            .all(|publication| publication.changed_datasets == vec!["summary"]));
         assert!(list_live_page_publications(&conn, "missing-page", 3)
             .unwrap()
             .is_none());

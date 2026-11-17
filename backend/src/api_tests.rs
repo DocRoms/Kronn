@@ -1756,6 +1756,78 @@ mod tests {
         assert_eq!(missing_json["error_code"], "not_found");
     }
 
+    #[tokio::test]
+    async fn page_data_route_returns_only_the_dataset_a_publication_changed() {
+        let state = test_state();
+        let (_, created) = send(
+            state.clone(),
+            false,
+            json_post(
+                "/api/pages",
+                serde_json::json!({
+                    "title": "Board", "slug": "board", "html": "<p>board-html</p>",
+                    "datasets": [
+                        {"name": "summary", "kind": "snapshot", "initial": {"count": 0}},
+                        {"name": "heavy", "kind": "snapshot", "initial": {"blob": "heavy-value"}}
+                    ]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(created["success"], true, "{created}");
+        let html_revision = created["data"]["revision"]["id"].as_str().unwrap();
+        let (_, published) = send(
+            state.clone(),
+            false,
+            json_post(
+                "/api/pages/board/publish",
+                serde_json::json!({"writes": [
+                    {"dataset": "summary", "operation": "replace", "value": {"count": 1}}
+                ]}),
+            ),
+        )
+        .await;
+        assert_eq!(published["data"]["data_revision"], 1, "{published}");
+
+        let read = |uri: String| {
+            send(
+                state.clone(),
+                false,
+                Request::builder().uri(uri).body(Body::empty()).unwrap(),
+            )
+        };
+        let (status, delta) = read(format!(
+            "/api/pages/board/data?since=0&revision={html_revision}"
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(delta["data"]["full"], Value::Null, "{delta}");
+        assert_eq!(delta["data"]["page"]["data_revision"], 1);
+        let datasets = delta["data"]["datasets"].as_array().unwrap();
+        assert_eq!(datasets.len(), 1);
+        assert_eq!(datasets[0]["name"], "summary");
+        assert_eq!(datasets[0]["current"]["count"], 1);
+        let wire = delta.to_string();
+        assert!(!wire.contains("heavy-value") && !wire.contains("board-html"));
+
+        let (_, idle) = read(format!(
+            "/api/pages/board/data?since=1&revision={html_revision}"
+        ))
+        .await;
+        assert_eq!(idle["data"]["full"], Value::Null);
+        assert_eq!(idle["data"]["datasets"], serde_json::json!([]));
+
+        let (_, full) = read("/api/pages/board/data".to_string()).await;
+        assert_eq!(
+            full["data"]["full"]["revision"]["html"],
+            "<p>board-html</p>"
+        );
+        assert_eq!(
+            full["data"]["full"]["datasets"].as_array().unwrap().len(),
+            2
+        );
+    }
+
     // ─── Q2: Auth middleware tests ────────────────────────────────────────────
 
     /// Health endpoint bypasses auth even when auth is enabled.

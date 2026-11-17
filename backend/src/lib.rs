@@ -1569,6 +1569,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/pages/{id}/export",
             get(api::artifact_portability::export),
         )
+        .route("/api/pages/{id}/data", get(api::live_pages::data))
         .route("/api/pages/{id}/revisions", get(api::live_pages::revisions))
         .route(
             "/api/pages/{id}/revisions/{revision_id}",

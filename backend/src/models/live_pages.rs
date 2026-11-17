@@ -119,6 +119,18 @@ pub struct LivePageDetail {
     pub slug_aliases: Vec<String>,
 }
 
+/// `GET /api/pages/{id}/data`: what an open view needs to catch up with the
+/// Page. `full` carries the whole Page whenever the publication journal cannot
+/// account for every revision the reader missed; otherwise `datasets` holds
+/// only the datasets that changed since the reader's revision.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageDataDelta {
+    pub page: LivePage,
+    pub full: Option<LivePageDetail>,
+    pub datasets: Vec<LivePageDatasetView>,
+}
+
 /// One step that loads a Page resource, with the version each of its shadows loads.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -169,7 +181,8 @@ pub struct LivePageWorkflowLink {
     pub step_names: Vec<String>,
 }
 
-/// One successful data refresh recorded in the Page publication ledger.
+/// One data refresh that changed a dataset, recorded in the Page publication
+/// ledger; a refresh that changed nothing is not recorded.
 /// Workflow fields remain optional because Pages may also be published
 /// directly and workflow deletion preserves the historical publication.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

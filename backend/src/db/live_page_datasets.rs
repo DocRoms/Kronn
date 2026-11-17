@@ -189,7 +189,7 @@ fn find_dataset(conn: &Connection, page_id: &str, name: &str) -> Result<LivePage
 }
 
 /// Moves the Page to a new data revision so open views reload it.
-fn bump_data_revision(conn: &Connection, page_id: &str) -> Result<u64> {
+pub(super) fn bump_data_revision(conn: &Connection, page_id: &str) -> Result<u64> {
     let revision: i64 = conn.query_row(
         "UPDATE live_pages SET data_revision = data_revision + 1, updated_at = ?2
           WHERE id = ?1 RETURNING data_revision",

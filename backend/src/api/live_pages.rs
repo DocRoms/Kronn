@@ -132,6 +132,45 @@ pub async fn get(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct LivePageDataQuery {
+    /// The data revision the reader holds. Kept as text: a value that does
+    /// not parse gets the full state rather than a refusal.
+    pub since: Option<String>,
+    /// The HTML revision id the reader shows.
+    pub revision: Option<String>,
+}
+
+/// What changed on a Page since the reader's revision: the changed datasets
+/// only, or the full state when the publication journal has a gap.
+pub async fn data(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<LivePageDataQuery>,
+) -> Json<ApiResponse<crate::models::LivePageDataDelta>> {
+    let since = query
+        .since
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let revision = query.revision.filter(|value| !value.is_empty());
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::live_pages::read_live_page_data(conn, &id, since, revision.as_deref())
+        })
+        .await
+    {
+        Ok(Some(delta)) => Json(ApiResponse::ok(delta)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to load Page data: {error}"),
+        )),
+    }
+}
+
 pub async fn revisions(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -993,6 +1032,10 @@ pub async fn change_embed_origins(
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "live_page_dataset_api_tests.rs"]
 mod dataset_api_tests;
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "live_page_data_api_tests.rs"]
+mod data_api_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {

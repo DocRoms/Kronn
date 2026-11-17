@@ -6058,6 +6058,14 @@ fingerprint: string | null, refusal: LivePageActionTrustRefusal | null, trust: L
  */
 active: boolean, };
 
+/**
+ * `GET /api/pages/{id}/data`: what an open view needs to catch up with the
+ * Page. `full` carries the whole Page whenever the publication journal cannot
+ * account for every revision the reader missed; otherwise `datasets` holds
+ * only the datasets that changed since the reader's revision.
+ */
+export type LivePageDataDelta = { page: LivePage, full: LivePageDetail | null, datasets: Array<LivePageDatasetView>, };
+
 export type LivePageDataset = { id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 
 export type LivePageDatasetKind = "snapshot" | "time_series" | "collection";
@@ -6114,7 +6122,8 @@ export type LivePageDiscussionLink = { discussion_id: string, title: string, rel
 export type LivePageDiscussionRelation = "created_from" | "attached";
 
 /**
- * One successful data refresh recorded in the Page publication ledger.
+ * One data refresh that changed a dataset, recorded in the Page publication
+ * ledger; a refresh that changed nothing is not recorded.
  * Workflow fields remain optional because Pages may also be published
  * directly and workflow deletion preserves the historical publication.
  */
@@ -9913,7 +9922,12 @@ scan_depth: number,
  * Default AI doc folder, relative to each project root (KT-263). `None`
  * keeps the historical detection (`docs/` → `doc/` → `ai/`).
  */
-default_docs_dir?: string, };
+default_docs_dir?: string,
+/**
+ * Repositories the owner hid from "Detect repositories" (KT-1684), by
+ * path: a hidden one is reported `hidden` by the scan and never offered again.
+ */
+hidden_repos: Array<string>, };
 
 export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
