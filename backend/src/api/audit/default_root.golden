@@ -20,7 +20,7 @@ volatile  .kiro/settings/mcp.json
 volatile  .kronn/audit/document-blame.json
 volatile  .kronn/audit/document-optimization.json
 volatile  .kronn/audit/validated-originals/a2404d07a79799f336d77c2fe9c3292b626fb280310d2bc2f0327f50329c611a.bak
-30c4046f27d198f977cfecedf4858fb163a9bab167d317d62f647ded6dc34673  .kronn/bin/git
+31e9106d94dfada6e045820edc46d778d19e6b0ccabc8a8d06307ab2c742cc3a  .kronn/bin/git
 29e0381ab7727cabf4e2e376a13802181c29adbc2a9e24e369c486590545e4ee  .kronn/mcp-managed.json
 cc7671b8e29a1bc8b5075dfbdbc424054425a601849861698655aa49e36cea1e  .kronn/native-files.json
 volatile  .mcp.json
