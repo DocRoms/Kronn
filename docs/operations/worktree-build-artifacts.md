@@ -726,10 +726,16 @@ decision, and only that list widens the allowlist, for that project:
   lane entry or not. Kronn keeps their checkouts and lane entries in memory, and
   rebuilds that snapshot whole from the project table
   (`task_worker_lane_settings::rebuild`, through `kronn::arm_lane_settings`) at the
-  standalone boot and the desktop boot, after an import and after a reset. In
+  standalone boot and the desktop boot, after an import (right after its commit,
+  before the files it writes) and after a reset. Until one such rebuild succeeds the
+  snapshot is unarmed: a project listing that fails empties it, and while unarmed
+  only a managed `<repo>/.kronn/worktrees/<name>` is resolved, so a registry filled
+  by later saves alone never hands an outer project's list to a nested one. In
   between it updates one project at a time: registered on create, add-folder, clone
-  and bootstrap (dropping any lane entry left at that path), moved on a remap or a
-  re-clone, dropped on delete, published on each workspace save. A removed folder is
+  and bootstrap (dropping a lane entry left at that path only when no registered
+  project holds it, so a second project at a live project's path never takes its
+  list away), moved on a remap or a re-clone, dropped on delete, published on each
+  workspace save. A removed folder is
   still forgotten or moved under either spelling of its path (its key, found from
   its deepest existing ancestor, and the path as stored). The most
   specific tree wins; at equal depth a project's own checkout beats a tree it only

@@ -71,9 +71,26 @@ pub async fn arm_lane_settings(
     database: &Arc<Database>,
     global: &crate::models::LaneWarmConfig,
 ) -> anyhow::Result<()> {
-    let projects = database
+    let listed = database
         .with_read_conn(crate::db::projects::list_projects)
-        .await?;
+        .await;
+    #[cfg(test)]
+    let listed = listed.and_then(|projects| {
+        if crate::core::task_worker_lane_settings::test_guard::listing_fails() {
+            anyhow::bail!("the project table could not be read (test)")
+        }
+        Ok(projects)
+    });
+    // KT-1751 fifth review — a listing that fails leaves no snapshot in force:
+    // emptied and unarmed, so neither a stale list nor a registry later filled
+    // by saves alone applies outside the managed layout.
+    let projects = match listed {
+        Ok(projects) => projects,
+        Err(error) => {
+            crate::core::task_worker_lane_settings::disarm(global);
+            return Err(error);
+        }
+    };
     crate::core::task_worker_lane_settings::rebuild(global, &projects);
     Ok(())
 }

@@ -2977,6 +2977,20 @@ async fn do_import_db(
         .map_err(|e| format!("{e:#}"))?;
     // The import went through: the bytes written for it stay.
     written.kept = true;
+    // KT-1751 fourth review — the project table was replaced: the lane snapshot
+    // is rebuilt from it, so no list of a project that is gone stays in force
+    // and a project that came in owns its tree. Fifth review: right after the
+    // commit, before the file writes below, and a failed listing leaves the
+    // snapshot empty and unarmed (`arm_lane_settings`), never the old one.
+    let lane_warm = state.config.read().await.workers.lane_warm.clone();
+    if let Err(e) = crate::arm_lane_settings(&state.db, &lane_warm).await {
+        tracing::warn!("Import could not reload the lane settings: {e:#}");
+        warnings.push(
+            "The lane settings of the imported projects could not be reloaded: restart Kronn \
+             before launching a worker."
+                .to_string(),
+        );
+    }
     if pruned > 0 {
         warnings.push(format!(
             "{pruned} quick-prompt version row(s) dropped — their prompts are not part of this import"
@@ -3050,19 +3064,6 @@ async fn do_import_db(
             "{} project(s) have invalid paths — remap them in the Projects page",
             invalid_paths.len()
         ));
-    }
-
-    // KT-1751 fourth review — the project table was replaced: the lane snapshot
-    // is rebuilt from it, so no list of a project that is gone stays in force
-    // and a project that came in owns its tree.
-    let lane_warm = state.config.read().await.workers.lane_warm.clone();
-    if let Err(e) = crate::arm_lane_settings(&state.db, &lane_warm).await {
-        tracing::warn!("Import could not reload the lane settings: {e:#}");
-        warnings.push(
-            "The lane settings of the imported projects could not be reloaded: restart Kronn \
-             before launching a worker."
-                .to_string(),
-        );
     }
 
     Ok(ImportResult {

@@ -139,6 +139,11 @@ struct Snapshot {
     /// KT-1751 third review — every registered project's checkout, with a lane
     /// entry or not: who owns a path is decided among all of them.
     registered: BTreeSet<PathBuf>,
+    /// KT-1751 fifth review — false until a rebuild from the full project list
+    /// succeeds: while false, `registered` may be partial (only what was saved
+    /// since), so no path outside the managed layout is resolved to a project.
+    /// A test build starts armed: its tests publish what they read.
+    armed: bool,
 }
 
 static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
@@ -153,6 +158,7 @@ static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
     },
     projects: BTreeMap::new(),
     registered: BTreeSet::new(),
+    armed: cfg!(test),
 });
 
 fn key_of(path: &Path) -> PathBuf {
@@ -190,6 +196,7 @@ pub fn rebuild(global: &LaneWarmConfig, projects: &[crate::models::Project]) {
         global: global.clone(),
         projects: BTreeMap::new(),
         registered: BTreeSet::new(),
+        armed: true,
     };
     for project in projects {
         let key = key_of(Path::new(&project.path));
@@ -208,6 +215,23 @@ pub fn rebuild(global: &LaneWarmConfig, projects: &[crate::models::Project]) {
         return;
     }
     *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = fresh;
+}
+
+/// KT-1751 fifth review — the project listing failed: no project's list stays
+/// in force, and nothing is looked up outside the managed layout until a
+/// rebuild succeeds.
+pub fn disarm(global: &LaneWarmConfig) {
+    let empty = Snapshot {
+        global: global.clone(),
+        projects: BTreeMap::new(),
+        registered: BTreeSet::new(),
+        armed: false,
+    };
+    #[cfg(test)]
+    if !test_guard::owns_snapshot() {
+        return;
+    }
+    *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = empty;
 }
 
 /// Publish Settings > Workers' lane entry to this process.
@@ -235,10 +259,21 @@ pub fn set_project(project_path: &Path, config: Option<&LaneWarmConfig>) {
 /// owns its tree before it has any lane entry. A new project has no lane entry
 /// yet: one left at its path (by a project gone without being forgotten) is
 /// dropped, never inherited.
+///
+/// KT-1751 fifth review — only a leftover is dropped: an entry whose path no
+/// registered project holds. A second project at the path of a live one (no
+/// duplicate check on create, a trailing `/` on add-folder) leaves the live
+/// project's list in force, as its stored workspace still says.
 pub fn register_project(project_path: &Path) {
     let mut snapshot = SNAPSHOT.write().unwrap_or_else(|e| e.into_inner());
-    for spelling in spellings_of(project_path) {
-        snapshot.projects.remove(&spelling);
+    let spellings = spellings_of(project_path);
+    let live = spellings
+        .iter()
+        .any(|spelling| snapshot.registered.contains(spelling));
+    if !live {
+        for spelling in &spellings {
+            snapshot.projects.remove(spelling);
+        }
     }
     snapshot.registered.insert(key_of(project_path));
 }
@@ -296,12 +331,21 @@ pub fn effective_for(worktree: &Path, main_checkout: Option<&Path>) -> Effective
 /// to `<repo>`; a tree anywhere else (a configured worktree root, an autoCode
 /// root, a sub-directory) belongs to the registered project whose own worktree
 /// list names it. A tree of no registered project gets nothing.
+///
+/// KT-1751 fifth review — until the snapshot is armed (a rebuild from the full
+/// project list succeeded), only the managed layout is resolved: a registry
+/// filled by saves alone may miss a nested project, and would widen.
 pub fn validation_executables_for(worktree: &Path) -> Vec<String> {
     let worktree = key_of(worktree);
-    let main_checkout = crate::core::task_worker_env::WorkerLane::for_worktree(&worktree)
+    let managed = crate::core::task_worker_env::WorkerLane::for_worktree(&worktree)
         .ok()
-        .and_then(|lane| lane.main_checkout)
-        .or_else(|| project_listing(&worktree));
+        .and_then(|lane| lane.main_checkout);
+    let armed = SNAPSHOT.read().unwrap_or_else(|e| e.into_inner()).armed;
+    let main_checkout = match managed {
+        Some(checkout) => Some(checkout),
+        None if armed => project_listing(&worktree),
+        None => return Vec::new(),
+    };
     effective_for(&worktree, main_checkout.as_deref()).validation_executables
 }
 
@@ -435,6 +479,12 @@ pub(crate) mod test_guard {
     impl Drop for Exclusive {
         fn drop(&mut self) {
             OWNER.with(|owner| owner.set(false));
+            // A test that disarmed (even one that panicked) hands the others
+            // an armed snapshot, as the test build starts.
+            super::SNAPSHOT
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .armed = true;
         }
     }
 
@@ -453,6 +503,29 @@ pub(crate) mod test_guard {
 
     pub(crate) fn owns_snapshot() -> bool {
         OWNER.with(Cell::get)
+    }
+
+    thread_local! {
+        static LISTING_FAILS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// While held, `crate::arm_lane_settings` on this thread fails as if the
+    /// project table could not be read (a `#[tokio::test]` runs on one thread).
+    pub(crate) struct FailingListing;
+
+    impl Drop for FailingListing {
+        fn drop(&mut self) {
+            LISTING_FAILS.with(|fails| fails.set(false));
+        }
+    }
+
+    pub(crate) fn fail_listing() -> FailingListing {
+        LISTING_FAILS.with(|fails| fails.set(true));
+        FailingListing
+    }
+
+    pub(crate) fn listing_fails() -> bool {
+        LISTING_FAILS.with(Cell::get)
     }
 }
 

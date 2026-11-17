@@ -56,6 +56,8 @@ fn the_macos_clang_default_applies_only_to_a_project_that_builds_c_through_cc() 
 
 #[test]
 fn detection_reads_the_projects_own_lock_files() {
+    // Reads the snapshot's global entry: never while a test rebuilds it.
+    let _shared = test_guard::shared();
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     std::fs::create_dir_all(repo.join("redis-flush")).unwrap();
@@ -189,6 +191,9 @@ fn a_project_with_nothing_set_follows_detection() {
 /// main checkout, so every lane of that project (and no other) gets it.
 #[test]
 fn a_projects_entry_reaches_the_lanes_of_that_project_only() {
+    // KT-1751 fifth review — publishes then reads the snapshot: a concurrent
+    // test's rebuild must not wipe the entry in between.
+    let _shared = test_guard::shared();
     let project = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     let worktree = project

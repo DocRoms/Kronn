@@ -149,6 +149,8 @@ async fn a_projects_lane_warm_settings_are_stored_published_and_cleared() {
 
 #[tokio::test]
 async fn a_workspace_with_neither_hooks_nor_lane_settings_is_not_stored() {
+    // A save publishes to the snapshot: never while a test rebuilds it.
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
     let state = test_state();
     let dir = tempfile::tempdir().unwrap();
     seed_project(&state, "p2", dir.path()).await;
@@ -225,6 +227,7 @@ async fn a_saved_repository_wrapper_keeps_its_dot_slash_and_a_bare_name_stays_a_
 /// `.`/`..`/empty segment, and nothing of the refused entry is stored.
 #[tokio::test]
 async fn a_saved_validation_path_that_escapes_or_hides_a_segment_is_refused() {
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
     let state = test_state();
     let dir = tempfile::tempdir().unwrap();
     seed_project(&state, "p4", dir.path()).await;

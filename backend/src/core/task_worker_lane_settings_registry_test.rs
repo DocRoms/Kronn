@@ -1,6 +1,8 @@
 //! KT-1751 fourth review — the snapshot's registry follows the project table:
 //! rebuilt whole from it (both boots, an import, a reset), a re-registered path
 //! never keeps a stale list, and a removed folder is still forgotten or moved.
+//! Fifth review: a live project's list survives a second registration at its
+//! path, and an unarmed snapshot gives nothing outside the managed layout.
 
 use super::*;
 use crate::models::{Project, ProjectWorkspace};
@@ -145,17 +147,66 @@ async fn arming_from_the_database_registers_every_project_and_loads_its_lane_ent
     assert!(stale.is_empty(), "a project not in the database: {stale:?}");
 }
 
+/// A leftover is a lane entry no registered project owns any more.
 #[test]
 fn registering_a_project_drops_a_leftover_lane_entry_for_its_path() {
     let _shared = test_guard::shared();
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path().canonicalize().unwrap();
-    set_project(&dir, Some(&listing(&["left-over"])));
+    SNAPSHOT
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .projects
+        .insert(dir.clone(), listing(&["left-over"]));
     register_project(&dir);
     let after = validation_executables_for(&dir);
     forget_project(&dir);
 
     assert!(after.is_empty(), "a new project inherited {after:?}");
+}
+
+/// KT-1751 fifth review — `create` has no duplicate-path check and `add_folder`
+/// compares strings: a second project at a registered path (or the same path
+/// with a trailing `/`) must not take the first one's list out of memory.
+#[test]
+fn registering_a_second_project_at_a_registered_path_keeps_the_first_ones_list() {
+    let _shared = test_guard::shared();
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().canonicalize().unwrap().join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    set_project(&dir, Some(&listing(&["first-tool"])));
+
+    register_project(&dir);
+    let same_path = validation_executables_for(&dir);
+    register_project(&PathBuf::from(format!("{}/", dir.display())));
+    let trailing_slash = validation_executables_for(&dir);
+    forget_project(&dir);
+
+    assert_eq!(same_path, vec!["first-tool".to_string()]);
+    assert_eq!(trailing_slash, vec!["first-tool".to_string()]);
+}
+
+/// KT-1751 fifth review — the snapshot could not be armed (the project listing
+/// failed at boot or after an import): a workspace save of the outer project
+/// registers it alone, and that partial registry must not hand its list to an
+/// unregistered nested project. Outside the managed layout nothing runs.
+#[test]
+fn an_unarmed_snapshot_gives_nothing_after_a_workspace_save_of_an_outer_project() {
+    let _owner = test_guard::exclusive();
+    let t = tree();
+    disarm(&current_global());
+
+    // What `set_project_workspace` publishes for `mono`.
+    set_project(&t.mono, Some(&listing(&["outer-tool"])));
+    let in_sub = validation_executables_for(&t.sub.join("src"));
+    let outer = validation_executables_for(&t.mono);
+    rebuild(&current_global(), &[]);
+
+    assert!(
+        in_sub.is_empty(),
+        "the unregistered sub-project got {in_sub:?}"
+    );
+    assert!(outer.is_empty(), "an unarmed lookup gave {outer:?}");
 }
 
 /// The stored key went through a link (`/var` and `/private/var` on macOS), and

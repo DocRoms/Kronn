@@ -79,6 +79,61 @@ async fn an_import_rebuilds_the_lane_snapshot_from_the_imported_projects() {
     assert_eq!(outer, vec!["new-outer".to_string()]);
 }
 
+/// KT-1751 fifth review — the import committed, then the project table could
+/// not be read back: the pre-import snapshot must not stay in force (a list of
+/// a project no longer in the table, an imported nested project unregistered).
+#[tokio::test]
+async fn an_import_whose_project_listing_fails_leaves_no_stale_list() {
+    let _owner = test_guard::exclusive_async().await;
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let mono = base.join("mono");
+    let sub = mono.join("sub");
+    let gone = base.join("gone");
+    std::fs::create_dir_all(sub.join("src")).unwrap();
+    std::fs::create_dir_all(&gone).unwrap();
+
+    // The backup: `mono` and a plain sub-folder project `mono/sub`, no lists.
+    let source = state();
+    insert(
+        &source,
+        vec![project("mono", &mono, None), project("sub", &sub, None)],
+    )
+    .await;
+    let export = build_export(&source).await.expect("export");
+
+    // This instance: `mono` lists `stale-outer`, `gone` lists `gone-tool`.
+    let target = state();
+    let before = vec![
+        project("mono", &mono, Some(listing(&["stale-outer"]))),
+        project("gone", &gone, Some(listing(&["gone-tool"]))),
+    ];
+    insert(&target, before.clone()).await;
+    crate::core::task_worker_lane_settings::rebuild(&LaneWarmConfig::default(), &before);
+
+    let result = {
+        let _failing = test_guard::fail_listing();
+        do_import_db(&target, &export, ContextBlobs::default())
+            .await
+            .expect("import")
+    };
+    let in_sub = validation_executables_for(&sub.join("src"));
+    let outer = validation_executables_for(&mono);
+    let in_gone = validation_executables_for(&gone);
+
+    assert!(in_sub.is_empty(), "the imported sub-project got {in_sub:?}");
+    assert!(outer.is_empty(), "the pre-import list stayed: {outer:?}");
+    assert!(
+        in_gone.is_empty(),
+        "a project gone from the table: {in_gone:?}"
+    );
+    assert!(
+        result.warnings.iter().any(|w| w.contains("lane settings")),
+        "{:?}",
+        result.warnings
+    );
+}
+
 #[tokio::test]
 async fn a_reset_empties_the_lane_snapshot() {
     let _owner = test_guard::exclusive_async().await;

@@ -447,6 +447,9 @@ fn the_os_junk_patterns_default_and_are_validated() {
 #[serial_test::serial]
 async fn the_lane_warm_settings_are_validated_stored_and_published() {
     use crate::models::LaneWarmConfig;
+    // KT-1751 fifth review — publishes the global entry to the snapshot and
+    // restores it: never while a test rebuilds it.
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
     let _restore =
         crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
     let data = tempfile::tempdir().unwrap();
