@@ -998,4 +998,4 @@ definition from the database — keep it, and the step provenance names the agen
 actually used. Only agent, model and effort are replaced; tier, budget, tools
 stay, and a named connection stays only while the agent does.
 `[src: file: backend/src/workflows/step_agents.rs:58-134#validate]` `[src: file: backend/src/workflows/step_agents.rs:181-238#apply_to_step]` `[src: file: backend/src/workflows/runner.rs:1306-1326#apply_from_run]`
-`[src: file: backend/src/api/workflows.rs:5349-5407#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5546-5551#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5456-5461#TRIGGER_CONTEXT_KEY]`
+`[src: file: backend/src/api/workflows.rs:5405#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5550-5606#admit_step_agents]` `[src: file: backend/src/api/workflows.rs:5459#TRIGGER_CONTEXT_KEY]`

@@ -104,7 +104,7 @@ datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
 [src: file: backend/src/lib.rs:1546-1567#artifact_portability]
-[src: file: backend/src/api/artifact_portability/import.rs:1147-1165#preview_digest]
+[src: file: backend/src/api/artifact_portability/import.rs:1157-1159#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
 ## Status
@@ -136,7 +136,7 @@ Workflow run when that provenance still exists. A publication that changes no
 dataset at all writes no ledger entry (KT-1819), so the timeline lists data
 updates; the "Synced" time next to it is the Page's `last_published_at`, which
 every successful publication moves, changed or not.
-`[src: file: frontend/src/pages/PagesPage.tsx:861#lastRefreshAt]`
+`[src: file: frontend/src/pages/PagesPage.tsx:865#lastRefreshAt]`
 Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
@@ -311,7 +311,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:722-746#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:726-750#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -437,9 +437,9 @@ the HTTP-agent tools, a repository import) is never refused: the last save
 wins, as before.
 `[src: file: backend/src/db/live_pages.rs:569-628#update_live_page_html_from]`
 `[src: file: backend/src/api/live_pages.rs:527-544#update_html_route]`
-`[src: file: frontend/src/pages/PagesPage.tsx:652-662#toggleHtmlEditor]`
-`[src: file: frontend/src/pages/PagesPage.tsx:621-648#persistHtml]`
-`[src: file: frontend/src/pages/PagesPage.tsx:604-617#readConflictingHtml]`
+`[src: file: frontend/src/pages/PagesPage.tsx:656-666#toggleHtmlEditor]`
+`[src: file: frontend/src/pages/PagesPage.tsx:625-652#persistHtml]`
+`[src: file: frontend/src/pages/PagesPage.tsx:604-621#readConflictingHtml]`
 
 ## « Ma Todo », the default board (KT-1030)
 
@@ -831,7 +831,7 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:5191-5199#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:5194-5196#create_live_page_in_transaction]
 [src: file: backend/src/db/live_pages.rs:131-263#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
@@ -879,7 +879,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:5315-5325#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5350-5546#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
