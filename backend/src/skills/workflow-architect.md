@@ -501,8 +501,8 @@ Use it when a plan is already split into subtasks (each with its DoD, order, blo
 - **Workers**: the first `worker:<key>` tag of a subtask found in `worker_map`, else `default_worker`. Native/HTTP agents only (no CLI session). A subtask with no worker stops the step before anything launches.
 - **Order**: plan order (subtask rank), blockers and `concurrency` (1-8) decide what launches; a stop never cancels a running worker.
 - **Review**: the step's `agent` + `agent_settings` review each delivery with the DoD, the diff and the worker's report; `prompt_template` adds guidance. Verdict: `approve` (needs evidence for every DoD item), `request_changes` (back to the worker, counts a round), `reassign` (to another `worker_map` key, once), `escalate` (stops for a human). Each review counts against the run's `max_llm_calls`. The diff is cut at 40,000 characters and an HTTP reviewer cannot read the worktree: for a larger change, prefer a CLI reviewer (Claude Code, Codex) or smaller subtasks.
-- **Integration**: approved work lands on `target_branch` (default: the run's branch, so later steps see it), with `validations` run first. A dirty target refuses the step before launch.
-- **Output**: `data = { discussion_id, campaign_id, target_branch, review_calls, subtasks: [{ task, status, integrated_sha, review_rounds, attempts, integration_conflicts, worker, cost_usd, tokens }] }`.
+- **Integration**: approved work lands on `target_branch` (default: the run's branch, so later steps see it), with `validations` run first. A dirty target refuses the step before launch; a branch checked out nowhere has its ref moved. `OK` = every subtask integrated, even when its task stays awaiting the merge.
+- **Output**: `data = { discussion_id, campaign_id, target_branch, review_calls, subtasks: [{ task, status, integrated_sha, review_rounds, attempts, integration_conflicts, worker, cost_usd, cost_unknown_reason, tokens }] }`.
 - **Resume**: re-running the step picks its campaign back up; nothing launches twice and a recorded verdict is not paid for again.
 - **Forbidden in `on_failure`**.
 

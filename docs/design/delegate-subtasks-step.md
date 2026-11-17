@@ -102,9 +102,14 @@ The "target workspace" part of the finding is inaccurate today.
    `integration_target_worktree` already finds it and approved deliveries land
    on the run's branch, which later steps (tests, PR) consume. The step
    commits or refuses before starting if the run worktree is dirty (the saga
-   would hold every integration otherwise). A step that targets another
-   branch must name it explicitly (`target_branch`), with the same
-   one-checkout rule.
+   would hold every integration otherwise). The step's own integrations do
+   not count its run, nor a parent run sharing its worktree (a sub-workflow),
+   as a busy holder of the target: they wait on the step and write nothing
+   meanwhile. Any other live run or execution on it still is, and every other
+   integration path (a human approval, a resume) keeps the strict check
+   (KT-1795). A step that targets another branch must name it explicitly
+   (`target_branch`): checked out in one worktree, which must be clean, or in
+   none, and then the integration moves its ref.
 3. **Mechanical principal.** The step acts as a backend principal: it calls
    the provisioning, review and integration functions directly, not the HTTP
    routes, with an actor that is recorded in the journal (`workflow-step:<run>:
@@ -161,7 +166,7 @@ The step output ends with one signal, so `on_result` can route it:
 
 | Signal | When |
 | --- | --- |
-| `[SIGNAL: OK]` | every subtask integrated |
+| `[SIGNAL: OK]` | every subtask integrated: its task is done, or stays open only awaiting the merge of its integration into the step's target (KT-1519, KT-1802) |
 | `[SIGNAL: ESCALATED]` | a reviewer chose `escalate`, or `request_changes` past `max_review_rounds` (`Escalated`) |
 | `[SIGNAL: CONFLICT]` | an integration conflict came back more than once for one subtask |
 | `[SIGNAL: BLOCKED]` | no launchable subtask left while some are not done (blockers, Later, scope) |
@@ -178,7 +183,10 @@ never cancelled implicitly. Structured data (`data.subtasks`):
 
 `cost_usd` and `tokens` sum the messages of the execution's sub-discussion and
 of its reviewer sessions (`DiscussionMessage.cost_usd`); `TaskExecution` has no
-cost field today. `[src: file: backend/src/models/discussions.rs:369-371#cost_usd]`
+cost field today. `cost_usd` is set only when every agent reply carries a
+cost; otherwise it is `null` and `cost_unknown_reason` says why (a partial
+sum, or the worker session's own reason when no reply is priced), so a
+missing or partial cost never reads as the whole (KT-1802). `[src: file: backend/src/models/discussions.rs:369-371#cost_usd]`
 
 ## 6. Resume and cleanup
 

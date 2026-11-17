@@ -439,11 +439,14 @@ pub fn is_registered_managed_checkout(conn: &Connection, path: &std::path::Path)
 /// that has not finished, a task execution (other than `own_execution_id`, the
 /// integration asking) that has not reached Done/Failed/Cancelled, or a pending or
 /// running agent dispatch / resume job of the discussion bound to that path.
+/// A run in `waiting_runs` is not a holder: it waits on the caller and writes
+/// nothing meanwhile (KT-1795, a DelegateSubtasks step and its parent runs).
 /// A database error answers "busy": an unreadable registry never says idle.
 pub fn active_holder_of_checkout(
     conn: &Connection,
     path: &std::path::Path,
     own_execution_id: Option<&str>,
+    waiting_runs: &[String],
 ) -> Option<String> {
     let path = path.to_string_lossy();
     let own = own_execution_id.unwrap_or("");
@@ -452,13 +455,22 @@ pub fn active_holder_of_checkout(
             .optional()
             .map(|row| row.map(label))
     };
-    let probes = [
-        first(
+    let active_run = || -> rusqlite::Result<Option<String>> {
+        let mut statement = conn.prepare(
             "SELECT id FROM workflow_runs WHERE workspace_path = ?1 \
-             AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota') LIMIT 1",
-            params![path.as_ref()],
-            &|id| format!("workflow run {id} is still active"),
-        ),
+             AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')",
+        )?;
+        let ids = statement.query_map(params![path.as_ref()], |row| row.get::<_, String>(0))?;
+        for id in ids {
+            let id = id?;
+            if !waiting_runs.contains(&id) {
+                return Ok(Some(format!("workflow run {id} is still active")));
+            }
+        }
+        Ok(None)
+    };
+    let probes = [
+        active_run(),
         first(
             "SELECT te.id FROM discussion_workspaces dw \
                JOIN task_executions te ON te.id = dw.task_execution_id \
@@ -815,11 +827,14 @@ mod tests {
         )
         .unwrap();
 
-        let holder = active_holder_of_checkout(&conn, lane, None).unwrap();
+        let holder = active_holder_of_checkout(&conn, lane, None, &[]).unwrap();
         assert!(holder.contains(&exec), "names the execution: {holder}");
-        assert_eq!(active_holder_of_checkout(&conn, lane, Some(&exec)), None);
         assert_eq!(
-            active_holder_of_checkout(&conn, std::path::Path::new("/unknown"), None),
+            active_holder_of_checkout(&conn, lane, Some(&exec), &[]),
+            None
+        );
+        assert_eq!(
+            active_holder_of_checkout(&conn, std::path::Path::new("/unknown"), None, &[]),
             None
         );
 
@@ -828,7 +843,7 @@ mod tests {
             params![exec],
         )
         .unwrap();
-        assert_eq!(active_holder_of_checkout(&conn, lane, None), None);
+        assert_eq!(active_holder_of_checkout(&conn, lane, None, &[]), None);
 
         conn.execute(
             "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, \
@@ -845,14 +860,62 @@ mod tests {
         )
         .unwrap();
         let auto = std::path::Path::new("/auto/wt");
-        let holder = active_holder_of_checkout(&conn, auto, None).unwrap();
+        let holder = active_holder_of_checkout(&conn, auto, None, &[]).unwrap();
         assert!(holder.contains("r-live"), "names the run: {holder}");
         conn.execute(
             "UPDATE workflow_runs SET status = 'Success' WHERE id = 'r-live'",
             [],
         )
         .unwrap();
-        assert_eq!(active_holder_of_checkout(&conn, auto, None), None);
+        assert_eq!(active_holder_of_checkout(&conn, auto, None, &[]), None);
+    }
+
+    /// KT-1795 — a run the caller names as waiting on it does not hold its
+    /// worktree; any other live run on that path, or elsewhere, still does.
+    #[test]
+    fn a_run_waiting_on_the_integration_does_not_hold_its_worktree() {
+        let conn = fixture();
+        let exec = seed_execution(&conn, "task-delegated", 5);
+        conn.execute(
+            "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, \
+             actions_json, safety_json, workspace_config_json, concurrency_limit, enabled, \
+             created_at, updated_at) VALUES ('w1', 'wf', NULL, '{}', '[]', '[]', '{}', NULL, \
+             NULL, 1, 'now', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, workspace_path, started_at, status) \
+             VALUES ('r-own', 'w1', '/wf/own', 'now', 'Running'), \
+                    ('r-other', 'w1', '/wf/other', 'now', 'Running')",
+            [],
+        )
+        .unwrap();
+        let own = std::path::Path::new("/wf/own");
+        let other = std::path::Path::new("/wf/other");
+        let waiting = vec!["r-own".to_string()];
+        assert!(active_holder_of_checkout(&conn, own, Some(&exec), &[]).is_some());
+        assert_eq!(
+            active_holder_of_checkout(&conn, own, Some(&exec), &waiting),
+            None
+        );
+        let holder = active_holder_of_checkout(&conn, other, Some(&exec), &waiting).unwrap();
+        assert!(
+            holder.contains("r-other"),
+            "another path still held: {holder}"
+        );
+
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_id, workspace_path, started_at, status) \
+             VALUES ('r-twin', 'w1', '/wf/own', 'now', 'Running')",
+            [],
+        )
+        .unwrap();
+        let holder = active_holder_of_checkout(&conn, own, Some(&exec), &waiting).unwrap();
+        assert!(
+            holder.contains("r-twin"),
+            "a second run on the same path holds it: {holder}"
+        );
     }
 
     #[test]

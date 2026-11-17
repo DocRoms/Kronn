@@ -3495,14 +3495,21 @@ async fn busy_target_refusal(
     repo: &std::path::Path,
     target_branch: &str,
     exec_id: &str,
+    waiting_runs: &[String],
 ) -> Option<String> {
     let repo = repo.to_path_buf();
     let target = target_branch.to_string();
     let own = exec_id.to_string();
+    let waiting = waiting_runs.to_vec();
     let verdict = db
         .with_conn(move |conn| {
             Ok(worktree::integration_target_idle(&repo, &target, &|path| {
-                crate::db::discussion_workspaces::active_holder_of_checkout(conn, path, Some(&own))
+                crate::db::discussion_workspaces::active_holder_of_checkout(
+                    conn,
+                    path,
+                    Some(&own),
+                    &waiting,
+                )
             }))
         })
         .await;
@@ -3633,6 +3640,18 @@ struct AnchoredCandidate {
 pub async fn run_integration(
     db: &Database,
     exec_id: &str,
+) -> Result<IntegrationOutcome, ProvisionError> {
+    run_integration_waited_on(db, exec_id, &[]).await
+}
+
+/// `run_integration` for a caller that `waiting_runs` wait on (a DelegateSubtasks
+/// step, its run and the parent runs sharing its worktree): they write nothing
+/// meanwhile, so they do not hold the target (KT-1795). Every other path,
+/// a human approval or a resume included, keeps the strict check.
+pub async fn run_integration_waited_on(
+    db: &Database,
+    exec_id: &str,
+    waiting_runs: &[String],
 ) -> Result<IntegrationOutcome, ProvisionError> {
     let internal = |e: String| ProvisionError::Internal(e);
 
@@ -3889,6 +3908,7 @@ pub async fn run_integration(
         &run,
         &repo_path,
         &child_path,
+        waiting_runs,
         AnchoredCandidate {
             target_sha,
             merge_sha,
@@ -3977,6 +3997,7 @@ async fn validate_and_apply(
     run: &crate::models::OrchestrationRun,
     repo: &std::path::Path,
     child_path: &str,
+    waiting_runs: &[String],
     mut candidate: AnchoredCandidate,
 ) -> Result<IntegrationOutcome, ProvisionError> {
     let exec_id = execution.id.as_str();
@@ -4041,7 +4062,9 @@ async fn validate_and_apply(
         let tip = if tip != candidate.target_sha {
             tip
         } else {
-            if let Some(reason) = busy_target_refusal(db, repo, target_branch, exec_id).await {
+            if let Some(reason) =
+                busy_target_refusal(db, repo, target_branch, exec_id, waiting_runs).await
+            {
                 let fix = format!(
                     "Attends que le run qui utilise le worktree de `{target_branch}` se termine, puis relance l'intégration."
                 );
@@ -4633,6 +4656,7 @@ async fn resume_recovered_integration(
         &run,
         &repo,
         child_path,
+        &[],
         AnchoredCandidate {
             target_sha,
             merge_sha,
@@ -4753,7 +4777,8 @@ async fn finish_recovered_apply(
                 reason: "target became dirty; execution parked".into(),
             });
         }
-        if let Some(reason) = busy_target_refusal(db, repo, target_branch, &execution.id).await {
+        if let Some(reason) = busy_target_refusal(db, repo, target_branch, &execution.id, &[]).await
+        {
             // Parked again, like a dirty target: the next resume asks again.
             let id = execution.id.clone();
             let durable_reason = reason.clone();

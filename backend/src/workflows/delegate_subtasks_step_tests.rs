@@ -408,6 +408,16 @@ async fn delegate(
     world: &FakeWorld,
     budget: Option<SharedBudget>,
 ) -> DelegationReport {
+    delegate_into(fixture, config, world, budget, None).await
+}
+
+async fn delegate_into(
+    fixture: &Fixture,
+    config: &DelegateSubtasksConfig,
+    world: &FakeWorld,
+    budget: Option<SharedBudget>,
+    target_branch: Option<String>,
+) -> DelegationReport {
     let repo = fixture.repo.to_string_lossy().to_string();
     let delegation = Delegation {
         state: &fixture.state,
@@ -417,7 +427,7 @@ async fn delegate(
         reviewer_agent: AgentType::ClaudeCode,
         config,
         parent_task: fixture.parent.clone(),
-        target_branch: None,
+        target_branch,
         work_dir: &repo,
         reviewer_guidance: "",
         budget,
@@ -1200,4 +1210,174 @@ async fn an_interrupted_review_stays_counted_across_a_restart() {
         report.summary
     );
     assert_eq!(report.review_calls, 0, "the cut call is not bought again");
+}
+
+#[tokio::test]
+async fn subtasks_integrated_into_a_feature_branch_end_the_step_ok_and_stay_awaiting_merge() {
+    // KT-1802 — an integration into a non-default branch leaves the task
+    // open, awaiting its merge (KT-1519): success is the integration itself.
+    let fixture = fixture(1, &[]).await;
+    git(&fixture.repo, &["checkout", "-q", "-b", "feature"]);
+    let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
+    let report = delegate_into(
+        &fixture,
+        &config(1, 3),
+        &world,
+        None,
+        Some("feature".into()),
+    )
+    .await;
+
+    assert_eq!(report.signal, DelegationSignal::Ok, "{}", report.summary);
+    let subtask = &report.subtasks[0];
+    assert!(subtask.integrated_sha.is_some());
+    // Every reply of the fake world is priced: the cost is known, no reason.
+    assert_eq!(subtask.cost_usd, Some(0.01), "{subtask:?}");
+    assert_eq!(subtask.cost_unknown_reason, None, "{subtask:?}");
+    let reference = fixture.subtasks[0].clone();
+    let task = fixture
+        .state
+        .db
+        .with_read_conn(move |conn| crate::db::planning::get_task(conn, &reference))
+        .await
+        .unwrap()
+        .expect("the subtask");
+    assert_eq!(task.summary.status, PlanningTaskStatus::InProgress);
+    assert!(task.summary.awaiting_merge.is_some());
+}
+
+#[tokio::test]
+async fn the_running_run_that_delegates_integrates_into_its_own_worktree() {
+    // KT-1795 — the run that owns the step is Running while it waits, and its
+    // worktree is the target's checkout: it is not a busy holder of it.
+    let fixture = fixture(1, &[]).await;
+    let checkout = fixture.repo.canonicalize().unwrap();
+    let checkout = checkout.to_string_lossy().to_string();
+    fixture
+        .state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE workflow_runs SET workspace_path = ?1 WHERE id = ?2",
+                rusqlite::params![checkout, RUN_ID],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
+    let report = delegate(&fixture, &config(1, 3), &world, None).await;
+
+    assert_eq!(report.signal, DelegationSignal::Ok, "{}", report.summary);
+    assert!(report.subtasks[0].integrated_sha.is_some());
+}
+
+#[tokio::test]
+async fn a_target_branch_no_worktree_holds_is_integrated_by_moving_its_ref() {
+    // KT-1795 — the integration saga moves the ref of a branch nothing has
+    // checked out; the step no longer refuses it before launching.
+    let fixture = fixture(1, &[]).await;
+    git(&fixture.repo, &["branch", "parked"]);
+    let before = git_rev(&fixture.repo, "parked");
+    let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
+    let report = delegate_into(&fixture, &config(1, 3), &world, None, Some("parked".into())).await;
+
+    let integrated = report.subtasks[0]
+        .integrated_sha
+        .clone()
+        .unwrap_or_else(|| panic!("{}", report.summary));
+    assert_ne!(integrated, before);
+    assert_eq!(git_rev(&fixture.repo, "parked"), integrated);
+}
+
+#[tokio::test]
+async fn a_sub_workflow_that_delegates_integrates_into_the_worktree_its_parent_shares() {
+    // KT-1795 — a child run inherits its parent's worktree; the parent waits on
+    // the child, so neither holds the target against the child's own step.
+    let fixture = fixture(1, &[]).await;
+    let checkout = fixture.repo.canonicalize().unwrap();
+    let checkout = checkout.to_string_lossy().to_string();
+    fixture
+        .state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, workspace_path, started_at, status) \
+                 SELECT 'run-parent', workflow_id, ?1, 'now', 'Running' FROM workflow_runs \
+                 WHERE id = ?2",
+                rusqlite::params![checkout, RUN_ID],
+            )?;
+            conn.execute(
+                "UPDATE workflow_runs SET workspace_path = ?1, parent_run_id = 'run-parent' \
+                 WHERE id = ?2",
+                rusqlite::params![checkout, RUN_ID],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
+    let report = delegate(&fixture, &config(1, 3), &world, None).await;
+
+    assert_eq!(report.signal, DelegationSignal::Ok, "{}", report.summary);
+    assert!(report.subtasks[0].integrated_sha.is_some());
+}
+
+#[tokio::test]
+async fn a_partly_priced_subtask_reports_no_cost_and_says_why() {
+    // KT-1802 — a sum over some replies only would read as the whole cost.
+    let fixture = fixture(1, &[]).await;
+    let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
+    let first = delegate(&fixture, &config(1, 3), &world, None).await;
+    assert_eq!(first.signal, DelegationSignal::Ok, "{}", first.summary);
+    let execution = first.subtasks[0].execution_id.clone().expect("launched");
+    fixture
+        .state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, agent_type, content, timestamp, \
+                 sort_order, tokens_used, cost_usd) \
+                 SELECT 'unpriced-reply', sub_discussion_id, 'Agent', 'Codex', 'x', 'now', \
+                 (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM messages), 10, NULL \
+                 FROM task_executions WHERE id = ?1",
+                rusqlite::params![execution],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let again = delegate(&fixture, &config(1, 3), &world, None).await;
+    let subtask = &again.subtasks[0];
+    assert_eq!(subtask.cost_usd, None, "{subtask:?}");
+    let reason = subtask.cost_unknown_reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("agent replies carry a cost"), "{subtask:?}");
+}
+
+#[tokio::test]
+async fn a_step_run_again_once_its_subtasks_await_the_merge_ignores_a_dirty_target() {
+    // KT-1802 — nothing is left to integrate: the target's state no longer matters.
+    let fixture = fixture(1, &[]).await;
+    git(&fixture.repo, &["checkout", "-q", "-b", "feature"]);
+    let world = FakeWorld::new(fixture.state.db.clone(), Box::new(approve));
+    let target = Some("feature".to_string());
+    let first = delegate_into(&fixture, &config(1, 3), &world, None, target.clone()).await;
+    assert_eq!(first.signal, DelegationSignal::Ok, "{}", first.summary);
+    std::fs::write(fixture.repo.join("wip.txt"), "someone's work\n").unwrap();
+
+    let again = delegate_into(&fixture, &config(1, 3), &world, None, target).await;
+    assert_eq!(again.signal, DelegationSignal::Ok, "{}", again.summary);
+}
+
+#[test]
+fn a_subtask_is_settled_only_closed_or_awaiting_the_merge_of_the_steps_target() {
+    // KT-1802 — reopened since its integration, or awaiting another branch: not settled.
+    use PlanningTaskStatus::*;
+    assert!(subtask_settled(Done, None, "feature"));
+    assert!(subtask_settled(Archived, None, "feature"));
+    assert!(subtask_settled(InProgress, Some("feature"), "feature"));
+    assert!(!subtask_settled(InProgress, Some("other"), "feature"));
+    assert!(!subtask_settled(InProgress, None, "feature"));
+    assert!(!subtask_settled(Todo, Some("feature"), "feature"));
 }
