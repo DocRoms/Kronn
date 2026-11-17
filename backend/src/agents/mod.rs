@@ -452,7 +452,10 @@ where
                 return_stale,
             } => {
                 let detection = detection.take().expect("detection future used once");
-                tokio::spawn(run_detect_all_refresh(detection, generation, stale_len));
+                let done = RefreshDone;
+                tokio::spawn(run_detect_all_refresh(
+                    detection, generation, stale_len, done,
+                ));
                 if let Some(stale) = return_stale {
                     return stale;
                 }
@@ -466,8 +469,26 @@ where
     }
 }
 
-async fn run_detect_all_refresh<F>(detection: F, generation: u64, stale_len: Option<usize>)
-where
+/// Ends a sweep on drop, so one cancelled with its runtime does not leave
+/// `refreshing` set and every later caller waiting.
+struct RefreshDone;
+
+impl Drop for RefreshDone {
+    fn drop(&mut self) {
+        DETECT_ALL_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refreshing = false;
+        DETECT_ALL_REFRESHED.send_modify(|completed| *completed = completed.wrapping_add(1));
+    }
+}
+
+async fn run_detect_all_refresh<F>(
+    detection: F,
+    generation: u64,
+    stale_len: Option<usize>,
+    _done: RefreshDone,
+) where
     F: std::future::Future<Output = Vec<AgentDetection>> + Send + 'static,
 {
     // A cold cache must produce a real list. Once stale data exists, keep the
@@ -494,9 +515,7 @@ where
             cache.value = Some((fresh, Instant::now()));
         }
     }
-    cache.refreshing = false;
     drop(cache);
-    DETECT_ALL_REFRESHED.send_modify(|completed| *completed = completed.wrapping_add(1));
 }
 
 /// Drop the cached sweep so the next `detect_all_cached(false)` re-probes.
@@ -1869,6 +1888,36 @@ mod tests {
             "within TTL the cached sweep must be served as-is (no re-probe)"
         );
         invalidate_detect_cache(); // leave the static clean for other tests
+    }
+
+    #[test]
+    #[serial]
+    fn a_sweep_cancelled_with_its_runtime_does_not_block_the_next_caller() {
+        invalidate_detect_cache();
+        DETECT_ALL_CACHE.lock().unwrap().refreshing = false;
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let first = runtime();
+        let waited = first.block_on(async {
+            let sweep = detect_all_cached_with(false, std::future::pending());
+            tokio::time::timeout(std::time::Duration::from_millis(50), sweep).await
+        });
+        assert!(waited.is_err(), "the sweep never ends");
+        drop(first);
+
+        let next = runtime().block_on(async {
+            let sweep = detect_all_cached_with(false, async { Vec::new() });
+            tokio::time::timeout(std::time::Duration::from_secs(5), sweep).await
+        });
+        assert!(
+            next.is_ok(),
+            "the next caller waits on a sweep that is gone"
+        );
+        invalidate_detect_cache();
     }
 
     #[tokio::test]
