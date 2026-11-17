@@ -3570,6 +3570,98 @@ async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previo
 }
 
 #[tokio::test]
+async fn an_imported_artifact_is_read_incrementally_like_any_other_page() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    // A file from before bare exports: it arrives with a value.
+    let mut bundle = exported["data"].clone();
+    bundle["artifact"]["datasets"][0]["has_current"] = serde_json::json!(true);
+    bundle["artifact"]["datasets"][0]["current"] = serde_json::json!({"n": 1});
+    let name = bundle["artifact"]["datasets"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let content = serde_json::to_string(&bundle).unwrap();
+    let state = test_state();
+    let app = build_router_with_auth(state, false);
+    let mut pages = Vec::new();
+    for _ in 0..2 {
+        let (_, preview) = post_json(
+            app.clone(),
+            "/api/pages/import/preview",
+            serde_json::json!({"content":content,"approved_quick_exec_ids":["qe-portable"],"project_id":null}),
+        )
+        .await;
+        let (_, imported) = post_json(
+            app.clone(),
+            "/api/pages/import",
+            serde_json::json!({
+                "content":content,"approved_quick_exec_ids":["qe-portable"],"project_id":null,"preview_digest":preview["data"]["digest"]
+            }),
+        )
+        .await;
+        assert_eq!(imported["success"], true, "{imported}");
+        let id = imported["data"]["artifact"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (_, detail) = get_json(app.clone(), &format!("/api/pages/{id}")).await;
+        assert_eq!(detail["data"]["data_revision"], 0, "{detail}");
+        let html = detail["data"]["revision"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let read = |since: u64| {
+            let app = app.clone();
+            let uri = format!("/api/pages/{id}/data?since={since}&revision={html}");
+            async move { get_json(app, &uri).await.1 }
+        };
+        // The reader that just opened it has missed nothing.
+        let same = read(0).await;
+        assert!(same["data"]["full"].is_null(), "{same}");
+        assert_eq!(same["data"]["datasets"], serde_json::json!([]), "{same}");
+        // A revision this copy never reached gets the whole Page.
+        let ahead = read(3).await;
+        assert_eq!(ahead["data"]["full"]["data_revision"], 0, "{ahead}");
+        assert_eq!(
+            ahead["data"]["full"]["datasets"][0]["current"],
+            serde_json::json!({"n": 1}),
+            "{ahead}"
+        );
+        let (_, published) = post_json(
+            app.clone(),
+            &format!("/api/pages/{id}/publish"),
+            serde_json::json!({"writes":[{"dataset":name,"operation":"replace","value":{"n":2}}]}),
+        )
+        .await;
+        assert_eq!(published["data"]["data_revision"], 1, "{published}");
+        let delta = read(0).await;
+        assert!(delta["data"]["full"].is_null(), "{delta}");
+        assert_eq!(delta["data"]["datasets"][0]["name"], name, "{delta}");
+        assert_eq!(
+            delta["data"]["datasets"][0]["current"],
+            serde_json::json!({"n": 2}),
+            "{delta}"
+        );
+        pages.push((id, html));
+    }
+    // Importing the file again made a new Page and left the first one alone.
+    let (first, html) = &pages[0];
+    assert_ne!(first, &pages[1].0);
+    let (_, after) = get_json(
+        app,
+        &format!("/api/pages/{first}/data?since=1&revision={html}"),
+    )
+    .await;
+    assert!(after["data"]["full"].is_null(), "{after}");
+    assert_eq!(after["data"]["datasets"], serde_json::json!([]), "{after}");
+}
+
+#[tokio::test]
 #[serial]
 async fn embed_origins_config_normalizes_dedupes_revokes_and_rejects_invalid_sites() {
     let state = test_state();
