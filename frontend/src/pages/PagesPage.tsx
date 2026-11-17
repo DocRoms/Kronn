@@ -61,6 +61,7 @@ import {
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
 import { useLivePageDataPush } from '../hooks/useLivePageDataPush';
+import { newestLivePageDetail, refreshLivePageDetail } from '../lib/live-page-refresh';
 import { userError } from '../lib/userError';
 import {
   livePageMosaicLayouts,
@@ -301,10 +302,16 @@ export function PagesPage({
     }
   }, [collapsedSections]);
 
-  const loadDetail = useCallback(async (pageId: string) => {
+  // The snapshot a background refresh starts from: only what changed is read.
+  const detailRef = useRef<LivePageDetail | null>(null);
+  useEffect(() => { detailRef.current = detail; }, [detail]);
+
+  // `incremental` is for the timer: an action the user took reads the whole Page.
+  const loadDetail = useCallback(async (pageId: string, incremental = false) => {
+    const known = incremental && detailRef.current?.id === pageId ? detailRef.current : null;
     const [[nextDetail, workflows, publications, discussions, pageRevisions, usage]] = await Promise.all([
       Promise.all([
-        pagesApi.get(pageId),
+        refreshLivePageDetail(pageId, known),
         pagesApi.workflows(pageId),
         pagesApi.publications(pageId),
         pagesApi.discussions(pageId),
@@ -314,7 +321,7 @@ export function PagesPage({
       ]),
       reloadPageActions(pageId),
     ]);
-    setDetail(nextDetail);
+    setDetail(current => (known ? newestLivePageDetail(current, nextDetail) : nextDetail));
     setDatasetUsage(usage);
     setLinkedWorkflows(workflows);
     setRecentPublications(publications);
@@ -324,7 +331,7 @@ export function PagesPage({
     setHtmlDraft(nextDetail.revision.html);
   }, [reloadPageActions]);
 
-  const refresh = useCallback(async (selectedOverride?: string | null) => {
+  const refresh = useCallback(async (selectedOverride?: string | null, incremental = false) => {
     try {
       const list = await pagesApi.list();
       setPages(list);
@@ -340,7 +347,7 @@ export function PagesPage({
         ?? null;
       setSelectedId(target);
       if (target) {
-        await loadDetail(target);
+        await loadDetail(target, incremental);
       } else {
         setDetail(null);
         setDatasetUsage([]);
@@ -387,7 +394,7 @@ export function PagesPage({
   }, [selectedPageId, initialSelectedPageId, onInitialSelectionConsumed, selectedId]);
   useEffect(() => {
     if (editingHtml) return undefined;
-    const timer = window.setInterval(() => { void refreshRef.current(); }, REFRESH_MS);
+    const timer = window.setInterval(() => { void refreshRef.current(undefined, true); }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [editingHtml]);
 
@@ -395,8 +402,9 @@ export function PagesPage({
   useLivePageDataPush(selectedId, () => {
     const pageId = selectedId;
     if (!pageId) return;
-    void Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([next]) => {
-      setDetail(current => (current && current.id === next.id ? next : current));
+    const known = detailRef.current?.id === pageId ? detailRef.current : null;
+    void Promise.all([refreshLivePageDetail(pageId, known), reloadPageActions(pageId)]).then(([next]) => {
+      setDetail(current => (current && current.id === next.id ? newestLivePageDetail(current, next) : current));
     }).catch(() => { /* the poll retries */ });
   });
 
@@ -719,6 +727,8 @@ export function PagesPage({
 
   const revisionHtml = detail?.revision.html ?? '';
   const latestPublication = recentPublications[0] ?? null;
+  // A refresh that changes nothing is not journaled: the Page's own date still moves.
+  const lastRefreshAt = detail?.last_published_at ?? latestPublication?.published_at ?? null;
   const totalDatasetSize = detail?.datasets.reduce(
     (total, dataset) => total + dataset.data_size_bytes,
     0,
@@ -1153,10 +1163,10 @@ export function PagesPage({
                 <span
                   className="live-pages-sync-fresh"
                   data-testid="live-page-sync-freshness"
-                  data-state={latestPublication ? 'synced' : 'waiting'}
+                  data-state={lastRefreshAt ? 'synced' : 'waiting'}
                 >
-                  {latestPublication
-                    ? `${t('pages.refreshSynced')} · ${formatRelativeTime(latestPublication.published_at, locale)}`
+                  {lastRefreshAt
+                    ? `${t('pages.refreshSynced')} · ${formatRelativeTime(lastRefreshAt, locale)}`
                     : t('pages.refreshWaiting')}
                 </span>
               )}
@@ -1165,9 +1175,9 @@ export function PagesPage({
                   type="button"
                   className="disc-chat-header-btn disc-chat-header-btn--primary"
                   data-testid="live-page-refresh-menu"
-                  data-state={latestPublication ? 'synced' : 'waiting'}
-                  title={latestPublication
-                    ? `${t('pages.autoRefresh')} · ${t('pages.refreshSynced')} ${formatRelativeTime(latestPublication.published_at, locale)}`
+                  data-state={lastRefreshAt ? 'synced' : 'waiting'}
+                  title={lastRefreshAt
+                    ? `${t('pages.autoRefresh')} · ${t('pages.refreshSynced')} ${formatRelativeTime(lastRefreshAt, locale)}`
                     : `${t('pages.autoRefresh')} · ${t('pages.refreshWaiting')}`}
                   aria-expanded={sidePanel === 'sync'}
                   aria-controls="live-page-side-panel"

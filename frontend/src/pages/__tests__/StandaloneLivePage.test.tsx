@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { LivePageAction, LivePageDetail } from '../../types/generated';
+import type { LivePage, LivePageAction, LivePageDataDelta, LivePageDatasetView, LivePageDetail } from '../../types/generated';
 
 const linkRelay = vi.hoisted(() => ({
   connect: vi.fn(),
@@ -27,7 +27,7 @@ const detail: LivePageDetail = {
 };
 
 vi.mock('../../lib/api', () => ({
-  pages: { get: vi.fn(), actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn() },
+  pages: { get: vi.fn(), data: vi.fn(), actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn() },
   // The card reads a workflow's Agent steps (KT-1025); none here.
   workflows: { get: vi.fn(() => Promise.resolve({ steps: [] })) },
   agents: { detect: vi.fn(() => Promise.resolve([])) },
@@ -52,7 +52,7 @@ vi.mock('../../components/RunStatusCard', () => ({
 }));
 
 import { pages as pagesApi } from '../../lib/api';
-import { LIVE_PAGE_CSP } from '../../lib/live-page-sandbox';
+import { LIVE_PAGE_CSP, runtimeData } from '../../lib/live-page-sandbox';
 import { StandaloneLivePage } from '../StandaloneLivePage';
 
 function pageAction(overrides: Partial<LivePageAction> = {}): LivePageAction {
@@ -69,11 +69,35 @@ function pageAction(overrides: Partial<LivePageAction> = {}): LivePageAction {
 
 const anchor = { left: 24, top: 40, width: 120, height: 32 };
 
+function summary({ revision: _revision, datasets: _datasets, slug_aliases: _aliases, ...page }: LivePageDetail): LivePage {
+  return page;
+}
+
+/** What the data route answers when only `datasets` changed. */
+function delta(page: Partial<LivePage> = {}, datasets: LivePageDatasetView[] = []): LivePageDataDelta {
+  return { page: { ...summary(detail), ...page }, full: null, datasets };
+}
+
+function dataset(name: string, current: unknown): LivePageDatasetView {
+  return {
+    id: `dataset-${name}`, page_id: 'page-1', name, kind: 'snapshot', current, schema: null,
+    max_points: 50_000, max_age_days: null, updated_at: detail.updated_at, points: [], data_size_bytes: 1,
+  } as LivePageDatasetView;
+}
+
+function pageDataPosts(post: { mock: { calls: unknown[][] } }): unknown[] {
+  return post.mock.calls
+    .map(([message]) => message as { type?: string; data?: unknown })
+    .filter(message => message.type === 'kronn:page-data')
+    .map(message => message.data);
+}
+
 beforeEach(() => {
   linkRelay.connect.mockClear();
   linkRelay.dispose.mockClear();
   linkRelay.onAction = null;
-  vi.mocked(pagesApi.get).mockResolvedValue(detail);
+  vi.mocked(pagesApi.get).mockReset().mockResolvedValue(detail);
+  vi.mocked(pagesApi.data).mockReset().mockResolvedValue(delta());
   vi.mocked(pagesApi.actions).mockResolvedValue([]);
 });
 
@@ -83,6 +107,69 @@ afterEach(() => {
 });
 
 describe('StandaloneLivePage', () => {
+  it('reads only the dataset a publication changed and posts the same full snapshot', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    const loaded = { ...detail, datasets: [dataset('summary', { count: 1 }), dataset('heavy', { blob: 'kept' })] };
+    vi.mocked(pagesApi.get).mockResolvedValue(loaded);
+    render(<StandaloneLivePage pageId="page-1" />);
+    const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    const documentBefore = frame.getAttribute('srcdoc');
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    vi.mocked(pagesApi.data).mockResolvedValue(delta({ data_revision: 3 }, [dataset('summary', { count: 2 })]));
+
+    const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+    await act(async () => {
+      handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: 3 }));
+    });
+
+    // What a full read of the Page would have given the frame.
+    const full = { ...loaded, data_revision: 3, datasets: [dataset('summary', { count: 2 }), dataset('heavy', { blob: 'kept' })] };
+    await waitFor(() => expect(pageDataPosts(post)).toEqual([runtimeData(full, {})]));
+    expect(pagesApi.data).toHaveBeenCalledWith('page-1', 2, 'rev-1');
+    expect(pagesApi.get).toHaveBeenCalledTimes(1);
+    expect(frame.getAttribute('srcdoc')).toBe(documentBefore);
+  });
+
+  it('polls the revision alone: an unchanged Page reads no dataset and posts nothing', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, datasets: [dataset('summary', { count: 1 })] });
+      render(<StandaloneLivePage pageId="page-1" />);
+      const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+
+      expect(pagesApi.data).toHaveBeenCalledTimes(2);
+      expect(pagesApi.data).toHaveBeenLastCalledWith('page-1', 2, 'rev-1');
+      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+      expect(pageDataPosts(post)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes the full state when the data route answers with it', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    render(<StandaloneLivePage pageId="page-1" />);
+    const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    const rewritten: LivePageDetail = {
+      ...detail, current_revision_id: 'rev-2', data_revision: 3,
+      revision: { ...detail.revision, id: 'rev-2', revision: 2, html: '<main><h1>Rewritten</h1></main>' },
+      datasets: [dataset('added', [1])],
+    };
+    vi.mocked(pagesApi.data).mockResolvedValue({ page: summary(rewritten), full: rewritten, datasets: [] });
+
+    const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+    await act(async () => {
+      handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: 3 }));
+    });
+
+    await waitFor(() => expect(frame.getAttribute('srcdoc')).toContain('Rewritten'));
+    expect(pagesApi.get).toHaveBeenCalledTimes(1);
+  });
+
   it('pushes newly published data into the open frame without rebuilding it', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
@@ -90,7 +177,7 @@ describe('StandaloneLivePage', () => {
       const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
       const documentBefore = frame.getAttribute('srcdoc');
       const post = vi.spyOn(frame.contentWindow!, 'postMessage');
-      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, data_revision: 3 });
+      vi.mocked(pagesApi.data).mockResolvedValue(delta({ data_revision: 3 }));
 
       await act(async () => { vi.advanceTimersByTime(30_000); });
 
@@ -114,7 +201,7 @@ describe('StandaloneLivePage', () => {
     const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
     const documentBefore = frame.getAttribute('srcdoc');
     const post = vi.spyOn(frame.contentWindow!, 'postMessage');
-    vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, data_revision: 7 });
+    vi.mocked(pagesApi.data).mockResolvedValue(delta({ data_revision: 7 }));
     const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
     await act(async () => {
       handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'other', data_revision: 9 }));

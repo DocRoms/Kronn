@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { formatRelativeTime } from '../../lib/relativeTime';
 import { resolve } from 'node:path';
 import type { LivePage, LivePageAction, LivePageDetail, LivePagePublication, LivePageRevision, LivePageRevisionSummary } from '../../types/generated';
 
@@ -51,7 +52,7 @@ vi.mock('../../lib/api', () => ({
   discussionActions: { get: vi.fn(), cancel: vi.fn(), launch: vi.fn() },
   docs: { generatePdf: vi.fn(), generateDocx: vi.fn(), generateCsv: vi.fn() },
   pages: {
-    list: vi.fn(), get: vi.fn(), revisions: vi.fn(), revision: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
+    list: vi.fn(), get: vi.fn(), data: vi.fn(), revisions: vi.fn(), revision: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
     actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
     datasetUsage: vi.fn(() => Promise.resolve([])), resources: vi.fn(() => Promise.resolve([])), deleteDataset: vi.fn(), updateDataset: vi.fn(), publish: vi.fn(),
@@ -109,6 +110,7 @@ beforeEach(() => {
   actionRelay.onAction = null;
   vi.mocked(pagesApi.list).mockResolvedValue([page]);
   vi.mocked(pagesApi.get).mockResolvedValue(detail);
+  vi.mocked(pagesApi.data).mockResolvedValue({ page, full: null, datasets: [] });
   vi.mocked(pagesApi.revisions).mockResolvedValue([detail.revision, legacyRevision].map(summarize));
   vi.mocked(pagesApi.revision).mockImplementation(async (_id, revisionId) =>
     [detail.revision, legacyRevision, archivedRevision].find(revision => revision.id === revisionId)!);
@@ -458,16 +460,52 @@ describe('PagesPage', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(pagesApi.get).toHaveBeenCalledTimes(1);
 
+      // KT-1819: the timer compares the revision; it never re-reads the Page.
       vi.mocked(pagesApi.get).mockClear();
       await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+      expect(pagesApi.data).toHaveBeenCalledTimes(1);
+      expect(pagesApi.data).toHaveBeenLastCalledWith('page-1', 3, 'rev-2');
 
-      vi.mocked(pagesApi.get).mockClear();
       await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
-      expect(pagesApi.get).toHaveBeenCalledTimes(1);
+      expect(pagesApi.data).toHaveBeenCalledTimes(2);
+      expect(pagesApi.get).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('reads only the dataset a publication changed, and keeps the others', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    const kept = { ...detail.datasets[0], id: 'dataset-2', name: 'kept', current: { untouched: true } };
+    vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, datasets: [detail.datasets[0], kept] });
+    render(<PagesPage />);
+    const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    vi.mocked(pagesApi.get).mockClear();
+    vi.mocked(pagesApi.data).mockResolvedValue({
+      page: { ...page, data_revision: 4 },
+      full: null,
+      datasets: [{ ...detail.datasets[0], current: { total: 99 } }],
+    });
+
+    const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+    await act(async () => {
+      handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: 4 }));
+    });
+
+    // The frame gets the whole snapshot, as after a full read.
+    await waitFor(() => expect(post).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'kronn:page-data',
+      data: expect.objectContaining({
+        page: expect.objectContaining({ data_revision: 4 }),
+        datasets: {
+          summary: { kind: 'snapshot', current: { total: 99 }, points: [] },
+          kept: { kind: 'snapshot', current: { untouched: true }, points: [] },
+        },
+      }),
+    }), '*'));
+    expect(pagesApi.data).toHaveBeenCalledWith('page-1', 3, 'rev-2');
+    expect(pagesApi.get).not.toHaveBeenCalled();
   });
 
   it('fetches a newly selected Page detail exactly once, not twice', async () => {
@@ -1558,8 +1596,19 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
       expect(group.lastElementChild).toBe(screen.getByTestId('live-page-header-details-toggle'));
     });
 
+    it('dates the sync from the last refresh, even one that changed nothing and left no journal entry', async () => {
+      const refreshedAt = new Date(Date.now() - 60_000).toISOString();
+      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, last_published_at: refreshedAt });
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const fresh = await screen.findByText(/^pages\.refreshSynced · /);
+      expect(fresh).toHaveTextContent(`pages.refreshSynced · ${formatRelativeTime(refreshedAt, 'fr')}`);
+      expect(screen.getByTestId('live-page-refresh-menu').title).toContain(formatRelativeTime(refreshedAt, 'fr'));
+    });
+
     it('says the page is waiting for its first run when nothing was published yet', async () => {
       vi.mocked(pagesApi.publications).mockResolvedValue([]);
+      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, last_published_at: null });
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');
       const fresh = await screen.findByTestId('live-page-sync-freshness');

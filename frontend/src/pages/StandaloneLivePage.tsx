@@ -10,6 +10,7 @@ import {
   runtimeData,
 } from '../lib/live-page-sandbox';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
+import { newestLivePageDetail, refreshLivePageDetail } from '../lib/live-page-refresh';
 import {
   useActionStatesInFrame,
   useLivePageActions,
@@ -69,15 +70,20 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
     return () => { active = false; };
   }, [pageId, reloadPageActions]);
 
-  // Keep reading the Page while the tab is open. New data reaches the frame by
-  // postMessage; the document is only rebuilt when the Page's HTML changes, so
-  // scroll and open rows survive a refresh.
+  // The snapshot a refresh starts from: only what changed since is read.
+  const detailRef = useRef<LivePageDetail | null>(null);
+  useEffect(() => { detailRef.current = detail; }, [detail]);
+
+  // Keep following the Page while the tab is open: the poll compares the
+  // revision and reads the datasets that changed. New data reaches the frame
+  // by postMessage; the document is only rebuilt when the Page's HTML
+  // changes, so scroll and open rows survive a refresh.
   useEffect(() => {
     let active = true;
     const refresh = () => {
       if (document.visibilityState === 'hidden') return;
-      Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
-        if (active) setDetail(page);
+      Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([page]) => {
+        if (active) setDetail(current => newestLivePageDetail(current, page));
       }).catch(() => { /* keep the last view; the next tick retries */ });
     };
     const timer = window.setInterval(refresh, REFRESH_MS);
@@ -92,8 +98,8 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
 
   // A publish reaches the open tab at once, without waiting for the poll.
   useLivePageDataPush(pageId, () => {
-    Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
-      setDetail(current => (current && current.id !== page.id ? current : page));
+    Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([page]) => {
+      setDetail(current => (current && current.id !== page.id ? current : newestLivePageDetail(current, page)));
     }).catch(() => { /* the poll retries */ });
   });
 

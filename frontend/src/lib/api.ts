@@ -272,6 +272,7 @@ import type {
   DiscussionTokenCost,
   CreateLivePageRequest,
   LivePage,
+  LivePageDataDelta,
   LivePageDetail,
   LivePageDiscussionLink,
   LivePagePublication,
@@ -3264,6 +3265,11 @@ export const pages = {
     `/pages${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`,
   ),
   get: (id: string) => api<LivePageDetail>('GET', `/pages/${encodeURIComponent(id)}`),
+  /** What changed since data revision `since` for a view showing HTML revision `revisionId`. */
+  data: (id: string, since: number, revisionId: string) => api<LivePageDataDelta>(
+    'GET',
+    `/pages/${encodeURIComponent(id)}/data?since=${since}&revision=${encodeURIComponent(revisionId)}`,
+  ),
   revisions: (id: string) => api<LivePageRevisionSummary[]>('GET', `/pages/${encodeURIComponent(id)}/revisions`),
   revision: (id: string, revisionId: string) =>
     api<LivePageRevision>('GET', `/pages/${encodeURIComponent(id)}/revisions/${encodeURIComponent(revisionId)}`),
