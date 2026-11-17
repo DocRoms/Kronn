@@ -722,9 +722,15 @@ decision, and only that list widens the allowlist, for that project:
   `<repo>/.kronn/worktrees/<name>` belongs to `<repo>`, and a tree anywhere else (a
   configured worktree root, an autoCode root, a sub-directory) to the registered
   project whose own `git worktree list` (asked of the registered checkout, never of
-  the lane) names it. The most specific tree wins, and a repository nested between it
-  and the worktree owns the worktree: a project registered inside another one gets its
-  own list, or nothing when it has none, never the outer project's. The intake of a validation (campaign, swap, launch) has no
+  the lane) names it. The owner is chosen among every registered project, with a
+  lane entry or not (Kronn keeps their checkouts in memory from boot, and adds,
+  moves or drops one when a project is created, remapped or deleted). The most
+  specific tree wins; at equal depth a project's own checkout beats a tree it only
+  shares through a common repository, and a tie that is still left gives no
+  project; a repository nested between the winning tree and the worktree owns the
+  worktree. So a project registered inside another one (a monorepo sub-folder, with
+  or without a repository of its own) gets its own list, or nothing when it has
+  none, never the outer project's. The intake of a validation (campaign, swap, launch) has no
   project, so it only keeps a name no project lists from being accepted, and the
   run's own refusal is the one that decides.
 

@@ -217,3 +217,37 @@ async fn a_saved_repository_wrapper_keeps_its_dot_slash_and_a_bare_name_stays_a_
     assert!(check("vendor/bin/phpunit").is_ok());
     assert!(check("./vendor/bin/phpunit").is_ok());
 }
+
+/// KT-1751 third review — the path branch of a validation executable refuses,
+/// through the real save, every spelling that leaves the repository or hides a
+/// `.`/`..`/empty segment, and nothing of the refused entry is stored.
+#[tokio::test]
+async fn a_saved_validation_path_that_escapes_or_hides_a_segment_is_refused() {
+    let state = test_state();
+    let dir = tempfile::tempdir().unwrap();
+    seed_project(&state, "p4", dir.path()).await;
+    for entry in ["./..", "./../x", ".//x", "./a/../b", "././x", "/abs", "./"] {
+        let saved = set_project_workspace(
+            State(state.clone()),
+            Path("p4".into()),
+            Json(Some(ProjectWorkspace {
+                lane_warm: LaneWarmConfig {
+                    validation_executables: Some(vec![entry.into()]),
+                    ..LaneWarmConfig::default()
+                },
+                ..ProjectWorkspace::default()
+            })),
+        )
+        .await;
+        assert!(!saved.0.success, "`{entry}` was accepted");
+        assert!(
+            saved
+                .0
+                .error
+                .unwrap_or_default()
+                .contains("validation_executables"),
+            "the refusal of `{entry}` names the field"
+        );
+        assert!(stored(&state, "p4").await.is_none(), "`{entry}` was stored");
+    }
+}

@@ -318,7 +318,13 @@ pub async fn create(
         })
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(project)),
+        Ok(()) => {
+            // KT-1751: the project owns its tree from now on.
+            crate::core::task_worker_lane_settings::register_project(std::path::Path::new(
+                &project.path,
+            ));
+            Json(ApiResponse::ok(project))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -495,6 +501,10 @@ pub async fn add_folder(
                 project.name,
                 project.path
             );
+            // KT-1751: a sub-folder project owns its tree from now on.
+            crate::core::task_worker_lane_settings::register_project(std::path::Path::new(
+                &project.path,
+            ));
             Json(ApiResponse::ok(project))
         }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -609,6 +619,7 @@ pub async fn delete(
         Ok(true) => {
             if let Some(path) = stored_path {
                 super::docs_location::rekey(&state, &deleted_id, &path, None).await;
+                crate::core::task_worker_lane_settings::forget_project(std::path::Path::new(&path));
             }
             Json(ApiResponse::ok(()))
         }
@@ -1277,6 +1288,10 @@ pub async fn remap_path(
             // there saw none of its plugins. Best-effort (logs on failure).
             if let Some(old_path) = old_path {
                 super::docs_location::rekey(&state, &id, &old_path, Some(&new_path)).await;
+                crate::core::task_worker_lane_settings::rekey_project(
+                    std::path::Path::new(&old_path),
+                    std::path::Path::new(&new_path),
+                );
             }
             super::resync_project_assets(&state, &id).await;
             Json(ApiResponse::ok(()))

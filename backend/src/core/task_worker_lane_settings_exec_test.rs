@@ -210,3 +210,50 @@ fn a_nested_project_never_inherits_the_outer_projects_executables() {
     assert_eq!(outer_itself, vec!["outer-tool".to_string()]);
     assert_eq!(with_list, vec!["inner-tool".to_string()]);
 }
+
+/// KT-1751 third review — the owner of a path is found among every registered
+/// project, not only those with a list: a project registered as a plain
+/// sub-folder of another (`mono/sub`, no repository of its own) owns its tree,
+/// with no lane entry or with an entry that lists no executable, and gets
+/// nothing; the outer project keeps its own list.
+#[test]
+fn a_registered_sub_folder_project_without_a_list_gets_nothing_from_the_outer_one() {
+    let root = tempfile::tempdir().unwrap();
+    let mono = root.path().canonicalize().unwrap().join("mono");
+    let sub = mono.join("sub");
+    std::fs::create_dir_all(sub.join("src")).unwrap();
+    std::fs::create_dir_all(mono.join("other")).unwrap();
+    git_in(&mono, &["init", "-q", "-b", "main"]);
+    git_in(&mono, &["commit", "-q", "--allow-empty", "-m", "init"]);
+
+    set_project(
+        &mono,
+        Some(&LaneWarmConfig {
+            validation_executables: Some(vec!["outer-only".into()]),
+            ..LaneWarmConfig::default()
+        }),
+    );
+    register_project(&sub);
+    let unlisted = validation_executables_for(&sub.join("src"));
+    set_project(
+        &sub,
+        Some(&LaneWarmConfig {
+            dependency_dirs: Some(vec!["vendor".into()]),
+            ..LaneWarmConfig::default()
+        }),
+    );
+    let configured_without_executables = validation_executables_for(&sub.join("src"));
+    let outer = validation_executables_for(&mono.join("other"));
+    forget_project(&sub);
+    let after_forget = validation_executables_for(&sub.join("src"));
+    forget_project(&mono);
+
+    assert!(unlisted.is_empty(), "{unlisted:?}");
+    assert!(
+        configured_without_executables.is_empty(),
+        "{configured_without_executables:?}"
+    );
+    assert_eq!(outer, vec!["outer-only".to_string()]);
+    // Once the sub-folder project is gone, its tree is the outer project's again.
+    assert_eq!(after_forget, vec!["outer-only".to_string()]);
+}

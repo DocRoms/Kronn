@@ -21,7 +21,7 @@
 //! workspace settings): a process-wide snapshot, like the other Settings >
 //! Workers switches, so no caller has to carry a config around.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
@@ -135,6 +135,9 @@ struct Snapshot {
     global: LaneWarmConfig,
     /// Per project, by the project's main-checkout path.
     projects: BTreeMap<PathBuf, LaneWarmConfig>,
+    /// KT-1751 third review — every registered project's checkout, with a lane
+    /// entry or not: who owns a path is decided among all of them.
+    registered: BTreeSet<PathBuf>,
 }
 
 static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
@@ -148,6 +151,7 @@ static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
         validation_executables: None,
     },
     projects: BTreeMap::new(),
+    registered: BTreeSet::new(),
 });
 
 fn key_of(path: &Path) -> PathBuf {
@@ -160,9 +164,11 @@ pub fn set_global(config: &LaneWarmConfig) {
 }
 
 /// Publish one project's own lane entry (`None` or an empty one removes it).
+/// The project stays registered either way: it still owns its tree.
 pub fn set_project(project_path: &Path, config: Option<&LaneWarmConfig>) {
     let key = key_of(project_path);
     let mut snapshot = SNAPSHOT.write().unwrap_or_else(|e| e.into_inner());
+    snapshot.registered.insert(key.clone());
     match config.filter(|config| !config.is_empty()) {
         Some(config) => {
             snapshot.projects.insert(key, config.clone());
@@ -171,6 +177,36 @@ pub fn set_project(project_path: &Path, config: Option<&LaneWarmConfig>) {
             snapshot.projects.remove(&key);
         }
     }
+}
+
+/// KT-1751 third review — record a newly registered project's checkout, so it
+/// owns its tree before it has any lane entry.
+pub fn register_project(project_path: &Path) {
+    SNAPSHOT
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .registered
+        .insert(key_of(project_path));
+}
+
+/// A deleted project: its lane entry and its registration both go.
+pub fn forget_project(project_path: &Path) {
+    let key = key_of(project_path);
+    let mut snapshot = SNAPSHOT.write().unwrap_or_else(|e| e.into_inner());
+    snapshot.projects.remove(&key);
+    snapshot.registered.remove(&key);
+}
+
+/// A project whose checkout moved (a remap, a re-clone): its lane entry and
+/// its registration follow it to the new path.
+pub fn rekey_project(old_path: &Path, new_path: &Path) {
+    let (old, new) = (key_of(old_path), key_of(new_path));
+    let mut snapshot = SNAPSHOT.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(config) = snapshot.projects.remove(&old) {
+        snapshot.projects.insert(new.clone(), config);
+    }
+    snapshot.registered.remove(&old);
+    snapshot.registered.insert(new);
 }
 
 /// The settings of the lane of `worktree`, whose project lives at
@@ -208,32 +244,32 @@ pub fn validation_executables_for(worktree: &Path) -> Vec<String> {
     effective_for(&worktree, main_checkout.as_deref()).validation_executables
 }
 
-/// The registered project that lists validation executables and whose
-/// checkout, or one of whose worktrees (as its own `git worktree list` says),
-/// contains `path`. Only projects with such a list are asked: the others would
-/// add nothing.
+/// The registered project that owns `path`: the one whose checkout, or one of
+/// whose worktrees (as its own `git worktree list` says), is the most specific
+/// tree containing `path`. Its list is what runs there, empty when it has none.
 ///
-/// KT-1751 review — the most specific tree wins (a project registered inside
-/// another one owns its own files), and a repository nested between that tree
-/// and `path` owns `path` instead: a project without a list registered inside
-/// one with a list gets nothing, never the outer project's list. A nested
-/// repository can only narrow what runs, never widen it.
+/// KT-1751 third review — the owner is chosen among EVERY registered project,
+/// with a lane entry or not: a project registered inside another one (a
+/// monorepo sub-folder, with or without a repository of its own) owns its own
+/// files and never gets the outer project's list. At equal depth a project's
+/// own checkout beats a tree it only shares through a common repository; a tie
+/// that is still left (two projects of one repository, a worktree of it)
+/// resolves to no project. A repository nested between the owning tree and
+/// `path` owns `path` instead. Every doubt narrows what runs, never widens it.
 fn project_listing(path: &Path) -> Option<PathBuf> {
-    let candidates: Vec<PathBuf> = SNAPSHOT
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .projects
-        .iter()
-        .filter(|(_, config)| {
-            config
-                .validation_executables
-                .as_ref()
-                .is_some_and(|list| !list.is_empty())
-        })
-        .map(|(project, _)| project.clone())
-        .collect();
-    let depth = |tree: &PathBuf| tree.components().count();
-    let (project, tree) = candidates
+    let candidates: Vec<PathBuf> = {
+        let snapshot = SNAPSHOT.read().unwrap_or_else(|e| e.into_inner());
+        snapshot
+            .registered
+            .iter()
+            .chain(snapshot.projects.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+    let rank = |project: &PathBuf, tree: &PathBuf| (tree.components().count(), tree == project);
+    let mut owners: Vec<((usize, bool), PathBuf, PathBuf)> = candidates
         .into_iter()
         .filter_map(|project| {
             let mut trees = vec![project.clone()];
@@ -245,10 +281,15 @@ fn project_listing(path: &Path) -> Option<PathBuf> {
             let tree = trees
                 .into_iter()
                 .filter(|tree| path.starts_with(tree))
-                .max_by_key(depth)?;
-            Some((project, tree))
+                .max_by_key(|tree| rank(&project, tree))?;
+            Some((rank(&project, &tree), project, tree))
         })
-        .max_by_key(|(_, tree)| depth(tree))?;
+        .collect();
+    owners.sort_by_key(|(rank, _, _)| std::cmp::Reverse(*rank));
+    let (best, project, tree) = owners.first()?.clone();
+    if owners.get(1).is_some_and(|(next, _, _)| *next == best) {
+        return None;
+    }
     let nested = path
         .ancestors()
         .take_while(|dir| *dir != tree.as_path())

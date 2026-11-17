@@ -321,6 +321,8 @@ pub async fn clone_project(
     {
         return Json(ApiResponse::err(format!("DB error: {}", e)));
     }
+    // KT-1751: the project owns its tree from now on.
+    crate::core::task_worker_lane_settings::register_project(std::path::Path::new(&project.path));
 
     // Auto-detect skills
     let detected = crate::api::audit::detect_project_skills(&host_path);
@@ -519,7 +521,11 @@ pub async fn clone_and_remap(
         .await
     {
         Ok(true) => {
-            super::docs_location::rekey(&state, &id, &project.path, Some(&project_path)).await
+            super::docs_location::rekey(&state, &id, &project.path, Some(&project_path)).await;
+            crate::core::task_worker_lane_settings::rekey_project(
+                std::path::Path::new(&project.path),
+                std::path::Path::new(&project_path),
+            );
         }
         Ok(false) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {e}"))),

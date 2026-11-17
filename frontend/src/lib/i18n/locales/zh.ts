@@ -7603,7 +7603,7 @@ const zh: TranslationDict = {
   "laneWarm.rootsInvalid": "每行必须是仓库内的目录（不能以 / 开头，也不能含 ..）。",
   "laneWarm.executables": "验证可执行文件",
   "laneWarm.executablesPlaceholder": "除 Kronn 内置列表外无其他项",
-  "laneWarm.executablesHelp": "每行一个：程序名称（composer、pytest、go）或仓库内的路径（vendor/bin/phpunit）。只有此项目的验证可以运行它们；shell 始终被拒绝。",
+  "laneWarm.executablesHelp": "每行一个：程序名称（composer、pytest、go）或仓库内的路径（vendor/bin/phpunit）。仓库根目录下的包装脚本须加 ./（./gradlew）：只写名称（gradlew）表示 PATH 中的程序。只有此项目的验证可以运行它们；shell 始终被拒绝。",
   "laneWarm.executablesInvalid": "每行必须是程序名称或仓库内的路径（不能以 / 开头，不能含 ..，也不能是选项）。",
   "laneWarm.commandPlaceholder": "自动检测（每个 Rust 工作区运行 cargo test --lib --no-run）",
   "laneWarm.timeout": "首次构建时间上限（分钟）",

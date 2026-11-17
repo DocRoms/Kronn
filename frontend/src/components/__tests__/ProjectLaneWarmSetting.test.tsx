@@ -196,6 +196,20 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     expect(screen.getByTestId('project-lane-warm-title')).toHaveTextContent('laneWarm.projectTitle');
   });
 
+  it('says in every locale that a root wrapper is typed with ./ while a bare name is a PATH program (KT-1751)', async () => {
+    const locales = await Promise.all([
+      import('../../lib/i18n/locales/en'),
+      import('../../lib/i18n/locales/fr'),
+      import('../../lib/i18n/locales/es'),
+      import('../../lib/i18n/locales/zh'),
+    ]);
+    for (const { default: dict } of locales) {
+      const help = dict['laneWarm.executablesHelp'];
+      expect(help).toContain('./gradlew');
+      expect(help).toContain('PATH');
+    }
+  });
+
   it('tells when KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS is set on the host, as a fallback for an empty field', async () => {
     envMock.mockResolvedValue(5400);
     getMock.mockResolvedValue(null);
