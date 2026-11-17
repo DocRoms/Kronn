@@ -1410,7 +1410,7 @@ mod enforce_gate_tests {
 
 /// KT-1595 — the audit-date stamp runs right after the agent; these tests are
 /// not behind `full-tests` because they are the swap guarantee.
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix))] // creates symlinks and sets chmod mode bits through std::os::unix
 mod stamp_target_tests {
     use super::*;
 

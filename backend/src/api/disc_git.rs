@@ -191,6 +191,9 @@ async fn status_for_selected_workspace(
         return Err(format!("Project path not found: {}", repo.display()));
     }
 
+    if attached {
+        git_allowed_in(&repo)?;
+    }
     let live_head = attached
         .then(|| crate::core::worktree::resolve_commit(&repo, "HEAD").ok())
         .flatten();
@@ -296,6 +299,19 @@ fn default_disc_pr_base() -> String {
     "main".into()
 }
 
+/// KT-1745: Kronn runs git in a worker's worktree only when it is the one git
+/// registered and its `.git` pointer still says so. When it is not, the panel
+/// says why, instead of showing an empty answer as if the workspace were clean.
+pub(crate) fn git_allowed_in(dir: &std::path::Path) -> Result<(), String> {
+    crate::core::lane_git::LaneGit::resolve(dir)
+        .map(|_| ())
+        .map_err(|reason| {
+            format!(
+                "Kronn does not run git in this workspace, so nothing is shown for it: {reason}"
+            )
+        })
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct DiscExecRequest {
     pub command: String,
@@ -328,6 +344,9 @@ pub async fn disc_git_status(
             Ok(v) => v,
             Err(e) => return Json(ApiResponse::err(e)),
         };
+    if let Err(reason) = git_allowed_in(&work_dir) {
+        return Json(ApiResponse::err(reason));
+    }
     let display_path = work_dir.to_string_lossy().to_string();
     let status_dir = work_dir.clone();
     let commit_offset = query.commit_offset;
@@ -1182,7 +1201,7 @@ pub async fn disc_pr_template(
             Err(e) => return Json(ApiResponse::err(e)),
         };
 
-    let branch = crate::core::cmd::git_cmd()
+    let branch = crate::core::lane_git::git_or_refuse(&work_dir)
         .args(["branch", "--show-current"])
         .current_dir(&work_dir)
         .output()

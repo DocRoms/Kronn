@@ -2128,7 +2128,7 @@ mod tests {
 
     /// KT-1595 round 5 (NEW-3): the validation reads after an agent are no
     /// oracle on an outside file a planted link points at.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_link_at_the_target_is_an_unreadable_snapshot_not_the_outside_content() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2140,7 +2140,7 @@ mod tests {
         assert!(target_snapshot(tmp.path(), "docs/a.md").is_err());
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_linked_companion_is_not_read_for_placeholders() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2161,7 +2161,7 @@ mod tests {
         assert_eq!(unfilled_companion(tmp.path(), "docs/coding-rules.md"), None);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_linked_tech_debt_folder_contributes_no_sheet_to_the_step8_surface() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2194,7 +2194,7 @@ mod tests {
 
     /// KT-1595 — no race needed: a link already at the target name is not
     /// read through nor rewritten.
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn a_link_at_the_target_name_is_not_filled_through() {
         let tmp = tempfile::TempDir::new().unwrap();

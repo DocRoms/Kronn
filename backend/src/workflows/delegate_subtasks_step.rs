@@ -1493,15 +1493,19 @@ async fn review_request(
 async fn git_diff(work_dir: &str, base: &str, head: &str) -> anyhow::Result<String> {
     worktree::reject_option_like_rev(base).map_err(anyhow::Error::msg)?;
     worktree::reject_option_like_rev(head).map_err(anyhow::Error::msg)?;
-    let output = crate::core::cmd::async_git_cmd()
-        .args([
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            &format!("{base}..{head}"),
-            "--",
-        ])
-        .current_dir(work_dir)
+    // KT-1745 — a sub-task's worktree is the worker's: the repository is the
+    // registered one, and the diff runs no program the worktree names.
+    let mut command =
+        crate::core::lane_git::git(std::path::Path::new(work_dir)).map_err(anyhow::Error::msg)?;
+    command.args([
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        &format!("{base}..{head}"),
+        "--",
+    ]);
+    let output = tokio::process::Command::from(command)
         .output()
         .await
         .context("git diff could not run")?;

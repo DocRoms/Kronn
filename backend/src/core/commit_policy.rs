@@ -25,7 +25,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::RwLock;
 
-use crate::core::cmd::git_cmd;
 use crate::models::{BriefingYesNo, ProjectCommitSettings, SignoffSetting};
 
 /// Identity used when git knows none at all.
@@ -288,12 +287,13 @@ pub fn registered_settings(repo_path: &Path) -> Option<ProjectCommitSettings> {
         .cloned()
 }
 
-/// Run `git config <args>` in `repo_path`: the trimmed, non-empty output.
+/// Run `git config <args>` in `repo_path`: the trimmed, non-empty output. In a
+/// worker's worktree git reads the registered repository's configuration, never
+/// one the worker pointed `.git` at (KT-1745).
 fn git_config(repo_path: &Path, args: &[&str]) -> Option<String> {
-    let output = git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .arg("config")
         .args(args)
-        .current_dir(repo_path)
         .output()
         .ok()?;
     if !output.status.success() {
@@ -430,16 +430,11 @@ fn resolve_signoff(repo_path: &Path) -> (bool, SignoffSource) {
 /// Whether the repository's own `commit-msg` hook checks for a `Signed-off-by`
 /// (a DCO check run at commit time).
 fn commit_msg_hook_requires_signoff(repo_path: &Path) -> bool {
-    let Some(hook) = git_output(repo_path, &["rev-parse", "--git-path", "hooks/commit-msg"]) else {
+    // Not `rev-parse --git-path`: the lane's builder turns `core.hooksPath` off.
+    let Some(hooks) = crate::core::commit_hooks::repository_hooks_dir(repo_path) else {
         return false;
     };
-    let hook = PathBuf::from(hook);
-    let hook = if hook.is_absolute() {
-        hook
-    } else {
-        repo_path.join(hook)
-    };
-    std::fs::read_to_string(hook)
+    std::fs::read_to_string(hooks.join("commit-msg"))
         .is_ok_and(|script| script.to_ascii_lowercase().contains("signed-off-by"))
 }
 
@@ -465,7 +460,10 @@ fn project_root(repo_path: &Path) -> PathBuf {
 }
 
 fn git_output(repo_path: &Path, args: &[&str]) -> Option<String> {
-    let output = git_cmd().args(args).current_dir(repo_path).output().ok()?;
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
+        .args(args)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -491,7 +489,7 @@ fn briefing_signoff(root: &Path, repo_path: &Path) -> BriefingYesNo {
 /// Whether most of the recent non-merge commits carry a `Signed-off-by`;
 /// `None` when there are too few to tell.
 fn history_signs_off(repo_path: &Path) -> Option<bool> {
-    let output = git_cmd()
+    let output = crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "log",
             "--no-merges",
@@ -499,7 +497,6 @@ fn history_signs_off(repo_path: &Path) -> Option<bool> {
             &HISTORY_WINDOW.to_string(),
             "--format=%B%x00",
         ])
-        .current_dir(repo_path)
         .output()
         .ok()?;
     if !output.status.success() {

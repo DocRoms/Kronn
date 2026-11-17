@@ -33,13 +33,18 @@ pub struct ProjectWorkspace {
     /// signed off, when the owner decided it rather than leaving it detected.
     #[serde(default, skip_serializing_if = "ProjectCommitSettings::is_default")]
     pub commit: ProjectCommitSettings,
+    /// Which git hooks Kronn's own commits and merges for a worker run
+    /// (KT-1745). Only a human sets it; absent means [`WorkerCommitHooks::Off`].
+    #[serde(default, skip_serializing_if = "WorkerCommitHooks::is_default")]
+    pub worker_commit_hooks: WorkerCommitHooks,
 }
 
 impl ProjectWorkspace {
-    /// Nothing to store: no hook, no managed root, no lane warm-up setting and
-    /// no commit setting.
+    /// Nothing to store: no hook, no hook policy, no managed root, no lane
+    /// warm-up setting and no commit setting.
     pub fn is_empty(&self) -> bool {
         self.hooks.is_empty()
+            && self.worker_commit_hooks.is_default()
             && self.managed_worktree_roots.is_empty()
             && self.lane_warm.is_empty()
             && self.commit.is_default()
@@ -122,6 +127,39 @@ impl ProjectCommitSettings {
             }
         }
         Ok(self)
+    }
+}
+
+/// Which of the repository's git hooks Kronn runs when it commits or merges for
+/// a worker (KT-1745). Kronn makes those commits itself, outside the worker's OS
+/// sandbox and with the host user's rights, so a hook that lives in the worker's
+/// writable worktree (husky's relative `core.hooksPath`) is worker-written code.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WorkerCommitHooks {
+    /// No hook runs. The DCO sign-off is added by Kronn itself.
+    #[default]
+    Off,
+    /// The repository's gating hook (`pre-commit`, `pre-merge-commit`) runs
+    /// inside the lane's OS sandbox, never as the host user. Refused when the
+    /// host has no sandbox. A stored `main_checkout` (the unconfined mode this
+    /// setting briefly had, which ran worker-reachable binaries as the host)
+    /// reads as this value: a configured hook runs confined or not at all.
+    #[serde(alias = "main_checkout")]
+    Sandboxed,
+}
+
+impl WorkerCommitHooks {
+    pub fn is_default(&self) -> bool {
+        *self == Self::Off
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Sandboxed => "sandboxed",
+        }
     }
 }
 

@@ -35,6 +35,7 @@ fn must_add(in_docker: bool, existing: &[String], path: &str) -> bool {
 /// `None` when git cannot read it. Includes are not followed: only the file's
 /// own entries matter, and only those can be rewritten.
 fn read_entries(file: Option<&Path>) -> Option<Vec<String>> {
+    // lane-git-allow: the global (or a named) config file, never a worktree.
     let mut cmd = git_cmd();
     match file {
         Some(file) => cmd.arg("config").arg("--file").arg(file),
@@ -74,6 +75,7 @@ pub fn ensure_safe_directory(path: &Path) {
     if !must_add(true, &existing, &path) {
         return;
     }
+    // lane-git-allow: writes the container's global config, never a worktree.
     let _ = git_cmd()
         .args(["config", "--global", "--add", "safe.directory"])
         .arg(path.as_ref())
@@ -124,19 +126,32 @@ pub fn isolate_global_git_config_for_tests() -> PathBuf {
     let _ = std::fs::create_dir_all(&dir);
     let scratch = dir.join("gitconfig");
     let (work, include) = test_work_dir();
-    let _ = std::fs::write(
-        &scratch,
-        format!(
-            "[user]\n\tname = Kronn Test\n\temail = kronn-test@example.invalid\n\
-             [includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
-            work.display(),
-            include.display()
-        ),
-    );
+    let _ = std::fs::write(&scratch, scratch_global_config(&work, &include));
     crate::core::child_env::set_var("GIT_CONFIG_GLOBAL", &scratch);
     let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
     crate::core::child_env::set_var("GIT_CONFIG_SYSTEM", null);
     scratch
+}
+
+/// The scratch global config: a commit identity, and the include that
+/// [`test_work_dir`] makes conditional.
+fn scratch_global_config(work: &Path, include: &Path) -> String {
+    format!(
+        "[user]\n\tname = Kronn Test\n\temail = kronn-test@example.invalid\n\
+         [includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+        config_path(work),
+        config_path(include)
+    )
+}
+
+/// A path as a git config file can hold it: a backslash is an escape there (a
+/// Windows path fails the whole file), and git matches `gitdir:` against a
+/// path without the `\\?\` prefix `canonicalize` adds on Windows.
+fn config_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    text.strip_prefix(r"\\?\")
+        .unwrap_or(&text)
+        .replace('\\', "/")
 }
 
 // ── One-off cleanup ─────────────────────────────────────────────────────────
@@ -251,6 +266,7 @@ fn backup(file: &Path) -> std::io::Result<PathBuf> {
 pub fn apply_cleanup(file: &Path, keep: &[String]) -> Result<PathBuf, String> {
     let saved = backup(file).map_err(|e| format!("backup failed, nothing changed: {e}"))?;
     let rewrite = || -> Result<(), String> {
+        // lane-git-allow: rewrites the named global config file, never a worktree.
         let unset = git_cmd()
             .arg("config")
             .arg("--file")
@@ -262,6 +278,7 @@ pub fn apply_cleanup(file: &Path, keep: &[String]) -> Result<PathBuf, String> {
             return Err(String::from_utf8_lossy(&unset.stderr).trim().to_string());
         }
         for entry in keep {
+            // lane-git-allow: rewrites the named global config file, never a worktree.
             let add = git_cmd()
                 .arg("config")
                 .arg("--file")
@@ -299,6 +316,7 @@ fn rev_parse_ms() -> f64 {
     const RUNS: u32 = 5;
     let start = std::time::Instant::now();
     for _ in 0..RUNS {
+        // lane-git-allow: times git's start-up in the backend's own directory.
         let _ = git_cmd().args(["rev-parse", "--git-dir"]).output();
     }
     start.elapsed().as_secs_f64() * 1000.0 / f64::from(RUNS)
@@ -400,6 +418,33 @@ mod tests {
         assert!(must_add(true, &list(&["/other"]), "/data/repo"));
         assert!(!must_add(true, &list(&["/data/repo"]), "/data/repo"));
         assert!(!must_add(true, &list(&["*"]), "/data/repo"));
+    }
+
+    #[test]
+    fn the_scratch_config_with_windows_paths_is_one_git_can_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("gitconfig");
+        let text = scratch_global_config(
+            Path::new(r"\\?\C:\Users\RUNNER~1\AppData\Local\Temp\kronn-test-work-7"),
+            Path::new(r"C:\Users\RUNNER~1\AppData\Local\Temp\kronn-test-work-7.inc"),
+        );
+        std::fs::write(&file, text).unwrap();
+        let out = git_cmd()
+            .args(["config", "--file"])
+            .arg(&file)
+            .args(["--get-regexp", "^includeif\\."])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "includeif.gitdir:C:/Users/RUNNER~1/AppData/Local/Temp/kronn-test-work-7/.path \
+             C:/Users/RUNNER~1/AppData/Local/Temp/kronn-test-work-7.inc"
+        );
     }
 
     #[test]

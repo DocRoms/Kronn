@@ -884,7 +884,7 @@ fn kronn_own_docs_report() {
 
 /// KT-1595 round 12: listing a project's files and asking what git ignores
 /// never run the file-system monitor its configuration names.
-#[cfg(unix)]
+#[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
 #[test]
 fn listing_the_files_runs_no_program_the_repository_names() {
     use crate::core::cmd::hostile_git::{git, marker_program, repo};

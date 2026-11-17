@@ -1927,3 +1927,123 @@ fn the_os_sandbox_reaches_the_docker_socket_only_when_the_policy_opens_it() {
     );
     assert!(listener.accept().is_ok(), "the connection never arrived");
 }
+
+// ── KT-1745: the worktree's `.git` pointer is read-only to the worker ────
+
+#[test]
+fn the_worktrees_git_pointer_is_denied_to_a_confined_command() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join(".git"), "gitdir: /registered\n").unwrap();
+    let policy = policy_of(&layout);
+    let pointer = layout.worktree.canonicalize().unwrap().join(".git");
+    assert_eq!(policy.read_only, vec![layout.worktree.join(".git")]);
+    let command = probe("true", &[], &layout.worktree);
+
+    // Seatbelt: a write deny on the file, after every allow so it wins.
+    let seatbelt = confine(Mechanism::Seatbelt, &policy, &command);
+    let profile = &seatbelt.args[1];
+    let deny = format!(
+        "(deny file-write*\n  (literal {})\n)",
+        seatbelt_literal(&pointer)
+    );
+    let at = profile.find(&deny).unwrap_or_else(|| panic!("{profile}"));
+    assert!(at > profile.find("(allow file-write*").unwrap());
+
+    // Bubblewrap: bound read-only over itself, before the namespace flags.
+    let bwrap = confine(Mechanism::Bubblewrap, &policy, &command).args;
+    let text = pointer.to_string_lossy().into_owned();
+    let bind = bwrap
+        .windows(3)
+        .position(|w| w[0] == "--ro-bind" && w[1] == text && w[2] == text)
+        .expect("the pointer is bound read-only");
+    assert!(bind < bwrap.iter().position(|a| a == "--unshare-net").unwrap());
+}
+
+#[test]
+fn a_confined_command_cannot_rewrite_or_replace_the_git_pointer() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    let pointer = layout.worktree.join(".git");
+    std::fs::write(&pointer, "gitdir: /registered\n").unwrap();
+    let run = |script: &str| {
+        let command = probe("sh", &["-c", script], &layout.worktree);
+        SandboxedProbeRunner::new(
+            Ok(policy_of(&layout)),
+            Some(mechanism),
+            Arc::new(ProcessProbeRunner),
+        )
+        .run(&command)
+    };
+
+    assert!(!run("echo 'gitdir: /evil' > .git").success);
+    assert!(!run("rm -f .git && echo 'gitdir: /evil' > .git").success);
+    assert!(!run("mv .git .git.bak").success);
+    assert_eq!(
+        std::fs::read_to_string(&pointer).unwrap(),
+        "gitdir: /registered\n"
+    );
+    // The rest of the worktree stays writable.
+    assert!(run("echo ok > other.txt").success);
+    assert!(layout.worktree.join("other.txt").exists());
+}
+
+// ── KT-1745 round 4: nested `.git` — only the repositories that exist ────
+
+#[test]
+fn only_the_nested_repositories_that_exist_are_denied_not_every_git_path() {
+    let layout = layout();
+    std::fs::write(layout.worktree.join(".git"), "gitdir: /registered\n").unwrap();
+    std::fs::create_dir_all(layout.worktree.join("lib/.git")).unwrap();
+    let policy = policy_of(&layout);
+    let command = probe("true", &[], &layout.worktree);
+    let seatbelt = confine(Mechanism::Seatbelt, &policy, &command);
+    let profile = &seatbelt.args[1];
+    let root = layout.worktree.canonicalize().unwrap();
+    let denies = |parent: &Path| {
+        profile.contains(&format!(
+            "^{}/\\.[gG][iI][tT](/.*)?$",
+            seatbelt_regex_escape(parent)
+        ))
+    };
+    assert!(denies(&root), "{profile}");
+    assert!(denies(&root.join("lib")), "{profile}");
+    // A repository the worker may create (`git init vendor/pkg`, a Composer
+    // source install, terraform git modules) is not matched by any deny: no
+    // `any depth` rule is left.
+    assert!(!denies(&root.join("vendor/pkg")), "{profile}");
+    assert!(!profile.contains("(.*/)?"), "{profile}");
+}
+
+#[test]
+fn a_confined_command_can_create_a_nested_repository_but_not_rewrite_an_existing_one() {
+    let Some(mechanism) = live_mechanism() else {
+        return;
+    };
+    let layout = layout();
+    std::fs::write(layout.worktree.join(".git"), "gitdir: /registered\n").unwrap();
+    std::fs::create_dir_all(layout.worktree.join("lib/.git")).unwrap();
+    std::fs::write(layout.worktree.join("lib/.git/config"), "[core]\n").unwrap();
+    let run = |script: &str| {
+        let command = probe("sh", &["-c", script], &layout.worktree);
+        SandboxedProbeRunner::new(
+            Ok(policy_of(&layout)),
+            Some(mechanism),
+            Arc::new(ProcessProbeRunner),
+        )
+        .run(&command)
+    };
+    // What `git init vendor/pkg` does: make the directory, then `.git` in it.
+    assert!(run(
+        "mkdir -p vendor/pkg/.git/objects && echo 'ref: refs/heads/main' > vendor/pkg/.git/HEAD"
+    )
+    .success);
+    assert!(layout.worktree.join("vendor/pkg/.git/HEAD").exists());
+    // An existing nested repository's configuration stays the registered one.
+    assert!(!run("echo '[filter w]' >> lib/.git/config").success);
+    assert_eq!(
+        std::fs::read_to_string(layout.worktree.join("lib/.git/config")).unwrap(),
+        "[core]\n"
+    );
+}

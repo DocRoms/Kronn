@@ -49,10 +49,10 @@ Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
 [src: file: backend/src/agents/runner.rs:4760-4765#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4786-4788#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4796-4798#read_only_repos]
 [src: file: backend/src/agents/read_only_repos.rs:1001-1010#apply]
-[src: file: backend/src/agents/runner.rs:14903-14908#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15138-15149#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:14939-14944#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15173-15184#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14759-14778#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14916-14930#is_codex]
+[src: file: backend/src/agents/runner.rs:14796-14815#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:14946-14960#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -353,7 +353,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test.rs:12439-12500#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test.rs:12500-12561#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

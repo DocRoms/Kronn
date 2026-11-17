@@ -22,6 +22,10 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Cargo 1.100 builds test binaries under build/<pkg>/<hash>/out/; the coverage
+  # report of the nextest archive then misses most objects (32 % instead of 83+).
+  # Keep the previous layout until KT-1788 handles both.
+  __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: "1"
   # onnxruntime-node's postinstall downloads CUDA binaries CI never uses, from
   # a host that times out on GitHub runners (see ci-test.yml).
   ONNXRUNTIME_NODE_INSTALL: skip

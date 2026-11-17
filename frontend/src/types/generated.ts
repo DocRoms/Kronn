@@ -8444,7 +8444,12 @@ managed_worktree_roots?: Array<string>,
  * KT-1750 — who Kronn's commits are attributed to and whether they are
  * signed off, when the owner decided it rather than leaving it detected.
  */
-commit?: ProjectCommitSettings, };
+commit?: ProjectCommitSettings,
+/**
+ * Which git hooks Kronn's own commits and merges for a worker run
+ * (KT-1745). Only a human sets it; absent means [`WorkerCommitHooks::Off`].
+ */
+worker_commit_hooks?: WorkerCommitHooks, };
 
 export type ProjectWriteAccess = { status: ProjectWriteAccessStatus, reason?: string | null, writable_roots?: Array<string>, };
 
@@ -13027,6 +13032,14 @@ timezone?: string, detection: WatchDetection, };
 export type WeightLevel = "green" | "amber" | "red";
 
 export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
+
+/**
+ * Which of the repository's git hooks Kronn runs when it commits or merges for
+ * a worker (KT-1745). Kronn makes those commits itself, outside the worker's OS
+ * sandbox and with the host user's rights, so a hook that lives in the worker's
+ * writable worktree (husky's relative `core.hooksPath`) is worker-written code.
+ */
+export type WorkerCommitHooks = "off" | "sandboxed";
 
 /**
  * Observed network connectivity, kept apart from `configured` (an address is

@@ -527,7 +527,7 @@ fn a_failed_seal_drops_a_keyless_copy_but_never_touches_a_corrupt_one() {
 
 /// A FIFO named like a copy is refused, not read: without the check `fs::read`
 /// would block the start pass for good.
-#[cfg(unix)]
+#[cfg(unix)] // makes a FIFO through libc
 #[test]
 fn a_fifo_copy_is_refused_and_does_not_block_the_pass() {
     use std::os::unix::ffi::OsStrExt;
@@ -563,7 +563,7 @@ fn a_fifo_copy_is_refused_and_does_not_block_the_pass() {
 /// A symbolic link is never read through, renamed over or removed (its target
 /// would keep the content in clear), and a file with another hard link is left
 /// alone: both are failures, with or without a key.
-#[cfg(unix)]
+#[cfg(unix)] // creates a symlink through std::os::unix
 #[test]
 fn a_linked_copy_is_refused_and_reported() {
     let (dir, key) = dir_with_key();

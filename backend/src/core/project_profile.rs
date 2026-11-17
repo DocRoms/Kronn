@@ -383,9 +383,10 @@ pub enum ProfileSource {
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = crate::core::cmd::git_cmd()
-        .arg("-C")
-        .arg(repo)
+    // KT-1745 — also asked of a worker's worktree (the doc citations gate): the
+    // repository is the registered one, never what the worktree's `.git` names.
+    let output = crate::core::lane_git::git(repo)
+        .ok()?
         .args(args)
         .output()
         .ok()?;

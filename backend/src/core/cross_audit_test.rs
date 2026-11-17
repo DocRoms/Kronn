@@ -150,7 +150,7 @@ fn the_last_fenced_block_is_parsed() {
 // ── citation check ──
 
 /// KT-1595 round 5 (NEW-3): the quote check is no oracle on an outside file.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_citation_through_a_link_is_refused_not_checked_against_the_outside_file() {
     let (_d, root) = repo();

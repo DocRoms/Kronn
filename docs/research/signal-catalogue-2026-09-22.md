@@ -9,7 +9,7 @@ cells also failed, so this is not evidence of general reliability for either
 prompt style.
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]
 [src: file: backend/src/api/signal_catalog.rs:66-69#get]
-[src: file: backend/src/api/agent_tools.rs:4722-4724#signals]
+[src: file: backend/src/api/agent_tools.rs:4732-4734#signals]
 [src: file: backend/scripts/disc-introspection-mcp.py:10968-10969#signals]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:579#decision]
 [src: file: docs/research/signal-catalogue-2026-09-22.json:275-339]
@@ -134,5 +134,5 @@ and QP-improvement parsers remain separate.
 [src: file: backend/tests/api_tests.rs:1502-1557#discussion_action_invalid_proposals_are_actionable_through_the_real_message_transaction]
 [src: file: backend/tests/api_tests.rs:1402-1497#discussion_action_allow_manual_override_never_leaks_plaintext_through_the_api]
 [src: file: backend/tests/api_tests.rs:1256-1397#discussion_action_launch_context_resolves_project_env_for_a_global_target]
-[src: file: backend/src/agents/runner_test.rs:2414-2482#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
+[src: file: backend/src/agents/runner_test.rs:2443-2511#authoring_schemas_survive_clamping_when_tool_history_fills_the_window]
 [src: file: backend/src/api/signal_catalog.rs:10-64#catalogue]

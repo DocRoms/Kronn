@@ -866,7 +866,7 @@ mod tests {
 
     /// KT-1595 round 12: a driver whose name is not UTF-8 is turned off by its
     /// exact bytes; a lossy name would turn off another driver and let it run.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a `#!/bin/sh` fixture named with non-UTF-8 bytes
     #[test]
     fn a_driver_named_with_bytes_that_are_not_utf8_never_runs() {
         use hostile_git::{append_config, git, marker_program, repo};
@@ -915,7 +915,7 @@ mod tests {
     /// KT-1595 round 13: any git call that ran out of time (a FIFO `.gitignore`
     /// blocks `check-ignore`) is waited for once; the next call on that checkout
     /// is refused at once.
-    #[cfg(unix)]
+    #[cfg(unix)] // makes a FIFO through libc
     #[test]
     fn a_git_call_that_ran_out_of_time_is_not_waited_for_again() {
         use hostile_git::repo;
@@ -943,7 +943,7 @@ mod tests {
 
     /// KT-1595 round 15: a `diff` blocked by an attributes file that is a FIFO
     /// is waited for once; the next call on that checkout is refused at once.
-    #[cfg(unix)]
+    #[cfg(unix)] // makes a FIFO through libc
     #[test]
     fn a_diff_blocked_by_a_fifo_is_not_waited_for_again() {
         use hostile_git::{git, repo};
@@ -995,7 +995,7 @@ mod tests {
 
     /// KT-1595 round 13: a driver configured in a SUBMODULE's own config never
     /// runs through a git call on the superproject.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
     #[test]
     fn a_submodule_driver_never_runs_through_the_superproject() {
         use hostile_git::{git, marker_program, repo};
@@ -1044,7 +1044,7 @@ mod tests {
     /// KT-1595 round 12: a configuration that blocks git (an include on a FIFO)
     /// costs one bounded wait; the next git call on that checkout is refused
     /// at once instead of waiting again.
-    #[cfg(unix)]
+    #[cfg(unix)] // makes a FIFO through libc
     #[test]
     fn a_configuration_listing_that_ran_out_of_time_is_not_waited_for_again() {
         use hostile_git::{git, repo};

@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::task_worker_env::LANE_TARGET_PREFIX;
+use crate::models::WorkerCommitHooks;
 
 // ── KT-373 — disk as a provisioning precondition ─────────────────────────────
 //
@@ -1459,12 +1460,27 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
 /// (worktree provisioning, the worker environment). Code that runs after an
 /// agent uses [`ensure_local_git_exclude_pinned`].
 pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
-    if already_ignored(repo_path, pattern) {
+    // Already ignored (a committed rule, or a previous run): write nothing.
+    // `repo_path` may be a worker's worktree (lane seeds, the lane's Cargo target):
+    // pinned to its registration there, so neither the `.git` pointer nor a nested
+    // repository the worker wrote decides what git reads.
+    let lane = crate::core::lane_git::LaneGit::resolve(repo_path)?;
+    if lane
+        .command()
+        .args([
+            "check-ignore",
+            "-q",
+            "--no-index",
+            pattern.trim_start_matches('/'),
+        ])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
         return Ok(());
     }
-    let output = crate::core::cmd::git_cmd()
+    let output = lane
+        .command()
         .args(["rev-parse", "--git-path", "info/exclude"])
-        .current_dir(repo_path)
         .output()
         .map_err(|error| format!("cannot resolve git exclude path: {error}"))?;
     if !output.status.success() {
@@ -1485,6 +1501,30 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
             repo_path.join(path)
         }
     };
+    for path in [Some(exclude.as_path()), exclude.parent()]
+        .into_iter()
+        .flatten()
+    {
+        if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(format!(
+                "{} is a symlink — refusing to update the local Git exclude",
+                path.display()
+            ));
+        }
+    }
+    if let Some(pinned) = lane.pinned() {
+        // A managed worktree's exclude stays inside the registered git directory.
+        let inside = exclude
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .is_none_or(|real| real.starts_with(&pinned.common_dir));
+        if !inside {
+            return Err(format!(
+                "{} leaves the repository's git directory — refusing to update the local Git exclude",
+                exclude.display()
+            ));
+        }
+    }
     // The git directory git itself named (`<git dir>/info/exclude`) is the
     // root: a link at `exclude` or `info`, or swapped in for either, is refused.
     let git_dir = exclude
@@ -1495,16 +1535,16 @@ pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Resul
 }
 
 /// Whether git already ignores `pattern` (a committed rule, or a previous run):
-/// then nothing is written.
+/// then nothing is written. In a managed worktree git is pinned to its
+/// registration (KT-1745).
 fn already_ignored(repo_path: &Path, pattern: &str) -> bool {
-    crate::core::cmd::git_cmd()
+    crate::core::lane_git::git_or_refuse(repo_path)
         .args([
             "check-ignore",
             "-q",
             "--no-index",
             pattern.trim_start_matches('/'),
         ])
-        .current_dir(repo_path)
         .status()
         .is_ok_and(|status| status.success())
 }
@@ -1593,6 +1633,7 @@ pub(crate) fn ensure_local_git_exclude_pinned_for(
 /// the REGISTERED checkout `repo_path` answers, or `None` when it is not inside
 /// a git work tree. The directory must be a real folder, not a link.
 fn registered_git_layout(repo_path: &Path) -> Result<Option<(PathBuf, String)>, String> {
+    // lane-git-allow: asked of the registered checkout, never a lane.
     let output = crate::core::cmd::git_cmd()
         .args([
             "rev-parse",
@@ -1701,6 +1742,7 @@ pub(crate) fn registered_worktree_git_dir(
             "the checkout registers this lane more than once".to_string()
         });
     };
+    // lane-git-allow: asks through the worktree's own pointer on purpose, to refuse a moved one.
     let answer = crate::core::cmd::git_cmd()
         .args(["rev-parse", "--absolute-git-dir"])
         .current_dir(worktree)
@@ -2146,9 +2188,8 @@ pub fn release_review_worktree(
 
 /// Why removing the review checkout at `path` would lose something, if it would.
 fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String> {
-    let on_branch = crate::core::cmd::git_cmd()
+    let on_branch = crate::core::lane_git::git(path)?
         .args(["symbolic-ref", "-q", "HEAD"])
-        .current_dir(path)
         .output()
         .map_err(|e| format!("git symbolic-ref failed: {e}"))?
         .status
@@ -2159,9 +2200,8 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
 
     // `--glob=refs/*`, not `--all`: `--all` also counts this worktree's own
     // HEAD, which would make every commit it holds look reachable.
-    let unreachable = crate::core::cmd::git_cmd()
+    let unreachable = crate::core::lane_git::git(path)?
         .args(["rev-list", "-n", "1", "HEAD", "--not", "--glob=refs/*"])
-        .current_dir(path)
         .output()
         .map_err(|e| format!("git rev-list failed: {e}"))?;
     if !unreachable.status.success() {
@@ -2179,9 +2219,13 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
         ));
     }
 
-    let status = crate::core::cmd::git_cmd()
-        .args(["status", "--porcelain=v1", "--untracked-files=all"])
-        .current_dir(path)
+    let status = crate::core::lane_git::git(path)?
+        .args([
+            "status",
+            "--ignore-submodules=dirty",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ])
         .output()
         .map_err(|e| format!("git status failed: {e}"))?;
     if !status.status.success() {
@@ -2535,9 +2579,8 @@ pub fn remove_discussion_worktree(
 
 /// Read the current HEAD commit SHA of a git dir (repo or worktree).
 fn git_head(dir: &Path) -> Result<String, String> {
-    let out = crate::core::cmd::git_cmd()
+    let out = crate::core::lane_git::git(dir)?
         .args(["rev-parse", "HEAD"])
-        .current_dir(dir)
         .output()
         .map_err(|e| format!("git rev-parse HEAD failed: {e}"))?;
     if !out.status.success() {
@@ -2597,9 +2640,11 @@ pub fn reject_option_like_rev(rev: &str) -> Result<(), String> {
 /// builds on. Returns an error the saga surfaces as a refusal (never a guess).
 pub fn resolve_commit(repo_path: &Path, rev: &str) -> Result<String, String> {
     reject_option_like_rev(rev)?;
-    let out = crate::core::cmd::git_cmd()
+    // A worker's worktree is pinned and its pointer checked (KT-1745): git never
+    // discovers the repository, and so never fetches lazily or runs a program,
+    // from what the worker wrote. The owner's checkout keeps plain git.
+    let out = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?
         .args(["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git rev-parse failed: {e}"))?;
     if !out.status.success() {
@@ -2681,9 +2726,9 @@ pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<Pat
     let path = path
         .canonicalize()
         .map_err(|error| format!("integration target worktree is unavailable: {error}"))?;
-    let head = crate::core::cmd::git_cmd()
+    // The target checkout may be a Kronn-managed worktree: pinned there.
+    let head = crate::core::lane_git::git_keeping_owner_hooks(&path)?
         .args(["symbolic-ref", "--quiet", "HEAD"])
-        .current_dir(&path)
         .output()
         .map_err(|error| format!("cannot verify target checkout branch: {error}"))?;
     if !head.status.success()
@@ -2692,9 +2737,8 @@ pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<Pat
         return Err("integration target checkout changed branch; refusing to mutate it".into());
     }
     let common_dir = |directory: &Path| -> Result<PathBuf, String> {
-        let output = crate::core::cmd::git_cmd()
+        let output = crate::core::lane_git::git_keeping_owner_hooks(directory)?
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(directory)
             .output()
             .map_err(|error| format!("cannot verify target repository: {error}"))?;
         if !output.status.success() {
@@ -2719,6 +2763,10 @@ pub enum CandidateOutcome {
     /// The child branch now descends from the pinned parent tip; the parent can be
     /// fast-forwarded onto `sha`.
     Built { sha: String },
+    /// A hook the project's worker commit policy runs refused the merge commit
+    /// (KT-1745), or could not be run safely. Nothing was committed and the merge
+    /// was undone; this is not a conflict and no file is named.
+    HookRefused { hook: String, output: String },
     /// The child cannot absorb the parent tip without a human decision. Nothing was
     /// left half-merged: the merge is aborted, so the worker keeps a usable worktree.
     Conflict { files: Vec<String> },
@@ -2767,6 +2815,15 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
     build_candidate_detailed(worktree_path, base_sha).map(|build| build.outcome)
 }
 
+/// [`build_candidate_detailed`] under the default worker commit hook policy
+/// (no hook runs).
+pub fn build_candidate_detailed(
+    worktree_path: &Path,
+    base_sha: &str,
+) -> Result<CandidateBuild, String> {
+    build_candidate_with_hooks(worktree_path, base_sha, WorkerCommitHooks::default())
+}
+
 /// A built candidate with what the merge settled or why it bounced (KT-1669).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateBuild {
@@ -2800,33 +2857,59 @@ impl CandidateBuild {
 /// citation line anchors never reaches the worker: the target's side is taken,
 /// the citations are re-anchored onto the merge, and every citation of those
 /// docs must resolve, else the merge is undone and the bounce lists them.
-pub fn build_candidate_detailed(
+///
+/// KT-1745 — the merge runs in the worker's worktree but in Kronn's process, as
+/// the host user: no git command here resolves a hook inside the worktree (a
+/// husky `.husky/_` is worker-written). The merge commit's gating hook runs only
+/// as `hooks` allows, and its refusal is [`CandidateOutcome::HookRefused`], never
+/// an empty conflict.
+pub fn build_candidate_with_hooks(
     worktree_path: &Path,
     base_sha: &str,
+    hooks: WorkerCommitHooks,
 ) -> Result<CandidateBuild, String> {
     reject_option_like_rev(base_sha)?;
     // The merge stops before its commit so the doc citations the two sides
     // shifted are settled into it (KT-1321) and the commit is made once.
-    let out = crate::core::cmd::git_cmd()
+    // A fast-forward does run `post-merge`, hence the hooks override here too.
+    let out = crate::core::lane_git::git(worktree_path)?
         .args(["merge", "--no-edit", "--no-commit", base_sha])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git merge failed: {e}"))?;
     if !crate::core::docs_citations::merge::merge_in_progress(worktree_path) {
         // Fast-forwarded, already up to date, or refused before any merge state.
         if out.status.success() {
-            return settle_branch_docs(worktree_path, base_sha);
+            return settle_branch_docs(worktree_path, base_sha, hooks);
         }
-        return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
-            files: Vec::new(),
-        }));
+        // The merge was refused before it started (a dirty tree, an unrelated
+        // history…): there are no conflicting files to name, so this is not a
+        // `Conflict { files: [] }` the worker can only loop on — what git said
+        // travels as the error.
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        tracing::warn!(
+            "git merge refused in {}: {}",
+            worktree_path.display(),
+            said.trim()
+        );
+        return Err(format!(
+            "git merge of {base_sha} was refused before it started: {}",
+            crate::core::commit_hooks::first_lines(&said)
+        ));
     }
     let conflicted_files = |path: &Path| {
-        crate::core::cmd::git_cmd()
-            .args(["diff", "--name-only", "--diff-filter=U"])
-            .current_dir(path)
-            .output()
+        crate::core::lane_git::git(path)
             .ok()
+            .and_then(|mut git| {
+                git.args([
+                    "diff",
+                    "--ignore-submodules=dirty",
+                    "--name-only",
+                    "--diff-filter=U",
+                    "--no-ext-diff",
+                ])
+                .output()
+                .ok()
+            })
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -2880,30 +2963,43 @@ pub fn build_candidate_detailed(
         abort_merge(worktree_path);
         return Ok(bounce);
     }
-    // Signed only where the project signs off (a DCO repository rejects an
-    // unsigned merge commit; any other does not want the trailer), as the
-    // project's commit identity (KT-1750).
+    // Repositories that enforce DCO reject an unsigned merge commit: the gating
+    // hook runs under the project's policy (KT-1745), and the commit is signed
+    // only where the project signs off, as the project's identity (KT-1750).
+    if let Err(refusal) =
+        crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-merge-commit")
+    {
+        abort_merge(worktree_path);
+        return Ok(CandidateBuild::of(CandidateOutcome::HookRefused {
+            hook: refusal.hook,
+            output: refusal.output,
+        }));
+    }
     let policy = crate::core::commit_policy::CommitPolicy::for_repo(worktree_path);
-    let mut commit = crate::core::cmd::git_cmd();
+    let mut commit = crate::core::lane_git::git(worktree_path)?;
     commit.arg("commit");
     if policy.signoff {
         commit.arg("--signoff");
     }
-    commit.arg("--cleanup=strip");
+    commit.args(["--no-gpg-sign", "--cleanup=strip"]);
     policy.apply_identity(&mut commit, false);
     match docs.as_ref().and_then(|docs| docs.summary()) {
         Some(note) => commit.args(["-m", &merge_subject(worktree_path, base_sha), "-m", &note]),
         None => commit.arg("--no-edit"),
     };
     let committed = commit
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git commit failed: {e}"))?;
     if !committed.status.success() {
+        // Not a conflict: the tree merged cleanly, and no hook ran in this git
+        // command. Say what git printed rather than hand the worker an empty
+        // conflict it can only loop on.
+        let stderr = String::from_utf8_lossy(&committed.stderr).into_owned();
         abort_merge(worktree_path);
-        return Ok(CandidateBuild::of(CandidateOutcome::Conflict {
-            files: Vec::new(),
-        }));
+        return Err(format!(
+            "cannot commit the candidate merge: {}",
+            crate::core::commit_hooks::first_lines(&stderr)
+        ));
     }
     Ok(CandidateBuild {
         outcome: CandidateOutcome::Built {
@@ -2947,7 +3043,11 @@ fn unresolved_bounce(worktree_path: &Path, target: &str) -> Option<CandidateBuil
 /// merged by its worker): no merge commit carries the re-anchoring, so the
 /// citations the branch's own code shift moved are re-anchored into a commit of
 /// their own, under the same rules as a merge (KT-1669).
-fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateBuild, String> {
+fn settle_branch_docs(
+    worktree_path: &Path,
+    base_sha: &str,
+    hooks: WorkerCommitHooks,
+) -> Result<CandidateBuild, String> {
     use crate::core::docs_citations::merge::{self, SettleError};
     let head = git_head(worktree_path)?;
     if head == base_sha {
@@ -2983,8 +3083,21 @@ fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateB
     }
     let settled = docs.as_ref().and_then(|docs| docs.settlement());
     if let Some(note) = docs.as_ref().and_then(|docs| docs.summary()) {
+        if let Err(refusal) =
+            crate::core::commit_hooks::run_gating_hook(worktree_path, hooks, "pre-commit")
+        {
+            if let Some(docs) = &docs {
+                if let Err(error) = merge::undo_staged(worktree_path, docs) {
+                    tracing::warn!("re-anchored docs not restored: {error}");
+                }
+            }
+            return Ok(CandidateBuild::of(CandidateOutcome::HookRefused {
+                hook: refusal.hook,
+                output: refusal.output,
+            }));
+        }
         let policy = crate::core::commit_policy::CommitPolicy::for_repo(worktree_path);
-        let mut commit = crate::core::cmd::git_cmd();
+        let mut commit = crate::core::lane_git::git(worktree_path)?;
         commit.arg("commit");
         if policy.signoff {
             commit.arg("--signoff");
@@ -2992,13 +3105,13 @@ fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateB
         policy.apply_identity(&mut commit, false);
         let committed = commit
             .args([
+                "--no-gpg-sign",
                 "--cleanup=strip",
                 "-m",
                 "Re-anchor doc citations moved by the branch's code",
                 "-m",
                 &note,
             ])
-            .current_dir(worktree_path)
             .output()
             .map_err(|e| format!("git commit failed: {e}"))?;
         if !committed.status.success() {
@@ -3017,20 +3130,23 @@ fn settle_branch_docs(worktree_path: &Path, base_sha: &str) -> Result<CandidateB
     })
 }
 
+/// Undo the merge in progress. Runs through the lane builder: `git merge --abort`
+/// fires `reference-transaction`, and a hook of the worktree is the worker's.
 fn abort_merge(worktree_path: &Path) {
-    let _ = crate::core::cmd::git_cmd()
-        .args(["merge", "--abort"])
-        .current_dir(worktree_path)
-        .output();
+    if let Ok(mut git) = crate::core::lane_git::git(worktree_path) {
+        let _ = git.args(["merge", "--abort"]).output();
+    }
 }
 
 /// The subject git prepared for the merge in progress.
 fn merge_subject(worktree_path: &Path, base_sha: &str) -> String {
-    let prepared = crate::core::cmd::git_cmd()
-        .args(["rev-parse", "--git-path", "MERGE_MSG"])
-        .current_dir(worktree_path)
-        .output()
+    let prepared = crate::core::lane_git::git(worktree_path)
         .ok()
+        .and_then(|mut git| {
+            git.args(["rev-parse", "--git-path", "MERGE_MSG"])
+                .output()
+                .ok()
+        })
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|path| worktree_path.join(path.trim()))
         .and_then(|path| std::fs::read_to_string(path).ok())
@@ -3046,9 +3162,11 @@ fn merge_subject(worktree_path: &Path, base_sha: &str) -> String {
 /// candidate can therefore never be forced over work that landed meanwhile.
 pub fn fast_forward_to(repo_path: &Path, candidate_sha: &str) -> Result<String, String> {
     reject_option_like_rev(candidate_sha)?;
-    let out = crate::core::cmd::git_cmd()
+    // The target checkout may itself be a Kronn-managed worktree (a branch a task
+    // worker also writes): there it is the pinned, hook-less lane command; in the
+    // owner's own checkout their hooks keep running.
+    let out = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?
         .args(["merge", "--ff-only", candidate_sha])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git merge --ff-only failed: {e}"))?;
     if !out.status.success() {
@@ -3462,9 +3580,8 @@ pub fn fast_forward_target_to(
 pub fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
     reject_option_like_rev(ancestor)?;
     reject_option_like_rev(descendant)?;
-    let out = crate::core::cmd::git_cmd()
+    let out = crate::core::lane_git::git_keeping_owner_hooks(repo_path)?
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git merge-base failed: {e}"))?;
     match out.status.code() {
@@ -3496,9 +3613,11 @@ fn task_submodule_head(path: &Path) -> Result<Option<String>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let top_level = crate::core::cmd::git_cmd()
+    // The closest repository from `path`, pinned when it is (or is inside) a
+    // managed worktree: a submodule is its own repository, an empty placeholder
+    // is the parent worktree's directory.
+    let top_level = crate::core::lane_git::git_keeping_owner_hooks(path)?
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(path)
         .output()
         .map_err(|error| format!("cannot inspect task submodule {}: {error}", path.display()))?;
     let is_root = top_level.status.success()
@@ -4041,10 +4160,9 @@ pub const RELEASED_WORKTREE_STAGED_PATCH: &str = "staged-changes.patch";
 pub const RELEASED_WORKTREE_PATCH_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
 fn run_git_in_index(wt: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(wt)?
         .args(args)
         .env("GIT_INDEX_FILE", index)
-        .current_dir(wt)
         .output()
         .map_err(|e| format!("git {} failed: {e}", args.join(" ")))?;
     if !output.status.success() {
@@ -4061,7 +4179,7 @@ fn run_git_in_index(wt: &Path, index: &Path, args: &[&str]) -> Result<Vec<u8>, S
 /// files of `wt` is known to exceed `cap`. Measured from file sizes before
 /// anything is staged, so an oversized tree is refused without copying a byte.
 fn uncommitted_content_over(wt: &Path, cap: u64) -> Result<Option<u64>, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(wt)?
         .args([
             "ls-files",
             "-z",
@@ -4069,7 +4187,6 @@ fn uncommitted_content_over(wt: &Path, cap: u64) -> Result<Option<u64>, String> 
             "--others",
             "--exclude-standard",
         ])
-        .current_dir(wt)
         .output()
         .map_err(|e| format!("git ls-files failed: {e}"))?;
     if !output.status.success() {
@@ -4110,9 +4227,8 @@ fn write_capped_git_patch(
     cap: u64,
 ) -> Result<Option<u64>, String> {
     use std::io::Read;
-    let mut child = crate::core::cmd::git_cmd()
+    let mut child = crate::core::lane_git::git(wt)?
         .args(args)
-        .current_dir(wt)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -4158,9 +4274,8 @@ fn write_capped_git_patch(
 
 /// The real index of `wt`, as a path.
 fn worktree_index_path(wt: &Path) -> Result<PathBuf, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(wt)?
         .args(["rev-parse", "--git-path", "index"])
-        .current_dir(wt)
         .output()
         .map_err(|e| format!("git rev-parse failed: {e}"))?;
     if !output.status.success() {
@@ -4215,8 +4330,10 @@ fn write_uncommitted_patches(
     let diff = |from: &str, to: &str| {
         vec![
             "diff".to_string(),
+            "--ignore-submodules=dirty".to_string(),
             "--binary".to_string(),
             "--no-ext-diff".to_string(),
+            "--no-textconv".to_string(),
             from.to_string(),
             to.to_string(),
         ]
@@ -4580,9 +4697,10 @@ fn parse_porcelain(stdout: &str) -> Vec<DirtyFile> {
 /// dirty, unlocking it would lose the changes. We surface the list so the UI
 /// can block with a "commit first" CTA rather than a blind refusal.
 pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(["status", "--porcelain=v1"])
-        .current_dir(worktree_path)
+    // `--ignore-submodules=dirty` on the command line: a `.gitmodules` the worker
+    // wrote (`ignore = none`) must not make git run `status` inside a submodule.
+    let output = crate::core::lane_git::git(worktree_path)?
+        .args(["status", "--ignore-submodules=dirty", "--porcelain=v1"])
         .output()
         .map_err(|e| format!("git status failed in worktree: {}", e))?;
     if !output.status.success() {
@@ -4640,9 +4758,11 @@ pub fn committed_file_changes(
     base_rev: &str,
     head_rev: &str,
 ) -> Result<Vec<CommittedFileChange>, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(worktree_path)?
         .args([
             "diff",
+            "--no-ext-diff",
+            "--no-textconv",
             "--name-status",
             "--no-renames",
             "-z",
@@ -4650,7 +4770,6 @@ pub fn committed_file_changes(
             head_rev,
             "--",
         ])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git diff failed in worktree: {e}"))?;
     if !output.status.success() {
@@ -4715,9 +4834,8 @@ pub(crate) fn parse_commit_log(stdout: &[u8]) -> Vec<(String, String)> {
 /// Raw bytes of `path` as committed at `rev`.
 pub fn file_at_revision(worktree_path: &Path, rev: &str, path: &str) -> Result<Vec<u8>, String> {
     reject_option_like_rev(rev)?;
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(worktree_path)?
         .args(["cat-file", "blob", &format!("{rev}:{path}")])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git cat-file failed in worktree: {e}"))?;
     if !output.status.success() {
@@ -4731,9 +4849,8 @@ pub fn file_at_revision(worktree_path: &Path, rev: &str, path: &str) -> Result<V
 
 /// The `Name <email>` that `git commit -s` signs with in this worktree.
 pub fn committer_identity(worktree_path: &Path) -> Result<String, String> {
-    let output = crate::core::cmd::git_cmd()
+    let output = crate::core::lane_git::git(worktree_path)?
         .args(["var", "GIT_COMMITTER_IDENT"])
-        .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git var failed in worktree: {e}"))?;
     if !output.status.success() {
@@ -6397,6 +6514,11 @@ mod tests {
             .is_empty());
     }
 
+    /// A real path git accepts: no `\\?\` prefix on Windows.
+    fn for_git(path: &Path) -> PathBuf {
+        crate::core::lane_git::without_verbatim_prefix(path.canonicalize().unwrap())
+    }
+
     fn add_worktree(repo: &Path, path: &Path, branch: &str) {
         assert!(crate::core::cmd::git_cmd()
             .args(["worktree", "add"])
@@ -6465,7 +6587,7 @@ mod tests {
     fn integration_target_accepts_autocode_and_registered_worktrees_only() {
         let repo = make_test_repo("target-autocode");
         let kronn_home = tempfile::tempdir().unwrap();
-        let kronn_home_path = kronn_home.path().canonicalize().unwrap();
+        let kronn_home_path = for_git(kronn_home.path());
         let roots = managed_worktree_roots(repo.path(), Some(&kronn_home_path), &[]);
         let ownership = |branch: &str, registered: &dyn Fn(&Path) -> bool| {
             integration_target_ownership_in(repo.path(), branch, &roots, registered).unwrap()
@@ -6482,7 +6604,7 @@ mod tests {
 
         // A root the operator declared as managed makes its worktrees Kronn's too.
         let extra = tempfile::tempdir().unwrap();
-        let extra_path = extra.path().canonicalize().unwrap();
+        let extra_path = for_git(extra.path());
         make_branch(repo.path(), "feat/extra");
         add_worktree(repo.path(), &extra_path.join("wt"), "feat/extra");
         assert!(matches!(
@@ -6509,7 +6631,7 @@ mod tests {
         // An unknown worktree outside every root is refused...
         let outside = tempfile::tempdir().unwrap();
         make_branch(repo.path(), "feat/foreign");
-        let foreign = outside.path().canonicalize().unwrap().join("wt");
+        let foreign = for_git(outside.path()).join("wt");
         add_worktree(repo.path(), &foreign, "feat/foreign");
         let refusal = ownership("feat/foreign", &|_| false).unwrap_err();
         assert_eq!(refusal.code(), "integration_target_foreign_worktree");
@@ -6528,20 +6650,20 @@ mod tests {
 
     #[test]
     fn managed_roots_ignore_relative_extras_and_a_missing_home() {
-        let repo = Path::new("/repo");
-        let roots = managed_worktree_roots(repo, None, &[PathBuf::from("relative/root")]);
+        // Absolute on every platform: `/srv` has no drive on Windows.
+        let base = std::env::temp_dir();
+        let repo = base.join("repo");
+        let roots = managed_worktree_roots(&repo, None, &[PathBuf::from("relative/root")]);
         assert_eq!(roots, vec![repo.join(".kronn/worktrees")]);
-        let roots = managed_worktree_roots(
-            repo,
-            Some(Path::new("/home/u/.kronn")),
-            &[PathBuf::from("/srv/lanes")],
-        );
+        let home = base.join("home").join(".kronn");
+        let lanes = base.join("srv").join("lanes");
+        let roots = managed_worktree_roots(&repo, Some(&home), std::slice::from_ref(&lanes));
         assert_eq!(
             roots,
             vec![
                 repo.join(".kronn/worktrees"),
-                PathBuf::from("/home/u/.kronn/autocode-worktrees"),
-                PathBuf::from("/srv/lanes"),
+                home.join("autocode-worktrees"),
+                lanes,
             ]
         );
     }
@@ -6556,7 +6678,7 @@ mod tests {
         make_branch(repo.path(), "elsewhere");
         let owned = worktree_base_dir(repo.path());
         fs::create_dir_all(&owned).unwrap();
-        let held = owned.canonicalize().unwrap().join("integ");
+        let held = for_git(&owned).join("integ");
         add_worktree(repo.path(), &held, "integ");
 
         let busy = integration_target_idle(repo.path(), "integ", &|path| {
@@ -6889,7 +7011,7 @@ mod tests {
     /// write, right after an agent. A `.git/info` folder or an `exclude` file
     /// swapped for a link never makes Kronn create or append outside the
     /// git directory.
-    #[cfg(unix)]
+    #[cfg(unix)] // the swap probe plants a symlink through std::os::unix
     #[test]
     fn the_local_exclude_is_never_updated_through_a_swapped_info_folder() {
         use crate::core::fs_guard::swap_probe;
@@ -6911,7 +7033,7 @@ mod tests {
         assert_eq!(fs::read_dir(external.path()).unwrap().count(), 1);
     }
 
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn the_local_exclude_refuses_a_linked_info_folder_and_a_linked_exclude_file() {
         let repo = make_test_repo("exclude-link");
@@ -6941,7 +7063,6 @@ mod tests {
     /// `.git/commondir` that names another repository's git directory makes
     /// `rev-parse --git-path info/exclude` point there. The pinned writer
     /// refuses; nothing is created or appended in the other repository.
-    #[cfg(unix)]
     #[test]
     fn the_pinned_exclude_refuses_a_planted_commondir() {
         let repo = make_test_repo("exclude-commondir");
@@ -6976,7 +7097,6 @@ mod tests {
 
     /// KT-1595 (N3) — the same for a `.git` FILE whose `gitdir:` the agent
     /// rewrote (the form of a linked worktree or a submodule).
-    #[cfg(unix)]
     #[test]
     fn the_pinned_exclude_refuses_a_gitdir_pointer_file() {
         let repo = make_test_repo("exclude-gitdir");
@@ -7003,7 +7123,7 @@ mod tests {
 
     /// KT-1595 (N3) — a `.git` that is itself a link to another repository is
     /// refused (the rooted walk never follows it, and neither does the lstat).
-    #[cfg(unix)]
+    #[cfg(unix)] // creates symlinks through std::os::unix
     #[test]
     fn the_pinned_exclude_refuses_a_git_directory_that_is_a_link() {
         let repo = make_test_repo("exclude-gitlink");

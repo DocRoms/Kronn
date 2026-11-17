@@ -396,10 +396,11 @@ async fn a_fallback_that_fails_too_moves_on_to_the_next_link_with_the_same_tier(
                 "UPDATE agent_dispatch_jobs SET status = 'Running' WHERE id = 'job-1'",
                 [],
             )?;
-            Ok(crate::db::agent_dispatch::get(conn, "job-1")?.unwrap())
+            crate::db::agent_dispatch::get(conn, "job-1")
         })
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the dispatch is still there");
     assert_eq!(second.agent_override, Some(AgentType::Codex));
     assert!(
         intercept_failed_turn_among(

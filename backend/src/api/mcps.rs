@@ -1951,7 +1951,7 @@ pub async fn refresh(
                     // Try to match against registry by command+args
                     let registry_match = match_registry_entry(entry, &reg);
 
-                    let (server_id, server_name, description, source, server_transport) =
+                    let (server_id, server_name, description, source, server_transport, api_spec) =
                         if let Some(def) = registry_match {
                             (
                                 def.id.clone(),
@@ -1959,6 +1959,7 @@ pub async fn refresh(
                                 def.description.clone(),
                                 McpSource::Registry,
                                 def.transport.clone(),
+                                def.api_spec.clone(),
                             )
                         } else {
                             let desc = if let Some(cmd) = &entry.command {
@@ -1980,19 +1981,20 @@ pub async fn refresh(
                                 desc,
                                 McpSource::Detected,
                                 transport.clone(),
+                                None,
                             )
                         };
 
-                    // `.mcp.json` detection never surfaces API-only plugins —
-                    // they live exclusively in the Kronn catalog, not on disk —
-                    // so api_spec is always None on this path.
+                    // A registry match keeps its spec: a hybrid plugin (GitHub,
+                    // Atlassian) is in `.mcp.json` AND has a REST API. Only a
+                    // `detected:*` server has none.
                     let server = McpServer {
                         id: server_id.clone(),
                         name: server_name,
                         description,
                         transport: server_transport,
                         source,
-                        api_spec: None,
+                        api_spec,
                     };
                     db::mcps::upsert_server(&tx, &server)?;
 

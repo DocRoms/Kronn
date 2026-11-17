@@ -24,11 +24,11 @@ itself is stopped.
 - A project's validations reach is a human setting, in the project's settings:
   sandbox only (default), Docker allowed (the sandbox plus the resolved Docker
   socket, nothing else), or full access (no sandbox, behind a warning).
-  [src: file: backend/src/models/projects.rs:128-136#ValidationsAccess]
+  [src: file: backend/src/models/projects.rs:166-174#ValidationsAccess]
 - The socket comes from `DOCKER_HOST` (Unix only), then `docker context
   inspect`, then the known OrbStack, Docker Desktop, Colima and `/var/run`
   paths. A TCP endpoint is refused.
-  [src: file: backend/src/core/task_worker_sandbox.rs:487-503#host_docker_socket]
+  [src: file: backend/src/core/task_worker_sandbox.rs:628-644#host_docker_socket]
 
 The Docker socket carries the host's rights: allow it only for a project whose
 validations you trust.

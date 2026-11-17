@@ -15,7 +15,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-use crate::models::{AgentType, TaskExecutionStatus};
+use crate::models::{AgentType, TaskExecutionStatus, WorkerCommitHooks};
 
 /// How long before the limit the first warning (`Near`) is due.
 const NEAR_LEAD: Duration = Duration::from_secs(30 * 60);
@@ -164,9 +164,16 @@ fn checkpoint_message(reference: &str, files: usize, elapsed: Duration, limit: D
 }
 
 fn diff_patch(root: &Path) -> Option<(String, bool)> {
-    let output = crate::core::cmd::git_cmd()
-        .args(["diff", "HEAD", "--binary"])
-        .current_dir(root)
+    let output = crate::core::lane_git::git(root)
+        .ok()?
+        .args([
+            "diff",
+            "--ignore-submodules=dirty",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+            "--binary",
+        ])
         .output()
         .ok()
         .filter(|output| output.status.success())?;
@@ -187,6 +194,26 @@ pub fn checkpoint_worktree(
     limit: Duration,
     data_dir_lock: Option<&std::fs::File>,
 ) -> Result<Option<Checkpoint>, String> {
+    checkpoint_worktree_with_hooks(
+        root,
+        reference,
+        elapsed,
+        limit,
+        data_dir_lock,
+        WorkerCommitHooks::default(),
+    )
+}
+
+/// [`checkpoint_worktree`] under the project's worker commit hook policy
+/// (KT-1745).
+pub fn checkpoint_worktree_with_hooks(
+    root: &Path,
+    reference: &str,
+    elapsed: Duration,
+    limit: Duration,
+    data_dir_lock: Option<&std::fs::File>,
+    hooks: WorkerCommitHooks,
+) -> Result<Option<Checkpoint>, String> {
     let dirty = crate::core::worktree::worktree_dirty_files(root)?;
     if dirty.is_empty() {
         return Ok(None);
@@ -196,13 +223,14 @@ pub fn checkpoint_worktree(
     let committed = if crate::api::git_ops::merge_in_progress(root) {
         Err("a merge is in progress in the worktree".to_string())
     } else {
-        crate::api::git_ops::run_git_commit_with_child_lock(
+        crate::api::git_ops::run_git_commit_for_worker(
             root,
             &files,
             &message,
             false,
             false,
             data_dir_lock,
+            hooks,
         )
     };
     Ok(Some(match committed {
@@ -313,9 +341,15 @@ pub async fn checkpoint_stopped_worker(
             else {
                 return Ok(None);
             };
-            let root =
-                crate::db::discussion_workspaces::get_managed_for_execution(conn, &execution.id)?
-                    .and_then(|workspace| workspace.canonical_path);
+            let workspace =
+                crate::db::discussion_workspaces::get_managed_for_execution(conn, &execution.id)?;
+            let hooks = crate::db::projects::worker_commit_hooks(
+                conn,
+                workspace
+                    .as_ref()
+                    .map(|workspace| workspace.project_id.as_str()),
+            );
+            let root = workspace.and_then(|workspace| workspace.canonical_path);
             let task_number: i64 = conn.query_row(
                 "SELECT t.task_number FROM task_executions e \
                  JOIN planning_tasks t ON t.id = e.task_id WHERE e.id = ?1",
@@ -323,10 +357,10 @@ pub async fn checkpoint_stopped_worker(
                 |row| row.get(0),
             )?;
             let reference = format!("KT-{task_number}");
-            Ok(Some((root, reference)))
+            Ok(Some((root, reference, hooks)))
         })
         .await;
-    let (root, reference) = match lookup {
+    let (root, reference, hooks) = match lookup {
         Ok(Some(found)) => found,
         Ok(None) => return,
         Err(error) => {
@@ -341,12 +375,13 @@ pub async fn checkpoint_stopped_worker(
         Some(root) => {
             let lock = state.data_dir_lock.clone();
             let outcome = tokio::task::spawn_blocking(move || {
-                checkpoint_worktree(
+                checkpoint_worktree_with_hooks(
                     Path::new(&root),
                     &reference,
                     elapsed,
                     limit,
                     lock.as_deref(),
+                    hooks,
                 )
             })
             .await;

@@ -35,6 +35,8 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::models::WorkerCommitHooks;
+
 /// Cap on a fetched body and on a file read. Large enough for a page or a source
 /// file, small enough that one tool call cannot blow the model's window.
 const MAX_BYTES: usize = 256 * 1024;
@@ -223,6 +225,8 @@ pub enum Refusal {
     PrivateAddress(String),
     /// The path leaves the workspace once canonicalised.
     OutsideWorkspace(String),
+    /// The path is the worktree's `.git` pointer, which a worker never writes.
+    ProtectedGitPointer(String),
     /// The discussion has no declared workspace, so there is nothing to scope to.
     NoWorkspace,
 }
@@ -243,6 +247,10 @@ impl Refusal {
                 "refused: `{path}` is outside this discussion's workspace. \
                  Paths are relative to the workspace root; `..` and absolute \
                  paths cannot leave it."
+            ),
+            Refusal::ProtectedGitPointer(path) => format!(
+                "refused: `{path}` is the repository pointer of this worktree. Kronn runs git \
+                 in it for you (task_exec_commit, git_commit…); it is never written by a worker."
             ),
             Refusal::NoWorkspace => "refused: this discussion is not attached to any \
                  directory — it has no project and no workspace — so there is nothing to \
@@ -418,6 +426,35 @@ pub fn resolve_in_workspace(root: &Path, requested: &str) -> Result<PathBuf, Ref
     Ok(target)
 }
 
+/// [`resolve_in_workspace`] for a path the model is about to WRITE: the `.git`
+/// pointer of a worktree is also refused (KT-1745). Kronn's own git commands in
+/// that worktree trust what it names, so a worker that redirected it would pick
+/// the repository, and the programs its configuration names, Kronn runs. A
+/// symlink to it is refused as the file itself.
+pub fn resolve_writable_in_workspace(root: &Path, requested: &str) -> Result<PathBuf, Refusal> {
+    let target = resolve_in_workspace(root, requested)?;
+    let root_canonical = root.canonicalize().map_err(|_| Refusal::NoWorkspace)?;
+    let resolved = crate::core::task_worker_sandbox::real_path(&target);
+    // The pointer, and every nested repository's `.git` (a submodule's
+    // configuration is read by commands that look inside it). Compared without
+    // regard to case, explicitly: a case-insensitive volume names the same
+    // directory `.GIT`, and the resolved path of a not-yet-existing file is not
+    // normalised by the file system.
+    let names_a_git_entry = |path: &Path| {
+        path.strip_prefix(&root_canonical)
+            .unwrap_or(path)
+            .components()
+            .any(|component| {
+                matches!(component, Component::Normal(name)
+                    if name.to_string_lossy().eq_ignore_ascii_case(".git"))
+            })
+    };
+    if names_a_git_entry(&resolved) || names_a_git_entry(&target) {
+        return Err(Refusal::ProtectedGitPointer(requested.to_string()));
+    }
+    Ok(target)
+}
+
 /// Cap on a diff or a log payload. A full diff of a large branch would blow the
 /// model's window and be useless; truncation is reported so a partial diff is
 /// never mistaken for the whole change.
@@ -432,9 +469,17 @@ const MAX_GIT_BYTES: usize = 192 * 1024;
 /// agent actually needs to review work. The separate commit primitive below is
 /// narrower still: named paths only, after durable execution authorisation.
 fn git_read(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = crate::core::cmd::git_cmd()
-        .args(args)
-        .current_dir(root)
+    // KT-1745 — the repository is the registered one, never what the worktree's
+    // `.git` file says; a diff runs no external program.
+    let mut command = crate::core::lane_git::git(root)?;
+    if let Some((subcommand, rest)) = args.split_first() {
+        command
+            .arg(subcommand)
+            .args(crate::core::lane_git::no_external_diff(subcommand))
+            .args(crate::core::lane_git::ignore_submodules(root, subcommand))
+            .args(rest);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("git could not run: {error}"))?;
     if !output.status.success() {
@@ -618,6 +663,25 @@ pub fn git_commit_payload_with_data_dir_lock(
     message: &str,
     data_dir_lock: Option<&std::fs::File>,
 ) -> Result<Value, String> {
+    git_commit_payload_with_hooks(
+        root,
+        files,
+        message,
+        data_dir_lock,
+        WorkerCommitHooks::default(),
+    )
+}
+
+/// [`git_commit_payload_with_data_dir_lock`] under the project's worker commit
+/// hook policy (KT-1745): no hook of the worktree is ever run by git here, and
+/// the `pre-commit` hook runs only as `hooks` allows.
+pub fn git_commit_payload_with_hooks(
+    root: &Path,
+    files: &[String],
+    message: &str,
+    data_dir_lock: Option<&std::fs::File>,
+    hooks: WorkerCommitHooks,
+) -> Result<Value, String> {
     let (message, removed_trailers) = strip_identity_trailers(message);
     let message = message.as_str();
     if message.is_empty() {
@@ -657,21 +721,23 @@ pub fn git_commit_payload_with_data_dir_lock(
     // merge with both parents rather than leave the worker to erase MERGE_HEAD.
     let finishing_merge = crate::api::git_ops::merge_in_progress(&canonical_root);
     let committed = if finishing_merge {
-        crate::api::git_ops::run_git_merge_commit_with_child_lock(
+        crate::api::git_ops::run_git_merge_commit_for_worker(
             &canonical_root,
             &normalized,
             message,
             false,
             data_dir_lock,
+            hooks,
         )?
     } else {
-        crate::api::git_ops::run_git_commit_with_child_lock(
+        crate::api::git_ops::run_git_commit_for_worker(
             &canonical_root,
             &normalized,
             message,
             false,
             false,
             data_dir_lock,
+            hooks,
         )?
     };
     let mut payload = json!({
@@ -713,10 +779,31 @@ pub fn git_commit_payload_reanchoring_docs(
     data_dir_lock: Option<&std::fs::File>,
     base: Option<&str>,
 ) -> Result<Value, String> {
-    let mut payload = git_commit_payload_with_data_dir_lock(root, files, message, data_dir_lock)?;
+    git_commit_payload_reanchoring_docs_with_hooks(
+        root,
+        files,
+        message,
+        data_dir_lock,
+        base,
+        WorkerCommitHooks::default(),
+    )
+}
+
+/// [`git_commit_payload_reanchoring_docs`] under the project's worker commit hook
+/// policy (KT-1745). A hook that refuses is reported as `HookRefused` with its
+/// first lines (the error string starts with `HookRefused`).
+pub fn git_commit_payload_reanchoring_docs_with_hooks(
+    root: &Path,
+    files: &[String],
+    message: &str,
+    data_dir_lock: Option<&std::fs::File>,
+    base: Option<&str>,
+    hooks: WorkerCommitHooks,
+) -> Result<Value, String> {
+    let mut payload = git_commit_payload_with_hooks(root, files, message, data_dir_lock, hooks)?;
     let base = base.map(str::trim).filter(|base| !base.is_empty());
     if let (Some(base), None) = (base, payload.get("merge_commit")) {
-        if let Some(report) = reanchor_docs_after_commit(root, base, data_dir_lock) {
+        if let Some(report) = reanchor_docs_after_commit(root, base, data_dir_lock, hooks) {
             payload["doc_citations"] = report;
         }
     }
@@ -730,6 +817,7 @@ fn reanchor_docs_after_commit(
     root: &Path,
     base: &str,
     data_dir_lock: Option<&std::fs::File>,
+    hooks: WorkerCommitHooks,
 ) -> Option<Value> {
     use crate::core::docs_citations::merge::{self, SettleError};
     let mut report = serde_json::Map::new();
@@ -743,13 +831,14 @@ fn reanchor_docs_after_commit(
             if !touched.is_empty() {
                 let note = docs.summary().unwrap_or_default();
                 let subject = "Re-anchor doc citations moved by the worker's code";
-                match crate::api::git_ops::run_git_commit_with_child_lock(
+                match crate::api::git_ops::run_git_commit_for_worker(
                     root,
                     &touched,
                     &format!("{subject}\n\n{note}"),
                     false,
                     false,
                     data_dir_lock,
+                    hooks,
                 ) {
                     Ok(committed) => {
                         report.insert(
@@ -1483,7 +1572,8 @@ pub fn write_file_payload_with_receipt(
     content: &str,
     expected_sha256: Option<&str>,
 ) -> Result<Value, String> {
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     validate_proposed_source(&path, requested, content)?;
     if agent_workspace_structure::is_guarded(&path) {
         if let Ok(original) = std::fs::read_to_string(&path) {
@@ -1501,7 +1591,8 @@ fn write_file_payload_inner(
     content: &str,
     expected_sha256: Option<&str>,
 ) -> Result<Value, String> {
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("could not create `{}`: {error}", parent.display()))?;
@@ -1626,7 +1717,8 @@ pub fn edit_file_payload(
     if old_string == new_string {
         return Err("`old_string` and `new_string` are identical — nothing would change.".into());
     }
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     if !sha256_receipt_is_well_formed(expected_sha256) {
         return Err(invalid_sha256_receipt_message());
     }
@@ -1754,7 +1846,8 @@ pub fn edit_lines_payload(
     if !sha256_receipt_is_well_formed(expected_sha256) {
         return Err(invalid_sha256_receipt_message());
     }
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1872,7 +1965,8 @@ pub fn insert_after_line_payload(
     if !sha256_receipt_is_well_formed(expected_sha256) {
         return Err(invalid_sha256_receipt_message());
     }
-    let path = resolve_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
+    let path =
+        resolve_writable_in_workspace(root, requested).map_err(|refusal| refusal.message())?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

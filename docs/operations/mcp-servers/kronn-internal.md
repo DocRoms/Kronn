@@ -763,7 +763,7 @@ of the same provider remain distinguishable in the audit trail.
 `[src: file: backend/scripts/disc-introspection-mcp.py:5903-5912#_task_exec_principal]`
 `[src: file: backend/src/api/orchestration.rs:15489-15499#principal_cli_is_authorized]`
 `[src: file: backend/src/api/orchestration.rs:15539-15577#room_agent_is_authorized]`
-`[src: file: backend/src/api/agent_tools.rs:4126-4162#native_execution_for_caller]`
+`[src: file: backend/src/api/agent_tools.rs:4136-4172#native_execution_for_caller]`
 `[src: file: backend/src/db/sql/136_planning_actor_session.sql:1-5#actor_session_id]`
 
 For a native HTTP worker, the execution id is also server-derived. The executor
@@ -773,7 +773,7 @@ worker schema contains no execution-id field; if a client nevertheless injects
 one, it has no influence. The regression test uses two real concurrent
 executions and forges B's valid id in worker A's call to prove that A remains
 the only target.
-`[src: file: backend/src/api/agent_tools.rs:4164-4186#native_worker_execution_for_trusted_dispatch]`
+`[src: file: backend/src/api/agent_tools.rs:4174-4196#native_worker_execution_for_trusted_dispatch]`
 `[src: file: backend/src/api_tests.rs:7140-7279#worker_delivery_ignores_a_forged_valid_execution_id_and_uses_its_dispatch]`
 
 Accepting a CLI worker control offer (`task_exec_accept_worker_offer`) crosses
@@ -873,7 +873,7 @@ the MCP entry's `env_vars`. Kronn writes a narrow `KRONN_*` allowlist into the
 global Codex config and repeats it as a per-run `-c` override, so the dynamic
 discussion/task capability reaches that run immediately without rewriting
 shared config or leaking unrelated host variables.
-`[src: file: backend/src/agents/runner.rs:13833-13883#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2827-2855#KRONN_INTERNAL_CODEX_ENV_VARS]`
+`[src: file: backend/src/agents/runner.rs:13870-13920#claude_task_worker_mcp_config]` `[src: file: backend/src/agents/runner.rs:2827-2855#KRONN_INTERNAL_CODEX_ENV_VARS]`
 `[src: file: backend/src/api/discussions/streaming.rs:148-233#cli_task_worker_context]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:5917-5949#_spawned_task_worker_context]` `[src: file: backend/scripts/disc-introspection-mcp.py:5949-5962#_spawned_task_worker_mode]`
 
@@ -887,7 +887,7 @@ push option. Project-scoped Workflow Agent steps do not receive it. This keeps a
 local Ollama/LiteLLM/NVIDIA worker capable of producing the clean committed HEAD
 required by `task_exec_deliver` without turning the HTTP tool catalogue into
 arbitrary Git access.
-`[src: file: backend/src/api/agent_workspace_tools.rs:567-574#git_commit_payload] [src: file: backend/src/api/agent_workspace_tools.rs:615-692#git_commit_payload_with_data_dir_lock]`
+`[src: file: backend/src/api/agent_workspace_tools.rs:611-618#git_commit_payload] [src: file: backend/src/api/agent_workspace_tools.rs:659-736#git_commit_payload_with_data_dir_lock]`
 `[src: file: backend/src/api/agent_tools.rs:3706-3778#git_commit]` `[src: file: backend/src/api/agent_tools.rs:1580-1591#DISCUSSION_ONLY]`
 `[src: file: backend/src/db/orchestration.rs:1215-1247#managed_working_execution_for_workspace]`
 

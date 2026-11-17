@@ -19727,7 +19727,7 @@ async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
         .await
         .unwrap();
 
-    let app = build_router_with_auth(state, false);
+    let app = build_router_with_auth(state.clone(), false);
     let (status, refreshed) = post_json(app, "/api/mcps/refresh", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "refresh failed: {refreshed:?}");
     assert_eq!(refreshed["success"], true, "{refreshed:?}");
@@ -19746,6 +19746,22 @@ async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
     assert_eq!(
         detected["host_sync"], "None",
         "a config detected from a project's own .mcp.json must not be opted into host sync"
+    );
+
+    // GitHub #559: GitHub is an MCP server AND a REST API; matching it from
+    // `.mcp.json` must keep the registry's api_spec, or every ApiCall fails.
+    let servers = state
+        .db
+        .with_conn(kronn::db::mcps::list_servers)
+        .await
+        .unwrap();
+    let github = servers
+        .iter()
+        .find(|server| server.id == "mcp-github")
+        .expect("mcp-github server");
+    assert!(
+        github.api_spec.is_some(),
+        "the refresh erased the api_spec of mcp-github"
     );
 }
 

@@ -5252,7 +5252,7 @@ fn write_reconciliation_report(
 
 /// The reconciliation report is written by the audit pipeline itself, so these
 /// tests are not behind `full-tests`: they are the caller-level swap guarantee.
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix))] // creates symlinks through std::os::unix
 mod reconciliation_report_tests {
     use super::write_reconciliation_report;
     use crate::core::fs_guard::swap_probe;

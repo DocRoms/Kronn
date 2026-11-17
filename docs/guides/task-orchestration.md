@@ -173,6 +173,20 @@ execution boundary according to the worker transport:
   cannot proceed without such a bypass, the task fails visibly and can be
   reassigned; Kronn does not trade confinement for apparent progress.
 
+Every git command Kronn runs on a worker's worktree (inspect, stage, commit,
+merge, abort, doc re-anchoring) runs in Kronn's process, not the worker's
+sandbox. It is therefore built by one function that pins the repository to the
+registered project checkout (never to the worktree's own `.git` file, which the
+worker could redirect), gives git no hook, file-system monitor or signing
+program (so no program a worker names can run), and refuses with `WorktreeTampered` when the pointer was
+changed; the worker cannot write that file in the first place. The project's
+`worker_commit_hooks` setting (`off` by default, or `sandboxed`; a hook never runs
+as the host user)
+decides which gating hook Kronn itself runs, and a refusing hook is reported as
+`HookRefused` with its output, not as a conflict; `commit-msg` checks other than
+the DCO sign-off Kronn adds are not run. See
+[worker-commit-hooks](../operations/worker-commit-hooks.md).
+
 Sandbox startup failure is a launch failure, not a reason to run unsandboxed.
 Likewise, delivery is accepted only through the execution-scoped capability and
 against the exact managed branch/HEAD.
@@ -289,9 +303,9 @@ delivery manifest and diff, then choose one of:
   worktree, these checks followed by `git merge --ff-only` are not an atomic
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
-  [src: file: backend/src/core/worktree.rs:2727-2755#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:3439-3459#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:3384-3437#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:2775-2803#write_backup_ref]
+  [src: file: backend/src/core/worktree.rs:3557-3577#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:3502-3555#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -305,7 +319,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:3078-3085#integration_target]
+[src: file: backend/src/core/worktree.rs:3196-3203#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This
@@ -354,10 +368,10 @@ integration branch stays green on the strict `docs_citations_resolve_in_the_repo
 test without a release-time sweep. A citation the lane breaks for good (symbol
 removed or renamed) is the lane's to fix; the worker brief says so. The merge a
 worker finishes with `task_exec_commit` runs the same settlement.
-[src: file: backend/src/core/worktree.rs:2799-2903#build_candidate_detailed]
-[src: file: backend/src/core/worktree.rs:2946-3009#settle_branch_docs]
-[src: file: backend/src/core/docs_citations/merge.rs:306-322#resolve_anchor_only_conflicts]
-[src: file: backend/src/core/docs_citations/merge.rs:734-794#newly_unresolved]
+[src: file: backend/src/core/worktree.rs:2818-2922#build_candidate_detailed]
+[src: file: backend/src/core/worktree.rs:3042-3105#settle_branch_docs]
+[src: file: backend/src/core/docs_citations/merge.rs:318-334#resolve_anchor_only_conflicts]
+[src: file: backend/src/core/docs_citations/merge.rs:747-807#newly_unresolved]
 [src: file: backend/src/api/delivery_publication.rs:91-123#citations_settled_point]
 
 ### The worker's own commit settles the citations its code shifted
@@ -385,8 +399,8 @@ A doc or a cited file with unstaged changes defers the re-anchoring
 (`doc_citations.reanchor_deferred`) rather than sweeping work in progress; the
 next commit re-anchors. A commit that finishes a merge keeps the merge's own
 settlement above.
-[src: file: backend/src/api/agent_workspace_tools.rs:697-724#git_commit_payload_reanchoring_docs]
-[src: file: backend/src/core/docs_citations/merge.rs:638-650#reanchor_branch_leaving_unplaced]
+[src: file: backend/src/api/agent_workspace_tools.rs:762-789#git_commit_payload_reanchoring_docs]
+[src: file: backend/src/core/docs_citations/merge.rs:650-662#reanchor_branch_leaving_unplaced]
 
 ### A DoD item the principal checks live, after integration
 

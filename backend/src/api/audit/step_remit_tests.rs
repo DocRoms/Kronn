@@ -312,7 +312,7 @@ fn swap_docs_for_a_link(dir: &Path) -> tempfile::TempDir {
 
 /// KT-1595 — the restore of a file the user had dirty never WRITES through an
 /// AI-doc folder the agent swapped for a link.
-#[cfg(unix)]
+#[cfg(unix)] // swaps a folder for a symlink through std::os::unix
 #[test]
 fn a_restore_never_writes_through_an_ai_folder_swapped_for_a_link() {
     let dir = repo();
@@ -340,7 +340,7 @@ fn a_restore_never_writes_through_an_ai_folder_swapped_for_a_link() {
 /// KT-1595 (Argon-2) — a file that was CLEAN before the step goes back from
 /// HEAD without git writing its path: an AI-doc folder swapped for a link never
 /// receives the HEAD content.
-#[cfg(unix)]
+#[cfg(unix)] // swaps a folder for a symlink through std::os::unix
 #[test]
 fn a_put_back_from_head_never_writes_through_an_ai_folder_swapped_for_a_link() {
     let dir = repo();
@@ -367,7 +367,7 @@ fn a_put_back_from_head_never_writes_through_an_ai_folder_swapped_for_a_link() {
 
 /// KT-1595 (Argon-2) — the swap lands between the read of the current bytes and
 /// the write of the HEAD blob: the content goes to the folder the call holds.
-#[cfg(unix)]
+#[cfg(unix)] // the swap probe plants a symlink through std::os::unix
 #[test]
 fn a_folder_swapped_right_before_the_put_back_from_head_never_receives_it() {
     use crate::core::fs_guard::swap_probe;
@@ -391,7 +391,7 @@ fn a_folder_swapped_right_before_the_put_back_from_head_never_receives_it() {
 
 /// KT-1595 (Argon-2) — the executable bit git records comes back with the
 /// content.
-#[cfg(unix)]
+#[cfg(unix)] // checks chmod mode bits
 #[test]
 fn a_put_back_from_head_restores_the_recorded_mode() {
     use std::os::unix::fs::PermissionsExt;
@@ -416,7 +416,7 @@ fn a_put_back_from_head_restores_the_recorded_mode() {
 
 /// KT-1595 — a pre-step "deleted" state must not delete the file of the folder
 /// behind the swapped link.
-#[cfg(unix)]
+#[cfg(unix)] // swaps a folder for a symlink through std::os::unix
 #[test]
 fn a_restore_never_deletes_through_an_ai_folder_swapped_for_a_link() {
     let dir = repo();
@@ -436,7 +436,7 @@ fn a_restore_never_deletes_through_an_ai_folder_swapped_for_a_link() {
 
 /// KT-1595 — the swap lands between the checks and the write itself: the
 /// restore goes to the folder it holds, never to the link's target.
-#[cfg(unix)]
+#[cfg(unix)] // the swap probe plants a symlink through std::os::unix
 #[test]
 fn a_folder_swapped_right_before_the_restore_write_never_receives_it() {
     use crate::core::fs_guard::swap_probe;
@@ -456,7 +456,7 @@ fn a_folder_swapped_right_before_the_restore_write_never_receives_it() {
 
 /// KT-1595 — a link at the tracked name itself is not read, kept nor
 /// overwritten either.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_link_planted_at_the_tracked_name_is_left_alone() {
     let dir = repo();
@@ -745,7 +745,7 @@ fn an_edit_hidden_by_a_flag_set_during_the_step_is_restored_or_reported() {
 
 /// KT-1595 round 9: the recorded entries go back NUL-separated, so a path with a
 /// newline cannot smuggle a second entry (another file's index) in.
-#[cfg(unix)]
+#[cfg(unix)] // a newline in a file name cannot exist on Windows
 #[test]
 fn a_newline_in_a_path_never_rewrites_another_index_entry() {
     let dir = repo();
@@ -818,7 +818,7 @@ fn a_file_the_agent_adds_in_another_ai_folder_is_reported() {
 
 /// KT-1595 round 9: a tracked name the user had made a link, which the agent
 /// replaced, is reported (it was never read, and is still never written).
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_refused_link_the_agent_replaced_is_reported() {
     let dir = repo();
@@ -878,7 +878,7 @@ fn both_flags_come_back() {
 /// KT-1595 round 10: a refused path under a folder that is a link is
 /// fingerprinted without stat'ing through that link, and replacing the link
 /// with a real folder is reported.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_link_folder_replaced_during_the_step_is_reported() {
     let dir = repo();
@@ -959,7 +959,7 @@ fn many_flagged_files_keep_their_index_and_are_never_rewritten_from_head() {
 /// KT-1595 round 10: a clean filter, a replace ref or `core.bare` the agent
 /// writes into the repository never runs a program nor hides its edit from the
 /// settle, and the configuration change is reported.
-#[cfg(unix)]
+#[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
 #[test]
 fn a_repository_reconfigured_by_the_agent_runs_nothing_and_hides_nothing() {
     use std::os::unix::fs::PermissionsExt;
@@ -1015,7 +1015,7 @@ fn a_replace_ref_never_hides_an_edit() {
 
 /// KT-1595 round 11: programs the agent declares through config hooks, an
 /// included file, a filter name holding `=` or the worktree config never run.
-#[cfg(unix)]
+#[cfg(unix)] // runs `#!/bin/sh` fixtures as programs
 #[test]
 fn hooks_and_hidden_filters_the_agent_declares_never_run() {
     use std::os::unix::fs::PermissionsExt;
@@ -1181,7 +1181,7 @@ fn an_intent_to_add_never_stages_what_the_agent_put_at_its_path() {
 
 /// KT-1595 round 15: a user's intent-to-add on a SYMLINK comes back as it was
 /// when the agent staged it during the step.
-#[cfg(unix)]
+#[cfg(unix)] // creates symlinks through std::os::unix
 #[test]
 fn a_users_intent_to_add_symlink_comes_back() {
     let dir = repo();
@@ -1228,7 +1228,7 @@ fn an_index_change_on_a_file_too_large_to_keep_is_put_back() {
 
 /// KT-1595 round 13: a same-size edit of a file too large to keep, its time
 /// put back, is still seen (the fingerprint holds the change time and inode).
-#[cfg(unix)]
+#[cfg(unix)] // writes in place through std::os::unix FileExt
 #[test]
 fn a_same_size_edit_with_its_time_put_back_is_still_seen() {
     use std::os::unix::fs::FileExt;
@@ -1302,7 +1302,7 @@ fn a_file_the_agent_grew_past_the_limit_is_left_as_it_is() {
 /// KT-1595 round 11: a staged rename whose new name is not UTF-8 keeps the
 /// status fields paired: the origin is restored, nothing bogus is reported and
 /// no settle panics.
-#[cfg(unix)]
+#[cfg(unix)] // indexes a name with non-UTF-8 bytes
 #[test]
 fn a_rename_to_a_non_utf8_name_keeps_the_status_paired() {
     use std::io::Write;
@@ -1317,7 +1317,7 @@ fn a_rename_to_a_non_utf8_name_keeps_the_status_paired() {
     // The new name lives in the index only (APFS refuses non-UTF-8 names).
     let mut entry = format!("100644 {blob} 0\t").into_bytes();
     entry.extend_from_slice(b"docs/tech-debt/\xff.md\0");
-    let mut child = std::process::Command::new("git")
+    let mut child = crate::core::cmd::git_cmd()
         .args(["update-index", "-z", "--index-info"])
         .current_dir(dir.path())
         .stdin(std::process::Stdio::piped())

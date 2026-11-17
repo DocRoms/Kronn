@@ -119,7 +119,7 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:4038-4039#start_agent_with_config]
+contract. [src: file: backend/src/agents/runner.rs:4048-4049#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
 [src: file: backend/src/api/discussions/orchestration.rs:1742-1882#detect_agent_error_hint]
 

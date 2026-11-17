@@ -20,11 +20,11 @@ override.
   Validated on save (`WorkersConfig::validate`) and published to the process by
   `config::save` and at boot (`commit_policy::set_global_settings`).
   [src: file: backend/src/models/setup.rs:170#commit]
-  [src: file: backend/src/core/commit_policy.rs:222#set_global_settings]
+  [src: file: backend/src/core/commit_policy.rs:221#set_global_settings]
 - **Project — the card** (Dashboard › project › *Identité et signoff des commits*)
   saves `ProjectCommitSettings` inside the project workspace
   (`PUT /api/projects/{id}/workspace`, stored in `workspace_json` next to the
-  worktree hooks). [src: file: backend/src/models/projects.rs:61-67#ProjectCommitSettings]
+  worktree hooks). [src: file: backend/src/models/projects.rs:66-72#ProjectCommitSettings]
   Its sign-off defaults to *Hériter* (`auto`) and its name / e-mail fields to empty.
 - **Name and e-mail**: both or neither (the API refuses half an identity). Empty
   means *inherit*.
@@ -89,12 +89,12 @@ The list is **Settings › Workers › OS junk files** (`workers.os_junk_pattern
 validated on save (`WorkersConfig::validate`, `os_junk_pattern_problem`) and
 published to the process by `config::save` and at boot
 (`worktree::set_os_junk_patterns`).
-[src: file: backend/src/core/worktree.rs:1788-1789#set_os_junk_patterns]
+[src: file: backend/src/core/worktree.rs:1830-1831#set_os_junk_patterns]
 
 - Each lane Kronn creates excludes the patterns in the repository's local exclude
   (`ensure_os_junk_excluded`), without touching a tracked `.gitignore`.
-  [src: file: backend/src/core/worktree.rs:1832-1834#ensure_os_junk_excluded]
+  [src: file: backend/src/core/worktree.rs:1874-1876#ensure_os_junk_excluded]
 - A checkout that holds only junk is not dirty: delivery and cleanup go through.
   A *tracked* junk file that changed is still work.
-  [src: file: backend/src/core/worktree.rs:4576-4582#worktree_dirty_files]
+  [src: file: backend/src/core/worktree.rs:4693-4699#worktree_dirty_files]
 - A type change (`T`, a file replaced by a symlink) is delivered as *Modified*.

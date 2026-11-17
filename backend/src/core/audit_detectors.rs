@@ -993,7 +993,7 @@ mod tests {
 
     /// KT-1595 round 12: the tracked listing never runs the file-system
     /// monitor the repository's configuration names.
-    #[cfg(unix)]
+    #[cfg(unix)] // runs a `#!/bin/sh` fixture as a program
     #[test]
     fn the_tracked_listing_runs_no_program_the_repository_names() {
         use crate::core::cmd::hostile_git::{git, marker_program, repo};

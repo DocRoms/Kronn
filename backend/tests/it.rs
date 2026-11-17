@@ -22,6 +22,23 @@ static ARM_THE_REAL_AGENT_GUARD: extern "C" fn() = {
     arm
 };
 
+/// No test of this binary may write the user's real Kronn data: the library
+/// refuses it without `KRONN_DATA_DIR` once the binary is marked, whatever
+/// directory Cargo built it in. Same constructor mechanism as above.
+#[used]
+#[cfg_attr(
+    any(target_os = "linux", target_os = "android"),
+    link_section = ".init_array"
+)]
+#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
+#[cfg_attr(windows, link_section = ".CRT$XCU")]
+static MARK_THE_TEST_BINARY: extern "C" fn() = {
+    extern "C" fn mark() {
+        kronn::core::config::mark_test_binary();
+    }
+    mark
+};
+
 /// No test of this binary may read or write the user's global git config
 /// (KT-1746: the suite once added 29 864 temp-dir `safe.directory` entries to
 /// the real `~/.gitconfig`). Same constructor mechanism as above.

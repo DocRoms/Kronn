@@ -4015,6 +4015,11 @@ pub fn native_full_access_refusal_in(agent: &AgentType, language: &str) -> Strin
     }
 }
 
+/// Why a generic `Custom` HTTP connection cannot run a task worker.
+pub const CUSTOM_HTTP_TASK_WORKER_REFUSAL: &str =
+    "a generic Custom HTTP connection cannot run a task worker; pick a CLI agent or a \
+     supported model provider (Ollama, LiteLLM, NVIDIA)";
+
 /// The worker policy shared by every launch route and by worker preparation.
 /// Returns the `full_access` the launch may use, or why a task worker cannot
 /// run on this agent's resolved transport. A worker never inherits the
@@ -4026,6 +4031,11 @@ pub fn task_worker_route_policy(
 ) -> Result<bool, &'static str> {
     if !task_worker {
         return Ok(full_access);
+    }
+    // KT-1745: the generic `Custom` HTTP connection has no worker lane contract
+    // (no pinned workspace tools, no commit primitive): it never runs a task.
+    if matches!(agent, AgentType::Custom) {
+        return Err(CUSTOM_HTTP_TASK_WORKER_REFUSAL);
     }
     match crate::acp::resolve_acp_route(agent) {
         crate::acp::AcpProductionRoute::NativeAcp => Err(NATIVE_ACP_TASK_WORKER_REFUSAL),
@@ -13230,6 +13240,32 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     let lane = crate::core::task_worker_env::WorkerLane::for_worktree(&work_dir)?;
     let caches =
         crate::core::task_worker_env::SharedCaches::discover(lane.main_checkout.as_deref());
+    // KT-1745 — the `.git` pointer of the worktree is the repository Kronn's own
+    // git commands in it trust: the worker reads it, never writes or replaces it
+    // (the shell through `denyWrite`, the file tools through a permission rule).
+    let git_pointer = lane.worktree.join(".git");
+    let mut permission_deny = crate::core::vault_guard::claude_permission_deny();
+    // …and so is the `.git` of every repository that EXISTS in the worktree now (a
+    // submodule: its configuration is read by commands that look inside it). A
+    // repository the worker creates later (`git init vendor/pkg`, terraform git
+    // modules, Composer source installs, Bundler git gems) stays possible: Kronn
+    // refuses to stage or to run git in a new one.
+    let mut nested_git: Vec<String> = Vec::new();
+    for entry in crate::core::task_worker_sandbox::nested_git_entries(&lane.worktree) {
+        let text = entry.to_string_lossy().into_owned();
+        nested_git.push(format!("{text}/**"));
+        nested_git.push(text);
+    }
+    nested_git.sort();
+    nested_git.dedup();
+    for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        permission_deny.push(format!("{tool}(/{})", git_pointer.to_string_lossy()));
+        for pattern in &nested_git {
+            permission_deny.push(format!("{tool}(/{pattern})"));
+        }
+    }
+    let mut deny_write = vec![git_pointer.to_string_lossy().into_owned()];
+    deny_write.extend(nested_git.iter().cloned());
     serde_json::to_string(&serde_json::json!({
         "sandbox": {
             "enabled": true,
@@ -13239,6 +13275,7 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             "excludedCommands": [],
             "filesystem": {
                 "allowWrite": lane.write_roots(),
+                "denyWrite": deny_write,
                 "allowRead": lane.read_roots(&caches),
                 // KT-1495 — the Kronn data directory: `allowRead` is additive, so
                 // without this the worker's shell reads the keys and the database.
@@ -13246,7 +13283,7 @@ fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
             },
             "network": { "allowLocalBinding": true }
         },
-        "permissions": { "deny": crate::core::vault_guard::claude_permission_deny() },
+        "permissions": { "deny": permission_deny },
         "hooks": claude_project_cargo_hooks(&work_dir)
     }))
     .map_err(|error| format!("Unable to encode the Claude task-worker sandbox policy: {error}"))

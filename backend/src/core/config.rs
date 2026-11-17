@@ -40,17 +40,38 @@ pub fn refuse_real_data_dir_in_tests() -> Result<(), String> {
     if crate::core::child_env::var("KRONN_DATA_DIR").is_ok() {
         return Ok(());
     }
-    let in_test_binary = cfg!(test)
-        || std::env::current_exe()
-            .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
-            .unwrap_or(false);
-    if in_test_binary {
+    if in_test_binary() {
         return Err(
             "test binary attempted to write into the real Kronn data directory; set KRONN_DATA_DIR"
                 .to_string(),
         );
     }
     Ok(())
+}
+
+/// Set before `main` by the integration test harness (`tests/it.rs`).
+static MARKED_TEST_BINARY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Marks this process as a test binary, whatever its path: from then on a
+/// write into the real data directory without `KRONN_DATA_DIR` is refused.
+pub fn mark_test_binary() {
+    MARKED_TEST_BINARY.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The library's test build, a marked binary, or one under Cargo's `deps/`.
+pub(crate) fn in_test_binary() -> bool {
+    cfg!(test)
+        || is_test_binary(
+            MARKED_TEST_BINARY.load(std::sync::atomic::Ordering::SeqCst),
+            std::env::current_exe().ok().as_deref(),
+        )
+}
+
+/// The path alone is not enough: Cargo 1.100 builds test binaries under
+/// `build/<package>/<hash>/out/`, with no `deps` in it.
+fn is_test_binary(marked: bool, exe: Option<&std::path::Path>) -> bool {
+    marked || exe.is_some_and(|path| path.components().any(|part| part.as_os_str() == "deps"))
 }
 
 /// The agent's full-access setting as saved in config.toml, read without any
@@ -706,19 +727,15 @@ async fn persist_atomic(dir: PathBuf, path: PathBuf, content: String) -> Result<
     // clobbers the developer's REAL config.toml (a full `cargo test` wiped
     // pseudo/avatar/model-tiers on the host, 2026-07-13). Two layers because
     // integration binaries compile this lib WITHOUT cfg(test): the runtime
-    // check keys on the executable living in `target/*/deps/` — true for
-    // every cargo test/bench binary, never for `cargo run` or installed
-    // binaries. Reads stay free; only the destructive act is fenced.
+    // check is `in_test_binary` (the harness marks itself), never true for
+    // `cargo run` or installed binaries. Reads stay free; only the
+    // destructive act is fenced.
     #[cfg(test)]
     if crate::core::child_env::var("KRONN_DATA_DIR").is_err() {
         panic!("test attempted to WRITE the real config.toml — set KRONN_DATA_DIR (tempdir) in this test");
     }
     #[cfg(not(test))]
-    if crate::core::child_env::var("KRONN_DATA_DIR").is_err()
-        && std::env::current_exe()
-            .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
-            .unwrap_or(false)
-    {
+    if crate::core::child_env::var("KRONN_DATA_DIR").is_err() && in_test_binary() {
         anyhow::bail!(
             "test binary attempted to WRITE the real config.toml — call isolate_config_dir() \
              (set KRONN_DATA_DIR to a tempdir) in this integration test"
@@ -1579,6 +1596,18 @@ mod tests {
             !cfg.encryption_secret.as_ref().unwrap().is_empty(),
             "encryption_secret must be non-empty"
         );
+    }
+
+    #[test]
+    fn a_marked_binary_is_a_test_binary_wherever_cargo_built_it() {
+        let new_layout = std::path::Path::new("/w/target/debug/build/kronn/0a1b/out/it-2c3d");
+        let old_layout = std::path::Path::new("/w/target/debug/deps/it-2c3d");
+        let installed = std::path::Path::new("/usr/local/bin/kronn");
+        assert!(is_test_binary(true, Some(new_layout)));
+        assert!(is_test_binary(false, Some(old_layout)));
+        assert!(!is_test_binary(false, Some(new_layout)));
+        assert!(!is_test_binary(false, Some(installed)));
+        assert!(!is_test_binary(false, None));
     }
 
     #[test]

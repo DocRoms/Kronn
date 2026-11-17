@@ -27,4 +27,4 @@ directories: 34 727 entries (3.1 MB) made `git rev-parse` ~76 ms instead of
 `safe.directory` entries, prints the entry count and `git rev-parse` time, and
 removes them only after a backup (`<file>.kronn-backup-<epoch>`) and a `y`
 answer. Git rewrites the file, so every other key is left alone.
-[src: file: backend/src/core/git_global_config.rs:290]
+[src: file: backend/src/core/git_global_config.rs:303]

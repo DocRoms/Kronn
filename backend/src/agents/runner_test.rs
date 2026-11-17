@@ -10,6 +10,26 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
+    /// The vault's permission denies come first and untouched; what a task worker's
+    /// settings add after them is only the `.git` entries (KT-1745: the worktree's
+    /// pointer and the nested repositories that exist, which the worker never writes).
+    fn assert_vault_deny_list_untouched(settings: &serde_json::Value) {
+        let deny: Vec<String> = settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule.as_str().unwrap().to_string())
+            .collect();
+        let vault = crate::core::vault_guard::claude_permission_deny();
+        assert_eq!(deny[..vault.len()], vault[..]);
+        for added in &deny[vault.len()..] {
+            assert!(
+                added.ends_with("/.git)") || added.ends_with("/.git/**)"),
+                "only `.git` entries are added to the vault's list: {added}"
+            );
+        }
+    }
+
     #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have; runs a POSIX shell script fixture
     #[tokio::test]
     #[serial]
@@ -279,6 +299,15 @@ fi
         for agent in [AgentType::Ollama, AgentType::LiteLlm, AgentType::Nvidia] {
             assert_eq!(task_worker_route_policy(&agent, true, true), Ok(false));
         }
+        // The generic Custom HTTP connection is no worker.
+        assert_eq!(
+            task_worker_route_policy(&AgentType::Custom, true, true),
+            Err(CUSTOM_HTTP_TASK_WORKER_REFUSAL)
+        );
+        assert_eq!(
+            task_worker_route_policy(&AgentType::Custom, true, false),
+            Ok(true)
+        );
         // Direct CLI compatibility route.
         crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
         assert_eq!(
@@ -10621,10 +10650,7 @@ Suite de la réponse.";
             settings["sandbox"]["filesystem"]["denyRead"],
             serde_json::json!(crate::core::vault_guard::claude_sandbox_deny_read())
         );
-        assert_eq!(
-            settings["permissions"]["deny"],
-            serde_json::json!(crate::core::vault_guard::claude_permission_deny())
-        );
+        assert_vault_deny_list_untouched(&settings);
         assert_eq!(
             crate::core::vault_guard::launch_sandbox("claude", None, &args),
             crate::core::vault_guard::LaunchSandbox::Own,
@@ -10790,6 +10816,34 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn claude_task_worker_cannot_write_the_worktrees_git_pointer() {
+        // KT-1745 — Kronn's own git commands in the worktree trust what the
+        // pointer names: the shell is denied it, and so are the file tools.
+        let (_repo_dir, _repo, worktree) = managed_task_worktree();
+        let settings: serde_json::Value =
+            serde_json::from_str(&super::super::claude_task_worker_settings(&worktree).unwrap())
+                .unwrap();
+        let pointer = worktree.join(".git");
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyWrite"],
+            serde_json::json!([pointer])
+        );
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+            let rule = format!("{tool}(/{})", pointer.to_string_lossy());
+            assert!(
+                deny.contains(&serde_json::json!(rule)),
+                "{rule} in {deny:?}"
+            );
+        }
+        // The worktree itself stays writable.
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["allowWrite"][0],
+            serde_json::json!(worktree)
+        );
+    }
+
+    #[test]
     fn claude_task_worker_sandbox_stays_fail_closed_after_the_widening() {
         let (_repo_dir, _repo, worktree) = managed_task_worktree();
         let settings: serde_json::Value =
@@ -10942,10 +10996,7 @@ Suite de la réponse.";
         // The data directory stays refused by `permissions.deny`, which Claude
         // checks before it ever asks (so before the hook): the hook adds no
         // path of its own to it, and the deny list is the vault's, untouched.
-        assert_eq!(
-            settings["permissions"]["deny"],
-            serde_json::json!(crate::core::vault_guard::claude_permission_deny())
-        );
+        assert_vault_deny_list_untouched(&settings);
         assert!(
             settings["permissions"].get("allow").is_none(),
             "no allow rule is added: {settings}"
@@ -11235,7 +11286,17 @@ Suite de la réponse.";
         .iter()
         .map(|path| 2 * (path.as_os_str().len() + 24))
         .sum();
-        assert!(receipt.settings_bytes < 4096 + stores);
+        // KT-1745 — the worktree's `.git` pointer is named once in `denyWrite` and
+        // once per file-editing tool rule (`Edit`, `Write`, `MultiEdit`,
+        // `NotebookEdit`): five copies of the worktree path, so the budget grows
+        // with that path (a deep temp directory is common), never with the catalogue.
+        let pointer_rules = 5 * (worktree.path().canonicalize().unwrap().as_os_str().len() + 32);
+        assert!(
+            receipt.settings_bytes < 4096 + stores + pointer_rules,
+            "settings are {} bytes, budget {}",
+            receipt.settings_bytes,
+            4096 + stores + pointer_rules
+        );
         assert!(receipt.max_argument_bytes < MAX_SINGLE_ARG_BYTES);
         assert_eq!(receipt.validate_single_argument_limit(), Ok(()));
         assert!(
