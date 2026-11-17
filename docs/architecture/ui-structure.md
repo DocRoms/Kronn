@@ -75,7 +75,7 @@ like any other.
   `[src: file: frontend/src/routes/appRoutes.tsx:14-31]`
   `[src: file: frontend/src/routes/dashboardRoutes.tsx:19-41#dashboardRoutes]`
   `[src: file: frontend/src/App.tsx:209-210#Outlet]`
-  `[src: file: frontend/src/pages/Dashboard.tsx:1241-1244#Outlet]`
+  `[src: file: frontend/src/pages/Dashboard.tsx:1215-1218#Outlet]`
 - **Paths** — spelled out once, in `lib/routes.ts`. Components navigate with
   `useKronnNavigate()`, never with a literal path.
   `[src: file: frontend/src/lib/routes.ts:1-8]`

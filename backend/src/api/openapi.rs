@@ -60,7 +60,7 @@ const KRONN_VERSION: &str = env!("CARGO_PKG_VERSION");
         ApiResponseVersion,
     )),
     tags(
-        (name = "version", description = "Version & update-check endpoint feeding the in-app UpdateBanner."),
+        (name = "version", description = "Version & update-check endpoint feeding the bell's update notice."),
         (name = "discussions", description = "Discussion CRUD, messaging, and the kronn-internal introspection endpoints."),
         (name = "agents", description = "Agent detection, install / uninstall, runtime warnings."),
         (name = "pages", description = "Versioned HTML Pages and their workflow publishers."),
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn spec_documents_version_check_endpoint() {
-        // The version-check endpoint feeds the UpdateBanner — pin it to
+        // The version-check endpoint feeds the bell's update notice — pin it to
         // catch a regression where the path macro gets dropped.
         let spec = openapi_spec();
         let paths = &spec.paths;

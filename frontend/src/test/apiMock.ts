@@ -795,7 +795,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     version: {
-      // Default mock = "no update available" so the UpdateBanner stays
+      // Default mock = "no update available" so the update notice stays
       // hidden in tests that don't explicitly opt in. Tests that want
       // to render the banner can override with `up_to_date: false`.
       check: resolve({ current: '0.7.1', latest: null, release_url: null, up_to_date: true }),

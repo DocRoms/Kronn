@@ -73,8 +73,8 @@ wizard test) and after each readiness probe:
 
 The row surfaces as `McpConfigDisplay.auth_failure`: the card shows the
 `TokenRefusedNotice` with an update action, the list row a badge, the API
-access health reads `token_refused`, and `AuthFailureBanner` (dashboard layout)
-lists every refused connection. A failed ApiCall output starts with one plain
+access health reads `token_refused`, and the bell's Notifications tab lists
+every refused connection (`useAuthFailureNotices`). A failed ApiCall output starts with one plain
 sentence (`Connection "<label>" (<plugin>) refused the token (HTTP 401): … —
 update the token in Settings → APIs.`) and ends with `[SIGNAL: auth_refused]`;
 a `CollectApiData` step repeats it with the `N of M sources` count. The run page

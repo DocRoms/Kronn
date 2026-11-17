@@ -63,9 +63,9 @@ vi.mock('../lib/api', () => ({
     getLanguage: vi.fn(),
     getRecoveryStatus: vi.fn().mockResolvedValue({ key_locked: true }),
   },
-  // UpdateBanner is rendered inside Dashboard via App's tree and calls
+  // The update notice (useSystemNotices) is read around the Dashboard and calls
   // version.check on mount. The Dashboard component is itself mocked
-  // above so it never actually mounts UpdateBanner, BUT in the real
+  // above so it never actually mounts it, BUT in the real
   // App tree (e.g. when the lazy import resolves before mocks take
   // effect in the test runner) the import chain still asks for
   // `version`. Mocking it as a never-resolving promise keeps things
