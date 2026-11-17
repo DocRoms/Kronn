@@ -75,7 +75,7 @@ The desktop resolves it through Tauri's resource directory and sets
 `KRONN_INTERNAL_MCP_EXECUTABLE` before starting the backend. An explicitly
 configured but missing executable fails closed instead of using a developer's
 source checkout. Docker and source development keep the existing script route.
-[src: file: desktop/src-tauri/src/main.rs:1153-1170#KRONN_INTERNAL_MCP_EXECUTABLE]
+[src: file: desktop/src-tauri/src/main.rs:1158-1175#KRONN_INTERNAL_MCP_EXECUTABLE]
 [src: file: backend/src/agents/runner.rs:6568-6587#resolve_internal_mcp_command]
 
 The embedded backend exports its actual loopback port as `KRONN_BACKEND_URL`

@@ -420,7 +420,7 @@ every channel, loopback included (see `strong-confirmation-routes.md`):
   [src: file: backend/src/core/strong_confirm.rs:126-137#OWN_PROOF]
 - `POST /api/config/auth-token/regenerate` is also in `DESTRUCTIVE_POSTS`
   (`lib.rs`): a remote peer is refused even while auth is off, like a reset.
-  [src: file: backend/src/lib.rs:1271-1293#DESTRUCTIVE_POSTS]
+  [src: file: backend/src/lib.rs:1283-1305#DESTRUCTIVE_POSTS]
 
 ## Files
 

@@ -26,8 +26,8 @@ stack, not to start a task. Content verbatim.
   [src: file: scripts/dev-backend-supervisor.sh:109-116#backend_ready]
   [src: file: scripts/dev-backend-supervisor.sh:202-211#readiness_status]
   [src: file: lib/ui.sh:381-400#wait_for_process_http_ready]
-  [src: file: backend/src/main.rs:829-849#sync_all_projects]
-  [src: file: backend/src/main.rs:1053#TcpListener]
+  [src: file: backend/src/main.rs:821-841#sync_all_projects]
+  [src: file: backend/src/main.rs:1045#TcpListener]
 - The desktop app and native CLI share configuration, but the desktop's free
   listener port is process-local (`ServerConfig.runtime_port`, excluded from
   serialization). The persisted `server.port` remains the CLI preference;

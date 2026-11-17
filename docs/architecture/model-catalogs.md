@@ -231,7 +231,7 @@ does not silently authorize an effort. Discussion preflight may refresh the
 catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
 [src: file: backend/src/main.rs:314-318#migrate_hardcoded_catalog_once]
-[src: file: desktop/src-tauri/src/main.rs:716-720#migrate_hardcoded_catalog_once]
+[src: file: desktop/src-tauri/src/main.rs:721-725#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:156-276#refresh_runtime_cache]
 
 A Quick Prompt's explicit `agent_settings.reasoning_effort` is copied onto a
