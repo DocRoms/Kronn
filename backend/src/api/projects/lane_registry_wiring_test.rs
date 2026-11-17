@@ -49,7 +49,7 @@ async fn list_through_save(state: &AppState, id: &str, entries: &[&str]) {
 
 #[tokio::test]
 async fn an_added_sub_folder_owns_its_tree_until_it_is_deleted() {
-    let _shared = test_guard::shared_async().await;
+    let _owner = test_guard::exclusive_async().await;
     let root = tempfile::tempdir().unwrap();
     let mono = root.path().canonicalize().unwrap().join("mono");
     let sub = mono.join("sub");
@@ -89,6 +89,34 @@ async fn an_added_sub_folder_owns_its_tree_until_it_is_deleted() {
         vec!["outer-tool".to_string()],
         "once deleted, the sub-folder is the outer project's again"
     );
+}
+
+/// Two rows can hold one folder (a trailing `/` on add-folder): deleting one
+/// leaves the other's list in force, as its stored workspace still says.
+#[tokio::test]
+async fn deleting_a_duplicate_leaves_the_live_projects_list_in_force() {
+    let _owner = test_guard::exclusive_async().await;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().canonicalize().unwrap().join("twice");
+    std::fs::create_dir_all(&dir).unwrap();
+    let state = test_state();
+    seed(&state, "live", &dir).await;
+    // The same folder under another spelling: the table takes both rows.
+    let spelled = std::path::PathBuf::from(format!("{}/", dir.display()));
+    seed(&state, "duplicate", &spelled).await;
+    list_through_save(&state, "live", &["live-tool"]).await;
+
+    let deleted = delete(
+        State(state.clone()),
+        Path("duplicate".into()),
+        Query(DeleteProjectQuery { hard: false }),
+    )
+    .await;
+    assert!(deleted.0.success, "{:?}", deleted.0.error);
+    let after_delete = validation_executables_for(&dir);
+    forget_project(&dir);
+
+    assert_eq!(after_delete, vec!["live-tool".to_string()]);
 }
 
 #[tokio::test]

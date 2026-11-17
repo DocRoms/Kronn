@@ -619,7 +619,12 @@ pub async fn delete(
         Ok(true) => {
             if let Some(path) = stored_path {
                 super::docs_location::rekey(&state, &deleted_id, &path, None).await;
-                crate::core::task_worker_lane_settings::forget_project(std::path::Path::new(&path));
+            }
+            // Rebuilt from the table, not from the path read above: that
+            // read can fail, and another row can hold the same folder.
+            let lane_warm = state.config.read().await.workers.lane_warm.clone();
+            if let Err(e) = crate::arm_lane_settings(&state.db, &lane_warm).await {
+                tracing::warn!("Project deleted, lane settings not reloaded: {e:#}");
             }
             Json(ApiResponse::ok(()))
         }
