@@ -161,7 +161,7 @@ export type ActivityLink = { target: ActivityLinkTarget, id: string, run_id?: st
  * The kinds of place a row's deep link can open. Resolved to an address by the
  * UI's route table, so a path is never spelled in the backend.
  */
-export type ActivityLinkTarget = "discussion" | "workflow" | "project" | "planning_task" | "plugin";
+export type ActivityLinkTarget = "discussion" | "workflow" | "project" | "planning_task";
 
 /**
  * `GET /api/activity`.

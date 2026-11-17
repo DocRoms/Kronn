@@ -267,14 +267,16 @@ those tokens ahead of the call.
   notice, the `token_refused` health); a good probe clears the flag. Any other
   failure (5xx, network, a missing scope) is `inconclusive`: the flag stays as it
   was.
-- **The bell.** A flagged connection is a row of the activity bell, "Update
-  *name*", under "needs a decision", opening the connection. It is derived from
-  the flag, so it disappears with it: nothing is stored for the bell.
-  [src: file: backend/src/api/activity.rs:444-444#ConnectionTokenSource]
+- **The bell.** A flagged connection is listed in the bell's Notifications tab,
+  opening the connection, and nowhere else: it is not a row of the activity
+  overview and adds nothing to the "waiting on you" count. The notice is read
+  from the flag (`McpConfigDisplay.auth_failure`), so it disappears with it:
+  nothing is stored for the bell.
+  [src: file: frontend/src/hooks/useAuthFailureNotices.ts:13-36#useAuthFailureNotices]
 - **No probe.** A connection that cannot be probed shows "Not checked since
   *date of its last good call*", or "Never checked" when no call has worked yet.
   Every good call records that date, after the refusal flag is cleared: a
-  failed date write is logged and never keeps a refusal (or its bell entry) up.
+  failed date write is logged and never keeps a refusal (or its notice) up.
   [src: file: backend/src/workflows/api_auth_failure.rs:207-207#mark_good_call]
 - **Rate limits.** A connection is never probed twice within five minutes (a
   click storm, a restart loop or a second request while one is running gets the

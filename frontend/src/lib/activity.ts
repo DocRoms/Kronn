@@ -13,7 +13,7 @@ import {
   projects as projectsApi,
   workflows as workflowsApi,
 } from './api';
-import { discussionPath, planningTaskPath, pluginPath, projectPath, workflowPath } from './routes';
+import { discussionPath, planningTaskPath, projectPath, workflowPath } from './routes';
 import type { KronnNavigate } from '../hooks/useKronnNavigate';
 import type {
   ActivityAction,
@@ -120,7 +120,6 @@ export function activityLinkPath(link: ActivityLink): string {
     case 'workflow': return workflowPath(link.id, link.run_id);
     case 'project': return projectPath(link.id);
     case 'planning_task': return planningTaskPath(link.id);
-    case 'plugin': return pluginPath(link.id);
   }
 }
 
@@ -131,7 +130,6 @@ export function openActivityLink(nav: KronnNavigate, link: ActivityLink): void {
     case 'workflow': nav.toWorkflow(link.id, link.run_id); return;
     case 'project': nav.toProject(link.id); return;
     case 'planning_task': nav.toPlanningTask(link.id); return;
-    case 'plugin': nav.toPlugin(link.id); return;
   }
 }
 

@@ -351,8 +351,8 @@ mod tests {
     use super::*;
     use crate::api::activity::{collect_activity, default_sources, ActivityContext};
     use crate::models::{
-        ActivityCompartment, ActivityLinkTarget, ApiAuthKind, ApiEndpoint, ApiSpec, HostSyncMode,
-        McpAuthFailureKind, McpConfig, McpSource, McpTransport,
+        ApiAuthKind, ApiEndpoint, ApiSpec, HostSyncMode, McpAuthFailureKind, McpConfig, McpSource,
+        McpTransport,
     };
     use wiremock::matchers::{header, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -456,7 +456,7 @@ mod tests {
             .remove("cfg-slides")
     }
 
-    async fn bell_rows(state: &AppState) -> Vec<crate::models::ActivityRow> {
+    async fn activity_rows(state: &AppState) -> Vec<crate::models::ActivityRow> {
         state
             .db
             .with_conn(|conn| {
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_probe_flags_the_connection_and_raises_the_bell_entry() {
+    async fn a_refused_probe_flags_the_connection_and_stays_out_of_the_activity_overview() {
         let server = MockServer::start().await;
         refuse(&server, serde_json::json!({"message": "Bad credentials"})).await;
         let state = state_with_connections(&server.uri()).await;
@@ -499,21 +499,14 @@ mod tests {
         // Flagged exactly like a refused call.
         let flagged = flag(&state).await.expect("the connection is flagged");
         assert_eq!(flagged.http_status, Some(401));
-        // The bell, Kronn side: "Update <name>", waiting for the owner, opening the connection.
-        let rows = bell_rows(&state).await;
-        assert_eq!(rows.len(), 1, "{rows:#?}");
-        assert_eq!(rows[0].title, "Update Slides.com");
-        assert_eq!(rows[0].compartment, ActivityCompartment::NeedsDecision);
-        assert_eq!(rows[0].row_type, "connection_token");
-        let link = rows[0].link.as_ref().unwrap();
-        assert_eq!(
-            (link.target, link.id.as_str()),
-            (ActivityLinkTarget::Plugin, "cfg-slides")
-        );
+        // The Notifications tab lists it from the flag; the activity overview
+        // carries no row for it, so it is shown once and counts for nothing.
+        let rows = activity_rows(&state).await;
+        assert!(rows.is_empty(), "{rows:#?}");
     }
 
     #[tokio::test]
-    async fn a_good_probe_clears_the_flag_and_the_bell_entry() {
+    async fn a_good_probe_clears_the_flag() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
@@ -534,7 +527,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(bell_rows(&state).await.len(), 1);
+        assert!(flag(&state).await.is_some());
         let now = Utc::now();
 
         let result = check(&state, now).await.unwrap();
@@ -542,7 +535,6 @@ mod tests {
         assert_eq!(result.check.outcome, Some(McpTokenCheckOutcome::Ok));
         assert_eq!(result.check.last_good_at, Some(now.to_rfc3339()));
         assert!(flag(&state).await.is_none(), "a good probe unflags it");
-        assert!(bell_rows(&state).await.is_empty());
     }
 
     #[tokio::test]
@@ -564,7 +556,6 @@ mod tests {
             flag(&state).await.is_none(),
             "a 500 says nothing about the token"
         );
-        assert!(bell_rows(&state).await.is_empty());
     }
 
     #[tokio::test]
@@ -738,7 +729,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(bell_rows(&state).await.len(), 1);
+        assert!(flag(&state).await.is_some());
         let (config, server_def, env) = {
             let secret = state.config.read().await.encryption_secret.clone().unwrap();
             state
@@ -771,7 +762,6 @@ mod tests {
             flag(&state).await.is_none(),
             "a failed date write must not keep the refusal up"
         );
-        assert!(bell_rows(&state).await.is_empty());
     }
 
     #[tokio::test]
