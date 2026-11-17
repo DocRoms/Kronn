@@ -71,6 +71,19 @@ export interface NoticeEntry {
 
 export type NoticeReport = Omit<NoticeEntry, 'seen'>;
 
+/** Notices that stop work or say an action failed: the panel opens on them
+ *  and they are announced at once. */
+export function isUrgentNotice(notice: Pick<NoticeEntry, 'kind'>): boolean {
+  return notice.kind === 'key_locked' || notice.kind === 'credentials_unavailable' || notice.kind === 'reset_error';
+}
+
+function sameNotice(a: NoticeEntry, b: NoticeEntry): boolean {
+  return a.id === b.id && a.kind === b.kind && a.label === b.label && a.link === b.link
+    && a.external === b.external && a.category === b.category && a.seen === b.seen
+    && !a.dismiss && !b.dismiss
+    && (a.args ?? []).join('\u0000') === (b.args ?? []).join('\u0000');
+}
+
 export interface NotificationsSnapshot {
   outage: OutageEntry | null;
   notices: readonly NoticeEntry[];
@@ -156,6 +169,9 @@ export function setNotices(source: string, reports: readonly NoticeReport[]): vo
     return { ...report, id, seen };
   });
   if (next.length === 0 && kept.length === state.notices.length) return;
+  // The same report again (a periodic re-read): nothing to redraw.
+  const before = state.notices.filter(notice => notice.id.startsWith(prefix));
+  if (before.length === next.length && before.every((notice, i) => sameNotice(notice, next[i]))) return;
   commit({ ...state, notices: [...kept, ...next] });
 }
 

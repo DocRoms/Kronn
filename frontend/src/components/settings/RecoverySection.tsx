@@ -76,7 +76,18 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
       dropNotice('key:beside-data');
       toast(t('settings.recovery.saved'), 'success');
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), 'error');
+      // The answer can be lost after the backend stored the phrase: say what
+      // is true now, not only that the call failed.
+      const now = await configApi.getRecoveryStatus().catch(() => null);
+      if (now?.configured && now.matches_key) {
+        setConfigured(true);
+        setStatus(now);
+        setGenerated(null);
+        dropNotice('key:beside-data');
+        toast(t('settings.recovery.codeNotShown'), 'error');
+      } else {
+        toast(e instanceof Error ? e.message : String(e), 'error');
+      }
     } finally {
       setSaving(false);
     }
@@ -101,6 +112,9 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
       setConfigured(true);
       setStatus(s => (s ? { ...s, matches_key: true, recovery_other_key: false, recovery_unverified: false, recovery_damaged: false } : s));
       setReplaceUnverified(false);
+      // The advice of the bell is answered, and a phrase Kronn wrote is void.
+      setGenerated(null);
+      dropNotice('key:beside-data');
       setPassphrase('');
       setConfirm('');
       setCurrent('');
@@ -214,7 +228,9 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
             <AlertTriangle size={13} />
             <div className="flex-col gap-3">
               <span className="font-semibold">{t('notif.protect.title')}</span>
-              <span>{t('notif.protect.body')}</span>
+              <span data-testid="recovery-key-beside-data-body">
+                {t(configured && status.matches_key ? 'settings.recovery.phraseActive' : 'notif.protect.body')}
+              </span>
               {!configured && generated === null && (
                 <div>
                   <button className="set-action-btn" onClick={() => setGenerated(generateRecoveryPhrase())} data-testid="recovery-generate">
@@ -232,6 +248,9 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
                     </button>
                     <button className="set-action-btn" disabled={saving} onClick={storeGenerated} data-testid="recovery-generated-stored">
                       {t('settings.recovery.generatedStored')}
+                    </button>
+                    <button className="set-action-btn" disabled={saving} onClick={() => setGenerated(null)} data-testid="recovery-generated-cancel">
+                      {t('common.cancel')}
                     </button>
                   </div>
                 </div>

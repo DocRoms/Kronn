@@ -10,7 +10,7 @@ import {
   type ActivityActionHandler,
 } from '../../lib/activity';
 import type { ActivityTab } from '../../lib/activityFilters';
-import { unreadCount, useNotifications } from '../../lib/notifications';
+import { isUrgentNotice, unreadCount, useNotifications } from '../../lib/notifications';
 import type { ActivityLink } from '../../types/generated';
 import { ActivityPanel } from './ActivityPanel';
 import './ActivityBell.css';
@@ -70,6 +70,19 @@ export function ActivityBell({ onOpenLink, onActionSettled, handlers = ACTIVITY_
       setOpen(false);
     }
   }, [outage, tickedAt, open]);
+
+  // A notice that stops work, or says an action failed, opens the panel once:
+  // the banner it replaces was on screen at once.
+  const urgentOpened = useRef(new Set<string>());
+  useEffect(() => {
+    const urgent = notifications.notices.filter(notice => isUrgentNotice(notice) && !notice.seen);
+    const fresh = urgent.filter(notice => !urgentOpened.current.has(notice.id));
+    urgentOpened.current = new Set(urgent.map(notice => notice.id));
+    if (fresh.length === 0 || open) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- opening follows external store state, there is no event to hang it on.
+    setOpenTab('notifications');
+    setOpen(true);
+  }, [notifications.notices, open]);
 
   const activityLabel = waiting > 0
     ? t('activity.bell.labelWaiting', waiting, inProgress)
@@ -151,7 +164,10 @@ export function ActivityBell({ onOpenLink, onActionSettled, handlers = ACTIVITY_
       )}
       {/* The state change is announced without moving focus. */}
       <span className="activity-bell-live" role="status" aria-live="polite" data-testid="activity-bell-live">
-        {outage ? t('notif.bell.labelOutage') : waiting > 0 ? t('activity.bell.labelWaiting', waiting, inProgress) : ''}
+        {outage
+          ? t('notif.bell.labelOutage')
+          : [waiting > 0 ? t('activity.bell.labelWaiting', waiting, inProgress) : '', unread > 0 ? t('notif.bell.labelUnread', unread) : '']
+            .filter(Boolean).join(' — ')}
       </span>
     </div>
   );

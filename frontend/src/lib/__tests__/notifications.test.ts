@@ -12,6 +12,8 @@ import {
   noteSuspectedOutage,
   normalizeRoute,
   recordServerError,
+  setNotices,
+  subscribeNotifications,
   resetNotifications,
   serverErrorDetails,
   unreadCount,
@@ -143,5 +145,34 @@ describe('what a toast may say', () => {
   it('normalises routes', () => {
     expect(normalizeRoute('/api/discussions/12/messages?limit=5')).toBe('/api/discussions/:id/messages');
     expect(normalizeRoute('/api/projects')).toBe('/api/projects');
+  });
+});
+
+describe('the notices of a source (KT-1686)', () => {
+  beforeEach(() => resetNotifications());
+
+  it('replace what that source said, keep what was read, and leave the other sources alone', () => {
+    setNotices('token', [{ id: 'a', kind: 'token_refused', label: 'A', category: 'automations' }]);
+    setNotices('key', [{ id: 'locked', kind: 'key_locked', category: 'kronn' }]);
+    markNotificationsSeen();
+    setNotices('token', [
+      { id: 'a', kind: 'token_refused', label: 'A', category: 'automations' },
+      { id: 'b', kind: 'token_refused', label: 'B', category: 'automations' },
+    ]);
+    expect(getNotifications().notices.map(n => [n.id, n.seen])).toEqual([['key:locked', true], ['token:a', true], ['token:b', false]]);
+    setNotices('token', []);
+    expect(getNotifications().notices.map(n => n.id)).toEqual(['key:locked']);
+  });
+
+  it('redraw nothing when a source says the same thing again', () => {
+    const report = [{ id: 'a', kind: 'token_refused' as const, label: 'A', link: '/plugins/a', category: 'automations' as const }];
+    setNotices('token', report);
+    let calls = 0;
+    const stop = subscribeNotifications(() => { calls += 1; });
+    setNotices('token', [...report]);
+    expect(calls).toBe(0);
+    setNotices('token', [{ ...report[0], label: 'Renamed' }]);
+    expect(calls).toBe(1);
+    stop();
   });
 });

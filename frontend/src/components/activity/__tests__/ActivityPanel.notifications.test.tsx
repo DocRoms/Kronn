@@ -335,6 +335,24 @@ describe('the standing notices (KT-1686)', () => {
     expect(getNotifications().notices.map(n => n.kind)).toEqual(['key_locked', 'credentials_unavailable']);
   });
 
+  it('offers "Plus tard" on the advice to protect the secrets, and announces only what stops work', () => {
+    const later = vi.fn();
+    setNotices('key', [
+      { id: 'beside-data', kind: 'key_beside_data', link: '/config#settings-recovery', category: 'kronn', dismiss: later },
+      { id: 'locked', kind: 'key_locked', link: '/config#settings-recovery', category: 'kronn' },
+    ]);
+    renderPanel();
+    const [advice, locked] = screen.getAllByTestId('notif-notice');
+    expect(advice).not.toHaveAttribute('role');
+    expect(locked).toHaveAttribute('role', 'alert');
+    const button = within(advice).getByTestId('notif-notice-dismiss-key:beside-data');
+    expect(button).toHaveTextContent('Plus tard');
+    expect(button.querySelector('svg')).toBeNull();
+    fireEvent.click(button);
+    expect(later).toHaveBeenCalledTimes(1);
+    expect(getNotifications().notices.map(n => n.kind)).toEqual(['key_locked']);
+  });
+
   it('counts them unread until the tab is read, then no longer takes the panel over', () => {
     key();
     renderPanel({ initialTab: 'progress' });

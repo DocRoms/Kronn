@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../../lib/I18nContext';
-import { confirmOutage, noteBackendAnswered, recordServerError, resetNotifications } from '../../../lib/notifications';
+import { confirmOutage, noteBackendAnswered, recordServerError, resetNotifications, setNotices } from '../../../lib/notifications';
 import { ActivityBell, OUTAGE_AUTO_OPEN_MS } from '../ActivityBell';
 
 vi.mock('../../../lib/api', async () => {
@@ -125,5 +125,28 @@ describe('the panel that opens by itself', () => {
     expect(screen.getByTestId('activity-tab-progress')).toHaveAttribute('aria-selected', 'true');
     act(() => { noteBackendAnswered(); });
     expect(screen.getByTestId('activity-panel')).toBeInTheDocument();
+  });
+});
+
+describe('the notices of the install (KT-1686)', () => {
+  it('opens the panel on a notice that stops work or says an action failed, once', async () => {
+    await renderBell();
+    act(() => { setNotices('reset', [{ id: 'failed', kind: 'reset_error', args: ['disk full'], category: 'kronn', dismiss: () => {} }]); });
+    expect(screen.getByTestId('notifications-tab')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('disk full');
+
+    // Closed by the owner: the same notice does not open it again.
+    fireEvent.click(screen.getByTestId('activity-bell'));
+    expect(screen.queryByTestId('notifications-tab')).toBeNull();
+    act(() => { setNotices('token', [{ id: 'cfg-1', kind: 'token_refused', label: 'GitHub', link: '/plugins/cfg-1', category: 'automations' }]); });
+    expect(screen.queryByTestId('notifications-tab')).toBeNull();
+  });
+
+  it('leaves the panel closed for advice, and says the unread count without moving focus', async () => {
+    await renderBell();
+    act(() => { setNotices('key', [{ id: 'beside-data', kind: 'key_beside_data', category: 'kronn' }]); });
+    expect(screen.queryByTestId('activity-panel')).toBeNull();
+    expect(screen.getByTestId('activity-bell-live')).toHaveTextContent('1 non lue(s)');
+    expect(screen.getByTestId('activity-bell-dot')).toBeInTheDocument();
   });
 });

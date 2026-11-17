@@ -12,6 +12,7 @@ import {
   acknowledgeServerError,
   clearNotificationHistory,
   dismissNotice,
+  isUrgentNotice,
   serverErrorDetails,
   type HistoryEntry,
   type NoticeEntry,
@@ -169,7 +170,14 @@ function NoticeRow({ entry, onClose }: { entry: NoticeEntry; onClose?: () => voi
       body = first;
   }
   return (
-    <li className="notif-row" data-testid="notif-notice" data-kind={entry.kind} data-category={entry.category}>
+    <li
+      className="notif-row"
+      data-testid="notif-notice"
+      data-kind={entry.kind}
+      data-category={entry.category}
+      // The banners these replace were alerts: what stops work is still announced.
+      role={isUrgentNotice(entry) ? 'alert' : undefined}
+    >
       <TriangleAlert size={13} aria-hidden="true" className="notif-error-icon" />
       <div className="notif-body">
         {title && <span className="notif-title">{title}</span>}

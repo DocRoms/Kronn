@@ -19,13 +19,33 @@ describe('generateRecoveryPhrase', () => {
   });
 
   it('draws again a byte that would favour the first symbols', () => {
-    // 248..255 are past the last full multiple of 31: they must be skipped.
-    const bytes = [255, 248, 0, 31, 62];
+    // 248..255 are past the last full multiple of 31: they must be skipped
+    // (249 would otherwise read as 'b').
+    const bytes = [255, 249, 248, 0, 31, 62];
     let i = 0;
     vi.spyOn(crypto, 'getRandomValues').mockImplementation(array => {
       (array as Uint8Array)[0] = bytes[i++ % bytes.length];
       return array;
     });
     expect(generateRecoveryPhrase().replace(/-/g, '')).toBe('a'.repeat(25));
+  });
+
+  it('draws again the first byte past the last full multiple', () => {
+    // 248 would read as 'a': skipped, only the 1 ('b') is kept.
+    const bytes = [248, 1];
+    let i = 0;
+    vi.spyOn(crypto, 'getRandomValues').mockImplementation(array => {
+      (array as Uint8Array)[0] = bytes[i++ % bytes.length];
+      return array;
+    });
+    expect(generateRecoveryPhrase().replace(/-/g, '')).toBe('b'.repeat(25));
+  });
+
+  it('keeps the last byte of the last full multiple', () => {
+    vi.spyOn(crypto, 'getRandomValues').mockImplementation(array => {
+      (array as Uint8Array)[0] = 247;
+      return array;
+    });
+    expect(generateRecoveryPhrase().replace(/-/g, '')).toBe('9'.repeat(25));
   });
 });
