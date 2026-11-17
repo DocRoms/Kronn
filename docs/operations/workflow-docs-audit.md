@@ -25,11 +25,15 @@ a token from a dated identifier or a hash the document cites. It is a known
 secret, and fails the step, when a sensitive file of the worktree holds it:
 the run itself or a part of it between `=` or `/`, found anywhere in the text
 of the file (also read without NUL bytes, for UTF-16, and with the escapes of
-a JSON string undone), a long run of the file found in the document, or any
-32 characters in a row that the document and the file share, whatever their
-share of digits (a value whole, glued to a name, cut short or extended). A
-document that is not plain UTF-8 is read all the same, its invalid bytes
-replaced and its NUL bytes dropped. The
+a JSON string undone, `\uXXXX` included), or 32 characters in a row or more
+that the document and the file share and that read as a value: six different
+characters, and either a digit with a letter or letters whose case keeps
+changing (a value whole, glued to a name, cut short or extended; not a rule,
+a variable name or a plain path). A document that is not plain UTF-8 is read
+all the same (byte-order mark and NUL bytes dropped, invalid bytes replaced)
+unless most of it is no text (an image, a PDF): that one is not read. A
+changed document that cannot be read whole (over 16 MiB, unreadable) fails
+the step once what the others hold is recorded. The
 sensitive files are scanned at the start of the run and again at each audit.
 Any other run fails nothing: the step stands, and the run records, per step,
 the documents and the lines that hold one (50 documents and 5 lines each at
@@ -40,14 +44,16 @@ execution changed: the record keeps what it said of the documents this
 execution left alone, and replaces or drops what it said of those it changed
 or removed. After a sub-workflow step, the records of its child runs are
 copied to the parent run under the step and the child run, in keys apart
-from its own, replacing the ones copied before; child runs that could not be
-read leave a record saying so. The run list marks such a run on its row, and the run
+from its own, replacing the ones copied before from the runs read again (a
+child run deleted since keeps its record); child runs that could not be read
+leave a record saying so. The run list marks such a run on its row, and the run
 view lists the documents above the step list, saying that they did not block
 the run, so the reader checks them before committing or publishing. Accepted
 limit: a credential in a format the pattern list does not know, and that no
 sensitive file of the worktree holds (or holds only transformed: encoded,
-shorter than 32 characters and reworded, or in a sensitive file over 4 MiB,
-which is read by lines only), is reported and not blocked. A step
+shorter than 32 characters and reworded, a part of it without a digit and
+in one case, or in a sensitive file over 4 MiB, which is read by lines only),
+is reported and not blocked. A step
 cancelled or stopped by a guard while it runs is not audited at all
 (KT-1796). [src: file: backend/src/core/docs_write_filter.rs:120-130#possible_secret_lines] [src: file: backend/src/workflows/runner.rs:32-60#possible_secrets_report] [src: file: frontend/src/lib/docsPossibleSecrets.ts:49-54#runPossibleSecrets]
 Unchanged content that was already modified, staged or untracked before the

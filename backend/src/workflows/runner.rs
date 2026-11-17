@@ -111,7 +111,7 @@ fn mark_child_possible_secrets_unread(
 ) {
     run_state.insert(
         format!("{DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX}{step_name}"),
-        "unread".to_string(),
+        CHILD_RUNS_UNREAD.to_string(),
     );
 }
 
@@ -121,13 +121,25 @@ fn replace_child_possible_secrets(
     run_state: &mut std::collections::HashMap<String, String>,
     children: &[WorkflowRun],
 ) {
-    run_state.retain(|key, _| !key.starts_with(DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX));
+    // Of the runs read, and the notes left when none could be: a child run
+    // no longer listed keeps what it said.
+    let read: Vec<String> = children
+        .iter()
+        .map(|child| format!("{SUB_RUN_MARK}{})", child.id))
+        .collect();
+    run_state.retain(|key, report| {
+        !key.starts_with(DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX)
+            || !(report == CHILD_RUNS_UNREAD || read.iter().any(|mark| key.ends_with(mark)))
+    });
     run_state.extend(child_possible_secrets(children));
 }
 
 /// Run state keys of the records adopted from child runs: apart from the
 /// run's own, whose steps can carry any name.
 const DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX: &str = "__kronn.docs_child_possible_secrets.";
+
+/// The record left when the child runs of a step could not be read.
+const CHILD_RUNS_UNREAD: &str = "unread";
 
 /// What the key of an adopted record carries after its step.
 const SUB_RUN_MARK: &str = " (sub-run ";
@@ -137,7 +149,6 @@ const SUB_RUN_MARK: &str = " (sub-run ";
 fn child_possible_secrets(children: &[WorkflowRun]) -> Vec<(String, String)> {
     let mut adopted = Vec::new();
     for child in children {
-        let short: String = child.id.chars().take(8).collect();
         for (key, report) in &child.state {
             // Its own, and those it adopted from its own children.
             let step = key
@@ -145,7 +156,8 @@ fn child_possible_secrets(children: &[WorkflowRun]) -> Vec<(String, String)> {
                 .or_else(|| key.strip_prefix(DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX));
             if let Some(step) = step {
                 let key = format!(
-                    "{DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX}{step}{SUB_RUN_MARK}{short})"
+                    "{DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX}{step}{SUB_RUN_MARK}{})",
+                    child.id
                 );
                 adopted.push((key, report.clone()));
             }
@@ -3023,6 +3035,14 @@ async fn execute_run_body(
                                         let count_key =
                                             format!("docs_write_rejections.{}", step.name);
                                         run.state.insert(count_key, rejections.len().to_string());
+                                    }
+                                    // What could not be read fails the step, once
+                                    // the rest is recorded below.
+                                    if !audit.incomplete.is_empty() {
+                                        fail_document_audit(
+                                            &mut outcome,
+                                            &audit.incomplete.join("\n"),
+                                        );
                                     }
                                     // KT-1796 — never a failure, never silent.
                                     let key = format!(
@@ -8164,8 +8184,7 @@ mod tests {
                 .child_run_id
                 .clone()
                 .expect("a child");
-            let short: String = child_run.chars().take(8).collect();
-            let key = format!("__kronn.docs_child_possible_secrets.advise (sub-run {short})");
+            let key = format!("__kronn.docs_child_possible_secrets.advise (sub-run {child_run})");
             let report = persisted
                 .state
                 .get(&key)

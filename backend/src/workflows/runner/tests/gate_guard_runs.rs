@@ -1190,11 +1190,11 @@ fn the_possible_secrets_of_child_runs_are_keyed_for_their_parent() {
         child_possible_secrets(&[first, second, pending_run("cccccccc-3333", "wf-child")]),
         vec![
             (
-                "__kronn.docs_child_possible_secrets.write (sub-run aaaaaaaa)".to_string(),
+                "__kronn.docs_child_possible_secrets.write (sub-run aaaaaaaa-1111)".to_string(),
                 "{\"documents\":[]}".to_string()
             ),
             (
-                "__kronn.docs_child_possible_secrets.write (sub-run bbbbbbbb)".to_string(),
+                "__kronn.docs_child_possible_secrets.write (sub-run bbbbbbbb-2222)".to_string(),
                 "{\"more_documents\":1}".to_string()
             ),
         ]
@@ -1209,8 +1209,13 @@ fn adopted_records_are_replaced_and_the_runs_own_are_kept() {
             "own".to_string(),
         ),
         (
-            "__kronn.docs_child_possible_secrets.write (sub-run 99999999)".to_string(),
+            "__kronn.docs_child_possible_secrets.write (sub-run aaaaaaaa-1111)".to_string(),
             "stale".to_string(),
+        ),
+        // A child run no longer listed (deleted since): its record stays.
+        (
+            "__kronn.docs_child_possible_secrets.write (sub-run 99999999-0000)".to_string(),
+            "of a run gone".to_string(),
         ),
         // A step of the run itself can carry any name.
         (
@@ -1233,7 +1238,11 @@ fn adopted_records_are_replaced_and_the_runs_own_are_kept() {
         keys,
         [
             (
-                "__kronn.docs_child_possible_secrets.write (sub-run aaaaaaaa)",
+                "__kronn.docs_child_possible_secrets.write (sub-run 99999999-0000)",
+                "of a run gone"
+            ),
+            (
+                "__kronn.docs_child_possible_secrets.write (sub-run aaaaaaaa-1111)",
                 "fresh"
             ),
             (
@@ -1257,7 +1266,7 @@ fn the_records_a_child_adopted_go_up_too() {
     assert_eq!(
         child_possible_secrets(&[child]),
         vec![(
-            "__kronn.docs_child_possible_secrets.write (sub-run cccccccc) (sub-run aaaaaaaa)"
+            "__kronn.docs_child_possible_secrets.write (sub-run cccccccc) (sub-run aaaaaaaa-1111)"
                 .to_string(),
             "deep".to_string()
         )]
