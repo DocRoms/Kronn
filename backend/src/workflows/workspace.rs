@@ -614,7 +614,7 @@ async fn submodules_hold_nothing(checkout: &Path) -> std::result::Result<bool, S
             ));
         }
         // Its recorded work tree may be gone (deinitialised, removed).
-        let unpushed = crate::core::cmd::async_git_cmd()
+        let unpushed = crate::core::cmd::async_git_cmd() // lane-git-allow: a submodule clone of a workflow run's worktree, never a worker lane
             .arg("--git-dir")
             .arg(clone)
             .arg("--work-tree")
@@ -662,7 +662,7 @@ pub(crate) async fn remove_checkout_with_submodules(
     if !submodules_hold_nothing(checkout).await.map_err(Some)? {
         return Err(None);
     }
-    let removed = crate::core::cmd::async_git_cmd()
+    let removed = crate::core::cmd::async_git_cmd() // lane-git-allow: the worktree of a workflow run, removed from the registered checkout
         .args(["worktree", "remove", "--force"])
         .arg(checkout)
         .current_dir(repo_path)
