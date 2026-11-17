@@ -13,7 +13,43 @@ invalid names, control characters and literal backslashes use an explicit
 The label is never used to open a file. Platforms without Unix byte paths keep
 the UTF-8 conversion and fail explicitly if a Git path cannot be represented. [src: file: backend/src/core/docs_write_filter.rs:387-428#native_document_path]
 After the step, it checks new or changed text for credential
-patterns, high-entropy tokens and overlaps with the run's sensitive-file scan. [src: file: backend/src/core/docs_write_filter.rs:104-120#check_docs_content]
+patterns and overlaps with the run's sensitive-file scan: either one fails the
+step, and the rejection names the file and the line, never the content. A
+rejected audit also drops the step's quota wait, which would run it again over
+the rejected content. [src: file: backend/src/core/docs_write_filter.rs:104-120#check_docs_content]
+
+A long run (32 characters or more among letters, digits and `_ - / + =`, at
+least 15 % digits, as a whole or in a part between `=` or `/`, so that a name
+glued to a value does not hide it) is a possible secret, not a known one: its form cannot tell
+a token from a dated identifier or a hash the document cites. It is a known
+secret, and fails the step, when a sensitive file of the worktree holds it:
+the run itself or a part of it between `=` or `/`, found anywhere in the text
+of the file (also read without NUL bytes, for UTF-16, and with the escapes of
+a JSON string undone), a long run of the file found in the document, or any
+32 characters in a row that the document and the file share, whatever their
+share of digits (a value whole, glued to a name, cut short or extended). A
+document that is not plain UTF-8 is read all the same, its invalid bytes
+replaced and its NUL bytes dropped. The
+sensitive files are scanned at the start of the run and again at each audit.
+Any other run fails nothing: the step stands, and the run records, per step,
+the documents and the lines that hold one (50 documents and 5 lines each at
+most, then a count; never the content). A rejected document still lists its
+lines, the rejected one included. A step can run several
+times (a loop, a resume, a quota wake) and each audit sees only what that
+execution changed: the record keeps what it said of the documents this
+execution left alone, and replaces or drops what it said of those it changed
+or removed. After a sub-workflow step, the records of its child runs are
+copied to the parent run under the step and the child run, in keys apart
+from its own, replacing the ones copied before; child runs that could not be
+read leave a record saying so. The run list marks such a run on its row, and the run
+view lists the documents above the step list, saying that they did not block
+the run, so the reader checks them before committing or publishing. Accepted
+limit: a credential in a format the pattern list does not know, and that no
+sensitive file of the worktree holds (or holds only transformed: encoded,
+shorter than 32 characters and reworded, or in a sensitive file over 4 MiB,
+which is read by lines only), is reported and not blocked. A step
+cancelled or stopped by a guard while it runs is not audited at all
+(KT-1796). [src: file: backend/src/core/docs_write_filter.rs:120-130#possible_secret_lines] [src: file: backend/src/workflows/runner.rs:32-60#possible_secrets_report] [src: file: frontend/src/lib/docsPossibleSecrets.ts:49-54#runPossibleSecrets]
 Unchanged content that was already modified, staged or untracked before the
 step is outside this audit. Changes committed during the step are still checked.
 A document's size alone is not a leak signal. Fingerprinting uses a streaming

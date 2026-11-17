@@ -1143,3 +1143,252 @@ fn a_terminal_stop_overrides_a_quota_wait_and_a_recovery_rule() {
     assert!(outcome.condition_action.is_none());
     assert!(outcome.result.output.starts_with("counter down"));
 }
+
+#[test]
+fn the_possible_secrets_report_is_bounded_and_names_lines_only() {
+    use crate::core::docs_write_filter::DocsAudit;
+    assert_eq!(possible_secrets_report(None, &DocsAudit::default()), None);
+
+    let mut found = vec![("docs/notes.md".to_string(), (1..=8).collect::<Vec<usize>>())];
+    found.extend((0..55).map(|n| (format!("docs/{n}.md"), vec![3])));
+    let audit = DocsAudit {
+        possible_secrets: found,
+        ..Default::default()
+    };
+    let report = possible_secrets_report(None, &audit).expect("a report");
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["documents"].as_array().unwrap().len(), 50);
+    assert_eq!(report["more_documents"], 6);
+    assert_eq!(
+        report["documents"][0],
+        serde_json::json!({"path": "docs/notes.md", "lines": [1, 2, 3, 4, 5], "more_lines": 3})
+    );
+    assert_eq!(
+        report["documents"][1],
+        serde_json::json!({"path": "docs/0.md", "lines": [3], "more_lines": 0})
+    );
+}
+
+/// A child run is a row nobody opens: its possible secrets go up to its
+/// parent, each under its step and its own run. Nothing else does.
+#[test]
+fn the_possible_secrets_of_child_runs_are_keyed_for_their_parent() {
+    let mut first = pending_run("aaaaaaaa-1111", "wf-child");
+    first.state.insert(
+        "__kronn.docs_possible_secrets.write".into(),
+        "{\"documents\":[]}".into(),
+    );
+    first
+        .state
+        .insert("docs_write_rejections.write".into(), "1".into());
+    let mut second = pending_run("bbbbbbbb-2222", "wf-child");
+    second.state.insert(
+        "__kronn.docs_possible_secrets.write".into(),
+        "{\"more_documents\":1}".into(),
+    );
+    assert_eq!(
+        child_possible_secrets(&[first, second, pending_run("cccccccc-3333", "wf-child")]),
+        vec![
+            (
+                "__kronn.docs_child_possible_secrets.write (sub-run aaaaaaaa)".to_string(),
+                "{\"documents\":[]}".to_string()
+            ),
+            (
+                "__kronn.docs_child_possible_secrets.write (sub-run bbbbbbbb)".to_string(),
+                "{\"more_documents\":1}".to_string()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn adopted_records_are_replaced_and_the_runs_own_are_kept() {
+    let mut state = std::collections::HashMap::from([
+        (
+            "__kronn.docs_possible_secrets.own".to_string(),
+            "own".to_string(),
+        ),
+        (
+            "__kronn.docs_child_possible_secrets.write (sub-run 99999999)".to_string(),
+            "stale".to_string(),
+        ),
+        // A step of the run itself can carry any name.
+        (
+            "__kronn.docs_possible_secrets.draft (sub-run notes)".to_string(),
+            "own too".to_string(),
+        ),
+        ("other (sub-run x)".to_string(), "kept".to_string()),
+    ]);
+    let mut child = pending_run("aaaaaaaa-1111", "wf-child");
+    child
+        .state
+        .insert("__kronn.docs_possible_secrets.write".into(), "fresh".into());
+    replace_child_possible_secrets(&mut state, &[child]);
+    let mut keys: Vec<(&str, &str)> = state
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            (
+                "__kronn.docs_child_possible_secrets.write (sub-run aaaaaaaa)",
+                "fresh"
+            ),
+            (
+                "__kronn.docs_possible_secrets.draft (sub-run notes)",
+                "own too"
+            ),
+            ("__kronn.docs_possible_secrets.own", "own"),
+            ("other (sub-run x)", "kept"),
+        ]
+    );
+}
+
+/// What a child adopted from its own children goes up with it.
+#[test]
+fn the_records_a_child_adopted_go_up_too() {
+    let mut child = pending_run("aaaaaaaa-1111", "wf-child");
+    child.state.insert(
+        "__kronn.docs_child_possible_secrets.write (sub-run cccccccc)".into(),
+        "deep".into(),
+    );
+    assert_eq!(
+        child_possible_secrets(&[child]),
+        vec![(
+            "__kronn.docs_child_possible_secrets.write (sub-run cccccccc) (sub-run aaaaaaaa)"
+                .to_string(),
+            "deep".to_string()
+        )]
+    );
+}
+
+/// Child runs that could not be read are said, not passed over: the reader
+/// is sent to them.
+#[test]
+fn unread_child_runs_leave_a_record_the_next_reading_replaces() {
+    let mut state = std::collections::HashMap::new();
+    mark_child_possible_secrets_unread(&mut state, "fan-out");
+    let unread: Vec<(String, String)> = state.clone().into_iter().collect();
+    assert_eq!(
+        unread,
+        [(
+            "__kronn.docs_child_possible_secrets.fan-out".to_string(),
+            "unread".to_string()
+        )]
+    );
+    replace_child_possible_secrets(&mut state, &[]);
+    assert!(state.is_empty(), "{state:?}");
+}
+
+/// A step that runs again (a loop, a resume, a quota wake) audits only what
+/// that execution changed: the rest of what it reported before still holds.
+#[test]
+fn a_later_execution_keeps_what_it_did_not_inspect() {
+    use crate::core::docs_write_filter::DocsAudit;
+    let paths = |report: &Option<String>| -> Vec<String> {
+        let report: serde_json::Value = serde_json::from_str(report.as_deref().unwrap()).unwrap();
+        let documents = report["documents"].as_array().unwrap().iter();
+        documents
+            .map(|d| d["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let first = possible_secrets_report(
+        None,
+        &DocsAudit {
+            possible_secrets: vec![("docs/x.md".into(), vec![4]), ("docs/z.md".into(), vec![1])],
+            inspected: vec!["docs/x.md".into(), "docs/z.md".into()],
+            ..Default::default()
+        },
+    );
+
+    // Code only: nothing inspected, nothing forgotten.
+    let untouched = possible_secrets_report(first.as_deref(), &DocsAudit::default());
+    assert_eq!(untouched, first);
+
+    // Another document: added, never a replacement.
+    let second = possible_secrets_report(
+        first.as_deref(),
+        &DocsAudit {
+            possible_secrets: vec![("docs/y.md".into(), vec![9])],
+            inspected: vec!["docs/y.md".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(paths(&second), ["docs/x.md", "docs/z.md", "docs/y.md"]);
+
+    // `x` rewritten with other lines, `z` cleaned or removed.
+    let third = possible_secrets_report(
+        second.as_deref(),
+        &DocsAudit {
+            possible_secrets: vec![("docs/x.md".into(), vec![7])],
+            inspected: vec!["docs/x.md".into(), "docs/z.md".into()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(paths(&third), ["docs/y.md", "docs/x.md"]);
+    assert!(third.as_deref().unwrap().contains("[7]"), "{third:?}");
+
+    // Everything cleaned: the record goes.
+    let cleaned = DocsAudit {
+        inspected: vec!["docs/x.md".into(), "docs/y.md".into()],
+        ..Default::default()
+    };
+    assert_eq!(possible_secrets_report(third.as_deref(), &cleaned), None);
+}
+
+#[test]
+fn a_kept_branch_is_recorded_once() {
+    let mut run = pending_run("run-kept", "wf");
+    for (sha, ahead) in [("1".repeat(40), 1), ("2".repeat(40), 2)] {
+        record_produced_branch(
+            &mut run,
+            crate::workflows::workspace::PreservedBranch {
+                branch_name: "kronn/wf/run".into(),
+                head_sha: sha,
+                ahead,
+                pushed_upstream: false,
+            },
+        );
+    }
+    assert_eq!(
+        run.produced_branches.len(),
+        1,
+        "{:?}",
+        run.produced_branches
+    );
+    assert_eq!(run.produced_branches[0].ahead, 2);
+    // A reading git could not make never replaces a commit already recorded.
+    record_produced_branch(
+        &mut run,
+        crate::workflows::workspace::PreservedBranch {
+            branch_name: "kronn/wf/run".into(),
+            head_sha: String::new(),
+            ahead: 0,
+            pushed_upstream: false,
+        },
+    );
+    assert_eq!(run.produced_branches[0].head_sha, "2".repeat(40));
+}
+
+#[test]
+fn a_document_audit_failure_overrides_a_quota_wait() {
+    // KT-1796 — a quota wait would run the step again over the rejected content.
+    let mut result = fake_result("work");
+    result.quota_wait = Some(crate::models::QuotaWait {
+        id: None,
+        reset_at: None,
+        wake_at: None,
+        attempt: 0,
+        parked: None,
+        detail: None,
+    });
+    let mut outcome = crate::workflows::steps::StepOutcome {
+        result,
+        condition_action: None,
+    };
+    fail_document_audit(&mut outcome, "docs/notes.md: write rejected");
+    assert_eq!(outcome.result.status, RunStatus::Failed);
+    assert_eq!(outcome.result.quota_wait, None);
+}

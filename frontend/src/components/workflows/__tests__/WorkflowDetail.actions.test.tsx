@@ -771,6 +771,15 @@ describe('WorkflowDetail — step shadows (KT-1459)', () => {
     expect(screen.getByTitle('wf.deleteRun')).toBeInTheDocument();
   });
 
+  it('marks, on its row, a run whose audit reported possible secrets', () => {
+    // KT-1796 — a successful run stays collapsed: the row itself says it.
+    const flagged = { ...normal, id: 'p1', state: { '__kronn.docs_possible_secrets.lire': '{"documents":[{"path":"docs/a.md","lines":[2],"more_lines":0}],"more_documents":0}' } };
+    const { container } = renderDetail({ runs: [flagged, normal] });
+    const badges = screen.getAllByTestId('wf-run-possible-secrets');
+    expect(badges).toHaveLength(1);
+    expect(container.querySelector('[data-run-id="p1"]')?.contains(badges[0])).toBe(true);
+  });
+
   it('shows, in a run whose step ran shadows, the main execution beside them', async () => {
     vi.mocked(workflowsApi.stepShadows).mockResolvedValue([{
       step_name: 'lire', result_index: 0,

@@ -7742,6 +7742,33 @@
   margin: 4px 0 0;
 }
 
+/* KT-1796 — possible secrets of a run: a warning, nothing was blocked. */
+.wf-possible-secrets {
+  margin: 10px 0 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  font-size: var(--kr-fs-sm);
+  border-radius: var(--kr-r-md);
+}
+
+.wf-possible-secrets strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--kr-warning);
+}
+
+.wf-possible-secrets p {
+  margin: 4px 0 0;
+}
+
+.wf-possible-secrets ul {
+  margin: 2px 0 4px;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+
 .wf-rollback-separator {
   margin: 10px 0 6px;
   padding: 6px 10px;
@@ -8397,6 +8424,7 @@
   .wf-shadow-select { min-width: 0; flex: 1; }
 }
 .wf-run-compact-shadow { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: var(--kr-r-sm); font-size: var(--kr-fs-xs); font-weight: 700; background: var(--kr-accent-bg); color: var(--kr-accent-ink); white-space: nowrap; }
+.wf-run-compact-secrets { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; border-radius: var(--kr-r-sm); font-size: var(--kr-fs-xs); font-weight: 700; background: rgba(var(--kr-warning-rgb), 0.12); color: var(--kr-warning); white-space: nowrap; }
 .wf-run-compact-shadow[data-variant="paired"] { background: transparent; border: 1px dashed var(--kr-accent-border); font-weight: 600; }
 .wf-shadow-cmp { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-md); background: var(--kr-bg-raised); font-size: var(--kr-fs-sm); min-width: 0; }
 .wf-shadow-cmp-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; }

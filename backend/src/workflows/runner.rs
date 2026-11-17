@@ -23,7 +23,156 @@ fn fail_document_audit(outcome: &mut StepOutcome, reason: &str) {
         "Document audit failed. Files and index were preserved; inspect these changes before committing or publishing.\n{reason}\n\nAgent result:\n{}",
         outcome.result.output
     );
+    // A quota wait would run the step again over the rejected content.
+    outcome.result.quota_wait = None;
     tracing::warn!(target: "kronn::docs_write_filter", "Document audit failed; files preserved: {reason}");
+}
+
+/// Engine-reserved state, one key per step: the possible secrets its
+/// document audit reported. The run view reads it.
+const DOCS_POSSIBLE_SECRETS_STATE_PREFIX: &str = "__kronn.docs_possible_secrets.";
+const MAX_REPORTED_DOCUMENTS: usize = 50;
+const MAX_REPORTED_LINES: usize = 5;
+
+/// KT-1796 — what the run view shows of the possible secrets a step left:
+/// documents and lines, bounded, never content. `None` when there is none.
+///
+/// A step runs more than once (a loop, a resume, a quota wake) and each audit
+/// sees only what that execution changed: what `previous` says of a document
+/// this audit did not inspect still holds, and is kept.
+fn possible_secrets_report(
+    previous: Option<&str>,
+    audit: &crate::core::docs_write_filter::DocsAudit,
+) -> Option<String> {
+    let previous = previous.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let known = previous
+        .as_ref()
+        .and_then(|report| report["documents"].as_array());
+    let mut documents: Vec<serde_json::Value> = known
+        .into_iter()
+        .flatten()
+        .filter(|document| {
+            document["path"]
+                .as_str()
+                .is_some_and(|path| !audit.inspected.iter().any(|seen| seen == path))
+        })
+        .cloned()
+        .collect();
+    documents.extend(audit.possible_secrets.iter().map(|(path, lines)| {
+        serde_json::json!({
+            "path": path,
+            "lines": lines.iter().take(MAX_REPORTED_LINES).collect::<Vec<_>>(),
+            "more_lines": lines.len().saturating_sub(MAX_REPORTED_LINES),
+        })
+    }));
+    // Documents beyond the bound are counted, and that count never goes down:
+    // nothing says which of them a later execution cleaned.
+    let uncounted = previous
+        .as_ref()
+        .and_then(|report| report["more_documents"].as_u64());
+    let more =
+        uncounted.unwrap_or(0) as usize + documents.len().saturating_sub(MAX_REPORTED_DOCUMENTS);
+    documents.truncate(MAX_REPORTED_DOCUMENTS);
+    if documents.is_empty() && more == 0 {
+        return None;
+    }
+    Some(serde_json::json!({ "documents": documents, "more_documents": more }).to_string())
+}
+
+/// KT-1796 — the possible secrets of the runs a step spawned are said on
+/// this run too: a child run is a row nobody opens.
+async fn adopt_child_possible_secrets(
+    state: &AppState,
+    run_id: &str,
+    step_name: &str,
+    run_state: &mut std::collections::HashMap<String, String>,
+) {
+    let parent = run_id.to_string();
+    let children = state
+        .db
+        .with_read_conn(move |conn| crate::db::workflows::subworkflow_children(conn, &parent))
+        .await;
+    let children = match children {
+        Ok(children) => children,
+        Err(error) => {
+            tracing::warn!(run_id = %run_id, "possible secrets of the child runs not read: {error}");
+            mark_child_possible_secrets_unread(run_state, step_name);
+            return;
+        }
+    };
+    replace_child_possible_secrets(run_state, &children);
+}
+
+/// The child runs of `step_name` could not be read: said on the run, as a
+/// record its reader cannot open, until a later reading replaces it.
+fn mark_child_possible_secrets_unread(
+    run_state: &mut std::collections::HashMap<String, String>,
+    step_name: &str,
+) {
+    run_state.insert(
+        format!("{DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX}{step_name}"),
+        "unread".to_string(),
+    );
+}
+
+/// The records adopted before go, those of `children` come: a child run
+/// again may have cleaned its documents.
+fn replace_child_possible_secrets(
+    run_state: &mut std::collections::HashMap<String, String>,
+    children: &[WorkflowRun],
+) {
+    run_state.retain(|key, _| !key.starts_with(DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX));
+    run_state.extend(child_possible_secrets(children));
+}
+
+/// Run state keys of the records adopted from child runs: apart from the
+/// run's own, whose steps can carry any name.
+const DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX: &str = "__kronn.docs_child_possible_secrets.";
+
+/// What the key of an adopted record carries after its step.
+const SUB_RUN_MARK: &str = " (sub-run ";
+
+/// The possible-secret records of `children`, keyed for their parent: the
+/// step, then the child run it ran in.
+fn child_possible_secrets(children: &[WorkflowRun]) -> Vec<(String, String)> {
+    let mut adopted = Vec::new();
+    for child in children {
+        let short: String = child.id.chars().take(8).collect();
+        for (key, report) in &child.state {
+            // Its own, and those it adopted from its own children.
+            let step = key
+                .strip_prefix(DOCS_POSSIBLE_SECRETS_STATE_PREFIX)
+                .or_else(|| key.strip_prefix(DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX));
+            if let Some(step) = step {
+                let key = format!(
+                    "{DOCS_CHILD_POSSIBLE_SECRETS_STATE_PREFIX}{step}{SUB_RUN_MARK}{short})"
+                );
+                adopted.push((key, report.clone()));
+            }
+        }
+    }
+    adopted
+}
+
+/// Records a branch a cleanup kept, once: a run resumed in its kept worktree
+/// ends on the same branch again.
+fn record_produced_branch(run: &mut WorkflowRun, preserved: super::workspace::PreservedBranch) {
+    let produced = crate::models::ProducedBranch {
+        branch_name: preserved.branch_name,
+        head_sha: preserved.head_sha,
+        ahead: preserved.ahead,
+        pushed_upstream: preserved.pushed_upstream,
+    };
+    match run
+        .produced_branches
+        .iter_mut()
+        .find(|known| known.branch_name == produced.branch_name)
+    {
+        // A reading git could not make carries no commit: keep the one known.
+        Some(_) if produced.head_sha.is_empty() => {}
+        Some(known) => *known = produced,
+        None => run.produced_branches.push(produced),
+    }
 }
 
 /// The single place a `terminal_stop` takes effect: Failed, no quota wait, no
@@ -2844,27 +2993,59 @@ async fn execute_run_body(
                         // may have authored them. Reject the step instead, while
                         // preserving all content and the original agent outcome.
                         if let Ok(Some(before)) = &docs_before {
+                            // Scanned again: a sensitive file can appear
+                            // during the run (a hook, the step itself).
+                            let root = std::path::PathBuf::from(&work_dir);
+                            let mut sensitive = tokio::task::spawn_blocking(move || {
+                                crate::core::docs_write_filter::scan_sensitive_files(&root)
+                            })
+                            .await
+                            .unwrap_or_default();
+                            sensitive.extend_from(sensitive_substrings.as_ref());
                             let audit = crate::core::docs_write_filter::audit_docs_writes(
                                 std::path::Path::new(&work_dir),
-                                sensitive_substrings.as_ref(),
+                                &sensitive,
                                 before,
                             )
                             .await;
                             match audit {
-                                Ok(rejections) if !rejections.is_empty() => {
-                                    let reasons = rejections
-                                        .iter()
-                                        .map(|(path, reason)| {
-                                            format!("{path}: {}", reason.explain())
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n");
-                                    fail_document_audit(&mut outcome, &reasons);
-                                    let count_key = format!("docs_write_rejections.{}", step.name);
-                                    run.state.insert(count_key, rejections.len().to_string());
+                                Ok(audit) => {
+                                    let rejections = &audit.rejections;
+                                    if !rejections.is_empty() {
+                                        let reasons = rejections
+                                            .iter()
+                                            .map(|(path, reason)| {
+                                                format!("{path}: {}", reason.explain())
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        fail_document_audit(&mut outcome, &reasons);
+                                        let count_key =
+                                            format!("docs_write_rejections.{}", step.name);
+                                        run.state.insert(count_key, rejections.len().to_string());
+                                    }
+                                    // KT-1796 — never a failure, never silent.
+                                    let key = format!(
+                                        "{DOCS_POSSIBLE_SECRETS_STATE_PREFIX}{}",
+                                        step.name
+                                    );
+                                    let known = run.state.get(&key).map(String::as_str);
+                                    match possible_secrets_report(known, &audit) {
+                                        Some(report) => {
+                                            tracing::warn!(
+                                                target: "kronn::docs_write_filter",
+                                                run_id = %run.id,
+                                                step = %step.name,
+                                                "possible secrets left in changed documents, not blocked: {report}"
+                                            );
+                                            run.state.insert(key, report);
+                                        }
+                                        None => {
+                                            run.state.remove(&key);
+                                        }
+                                    }
                                 }
                                 Err(error) => fail_document_audit(&mut outcome, &error),
-                                Ok(_) => {}
                             }
                         }
                         // KT-1544 — a step that merges its shadows hands the
@@ -3530,6 +3711,12 @@ async fn execute_run_body(
                 run.id,
                 step.name
             ));
+        }
+
+        // KT-1796 — whatever the child runs of this step reported is said
+        // on this run too.
+        if step.step_type == StepType::SubWorkflow {
+            adopt_child_possible_secrets(&state, &run.id, &step.name, &mut run.state).await;
         }
 
         // Persist progress
@@ -7843,15 +8030,31 @@ mod tests {
 
     #[tokio::test]
     async fn document_audit_stops_the_run_and_persists_paths_without_erasing_files() {
-        check_document_audit_in_full_run(false).await;
+        check_document_audit_in_full_run(false, true).await;
     }
 
     #[tokio::test]
     async fn document_audit_preserves_preexisting_files_after_agent_launch_failure() {
-        check_document_audit_in_full_run(true).await;
+        check_document_audit_in_full_run(true, true).await;
     }
 
-    async fn check_document_audit_in_full_run(agent_launch_fails: bool) {
+    /// KT-1796 — a possible secret fails nothing and is never silent.
+    #[tokio::test]
+    async fn a_possible_secret_lets_the_run_go_on_and_is_recorded_for_its_reader() {
+        check_document_audit_in_full_run(false, false).await;
+    }
+
+    /// KT-1796 — a child run is a row nobody opens: its parent says it.
+    #[test]
+    fn a_possible_secret_of_a_child_run_is_recorded_on_its_parent() {
+        gate_guard_runs::on_big_stack(check_document_audit(false, false, true));
+    }
+
+    async fn check_document_audit_in_full_run(agent_launch_fails: bool, known_secret: bool) {
+        check_document_audit(agent_launch_fails, known_secret, false).await;
+    }
+
+    async fn check_document_audit(agent_launch_fails: bool, known_secret: bool, as_child: bool) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let (state, tokens, mut agents) = test_state_and_configs();
@@ -7868,7 +8071,11 @@ mod tests {
         std::fs::write(&existing_path, &existing).unwrap();
         let rejected_path = repo.path().join("docs/new report.md");
         let write_path = rejected_path.clone();
-        let fake_secret = "sk-1234567890abcdefghijklmnopqrstuvwxyz";
+        let fake_secret = if known_secret {
+            "sk-1234567890abcdefghijklmnopqrstuvwxyz"
+        } else {
+            "q8Z3vL0xT5mR2nB7kW9cY4hJ1pF6dS3gA8eU0iO2"
+        };
         let server = MockServer::start().await;
         Mock::given(method("POST")).and(path("/v1/chat/completions"))
             .respond_with(move |_: &wiremock::Request| {
@@ -7913,6 +8120,60 @@ mod tests {
             agent,
             json_data_step("publish", serde_json::json!({"unexpected":true})),
         ];
+        if as_child {
+            let child = wf.clone();
+            state
+                .db
+                .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &child))
+                .await
+                .unwrap();
+            let mut parent = make_workflow_with_artifacts(Default::default());
+            parent.id = "wf-doc-audit-parent".into();
+            // Its own project: the child, pinned to the audited one, runs there.
+            let parent_repo = tempfile::TempDir::new().unwrap();
+            git_in(parent_repo.path(), &["init", "-q", "-b", "main"]).await;
+            insert_project_at(&state, "proj-doc-audit-parent", parent_repo.path()).await;
+            parent.project_id = Some("proj-doc-audit-parent".into());
+            let mut call = fake_step("call_child");
+            call.step_type = StepType::SubWorkflow;
+            call.sub_workflow_id = Some(wf.id.clone());
+            parent.steps = vec![call];
+            let mut run = pending_run("run-doc-audit-parent", &parent.id);
+            run.project_id = parent.project_id.clone();
+            insert_wf_and_run(&state, &parent, &run).await;
+            execute_run(
+                state.clone(),
+                &parent,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+            let persisted = state
+                .db
+                .with_conn(|conn| crate::db::workflows::get_run(conn, "run-doc-audit-parent"))
+                .await
+                .unwrap()
+                .unwrap();
+            let child_run = persisted.step_results[0]
+                .child_run_id
+                .clone()
+                .expect("a child");
+            let short: String = child_run.chars().take(8).collect();
+            let key = format!("__kronn.docs_child_possible_secrets.advise (sub-run {short})");
+            let report = persisted
+                .state
+                .get(&key)
+                .unwrap_or_else(|| panic!("no {key} in {:?}", persisted.state));
+            assert!(report.contains("docs/new report.md"), "{report}");
+            assert!(!report.contains(fake_secret), "{report}");
+            return;
+        }
         let mut run = pending_run("run-doc-audit", &wf.id);
         insert_wf_and_run(&state, &wf, &run).await;
         execute_run(
@@ -7927,6 +8188,30 @@ mod tests {
         )
         .await
         .unwrap();
+        if !known_secret {
+            assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+            assert_eq!(run.step_results.len(), 2, "the run went on to publish");
+            let output = &run.step_results[0].output;
+            assert!(!output.contains("Document audit failed"), "{output}");
+            let persisted = state
+                .db
+                .with_conn(|conn| crate::db::workflows::get_run(conn, "run-doc-audit"))
+                .await
+                .unwrap()
+                .unwrap();
+            let report = persisted
+                .state
+                .get("__kronn.docs_possible_secrets.advise")
+                .expect("the possible secret is recorded");
+            assert!(!report.contains(fake_secret), "{report}");
+            let report: serde_json::Value = serde_json::from_str(report).unwrap();
+            assert_eq!(
+                report["documents"],
+                serde_json::json!([{"path": "docs/new report.md", "lines": [1], "more_lines": 0}])
+            );
+            assert!(!persisted.state.contains_key("docs_write_rejections.advise"));
+            return;
+        }
         assert_eq!(run.status, RunStatus::Failed);
         assert_eq!(
             run.step_results.len(),
@@ -10787,6 +11072,30 @@ mod tests {
         assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
     }
 
+    #[tokio::test]
+    async fn a_successful_run_keeps_a_worktree_holding_uncommitted_work() {
+        // A step's output can be files no later step commits: success is not
+        // a licence to delete them.
+        let (state, _, _) = test_state_and_configs();
+        let (_repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-dirty").await;
+        workflow.exec_allowlist = vec!["sh".into()];
+        let mut design = fake_step("design");
+        design.step_type = StepType::Exec;
+        design.exec_command = Some("sh".into());
+        design.exec_args = vec!["-c".into(), "printf 'spec\\n' > design.md".into()];
+        workflow.steps = vec![design];
+        let run = run_to_end(&state, &workflow, "run-end-dirty").await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let path = std::path::PathBuf::from(run.workspace_path.clone().expect("isolated"));
+        assert_eq!(
+            std::fs::read_to_string(path.join("design.md")).expect("the file survives"),
+            "spec\n"
+        );
+        let last = &run.step_results.last().expect("one step").output;
+        assert!(last.contains("kept with its branch"), "{last}");
+        assert!(persisted_workspace(&state, "run-end-dirty").await.is_some());
+    }
+
     async fn persisted_workspace(state: &crate::AppState, run_id: &str) -> Option<String> {
         let run_id = run_id.to_string();
         state
@@ -11072,30 +11381,6 @@ mod tests {
             },
         )
         .await
-    #[tokio::test]
-    async fn a_successful_run_keeps_a_worktree_holding_uncommitted_work() {
-        // A step's output can be files no later step commits: success is not
-        // a licence to delete them.
-        let (state, _, _) = test_state_and_configs();
-        let (_repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-dirty").await;
-        workflow.exec_allowlist = vec!["sh".into()];
-        let mut design = fake_step("design");
-        design.step_type = StepType::Exec;
-        design.exec_command = Some("sh".into());
-        design.exec_args = vec!["-c".into(), "printf 'spec\\n' > design.md".into()];
-        workflow.steps = vec![design];
-        let run = run_to_end(&state, &workflow, "run-end-dirty").await;
-        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
-        let path = std::path::PathBuf::from(run.workspace_path.clone().expect("isolated"));
-        assert_eq!(
-            std::fs::read_to_string(path.join("design.md")).expect("the file survives"),
-            "spec\n"
-        );
-        let last = &run.step_results.last().expect("one step").output;
-        assert!(last.contains("kept with its branch"), "{last}");
-        assert!(persisted_workspace(&state, "run-end-dirty").await.is_some());
-    }
-
         .expect("admitted");
         execute_run(
             state.clone(),

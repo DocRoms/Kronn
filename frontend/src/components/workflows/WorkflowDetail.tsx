@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import { StepShadowCompare } from './StepShadowCompare';
 import { useStepShadows } from './useStepShadows';
+import { runPossibleSecrets } from '../../lib/docsPossibleSecrets';
 import { isShadowRun } from '../../lib/shadowRuns';
 import { newTabClickProps } from '../../lib/newTabNavigation';
 import { livePagePath, workflowPath } from '../../lib/routes';
@@ -2709,6 +2710,12 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
               {isShadowRun(run) && (
                 <span className="wf-run-compact-shadow" title={t('wf.shadow.badgeTitle')} data-testid="wf-run-shadow-badge">
                   <FlaskConical size={10} aria-hidden /> {t('wf.shadow.badge')}
+                </span>
+              )}
+              {runPossibleSecrets(run).length > 0 && (
+                // KT-1796 — said on the row: a successful run is never opened.
+                <span className="wf-run-compact-secrets" title={t('wf.possibleSecrets.title')} data-testid="wf-run-possible-secrets">
+                  <AlertTriangle size={10} aria-hidden /> {t('wf.possibleSecrets.badge')}
                 </span>
               )}
               <span className="wf-run-compact-time">{new Date(run.started_at).toLocaleString()}</span>

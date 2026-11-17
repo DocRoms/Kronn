@@ -13,6 +13,7 @@ import { StepTokensBadge } from './StepTokens';
 import { stepTokensUnknown } from './stepTokenStatus';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import { collectSourceWeights, isHeavyOutput, stepOutputBytes } from '../../lib/heavyOutput';
+import { runPossibleSecrets } from '../../lib/docsPossibleSecrets';
 import { formatBytes } from '../../lib/live-page-weight';
 import { useHeavyOutputThreshold } from '../../hooks/useHeavyOutputThreshold';
 import { HeavyOutputBadge, HeavyOutputNotice, SourceWeights } from './HeavyOutput';
@@ -1014,6 +1015,33 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
               </p>
             ))}
             <small>{t('wf.authRefused.hint')}</small>
+          </div>
+        );
+      })()}
+
+      {(() => {
+        // KT-1796 — a possible secret fails no step: said here, never silent.
+        const possible = runPossibleSecrets(run);
+        if (possible.length === 0) return null;
+        return (
+          <div className="wf-possible-secrets" role="note" data-testid="wf-possible-secrets">
+            <strong><AlertTriangle size={13} /> {t('wf.possibleSecrets.title')}</strong>
+            {possible.map(step => (
+              <div key={step.stepName}>
+                <p className="text-faint">{t('wf.possibleSecrets.step', step.stepName)}</p>
+                {step.unreadable && <p>{t('wf.possibleSecrets.unreadable')}</p>}
+                <ul>
+                  {step.documents.map(doc => (
+                    <li key={doc.path}>
+                      {t('wf.possibleSecrets.lines', doc.path, doc.lines.join(', '))}
+                      {doc.moreLines > 0 && <> {t('wf.possibleSecrets.moreLines', doc.moreLines)}</>}
+                    </li>
+                  ))}
+                  {step.moreDocuments > 0 && <li>{t('wf.possibleSecrets.moreDocuments', step.moreDocuments)}</li>}
+                </ul>
+              </div>
+            ))}
+            <small>{t('wf.possibleSecrets.hint')}</small>
           </div>
         );
       })()}
