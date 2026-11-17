@@ -2,16 +2,16 @@
 
 Before launching an Agent step, Kronn records content fingerprints of regular
 files in the project's detected documentation directory (`docs/`, `doc/` or
-legacy `ai/`). [src: file: backend/src/core/docs_write_filter.rs:507-529#snapshot_docs] [src: file: backend/src/workflows/runner.rs:2586-2597#docs_before] The scope is Git-tracked files and non-ignored untracked files,
+legacy `ai/`). [src: file: backend/src/core/docs_write_filter.rs:752-774#snapshot_docs] [src: file: backend/src/workflows/runner.rs:2742-2753#docs_before] The scope is Git-tracked files and non-ignored untracked files,
 enumerated with `git ls-files --cached --others --exclude-standard`; tracked
 files remain included even if an ignore pattern matches them. Non-Git projects
-remain outside this audit, as in earlier releases. [src: file: backend/src/core/docs_write_filter.rs:430-505#document_paths]
+remain outside this audit, as in earlier releases. [src: file: backend/src/core/docs_write_filter.rs:675-750#document_paths]
 On Unix, Git's NUL-delimited filename bytes are kept intact for filesystem
 access, including non-UTF-8 names. Diagnostics preserve ordinary Unicode names;
 invalid names, control characters and literal backslashes use an explicit
 `[escaped path bytes]` label with byte escapes instead of replacement characters.
 The label is never used to open a file. Platforms without Unix byte paths keep
-the UTF-8 conversion and fail explicitly if a Git path cannot be represented. [src: file: backend/src/core/docs_write_filter.rs:387-428#native_document_path]
+the UTF-8 conversion and fail explicitly if a Git path cannot be represented. [src: file: backend/src/core/docs_write_filter.rs:632-673#native_document_path]
 After the step, it checks new or changed text for credential
 patterns and overlaps with the run's sensitive-file scan: either one fails the
 step, and the rejection names the file and the line, never the content. A
@@ -55,13 +55,13 @@ shorter than 32 characters and reworded, a part of it without a digit and
 in one case, or in a sensitive file over 4 MiB, which is read by lines only),
 is reported and not blocked. A step
 cancelled or stopped by a guard while it runs is not audited at all
-(KT-1796). [src: file: backend/src/core/docs_write_filter.rs:120-130#possible_secret_lines] [src: file: backend/src/workflows/runner.rs:32-60#possible_secrets_report] [src: file: frontend/src/lib/docsPossibleSecrets.ts:49-54#runPossibleSecrets]
+(KT-1796). [src: file: backend/src/core/docs_write_filter.rs:127-163#possible_secret_lines] [src: file: backend/src/workflows/runner.rs:32-60#possible_secrets_report] [src: file: frontend/src/lib/docsPossibleSecrets.ts:49-54#runPossibleSecrets]
 Unchanged content that was already modified, staged or untracked before the
 step is outside this audit. Changes committed during the step are still checked.
 A document's size alone is not a leak signal. Fingerprinting uses a streaming
 hash; the post-step check retains at most 16 MiB per file and inspects the same
 bytes that were hashed. An unchanged larger file is allowed; a changed larger
-file fails with an explicit incomplete-audit diagnostic and remains intact. [src: file: backend/src/core/docs_write_filter.rs:345-385#MAX_AUDIT_BUFFER_BYTES] [src: file: backend/src/core/docs_write_filter.rs:531-573#audit_docs_writes]
+file fails with an explicit incomplete-audit diagnostic and remains intact. [src: file: backend/src/core/docs_write_filter.rs:590-630#MAX_AUDIT_BUFFER_BYTES] [src: file: backend/src/core/docs_write_filter.rs:793-881#audit_docs_writes]
 
 The audit never restores, deletes, stages or commits files. A change observed
 during the step may have been written concurrently by a person or another
@@ -70,7 +70,7 @@ the step, clear its condition action and stop normal workflow continuation.
 The persisted step output names the paths and detection reasons without
 copying suspected credentials. Files and index entries remain available for
 inspection. An incomplete snapshot prevents the agent launch; an incomplete
-post-step audit also fails the step. [src: file: backend/src/workflows/runner.rs:18-27#fail_document_audit] [src: file: backend/src/workflows/runner.rs:2612-2619#preparation_error] [src: file: backend/src/workflows/runner.rs:2848-2874#audit_docs_writes]
+post-step audit also fails the step. [src: file: backend/src/workflows/runner.rs:18-27#fail_document_audit] [src: file: backend/src/workflows/runner.rs:2768-2775#preparation_error] [src: file: backend/src/workflows/runner.rs:3004-3070#audit_docs_writes]
 
 Explicit failure compensation and workspace hooks keep their existing
 behavior. This audit is a post-step check, not a sandbox: it cannot undo an

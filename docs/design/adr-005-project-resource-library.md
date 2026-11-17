@@ -211,7 +211,7 @@ parent `node_modules`, Python's site-packages) are not covered
 [src: file: backend/src/core/approved_scripts.rs:173-179#copy_dir]
 [src: file: backend/src/core/approved_scripts.rs:181-231#prepare_copy]
 [src: file: backend/src/api/workflows.rs:1648-1720#pin_exec_script_files]
-[src: file: backend/src/workflows/runner.rs:1334-1371#carrying_repository]
+[src: file: backend/src/workflows/runner.rs:1490-1527#carrying_repository]
 [src: file: backend/src/workflows/exec_step.rs:143-189#approved_script_child].
 
 **Implementation note (KT-920, 0.15.0).** Templated step fields read the

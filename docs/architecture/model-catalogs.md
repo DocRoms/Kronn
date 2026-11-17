@@ -149,7 +149,7 @@ authentication failures and unavailable/unknown identities are not covered by
 that exception, and other runtimes keep their existing failure policy.
 [src: file: backend/src/core/model_catalog/mod.rs:1191-1222#retained_claude_model]
 [src: file: backend/src/api/discussions/streaming.rs:4240-4286#preflight_resolve]
-[src: file: backend/src/workflows/runner.rs:2009-2094#preflight_resolve]
+[src: file: backend/src/workflows/runner.rs:2165-2250#preflight_resolve]
 [src: file: backend/src/workflows/steps.rs:1213-1266#preflight_workflow_launch]
 
 A comparison's TARGET decides which connection its run uses (KT-672). A row
@@ -273,11 +273,11 @@ Settings → Agents exposes an effort selector per tier for Claude and Codex.
 It derives choices from the selected model's catalog entry, retains an invalid saved value only as an
 explained disabled option, and clears an incompatible effort in the same save
 that changes the model. Even without available modes, the control remains
-usable to clear an invalid saved effort. Other runtime cards state that effort
-is unsupported.
+usable to clear an invalid saved effort. The selector sits beside each mode's
+model picker; the cards of other runtimes carry none (KT-1807).
 [src: file: frontend/src/components/settings/AgentsSection.tsx:233-278#saveTierPreference]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:955-984#renderEffortSelect]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:953-958#supportsEffort]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:965-991#renderEffortSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:955-961#renderTierEfforts]
 
 ## Migration and test invariants
 

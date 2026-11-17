@@ -96,5 +96,5 @@ published to the process by `config::save` and at boot
   [src: file: backend/src/core/worktree.rs:1874-1876#ensure_os_junk_excluded]
 - A checkout that holds only junk is not dirty: delivery and cleanup go through.
   A *tracked* junk file that changed is still work.
-  [src: file: backend/src/core/worktree.rs:4693-4699#worktree_dirty_files]
+  [src: file: backend/src/core/worktree.rs:4714-4720#worktree_dirty_files]
 - A type change (`T`, a file replaced by a symlink) is delivered as *Modified*.

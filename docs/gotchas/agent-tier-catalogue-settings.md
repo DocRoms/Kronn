@@ -12,7 +12,7 @@ snapshot request succeeded. Clearing an override is an explicit action; its
 placeholder and card preview show the catalogue's tier assignment when known.
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-173#catalogModelOptions]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:90-93#catalogModelProvenance]
-[src: file: frontend/src/components/settings/AgentsSection.tsx:885-910#renderSelect]
+[src: file: frontend/src/components/settings/AgentsSection.tsx:892-917#renderSelect]
 
 The settings endpoint replaces the whole model-tier document. Before a save,
 the editor rereads it and merges only the selected agent/tier, guarded against

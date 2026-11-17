@@ -49,7 +49,7 @@ drives a task execution (0.15.0 adds `DelegateSubtasks`).
   checked out (or by moving the ref when no worktree has it), refusing a dirty
   checkout, and sends a conflict back to the worker.
   `[src: file: backend/src/api/orchestration.rs:3448-3706#run_integration]`
-  `[src: file: backend/src/core/worktree.rs:3181-3203#IntegrationTarget]`
+  `[src: file: backend/src/core/worktree.rs:3202-3224#IntegrationTarget]`
 - **Workflow side.** `on_result` routes on a `[SIGNAL: X]` line among the last
   five of the step output; an Agent step can join a room through `room_id`
   (KT-793); `SubWorkflow` foreach records durable per-item markers.
@@ -83,7 +83,7 @@ branch. Checked against the code:
   `[src: file: backend/src/api/orchestration.rs:7806-7813#deliver_worker_manifest]`
   `[src: file: backend/src/db/orchestration.rs:4848-4855#EscalationDelivery]`
 - A workflow run works in its own worktree on branch
-  `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:730-733#build_branch_name]`
+  `kronn/<workflow>/<run8>`. `[src: file: backend/src/workflows/workspace.rs:1168-1171#build_branch_name]`
 
 So the real constraints are: a discussion that owns the campaign, a pinned
 target branch with at most one checkout, clean, and an authorized principal.
@@ -146,7 +146,7 @@ Behaviour:
    `timeout_secs` (`task_exec_status`'s `wait_for` also re-reads the state, every
    500 ms, capped at 170 s).
    `[src: file: backend/src/workflows/delegate_subtasks_step.rs:42-45#IDLE_POLL]`
-   `[src: file: backend/src/workflows/delegate_subtasks_step.rs:279-289#idle]`
+   `[src: file: backend/src/workflows/delegate_subtasks_step.rs:285-295#idle]`
    `[src: file: backend/src/api/orchestration.rs:16856-16894#wait_for_execution_status]`
 4. On each `AwaitingReview`: start **one fresh reviewer session** with a
    compact context (task title, DoD, delivered diff against `base_sha`, the
