@@ -66,29 +66,52 @@ fn export_embed_origins(conn: &Connection, page_id: &str, html: &str) -> Result<
     Ok(crate::core::embed_origins::normalize_declared(&origins))
 }
 
+/// The page with its datasets' contents: what a project resource file carries.
 pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
+    read_page(conn, id, true)
+}
+
+/// The page as an Artifact file carries it: its datasets keep their name,
+/// kind, schema and limits, never their snapshot or points. Those are the
+/// data the page published (API answers, names, links), not its definition.
+pub(crate) fn export_bare_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
+    read_page(conn, id, false)
+}
+
+fn read_page(conn: &Connection, id: &str, with_data: bool) -> Result<ArtifactBundlePage> {
     let page_id = crate::db::live_pages::resolve_live_page_id(conn, id)?
         .ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     // Refuse oversized observations before hydrating the complete dataset graph.
+    // Dataset definitions always travel; values only with the data.
     let estimated: Option<i64> = conn.query_row(
         "SELECT length(CAST(r.html AS BLOB)) +
-            COALESCE((SELECT SUM(COALESCE(length(CAST(d.current_json AS BLOB)), 0) + COALESCE(length(CAST(d.schema_json AS BLOB)), 0) + length(CAST(d.name AS BLOB)) + 80)
+            COALESCE((SELECT SUM(COALESCE(length(CAST(d.schema_json AS BLOB)), 0) + length(CAST(d.name AS BLOB)) + 80)
+                FROM live_page_datasets d WHERE d.page_id = p.id), 0) + CASE WHEN ?2 THEN
+            COALESCE((SELECT SUM(COALESCE(length(CAST(d.current_json AS BLOB)), 0))
                 FROM live_page_datasets d WHERE d.page_id = p.id), 0) +
             COALESCE((SELECT SUM(length(CAST(pt.payload_json AS BLOB)) + length(CAST(COALESCE(pt.dedupe_key, '') AS BLOB)) + 80)
                 FROM live_page_dataset_points pt JOIN live_page_datasets d ON d.id = pt.dataset_id
-                WHERE d.page_id = p.id), 0)
+                WHERE d.page_id = p.id), 0) ELSE 0 END
          FROM live_pages p JOIN live_page_revisions r ON r.id = p.current_revision_id
-         WHERE p.id = ?1", [&page_id], |row| row.get(0)).optional()?;
+         WHERE p.id = ?1", rusqlite::params![&page_id, with_data], |row| row.get(0)).optional()?;
     let estimated = estimated.ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     if estimated > MAX_BUNDLE_BYTES as i64 {
         bail!("Artifact exceeds the 64 MiB bundle limit");
     }
-    let detail = crate::db::live_pages::get_live_page(conn, &page_id)?
-        .ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
-    let mut datasets = Vec::with_capacity(detail.datasets.len());
-    for view in detail.datasets {
-        let dataset = view.dataset;
-        let points = if dataset.kind == LivePageDatasetKind::TimeSeries {
+    // A bare page reads its dataset definitions only: no value, no point.
+    let (page, revision, definitions) = if with_data {
+        let detail = crate::db::live_pages::get_live_page(conn, &page_id)?
+            .ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
+        let definitions = detail.datasets.into_iter().map(|view| view.dataset);
+        (detail.page, detail.revision, definitions.collect())
+    } else {
+        crate::db::live_pages::get_live_page_definition(conn, &page_id)?
+            .ok_or_else(|| anyhow!("Artifact not found: {id}"))?
+    };
+    let created_at = page.created_at;
+    let mut datasets = Vec::with_capacity(definitions.len());
+    for dataset in definitions {
+        let points = if with_data && dataset.kind == LivePageDatasetKind::TimeSeries {
             let mut statement = conn.prepare(
                 "SELECT observed_at, payload_json, dedupe_key FROM live_page_dataset_points
                  WHERE dataset_id = ?1 ORDER BY observed_at, rowid",
@@ -118,29 +141,37 @@ pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundleP
         datasets.push(ArtifactBundleDataset {
             name: dataset.name,
             kind: dataset.kind,
-            has_current: dataset.current.is_some(),
-            current: dataset.current.unwrap_or(serde_json::Value::Null),
+            has_current: with_data && dataset.current.is_some(),
+            current: dataset
+                .current
+                .filter(|_| with_data)
+                .unwrap_or(serde_json::Value::Null),
             schema: dataset.schema,
             max_points: dataset.max_points,
             max_age_days: dataset.max_age_days,
-            updated_at: dataset.updated_at,
+            // A bare dataset does not date the page's last publication.
+            updated_at: if with_data {
+                dataset.updated_at
+            } else {
+                created_at
+            },
             points,
         });
     }
-    let embed_origins = export_embed_origins(conn, &detail.page.id, &detail.revision.html)?;
+    let embed_origins = export_embed_origins(conn, &page.id, &revision.html)?;
     Ok(ArtifactBundlePage {
-        id: detail.page.id,
-        title: detail.page.title,
-        slug: detail.page.slug,
+        id: page.id,
+        title: page.title,
+        slug: page.slug,
         embed_origins,
-        html: detail.revision.html,
-        created_by_agent: detail.revision.created_by_agent,
+        html: revision.html,
+        created_by_agent: revision.created_by_agent,
         datasets,
     })
 }
 
 fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
-    let artifact = export_page(conn, id)?;
+    let artifact = export_bare_page(conn, id)?;
     let root_id = artifact.id.clone();
     let root_slug = artifact.slug.clone();
     let mut pages = BTreeMap::new();
@@ -184,7 +215,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
         }
         let size = match kind {
             ResourceKind::Artifact => {
-                let page = export_page(conn, &id)?;
+                let page = export_bare_page(conn, &id)?;
                 if pages.contains_key(&page.id) || page.id == root_id {
                     continue;
                 }
@@ -209,6 +240,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
                 );
                 let deps = super::workflows::workflow_dependency_ids([&workflow]);
                 skill_ids.extend(deps.skills);
+                skill_ids.extend(deps.payload_skills);
                 for (kind, ids) in [
                     (ResourceKind::Artifact, deps.pages),
                     (ResourceKind::QuickPrompt, deps.quick_prompts),
@@ -700,5 +732,85 @@ mod tests {
             );
             assert!(action_dependencies(&html).is_err(), "{html}");
         }
+    }
+
+    /// #273 — a project resource keeps the values an Artifact file drops:
+    /// `export_page` carries the snapshot value and the series points, and
+    /// `export_bare_page` reads the same page without any of them.
+    #[test]
+    fn a_project_resource_keeps_the_values_a_bare_export_drops() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now();
+        let page = crate::models::LivePage {
+            id: "page-1".into(),
+            project_id: None,
+            title: "Board".into(),
+            slug: "board".into(),
+            current_revision_id: "rev-1".into(),
+            data_revision: 0,
+            created_at: now,
+            updated_at: now,
+            last_published_at: None,
+            pinned: false,
+            archived: false,
+            html_size_bytes: 0,
+        };
+        let revision = crate::models::LivePageRevision {
+            id: "rev-1".into(),
+            page_id: "page-1".into(),
+            revision: 1,
+            html: "<p>board</p>".into(),
+            created_by_agent: None,
+            created_at: now,
+        };
+        let dataset = |name: &str, kind, initial| crate::models::CreateLivePageDataset {
+            name: name.into(),
+            kind,
+            initial,
+            schema: None,
+            max_points: Some(10),
+            max_age_days: None,
+        };
+        let datasets = [
+            dataset(
+                "summary",
+                LivePageDatasetKind::Snapshot,
+                Some(serde_json::json!({"user": "someone"})),
+            ),
+            dataset("history", LivePageDatasetKind::TimeSeries, None),
+        ];
+        crate::db::live_pages::create_live_page(&conn, &page, &revision, &datasets, None).unwrap();
+        conn.execute(
+            "INSERT INTO live_page_dataset_points (id, dataset_id, observed_at, payload_json, created_at)
+             SELECT 'pt-1', id, '2026-01-02T03:04:05Z', '{\"value\":1}', '2026-01-02T03:04:05Z'
+               FROM live_page_datasets WHERE page_id = 'page-1' AND name = 'history'",
+            [],
+        )
+        .unwrap();
+
+        let find = |page: &ArtifactBundlePage, name: &str| {
+            page.datasets
+                .iter()
+                .find(|dataset| dataset.name == name)
+                .cloned()
+                .unwrap()
+        };
+        let resource = export_page(&conn, "page-1").unwrap();
+        let summary = find(&resource, "summary");
+        assert!(summary.has_current);
+        assert_eq!(summary.current, serde_json::json!({"user": "someone"}));
+        let history = find(&resource, "history");
+        assert_eq!(history.points.len(), 1);
+        assert_eq!(history.points[0].payload, serde_json::json!({"value": 1}));
+
+        let bare = export_bare_page(&conn, "page-1").unwrap();
+        let summary = find(&bare, "summary");
+        assert!(!summary.has_current);
+        assert_eq!(summary.current, serde_json::Value::Null);
+        assert!(find(&bare, "history").points.is_empty());
+        assert_eq!(bare.html, resource.html);
+        assert_eq!(bare.datasets.len(), resource.datasets.len());
     }
 }

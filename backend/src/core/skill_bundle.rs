@@ -403,6 +403,45 @@ pub fn remap_ids(ids: &mut [String], remap: &HashMap<String, String>) {
     }
 }
 
+/// Every value of a JsonData `payload` spelled like a custom skill id
+/// (`custom-x`, `custom-x@N`): a script that loads skills by the ids its
+/// configuration lists needs them as much as a step's `skill_ids`. Export
+/// bundles those that exist; any other string is left out.
+pub fn ids_in_payload(payload: &serde_json::Value, out: &mut BTreeSet<String>) {
+    match payload {
+        serde_json::Value::String(text) => {
+            if text.starts_with("custom-")
+                && !text.contains(char::is_whitespace)
+                && super::skill_versions::split_pin(text).is_ok()
+            {
+                out.insert(text.clone());
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| ids_in_payload(item, out)),
+        serde_json::Value::Object(map) => map.values().for_each(|item| ids_in_payload(item, out)),
+        _ => {}
+    }
+}
+
+/// [`remap_ids`] for the values of a JsonData `payload`: a value equal to a
+/// bundled skill id becomes the local id; keys and other values stay.
+pub fn remap_payload(payload: &mut serde_json::Value, remap: &HashMap<String, String>) {
+    match payload {
+        serde_json::Value::String(text) => {
+            if let Some(target) = remap.get(text.as_str()) {
+                *text = target.clone();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            items.iter_mut().for_each(|item| remap_payload(item, remap))
+        }
+        serde_json::Value::Object(map) => {
+            map.values_mut().for_each(|item| remap_payload(item, remap))
+        }
+        _ => {}
+    }
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;

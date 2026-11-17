@@ -15,9 +15,14 @@ label does not migrate or duplicate it. Historical code and documentation use
 
 The Artifact export action downloads a `kronn.artifact` version-2 JSON bundle
 (version 1, without bundled skills, still imports).
-It contains the current HTML, named dataset values (including JSON `null`
-distinct from an unpopulated snapshot), schemas, retention settings and every
-retained time-series point with its observation time and deduplication key.
+It contains the current HTML and each dataset's definition: name, kind,
+schema and retention settings. It carries no dataset value: every snapshot
+is exported unpopulated and every time series without points, so the file
+never shares what the page published (#273). A bundle written before still
+imports with its values (including JSON `null` distinct from an unpopulated
+snapshot, and time-series points with their observation time and
+deduplication key). Project repository resources, which read the same page
+export, still carry the values.
 It follows parsed action targets and workflow dependencies transitively,
 including saved workflows that publish into the root Artifact, their failure
 steps, sub-workflows, Quick Prompts, Quick APIs, Quick Execs and secondary
@@ -25,11 +30,14 @@ Artifacts. Secondary Artifacts do not pull in unrelated incoming publishers.
 Export uses one read transaction. Missing dependencies, unsupported bundles and
 bundles exceeding 64 MiB or 512 resources fail explicitly; nothing is silently
 truncated. Historical HTML revisions, run/publication history and discussion
-links are not included.
+links are not included. A bare export reads only the page, its current revision
+and its dataset definitions: no value or point is loaded, and the 64 MiB
+estimate counts that exported metadata.
 [src: file: backend/src/models/artifact_portability.rs:9-52#ArtifactBundlePoint]
 [src: file: backend/src/models/artifact_portability.rs:54-74#ArtifactBundle]
 [src: file: backend/src/api/artifact_portability.rs:26-29#MAX_BUNDLE_ITEMS]
-[src: file: backend/src/api/artifact_portability.rs:294-303#export_bundle]
+[src: file: backend/src/api/artifact_portability.rs:73-78#export_bare_page]
+[src: file: backend/src/api/artifact_portability.rs:326-335#export_bundle]
 
 Import is available in the library and in a workflow's publishing step before
 the library is activated. The user selects a project and reviews each planned
@@ -50,24 +58,28 @@ Reused local Quick Execs require no new approval. Choosing another file clears
 all approvals. New Quick APIs show their saved method, endpoint and plugin;
 an unspecified method is shown as unknown, not inferred.
 The custom skills of bundled workflows and Quick Prompts travel as
-`referenced_skills` (file, name, version, sha256). The preview shows each one as
+`referenced_skills` (file, name, version, sha256): those in steps' `skill_ids`,
+Quick Prompts, shadow variants and `refs`, plus any JsonData payload value
+spelled like a custom skill id (`custom-x`, `custom-x@N`) that names a local
+skill. The preview shows each one as
 reused (same content here), created, or in conflict (same name, other content),
 where the user picks a copy (default) or the local skill (`skill_choices`, part
-of the reviewed digest). Steps and Quick Prompts are remapped to the resulting
-ids; see the glossary's "Bundled skill".
-[src: file: backend/src/api/artifact_portability/import.rs:552-558#approved_quick_exec_ids]
-[src: file: backend/src/api/artifact_portability/import.rs:777-779#digest]
+of the reviewed digest). Steps, JsonData payload values and Quick Prompts are
+remapped to the resulting ids; see the glossary's "Bundled skill".
+[src: file: backend/src/api/artifact_portability/import.rs:574-580#approved_quick_exec_ids]
+[src: file: backend/src/api/artifact_portability/import.rs:799-801#digest]
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:71-74#setApprovedExecIds]
 
-Imported snapshots retain the publisher's values, including any identity a
+An export carries no dataset values. A file exported before #273 still does:
+its imported snapshots retain the publisher's values, including any identity a
 workflow previously collected from an API's current-user endpoint. They are
-not the recipient's identity: import copies dataset values as initial data,
+not the recipient's identity: import copies those values as initial data,
 and the runtime delivers those stored datasets without resolving a viewer.
 When a Page uses such a dataset for a personal default, recollect using the
 recipient's configured connection and reopen the Page before checking that
 default; do not infer the viewer from an imported identity snapshot.
-[src: file: backend/src/api/artifact_portability.rs:114-122]
-[src: file: backend/src/api/artifact_portability/import.rs:827-839]
+[src: file: backend/src/api/artifact_portability.rs:144-148#has_current]
+[src: file: backend/src/api/artifact_portability/import.rs:926#initial]
 [src: file: frontend/src/lib/live-page-sandbox.ts:314-333#runtimeData]
 
 Configured connections, their stored credentials, agent-library entries and
@@ -82,7 +94,7 @@ import preview shows that list. `{{…}}` references are kept.
 [src: file: backend/src/core/export_secrets.rs:15-16#REDACTED]
 The selected project applies to newly created automation definitions and
 Artifact action scopes. A deliberately reused local definition is unchanged.
-[src: file: backend/src/api/artifact_portability/import.rs:379-383#remap_value]
+[src: file: backend/src/api/artifact_portability/import.rs:398-402#remap_value]
 
 `GET /api/pages/{id}/export`, `POST /api/pages/import/preview` and
 `POST /api/pages/import` retain the established Page API naming. Import requires
@@ -1060,7 +1072,7 @@ it was itself imported with. That last part is stored with the Page
 declaration through a chain of imports. It is information for the importer,
 never an authorization, and the creator's allowed sites are not exported.
 [src: file: backend/src/core/embed_origins.rs:149-172#declared_origins]
-[src: file: backend/src/api/artifact_portability.rs:130#export_embed_origins]
+[src: file: backend/src/api/artifact_portability.rs:161#export_embed_origins]
 The import preview lists one row per distinct origin (from the HTML and the
 declaration): already allowed ("in the Artifact and already in your
 configuration"), or Add / Refuse. Answers are not part of the reviewed digest
@@ -1076,9 +1088,9 @@ sites in `not_allowed_embed_origins` with `embed_origins_error`, and the dialog
 says so before opening the Artifact.
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:171#embed_origins]
 [src: file: backend/src/api/artifact_portability/import.rs:88-101#origins_to_allow]
-[src: file: backend/src/api/artifact_portability/import.rs:1153-1158#apply_changes]
+[src: file: backend/src/api/artifact_portability/import.rs:1181-1186#apply_changes]
 [src: file: backend/src/core/embed_origins.rs:217-218#MAX_EMBED_ORIGINS]
-[src: file: backend/src/api/artifact_portability/import.rs:1173-1177#not_allowed_embed_origins]
+[src: file: backend/src/api/artifact_portability/import.rs:1201-1205#not_allowed_embed_origins]
 
 Security reasoning, in short: the destination Kronn alone decides which sites
 may be framed, and checks every URL at render time, including ones added by
