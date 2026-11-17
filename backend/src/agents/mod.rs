@@ -2282,7 +2282,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     #[serial]
-    async fn a_caller_cancelled_while_it_waits_to_restart_frees_the_next_one() {
+    async fn a_caller_cancelled_while_it_waits_to_restart_leaves_no_sweep_announced() {
         reset_detect_cache(None);
         let (detect, sweeps) = counted_sweeps(|_| async { panic!("the sweep dies") });
         let caller = tokio::spawn(detect_all_cached_with(false, detect));

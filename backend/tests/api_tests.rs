@@ -3633,6 +3633,19 @@ async fn an_imported_artifact_is_read_incrementally_like_any_other_page() {
     let mut bundle = exported["data"].clone();
     bundle["artifact"]["datasets"][0]["has_current"] = serde_json::json!(true);
     bundle["artifact"]["datasets"][0]["current"] = serde_json::json!({"n": 1});
+    let mut history = bundle["artifact"]["datasets"][0].clone();
+    history["name"] = serde_json::json!("history");
+    history["kind"] = serde_json::json!("time_series");
+    history["has_current"] = serde_json::json!(false);
+    history["current"] = Value::Null;
+    history["max_points"] = serde_json::json!(10);
+    history["points"] = serde_json::json!([
+        {"observed_at": "2026-01-02T03:04:05Z", "payload": {"value": 4}, "dedupe_key": "first"}
+    ]);
+    bundle["artifact"]["datasets"]
+        .as_array_mut()
+        .unwrap()
+        .push(history);
     let name = bundle["artifact"]["datasets"][0]["name"]
         .as_str()
         .unwrap()
@@ -3679,9 +3692,19 @@ async fn an_imported_artifact_is_read_incrementally_like_any_other_page() {
         // A revision this copy never reached gets the whole Page.
         let ahead = read(3).await;
         assert_eq!(ahead["data"]["full"]["data_revision"], 0, "{ahead}");
+        let arrived = |dataset: &str| {
+            ahead["data"]["full"]["datasets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["name"] == dataset)
+                .unwrap_or_else(|| panic!("{dataset}: {ahead}"))
+                .clone()
+        };
+        assert_eq!(arrived(&name)["current"], serde_json::json!({"n": 1}));
         assert_eq!(
-            ahead["data"]["full"]["datasets"][0]["current"],
-            serde_json::json!({"n": 1}),
+            arrived("history")["points"][0]["payload"],
+            serde_json::json!({"value": 4}),
             "{ahead}"
         );
         let (_, published) = post_json(
