@@ -350,6 +350,8 @@ a.live-pages-refresh-row:hover { background: var(--kr-bg-hover); }
 .live-pages-viewer iframe { width: 100%; height: 100%; border: 1px solid var(--kr-border-medium); border-radius: var(--kr-r-lg); background: white; box-shadow: var(--kr-shadow-sm); }
 .live-pages-notice { padding: 10px; border: 1px solid rgba(var(--kr-warning-rgb), 0.35); background: rgba(var(--kr-warning-rgb), 0.08); border-radius: var(--kr-r-md); }
 .live-pages-error { padding: 10px; border: 1px solid rgba(var(--kr-error-rgb), 0.35); color: var(--kr-error); border-radius: var(--kr-r-md); }
+.live-pages-editor-conflict { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.live-pages-editor-conflict > span { flex: 1; min-width: 200px; }
 .live-pages-empty { margin: auto; color: var(--kr-text-muted); }
 
 @media (max-width: 760px) {

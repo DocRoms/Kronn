@@ -10,7 +10,7 @@ import {
   runtimeData,
 } from '../lib/live-page-sandbox';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
-import { createRequestSequence, refreshLivePageDetail } from '../lib/live-page-refresh';
+import { createRequestSequence, refreshLivePageDetail, replacesShown } from '../lib/live-page-refresh';
 import {
   useActionStatesInFrame,
   useLivePageActions,
@@ -57,6 +57,10 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
     reload: reloadPageActions,
   } = useLivePageActions(() => setActionUnavailable(true));
 
+  // The snapshot a refresh starts from: only what changed since is read.
+  const detailRef = useRef<LivePageDetail | null>(null);
+  useEffect(() => { detailRef.current = detail; }, [detail]);
+
   // Answers are applied in the order their reads started; one that arrives
   // after a newer one was shown, or for a Page since left, is dropped.
   const [reads] = useState(createRequestSequence);
@@ -65,6 +69,7 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
     const ticket = reads.next(pageId);
     Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
       if (!reads.apply(ticket)) return;
+      detailRef.current = page;
       setDetail(page);
       setError(null);
     }).catch(cause => {
@@ -73,10 +78,6 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
     });
   }, [pageId, reads, reloadPageActions]);
 
-  // The snapshot a refresh starts from: only what changed since is read.
-  const detailRef = useRef<LivePageDetail | null>(null);
-  useEffect(() => { detailRef.current = detail; }, [detail]);
-
   // Keep following the Page while the tab is open: the poll compares the
   // revision and reads the datasets that changed. New data reaches the frame
   // by postMessage; the document is only rebuilt when the Page's HTML
@@ -84,9 +85,11 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
   const followPage = useCallback(() => {
     const ticket = reads.follow(pageId);
     if (ticket === null) return;
-    Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([page]) => {
-      if (!reads.apply(ticket)) return;
-      setDetail(page);
+    Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([read]) => {
+      if (!replacesShown(detailRef.current, read) || !reads.apply(ticket)) return;
+      // At once: the next answer of this turn is compared with this one.
+      detailRef.current = read.detail;
+      setDetail(read.detail);
       setError(null);
     }).catch(() => { /* keep the last view; the next read retries */ });
   }, [pageId, reads, reloadPageActions]);

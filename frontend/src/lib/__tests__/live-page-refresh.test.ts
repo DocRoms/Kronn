@@ -4,7 +4,7 @@ import type { LivePage, LivePageDataDelta, LivePageDatasetView, LivePageDetail }
 vi.mock('../api', () => ({ pages: { get: vi.fn(), data: vi.fn() } }));
 
 import { pages as pagesApi } from '../api';
-import { createRequestSequence, mergeLivePageData, refreshLivePageDetail } from '../live-page-refresh';
+import { createRequestSequence, mergeLivePageData, refreshLivePageDetail, replacesShown } from '../live-page-refresh';
 import { runtimeData } from '../live-page-sandbox';
 
 const page: LivePage = {
@@ -77,7 +77,7 @@ describe('mergeLivePageData', () => {
 describe('refreshLivePageDetail', () => {
   it('reads the whole Page when it holds nothing', async () => {
     vi.mocked(pagesApi.get).mockResolvedValue(held);
-    await expect(refreshLivePageDetail('board', null)).resolves.toBe(held);
+    await expect(refreshLivePageDetail('board', null)).resolves.toEqual({ detail: held, rewound: false });
     expect(pagesApi.data).not.toHaveBeenCalled();
   });
 
@@ -86,16 +86,52 @@ describe('refreshLivePageDetail', () => {
     const next = await refreshLivePageDetail('board', held);
     expect(pagesApi.data).toHaveBeenCalledWith('board', 4, 'rev-1');
     expect(pagesApi.get).not.toHaveBeenCalled();
-    expect(next.data_revision).toBe(5);
-    expect(next.datasets.map(item => item.current)).toEqual([{ count: 2 }, { blob: 'kept' }, null]);
+    expect(next.rewound).toBe(false);
+    expect(next.detail.data_revision).toBe(5);
+    expect(next.detail.datasets.map(item => item.current)).toEqual([{ count: 2 }, { blob: 'kept' }, null]);
   });
 
   it('reads the whole Page when the delta cannot be placed', async () => {
     const replaced: LivePageDetail = { ...held, id: 'page-2' };
     vi.mocked(pagesApi.data).mockResolvedValue(delta({ id: 'page-2' }, []));
     vi.mocked(pagesApi.get).mockResolvedValue(replaced);
-    await expect(refreshLivePageDetail('board', held)).resolves.toBe(replaced);
+    await expect(refreshLivePageDetail('board', held)).resolves.toEqual({ detail: replaced, rewound: false });
     expect(pagesApi.get).toHaveBeenCalledWith('board');
+  });
+
+  it('marks the full state of a Page that went back below the revision held', async () => {
+    const restored: LivePageDetail = { ...held, data_revision: 1 };
+    vi.mocked(pagesApi.data).mockResolvedValue({ page: { ...page, data_revision: 1 }, full: restored, datasets: [] });
+    await expect(refreshLivePageDetail('board', held)).resolves.toEqual({ detail: restored, rewound: true });
+  });
+
+  it('does not mark a full state that is at or above the revision held', async () => {
+    const grown: LivePageDetail = { ...held, data_revision: 6 };
+    vi.mocked(pagesApi.data).mockResolvedValue({ page: { ...page, data_revision: 6 }, full: grown, datasets: [] });
+    await expect(refreshLivePageDetail('board', held)).resolves.toEqual({ detail: grown, rewound: false });
+  });
+});
+
+describe('replacesShown', () => {
+  const read = (patch: Partial<LivePageDetail>, rewound = false) => ({ detail: { ...held, ...patch }, rewound });
+
+  it('shows an answer at or above the revision shown', () => {
+    expect(replacesShown(held, read({ data_revision: 4 }))).toBe(true);
+    expect(replacesShown(held, read({ data_revision: 5 }))).toBe(true);
+  });
+
+  it('does not show an older answer of the same Page and HTML', () => {
+    expect(replacesShown(held, read({ data_revision: 3 }))).toBe(false);
+  });
+
+  it('shows older data when the server itself went back', () => {
+    expect(replacesShown(held, read({ data_revision: 1 }, true))).toBe(true);
+  });
+
+  it('shows whatever comes for another Page, other HTML, or an empty view', () => {
+    expect(replacesShown(null, read({ data_revision: 1 }))).toBe(true);
+    expect(replacesShown(held, read({ id: 'page-2', data_revision: 1 }))).toBe(true);
+    expect(replacesShown(held, read({ data_revision: 1, revision: { ...held.revision, id: 'rev-2' } }))).toBe(true);
   });
 });
 

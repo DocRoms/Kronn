@@ -25,15 +25,37 @@ export function mergeLivePageData(current: LivePageDetail, delta: LivePageDataDe
   };
 }
 
+export interface LivePageRead {
+  detail: LivePageDetail;
+  /**
+   * The server sent the full state because the Page is now below the
+   * revision this read started from (a restored database): older data that
+   * must be shown all the same.
+   */
+  rewound: boolean;
+}
+
 /**
  * The Page as it is now. With a `current` snapshot only what changed since
  * its revision is transferred; without one, or when the snapshot cannot be
  * brought up to date, the whole Page is read.
  */
-export async function refreshLivePageDetail(pageRef: string, current: LivePageDetail | null): Promise<LivePageDetail> {
-  if (!current) return pagesApi.get(pageRef);
+export async function refreshLivePageDetail(pageRef: string, current: LivePageDetail | null): Promise<LivePageRead> {
+  if (!current) return { detail: await pagesApi.get(pageRef), rewound: false };
   const delta = await pagesApi.data(pageRef, current.data_revision, current.revision.id);
-  return mergeLivePageData(current, delta) ?? pagesApi.get(pageRef);
+  const rewound = delta.full !== null && delta.full.data_revision < current.data_revision;
+  return { detail: mergeLivePageData(current, delta) ?? await pagesApi.get(pageRef), rewound };
+}
+
+/**
+ * Whether the answer of a read may replace the Page shown. Two reads can be
+ * served out of order, so for the same Page and the same HTML an answer with
+ * a lower data revision is older and is not shown, unless the server itself
+ * went back (`rewound`).
+ */
+export function replacesShown(shown: LivePageDetail | null, read: LivePageRead): boolean {
+  if (!shown || shown.id !== read.detail.id || shown.revision.id !== read.detail.revision.id) return true;
+  return read.rewound || read.detail.data_revision >= shown.data_revision;
 }
 
 /**

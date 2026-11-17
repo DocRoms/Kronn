@@ -61,7 +61,7 @@ import {
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
 import { useLivePageDataPush } from '../hooks/useLivePageDataPush';
-import { createRequestSequence, refreshLivePageDetail } from '../lib/live-page-refresh';
+import { createRequestSequence, refreshLivePageDetail, replacesShown } from '../lib/live-page-refresh';
 import { userError } from '../lib/userError';
 import {
   livePageMosaicLayouts,
@@ -216,6 +216,9 @@ export function PagesPage({
   const [titleError, setTitleError] = useState<string | null>(null);
   const [savingTitle, setSavingTitle] = useState(false);
   const [htmlDraft, setHtmlDraft] = useState('');
+  // The HTML revision the draft started from, and whether the Page moved past it.
+  const draftBaseRef = useRef<string | null>(null);
+  const [htmlConflict, setHtmlConflict] = useState(false);
   const [comparisonRevisionId, setComparisonRevisionId] = useState<string | null>(null);
   const [savingHtml, setSavingHtml] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<Record<string, WorkflowRun>>({});
@@ -282,6 +285,12 @@ export function PagesPage({
   const [bridgeChannel] = useState(channelId);
   const selectedIdRef = useRef(selectedId);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
+  // The ref moves with the choice, not a render later: a reload that returns
+  // from the network checks it before it touches the view.
+  const choosePage = useCallback((pageId: string | null) => {
+    selectedIdRef.current = pageId;
+    setSelectedId(pageId);
+  }, []);
   const requestedPageIdRef = useRef(selectedPageId ?? initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
 
@@ -303,19 +312,39 @@ export function PagesPage({
   }, [collapsedSections]);
 
   // The snapshot a background refresh starts from: only what changed is read.
+  // Written with the state, never a render later: an answer is compared
+  // with the Page shown even when two arrive in the same turn.
   const detailRef = useRef<LivePageDetail | null>(null);
-  useEffect(() => { detailRef.current = detail; }, [detail]);
+  const putDetail = useCallback((next: LivePageDetail | null) => {
+    detailRef.current = next;
+    setDetail(next);
+  }, []);
+  const patchDetail = useCallback((updated: LivePageDetail) => {
+    if (detailRef.current?.id === updated.id) putDetail(updated);
+  }, [putDetail]);
 
   // Answers are applied in the order their reads started, for the Page being
   // read only: one that arrives after a newer one was shown, or for a Page
   // since left, is dropped. The panels follow the same rule on their own.
   const [detailReads] = useState(createRequestSequence);
   const [pageLoads] = useState(createRequestSequence);
-  // The Page `htmlDraft` was loaded from: a draft is saved into that Page only.
-  const draftPageRef = useRef<string | null>(null);
+
+  // Nothing typed for one Page stays open over another.
+  const closeEditors = useCallback(() => {
+    setEditingHtml(false);
+    setHtmlConflict(false);
+    setEditingTitle(false);
+    setTitleError(null);
+  }, []);
+  const showDetail = useCallback((next: LivePageDetail) => {
+    if (detailRef.current?.id !== next.id) closeEditors();
+    putDetail(next);
+  }, [closeEditors, putDetail]);
 
   // `incremental` is for the timer: an action the user took reads the whole Page.
+  // A Page the user has left is not read: its answer would take the view back.
   const loadDetail = useCallback(async (pageId: string, incremental = false) => {
+    if (selectedIdRef.current !== pageId) return;
     const known = incremental && detailRef.current?.id === pageId ? detailRef.current : null;
     const read = detailReads.next(pageId);
     const load = pageLoads.next(pageId);
@@ -331,12 +360,7 @@ export function PagesPage({
       ]),
       reloadPageActions(pageId),
     ]);
-    // The draft always comes with the Page it was read from.
-    if (detailReads.apply(read)) {
-      setDetail(nextDetail);
-      setHtmlDraft(nextDetail.revision.html);
-      draftPageRef.current = nextDetail.id;
-    }
+    if (replacesShown(detailRef.current, nextDetail) && detailReads.apply(read)) showDetail(nextDetail.detail);
     if (!pageLoads.apply(load)) return;
     setDatasetUsage(usage);
     setLinkedWorkflows(workflows);
@@ -344,9 +368,10 @@ export function PagesPage({
     setLinkedDiscussions(discussions);
     setRevisions(pageRevisions);
     setComparisonRevisionId(null);
-  }, [detailReads, pageLoads, reloadPageActions]);
+  }, [detailReads, pageLoads, reloadPageActions, showDetail]);
 
   const refresh = useCallback(async (selectedOverride?: string | null, incremental = false) => {
+    const selectedAtStart = selectedIdRef.current;
     try {
       const list = await pagesApi.list();
       setPages(list);
@@ -354,20 +379,22 @@ export function PagesPage({
       const requested = requestedId && list.some(page => page.id === requestedId)
         ? requestedId
         : null;
-      const candidate = selectedOverride === undefined ? selectedId : selectedOverride;
+      // The user may have opened another Page while the library was read.
+      const moved = selectedIdRef.current !== selectedAtStart;
+      const candidate = selectedOverride === undefined || moved ? selectedIdRef.current : selectedOverride;
       const target = requested
         ?? (candidate && list.some(page => page.id === candidate) ? candidate : null)
         ?? list.find(page => !page.archived)?.id
         ?? list[0]?.id
         ?? null;
-      setSelectedId(target);
+      choosePage(target);
       if (target) {
         await loadDetail(target, incremental);
       } else {
         detailReads.leave();
         pageLoads.leave();
-        draftPageRef.current = null;
-        setDetail(null);
+        closeEditors();
+        putDetail(null);
         setDatasetUsage([]);
         setLinkedWorkflows([]);
         setRecentPublications([]);
@@ -385,7 +412,7 @@ export function PagesPage({
     } finally {
       setLoading(false);
     }
-  }, [detailReads, loadDetail, pageLoads, reloadPageActions, selectedId]);
+  }, [choosePage, closeEditors, detailReads, loadDetail, pageLoads, putDetail, reloadPageActions]);
 
   // `refresh` is rebuilt whenever `selectedId` changes, including from inside
   // its own call and from `select`. Depending on it directly would re-run the
@@ -424,13 +451,13 @@ export function PagesPage({
     const read = detailReads.follow(pageId);
     if (read === null) return;
     void Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([next]) => {
-      if (detailRef.current?.id !== next.id || !detailReads.apply(read)) return;
-      setDetail(next);
+      if (detailRef.current?.id !== next.detail.id || !replacesShown(detailRef.current, next)) return;
+      if (detailReads.apply(read)) showDetail(next.detail);
     }).catch(() => { /* the poll retries */ });
   });
 
   const select = useCallback(async (page: LivePage) => {
-    setSelectedId(page.id);
+    choosePage(page.id);
     // Only the finished display state goes; a run still in flight keeps being
     // tracked, or its lock and its updates would be lost.
     setWorkflowRuns(current => Object.fromEntries(
@@ -440,16 +467,16 @@ export function PagesPage({
     setLoading(true);
     try {
       await loadDetail(page.id);
-      setEditingHtml(false);
-      setEditingTitle(false);
-      setTitleError(null);
+      // The user went on to another Page: its own load speaks for the view.
+      if (selectedIdRef.current !== page.id) return;
+      closeEditors();
       setError(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (selectedIdRef.current === page.id) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setLoading(false);
+      if (selectedIdRef.current === page.id) setLoading(false);
     }
-  }, [loadDetail]);
+  }, [choosePage, closeEditors, loadDetail]);
 
   const patchWorkflowRun = useCallback((workflowId: string, patch: (run: WorkflowRun) => WorkflowRun) => {
     setWorkflowRuns(current => current[workflowId]
@@ -566,7 +593,10 @@ export function PagesPage({
     setSavingHtml(true);
     try {
       await pagesApi.updateHtml(pageId, { html, created_by_agent: null });
+      // Saved for a Page the user has left: the view stays where it is.
+      if (selectedIdRef.current !== pageId) return;
       await loadDetail(pageId);
+      if (selectedIdRef.current !== pageId) return;
       setEditingHtml(false);
       setError(null);
     } catch (cause) {
@@ -576,10 +606,43 @@ export function PagesPage({
     }
   });
 
+  // The draft starts from the HTML the Page has when the editor opens, and
+  // nothing but the user changes it while the editor is open.
+  const toggleHtmlEditor = useCallback(() => {
+    setComparisonRevisionId(null);
+    setHtmlConflict(false);
+    if (editingHtml || !detail) {
+      setEditingHtml(false);
+      return;
+    }
+    setHtmlDraft(detail.revision.html);
+    draftBaseRef.current = detail.revision.id;
+    setEditingHtml(true);
+  }, [detail, editingHtml]);
+
   const saveHtml = useCallback(() => {
-    if (!detail || draftPageRef.current !== detail.id || !htmlDraft.trim()) return;
+    if (!detail || !htmlDraft.trim()) return;
+    // Someone saved other HTML since the editor opened: the user decides.
+    if (draftBaseRef.current !== detail.revision.id) {
+      setHtmlConflict(true);
+      return;
+    }
     void persistHtml(detail.id, htmlDraft);
   }, [detail, htmlDraft, persistHtml]);
+
+  const overwriteHtml = useCallback(() => {
+    if (!detail || !htmlDraft.trim()) return;
+    draftBaseRef.current = detail.revision.id;
+    setHtmlConflict(false);
+    void persistHtml(detail.id, htmlDraft);
+  }, [detail, htmlDraft, persistHtml]);
+
+  const reloadHtmlDraft = useCallback(() => {
+    if (!detail) return;
+    setHtmlDraft(detail.revision.html);
+    draftBaseRef.current = detail.revision.id;
+    setHtmlConflict(false);
+  }, [detail]);
 
   const exportPage = useCallback(async (format: 'pdf' | 'docx') => {
     if (!detail) return;
@@ -655,7 +718,7 @@ export function PagesPage({
     try {
       const updated = await pagesApi.update(page.id, patch);
       setPages(current => current.map(item => item.id === page.id ? updated : item));
-      setDetail(current => current?.id === page.id ? updated : current);
+      patchDetail(updated);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -668,11 +731,14 @@ export function PagesPage({
     try {
       const updated = await pagesApi.update(pageId, { title });
       setPages(current => current.map(page => page.id === pageId ? updated : page));
-      setDetail(current => current?.id === pageId ? updated : current);
+      patchDetail(updated);
+      // The title editor now belongs to another Page.
+      if (detailRef.current?.id !== pageId) return;
       setTitleDraft(updated.title);
       setEditingTitle(false);
       setError(null);
     } catch (cause) {
+      if (detailRef.current?.id !== pageId) return;
       // Keep the persisted title as the visible source of truth. The failed
       // draft must never leak into the sidebar or masquerade as a saved name.
       setTitleDraft(previousTitle);
@@ -1264,10 +1330,7 @@ export function PagesPage({
                       className="live-pages-editor-toggle"
                       data-active={editingHtml}
                       aria-label={editingHtml ? t('pages.closeEditor') : t('pages.editHtml')}
-                      onClick={() => {
-                        setEditingHtml(value => !value);
-                        setComparisonRevisionId(null);
-                      }}
+                      onClick={toggleHtmlEditor}
                     >
                       {editingHtml ? <X size={13} /> : <Pencil size={13} />}
                       <span className="live-pages-action-label">{editingHtml ? t('pages.closeEditor') : t('pages.editHtml')}</span>
@@ -1376,6 +1439,13 @@ export function PagesPage({
                     </button>
                   </div>
                 </div>
+                {htmlConflict && (
+                  <div className="live-pages-error live-pages-editor-conflict" role="alert">
+                    <span>{t('pages.htmlChangedElsewhere')}</span>
+                    <button type="button" onClick={reloadHtmlDraft}>{t('pages.htmlReloadDraft')}</button>
+                    <button type="button" onClick={overwriteHtml} disabled={savingHtml}>{t('pages.htmlOverwrite')}</button>
+                  </div>
+                )}
                 {comparisonRevision ? (
                   <div className="live-pages-editor-comparison">
                     <div><GitCompare size={14} />{t('pages.revisionComparison')}</div>
@@ -1466,7 +1536,7 @@ export function PagesPage({
                   page={detail}
                   onSaved={(updated) => {
                     setPages(current => current.map(item => item.id === updated.id ? updated : item));
-                    setDetail(current => current?.id === updated.id ? updated : current);
+                    patchDetail(updated);
                   }}
                 />
               </section>
