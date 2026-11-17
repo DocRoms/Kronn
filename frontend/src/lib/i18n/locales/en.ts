@@ -3467,6 +3467,7 @@ const en: TranslationDict = {
   'keyLocked.banner': 'Stored secrets are locked: no key on this machine decrypts them. Nothing was deleted.',
   'keyLocked.keyBesideData': 'The encryption key is stored in config.toml, beside the data it protects: anyone who can read that folder can read the secrets. Set a recovery passphrase, or provide the key through KRONN_ENCRYPTION_KEK, so Kronn can keep it out of that file.',
   'keyLocked.keyBesideDataLink': 'Set a recovery passphrase',
+  'keyLocked.restoreLink': 'Restore the key',
   'keyLocked.clearCredentials': 'Still in clear in config.toml: {0}.',
   'settings.recovery.clearTitle': 'Credentials still in clear',
   'settings.recovery.clearVerified': 'also in the encrypted store',

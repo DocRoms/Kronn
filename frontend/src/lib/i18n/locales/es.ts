@@ -3467,6 +3467,7 @@ const es: TranslationDict = {
   'keyLocked.banner': 'Los secretos guardados están bloqueados: ninguna clave de esta máquina los descifra. No se ha borrado nada.',
   'keyLocked.keyBesideData': 'La clave de cifrado está guardada en config.toml, junto a los datos que protege: quien pueda leer esa carpeta puede leer los secretos. Define una frase de recuperación, o proporciona la clave mediante KRONN_ENCRYPTION_KEK, para que Kronn pueda mantenerla fuera de ese archivo.',
   'keyLocked.keyBesideDataLink': 'Definir una frase de recuperación',
+  'keyLocked.restoreLink': 'Restaurar la clave',
   'keyLocked.clearCredentials': 'Aún en claro en config.toml: {0}.',
   'settings.recovery.clearTitle': 'Credenciales aún en claro',
   'settings.recovery.clearVerified': 'también en el almacén cifrado',

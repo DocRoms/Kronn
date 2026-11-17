@@ -43,13 +43,28 @@ export type HistoryEntry =
 
 /** A standing condition of the install: it stays until its cause is fixed,
  *  so it has no acknowledge button. The tab words it from `kind`. */
+export type NoticeKind =
+  | 'key_locked'
+  | 'key_beside_data'
+  | 'credentials_unavailable'
+  | 'config_set_aside'
+  | 'token_refused'
+  | 'update_available'
+  | 'reset_error';
+
 export interface NoticeEntry {
   id: string;
-  kind: 'key_beside_data' | 'token_refused';
+  kind: NoticeKind;
   /** The connection a refused token belongs to. */
   label?: string;
-  /** Where the owner fixes it. */
-  link: string;
+  /** What the wording of this kind takes: a server message, versions, names. */
+  args?: readonly string[];
+  /** Where the owner fixes it, or reads more. */
+  link?: string;
+  /** The link leaves Kronn: it opens in a new tab. */
+  external?: boolean;
+  /** The owner may put it away; called once when they do. */
+  dismiss?: () => void;
   seen: boolean;
   category: NotificationCategory;
 }
@@ -142,6 +157,14 @@ export function setNotices(source: string, reports: readonly NoticeReport[]): vo
   });
   if (next.length === 0 && kept.length === state.notices.length) return;
   commit({ ...state, notices: [...kept, ...next] });
+}
+
+/** The owner put a notice away: its source is told, and it leaves the list. */
+export function dismissNotice(id: string): void {
+  const notice = state.notices.find(candidate => candidate.id === id);
+  if (!notice) return;
+  commit({ ...state, notices: state.notices.filter(candidate => candidate !== notice) });
+  notice.dismiss?.();
 }
 
 // ─── Server errors ───────────────────────────────────────────────────────

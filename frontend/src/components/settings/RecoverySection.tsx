@@ -12,6 +12,7 @@ import { triggerDownload } from '../../lib/downloadBlob';
 import type { ToastFn } from '../../hooks/useToast';
 import { KeyRound, Copy, Download, ShieldCheck, AlertTriangle } from 'lucide-react';
 import { RecoveryRestorePanel } from '../RecoveryRestorePanel';
+import { StartNewKeyPanel } from '../StartNewKeyPanel';
 import type { RecoveryStatus } from '../../types/generated';
 import { clearCredentialLabel } from '../../lib/clearCredentials';
 import '../../pages/SettingsPage.css';
@@ -136,6 +137,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
         {status?.key_locked && (
           <RecoveryRestorePanel toast={toast} t={t} mode="restore" initiallyOpen onRestored={() => window.location.reload()} />
         )}
+        {status?.key_locked && <StartNewKeyPanel t={t} onDone={() => window.location.reload()} />}
         {status && !status.key_locked && status.configured && !status.matches_key && (
           <div className="set-expose-warn" data-testid="recovery-mismatch">
             <AlertTriangle size={13} />

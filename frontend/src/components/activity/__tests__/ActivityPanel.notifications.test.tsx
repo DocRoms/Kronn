@@ -306,6 +306,32 @@ describe('the standing notices (KT-1686)', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('words every kind, opens a release in a new tab, and puts away what may be put away', () => {
+    const put = vi.fn();
+    setNotices('key', [
+      { id: 'locked', kind: 'key_locked', args: ['Anthropic'], link: '/config#settings-recovery', category: 'kronn' },
+      { id: 'credentials', kind: 'credentials_unavailable', args: ['disk full'], category: 'kronn' },
+      { id: 'set-aside', kind: 'config_set_aside', args: ['kept as config.toml.corrupt.1'], category: 'kronn', dismiss: put },
+    ]);
+    setNotices('update', [{ id: '0.15.4', kind: 'update_available', args: ['0.15.3', '0.15.4'], link: 'https://example.test/r', external: true, category: 'kronn', dismiss: put }]);
+    renderPanel();
+    const by = (kind: string) => screen.getAllByTestId('notif-notice').find(el => el.getAttribute('data-kind') === kind)!;
+    expect(by('key_locked')).toHaveTextContent('Anthropic');
+    expect(within(by('key_locked')).getByRole('link')).toHaveAttribute('href', '/config#settings-recovery');
+    expect(within(by('key_locked')).queryByRole('button')).toBeNull();
+    expect(by('credentials_unavailable')).toHaveTextContent('disk full');
+    expect(within(by('credentials_unavailable')).queryByRole('link')).toBeNull();
+    expect(by('update_available')).toHaveTextContent('0.15.4');
+    const release = within(by('update_available')).getByRole('link');
+    expect(release).toHaveAttribute('href', 'https://example.test/r');
+    expect(release).toHaveAttribute('target', '_blank');
+    expect(by('config_set_aside')).toHaveTextContent('config.toml.corrupt.1');
+    fireEvent.click(within(by('config_set_aside')).getByRole('button'));
+    fireEvent.click(within(by('update_available')).getByRole('button'));
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(getNotifications().notices.map(n => n.kind)).toEqual(['key_locked', 'credentials_unavailable']);
+  });
+
   it('counts them unread until the tab is read, then no longer takes the panel over', () => {
     key();
     renderPanel({ initialTab: 'progress' });

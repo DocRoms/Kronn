@@ -3443,6 +3443,7 @@ const zh: TranslationDict = {
   "keyLocked.banner": "已存储的机密被锁定：本机没有任何密钥能解密它们。没有删除任何内容。",
   "keyLocked.keyBesideData": "加密密钥保存在 config.toml 中，与它所保护的数据放在一起：任何能读取该文件夹的人都能读取这些机密。请设置恢复密码，或通过 KRONN_ENCRYPTION_KEK 提供密钥，以便 Kronn 将其移出该文件。",
   "keyLocked.keyBesideDataLink": "设置恢复密码",
+  "keyLocked.restoreLink": "恢复密钥",
   "keyLocked.clearCredentials": "仍以明文存放在 config.toml 中：{0}。",
   "settings.recovery.clearTitle": "仍为明文的凭据",
   "settings.recovery.clearVerified": "同时位于加密存储中",

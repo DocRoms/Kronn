@@ -3477,6 +3477,7 @@ const fr: TranslationDict = {
   'keyLocked.banner': 'Les secrets enregistrés sont verrouillés : aucune clé de cette machine ne les déchiffre. Rien n\'a été supprimé.',
   'keyLocked.keyBesideData': 'La clé de chiffrement est stockée dans config.toml, à côté des données qu\'elle protège : quiconque peut lire ce dossier peut lire les secrets. Définissez une phrase de récupération, ou fournissez la clé via KRONN_ENCRYPTION_KEK, pour que Kronn puisse la garder hors de ce fichier.',
   'keyLocked.keyBesideDataLink': 'Définir une phrase de récupération',
+  'keyLocked.restoreLink': 'Restaurer la clé',
   'keyLocked.clearCredentials': 'Encore en clair dans config.toml : {0}.',
   'settings.recovery.clearTitle': 'Identifiants encore en clair',
   'settings.recovery.clearVerified': 'aussi dans le stockage chiffré',

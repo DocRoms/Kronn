@@ -45,13 +45,13 @@ for (const theme of ['light', 'dark'] as const) {
     await page.route('**/api/setup/status', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ is_first_run: false, current_step: 'Complete', agents_detected: [], scan_paths_set: true, repos_detected: [], default_scan_path: null }) }));
     await page.route('**/api/config/ui-language', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok('en') }));
     await page.route('**/api/ui-preferences', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({}) }));
-    await page.route('**/api/version/check', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ current: '0.15.3', latest: null, release_url: null, up_to_date: true }) }));
+    await page.route('**/api/version/check', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ current: '0.15.3', latest: '0.15.4', up_to_date: false, release_url: 'https://github.com/DocRoms/Kronn/releases' }) }));
     await page.route('**/api/activity', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ rows, stall_after_secs: 900, generated_at: new Date().toISOString(), unavailable_sources: [] }) }));
     await page.route('**/api/health', route => healthy
       ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, in_docker: false, version: '0.15.3' }) })
       : route.fulfill({ status: 503, contentType: 'application/json', body: '{"ok":false}' }));
     // The two standing notices of the bell (KT-1686): a key beside its data, a refused token.
-    await page.route('**/api/config/recovery/status', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ key_locked: false, config_holds_key: true, clear_credentials: [] }) }));
+    await page.route('**/api/config/recovery/status', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ key_locked: false, config_holds_key: true, clear_credentials: [], config_set_aside: 'config.toml could not be read and was kept as config.toml.corrupt.1' }) }));
     await page.route('**/api/mcps', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ servers: [], incompatibilities: [], configs: [{ id: 'cfg-1', label: 'Cloudflare API', server_id: 's', env_keys: [], project_ids: [], is_global: true, include_general: true, auth_failure: { kind: 'refused', http_status: 401, message: 'refused', failed_at: iso(5) } }] }) }));
     // Two failing reads: the same route and status, so they group (×N).
     await page.route('**/api/mcps/registry**', route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ success: false, data: null, error: 'internal error: pool timed out' }) }));

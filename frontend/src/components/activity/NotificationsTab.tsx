@@ -11,6 +11,7 @@ import {
 import {
   acknowledgeServerError,
   clearNotificationHistory,
+  dismissNotice,
   serverErrorDetails,
   type HistoryEntry,
   type NoticeEntry,
@@ -133,24 +134,65 @@ export function NotificationsTab({ notifications, now, filter, onFilterChange, o
   );
 }
 
-/** A standing notice: what is wrong, and the one place that fixes it. */
+/** A notice of the install: what is wrong, the one place that fixes it, and
+ *  a way to put it away when it is only information. */
 function NoticeRow({ entry, onClose }: { entry: NoticeEntry; onClose?: () => void }) {
   const { t } = useT();
-  const token = entry.kind === 'token_refused';
-  const label = entry.label ?? '';
+  const [first = '', second = ''] = entry.args ?? [];
+  let title: string | null = null;
+  let body: string;
+  let linkText: string | null = null;
+  switch (entry.kind) {
+    case 'token_refused':
+      title = t('authFailure.banner.title');
+      body = t('authFailure.banner.body', entry.label ?? '');
+      linkText = t('authFailure.banner.fix', entry.label ?? '');
+      break;
+    case 'key_locked':
+      body = first ? `${t('keyLocked.banner')} ${t('keyLocked.clearCredentials', first)}` : t('keyLocked.banner');
+      linkText = t('keyLocked.restoreLink');
+      break;
+    case 'key_beside_data':
+      body = t('keyLocked.keyBesideData');
+      linkText = t('keyLocked.keyBesideDataLink');
+      break;
+    case 'credentials_unavailable':
+      body = t('keyLocked.credentialsUnavailable', first);
+      break;
+    case 'update_available':
+      body = t('app.updateAvailable', first, second);
+      linkText = t('app.updateOpenRelease');
+      break;
+    default:
+      body = first;
+  }
   return (
     <li className="notif-row" data-testid="notif-notice" data-kind={entry.kind} data-category={entry.category}>
       <TriangleAlert size={13} aria-hidden="true" className="notif-error-icon" />
       <div className="notif-body">
-        {token && <span className="notif-title">{t('authFailure.banner.title')}</span>}
-        <span className={token ? 'notif-meta notif-message' : 'notif-title notif-message'}>
-          {token ? t('authFailure.banner.body', label) : t('keyLocked.keyBesideData')}
-        </span>
-        <span className="notif-actions" onClick={onClose}>
-          <AppLink to={entry.link} className="notif-btn" data-testid={`notif-notice-link-${entry.id}`}>
-            {token ? t('authFailure.banner.fix', label) : t('keyLocked.keyBesideDataLink')}
-          </AppLink>
-        </span>
+        {title && <span className="notif-title">{title}</span>}
+        <span className={title ? 'notif-meta notif-message' : 'notif-title notif-message'}>{body}</span>
+        {(entry.link || entry.dismiss) && (
+          <span className="notif-actions">
+            {entry.link && linkText && (entry.external ? (
+              <a href={entry.link} target="_blank" rel="noreferrer" className="notif-btn" data-testid={`notif-notice-link-${entry.id}`}>
+                {linkText}
+              </a>
+            ) : (
+              <span onClick={onClose}>
+                <AppLink to={entry.link} className="notif-btn" data-testid={`notif-notice-link-${entry.id}`}>
+                  {linkText}
+                </AppLink>
+              </span>
+            ))}
+            {entry.dismiss && (
+              <button type="button" className="notif-btn" data-testid={`notif-notice-dismiss-${entry.id}`} onClick={() => dismissNotice(entry.id)}>
+                <Check size={10} aria-hidden="true" />
+                {t('notif.error.ack')}
+              </button>
+            )}
+          </span>
+        )}
       </div>
     </li>
   );
