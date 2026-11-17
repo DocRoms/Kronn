@@ -10,6 +10,7 @@ import {
   noteBackendAnswered,
   recordServerError,
   resetNotifications,
+  setNotices,
 } from '../../../lib/notifications';
 import type { ActivityOverview, ActivityRow } from '../../../types/generated';
 import { ActivityPanel, type ActivityPanelProps } from '../ActivityPanel';
@@ -279,5 +280,42 @@ describe('during an outage', () => {
     renderPanel({ initialTab: 'progress' });
     expect(screen.getByTestId('progress-tab')).not.toHaveAttribute('data-stale');
     expect(screen.queryByTestId('activity-stale')).toBeNull();
+  });
+});
+
+describe('the standing notices (KT-1686)', () => {
+  const key = () => setNotices('key', [{ id: 'beside-data', kind: 'key_beside_data', link: '/config#settings-recovery', category: 'kronn' }]);
+  const token = () => setNotices('token', [{ id: 'cfg-1', kind: 'token_refused', label: 'Cloudflare API', link: '/plugins/cfg-1', category: 'automations' }]);
+
+  it('lists the key kept beside its data and a refused token, each with the link that fixes it', () => {
+    key();
+    token();
+    const onClose = vi.fn();
+    renderPanel({ onClose });
+    expect(screen.getByTestId('activity-tab-notifications')).toHaveAttribute('aria-selected', 'true');
+    const found = screen.getAllByTestId('notif-notice');
+    // Grouped by category: the token under Automations, the key under Kronn.
+    expect(found.map(el => el.getAttribute('data-kind'))).toEqual(['token_refused', 'key_beside_data']);
+    const notices = [found[1], found[0]];
+    expect(notices[0]).toHaveTextContent('config.toml');
+    expect(within(notices[0]).getByRole('link')).toHaveAttribute('href', '/config#settings-recovery');
+    expect(notices[1]).toHaveTextContent('Cloudflare API');
+    expect(within(notices[1]).getByRole('link')).toHaveAttribute('href', '/plugins/cfg-1');
+    expect(within(notices[1]).queryByTestId('notif-error-ack')).toBeNull();
+    fireEvent.click(within(notices[1]).getByRole('link'));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('counts them unread until the tab is read, then no longer takes the panel over', () => {
+    key();
+    renderPanel({ initialTab: 'progress' });
+    expect(screen.getByTestId('activity-tab-unread')).toHaveTextContent('1');
+    fireEvent.click(screen.getByTestId('activity-tab-notifications'));
+    expect(getNotifications().notices[0].seen).toBe(true);
+    cleanup();
+    renderPanel();
+    expect(screen.getByTestId('activity-tab-progress')).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(screen.getByTestId('activity-tab-notifications'));
+    expect(screen.getByTestId('notif-notice')).toBeInTheDocument();
   });
 });

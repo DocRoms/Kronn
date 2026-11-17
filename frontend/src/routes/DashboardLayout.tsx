@@ -1,6 +1,6 @@
-import { AuthFailureBanner } from '../components/AuthFailureBanner';
 import { KeyLockedBanner } from '../components/KeyLockedBanner';
 import { UpdateBanner } from '../components/UpdateBanner';
+import { useAuthFailureNotices } from '../hooks/useAuthFailureNotices';
 import { useBackendMonitor } from '../hooks/useBackendMonitor';
 import { useAppContext } from '../lib/appContext';
 import { Dashboard } from '../pages/Dashboard';
@@ -9,11 +9,11 @@ import { Dashboard } from '../pages/Dashboard';
 export function DashboardLayout() {
   const { resetSetup, resetError, dismissResetError } = useAppContext();
   useBackendMonitor();
+  useAuthFailureNotices();
   return (
     <>
       <UpdateBanner />
       <KeyLockedBanner />
-      <AuthFailureBanner />
       {resetError && (
         <div className="set-expose-warn" role="alert" data-testid="reset-error">
           <span>{resetError}</span>

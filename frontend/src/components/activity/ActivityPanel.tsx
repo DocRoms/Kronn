@@ -212,6 +212,7 @@ export function ActivityPanel({
       >
         {tab === 'notifications' ? (
           <NotificationsTab
+            onClose={onClose}
             notifications={notifications}
             now={now}
             filter={filters.notifications}

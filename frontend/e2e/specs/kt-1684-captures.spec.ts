@@ -50,6 +50,9 @@ for (const theme of ['light', 'dark'] as const) {
     await page.route('**/api/health', route => healthy
       ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, in_docker: false, version: '0.15.3' }) })
       : route.fulfill({ status: 503, contentType: 'application/json', body: '{"ok":false}' }));
+    // The two standing notices of the bell (KT-1686): a key beside its data, a refused token.
+    await page.route('**/api/config/recovery/status', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ key_locked: false, config_holds_key: true, clear_credentials: [] }) }));
+    await page.route('**/api/mcps', route => route.fulfill({ status: 200, contentType: 'application/json', body: ok({ servers: [], incompatibilities: [], configs: [{ id: 'cfg-1', label: 'Cloudflare API', server_id: 's', env_keys: [], project_ids: [], is_global: true, include_general: true, auth_failure: { kind: 'refused', http_status: 401, message: 'refused', failed_at: iso(5) } }] }) }));
     // Two failing reads: the same route and status, so they group (×N).
     await page.route('**/api/mcps/registry**', route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ success: false, data: null, error: 'internal error: pool timed out' }) }));
     await page.route('**/api/stats/tokens**', route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ success: false, data: null, error: 'internal error: pool timed out' }) }));

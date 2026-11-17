@@ -14,9 +14,10 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 
 import { KeyLockedBanner } from '../KeyLockedBanner';
+import { getNotifications, resetNotifications } from '../../lib/notifications';
 
 describe('KeyLockedBanner', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => { vi.clearAllMocks(); resetNotifications(); });
   afterEach(() => cleanup());
 
   it('says the stored credentials failed to load while the key is in use (C5-05)', async () => {
@@ -34,11 +35,14 @@ describe('KeyLockedBanner', () => {
     expect(screen.queryByTestId('config-set-aside-banner')).toBeNull();
   });
   // KT-1594
-  it('flags a key stored beside its data and links to Settings > Recovery', async () => {
+  it('sends a key stored beside its data to the bell, with no banner (KT-1686)', async () => {
     config.getRecoveryStatus.mockResolvedValue({ key_locked: false, config_holds_key: true });
     render(<KeyLockedBanner />);
-    const banner = await screen.findByTestId('key-beside-data-banner');
-    expect(banner.querySelector('a')!.getAttribute('href')).toBe('/config#settings-recovery');
+    await waitFor(() => expect(getNotifications().notices).toHaveLength(1));
+    const [notice] = getNotifications().notices;
+    expect(notice).toMatchObject({ kind: 'key_beside_data', link: '/config#settings-recovery', category: 'kronn', seen: false });
+    expect(screen.queryByTestId('key-beside-data-banner')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('says nothing about a key beside its data when config.toml does not hold it', async () => {
@@ -47,6 +51,7 @@ describe('KeyLockedBanner', () => {
     await waitFor(() => expect(config.getRecoveryStatus).toHaveBeenCalled());
     await act(async () => {});
     expect(screen.queryByTestId('key-beside-data-banner')).toBeNull();
+    expect(getNotifications().notices).toHaveLength(0);
   });
 
   it('lists, by name, the credentials still in clear while the key is locked', async () => {

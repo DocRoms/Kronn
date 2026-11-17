@@ -492,6 +492,10 @@ button.activity-row-link:hover .activity-row-name {
   cursor: pointer;
 }
 
+a.notif-btn {
+  text-decoration: none;
+}
+
 .notif-btn:hover {
   background: var(--kr-bg-hover);
   color: var(--kr-text-primary);

@@ -41,8 +41,24 @@ export type HistoryEntry =
   | { id: string; kind: 'outage'; since: number; resolvedAt: number; category: 'kronn' }
   | { id: string; kind: 'server_error'; resolvedAt: number; error: ServerErrorEntry; category: NotificationCategory };
 
+/** A standing condition of the install: it stays until its cause is fixed,
+ *  so it has no acknowledge button. The tab words it from `kind`. */
+export interface NoticeEntry {
+  id: string;
+  kind: 'key_beside_data' | 'token_refused';
+  /** The connection a refused token belongs to. */
+  label?: string;
+  /** Where the owner fixes it. */
+  link: string;
+  seen: boolean;
+  category: NotificationCategory;
+}
+
+export type NoticeReport = Omit<NoticeEntry, 'seen'>;
+
 export interface NotificationsSnapshot {
   outage: OutageEntry | null;
+  notices: readonly NoticeEntry[];
   errors: readonly ServerErrorEntry[];
   history: readonly HistoryEntry[];
 }
@@ -51,7 +67,7 @@ const MAX_ERRORS = 50;
 const MAX_HISTORY = 50;
 const MAX_MESSAGE_CHARS = 500;
 
-const EMPTY: NotificationsSnapshot = { outage: null, errors: [], history: [] };
+const EMPTY: NotificationsSnapshot = { outage: null, notices: [], errors: [], history: [] };
 
 let state: NotificationsSnapshot = EMPTY;
 let suspectSince: number | null = null;
@@ -110,6 +126,22 @@ export function noteBackendAnswered(now = Date.now()): void {
     category: 'kronn',
   };
   commit({ ...state, outage: null, history: [entry, ...state.history].slice(0, MAX_HISTORY) });
+}
+
+// ─── Notices ─────────────────────────────────────────────────────────────
+
+/** What one source (`key`, `token`) reports now: it replaces what that source
+ *  said before. A notice already read stays read. */
+export function setNotices(source: string, reports: readonly NoticeReport[]): void {
+  const prefix = `${source}:`;
+  const kept = state.notices.filter(notice => !notice.id.startsWith(prefix));
+  const next = reports.map(report => {
+    const id = `${prefix}${report.id}`;
+    const seen = state.notices.find(notice => notice.id === id)?.seen ?? false;
+    return { ...report, id, seen };
+  });
+  if (next.length === 0 && kept.length === state.notices.length) return;
+  commit({ ...state, notices: [...kept, ...next] });
 }
 
 // ─── Server errors ───────────────────────────────────────────────────────
@@ -205,10 +237,11 @@ export function clearNotificationHistory(): void {
 
 /** The Notifications tab is on screen: what is pending counts as read. */
 export function markNotificationsSeen(): void {
-  const unseenError = state.errors.some(entry => !entry.seen);
+  const unseenError = state.errors.some(entry => !entry.seen) || state.notices.some(notice => !notice.seen);
   if (!unseenError && (!state.outage || state.outage.seen)) return;
   commit({
     ...state,
+    notices: state.notices.map(notice => (notice.seen ? notice : { ...notice, seen: true })),
     outage: state.outage ? { ...state.outage, seen: true } : null,
     errors: state.errors.map(entry => (entry.seen ? entry : { ...entry, seen: true })),
   });
@@ -216,14 +249,17 @@ export function markNotificationsSeen(): void {
 
 // ─── Reading ─────────────────────────────────────────────────────────────
 
-/** An alert nobody dealt with yet: the outage, or a server error still pending. */
+/** An alert nobody dealt with yet: the outage, a server error still pending,
+ *  or a standing notice not read yet (read, it no longer takes the panel over). */
 export function hasUnresolvedAlert(snapshot: NotificationsSnapshot): boolean {
-  return snapshot.outage !== null || snapshot.errors.length > 0;
+  return snapshot.outage !== null || snapshot.errors.length > 0 || snapshot.notices.some(notice => !notice.seen);
 }
 
 /** What the tab's counter and the bell's orange dot show. */
 export function unreadCount(snapshot: NotificationsSnapshot): number {
-  return (snapshot.outage && !snapshot.outage.seen ? 1 : 0) + snapshot.errors.filter(entry => !entry.seen).length;
+  return (snapshot.outage && !snapshot.outage.seen ? 1 : 0)
+    + snapshot.notices.filter(notice => !notice.seen).length
+    + snapshot.errors.filter(entry => !entry.seen).length;
 }
 
 /** The text a copy button puts on the clipboard: status, route, and the server's message. */

@@ -13,10 +13,12 @@ import {
   clearNotificationHistory,
   serverErrorDetails,
   type HistoryEntry,
+  type NoticeEntry,
   type NotificationCategory,
   type NotificationsSnapshot,
   type ServerErrorEntry,
 } from '../../lib/notifications';
+import { AppLink } from '../AppLink';
 import { ActivityFilterChips } from './ActivityFilterChips';
 
 export interface NotificationsTabProps {
@@ -24,9 +26,12 @@ export interface NotificationsTabProps {
   now: number;
   filter: ActivityFilter;
   onFilterChange: (filter: ActivityFilter) => void;
+  /** A notice's link was followed: the panel closes. */
+  onClose?: () => void;
 }
 
 type Item =
+  | { kind: 'notice'; key: string; category: NotificationCategory; entry: NoticeEntry }
   | { kind: 'error'; key: string; category: NotificationCategory; entry: ServerErrorEntry }
   | { kind: 'history'; key: string; category: NotificationCategory; entry: HistoryEntry };
 
@@ -41,11 +46,12 @@ function outageLength(t: (key: string, ...args: (string | number)[]) => string, 
   return t(`notif.duration.${unit}`, first, second);
 }
 
-export function NotificationsTab({ notifications, now, filter, onFilterChange }: NotificationsTabProps) {
+export function NotificationsTab({ notifications, now, filter, onFilterChange, onClose }: NotificationsTabProps) {
   const { t } = useT();
-  const { outage, errors, history } = notifications;
+  const { outage, notices, errors, history } = notifications;
 
   const items: Item[] = [
+    ...notices.map((entry): Item => ({ kind: 'notice', key: entry.id, category: entry.category, entry })),
     ...errors.map((entry): Item => ({ kind: 'error', key: entry.id, category: entry.category, entry })),
     ...history.map((entry): Item => ({ kind: 'history', key: entry.id, category: entry.category, entry })),
   ];
@@ -58,9 +64,11 @@ export function NotificationsTab({ notifications, now, filter, onFilterChange }:
   const visible = filter === 'all' ? items : items.filter(item => item.category === filter);
 
   const renderItem = (item: Item) =>
-    item.kind === 'error'
-      ? <ServerErrorRow key={item.key} entry={item.entry} />
-      : <HistoryRow key={item.key} entry={item.entry} />;
+    item.kind === 'notice'
+      ? <NoticeRow key={item.key} entry={item.entry} onClose={onClose} />
+      : item.kind === 'error'
+        ? <ServerErrorRow key={item.key} entry={item.entry} />
+        : <HistoryRow key={item.key} entry={item.entry} />;
 
   return (
     <div className="activity-tabpanel" data-testid="notifications-tab">
@@ -122,6 +130,29 @@ export function NotificationsTab({ notifications, now, filter, onFilterChange }:
         </div>
       )}
     </div>
+  );
+}
+
+/** A standing notice: what is wrong, and the one place that fixes it. */
+function NoticeRow({ entry, onClose }: { entry: NoticeEntry; onClose?: () => void }) {
+  const { t } = useT();
+  const token = entry.kind === 'token_refused';
+  const label = entry.label ?? '';
+  return (
+    <li className="notif-row" data-testid="notif-notice" data-kind={entry.kind} data-category={entry.category}>
+      <TriangleAlert size={13} aria-hidden="true" className="notif-error-icon" />
+      <div className="notif-body">
+        {token && <span className="notif-title">{t('authFailure.banner.title')}</span>}
+        <span className={token ? 'notif-meta notif-message' : 'notif-title notif-message'}>
+          {token ? t('authFailure.banner.body', label) : t('keyLocked.keyBesideData')}
+        </span>
+        <span className="notif-actions" onClick={onClose}>
+          <AppLink to={entry.link} className="notif-btn" data-testid={`notif-notice-link-${entry.id}`}>
+            {token ? t('authFailure.banner.fix', label) : t('keyLocked.keyBesideDataLink')}
+          </AppLink>
+        </span>
+      </div>
+    </li>
   );
 }
 

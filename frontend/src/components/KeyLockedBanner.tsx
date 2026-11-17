@@ -1,6 +1,7 @@
 // KT-1007 — app-wide key notices while the API stays usable (auth off, or an
 // operator session token): no key decrypts the stored secrets (restore here),
-// the stored credentials failed to load, or config.toml was set aside.
+// the stored credentials failed to load, or config.toml was set aside. A key
+// kept beside its data is no banner: it goes to the bell's notifications.
 import { useEffect, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { config as configApi } from '../lib/api';
@@ -9,9 +10,9 @@ import { RecoveryRestorePanel } from './RecoveryRestorePanel';
 import { StartNewKeyPanel } from './StartNewKeyPanel';
 import { AlertTriangle } from 'lucide-react';
 import type { RecoveryStatus } from '../types/generated';
-import { AppLink } from './AppLink';
 import { settingsSectionPath } from '../lib/routes';
 import { clearCredentialLabel } from '../lib/clearCredentials';
+import { setNotices } from '../lib/notifications';
 
 export function KeyLockedBanner() {
   const { t } = useT();
@@ -24,7 +25,13 @@ export function KeyLockedBanner() {
     let live = true;
     Promise.resolve()
       .then(() => configApi.getRecoveryStatus())
-      .then(s => { if (live) setStatus(s); })
+      .then(s => {
+        if (!live) return;
+        setStatus(s);
+        setNotices('key', !s.key_locked && s.config_holds_key
+          ? [{ id: 'beside-data', kind: 'key_beside_data', link: settingsSectionPath('settings-recovery'), category: 'kronn' }]
+          : []);
+      })
       .catch(() => {});
     return () => { live = false; };
   }, []);
@@ -45,15 +52,6 @@ export function KeyLockedBanner() {
           <RecoveryRestorePanel toast={toast} t={t} mode="restore" onRestored={() => window.location.reload()} />
           <StartNewKeyPanel t={t} onDone={() => window.location.reload()} />
           {message && <span className="set-hint-xs">{message}</span>}
-        </div>
-      )}
-      {!status.key_locked && status.config_holds_key && (
-        <div className="set-expose-warn" role="alert" data-testid="key-beside-data-banner">
-          <AlertTriangle size={13} />
-          <span>{t('keyLocked.keyBesideData')}</span>
-          <AppLink to={settingsSectionPath('settings-recovery')} className="kr-inline-link">
-            {t('keyLocked.keyBesideDataLink')}
-          </AppLink>
         </div>
       )}
       {!status.key_locked && status.credentials_unavailable && (
