@@ -4151,7 +4151,6 @@ const zh: TranslationDict = {
   "config.defaultModel": "默认",
   "config.reasoningEffort": "推理强度",
   "config.reasoningEffortUnavailable": "此模型不支持",
-  "config.reasoningEffortUnsupported": "此运行时不支持推理强度。",
   "config.searchModel": "搜索模型…",
   "config.searchModelEmpty": "没有匹配的模型",
   "config.saveError": "保存错误",

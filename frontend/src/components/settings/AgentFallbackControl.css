@@ -17,6 +17,34 @@
   font-weight: 650;
 }
 
+/* The title, and on its right the links about the models (model list, cost help). */
+.set-agent-fallback-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-2);
+}
+
+.set-agent-fallback-tools {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.set-agent-fallback-tools a {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-text-muted);
+  text-decoration: none;
+}
+
+.set-agent-fallback-tools a:hover {
+  color: var(--agent-color, var(--kr-accent-text));
+}
+
 /* The block sits inside the card's own content inset, the same as its header:
    on a CLI card the block is a direct child of the card, so it carries it. */
 .set-agent-models-block {

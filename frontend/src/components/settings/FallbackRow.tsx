@@ -35,6 +35,21 @@ const gapText = (t: (key: string, ...args: string[]) => string, gaps: FallbackGa
     return text === `fallback.gap.${gap}` ? gap : text;
   }).join(', ');
 
+/** The icons of the text modes, the same as the default-tier chooser's. */
+const MODE_ICON: Partial<Record<FallbackMode, string>> = { eco: '⚡', standard: '🎯', advanced: '🧠' };
+
+/** The label of a mode row, its icon first when the mode has one. */
+export function FallbackModeLabel({ mode }: { mode: FallbackMode }) {
+  const { t } = useT();
+  const icon = MODE_ICON[mode];
+  return (
+    <span className="fbr-mode">
+      {icon && <span className="fbr-mode-icon" aria-hidden="true">{icon}</span>}
+      {t(`fallback.mode.${mode}`)}
+    </span>
+  );
+}
+
 /** The badge every pill carries: how the model is reached. There is no « paid » badge. */
 export function TransportBadge({ transport }: { transport: FallbackTransport }) {
   return (
@@ -425,6 +440,9 @@ interface RowProps {
   /** KT-1706 — the model picker of the mode: when given it IS the first element of the row's
    *  right-hand column, in place of the read-only `current` pill. */
   model?: ReactNode;
+  /** Another setting of the mode, on the line of its model picker (an agent's reasoning effort).
+   *  A row with no picker has no such line and does not draw it. */
+  extra?: ReactNode;
   /** The fallbacks set here, in order (an agent row stores one; an override may carry more). */
   links: AgentFallback[];
   /** What the backend resolved for them (gaps of each link, its own refusal). */
@@ -454,7 +472,7 @@ interface RowProps {
  *  dashed and read-only (they live on another card). The menu is filtered by
  *  kind of mode, grouped by agent, and a model already in the chain is disabled. */
 export function FallbackRow({
-  testId, mode, origin, current, model, links, view, inherited = [], options, maxLinks = MAX_FALLBACK_CHAIN, disabled, empty, actions, onChange, onOpenAgent,
+  testId, mode, origin, current, model, extra, links, view, inherited = [], options, maxLinks = MAX_FALLBACK_CHAIN, disabled, empty, actions, onChange, onOpenAgent,
 }: RowProps) {
   const { t } = useT();
   const [menu, setMenu] = useState<null | { index: number }>(null);
@@ -504,6 +522,7 @@ export function FallbackRow({
   };
   const full = links.length >= maxLinks;
   const nothing = links.length === 0 && inherited.length === 0;
+  const picker = model !== undefined && <span className="fbr-model" data-testid={`${testId}-model`}>{model}</span>;
 
   return (
     <div
@@ -513,9 +532,14 @@ export function FallbackRow({
       data-kind={modeKind(mode)}
       data-with-model={model !== undefined ? 'true' : undefined}
     >
-      <span className="fbr-mode">{t(`fallback.mode.${mode}`)}</span>
+      <FallbackModeLabel mode={mode} />
       <div className="fbr-track">
-        {model !== undefined && <span className="fbr-model" data-testid={`${testId}-model`}>{model}</span>}
+        {picker && extra ? (
+          <div className="fbr-line">
+            {picker}
+            <span className="fbr-extra">{extra}</span>
+          </div>
+        ) : picker}
         {model === undefined && current && (
           <FallbackPill
             testId={`${testId}-current`}

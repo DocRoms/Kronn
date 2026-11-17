@@ -4195,7 +4195,6 @@ const fr: TranslationDict = {
   'config.defaultModel': 'Par défaut',
   'config.reasoningEffort': 'Effort de raisonnement',
   'config.reasoningEffortUnavailable': 'non pris en charge par ce modèle',
-  'config.reasoningEffortUnsupported': 'L’effort de raisonnement n’est pas pris en charge par ce runtime.',
   'config.searchModel': 'Rechercher un modèle…',
   'config.searchModelEmpty': 'Aucun modèle correspondant',
   'config.saveError': 'Erreur de sauvegarde',

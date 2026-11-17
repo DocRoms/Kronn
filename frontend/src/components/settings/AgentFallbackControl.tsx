@@ -20,6 +20,10 @@ interface Props {
   /** KT-1706 — the model picker of each mode (« Mode · [model ▾] → fallback »). A mode with no picker shows
    *  its resolved model as a read-only pill. */
   pickers?: Partial<Record<FallbackMode, ReactNode>>;
+  /** KT-1807 — another setting of a mode, beside its model picker (Claude Code's and Codex's reasoning effort). */
+  extras?: Partial<Record<FallbackMode, ReactNode>>;
+  /** Links and helps about the models (the provider's model list, the cost help), beside the block's title. */
+  tools?: ReactNode;
   /** KT-1706 — what the catalogue says about the pickers (loading, nothing known, stale): one muted line
    *  under the block's title. */
   hint?: ReactNode;
@@ -54,13 +58,16 @@ const REASONS: Record<string, string> = {
  *  The model picker sets the mode's model; the fallback is what takes over when
  *  the provider cannot serve it. A discussion or a workflow step can override a
  *  mode; with no override this one applies. */
-export function AgentFallbackControl({ agentType, modes, pickers, hint, extraRows, options, chains, cooldown, onChange, onOpenAgent }: Props) {
+export function AgentFallbackControl({ agentType, modes, pickers, extras, tools, hint, extraRows, options, chains, cooldown, onChange, onOpenAgent }: Props) {
   const { t } = useT();
   return (
     <div className="set-agent-fallback" data-testid={`agent-fallback-${agentType}`}>
-      <div className="set-agent-fallback-row" title={t('agents.fallbackHint')}>
-        <Shuffle size={12} aria-hidden="true" />
-        <span>{t('agents.modelsAndFallbacks')}</span>
+      <div className="set-agent-fallback-head">
+        <div className="set-agent-fallback-row" title={t('agents.fallbackHint')}>
+          <Shuffle size={12} aria-hidden="true" />
+          <span>{t('agents.modelsAndFallbacks')}</span>
+        </div>
+        {tools && <div className="set-agent-fallback-tools">{tools}</div>}
       </div>
       {hint}
       {modes.map(({ mode, model }) => {
@@ -78,6 +85,7 @@ export function AgentFallbackControl({ agentType, modes, pickers, hint, extraRow
             origin={agentType}
             current={{ agent: agentType, model }}
             model={pickers?.[mode]}
+            extra={extras?.[mode]}
             links={links}
             view={view}
             inherited={view?.inherited ?? inheritedAfter(chains, agentType, mode, links)}

@@ -34,6 +34,12 @@
   color: var(--kr-text-secondary);
 }
 
+.fbr-mode-icon {
+  margin-right: var(--kr-sp-2);
+  font-size: var(--kr-fs-sm);
+  letter-spacing: 0;
+}
+
 /* The single column: model, caption, chain, add. */
 .fbr-track {
   display: flex;
@@ -81,6 +87,52 @@
 
 .fbr-model > .searchable-select .searchable-select-control input {
   text-overflow: ellipsis;
+}
+
+/* The model and, beside it, a second setting of the mode (the reasoning effort):
+   the picker takes the room, the setting is sized to its value and capped. */
+.fbr-line {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+
+.fbr-line > .fbr-model {
+  flex: 1 1 0;
+}
+
+.fbr-extra {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+}
+
+.fbr-extra > select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 0 var(--kr-sp-2);
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.fbr-extra > select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Native option lists are black on white otherwise, unreadable on a dark theme. */
+.fbr-extra > select option {
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
 }
 
 .fbr-caption {

@@ -251,3 +251,122 @@ describe('KT-1706 — the models and fallbacks block of each card', () => {
     expect(within(image).queryByTestId('connection-fallback-local:comfyui-image-link-0')).not.toBeInTheDocument();
   });
 });
+
+// KT-1807 — one mode, one place: its icon, its model and (Claude Code, Codex) its
+// reasoning effort sit in its row, with no Edit fold to open for the effort.
+describe('KT-1807 — each mode row carries its icon and its reasoning effort', () => {
+  const MODES = [['eco', 'economy', '⚡'], ['standard', 'default', '🎯'], ['advanced', 'reasoning', '🧠']] as const;
+  const effortOf = (agentType: string, tier: string) =>
+    document.querySelector<HTMLSelectElement>(`[data-model-tier-effort-agent="${agentType}"][data-model-tier-effort="${tier}"]`);
+  const withModes = (modes: Record<string, string[]>) => {
+    const entry = (model: string, tier: string) => ({
+      ...catalogEntry('agent:claude-code', 'ClaudeCode', model, tier), reasoning_modes: modes[model] ?? [],
+    });
+    mocks.catalogList.mockResolvedValue({ targets: [{
+      runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode', live_refresh_ok: true, stale: false,
+      models: [entry('haiku', 'economy'), entry('sonnet', 'default'), entry('opus', 'reasoning')],
+    }] });
+  };
+  const iconOf = (row: HTMLElement) => row.querySelector('.fbr-mode')?.firstElementChild ?? null;
+
+  it('Claude Code: each mode row shows its icon, then its model with its effort beside it, without opening the card', async () => {
+    withModes({ haiku: ['low', 'high'], sonnet: ['medium'], opus: ['high', 'max'] });
+    renderSection([agent('ClaudeCode', 'Claude Code')]);
+    const block = await screen.findByTestId('agent-models-ClaudeCode');
+    await waitFor(() => expect(effortOf('ClaudeCode', 'reasoning')).not.toBeNull());
+    expect(screen.getByTestId('agent-configure-ClaudeCode')).toHaveAttribute('aria-expanded', 'false');
+    const offered = { economy: ['low', 'high'], default: ['medium'], reasoning: ['high', 'max'] };
+    for (const [mode, tier, icon] of MODES) {
+      const row = within(block).getByTestId(`agent-fallback-ClaudeCode-${mode}`);
+      expect(iconOf(row)).toHaveAttribute('aria-hidden', 'true');
+      expect(iconOf(row)?.textContent).toBe(icon);
+      expect(row.querySelector('.fbr-mode')?.textContent).toBe(`${icon}fallback.mode.${mode}`);
+      // The effort shares the model's line, right after the picker, above the fallbacks.
+      const model = within(row).getByTestId(`agent-fallback-ClaudeCode-${mode}-model`);
+      const effort = effortOf('ClaudeCode', tier)!;
+      const line = row.querySelector('.fbr-track')!.firstElementChild;
+      expect(model).toContainElement(picker('ClaudeCode', tier));
+      expect(model).not.toContainElement(effort);
+      expect(line).toContainElement(model);
+      expect(line).toContainElement(effort);
+      expect(model.compareDocumentPosition(effort) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(effort).toHaveAccessibleName(`config.reasoningEffort ${tier}`);
+      await waitFor(() => expect(effort).toBeEnabled());
+      expect(Array.from(effort.options).map(option => option.value)).toEqual(['', ...offered[tier]]);
+    }
+    // The models link stays on the block; the old effort panel of the fold is gone, even opened.
+    expect(within(block).getByRole('link', { name: /config\.viewModels/ }))
+      .toHaveAttribute('href', 'https://docs.anthropic.com/en/docs/about-claude/models');
+    fireEvent.click(screen.getByTestId('agent-configure-ClaudeCode'));
+    expect(screen.queryByTestId('agent-tier-efforts-ClaudeCode')).not.toBeInTheDocument();
+    expect(document.querySelectorAll('[data-model-tier-effort-agent="ClaudeCode"]')).toHaveLength(3);
+  });
+
+  it('Claude Code: changing a mode’s effort in its row saves it as the effort of that tier', async () => {
+    withModes({ haiku: ['low'], sonnet: ['medium', 'high'], opus: ['max'] });
+    renderSection([agent('ClaudeCode', 'Claude Code')]);
+    await waitFor(() => expect(effortOf('ClaudeCode', 'default')).not.toBeNull());
+    const effort = effortOf('ClaudeCode', 'default')!;
+    await waitFor(() => expect(effort).toBeEnabled());
+    fireEvent.change(effort, { target: { value: 'high' } });
+    await waitFor(() => expect(mocks.setModelTiers).toHaveBeenCalledTimes(1));
+    expect(mocks.setModelTiers.mock.calls[0][0].claude_code).toEqual({
+      economy: 'haiku', default: null, reasoning: 'opus', default_effort: 'high',
+    });
+  });
+
+  it('Claude Code: a saved effort the model no longer supports stays visible, disabled, and can be cleared', async () => {
+    mocks.getModelTiers.mockResolvedValue({
+      claude_code: { economy: 'haiku', default: null, reasoning: 'opus', economy_effort: 'xhigh' },
+      codex: { ...blank }, open_code: { ...blank }, gemini_cli: { ...blank }, kiro: { ...blank }, vibe: { ...blank },
+      copilot_cli: { ...blank }, ollama: { ...blank }, lite_llm: { ...blank }, nvidia: { ...blank },
+    });
+    withModes({ haiku: ['low', 'high'] });
+    renderSection([agent('ClaudeCode', 'Claude Code')]);
+    await waitFor(() => expect(effortOf('ClaudeCode', 'economy')).toHaveValue('xhigh'));
+    const effort = effortOf('ClaudeCode', 'economy')!;
+    await waitFor(() => expect(effort).toBeEnabled());
+    const stale = within(effort).getByRole('option', { name: /xhigh.*config\.reasoningEffortUnavailable/ });
+    expect(stale).toBeDisabled();
+    fireEvent.change(effort, { target: { value: '' } });
+    await waitFor(() => expect(mocks.setModelTiers).toHaveBeenCalledTimes(1));
+    expect(mocks.setModelTiers.mock.calls[0][0].claude_code.economy_effort).toBeNull();
+  });
+
+  it('Codex: its mode rows carry the effort too', async () => {
+    mocks.catalogList.mockResolvedValue({ targets: [{
+      runtime_target_id: 'agent:codex', agent_type: 'Codex', live_refresh_ok: true, stale: false,
+      models: [{ ...catalogEntry('agent:codex', 'Codex', 'gpt-mini', 'economy'), reasoning_modes: ['low'] },
+        { ...catalogEntry('agent:codex', 'Codex', 'gpt-std', 'default'), reasoning_modes: ['medium'] },
+        { ...catalogEntry('agent:codex', 'Codex', 'gpt-deep', 'reasoning'), reasoning_modes: ['high'] }],
+    }] });
+    renderSection([agent('Codex', 'Codex')]);
+    const block = await screen.findByTestId('agent-models-Codex');
+    for (const [mode, tier] of MODES) {
+      await waitFor(() => expect(effortOf('Codex', tier)).not.toBeNull());
+      const row = within(block).getByTestId(`agent-fallback-Codex-${mode}`);
+      expect(row.querySelector('.fbr-track')!.firstElementChild).toContainElement(effortOf('Codex', tier));
+    }
+  });
+
+  it.each(['GeminiCli', 'Ollama'] as const)('%s: icons on its text modes, and no effort select', async agentType => {
+    renderSection([agent(agentType, agentType)]);
+    const block = await screen.findByTestId(`agent-fallback-${agentType}`);
+    await waitFor(() => expect(picker(agentType, 'economy')).not.toBeNull());
+    for (const [mode, , icon] of MODES) {
+      const row = within(block).getByTestId(`agent-fallback-${agentType}-${mode}`);
+      expect(iconOf(row)).toHaveAttribute('aria-hidden', 'true');
+      expect(iconOf(row)?.textContent).toBe(icon);
+      expect(row.querySelector('select')).toBeNull();
+    }
+    expect(document.querySelector('[data-model-tier-effort-agent]')).toBeNull();
+    if (agentType === 'Ollama') {
+      // A mode with no icon of its own keeps its plain label.
+      const decision = within(block).getByTestId('agent-fallback-Ollama-decision');
+      expect(decision.querySelector('.fbr-mode')?.textContent).toBe('fallback.mode.decision');
+    } else {
+      fireEvent.click(screen.getByTestId(`agent-configure-${agentType}`));
+      expect(screen.queryByText('config.reasoningEffortUnsupported')).not.toBeInTheDocument();
+    }
+  });
+});

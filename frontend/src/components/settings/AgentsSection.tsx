@@ -658,7 +658,12 @@ export function AgentsSection({
   /** KT-1693 — what continues a turn this agent cannot serve (rate limit, quota,
    *  outage, not signed in), one row per mode the agent has. Every installed
    *  agent has them, OpenCode included. */
-  const renderFallbackControl = (agentType: AgentType, pickers?: Partial<Record<FallbackMode, ReactNode>>, hint?: ReactNode) => {
+  const renderFallbackControl = (agentType: AgentType, slots: {
+    pickers?: Partial<Record<FallbackMode, ReactNode>>;
+    extras?: Partial<Record<FallbackMode, ReactNode>>;
+    tools?: ReactNode;
+    hint?: ReactNode;
+  } = {}) => {
     if (agentType === 'Custom') return null;
     const { overview, options, tiers, catalog, refetch } = fallbackData;
     const modes = modesOf(agentType, tiers, catalog);
@@ -671,8 +676,10 @@ export function AgentsSection({
       <AgentFallbackControl
         agentType={agentType}
         modes={modes}
-        pickers={pickers}
-        hint={hint}
+        pickers={slots.pickers}
+        extras={slots.extras}
+        tools={slots.tools}
+        hint={slots.hint}
         options={options}
         chains={overview?.chains ?? []}
         cooldown={overview?.cooldowns.find((cooldown) => cooldown.agent === agentType)}
@@ -930,30 +937,32 @@ export function AgentsSection({
   };
 
   /** KT-1706 — the one « Models and fallbacks » block of a card, under its header:
-   *  one row per mode, « Mode · [model ▾] → fallback ». */
+   *  one row per mode, « Mode · [model ▾] [effort ▾] → fallback ». */
   const renderModelsBlock = (agent: AgentDetection) => {
     const pickers = renderTierPickers(agent);
     return (
       <div className="set-agent-models-block" data-testid={`agent-models-${agent.agent_type}`}>
-        {renderFallbackControl(agent.agent_type, pickers, pickers && renderCatalogHint(agent.agent_type))}
+        {renderFallbackControl(agent.agent_type, {
+          pickers,
+          extras: pickers && renderTierEfforts(agent),
+          tools: pickers && renderModelTools(agent),
+          hint: pickers && renderCatalogHint(agent.agent_type),
+        })}
       </div>
     );
   };
 
-  /** Reasoning effort per tier (Claude Code, Codex): a secondary setting of the card's fold,
-   *  the model of each tier being chosen in the « Models and fallbacks » block. */
-  const renderEffortPanel = (agent: AgentDetection) => {
-    if (!(agent.installed || agent.runtime_available)) return null;
+  /** KT-1807 — the reasoning effort of each text mode (Claude Code, Codex), drawn beside
+   *  the mode's model picker: a mode's model and effort are set in the same place. */
+  const renderTierEfforts = (agent: AgentDetection): Partial<Record<FallbackMode, ReactNode>> | undefined => {
+    if (agent.agent_type !== 'ClaudeCode' && agent.agent_type !== 'Codex') return undefined;
     const agentKey = AGENT_TIER_KEY[agent.agent_type];
-    if (!agentKey) return null;
+    if (!agentKey) return undefined;
     const editing = tierEditing[agentKey];
-    if (!editing) return null;
-    const modelsUrl = AGENT_MODELS_URL[agentKey];
+    if (!editing) return undefined;
     const target = catalog.catalog?.targets.find(view => view.runtime_target_id === modelRuntimeTargetId(agent.agent_type));
-    const supportsEffort = agent.agent_type === 'ClaudeCode' || agent.agent_type === 'Codex';
 
     const renderEffortSelect = (field: ModelTier) => {
-      if (!supportsEffort) return null;
       const effortField = `${field}_effort` as 'economy_effort' | 'default_effort' | 'reasoning_effort';
       const configuredModel = editing[field]
         || target?.models.find(model => model.tier_assignment === field)?.model_id;
@@ -964,43 +973,45 @@ export function AgentsSection({
       const saved = editing[effortField];
       const supported = modes.includes(saved);
       return (
-        <label className="flex-row gap-2 text-2xs" key={`${field}-effort`}>
-          <span>{t(`disc.tier.${field}`)} · {t('config.reasoningEffort')}</span>
-          <select
-            aria-label={`${t('config.reasoningEffort')} ${field}`}
-            data-model-tier-effort-agent={agent.agent_type}
-            data-model-tier-effort={field}
-            value={saved}
-            // Even without modes, an invalid saved effort must remain clearable.
-            disabled={savingTiers || catalog.loading}
-            onChange={event => void saveTierPreference(agentKey, field, { kind: 'effort', value: event.target.value })}
-          >
-            <option value="">{t('config.defaultModel')}</option>
-            {saved && !supported && <option value={saved} disabled>{saved} — {t('config.reasoningEffortUnavailable')}</option>}
-            {modes.map(mode => <option value={mode} key={mode}>{mode}</option>)}
-          </select>
-        </label>
+        <select
+          title={t('config.reasoningEffort')}
+          aria-label={`${t('config.reasoningEffort')} ${field}`}
+          data-model-tier-effort-agent={agent.agent_type}
+          data-model-tier-effort={field}
+          value={saved}
+          // Even without modes, an invalid saved effort must remain clearable.
+          disabled={savingTiers || catalog.loading}
+          onChange={event => void saveTierPreference(agentKey, field, { kind: 'effort', value: event.target.value })}
+        >
+          <option value="">{t('config.defaultModel')}</option>
+          {saved && !supported && <option value={saved} disabled>{saved} — {t('config.reasoningEffortUnavailable')}</option>}
+          {modes.map(mode => <option value={mode} key={mode}>{mode}</option>)}
+        </select>
       );
     };
 
+    return {
+      eco: renderEffortSelect('economy'),
+      standard: renderEffortSelect('default'),
+      advanced: renderEffortSelect('reasoning'),
+    };
+  };
+
+  /** Beside the block's title: the provider's model list, the help on observed costs,
+   *  and NVIDIA's catalogue loader with the datalist its model fields read. */
+  const renderModelTools = (agent: AgentDetection) => {
+    const agentKey = AGENT_TIER_KEY[agent.agent_type];
+    const modelsUrl = agentKey ? AGENT_MODELS_URL[agentKey] : undefined;
+    const nvidia = agent.agent_type === 'Nvidia';
+    if (!usageReport && !modelsUrl && !nvidia) return undefined;
     return (
-      <div className="set-agent-panel set-agent-panel-models">
-        <div className="set-agent-section-title">
-          <span>{t('config.reasoningEffort')}</span>
-          {usageReport && (
-            <ContextHelp title={t('config.modelCostObservedTitle')}>
-              <p>{t('config.modelCostObservedHelp')}</p>
-            </ContextHelp>
-          )}
-          {modelsUrl && (
-            <a href={modelsUrl} target="_blank" rel="noopener noreferrer"
-              title={t('config.viewModels')}
-            >
-              <ExternalLink size={8} /> {t('config.viewModels')}
-            </a>
-          )}
-        </div>
-        {agent.agent_type === 'Nvidia' && (
+      <>
+        {usageReport && (
+          <ContextHelp title={t('config.modelCostObservedTitle')}>
+            <p>{t('config.modelCostObservedHelp')}</p>
+          </ContextHelp>
+        )}
+        {nvidia && (
           <>
             {/* One shared datalist feeds the three tier inputs. */}
             <datalist id="nvidia-model-catalogue">
@@ -1016,13 +1027,12 @@ export function AgentsSection({
             </button>
           </>
         )}
-        {supportsEffort && <div className="flex-row gap-5" data-testid={`agent-tier-efforts-${agent.agent_type}`}>
-          {renderEffortSelect('economy')}
-          {renderEffortSelect('default')}
-          {renderEffortSelect('reasoning')}
-        </div>}
-        {!supportsEffort && <p className="set-hint">{t('config.reasoningEffortUnsupported')}</p>}
-      </div>
+        {modelsUrl && (
+          <a href={modelsUrl} target="_blank" rel="noopener noreferrer" title={t('config.viewModels')}>
+            <ExternalLink size={8} aria-hidden="true" /> {t('config.viewModels')}
+          </a>
+        )}
+      </>
     );
   };
 
@@ -1561,7 +1571,6 @@ export function AgentsSection({
               </div>
               );
             })()}
-            {renderEffortPanel(agent)}
             </div>
             )}
           </div>
@@ -1929,7 +1938,7 @@ export function AgentsSection({
                   modelCostSuffix={modelCostSuffix}
                   title={renderAgentNameControl('Ollama', 'Ollama')}
                   headerAccessory={renderConcurrencyControl('Ollama')}
-                  modelsBlock={(pickers, hint) => renderFallbackControl('Ollama', pickers, hint)}
+                  modelsBlock={(pickers, hint) => renderFallbackControl('Ollama', { pickers, hint })}
                   toolsControl={renderToolsControl('Ollama')}
                 />
               </div>

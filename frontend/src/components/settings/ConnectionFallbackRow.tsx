@@ -3,7 +3,7 @@ import { AlertTriangle, Plus } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import type { FallbackMode, ConnectionChainView, ConnectionFallbackTarget, ConnectionLinkView } from '../../types/generated';
 import { modeKind, type FallbackOption } from '../../lib/fallbackChain';
-import { FallbackChainItem, FallbackMenu } from './FallbackRow';
+import { FallbackChainItem, FallbackMenu, FallbackModeLabel } from './FallbackRow';
 import './FallbackRow.css';
 
 interface Props {
@@ -108,7 +108,7 @@ export function ConnectionFallbackRow({ testId, mode, owner, model, view, option
 
   return (
     <div className="fbr" data-testid={testId} data-mode={mode} data-kind={modeKind(mode)} data-with-model="true">
-      <span className="fbr-mode">{t(`fallback.mode.${mode}`)}</span>
+      <FallbackModeLabel mode={mode} />
       <div className="fbr-track">
         <span className="fbr-model" data-testid={`${testId}-model`}>{model}</span>
         <span className="fbr-caption">{t('fallback.ifUnavailable')}</span>

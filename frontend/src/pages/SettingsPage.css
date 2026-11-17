@@ -3702,10 +3702,6 @@
   background: var(--kr-bg-subtle);
 }
 
-.set-agent-panel-models {
-  grid-column: 1 / -1;
-}
-
 .set-agent-section-title {
   display: flex;
   align-items: center;
@@ -3766,10 +3762,6 @@
 
 .set-agent-panel-auth .set-key-row {
   padding-left: 0;
-}
-
-.set-agent-panel-models > .flex-row:last-child {
-  flex-wrap: wrap;
 }
 
 .set-agent-row-ollama .set-ollama-card {
@@ -3849,10 +3841,6 @@
 
   .set-agent-card-body {
     grid-template-columns: 1fr;
-  }
-
-  .set-agent-panel-models {
-    grid-column: auto;
   }
 
   .set-agent-section-title code {
