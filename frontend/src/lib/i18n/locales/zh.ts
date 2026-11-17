@@ -305,6 +305,8 @@ const zh: TranslationDict = {
   "pages.htmlChangedElsewhere": "自您打开编辑器以来，此页面的 HTML 已更改。采用新的 HTML 将丢弃您输入的内容。",
   "pages.htmlReloadDraft": "采用新的 HTML",
   "pages.htmlOverwrite": "覆盖保存",
+  "pages.htmlConflictUnread": "无法读取新的 HTML。",
+  "pages.htmlConflictRetry": "重新读取",
   "pages.directPublication": "直接发布",
   "pages.refreshSynced": "已同步",
   "pages.refreshWaiting": "等待首次运行",

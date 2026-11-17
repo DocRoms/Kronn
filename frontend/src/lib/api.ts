@@ -845,7 +845,7 @@ async function api<T>(
         reportedFailure?.(json.error ?? '');
         throw new ApiRequestError(`Server error (HTTP ${res.status}) — ${json.error ?? 'Unknown API error'}`, json.error_code);
       }
-      throw new ApiRequestError(json.error ?? 'Unknown API error', json.error_code);
+      throw new ApiRequestError(json.error ?? 'Unknown API error', json.error_code, json);
     }
 
     return json.data as T;

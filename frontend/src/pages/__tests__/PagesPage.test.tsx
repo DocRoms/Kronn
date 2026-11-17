@@ -784,8 +784,19 @@ describe('PagesPage', () => {
 
     // Another editor saved r3 while this one was open on r2: nothing told this view.
     const anotherEditorSaved = (current: LivePageDetail = agentDetail) => {
-      vi.mocked(pagesApi.updateHtml).mockRejectedValueOnce(new ApiRequestError('The Page HTML changed', 'conflict'));
+      refusedFor(current.revision.id);
       vi.mocked(pagesApi.get).mockResolvedValue(current);
+    };
+    // The 409 of a save: the envelope plus the revision the Page has now.
+    const refusedFor = (revisionId: string) => {
+      vi.mocked(pagesApi.updateHtml).mockRejectedValueOnce(new ApiRequestError(
+        'The Page HTML changed', 'conflict', { success: false, error_code: 'conflict', current_revision_id: revisionId },
+      ));
+    };
+    // The HTML saved meanwhile has reached the view: the notice can be acted on.
+    const conflictShown = async () => {
+      await screen.findByText('pages.htmlChangedElsewhere');
+      await waitFor(() => expect(screen.getByText('pages.htmlOverwrite')).toBeEnabled());
     };
     const typeHtml = async (html = '<h1>typed</h1>') => {
       fireEvent.click(screen.getByText('pages.editHtml'));
@@ -806,7 +817,7 @@ describe('PagesPage', () => {
       expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
 
       // Saving over it names the revision the user was just told about.
-      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(2));
+      await conflictShown();
       vi.mocked(pagesApi.updateHtml).mockResolvedValue({ ...agentDetail.revision, id: 'rev-4', revision: 4 });
       fireEvent.click(screen.getByText('pages.htmlOverwrite'));
       await waitFor(() => expect(savedWith()).toHaveLength(2));
@@ -819,8 +830,7 @@ describe('PagesPage', () => {
       await typeHtml();
       anotherEditorSaved();
       fireEvent.click(screen.getByText('pages.saveRevision'));
-      await screen.findByText('pages.htmlChangedElsewhere');
-      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(2));
+      await conflictShown();
       const fourth: LivePageDetail = {
         ...agentDetail, current_revision_id: 'rev-4',
         revision: { ...agentDetail.revision, id: 'rev-4', revision: 4, html: '<h1>fourth</h1>' },
@@ -842,8 +852,7 @@ describe('PagesPage', () => {
       await typeHtml();
       anotherEditorSaved();
       fireEvent.click(screen.getByText('pages.saveRevision'));
-      await screen.findByText('pages.htmlChangedElsewhere');
-      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(2));
+      await conflictShown();
 
       fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
 
@@ -904,22 +913,87 @@ describe('PagesPage', () => {
       expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
     });
 
-    it('forgets the conflict when the user opens another Page', async () => {
-      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+    it('offers to read the new HTML again, and nothing else, when reading it failed', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      refusedFor('rev-3');
+      vi.mocked(pagesApi.get).mockRejectedValueOnce(new Error('offline'));
+
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+
+      expect(await screen.findByText('pages.htmlConflictUnread')).toBeInTheDocument();
+      expect(screen.getByText('pages.htmlOverwrite')).toBeDisabled();
+      expect(screen.getByText('pages.htmlReloadDraft')).toBeDisabled();
+      // Neither a save from the stale base nor the old HTML in place of the draft.
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
+      expect(savedWith()).toHaveLength(1);
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
+      expect(screen.getByText('pages.htmlChangedElsewhere')).toBeInTheDocument();
+
+      vi.mocked(pagesApi.get).mockResolvedValue(agentDetail);
+      fireEvent.click(screen.getByText('pages.htmlConflictRetry'));
+
+      await conflictShown();
+      expect(screen.queryByText('pages.htmlConflictUnread')).toBeNull();
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml);
+    });
+
+    it('shows the new HTML after a refusal even when a panel of the Page fails to load', async () => {
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');
       await typeHtml();
       anotherEditorSaved();
+      vi.mocked(pagesApi.workflows).mockRejectedValue(new Error('panel away'));
+
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await conflictShown();
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
+
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml);
+    });
+
+    it('ignores both choices until the new HTML has arrived', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      refusedFor('rev-3');
+      let arrive: (detail: LivePageDetail) => void = () => {};
+      vi.mocked(pagesApi.get).mockReturnValueOnce(new Promise(resolve => { arrive = resolve; }));
+
       fireEvent.click(screen.getByText('pages.saveRevision'));
       await screen.findByText('pages.htmlChangedElsewhere');
-      vi.mocked(pagesApi.get).mockImplementation(async id => (id === other.id ? otherDetail : agentDetail));
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
 
-      fireEvent.click(getCanonicalPageRow('Second'));
-      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
-      fireEvent.click(screen.getByText('pages.editHtml'));
+      expect(savedWith()).toHaveLength(1);
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
+      expect(screen.getByText('pages.htmlChangedElsewhere')).toBeInTheDocument();
 
-      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Second</h1>');
-      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+      await act(async () => { arrive(agentDetail); });
+      await conflictShown();
+    });
+
+    it('saves over the revision the server named, not a later one the view has read', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      refusedFor('rev-3');
+      vi.mocked(pagesApi.get).mockResolvedValue({
+        ...agentDetail, current_revision_id: 'rev-4',
+        revision: { ...agentDetail.revision, id: 'rev-4', revision: 4, html: '<h1>fourth</h1>' },
+      });
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await conflictShown();
+      refusedFor('rev-4');
+
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1].base_revision_id).toBe('rev-3');
+      await conflictShown();
     });
 
     it('leaves a whole-Page answer with older data to the next incremental read', async () => {

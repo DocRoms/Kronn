@@ -306,6 +306,8 @@ const es: TranslationDict = {
   'pages.htmlChangedElsewhere': 'El HTML de esta Page cambió desde que abriste el editor. Tomar el nuevo HTML descarta lo que escribiste.',
   'pages.htmlReloadDraft': 'Tomar el nuevo HTML',
   'pages.htmlOverwrite': 'Guardar encima',
+  'pages.htmlConflictUnread': 'No se pudo leer el nuevo HTML.',
+  'pages.htmlConflictRetry': 'Volver a leer',
   'pages.directPublication': 'Publicación directa',
   'pages.refreshSynced': 'Sincronizado',
   'pages.refreshWaiting': 'Esperando la primera ejecución',

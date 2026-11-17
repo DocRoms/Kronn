@@ -95,6 +95,17 @@ interface WorkflowRun {
 
 const NO_EMBEDS: LivePageEmbedPlacement[] = [];
 
+interface HtmlConflict {
+  current: string | null;
+  read: 'reading' | 'ready' | 'failed';
+}
+
+/** The revision a refused HTML save says the Page has now, when the answer names one. */
+function conflictingRevision(refusal: ApiRequestError): string | null {
+  const named = (refusal.body as { current_revision_id?: unknown } | undefined)?.current_revision_id;
+  return typeof named === 'string' ? named : null;
+}
+
 function readPageNavigation(): PageNavigationPreference {
   try {
     const parsed = JSON.parse(localStorage.getItem(PAGE_NAVIGATION_STORAGE_KEY) ?? '{}') as {
@@ -219,7 +230,9 @@ export function PagesPage({
   const [htmlDraft, setHtmlDraft] = useState('');
   // The HTML revision the draft started from, and whether the Page moved past it.
   const draftBaseRef = useRef<string | null>(null);
-  const [htmlConflict, setHtmlConflict] = useState(false);
+  // A save the server refused: `current` is the revision it named, `read`
+  // whether the HTML to compare with has reached the view.
+  const [htmlConflict, setHtmlConflict] = useState<HtmlConflict | null>(null);
   const [comparisonRevisionId, setComparisonRevisionId] = useState<string | null>(null);
   const [savingHtml, setSavingHtml] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<Record<string, WorkflowRun>>({});
@@ -586,6 +599,23 @@ export function PagesPage({
     };
   }, [sidePanel, closeSidePanel]);
 
+  // The detail alone: a panel that fails to load must not keep the HTML the
+  // user is asked about out of the view.
+  const readConflictingHtml = useCallback(async (pageId: string) => {
+    const read = detailReads.follow(pageId);
+    if (read === null) return;
+    setHtmlConflict(conflict => conflict && { ...conflict, read: 'reading' });
+    try {
+      const fresh = await pagesApi.get(pageId);
+      if (selectedIdRef.current !== pageId) return;
+      if (detailReads.apply(read)) putDetail(fresh);
+      setHtmlConflict(conflict => conflict && { ...conflict, read: 'ready' });
+    } catch {
+      if (selectedIdRef.current !== pageId) return;
+      setHtmlConflict(conflict => conflict && { ...conflict, read: 'failed' });
+    }
+  }, [detailReads, putDetail]);
+
   // `base` is the HTML revision the draft started from: the server refuses
   // the save when the Page has another one by then, whoever saved it.
   const persistHtml = useAsyncGuard(async (pageId: string, html: string, base: string | null) => {
@@ -597,9 +627,9 @@ export function PagesPage({
       } catch (cause) {
         if (!(cause instanceof ApiRequestError) || cause.code !== 'conflict') throw cause;
         if (selectedIdRef.current !== pageId) return;
-        setHtmlConflict(true);
-        // Bring the HTML that was saved meanwhile: the draft stays as typed.
-        await loadDetail(pageId).catch(() => undefined);
+        // The draft stays as typed; the HTML saved meanwhile is read next.
+        setHtmlConflict({ current: conflictingRevision(cause), read: 'reading' });
+        await readConflictingHtml(pageId);
         return;
       }
       // Saved for a Page the user has left: the view stays where it is.
@@ -621,7 +651,7 @@ export function PagesPage({
   // nothing but the user changes it while the editor is open.
   const toggleHtmlEditor = useCallback(() => {
     setComparisonRevisionId(null);
-    setHtmlConflict(false);
+    setHtmlConflict(null);
     if (editingHtml || !detail) {
       setEditingHtml(false);
       return;
@@ -638,19 +668,24 @@ export function PagesPage({
   }, [detail, htmlDraft, persistHtml]);
 
   const overwriteHtml = useCallback(() => {
-    if (!detail || !htmlDraft.trim()) return;
-    // Over the revision shown, and only that one: a later one is refused again.
-    draftBaseRef.current = detail.revision.id;
-    setHtmlConflict(false);
-    void persistHtml(detail.id, htmlDraft, detail.revision.id);
-  }, [detail, htmlDraft, persistHtml]);
+    if (!detail || !htmlDraft.trim() || htmlConflict?.read !== 'ready') return;
+    // Over the revision the server named, and only that one: a later one is refused again.
+    const base = htmlConflict.current ?? detail.revision.id;
+    draftBaseRef.current = base;
+    setHtmlConflict(null);
+    void persistHtml(detail.id, htmlDraft, base);
+  }, [detail, htmlConflict, htmlDraft, persistHtml]);
 
   const reloadHtmlDraft = useCallback(() => {
-    if (!detail) return;
+    if (!detail || htmlConflict?.read !== 'ready') return;
     setHtmlDraft(detail.revision.html);
     draftBaseRef.current = detail.revision.id;
-    setHtmlConflict(false);
-  }, [detail]);
+    setHtmlConflict(null);
+  }, [detail, htmlConflict]);
+
+  const retryConflictingHtml = useCallback(() => {
+    if (detail) void readConflictingHtml(detail.id);
+  }, [detail, readConflictingHtml]);
 
   const exportPage = useCallback(async (format: 'pdf' | 'docx') => {
     if (!detail) return;
@@ -1450,8 +1485,14 @@ export function PagesPage({
                 {htmlConflict && (
                   <div className="live-pages-error live-pages-editor-conflict" role="alert">
                     <span>{t('pages.htmlChangedElsewhere')}</span>
-                    <button type="button" className="live-pages-restore-revision" onClick={reloadHtmlDraft}>{t('pages.htmlReloadDraft')}</button>
-                    <button type="button" className="live-pages-restore-revision" onClick={overwriteHtml} disabled={savingHtml}>{t('pages.htmlOverwrite')}</button>
+                    {htmlConflict.read === 'failed' && (
+                      <>
+                        <span>{t('pages.htmlConflictUnread')}</span>
+                        <button type="button" className="live-pages-restore-revision" onClick={retryConflictingHtml}>{t('pages.htmlConflictRetry')}</button>
+                      </>
+                    )}
+                    <button type="button" className="live-pages-restore-revision" onClick={reloadHtmlDraft} disabled={savingHtml || htmlConflict.read !== 'ready'}>{t('pages.htmlReloadDraft')}</button>
+                    <button type="button" className="live-pages-restore-revision" onClick={overwriteHtml} disabled={savingHtml || htmlConflict.read !== 'ready'}>{t('pages.htmlOverwrite')}</button>
                   </div>
                 )}
                 {comparisonRevision ? (
