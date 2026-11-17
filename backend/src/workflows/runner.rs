@@ -1006,7 +1006,7 @@ async fn execute_run_with_notify_policy(
 /// What a run tells its reader when its end kept a checkout holding work.
 pub(crate) fn kept_checkout_note(kept: &super::workspace::KeptCheckout) -> String {
     format!(
-        "Worktree `{}` kept with its branch: it holds {}. Commit or discard that work; Kronn removes the worktree at a later start once it is clean.",
+        "Worktree `{}` kept with its branch: {}. Commit, push or discard what it holds (unlock it if git says it is locked), or remove it yourself (`git worktree remove --force`); Kronn removes it at a later start once it is clean.",
         kept.path.display(),
         kept.reason
     )
@@ -1098,12 +1098,7 @@ async fn reclaim_run_worktree(
         tracing::warn!(run_id = %run.id, "{}", kept_checkout_note(kept));
     }
     if let Some(preserved) = outcome.preserved {
-        run.produced_branches.push(crate::models::ProducedBranch {
-            branch_name: preserved.branch_name,
-            head_sha: preserved.head_sha,
-            ahead: preserved.ahead,
-            pushed_upstream: preserved.pushed_upstream,
-        });
+        record_produced_branch(run, preserved);
         let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
         if let Err(e) = state
             .db
@@ -4282,13 +4277,9 @@ async fn execute_run_body(
     };
     if !paused && !is_inherited_workspace && active_child_dispatches == 0 {
         if let Some(ws) = workspace {
-            // KT-1096 — only a fully successful run discards what it left
-            // uncommitted: its steps finished, so leftovers are its own scratch.
-            let cleaned = if run.status == RunStatus::Success {
-                ws.cleanup().await
-            } else {
-                ws.cleanup_keeping_work().await
-            };
+            // KT-1806 — a success keeps uncommitted work too: a step's output
+            // can be files that no later step committed.
+            let cleaned = ws.cleanup_keeping_work().await;
             match cleaned {
                 Ok(outcome) => {
                     if let Some(kept) = &outcome.kept {
@@ -4312,12 +4303,7 @@ async fn execute_run_body(
                         // Persist the preserved branch on the run row so the
                         // UI can surface it — without this, the operator only
                         // sees a tracing log line they'll never read.
-                        run.produced_branches.push(crate::models::ProducedBranch {
-                            branch_name: preserved.branch_name,
-                            head_sha: preserved.head_sha,
-                            ahead: preserved.ahead,
-                            pushed_upstream: preserved.pushed_upstream,
-                        });
+                        record_produced_branch(run, preserved);
                         let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                         let db = state.db.clone();
                         if let Err(e) = db
@@ -11086,6 +11072,30 @@ mod tests {
             },
         )
         .await
+    #[tokio::test]
+    async fn a_successful_run_keeps_a_worktree_holding_uncommitted_work() {
+        // A step's output can be files no later step commits: success is not
+        // a licence to delete them.
+        let (state, _, _) = test_state_and_configs();
+        let (_repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-dirty").await;
+        workflow.exec_allowlist = vec!["sh".into()];
+        let mut design = fake_step("design");
+        design.step_type = StepType::Exec;
+        design.exec_command = Some("sh".into());
+        design.exec_args = vec!["-c".into(), "printf 'spec\\n' > design.md".into()];
+        workflow.steps = vec![design];
+        let run = run_to_end(&state, &workflow, "run-end-dirty").await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let path = std::path::PathBuf::from(run.workspace_path.clone().expect("isolated"));
+        assert_eq!(
+            std::fs::read_to_string(path.join("design.md")).expect("the file survives"),
+            "spec\n"
+        );
+        let last = &run.step_results.last().expect("one step").output;
+        assert!(last.contains("kept with its branch"), "{last}");
+        assert!(persisted_workspace(&state, "run-end-dirty").await.is_some());
+    }
+
         .expect("admitted");
         execute_run(
             state.clone(),

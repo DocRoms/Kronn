@@ -466,29 +466,59 @@ pass (a frequent schedule adds no fire during the repeated hour).
   once it has been interrupted longer than `server.interrupted_worktree_ttl_days`
   (config file, default 7, `0` = never), its worktree is reclaimed unless that
   could lose work: a checkout with uncommitted or untracked (non-ignored) files
-  is kept, a detached HEAD is kept, a path shared with a run that is live,
+  is kept, a detached HEAD is kept (even on a commit a ref holds), a path shared with a run that is live,
   paused or interrupted more recently is kept, and a branch holding commits no
   known base has is kept and recorded in the run's `produced_branches` before
   the checkout goes. Git-ignored files (build output) go with the checkout.
-- **A stopped run never destroys uncommitted work (KT-1096).** At the end of
-  every run except a fully successful one (Partial, Failed, Cancelled,
-  StoppedByGuard, an engine error, a Gate rejection), and in the boot purge of
+  Worktrees registered inside it and its submodules follow the rules of the
+  next entry: work in a nested worktree keeps the set, and a checkout with
+  submodules is forced away only under the KT-1809 conditions.
+- **No run destroys uncommitted work (KT-1096, KT-1806).** At the end of
+  every run (Success, Partial, Failed, Cancelled, StoppedByGuard, an engine
+  error, a Gate rejection), and in the boot purge of
   terminal runs, a worktree with uncommitted or untracked (non-ignored) files,
-  a detached HEAD or a state git cannot read, in itself or in a worktree
-  registered inside it (`<run>/.kronn/pr-N`), is kept with its branch and its
-  nested worktrees, without running `before_remove`
-  (`Workspace::cleanup_keeping_work`, `workspace::work_to_keep`, the same
-  check as the Interrupted reclaim). The run keeps its `workspace_path`; its
+  a detached HEAD on a commit no ref holds or a state git cannot read, in
+  itself or in a worktree registered inside it (`<run>/.kronn/pr-N`; a PR
+  checkout of a commit a ref holds strands nothing), is kept with its branch and its
+  nested worktrees (clean nested ones may already be gone when git refuses
+  the parent at removal) (`Workspace::cleanup_keeping_work`,
+  `workspace::work_to_keep`, which the Interrupted reclaim runs too).
+  `before_remove` does not run for work found by that inspection; it has
+  run when the work is found only at removal (late files, a lock, a
+  submodule). The run keeps its `workspace_path`; its
   last step says where the work is (the log does, after an engine error, a
   Gate rejection or at boot), and a later boot removes the checkout
   once it is clean. A clean set is removed without `--force`, nested
-  worktrees first, and never forced: whenever git refuses (work written after
-  the inspection, a submodule, a lock) the set is kept and the run says why,
-  since no fresh look can exclude a write landing before a forced removal.
+  worktrees first. Whenever git refuses (work written after the inspection,
+  a lock) the set is kept and the run says why; the one forced removal is the
+  submodule case below.
   Kronn's own `.kronn/` files are not work: `.kronn/` is added to the
-  repository's local `info/exclude`. The one exception is a Success run: its
-  cleanup is unchanged and forced, because what it left uncommitted is its
-  own scratch once every step finished, and is discarded.
+  repository's local `info/exclude`. Nor are the agent configs Kronn copied
+  into the worktree (`.mcp.json` and the like) while they still equal the
+  main checkout's, are plain files at their own path and have nothing
+  staged: the inspection, read-only, leaves them out; the removal takes them
+  back first (tracked ones restored, the others removed) and puts those same
+  files back if git then refuses, so a kept worktree can still be resumed. Untracked files are read whatever `status.showUntrackedFiles`
+  says, and a nested worktree whose directory is gone holds nothing. A Success run follows the same rule: a
+  step's output can be files that no later step committed, so a successful
+  end is no reason to delete them. A kept set still records its branch in
+  `produced_branches` when it holds commits no known base has. The branch is
+  judged on its own commits, read from the repository: a HEAD an agent left
+  detached on a known commit, or a worktree directory already gone, never
+  deletes a branch that is ahead, and a synced branch checked out in another
+  checkout is left alone. Git refuses to remove, without force, a
+  worktree with a populated submodule or a submodule clone left under its git
+  directory: after that refusal the checkout and
+  its submodules are inspected again, and the removal is forced only when all
+  are clean, every submodule repository lives under the worktree's git
+  directory, no `.git` directory sits anywhere inside the tree, and no
+  submodule clone, deinitialised or removed ones included, has a worktree of
+  its own or holds a commit (HEAD, branch, tag, stash) that
+  no remote branch of it has (KT-1809). Otherwise the set is kept and the
+  reason names what holds it, the submodule when git could read it. A commit
+  only a remote tag holds, or whose remote branch was deleted, counts as
+  held work: such a checkout is kept until removed by hand. A detached commit counts as held only by
+  a branch, a tag or a remote ref, never by a ref that goes with the worktree.
 - **A provider quota pauses the run, it does not fail it (KT-811, KT-1562,
   KT-1563).** When an
   Agent step of a top-level run is refused for a quota or session limit

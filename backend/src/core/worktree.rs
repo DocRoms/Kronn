@@ -2368,6 +2368,27 @@ pub(crate) fn copy_agent_configs(repo_path: &Path, worktree_path: &Path) {
     }
 }
 
+/// The copies [`copy_agent_configs`] made that still equal the main
+/// checkout's file: Kronn's own, not the work of what ran in the worktree.
+pub(crate) fn unchanged_agent_configs(repo_path: &Path, worktree_path: &Path) -> Vec<PathBuf> {
+    let Ok(root) = worktree_path.canonicalize() else {
+        return Vec::new();
+    };
+    AGENT_CONFIG_FILES
+        .iter()
+        .filter_map(|parts| {
+            let relative: PathBuf = parts.iter().collect();
+            let copy = worktree_path.join(&relative);
+            // A link, or a file reached through one, is not Kronn's copy.
+            let plain = std::fs::symlink_metadata(&copy).ok()?.file_type().is_file()
+                && copy.canonicalize().ok()? == root.join(&relative);
+            let same = plain
+                && std::fs::read(&copy).ok()? == std::fs::read(repo_path.join(&relative)).ok()?;
+            same.then_some(relative)
+        })
+        .collect()
+}
+
 /// Re-attach an existing branch to a new worktree path.
 /// Used to migrate worktrees from /data/workspaces/ to .kronn/worktrees/.
 pub fn reattach_worktree(

@@ -63,42 +63,53 @@ pub async fn reclaim_stale_interrupted_worktrees(
             continue;
         }
 
-        let (branch, head_sha, preserve) =
-            match workspace::inspect_interrupted_checkout(&path).await {
-                Ok(InterruptedCheckout::Removable {
-                    branch,
-                    head_sha,
-                    preserve,
-                }) => (branch, head_sha, preserve),
-                Ok(InterruptedCheckout::Dirty { entries }) => {
-                    tracing::warn!(
-                        run_id = %candidate.run_id,
-                        path = %path.display(),
-                        entries,
-                        "kept the worktree of a stale Interrupted run: it holds uncommitted work"
-                    );
-                    report.kept_dirty += 1;
-                    continue;
-                }
-                Ok(InterruptedCheckout::Detached) => {
-                    tracing::warn!(
-                        run_id = %candidate.run_id,
-                        path = %path.display(),
-                        "kept the worktree of a stale Interrupted run: its HEAD is on no branch"
-                    );
-                    report.kept_other += 1;
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        run_id = %candidate.run_id,
-                        path = %path.display(),
-                        "kept the worktree of a stale Interrupted run: {error}"
-                    );
-                    report.kept_other += 1;
-                    continue;
-                }
-            };
+        let (branch, head_sha, preserve) = match workspace::inspect_run_checkout(&repo, &path).await
+        {
+            Ok(InterruptedCheckout::Removable {
+                branch,
+                head_sha,
+                preserve,
+            }) => (branch, head_sha, preserve),
+            Ok(InterruptedCheckout::Dirty { entries }) => {
+                tracing::warn!(
+                    run_id = %candidate.run_id,
+                    path = %path.display(),
+                    entries,
+                    "kept the worktree of a stale Interrupted run: it holds uncommitted work"
+                );
+                report.kept_dirty += 1;
+                continue;
+            }
+            Ok(InterruptedCheckout::Detached | InterruptedCheckout::DetachedReachable) => {
+                tracing::warn!(
+                    run_id = %candidate.run_id,
+                    path = %path.display(),
+                    "kept the worktree of a stale Interrupted run: its HEAD is on no branch"
+                );
+                report.kept_other += 1;
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    run_id = %candidate.run_id,
+                    path = %path.display(),
+                    "kept the worktree of a stale Interrupted run: {error}"
+                );
+                report.kept_other += 1;
+                continue;
+            }
+        };
+
+        // `.kronn/` is excluded: only its own inspection shows a nested worktree.
+        if let Some(reason) = workspace::work_to_keep(&repo, &path).await {
+            tracing::warn!(
+                run_id = %candidate.run_id,
+                path = %path.display(),
+                "kept the worktree of a stale Interrupted run: it holds {reason}"
+            );
+            report.kept_dirty += 1;
+            continue;
+        }
 
         // Recorded before the checkout goes: the branch is then the only trace.
         if let Some(preserved) = &preserve {
@@ -137,11 +148,17 @@ pub async fn reclaim_stale_interrupted_worktrees(
             }
         }
 
-        if let Err(error) = workspace::remove_clean_checkout(&repo, &path).await {
+        // Nested worktrees first, a submodule checkout re-inspected (KT-1809).
+        let refusal = match workspace::remove_inspected_checkout(&repo, &path).await {
+            Ok(None) => None,
+            Ok(Some(reason)) => Some(reason),
+            Err(error) => Some(format!("{error:#}")),
+        };
+        if let Some(refusal) = refusal {
             tracing::warn!(
                 run_id = %candidate.run_id,
                 path = %path.display(),
-                "stale Interrupted worktree not reclaimed: {error}"
+                "stale Interrupted worktree not reclaimed: {refusal}"
             );
             report.kept_other += 1;
             continue;
@@ -423,6 +440,52 @@ mod tests {
             std::fs::read_to_string(modified.path.join("README.md")).unwrap(),
             "edited\n"
         );
+    }
+
+    /// `.kronn/` is excluded: the parent's status never shows a worktree
+    /// registered under it, nor the work that worktree holds.
+    #[tokio::test]
+    async fn work_in_a_nested_worktree_keeps_an_interrupted_worktree() {
+        let fixture = fixture().await;
+        std::fs::write(fixture.repo.join(".git/info/exclude"), ".kronn/\n").unwrap();
+        std::fs::write(fixture.repo.join(".mcp.json"), "{}\n").unwrap();
+        let ws = interrupted(&fixture, "ffff6666-nested", 30).await;
+        let nested = ws.path.join(".kronn/pr-7");
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &nested.to_string_lossy(),
+                "HEAD",
+            ],
+        )
+        .await;
+        std::fs::write(nested.join("notes.md"), "draft\n").unwrap();
+
+        let report = reclaim(&fixture, TTL_DAYS).await;
+
+        assert_eq!(report.reclaimed, 0, "{report:?}");
+        assert!(nested.join("notes.md").exists());
+        // Still resumable: its agent configs are where Kronn put them.
+        assert!(ws.path.join(".mcp.json").exists());
+    }
+
+    /// The copy Kronn made of an agent config git does not ignore is not the
+    /// run's work, here as at the end of a run.
+    #[tokio::test]
+    async fn an_agent_config_kronn_copied_does_not_keep_an_interrupted_worktree() {
+        let fixture = fixture().await;
+        std::fs::write(fixture.repo.join(".mcp.json"), "{}\n").unwrap();
+        let ws = interrupted(&fixture, "aaaa7777-config", 30).await;
+        assert!(ws.path.join(".mcp.json").exists());
+
+        let report = reclaim(&fixture, TTL_DAYS).await;
+
+        assert_eq!(report.reclaimed, 1, "{report:?}");
+        assert!(!ws.path.exists());
     }
 
     #[tokio::test]
