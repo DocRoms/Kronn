@@ -1859,10 +1859,7 @@ fn imported_artifact(
             &exported.html,
             exported.created_by_agent.as_deref(),
         )?;
-        conn.execute(
-            "DELETE FROM live_page_datasets WHERE page_id = ?1",
-            [&page_id],
-        )?;
+        crate::db::live_pages::clear_live_page_datasets(conn, &page_id)?;
         for dataset in &datasets {
             crate::db::live_pages::add_live_page_dataset(conn, &page_id, dataset)?;
         }
@@ -3548,6 +3545,90 @@ mod tests {
                 .is_err_and(|error| error.contains("safety bound")),
             "{refused:?}"
         );
+    }
+
+    /// KT-1819 — a re-import replaces every dataset of a Page: a reader that
+    /// only asks what changed since its revision gets the whole Page, with or
+    /// without the HTML revision it shows.
+    #[tokio::test]
+    async fn a_kronn_reimport_sends_open_readers_the_full_page() {
+        use axum::extract::{Path as UrlPath, Query, State};
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let page_doc =
+            |datasets: serde_json::Value| crate::core::repository_resources::RepositoryDocument {
+                schema_version: 1,
+                kind: ProjectRepositoryResourceKind::Artifact,
+                slug: "board".into(),
+                updated_at: Utc::now(),
+                requires: vec![],
+                resource: serde_json::json!({
+                    "id": "foreign-page", "title": "Board", "slug": "board",
+                    "html": "<p>board</p>", "created_by_agent": null,
+                    "datasets": datasets
+                }),
+                redacted_fields: vec![],
+            };
+        let summary = |count: u32| {
+            serde_json::json!([{
+                "name": "summary", "kind": "snapshot", "has_current": true,
+                "current": {"count": count}, "schema": null, "max_points": 100,
+                "max_age_days": null, "updated_at": Utc::now(), "points": []
+            }])
+        };
+        let import = |document: crate::core::repository_resources::RepositoryDocument| {
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .with_conn(move |conn| {
+                        let key =
+                            crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                        import_document(conn, "project-1", &key, &document)
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        let read = |page_id: String, since: u64| {
+            let state = state.clone();
+            async move {
+                let axum::Json(response) = crate::api::live_pages::data(
+                    State(state),
+                    UrlPath(page_id),
+                    Query(crate::api::live_pages::LivePageDataQuery {
+                        since: Some(since.to_string()),
+                        revision: None,
+                    }),
+                )
+                .await;
+                response.data.unwrap()
+            }
+        };
+        let page_id = import(page_doc(summary(1))).await;
+        let open = read(page_id.clone(), 0).await.page.data_revision;
+        assert!(
+            read(page_id.clone(), open).await.full.is_none(),
+            "nothing moved yet"
+        );
+
+        // Same dataset name, another value.
+        assert_eq!(import(page_doc(summary(2))).await, page_id);
+        let changed = read(page_id.clone(), open).await;
+        let full = changed.full.expect("the datasets were replaced");
+        assert_eq!(
+            full.datasets[0].dataset.current,
+            Some(serde_json::json!({"count": 2}))
+        );
+
+        // No dataset left: nothing is declared again, the Page moves anyway.
+        let open = changed.page.data_revision;
+        assert_eq!(import(page_doc(serde_json::json!([]))).await, page_id);
+        let emptied = read(page_id.clone(), open).await;
+        assert!(emptied.page.data_revision > open);
+        let full = emptied.full.expect("the datasets were removed");
+        assert!(full.datasets.is_empty());
     }
 
     /// KT-1017 — a `kronn/` import refuses an unsafe inline line in a

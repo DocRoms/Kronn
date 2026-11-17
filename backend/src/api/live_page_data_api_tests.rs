@@ -32,29 +32,73 @@ async fn seeded() -> (AppState, LivePageDetail) {
     (state, created.data.unwrap())
 }
 
-async fn replace(state: &AppState, writes: &[(&str, serde_json::Value)]) -> PublishLivePageResult {
+fn write(
+    dataset: &str,
+    operation: LivePageWriteOperation,
+    value: serde_json::Value,
+) -> LivePageWrite {
+    LivePageWrite {
+        dataset: dataset.into(),
+        operation,
+        value,
+        observed_at: None,
+        dedupe_key: None,
+        key_field: None,
+    }
+}
+
+/// One point appended under a dedupe key: sent twice, it lands once.
+fn keyed_point(key: &str, value: serde_json::Value) -> LivePageWrite {
+    LivePageWrite {
+        dedupe_key: Some(key.into()),
+        ..write("traffic", LivePageWriteOperation::Append, value)
+    }
+}
+
+async fn publish_writes(state: &AppState, writes: Vec<LivePageWrite>) -> PublishLivePageResult {
     let Json(published) = publish(
         State(state.clone()),
         Path("board".into()),
         Json(PublishLivePageRequest {
             workflow_id: None,
             workflow_run_id: None,
-            writes: writes
-                .iter()
-                .map(|(dataset, value)| LivePageWrite {
-                    dataset: (*dataset).into(),
-                    operation: LivePageWriteOperation::Replace,
-                    value: value.clone(),
-                    observed_at: None,
-                    dedupe_key: None,
-                    key_field: None,
-                })
-                .collect(),
+            writes,
         }),
     )
     .await;
     assert!(published.success, "{:?}", published.error);
     published.data.unwrap()
+}
+
+async fn replace(state: &AppState, writes: &[(&str, serde_json::Value)]) -> PublishLivePageResult {
+    publish_writes(
+        state,
+        writes
+            .iter()
+            .map(|(dataset, value)| write(dataset, LivePageWriteOperation::Replace, value.clone()))
+            .collect(),
+    )
+    .await
+}
+
+async fn declare(state: &AppState, dataset: serde_json::Value) {
+    let Json(added) = add_dataset(
+        State(state.clone()),
+        Path("board".into()),
+        Json(serde_json::from_value(dataset).unwrap()),
+    )
+    .await;
+    assert!(added.success, "{:?}", added.error);
+}
+
+/// `updated_at` of every dataset, by name: a reader that skips a dataset
+/// must still hold this field of it.
+fn dataset_dates(detail: &LivePageDetail) -> Vec<(String, chrono::DateTime<chrono::Utc>)> {
+    detail
+        .datasets
+        .iter()
+        .map(|view| (view.dataset.name.clone(), view.dataset.updated_at))
+        .collect()
 }
 
 async fn read(state: &AppState, since: Option<&str>, revision: Option<&str>) -> LivePageDataDelta {
@@ -154,36 +198,250 @@ async fn several_missed_publications_add_up_and_points_come_whole() {
 #[tokio::test]
 async fn a_publication_that_changes_nothing_keeps_the_revision_and_stays_silent() {
     let (state, _) = seeded().await;
-    replace(&state, &[("summary", serde_json::json!({"count": 1}))]).await;
+    declare(
+        &state,
+        serde_json::json!({"name": "items", "kind": "collection"}),
+    )
+    .await;
+    let upsert = || LivePageWrite {
+        key_field: Some("id".into()),
+        ..write(
+            "items",
+            LivePageWriteOperation::Upsert,
+            serde_json::json!([{"id": 1, "label": "one"}]),
+        )
+    };
+    let first = publish_writes(
+        &state,
+        vec![
+            write(
+                "summary",
+                LivePageWriteOperation::Replace,
+                serde_json::json!({"count": 1}),
+            ),
+            upsert(),
+            keyed_point("run-1", serde_json::json!(4)),
+        ],
+    )
+    .await;
+    assert_eq!(first.data_revision, 2, "the declaration, then the data");
     let before = detail(&state).await;
     let mut events = state.ws_broadcast.subscribe();
 
-    let unchanged = replace(
+    let unchanged = publish_writes(
         &state,
-        &[
-            ("summary", serde_json::json!({"count": 1})),
-            ("heavy", serde_json::json!({"blob": HEAVY})),
+        vec![
+            write(
+                "summary",
+                LivePageWriteOperation::Replace,
+                serde_json::json!({"count": 1}),
+            ),
+            write(
+                "heavy",
+                LivePageWriteOperation::Replace,
+                serde_json::json!({"blob": HEAVY}),
+            ),
+            upsert(),
+            keyed_point("run-1", serde_json::json!(4)),
         ],
     )
     .await;
 
     assert!(!unchanged.content_changed);
-    assert_eq!(unchanged.unchanged_datasets, vec!["summary", "heavy"]);
-    assert_eq!(unchanged.data_revision, 1, "the caller reads the revision");
+    assert_eq!(
+        unchanged.unchanged_datasets,
+        vec!["summary", "heavy", "items", "traffic"]
+    );
+    assert_eq!(unchanged.data_revision, 2, "the caller reads the revision");
     assert!(events.try_recv().is_err(), "no page-data event");
     let after = detail(&state).await;
-    assert_eq!(after.page.data_revision, 1);
+    assert_eq!(after.page.data_revision, 2);
     assert!(
         after.page.last_published_at > before.page.last_published_at,
         "the refresh is still dated"
     );
-    for (old, new) in before.datasets.iter().zip(&after.datasets) {
-        assert_eq!(old.dataset.updated_at, new.dataset.updated_at);
-    }
+    assert_eq!(before.datasets.len(), 4);
+    assert_eq!(dataset_dates(&before), dataset_dates(&after));
     let Json(journal) = publications(State(state.clone()), Path("board".into())).await;
     let journal = journal.data.unwrap();
     assert_eq!(journal.len(), 1, "only the publication that changed data");
-    assert_eq!(journal[0].data_revision, 1);
+    assert_eq!(journal[0].data_revision, 2);
+}
+
+#[tokio::test]
+async fn a_clear_or_a_deduplicated_append_that_changes_nothing_reads_nothing() {
+    let (state, created) = seeded().await;
+    let clear = || {
+        write(
+            "summary",
+            LivePageWriteOperation::Clear,
+            serde_json::Value::Null,
+        )
+    };
+    let emptied = publish_writes(
+        &state,
+        vec![clear(), keyed_point("run-1", serde_json::json!(4))],
+    )
+    .await;
+    assert_eq!(emptied.changed_datasets, vec!["summary", "traffic"]);
+    let before = detail(&state).await;
+    let mut events = state.ws_broadcast.subscribe();
+
+    let again = publish_writes(
+        &state,
+        vec![clear(), keyed_point("run-1", serde_json::json!(4))],
+    )
+    .await;
+
+    assert!(!again.content_changed);
+    assert_eq!(again.unchanged_datasets, vec!["summary", "traffic"]);
+    assert_eq!((again.points_added, again.points_removed), (0, 0));
+    assert_eq!(again.data_revision, emptied.data_revision);
+    assert!(events.try_recv().is_err(), "no page-data event");
+    assert_eq!(dataset_dates(&before), dataset_dates(&detail(&state).await));
+    let delta = read(&state, Some("1"), Some(&created.revision.id)).await;
+    assert!(delta.full.is_none());
+    assert!(delta.datasets.is_empty(), "nothing to read");
+}
+
+/// Points age out while nobody publishes: the append that finds them too old
+/// removes them, and that alone is a change to read.
+#[tokio::test]
+async fn an_append_that_only_prunes_is_read_as_a_changed_dataset() {
+    let (state, created) = seeded().await;
+    let Json(limited) = update_dataset(
+        State(state.clone()),
+        None,
+        None,
+        Path(("board".into(), "traffic".into())),
+        Json(UpdateLivePageDatasetRequest {
+            max_points: None,
+            max_age_days: Some(Some(7)),
+        }),
+    )
+    .await;
+    assert_eq!(limited.data.unwrap().points_removed, 0);
+    let kept = publish_writes(&state, vec![keyed_point("run-1", serde_json::json!(4))]).await;
+    let since = kept.data_revision.to_string();
+    state
+        .db
+        .with_conn(|conn| {
+            let aged = conn.execute(
+                "UPDATE live_page_dataset_points SET observed_at = ?1
+                  WHERE dedupe_key IS NOT 'run-1'",
+                [(chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339()],
+            )?;
+            assert_eq!(aged, 3, "the three seeded points");
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let pruned = publish_writes(&state, vec![keyed_point("run-1", serde_json::json!(4))]).await;
+
+    assert_eq!((pruned.points_added, pruned.points_removed), (0, 3));
+    assert_eq!(pruned.changed_datasets, vec!["traffic"]);
+    assert_eq!(pruned.data_revision, kept.data_revision + 1);
+    let delta = read(&state, Some(&since), Some(&created.revision.id)).await;
+    assert!(delta.full.is_none());
+    assert_eq!(names(&delta), vec!["traffic"]);
+    assert_eq!(delta.datasets[0].points.len(), 1, "the point that is left");
+}
+
+#[tokio::test]
+async fn two_writes_to_one_dataset_in_one_publication_are_read_once() {
+    let (state, created) = seeded().await;
+    let count = |value: u32| {
+        write(
+            "summary",
+            LivePageWriteOperation::Replace,
+            serde_json::json!({"count": value}),
+        )
+    };
+
+    // The second write repeats the first: the dataset changed all the same.
+    let repeated = publish_writes(&state, vec![count(1), count(1)]).await;
+
+    assert_eq!(repeated.datasets_updated, vec!["summary"]);
+    assert_eq!(repeated.changed_datasets, vec!["summary"]);
+    assert!(repeated.unchanged_datasets.is_empty());
+    assert_eq!(repeated.data_revision, 1);
+    let delta = read(&state, Some("0"), Some(&created.revision.id)).await;
+    assert_eq!(names(&delta), vec!["summary"]);
+    assert_eq!(
+        delta.datasets[0].dataset.current,
+        Some(serde_json::json!({"count": 1}))
+    );
+
+    // Each write builds on the one before it: the last value is the one read.
+    let stacked = publish_writes(&state, vec![count(2), count(3)]).await;
+
+    assert_eq!(stacked.data_revision, 2, "one publication, one revision");
+    let delta = read(&state, Some("1"), Some(&created.revision.id)).await;
+    assert_eq!(names(&delta), vec!["summary"]);
+    assert_eq!(
+        delta.datasets[0].dataset.current,
+        Some(serde_json::json!({"count": 3}))
+    );
+}
+
+/// The name is back but the dataset is another one: its old value must not
+/// survive in a reader that only takes what the journal names.
+#[tokio::test]
+async fn a_dataset_deleted_then_declared_again_falls_back_to_the_full_state() {
+    let (state, created) = seeded().await;
+    replace(&state, &[("summary", serde_json::json!({"count": 1}))]).await;
+    let Json(deleted) = delete_dataset(
+        State(state.clone()),
+        None,
+        None,
+        Path(("board".into(), "heavy".into())),
+        Query(DeleteLivePageDatasetQuery { force: false }),
+    )
+    .await;
+    assert!(deleted.success, "{:?}", deleted.error);
+    declare(
+        &state,
+        serde_json::json!({"name": "heavy", "kind": "snapshot"}),
+    )
+    .await;
+    replace(&state, &[("summary", serde_json::json!({"count": 2}))]).await;
+
+    let delta = read(&state, Some("1"), Some(&created.revision.id)).await;
+
+    assert_full(&delta, "heavy was replaced by an empty dataset");
+    let full = delta.full.unwrap();
+    let heavy = full
+        .datasets
+        .iter()
+        .find(|view| view.dataset.name == "heavy")
+        .unwrap();
+    assert_eq!(heavy.dataset.current, None);
+}
+
+#[tokio::test]
+async fn declaring_a_dataset_tells_open_pages_once() {
+    let (state, _) = seeded().await;
+    let mut events = state.ws_broadcast.subscribe();
+    let extra = || serde_json::json!({"name": "extra", "kind": "snapshot"});
+
+    declare(&state, extra()).await;
+
+    match events.try_recv() {
+        Ok(crate::models::WsMessage::LivePageDataChanged {
+            page_id,
+            data_revision,
+        }) => {
+            let page = detail(&state).await.page;
+            assert_eq!((page_id, data_revision), (page.id, page.data_revision));
+            assert_eq!(data_revision, 1);
+        }
+        other => panic!("expected a page-data event, got {other:?}"),
+    }
+
+    // Declaring it again changes nothing: no event.
+    declare(&state, extra()).await;
+    assert!(events.try_recv().is_err());
 }
 
 #[tokio::test]

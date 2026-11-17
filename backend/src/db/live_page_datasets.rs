@@ -199,6 +199,16 @@ pub(super) fn bump_data_revision(conn: &Connection, page_id: &str) -> Result<u64
     u64::try_from(revision).context("Negative Page data revision")
 }
 
+/// Removes every dataset of a Page, for a caller that declares them again.
+/// The revision moves even when none comes back, so no reader keeps them.
+pub fn clear_live_page_datasets(conn: &Connection, page_id: &str) -> Result<u64> {
+    conn.execute(
+        "DELETE FROM live_page_datasets WHERE page_id = ?1",
+        [page_id],
+    )?;
+    bump_data_revision(conn, page_id)
+}
+
 /// Deletes a dataset and its points. Refused with [`DatasetReferenced`] while
 /// a workflow writes it, the HTML names it or a Page button binds to it,
 /// unless `force`. The check and the deletion share one transaction, so a

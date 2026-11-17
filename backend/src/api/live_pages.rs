@@ -625,12 +625,32 @@ pub async fn add_dataset(
     Path(id): Path<String>,
     Json(dataset): Json<CreateLivePageDataset>,
 ) -> Json<ApiResponse<LivePageDataset>> {
+    let revision = |conn: &rusqlite::Connection, page_id: &str| {
+        crate::db::live_pages::get_live_page_summary(conn, page_id)
+            .map(|page| page.map(|page| page.data_revision))
+    };
     match state
         .db
-        .with_conn(move |conn| crate::db::live_pages::add_live_page_dataset(conn, &id, &dataset))
+        .with_conn(move |conn| {
+            let before = revision(conn, &id)?;
+            let dataset = crate::db::live_pages::add_live_page_dataset(conn, &id, &dataset)?;
+            // Declaring an existing dataset again moves nothing.
+            let added = revision(conn, &dataset.page_id)?.filter(|after| Some(*after) != before);
+            Ok((dataset, added))
+        })
         .await
     {
-        Ok(dataset) => Json(ApiResponse::ok(dataset)),
+        Ok((dataset, added)) => {
+            if let Some(data_revision) = added {
+                let _ = state
+                    .ws_broadcast
+                    .send(crate::models::WsMessage::LivePageDataChanged {
+                        page_id: dataset.page_id.clone(),
+                        data_revision,
+                    });
+            }
+            Json(ApiResponse::ok(dataset))
+        }
         Err(error) if error.to_string().contains("Page not found") => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Page not found",
