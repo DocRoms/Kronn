@@ -723,8 +723,15 @@ decision, and only that list widens the allowlist, for that project:
   configured worktree root, an autoCode root, a sub-directory) to the registered
   project whose own `git worktree list` (asked of the registered checkout, never of
   the lane) names it. The owner is chosen among every registered project, with a
-  lane entry or not (Kronn keeps their checkouts in memory from boot, and adds,
-  moves or drops one when a project is created, remapped or deleted). The most
+  lane entry or not. Kronn keeps their checkouts and lane entries in memory, and
+  rebuilds that snapshot whole from the project table
+  (`task_worker_lane_settings::rebuild`, through `kronn::arm_lane_settings`) at the
+  standalone boot and the desktop boot, after an import and after a reset. In
+  between it updates one project at a time: registered on create, add-folder, clone
+  and bootstrap (dropping any lane entry left at that path), moved on a remap or a
+  re-clone, dropped on delete, published on each workspace save. A removed folder is
+  still forgotten or moved under either spelling of its path (its key, found from
+  its deepest existing ancestor, and the path as stored). The most
   specific tree wins; at equal depth a project's own checkout beats a tree it only
   shares through a common repository, and a tie that is still left gives no
   project; a repository nested between the winning tree and the worktree owns the

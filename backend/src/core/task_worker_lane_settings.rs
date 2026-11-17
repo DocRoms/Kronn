@@ -16,9 +16,10 @@
 //! Every consumer of the lane's environment (the warm-up, the worker's launch,
 //! its sandbox) asks [`effective_for`], so a build the worker runs later sees the
 //! very environment the seed and the first build were made with. The owner's two
-//! sources reach this module through [`set_global`] (on every config load and
-//! save) and [`set_project`] (at boot, and on every save of a project's
-//! workspace settings): a process-wide snapshot, like the other Settings >
+//! sources reach this module through [`rebuild`] (the whole snapshot from the
+//! project table: both boots, an import, a reset), [`set_global`] (on every
+//! config save) and [`set_project`] (on every save of a project's workspace
+//! settings): a process-wide snapshot, like the other Settings >
 //! Workers switches, so no caller has to carry a config around.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -155,7 +156,58 @@ static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
 });
 
 fn key_of(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    // KT-1751 fourth review — a folder that is gone (a deleted or moved
+    // project): its deepest existing ancestor is canonicalised, so the key is
+    // the one stored while it existed, even through a link (`/var` and
+    // `/private/var` on macOS).
+    let mut names = Vec::new();
+    let mut dir = path;
+    while let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
+        names.push(name);
+        if let Ok(real) = parent.canonicalize() {
+            return names.iter().rev().fold(real, |key, name| key.join(name));
+        }
+        dir = parent;
+    }
+    path.to_path_buf()
+}
+
+/// Both spellings of a project's path: its key, and the path as given.
+fn spellings_of(path: &Path) -> [PathBuf; 2] {
+    [key_of(path), path.to_path_buf()]
+}
+
+/// KT-1751 fourth review — the whole snapshot, rebuilt from the global entry
+/// and the FULL project list: every project registered, each one's lane entry
+/// published, nothing left of a project that is not in the list. Called
+/// wherever the project table is first read or replaced (both boots, an
+/// import, a reset), through `crate::arm_lane_settings`.
+pub fn rebuild(global: &LaneWarmConfig, projects: &[crate::models::Project]) {
+    let mut fresh = Snapshot {
+        global: global.clone(),
+        projects: BTreeMap::new(),
+        registered: BTreeSet::new(),
+    };
+    for project in projects {
+        let key = key_of(Path::new(&project.path));
+        fresh.registered.insert(key.clone());
+        let entry = project
+            .workspace
+            .as_ref()
+            .map(|workspace| &workspace.lane_warm)
+            .filter(|config| !config.is_empty());
+        if let Some(config) = entry {
+            fresh.projects.insert(key, config.clone());
+        }
+    }
+    #[cfg(test)]
+    if !test_guard::owns_snapshot() {
+        return;
+    }
+    *SNAPSHOT.write().unwrap_or_else(|e| e.into_inner()) = fresh;
 }
 
 /// Publish Settings > Workers' lane entry to this process.
@@ -180,32 +232,41 @@ pub fn set_project(project_path: &Path, config: Option<&LaneWarmConfig>) {
 }
 
 /// KT-1751 third review — record a newly registered project's checkout, so it
-/// owns its tree before it has any lane entry.
+/// owns its tree before it has any lane entry. A new project has no lane entry
+/// yet: one left at its path (by a project gone without being forgotten) is
+/// dropped, never inherited.
 pub fn register_project(project_path: &Path) {
-    SNAPSHOT
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .registered
-        .insert(key_of(project_path));
+    let mut snapshot = SNAPSHOT.write().unwrap_or_else(|e| e.into_inner());
+    for spelling in spellings_of(project_path) {
+        snapshot.projects.remove(&spelling);
+    }
+    snapshot.registered.insert(key_of(project_path));
 }
 
-/// A deleted project: its lane entry and its registration both go.
+/// A deleted project: its lane entry and its registration both go, under
+/// either spelling of its path.
 pub fn forget_project(project_path: &Path) {
-    let key = key_of(project_path);
     let mut snapshot = SNAPSHOT.write().unwrap_or_else(|e| e.into_inner());
-    snapshot.projects.remove(&key);
-    snapshot.registered.remove(&key);
+    for spelling in spellings_of(project_path) {
+        snapshot.projects.remove(&spelling);
+        snapshot.registered.remove(&spelling);
+    }
 }
 
 /// A project whose checkout moved (a remap, a re-clone): its lane entry and
-/// its registration follow it to the new path.
+/// its registration follow it to the new path, found under either spelling of
+/// the old one.
 pub fn rekey_project(old_path: &Path, new_path: &Path) {
-    let (old, new) = (key_of(old_path), key_of(new_path));
+    let new = key_of(new_path);
     let mut snapshot = SNAPSHOT.write().unwrap_or_else(|e| e.into_inner());
-    if let Some(config) = snapshot.projects.remove(&old) {
+    let mut moved = None;
+    for spelling in spellings_of(old_path) {
+        moved = snapshot.projects.remove(&spelling).or(moved);
+        snapshot.registered.remove(&spelling);
+    }
+    if let Some(config) = moved {
         snapshot.projects.insert(new.clone(), config);
     }
-    snapshot.registered.remove(&old);
     snapshot.registered.insert(new);
 }
 
@@ -340,9 +401,68 @@ fn intern(name: &str) -> &'static str {
     leaked
 }
 
+/// KT-1751 fourth review — the snapshot is process-wide, and `cargo test` runs
+/// tests as threads of one process: a test that rebuilds it would wipe what a
+/// concurrent test just published. A test that publishes then reads holds
+/// `shared()`; a test that rebuilds holds `exclusive()`, and a rebuild only
+/// takes effect on the thread that holds it (an import or a test elsewhere
+/// that rebuilds as a side effect leaves the others' entries alone).
+/// A tokio lock (held across awaits by async tests, as clippy requires); a sync
+/// test takes it with the `blocking_` forms, an async one with `.await`.
+#[cfg(test)]
+pub(crate) mod test_guard {
+    use std::cell::Cell;
+    use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+    static GUARD: RwLock<()> = RwLock::const_new(());
+
+    thread_local! {
+        static OWNER: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn shared() -> RwLockReadGuard<'static, ()> {
+        GUARD.blocking_read()
+    }
+
+    pub(crate) async fn shared_async() -> RwLockReadGuard<'static, ()> {
+        GUARD.read().await
+    }
+
+    pub(crate) struct Exclusive {
+        _guard: RwLockWriteGuard<'static, ()>,
+    }
+
+    impl Drop for Exclusive {
+        fn drop(&mut self) {
+            OWNER.with(|owner| owner.set(false));
+        }
+    }
+
+    fn own(guard: RwLockWriteGuard<'static, ()>) -> Exclusive {
+        OWNER.with(|owner| owner.set(true));
+        Exclusive { _guard: guard }
+    }
+
+    pub(crate) fn exclusive() -> Exclusive {
+        own(GUARD.blocking_write())
+    }
+
+    pub(crate) async fn exclusive_async() -> Exclusive {
+        own(GUARD.write().await)
+    }
+
+    pub(crate) fn owns_snapshot() -> bool {
+        OWNER.with(Cell::get)
+    }
+}
+
 #[cfg(test)]
 #[path = "task_worker_lane_settings_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "task_worker_lane_settings_registry_test.rs"]
+pub(crate) mod registry_tests;
 
 #[cfg(test)]
 #[path = "task_worker_lane_settings_deps_test.rs"]

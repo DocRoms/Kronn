@@ -63,6 +63,21 @@ pub async fn arm_docs_locations(database: &Arc<Database>) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// KT-1751 fourth review — load the lane snapshot from the database: every
+/// project registered (with a lane entry or not) and each one's lane entry
+/// published, beside the global entry. Both boots call it before the first
+/// launch; an import and a reset call it once the project table is replaced.
+pub async fn arm_lane_settings(
+    database: &Arc<Database>,
+    global: &crate::models::LaneWarmConfig,
+) -> anyhow::Result<()> {
+    let projects = database
+        .with_read_conn(crate::db::projects::list_projects)
+        .await?;
+    crate::core::task_worker_lane_settings::rebuild(global, &projects);
+    Ok(())
+}
+
 // `arm_mode` is injected so tests observe the arming without touching the
 // process-global mode that many other tests set.
 async fn load_startup_config_with(

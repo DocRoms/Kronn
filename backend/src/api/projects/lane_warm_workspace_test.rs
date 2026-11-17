@@ -66,6 +66,7 @@ async fn stored(state: &AppState, id: &str) -> Option<ProjectWorkspace> {
 
 #[tokio::test]
 async fn a_projects_lane_warm_settings_are_stored_published_and_cleared() {
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
     let state = test_state();
     let dir = tempfile::tempdir().unwrap();
     seed_project(&state, "p1", dir.path()).await;
@@ -167,6 +168,7 @@ async fn a_workspace_with_neither_hooks_nor_lane_settings_is_not_stored() {
 /// never admits a repository file `./composer`.
 #[tokio::test]
 async fn a_saved_repository_wrapper_keeps_its_dot_slash_and_a_bare_name_stays_a_name() {
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
     let state = test_state();
     let dir = tempfile::tempdir().unwrap();
     seed_project(&state, "p3", dir.path()).await;

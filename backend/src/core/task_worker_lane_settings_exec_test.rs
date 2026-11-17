@@ -96,6 +96,7 @@ fn an_executable_is_a_bare_name_or_a_path_inside_the_repository_and_never_a_shel
 
 #[test]
 fn the_executables_of_a_worktree_are_those_of_its_project() {
+    let _shared = test_guard::shared();
     let project = tempfile::tempdir().unwrap();
     let worktree = project
         .path()
@@ -150,6 +151,7 @@ fn git_in(dir: &Path, args: &[&str]) {
 /// worktree lists, whatever the layout.
 #[test]
 fn a_worktree_outside_the_kronn_layout_gets_its_projects_executables() {
+    let _shared = test_guard::shared();
     let project = tempfile::tempdir().unwrap();
     let project = project.path().canonicalize().unwrap();
     git_in(&project, &["init", "-q", "-b", "main"]);
@@ -180,6 +182,7 @@ fn a_worktree_outside_the_kronn_layout_gets_its_projects_executables() {
 /// and with its own list it gets that list, whatever the map order.
 #[test]
 fn a_nested_project_never_inherits_the_outer_projects_executables() {
+    let _shared = test_guard::shared();
     let root = tempfile::tempdir().unwrap();
     let mono = root.path().canonicalize().unwrap().join("mono");
     let sub = mono.join("sub");
@@ -218,6 +221,7 @@ fn a_nested_project_never_inherits_the_outer_projects_executables() {
 /// nothing; the outer project keeps its own list.
 #[test]
 fn a_registered_sub_folder_project_without_a_list_gets_nothing_from_the_outer_one() {
+    let _shared = test_guard::shared();
     let root = tempfile::tempdir().unwrap();
     let mono = root.path().canonicalize().unwrap().join("mono");
     let sub = mono.join("sub");

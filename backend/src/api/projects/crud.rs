@@ -1726,3 +1726,7 @@ mod bidirectional_link_tests {
 #[cfg(test)]
 #[path = "lane_warm_workspace_test.rs"]
 mod lane_warm_workspace_test;
+
+#[cfg(test)]
+#[path = "lane_registry_wiring_test.rs"]
+mod lane_registry_wiring_test;

@@ -3052,6 +3052,19 @@ async fn do_import_db(
         ));
     }
 
+    // KT-1751 fourth review — the project table was replaced: the lane snapshot
+    // is rebuilt from it, so no list of a project that is gone stays in force
+    // and a project that came in owns its tree.
+    let lane_warm = state.config.read().await.workers.lane_warm.clone();
+    if let Err(e) = crate::arm_lane_settings(&state.db, &lane_warm).await {
+        tracing::warn!("Import could not reload the lane settings: {e:#}");
+        warnings.push(
+            "The lane settings of the imported projects could not be reloaded: restart Kronn \
+             before launching a worker."
+                .to_string(),
+        );
+    }
+
     Ok(ImportResult {
         warnings,
         invalid_paths,
@@ -3304,22 +3317,23 @@ fn reset_refusal(proxy_declared: bool) -> Option<String> {
     })
 }
 
-/// POST /api/setup/reset
-/// Delete config file to trigger first-run wizard again
-pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
-    // KT-1596 — a reset leaves a key-only config.toml, so a TLS proxy declared in
-    // the config would be forgotten at the next start while the proxy keeps
-    // forwarding the whole network from 127.0.0.1, and every proxied request
-    // would regain the loopback owner trust. Clearing the declaration is a
-    // deliberate act in Settings, never a side effect of a reset. Checked before
-    // anything is deleted.
-    // The effective declaration counts: config or env.
-    let declared = crate::core::net_expose::proxy_declared_for(&state.config.read().await.server);
-    if let Some(refusal) = reset_refusal(declared) {
-        return Json(ApiResponse::err(refusal));
+/// The data a reset clears, in one transaction (a failure clears nothing).
+/// KT-1751 fourth review — the lane snapshot is then rebuilt from the emptied
+/// table, with the global entry a reset installs: no deleted project's list
+/// stays in force.
+async fn reset_data(state: &AppState) -> anyhow::Result<()> {
+    clear_reset_tables(state).await?;
+    let global = config::default_config().workers.lane_warm;
+    if let Err(e) = crate::arm_lane_settings(&state.db, &global).await {
+        // The table is empty either way: nothing of a project stays.
+        tracing::warn!("Reset could not reload the lane settings: {e:#}");
+        crate::core::task_worker_lane_settings::rebuild(&global, &[]);
     }
-    // Clear the data first: a failure reports, and nothing else changes.
-    if let Err(e) = state
+    Ok(())
+}
+
+async fn clear_reset_tables(state: &AppState) -> anyhow::Result<()> {
+    state
         .db
         .with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -3338,7 +3352,24 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
             Ok(())
         })
         .await
-    {
+}
+
+/// POST /api/setup/reset
+/// Delete config file to trigger first-run wizard again
+pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
+    // KT-1596 — a reset leaves a key-only config.toml, so a TLS proxy declared in
+    // the config would be forgotten at the next start while the proxy keeps
+    // forwarding the whole network from 127.0.0.1, and every proxied request
+    // would regain the loopback owner trust. Clearing the declaration is a
+    // deliberate act in Settings, never a side effect of a reset. Checked before
+    // anything is deleted.
+    // The effective declaration counts: config or env.
+    let declared = crate::core::net_expose::proxy_declared_for(&state.config.read().await.server);
+    if let Some(refusal) = reset_refusal(declared) {
+        return Json(ApiResponse::err(refusal));
+    }
+    // Clear the data first: a failure reports, and nothing else changes.
+    if let Err(e) = reset_data(&state).await {
         return Json(ApiResponse::err(format!(
             "Reset failed, nothing was cleared: {e}"
         )));
@@ -6870,6 +6901,10 @@ mod workers_config_tests;
 #[cfg(test)]
 #[path = "setup_context_files_tests.rs"]
 mod context_files_tests;
+
+#[cfg(test)]
+#[path = "setup_lane_snapshot_tests.rs"]
+mod lane_snapshot_tests;
 
 /// GET /api/config/agent-fallback
 /// Every mode row that has a fallback (KT-1693) with the cooldowns still running.

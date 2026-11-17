@@ -99,6 +99,7 @@ fn every_detected_dependency_dir_is_layered_read_only_from_the_main_checkout() {
 
 #[test]
 fn a_project_names_the_dependency_dirs_to_layer_and_the_others_stay_untouched() {
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared();
     let repo = repo();
     repo.docroms_like();
     crate::core::task_worker_lane_settings::set_project(
