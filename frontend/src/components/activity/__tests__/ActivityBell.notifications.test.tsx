@@ -150,3 +150,37 @@ describe('the notices of the install (KT-1686)', () => {
     expect(screen.getByTestId('activity-bell-dot')).toBeInTheDocument();
   });
 });
+
+describe('what is in progress (KT-1684)', () => {
+  const row = (id: string, compartment: string) => ({
+    id, type: 'agent_turn', compartment, state: 'running', source: 'test', title: id,
+    started_at: '2026-11-10T11:56:00Z', stalled: false, actions: [],
+  });
+
+  it('shows the number in progress beside the bell, apart from what waits, and nothing on hover', async () => {
+    vi.mocked(activityApi.overview).mockResolvedValue({
+      rows: [row('a', 'running'), row('b', 'running'), row('c', 'needs_decision')],
+      stall_after_secs: 900, generated_at: '2026-11-10T12:00:00Z', unavailable_sources: [],
+    } as never);
+    const bell = await renderBell();
+    expect(screen.getByTestId('activity-bell-count')).toHaveTextContent('2');
+    expect(screen.getByTestId('activity-bell-badge')).toHaveTextContent('1');
+    expect(bell).not.toHaveAttribute('title');
+
+    fireEvent.click(bell);
+    expect(screen.getByTestId('activity-tab-in-progress')).toHaveTextContent('2');
+  });
+
+  it('shows no number when nothing is in progress, nor during an outage', async () => {
+    await renderBell();
+    expect(screen.queryByTestId('activity-bell-count')).toBeNull();
+    cleanup();
+    vi.mocked(activityApi.overview).mockResolvedValue({
+      rows: [row('a', 'running')], stall_after_secs: 900, generated_at: '2026-11-10T12:00:00Z', unavailable_sources: [],
+    } as never);
+    await renderBell();
+    expect(screen.getByTestId('activity-bell-count')).toBeInTheDocument();
+    act(() => { confirmOutage(); });
+    expect(screen.queryByTestId('activity-bell-count')).toBeNull();
+  });
+});

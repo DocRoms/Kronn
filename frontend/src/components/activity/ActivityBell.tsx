@@ -121,12 +121,17 @@ export function ActivityBell({ onOpenLink, onActionSettled, handlers = ACTIVITY_
         data-alert={outage ? 'outage' : undefined}
         data-unread={!outage && unread > 0 ? 'true' : undefined}
         aria-label={label}
-        title={label}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? 'activity-panel' : undefined}
         onClick={toggle}
       >
+        {/* How much is in progress, in a neutral tone: red is what waits for the owner. */}
+        {!outage && inProgress > 0 && (
+          <span className="activity-bell-count" data-testid="activity-bell-count" aria-hidden="true">
+            {inProgress > 99 ? '99+' : inProgress}
+          </span>
+        )}
         <Bell size={14} className="activity-bell-icon" aria-hidden="true" />
         {outage ? (
           <span className="activity-bell-bang" data-testid="activity-bell-alert" aria-hidden="true">!</span>

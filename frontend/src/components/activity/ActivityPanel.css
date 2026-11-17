@@ -71,6 +71,13 @@
   text-align: center;
 }
 
+/* What is in progress is a fact, not an alert: no warning colour. */
+.activity-tab-counter-neutral {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-secondary);
+  font-weight: 600;
+}
+
 /* ── Category chips (All / Discussions / Automations / Kronn) ── */
 .activity-chips {
   flex-shrink: 0;

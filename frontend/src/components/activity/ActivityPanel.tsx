@@ -142,6 +142,7 @@ export function ActivityPanel({
   const rows = sortRowsForPanel(overview?.rows ?? []);
   const counts = countByCategory(rows, categoryOfRow);
   const progressFilter = filters.progress;
+  const inProgress = (overview?.rows ?? []).filter(row => row.compartment === 'running').length;
   const visibleRows = progressFilter === 'all' ? rows : rows.filter(row => categoryOfRow(row) === progressFilter);
   const unavailable = overview?.unavailable_sources ?? [];
   const lastKnown = asOf ?? (overview ? new Date(overview.generated_at).getTime() : null);
@@ -188,6 +189,9 @@ export function ActivityPanel({
               onClick={() => setTab(id)}
             >
               {t(`activity.tab.${id}`)}
+              {id === 'progress' && inProgress > 0 && (
+                <span className="activity-tab-counter activity-tab-counter-neutral" data-testid="activity-tab-in-progress">{inProgress}</span>
+              )}
               {id === 'notifications' && unread > 0 && (
                 <span className="activity-tab-counter" data-testid="activity-tab-unread">{unread}</span>
               )}
