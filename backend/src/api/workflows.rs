@@ -4778,9 +4778,14 @@ fn missing_skills<'a>(
         .into_iter()
         .map(|skill| skill.id)
         .collect();
+    // A pinned version (`custom-x@1`) is missing only when its skill is.
+    let unknown = |id: &str| {
+        let base = crate::core::skill_versions::split_pin(id).map_or(id, |(base, _)| base);
+        !known.contains(base)
+    };
     named
         .into_iter()
-        .filter(|id| !id.starts_with("repository:") && !bundled.contains(id) && !known.contains(id))
+        .filter(|id| !id.starts_with("repository:") && !bundled.contains(id) && unknown(id))
         .collect()
 }
 

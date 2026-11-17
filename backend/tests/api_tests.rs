@@ -32822,6 +32822,64 @@ async fn workflow_import_accepts_a_pin_to_a_bundled_skill_absent_locally() {
     );
 }
 
+/// A shadow that tests a pinned version of a skill the file carries imports
+/// like the step's own pin, on a Kronn that never had the skill.
+#[tokio::test]
+async fn workflow_import_accepts_a_shadow_pin_to_a_bundled_skill_absent_locally() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_import_accepts_a_shadow_pin_to_a_bundled_skill_absent_locally",
+    ) {
+        return;
+    }
+    let source = test_state();
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(source.clone(), false);
+    let skill = create_skill(app.clone(), "Shadowed review", "Check the shadow.").await;
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Shadowed", "project_id": null, "trigger": {"type": "Manual"},
+            "steps": [{"name": "review", "step_type": {"type": "Agent"},
+                       "prompt_template": "Review", "skill_ids": [skill],
+                       "shadows": [{"id": "pinned", "skills": {skill.clone(): format!("{skill}@1")}}]}],
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let workflow = created["data"]["id"].as_str().unwrap();
+    let (_, exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+    let file = serde_json::to_string(&exported).unwrap();
+
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    let (_, imported) = post_json(
+        target.clone(),
+        "/api/workflows/import",
+        serde_json::json!({"content": file, "project_id": null, "skill_choices": []}),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let step = &imported["data"]["steps"][0];
+    let local = step["skill_ids"][0].as_str().unwrap();
+    let pinned = step["shadows"][0]["skills"][local].as_str().unwrap();
+    let (base, version) = pinned.split_once('@').unwrap();
+    assert_eq!(version, "1", "the shadow stays pinned: {imported}");
+    let (_, listed) = get_json(target, "/api/skills").await;
+    assert!(
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == base && s["content"] == "Check the shadow."),
+        "the pin names a skill this Kronn created: {listed}"
+    );
+    // A pinned version of a skill that exists is not a missing skill.
+    assert!(imported.get("notice").is_none(), "{imported}");
+}
+
 /// A skill a JsonData step lists by id (for a script that loads it) travels
 /// with the workflow, and the imported payload names the created copy.
 #[tokio::test]
