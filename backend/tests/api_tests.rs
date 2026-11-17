@@ -33123,6 +33123,135 @@ async fn workflow_export_carries_skills_a_json_data_payload_lists_by_id() {
     );
 }
 
+/// A skill a JsonData payload lists arrives as a copy when this Kronn has
+/// another skill of that name: the imported payload names the copy.
+#[tokio::test]
+async fn workflow_import_points_a_json_data_payload_at_the_copy_it_created() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_import_points_a_json_data_payload_at_the_copy_it_created",
+    ) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(test_state(), false);
+    let skill = create_skill(app.clone(), "Repo conventions", "Follow the conventions.").await;
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Per repo", "project_id": null, "trigger": {"type": "Manual"},
+            "steps": [{"name": "skills", "step_type": {"type": "JsonData"},
+                       "json_data_payload": {"org/repo": [skill]}}],
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let workflow = created["data"]["id"].as_str().unwrap();
+    let (_, exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    let theirs = create_skill(target.clone(), "Repo conventions", "Ours differ.").await;
+    assert_eq!(theirs, skill, "same name, same id, other content");
+    let (_, imported) = post_json(
+        target.clone(),
+        "/api/workflows/import",
+        serde_json::json!({"content": serde_json::to_string(&exported).unwrap(),
+                           "project_id": null, "skill_choices": []}),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let local = imported["data"]["steps"][0]["json_data_payload"]["org/repo"][0]
+        .as_str()
+        .unwrap();
+    assert_ne!(local, skill, "the payload names the copy: {imported}");
+    let (_, listed) = get_json(target, "/api/skills").await;
+    assert!(
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == local && s["content"] == "Follow the conventions."),
+        "{listed}"
+    );
+}
+
+/// The same through an Artifact import.
+#[tokio::test]
+async fn artifact_import_points_a_json_data_payload_at_the_copy_it_created() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "artifact_import_points_a_json_data_payload_at_the_copy_it_created",
+    ) {
+        return;
+    }
+    let (state, _) = workflow_portability_fixture().await;
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(state.clone(), false);
+    let skill = create_skill(app.clone(), "Repo conventions", "Follow them.").await;
+    let listed = skill.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            let mut workflow =
+                kronn::db::workflows::get_workflow(conn, "workflow-portable")?.unwrap();
+            workflow.steps.push(
+                serde_json::from_value(serde_json::json!({
+                    "name": "skills", "step_type": {"type": "JsonData"},
+                    "json_data_payload": {"org/repo": [listed]},
+                }))
+                .unwrap(),
+            );
+            kronn::db::workflows::update_workflow(conn, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, exported) = get_json(app, "/api/pages/page-portable/export").await;
+    let content = serde_json::to_string(&exported["data"]).unwrap();
+
+    fresh_skill_dir(&root, "target");
+    let target_state = test_state();
+    let target = build_router_with_auth(target_state.clone(), false);
+    let theirs = create_skill(target.clone(), "Repo conventions", "Ours differ.").await;
+    assert_eq!(theirs, skill, "same name, same id, other content");
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/pages/import/preview",
+        serde_json::json!({"content": content, "project_id": null, "choices": [],
+                           "approved_quick_exec_ids": ["qe-portable"]}),
+    )
+    .await;
+    assert_eq!(preview["success"], true, "{preview}");
+    let (_, imported) = post_json(
+        target,
+        "/api/pages/import",
+        serde_json::json!({"content": content, "project_id": null, "choices": [],
+                           "approved_quick_exec_ids": ["qe-portable"],
+                           "preview_digest": preview["data"]["digest"]}),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let workflow = target_state
+        .db
+        .with_read_conn(|conn| Ok(kronn::db::workflows::list_workflows(conn)?.remove(0)))
+        .await
+        .unwrap();
+    let payload = workflow
+        .steps
+        .iter()
+        .find(|step| step.name == "skills")
+        .and_then(|step| step.json_data_payload.as_ref())
+        .unwrap();
+    let local = payload["org/repo"][0].as_str().unwrap();
+    assert_ne!(local, skill, "the payload names the copy: {payload}");
+    let copy = kronn::core::skills::get_skill(local).expect("created");
+    assert_eq!(copy.content, "Follow them.");
+}
+
 /// KT-1446 — a Page bundle carries the custom skills of its workflows and
 /// Quick Prompts; importing it elsewhere creates them and points both at them.
 #[tokio::test]
