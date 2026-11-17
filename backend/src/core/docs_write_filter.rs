@@ -817,18 +817,12 @@ pub async fn audit_docs_writes(
             ));
             continue;
         };
-        let (content, is_text) = document_text(&bytes);
+        let content = document_text(&bytes);
         let content = content.as_ref();
         audit.inspected.push(document_path_label(&path));
         // Only the first known secret is named: every line worth a look is
         // told, the rejected one too (it can hold another run).
-        // An image or a PDF is searched for known secrets like any other
-        // document; its long runs are no possible secrets.
-        let lines = if is_text {
-            possible_secret_lines(content)
-        } else {
-            Vec::new()
-        };
+        let lines = possible_secret_lines(content);
         if let Err(reason) = check_docs_content(content, sensitive) {
             audit.rejections.push((document_path_label(&path), reason));
         }
@@ -848,23 +842,18 @@ pub async fn audit_docs_writes(
 
 /// The text of a document as its reader sees it: a byte-order mark and NUL
 /// bytes dropped (UTF-16), bytes that are no UTF-8 replaced. Lines keep
-/// their numbers. The flag says whether it is text: an image or a PDF is
-/// full of control bytes, prose in any encoding has none.
-fn document_text(bytes: &[u8]) -> (std::borrow::Cow<'_, str>, bool) {
+/// their numbers. No document is set aside as binary: what tells text from
+/// an image also hides text in another script or a pasted terminal capture.
+fn document_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     let bytes = match bytes {
         [0xff, 0xfe, rest @ ..] | [0xfe, 0xff, rest @ ..] => rest,
         _ => bytes,
     };
-    let control = bytes
-        .iter()
-        .filter(|&&b| b < 0x20 && !matches!(b, 0 | b'\t' | b'\n' | 0x0c | b'\r' | 0x1b))
-        .count();
-    let is_text = control * 100 <= bytes.len();
     let text = String::from_utf8_lossy(bytes);
     if text.contains('\0') {
-        return (text.replace('\0', "").into(), is_text);
+        return text.replace('\0', "").into();
     }
-    (text, is_text)
+    text
 }
 
 /// Recursively walk a directory, calling `cb` on each FILE. Skips
@@ -1938,21 +1927,49 @@ mod tests {
         assert_eq!(audit.rejections.len(), 1);
     }
 
-    /// An image or a PDF is no text to warn about, and no place to hide a
-    /// known secret either.
+    /// Nothing is set aside as binary: a file full of control bytes, a
+    /// UTF-16 document in another script or a pasted terminal capture is
+    /// read like any other, for known secrets and for possible ones.
     #[tokio::test]
-    async fn a_binary_document_warns_of_nothing_and_hides_nothing() {
+    async fn no_document_is_set_aside_as_binary() {
         let noise: Vec<u8> = (0..4096u32).map(|i| (i * 131 % 251) as u8).collect();
         let mut bytes = noise.clone();
-        bytes.extend_from_slice(format!("\n/ID <{HEX_TOKEN}>\n").as_bytes());
-        let audit = audit_of_bytes(&bytes, &SensitiveSubstrings::new()).await;
-        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
-        assert_eq!(audit.possible_secrets, vec![]);
-
-        let mut bytes = noise;
         bytes.extend_from_slice(b"\nkey sk-1234567890abcdefghijklmnopqrstuvwxyz\n");
         let audit = audit_of_bytes(&bytes, &SensitiveSubstrings::new()).await;
         assert_eq!(audit.rejections.len(), 1);
+
+        let mut blob = noise;
+        blob.extend_from_slice(format!("\n/ID <{HEX_TOKEN}>\n").as_bytes());
+        let russian: Vec<u8> = [0xff, 0xfe]
+            .into_iter()
+            .chain(
+                format!("\u{414}\u{43e}\u{43a}\u{443}\u{43c}\u{435}\u{43d}\u{442}.\n\u{43a}\u{43b}\u{44e}\u{447}: {BASE64_TOKEN}\n")
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes),
+            )
+            .collect();
+        let capture = format!("id\u{8}: {BASE64_TOKEN}\nrotate soon\n").into_bytes();
+        for (index, bytes) in [blob, russian, capture].iter().enumerate() {
+            let audit = audit_of_bytes(bytes, &SensitiveSubstrings::new()).await;
+            assert!(audit.rejections.is_empty(), "case {index}");
+            assert_eq!(audit.possible_secrets.len(), 1, "case {index}");
+        }
+    }
+
+    /// The pattern list stays fast on the largest document the audit reads.
+    #[test]
+    fn a_large_binary_document_is_searched_in_seconds() {
+        // A quarter of the audit buffer: 5 s for the whole of it, measured
+        // on a debug build.
+        let bytes: Vec<u8> = (0..(MAX_AUDIT_BUFFER_BYTES / 4) as u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        let started = std::time::Instant::now();
+        let text = document_text(&bytes);
+        let _ = check_docs_content(&text, &SensitiveSubstrings::new());
+        let _ = possible_secret_lines(&text);
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
     }
 
     /// Prose in an 8-bit encoding is text: accents are no reason to skip it.

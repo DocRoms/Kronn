@@ -31,9 +31,8 @@ that a sensitive file holds, with six different characters and either a
 digit with a letter or letters whose case keeps changing (a value whole,
 glued to a name, cut short or extended; not a rule, a variable name or a
 plain path). A document in any encoding is read (byte-order mark and NUL
-bytes dropped, bytes that are no UTF-8 replaced); one full of control bytes
-(an image, a PDF) is searched for known secrets only, its long runs are not
-reported. A
+bytes dropped, bytes that are no UTF-8 replaced), an image or a PDF like any
+other: nothing is set aside as binary. A
 changed document that cannot be read whole (over 16 MiB, unreadable) fails
 the step once what the others hold is recorded. The
 sensitive files are scanned at the start of the run and again at each audit.
