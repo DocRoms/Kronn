@@ -4,8 +4,8 @@ The Darwin host-binary exclusion is conditional on container execution. A
 native macOS backend must keep a CLI even when its directory is listed in
 `KRONN_HOST_BIN`. In a container, resolution continues through PATH after a
 skipped host binary so a later Linux installation can still win.
-[src: file: backend/src/agents/mod.rs:172-188#should_skip_darwin_host_binary]
-[src: file: backend/src/agents/mod.rs:1355-1437#find_binary_in_paths]
+[src: file: backend/src/agents/mod.rs:182-189#should_skip_darwin_host_binary]
+[src: file: backend/src/agents/mod.rs:1358-1440#find_binary_in_paths]
 
 Agent detection exposes the installed `path`, or a `fallback_command` containing
 the resolved npx executable and arguments. The version comes from that command's
@@ -13,11 +13,11 @@ successful `--version` output; failed or empty output leaves it unknown. Setting
 shows the command and explicitly warns about npx fallback. Refreshing detection
 also clears cached fallback versions.
 [src: file: backend/src/models/setup.rs:1927-1930#fallback_command]
-[src: file: backend/src/agents/mod.rs:656-683#fallback_command]
-[src: file: backend/src/agents/mod.rs:1105-1175#probe_npx_invocation]
-[src: file: backend/src/agents/mod.rs:1470-1497#version_from_output]
+[src: file: backend/src/agents/mod.rs:679-688#fallback_command]
+[src: file: backend/src/agents/mod.rs:1108-1178#probe_npx_invocation]
+[src: file: backend/src/agents/mod.rs:1473-1500#version_from_output]
 [src: file: backend/src/agents/mod.rs:374-381#detect_all_cached]
-[src: file: backend/src/agents/mod.rs:551-564#invalidate_detect_cache]
+[src: file: backend/src/agents/mod.rs:556-564#invalidate_detect_cache]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1221-1234#fallback_command]
 
 A direct CLI spawn failure can also trigger npx. The launch records the fallback
@@ -33,17 +33,17 @@ project's run. A missing version remains unknown.
 [src: file: backend/src/models/workflows.rs:2357-2391#WorkflowAgentAttempt]
 [src: file: backend/src/workflows/steps.rs:1455-1476#npx_fallback_command]
 [src: file: backend/src/workflows/template.rs:182-223#set_step_provenance]
-[src: file: backend/src/agents/mod.rs:54-59#RUNTIME_CACHE]
-[src: file: backend/src/agents/mod.rs:1134-1144#cache_key]
-[src: file: backend/src/agents/mod.rs:1064-1086#probe_runtime]
+[src: file: backend/src/agents/mod.rs:56-57#RUNTIME_CACHE]
+[src: file: backend/src/agents/mod.rs:1137#cache_key]
+[src: file: backend/src/agents/mod.rs:1069-1089#probe_runtime]
 [src: file: backend/src/agents/mod.rs:374-381#detect_all_cached]
 
 When the backend's current directory cannot be read, only the PATH scan is
 skipped; absolute host-bin directories are still scanned with the same native
 versus container rules.
-[src: file: backend/src/agents/mod.rs:1224-1231#current_dir]
-[src: file: backend/src/agents/mod.rs:1363-1368#which_in_all]
-[src: file: backend/src/agents/mod.rs:1337-1374#host_dirs]
+[src: file: backend/src/agents/mod.rs:1230#current_dir]
+[src: file: backend/src/agents/mod.rs:1367-1371#which_in_all]
+[src: file: backend/src/agents/mod.rs:1403-1437#host_dirs]
 
 For a version-mismatch investigation, retain the **same backend process's**
 `find_binary('codex')` debug lines: PATH, host directories, container/host flags,
@@ -51,12 +51,12 @@ and the selected or skipped path. Record its `KRONN_HOST_BIN` value and compare
 the reported installed version with the command that was actually selected.
 The debug entry reads the backend environment; a terminal's PATH alone is not
 that evidence.
-[src: file: backend/src/agents/mod.rs:1204-1222#find_binary_on_machine]
-[src: file: backend/src/agents/mod.rs:173-184#should_skip_darwin_host_binary]
+[src: file: backend/src/agents/mod.rs:1207-1225#find_binary_on_machine]
+[src: file: backend/src/agents/mod.rs:182-189#should_skip_darwin_host_binary]
 
 The native/container regression and fake npx tests establish resolver behavior;
 they do not establish the cause of the colleague's reported KT-665 version
 mismatch. That incident still needs the reproducing backend's logs and
 environment before a causal conclusion can be recorded.
-[src: file: backend/src/agents/mod.rs:2159-2256]
-[src: file: backend/src/agents/mod.rs:2258-2416]
+[src: file: backend/src/agents/mod.rs:2595-2692]
+[src: file: backend/src/agents/mod.rs:2695-2852]
