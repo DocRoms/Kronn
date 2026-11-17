@@ -234,6 +234,15 @@ describe('Dashboard navigation', () => {
       project_id: 'project-live', phase: 'auditing', step_index: 1, total_steps: 2,
       current_file: null, started_at: '2026-01-01T00:00:00Z', kind: 'full_audit',
     }]);
+    // The Automation badge counts what the bell lists, not the workflows that
+    // say "Running" (a child run would count twice).
+    vi.mocked(activityApi.overview).mockResolvedValue({
+      rows: [{
+        id: 'w:run-live', type: 'workflow_run', compartment: 'running', state: 'running', source: 'workflow_runs',
+        title: 'Live workflow', started_at: '2026-01-01T00:00:00Z', stalled: false, actions: [],
+      }],
+      stall_after_secs: 900, generated_at: '2026-01-01T00:00:00Z', unavailable_sources: [],
+    } as never);
     await renderDashboard();
     const projectsTab = document.querySelector<HTMLAnchorElement>('[data-tour-id="nav-projects"]');
     const workflowsTab = document.querySelector<HTMLAnchorElement>('[data-tour-id="nav-workflows"]');

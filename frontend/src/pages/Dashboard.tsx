@@ -1,4 +1,5 @@
 import './Dashboard.css';
+import { runningWorkflowRuns, useSharedActivity } from '../lib/activityShared';
 import { isPlainLeftClick } from '../lib/newTabNavigation';
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { Outlet, useLocation } from 'react-router';
@@ -220,6 +221,9 @@ export function Dashboard({ onReset }: DashboardProps) {
     (workflowList ?? []).filter(w => w.last_run?.status === 'Running' || w.last_run?.status === 'Pending').length,
     [workflowList],
   );
+
+  // The badge counts what the bell lists (a sub-workflow shows through its parent).
+  const runningRuns = runningWorkflowRuns(useSharedActivity(), runningWorkflows);
 
   useEffect(() => {
     const pollInterval = runningWorkflows > 0 ? 3000 : page === 'workflows' ? 10000 : 60000;
@@ -738,13 +742,13 @@ export function Dashboard({ onReset }: DashboardProps) {
                   {totalUnseen}
                 </span>
               )}
-              {id === 'workflows' && runningWorkflows > 0 && (
+              {id === 'workflows' && runningRuns > 0 && (
                 <span
                   className="dash-nav-badge"
-                  title={t('workflows.runningTooltip', runningWorkflows, runningWorkflows > 1 ? 's' : '')}
-                  aria-label={t('workflows.runningTooltip', runningWorkflows, runningWorkflows > 1 ? 's' : '')}
+                  title={t('workflows.runningTooltip', runningRuns, runningRuns > 1 ? 's' : '')}
+                  aria-label={t('workflows.runningTooltip', runningRuns, runningRuns > 1 ? 's' : '')}
                 >
-                  {runningWorkflows}
+                  {runningRuns}
                 </span>
               )}
               {id === 'projects' && activeAudits.length > 0 && (

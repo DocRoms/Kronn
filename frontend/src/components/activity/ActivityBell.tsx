@@ -10,6 +10,7 @@ import {
   type ActivityActionHandler,
 } from '../../lib/activity';
 import type { ActivityTab } from '../../lib/activityFilters';
+import { publishActivity } from '../../lib/activityShared';
 import { isUrgentNotice, unreadCount, useNotifications } from '../../lib/notifications';
 import type { ActivityLink } from '../../types/generated';
 import { ActivityPanel } from './ActivityPanel';
@@ -44,6 +45,9 @@ export function ActivityBell({ onOpenLink, onActionSettled, handlers = ACTIVITY_
   // unless the owner took the panel over in between.
   const autoOpened = useRef<number | null>(null);
   const autoOpenHandled = useRef<number | null>(null);
+
+  // The menu badges count from the same read.
+  useEffect(() => { publishActivity(overview); }, [overview]);
 
   const outage = notifications.outage;
   // The shared clock only wakes the bell each second while an outage lasts; the
