@@ -364,9 +364,13 @@ pub(crate) fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
 /// it, so an uncached sweep froze the whole app on "Almost ready…" whenever a
 /// batch/WF was spawning agents. Once a result exists it is always returned
 /// immediately; an expired entry starts one background refresh.
-/// `force = true` bypasses + refreshes (right after an install/uninstall).
+/// `force = true` skips the cached list once: the caller waits for the sweep
+/// running now or starts one (right after an install/uninstall). If that
+/// sweep stores nothing while an older list exists, it gets the older list
+/// and leaves a refresh running.
 /// The list returned is always the result of a sweep that ended: a caller
-/// whose sweep was invalidated or died waits for the next one, or starts it.
+/// whose sweep was invalidated or died waits for the next one, or starts it
+/// after a growing pause (100 ms doubling to 5 s).
 pub async fn detect_all_cached(force: bool) -> Vec<AgentDetection> {
     if force {
         if let Ok(mut cache) = RUNTIME_CACHE.lock() {
@@ -391,6 +395,8 @@ where
     }
 
     let mut force_refresh = force;
+    // Sweeps this caller saw end without a list for it.
+    let mut empty_rounds = 0u32;
 
     loop {
         // Subscribe before inspecting `refreshing`, otherwise a very fast
@@ -446,6 +452,7 @@ where
                 // was invalidated while running, `value` is still empty and
                 // the next loop starts a cold sweep for the new generation.
                 force_refresh = false;
+                empty_rounds = empty_rounds.saturating_add(1);
             }
             CacheAction::Start {
                 generation,
@@ -453,6 +460,10 @@ where
                 return_stale,
             } => {
                 let done = RefreshDone;
+                // A sweep that keeps dying, or a runtime that drops the task
+                // at once, is started again further and further apart. `done`
+                // is held meanwhile: a caller cancelled here frees the others.
+                tokio::time::sleep(restart_backoff(empty_rounds)).await;
                 tokio::spawn(run_detect_all_refresh(
                     detect(),
                     generation,
@@ -469,8 +480,22 @@ where
                     .await
                     .expect("refresh signal remains open");
                 force_refresh = false;
+                empty_rounds = empty_rounds.saturating_add(1);
             }
         }
+    }
+}
+
+/// How long a caller waits before it starts a sweep again, after `rounds`
+/// sweeps that stored nothing.
+fn restart_backoff(rounds: u32) -> std::time::Duration {
+    const FIRST: std::time::Duration = std::time::Duration::from_millis(100);
+    const LONGEST: std::time::Duration = std::time::Duration::from_secs(5);
+    match rounds {
+        0 => std::time::Duration::ZERO,
+        rounds => FIRST
+            .checked_mul(1u32.checked_shl(rounds - 1).unwrap_or(u32::MAX))
+            .map_or(LONGEST, |wait| wait.min(LONGEST)),
     }
 }
 
@@ -2210,6 +2235,125 @@ mod tests {
         assert_eq!(sweeps.load(Ordering::SeqCst), 2);
         let cached = DETECT_ALL_CACHE.lock().unwrap().value.clone();
         assert_eq!(cached.map(|(list, _)| list.len()), Some(2));
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_detection_that_keeps_dying_is_restarted_further_and_further_apart() {
+        use std::sync::{Arc, Mutex};
+        reset_detect_cache(None);
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let (detect, _) = {
+            let starts = starts.clone();
+            counted_sweeps(move |call| {
+                starts.lock().unwrap().push(tokio::time::Instant::now());
+                async move {
+                    assert!(call > 5, "five sweeps die in a row");
+                    one_detection()
+                }
+            })
+        };
+
+        let list = caller_outcome(tokio::spawn(detect_all_cached_with(false, detect))).await;
+
+        assert_eq!(list.len(), 1, "still the list of a sweep that ended");
+        let starts = starts.lock().unwrap().clone();
+        let gaps: Vec<u128> = starts
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).as_millis())
+            .collect();
+        assert_eq!(gaps, vec![100, 200, 400, 800, 1600]);
+        invalidate_detect_cache();
+    }
+
+    #[test]
+    fn the_wait_before_a_restart_is_capped() {
+        use std::time::Duration;
+        assert_eq!(restart_backoff(0), Duration::ZERO);
+        assert_eq!(restart_backoff(1), Duration::from_millis(100));
+        assert_eq!(restart_backoff(6), Duration::from_millis(3200));
+        assert_eq!(restart_backoff(7), Duration::from_secs(5));
+        assert_eq!(restart_backoff(u32::MAX), Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_caller_cancelled_while_it_waits_to_restart_frees_the_next_one() {
+        reset_detect_cache(None);
+        let (detect, sweeps) = counted_sweeps(|_| async { panic!("the sweep dies") });
+        let caller = tokio::spawn(detect_all_cached_with(false, detect));
+        // Past the first sweep, inside the wait before the second.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(sweeps.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        caller.abort();
+        let _ = caller.await;
+
+        assert!(
+            !DETECT_ALL_CACHE.lock().unwrap().refreshing,
+            "no sweep is announced as running"
+        );
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_refresh_over_budget_keeps_the_previous_list_and_ends() {
+        let expired = Instant::now() - DETECT_ALL_TTL - std::time::Duration::from_secs(1);
+        reset_detect_cache(Some((one_detection(), expired)));
+        let mut completed = DETECT_ALL_REFRESHED.subscribe();
+        let began = tokio::time::Instant::now();
+
+        let list = detect_all_cached_with(false, std::future::pending).await;
+
+        assert_eq!(list.len(), 1, "served at once");
+        assert!(DETECT_ALL_CACHE.lock().unwrap().refreshing);
+        tokio::time::timeout(std::time::Duration::from_secs(120), completed.changed())
+            .await
+            .expect("the refresh gives up")
+            .unwrap();
+        assert!(began.elapsed() >= DETECT_ALL_BUDGET);
+        let cache = DETECT_ALL_CACHE.lock().unwrap();
+        assert!(!cache.refreshing);
+        assert_eq!(cache.value.as_ref().map(|(list, _)| list.len()), Some(1));
+        drop(cache);
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_waiter_whose_sweep_dies_gets_the_list_of_the_next_sweep() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        reset_detect_cache(None);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (detect, sweeps) = {
+            let (started, release) = (started.clone(), release.clone());
+            counted_sweeps(move |call| {
+                let (started, release) = (started.clone(), release.clone());
+                async move {
+                    if call > 1 {
+                        return two_detections();
+                    }
+                    started.notify_one();
+                    release.notified().await;
+                    panic!("the sweep dies");
+                }
+            })
+        };
+        let starter = tokio::spawn(detect_all_cached_with(false, detect.clone()));
+        started.notified().await;
+        let waiter = tokio::spawn(detect_all_cached_with(false, detect));
+        tokio::task::yield_now().await;
+        assert_eq!(sweeps.load(Ordering::SeqCst), 1, "it waits on that sweep");
+        release.notify_one();
+
+        let (first, second) = (caller_outcome(starter).await, caller_outcome(waiter).await);
+
+        assert_eq!((first.len(), second.len()), (2, 2));
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
         invalidate_detect_cache();
     }
 
