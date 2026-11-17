@@ -124,7 +124,7 @@ Workflow run when that provenance still exists. A publication that changes no
 dataset at all writes no ledger entry (KT-1819), so the timeline lists data
 updates; the "Synced" time next to it is the Page's `last_published_at`, which
 every successful publication moves, changed or not.
-`[src: file: frontend/src/pages/PagesPage.tsx:731-731#lastRefreshAt]`
+`[src: file: frontend/src/pages/PagesPage.tsx:745#lastRefreshAt]`
 Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
@@ -260,7 +260,7 @@ A dataset can be emptied, re-limited and deleted after creation:
 - **Limits.** `PATCH /api/pages/{id}/datasets/{name}` with `max_points` and/or
   `max_age_days` (`null` lifts the age limit) prunes the points beyond the new
   limits in the same transaction, then moves the Page to a new data revision
-  when anything was removed. `[src: file: backend/src/db/live_page_datasets.rs:245-283#update_live_page_dataset_limits]`
+  when anything was removed. `[src: file: backend/src/db/live_page_datasets.rs:255-293#update_live_page_dataset_limits]`
 - **Delete.** `DELETE /api/pages/{id}/datasets/{name}` removes the dataset and
   its points. It is refused (`conflict`) with the list of references while a
   saved workflow's `PublishPageData` step writes it (target matched by id, live
@@ -270,7 +270,7 @@ A dataset can be emptied, re-limited and deleted after creation:
   one transaction: a publication lands before (and is deleted) or after (and
   fails with "Unknown dataset"). A workflow page target written as a runtime
   template cannot be matched. `[src: file: backend/src/db/live_page_datasets.rs:58-86#targets_page]`
-  `[src: file: backend/src/db/live_page_datasets.rs:202-226#delete_live_page_dataset]`
+  `[src: file: backend/src/db/live_page_datasets.rs:212-236#delete_live_page_dataset]`
 - **Usage.** `GET /api/pages/{id}/dataset-usage` returns, per dataset, its
   writers, whether the HTML names it, and its bound buttons; the data panel
   shows it next to each dataset's size and last write, with Empty, Delete and
@@ -287,8 +287,8 @@ caller.
 None of these touch what a trusted button's approval fingerprint covers (the
 block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
-`[src: file: backend/src/api/live_pages.rs:693-703#delete_dataset]`
-`[src: file: backend/src/api/live_pages.rs:728-739#update_dataset]`
+`[src: file: backend/src/api/live_pages.rs:717-727#delete_dataset]`
+`[src: file: backend/src/api/live_pages.rs:753-764#update_dataset]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:8093-8100#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
@@ -299,7 +299,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:593-605#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:607-619#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -317,7 +317,7 @@ A publish that changes a Page (API `POST /api/pages/{id}/publish` or a
 standalone tab catch up at once and post `kronn:page-data` to the open frame
 without rebuilding it; their 30 s poll stays as a fallback. A publication that
 changes nothing broadcasts nothing.
-`[src: file: backend/src/api/live_pages.rs:907-919#announce_page_data_changed]`
+`[src: file: backend/src/api/live_pages.rs:924-936#announce_page_data_changed]`
 `[src: file: frontend/src/hooks/useLivePageDataPush.ts:9-13#useLivePageDataPush]`
 
 ### Incremental read (KT-1819)
@@ -349,23 +349,38 @@ costs. The route answers with the **full state** in `full`, and an empty
 `[src: file: backend/src/db/live_pages.rs:678-711#read_live_page_data]`
 `[src: file: backend/src/db/live_pages.rs:717-745#datasets_changed_since]`
 
-Adding a dataset therefore moves the Page to a new data revision, like
-deleting one; declaring an existing dataset again changes nothing. New limits
-that prune no point change no Page data and leave the revision alone: the
-limits shown for that dataset in another open tab stay as loaded until its
-next full read.
+Adding a dataset therefore moves the Page to a new data revision and tells
+open views, like deleting one; declaring an existing dataset again changes
+nothing and tells nobody. A repository re-import that replaces the datasets
+of a stored Page always moves the revision, even when the file declares no
+dataset, so a reader that sends no `revision` still gets the full state.
 `[src: file: backend/src/db/live_pages.rs:757-872#add_live_page_dataset]`
+`[src: file: backend/src/api/live_pages.rs:623-678#add_dataset]`
+`[src: file: backend/src/db/live_page_datasets.rs:202-210#clear_live_page_datasets]`
+
+Two things can be up to one full read late in an open view, because neither
+moves the data revision nor reaches the delta: the dataset limits (new limits
+that prune no point change no Page data) and `slug_aliases` (a renamed Page
+keeps its `slug` in `page`, the alias list is not part of it). Both are
+correct again at the next full read: opening the Page, an explicit action in
+the Pages view, or any fallback above.
 
 The host merges the changed datasets into its snapshot, replaces the snapshot
 when `full` is present, and reads the whole Page again when the delta cannot
 be placed (another Page id, another HTML revision, a dataset it does not
 hold). It then posts the same complete `kronn:page-data` snapshot as before,
-so Page HTML needs no change. A late answer older than the snapshot shown is
-dropped. Opening a Page, and every explicit action in the Pages view, still
-reads the whole Page.
+so Page HTML needs no change. Opening a Page, and every explicit action in the
+Pages view, still reads the whole Page.
 `[src: file: frontend/src/lib/live-page-refresh.ts:14-26#mergeLivePageData]`
 `[src: file: frontend/src/lib/live-page-refresh.ts:33-37#refreshLivePageDetail]`
-`[src: file: frontend/src/lib/live-page-refresh.ts:40-42#newestLivePageDetail]`
+
+Reads of one view can overlap (an event during the 30 s poll, a full read
+while a delta is in flight). Each read takes a ticket when it starts and its
+answer is applied only if no later read started and the view is still on that
+Page: the latest request wins whatever revision its answer carries, a full
+answer with a lower revision included, and nothing is applied after the view
+closed or moved to another Page.
+`[src: file: frontend/src/lib/live-page-refresh.ts:51-58#createRequestSequence]`
 
 ## « Ma Todo », the default board (KT-1030)
 
@@ -847,7 +862,7 @@ normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
 [src: file: backend/src/models/setup.rs:81-87#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
-[src: file: backend/src/api/live_pages.rs:1004-1006#change_embed_origins]
+[src: file: backend/src/api/live_pages.rs:1024-1026#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
 origin, see the exact value that will be saved, add it, or remove a
 permission. Every Page view, the import dialog and that section share one
@@ -857,7 +872,7 @@ the local WebSocket, with no origin in it (never relayed to a P2P peer); every
 open tab, a visible wall screen included, re-reads the list at once and a
 revoked site's players are unmounted. A tab also re-reads on WebSocket
 reconnect (for an event sent while it was disconnected) and on focus.
-[src: file: backend/src/api/live_pages.rs:918-922#announce_embed_origins_changed]
+[src: file: backend/src/api/live_pages.rs:941-945#announce_embed_origins_changed]
 Changes are sent one after the
 other, and a read that started before a change landed (or while one is in
 flight) is discarded, so a slow read can never bring back a revoked site or
@@ -931,8 +946,8 @@ governed by that site's document, not by Kronn's CSP, so an allowed site can
 itself embed other origins; Kronn controls only what the Page frames directly,
 redirects included.
 [src: file: backend/src/core/embed_origins.rs:254#frame_src_sources]
-[src: file: backend/src/api/live_pages.rs:880-881#embed_frame_src]
-[src: file: backend/src/api/live_pages.rs:934-938#document_frame_policy]
+[src: file: backend/src/api/live_pages.rs:900-901#embed_frame_src]
+[src: file: backend/src/api/live_pages.rs:954-958#document_frame_policy]
 [src: file: frontend/vite-frame-policy.ts:72#framePolicyMiddleware]
 [src: file: frontend/src/lib/served-frame-policy.ts:9#parseServedFrameSources]
 [src: file: .docker/nginx.conf:198-199#auth_request]
