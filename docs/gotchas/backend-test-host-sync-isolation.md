@@ -70,8 +70,8 @@ override it changes. [src: file: backend/src/core/mcp_scanner_test.rs:43-55]
 Host-discovery and agent-auth unit tests that change `KRONN_HOST_HOME` are
 serial and restore the saved value; they exercise discovery/auth reads rather
 than the MCP host-sync adapters. [src: file: backend/src/core/host_mcp_discovery.rs:854-865#resolve_home_prefers_kronn_host_home]
-[src: file: backend/src/agents/mod.rs:1642-1680#gemini_without_auth_reports_setup_requirement]
-[src: file: backend/src/agents/mod.rs:1704-1732#opencode_missing_auth_file_is_unknown_not_blocked]
+[src: file: backend/src/agents/mod.rs:1667-1705#gemini_without_auth_reports_setup_requirement]
+[src: file: backend/src/agents/mod.rs:1729-1757#opencode_missing_auth_file_is_unknown_not_blocked]
 
 ## Synthetic router regression
 

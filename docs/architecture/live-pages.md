@@ -124,7 +124,7 @@ Workflow run when that provenance still exists. A publication that changes no
 dataset at all writes no ledger entry (KT-1819), so the timeline lists data
 updates; the "Synced" time next to it is the Page's `last_published_at`, which
 every successful publication moves, changed or not.
-`[src: file: frontend/src/pages/PagesPage.tsx:752#lastRefreshAt]`
+`[src: file: frontend/src/pages/PagesPage.tsx:818#lastRefreshAt]`
 Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
@@ -299,7 +299,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:614-626#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:679-698#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -372,24 +372,43 @@ hold). It then posts the same complete `kronn:page-data` snapshot as before,
 so Page HTML needs no change. Opening a Page, and every explicit action in the
 Pages view, still reads the whole Page.
 `[src: file: frontend/src/lib/live-page-refresh.ts:14-26#mergeLivePageData]`
-`[src: file: frontend/src/lib/live-page-refresh.ts:33-37#refreshLivePageDetail]`
+`[src: file: frontend/src/lib/live-page-refresh.ts:43-48#refreshLivePageDetail]`
 
 Reads of one view can overlap (an event during the 30 s poll, a full read
 while a delta is in flight, a burst of publications). Each read takes a ticket
 when it starts, and its answer is applied unless the answer of a read started
-after it was applied first. Whatever revision an answer carries plays no
-part, so a full answer with a lower revision is taken. A read that fails
-applies nothing, so it never costs the view the answer of an older read, and
-during a burst every answer that arrives in order is shown. The error of the
-first read is shown only while no later read has brought the Page.
-`[src: file: frontend/src/lib/live-page-refresh.ts:57-81#createRequestSequence]`
+after it was applied first. A read that fails applies nothing, so it never
+costs the view the answer of an older read, and during a burst every answer
+that arrives in order is shown. The error of the first read is shown only
+while no later read has brought the Page.
+`[src: file: frontend/src/lib/live-page-refresh.ts:79-103#createRequestSequence]`
+
+Two reads can also be served out of order, so the ticket rule alone could put
+older data over newer. The exact rule for an answer that may replace the Page
+shown: it is for another Page, or for another HTML revision, or its data
+revision is at least the one shown, or the server itself went back. The last
+case is a full answer from the data route whose data revision is below the
+`since` the read sent (a restored database): it is shown although it is
+lower. Any other answer with a lower data revision for the same Page and the
+same HTML is not shown; a whole-Page read (`GET /api/pages/{id}`) carries no
+`since`, so a lower one is left to the next incremental read.
+`[src: file: frontend/src/lib/live-page-refresh.ts:43-48#refreshLivePageDetail]`
+`[src: file: frontend/src/lib/live-page-refresh.ts:56-59#replacesShown]`
 
 A read of another Page drops every read in flight, and so does a view that no
 longer shows any Page. In the Pages view a publication is followed only once
-the Page is shown: its first load brings the Page, its panels and the HTML
-draft together, and the draft is saved only into the Page it was loaded from.
-`[src: file: frontend/src/pages/PagesPage.tsx:318-347#loadDetail]`
-`[src: file: frontend/src/pages/PagesPage.tsx:579-582#saveHtml]`
+the Page is shown, and a reload asked for a Page the user has since left is
+not made: the first load of the selected Page brings it with its panels.
+Whenever the Page shown changes, the title and HTML editors close.
+`[src: file: frontend/src/pages/PagesPage.tsx:346-371#loadDetail]`
+
+The HTML draft is taken from the Page when the editor opens and only the user
+changes it while the editor is open: a reload or a publication updates the
+Page under it, never the draft. Saving a draft that started from an HTML
+revision the Page no longer has is not done silently: the editor says the
+HTML changed and offers to take the new HTML or to save over it.
+`[src: file: frontend/src/pages/PagesPage.tsx:611-621#toggleHtmlEditor]`
+`[src: file: frontend/src/pages/PagesPage.tsx:623-631#saveHtml]`
 
 ## « Ma Todo », the default board (KT-1030)
 

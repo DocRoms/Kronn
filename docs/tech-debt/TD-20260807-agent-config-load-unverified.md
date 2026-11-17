@@ -14,7 +14,7 @@
 - **What is fixed (2026-08-08)**: **Detection only.** Kronn now reads Vibe's trust store and reports when it has written a config Vibe will ignore:
   - `core::vibe_trust` mirrors Vibe's nearest-ancestor trust resolution [src: file: backend/src/core/vibe_trust.rs:102-118#decide].
   - The project sync warns at write time on `kronn::host_sync` [src: file: backend/src/core/mcp_scanner.rs:2040-2059#warn_if_vibe_trust_blocks].
-  - Agent detection surfaces `vibe.project_config_untrusted` to the UI [src: file: backend/src/agents/mod.rs:1028-1035#project_config_untrusted].
+  - Agent detection surfaces `vibe.project_config_untrusted` to the UI [src: file: backend/src/agents/mod.rs:1053-1060#project_config_untrusted].
   - `kronn doctor` lists every blocked Kronn-managed config with the fix [src: file: kronn:1050-1083#Vibe].
 
 - **Why we can't fix now (constraint)**:

@@ -1,6 +1,6 @@
 # Startup request caching
 
-Agent discovery uses stale-while-revalidate semantics. A fresh cached value is returned directly; an expired value is also returned directly while one shared refresh runs in the background. Concurrent cold callers wait for that same refresh instead of starting duplicate detection work. [src: file: backend/src/agents/mod.rs:376-460#detect_all_cached_with]
+Agent discovery uses stale-while-revalidate semantics. A fresh cached value is returned directly; an expired value is also returned directly while one shared refresh runs in the background. Concurrent cold callers wait for that same refresh instead of starting duplicate detection work. The list a caller gets is always the result of a sweep that ended: when its sweep was invalidated or died, it waits for the next one or starts it after a growing pause (100 ms doubling to 5 s), and is never answered with an empty list instead. [src: file: backend/src/agents/mod.rs:383-467#detect_all_cached_with]
 
 The frontend persists the last server-confirmed setup status and uses it as the initial application state. This lets the dashboard render while `/api/setup/status` refreshes in the background. [src: file: frontend/src/lib/appBoot.ts:23-40#readCachedSetupStatus] [src: file: frontend/src/App.tsx:31-33#readCachedSetupStatus] [src: file: frontend/src/App.tsx:49-55#cacheSetupStatus]
 
