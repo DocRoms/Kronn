@@ -267,7 +267,7 @@ and the identical one beside the step's own agent.
 A Page shows, in its **Quick Prompts and skills** panel, every Quick Prompt and
 skill used by the workflows behind it, step by step, with the version each step
 loads and the one each of its shadows tests.
-[src: file: backend/src/db/live_pages.rs:2219-2222#list_live_page_resources]
+[src: file: backend/src/db/live_pages.rs:2250-2404#list_live_page_resources]
 **Promote** hands the version a shadow tested to its step in one click:
 
 - a skill: the step now loads the tested version, pinned (a skill the shadow

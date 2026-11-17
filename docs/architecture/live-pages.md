@@ -104,7 +104,7 @@ datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
 [src: file: backend/src/lib.rs:1546-1567#artifact_portability]
-[src: file: backend/src/api/artifact_portability/import.rs:1119-1137#preview_digest]
+[src: file: backend/src/api/artifact_portability/import.rs:1147-1165#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
 ## Status
@@ -136,7 +136,7 @@ Workflow run when that provenance still exists. A publication that changes no
 dataset at all writes no ledger entry (KT-1819), so the timeline lists data
 updates; the "Synced" time next to it is the Page's `last_published_at`, which
 every successful publication moves, changed or not.
-`[src: file: frontend/src/pages/PagesPage.tsx:826#lastRefreshAt]`
+`[src: file: frontend/src/pages/PagesPage.tsx:861#lastRefreshAt]`
 Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
@@ -190,7 +190,7 @@ The library's source link opens the discussion at that exact message. Removing
 the message clears only its source anchor and preserves the Artifact and its
 discussion link. Streamed previews without a persisted message id do not offer
 this action.
-[src: file: backend/src/api/live_pages.rs:568-577#source_message_id]
+[src: file: backend/src/api/live_pages.rs:609-627#source_message_id]
 [src: file: frontend/src/components/DocPreviewArtifact.tsx:22-33#create]
 [src: file: frontend/src/components/DocPreview.tsx:153#DocPreviewArtifact]
 
@@ -268,7 +268,7 @@ A dataset can be emptied, re-limited and deleted after creation:
   the publication ledger like any write, from the API or a `PublishPageData`
   step. Only `clear` may omit `value` (API) or `value_from` (step); the other
   operations still require them, an explicit `null` value included.
-  `[src: file: backend/src/db/live_pages.rs:1027-1043#Clear]`
+  `[src: file: backend/src/db/live_pages.rs:1055-1078#Clear]`
 - **Limits.** `PATCH /api/pages/{id}/datasets/{name}` with `max_points` and/or
   `max_age_days` (`null` lifts the age limit) prunes the points beyond the new
   limits in the same transaction, then moves the Page to a new data revision
@@ -299,8 +299,8 @@ caller.
 None of these touch what a trusted button's approval fingerprint covers (the
 block and the workflow definition), so approvals stay valid; deleting a dataset
 a button binds needs `force`, after which that button fails at launch.
-`[src: file: backend/src/api/live_pages.rs:744-776#delete_dataset]`
-`[src: file: backend/src/api/live_pages.rs:780-813#update_dataset]`
+`[src: file: backend/src/api/live_pages.rs:780-812#delete_dataset]`
+`[src: file: backend/src/api/live_pages.rs:816-849#update_dataset]`
 `[src: file: backend/scripts/disc-introspection-mcp.py:8093-8100#call_page_delete_dataset]`
 
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
@@ -311,7 +311,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:687-711#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:722-746#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -329,7 +329,7 @@ A publish that changes a Page (API `POST /api/pages/{id}/publish` or a
 standalone tab catch up at once and post `kronn:page-data` to the open frame
 without rebuilding it; their 30 s poll stays as a fallback. A publication that
 changes nothing broadcasts nothing.
-`[src: file: backend/src/api/live_pages.rs:952-964#announce_page_data_changed]`
+`[src: file: backend/src/api/live_pages.rs:988-1000#announce_page_data_changed]`
 `[src: file: frontend/src/hooks/useLivePageDataPush.ts:9-13#useLivePageDataPush]`
 
 ### Incremental read (KT-1819)
@@ -358,16 +358,16 @@ costs. The route answers with the **full state** in `full`, and an empty
 - `revision` is given and is not the Page's current HTML revision (the HTML
   was updated). A caller that holds no HTML omits `revision`.
 
-`[src: file: backend/src/db/live_pages.rs:717-750#read_live_page_data]`
-`[src: file: backend/src/db/live_pages.rs:756-784#datasets_changed_since]`
+`[src: file: backend/src/db/live_pages.rs:745-778#read_live_page_data]`
+`[src: file: backend/src/db/live_pages.rs:784-812#datasets_changed_since]`
 
 Adding a dataset therefore moves the Page to a new data revision and tells
 open views, like deleting one; declaring an existing dataset again changes
 nothing and tells nobody. A repository re-import that replaces the datasets
 of a stored Page always moves the revision, even when the file declares no
 dataset, so a reader that sends no `revision` still gets the full state.
-`[src: file: backend/src/db/live_pages.rs:796-911#add_live_page_dataset]`
-`[src: file: backend/src/api/live_pages.rs:648-703#add_dataset]`
+`[src: file: backend/src/db/live_pages.rs:824-939#add_live_page_dataset]`
+`[src: file: backend/src/api/live_pages.rs:684-739#add_dataset]`
 `[src: file: backend/src/db/live_page_datasets.rs:202-210#clear_live_page_datasets]`
 
 Two things can be up to one full read late in an open view, because neither
@@ -412,7 +412,7 @@ longer shows any Page. In the Pages view a publication is followed only once
 the Page is shown, and a reload asked for a Page the user has since left is
 not made: the first load of the selected Page brings it with its panels.
 Whenever the Page shown changes, the title and HTML editors close.
-`[src: file: frontend/src/pages/PagesPage.tsx:345-370#loadDetail]`
+`[src: file: frontend/src/pages/PagesPage.tsx:358-383#loadDetail]`
 
 The HTML draft is taken from the Page when the editor opens and only the user
 changes it while the editor is open: a reload or a publication updates the
@@ -420,22 +420,26 @@ Page under it, never the draft.
 
 What is guaranteed about a save: `PUT /api/pages/{id}/html` accepts an
 optional `base_revision_id`. When it is given and is not the Page's current
-HTML revision, the save is refused with HTTP 409 (`error_code: "conflict"`,
-the message names the current revision) and nothing is written; the check and
+HTML revision, the save is refused with HTTP 409 (`error_code: "conflict"`;
+the answer carries the current revision in `current_revision_id`, `null` for
+a Page left without one) and nothing is written; the check and
 the write share one transaction, so two saves from the same base cannot both
 succeed. The Pages editor always sends the revision its draft started from,
 so it never overwrites HTML saved meanwhile by an agent, a workflow import or
 another tab, whether or not this view heard of it (an HTML save announces
-nothing). On a refusal the editor reloads the Page, keeps the draft, and
-offers to take the new HTML (the typed text is discarded) or to save over it;
-saving over it sends the revision then shown as base, so a further revision
-is refused again. A caller that sends no base (the `page_update_html` tool,
+nothing). On a refusal the editor keeps the draft and reads the Page's detail
+alone, so a panel that fails to load cannot hold it back. Its two choices,
+taking the new HTML (the typed text is discarded) or saving over it, stay
+disabled until that read has landed; when it fails the notice says so and
+offers to read again. Saving over it sends the revision the server named as
+base, so a further revision is refused again. A caller that sends no base (the `page_update_html` tool,
 the HTTP-agent tools, a repository import) is never refused: the last save
 wins, as before.
-`[src: file: backend/src/db/live_pages.rs:568-626#update_live_page_html_from]`
-`[src: file: backend/src/api/live_pages.rs:496-508#update_html_route]`
-`[src: file: frontend/src/pages/PagesPage.tsx:622-632#toggleHtmlEditor]`
-`[src: file: frontend/src/pages/PagesPage.tsx:591-618#persistHtml]`
+`[src: file: backend/src/db/live_pages.rs:569-628#update_live_page_html_from]`
+`[src: file: backend/src/api/live_pages.rs:527-544#update_html_route]`
+`[src: file: frontend/src/pages/PagesPage.tsx:652-662#toggleHtmlEditor]`
+`[src: file: frontend/src/pages/PagesPage.tsx:621-648#persistHtml]`
+`[src: file: frontend/src/pages/PagesPage.tsx:604-617#readConflictingHtml]`
 
 ## « Ma Todo », the default board (KT-1030)
 
@@ -581,7 +585,7 @@ revision with `content_changed: false`, updates `last_published_at`, and
 leaves the revision, the ledger and the datasets (their `updated_at`
 included) untouched: a dataset's "last write" is the last write that changed
 it.
-`[src: file: backend/src/db/live_pages.rs:1095-1107#data_revision]`
+`[src: file: backend/src/db/live_pages.rs:1123-1134#data_revision]`
 Dedupe keys make replayed append writes
 idempotent. Retention is enforced in the same transaction with `max_points`
 and optional `max_age_days`; the initial implementation deletes the oldest raw
@@ -827,8 +831,8 @@ Quick APIs, Quick Execs, root and child workflows. A late validation or SQL
 failure rolls everything back and preserves existing resources. The Page
 creation helper accepts the caller's transaction; starting and committing a
 separate Page transaction inside an import would break this guarantee.
-[src: file: backend/src/api/workflows.rs:5159-5167#create_live_page_in_transaction]
-[src: file: backend/src/db/live_pages.rs:129-131#create_live_page_in_transaction]
+[src: file: backend/src/api/workflows.rs:5191-5199#create_live_page_in_transaction]
+[src: file: backend/src/db/live_pages.rs:131-263#create_live_page_in_transaction]
 
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload
@@ -875,7 +879,7 @@ bridge-token list and the handlers refuse a bridge caller.
   in flight is never relaunched; one row waits 2 s between trusted launches
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
-[src: file: backend/src/api/workflows.rs:5283-5293#create_manual_run_admitted]
+[src: file: backend/src/api/workflows.rs:5315-5325#create_manual_run_admitted]
 [src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
@@ -917,7 +921,7 @@ normalized (lowercase host, default port dropped, IDN as punycode) and a
 malformed one rejects the whole change.
 [src: file: backend/src/models/setup.rs:81-87#embed_allowed_origins]
 [src: file: backend/src/core/embed_origins.rs:52-55#normalize_origin]
-[src: file: backend/src/api/live_pages.rs:1049-1051#change_embed_origins]
+[src: file: backend/src/api/live_pages.rs:1087-1111#change_embed_origins]
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
 origin, see the exact value that will be saved, add it, or remove a
 permission. Every Page view, the import dialog and that section share one
@@ -927,7 +931,7 @@ the local WebSocket, with no origin in it (never relayed to a P2P peer); every
 open tab, a visible wall screen included, re-reads the list at once and a
 revoked site's players are unmounted. A tab also re-reads on WebSocket
 reconnect (for an event sent while it was disconnected) and on focus.
-[src: file: backend/src/api/live_pages.rs:966-970#announce_embed_origins_changed]
+[src: file: backend/src/api/live_pages.rs:1002-1006#announce_embed_origins_changed]
 Changes are sent one after the
 other, and a read that started before a change landed (or while one is in
 flight) is discarded, so a slow read can never bring back a revoked site or
@@ -1001,8 +1005,8 @@ governed by that site's document, not by Kronn's CSP, so an allowed site can
 itself embed other origins; Kronn controls only what the Page frames directly,
 redirects included.
 [src: file: backend/src/core/embed_origins.rs:254#frame_src_sources]
-[src: file: backend/src/api/live_pages.rs:925-926#embed_frame_src]
-[src: file: backend/src/api/live_pages.rs:979-983#document_frame_policy]
+[src: file: backend/src/api/live_pages.rs:962-983#embed_frame_src]
+[src: file: backend/src/api/live_pages.rs:1019-1067#document_frame_policy]
 [src: file: frontend/vite-frame-policy.ts:72#framePolicyMiddleware]
 [src: file: frontend/src/lib/served-frame-policy.ts:9#parseServedFrameSources]
 [src: file: .docker/nginx.conf:198-199#auth_request]

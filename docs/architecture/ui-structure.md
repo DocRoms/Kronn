@@ -361,10 +361,10 @@ categories only temporarily.
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
 `[src: file: frontend/src/pages/PagesPage.tsx:81#PAGE_NAVIGATION_STORAGE_KEY]`
-`[src: file: frontend/src/pages/PagesPage.tsx:98-107#readPageNavigation]`
-`[src: file: frontend/src/pages/PagesPage.tsx:306-312#PAGE_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/PagesPage.tsx:372-414#refresh]`
-`[src: file: frontend/src/pages/PagesPage.tsx:810-813#isSectionCollapsed]`
+`[src: file: frontend/src/pages/PagesPage.tsx:109-118#readPageNavigation]`
+`[src: file: frontend/src/pages/PagesPage.tsx:319-325#PAGE_COLLAPSED_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:385-427#refresh]`
+`[src: file: frontend/src/pages/PagesPage.tsx:845-848#isSectionCollapsed]`
 Project detail restores the last valid tab across project switches and falls back to Overview
 when a stale value is found.
 `[src: file: frontend/src/components/ProjectCard.tsx:79-92#readProjectDetailView]`
@@ -593,8 +593,8 @@ run list and never encrypted, so it holds plain labels such as the ticket a run
 is about, never a secret. `GET /api/workflows/{id}/runs?state_key=ticketKey&state_value=EW-7791&limit=1`
 returns the newest run carrying that entry, whether it was seeded or written by
 a step, without reading any step output.
-`[src: file: backend/src/api/workflows.rs:5595-5627#validate_initial_run_state]`
-`[src: file: backend/src/api/workflows.rs:6240-6254#list_runs_by_state_visible]`
+`[src: file: backend/src/api/workflows.rs:5627-5659#validate_initial_run_state]`
+`[src: file: backend/src/api/workflows.rs:6272-6286#list_runs_by_state_visible]`
 `[src: file: backend/src/db/workflows.rs:1645-1681#list_runs_by_state_visible]`
 
 **6. Rollback / `on_failure`.** `Workflow.on_failure: Vec<WorkflowStep>` — a separate step list that fires **only** when the run terminates with `RunStatus::Failed`. Skipped on `Cancelled`, `StoppedByGuard`, and Gate `reject`. Templates `{{failed_step.name}}` and `{{failed_step.output}}` are exposed inside on_failure prompts. Migration `041_workflow_on_failure.sql`. The wizard rejects `Gate` inside the rollback list (Notify + Agent + ApiCall accepted).
