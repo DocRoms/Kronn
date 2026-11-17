@@ -297,7 +297,10 @@ describe('the standing notices (KT-1686)', () => {
     // Grouped by category: the token under Automations, the key under Kronn.
     expect(found.map(el => el.getAttribute('data-kind'))).toEqual(['token_refused', 'key_beside_data']);
     const notices = [found[1], found[0]];
-    expect(notices[0]).toHaveTextContent('config.toml');
+    // Plain words: no technical term in the notification itself.
+    expect(notices[0]).toHaveTextContent('Protégez vos secrets');
+    expect(notices[0].textContent).not.toMatch(/config\.toml|KRONN_ENCRYPTION_KEK/);
+    expect(within(notices[0]).getByRole('link')).toHaveTextContent('Créer ma phrase de secours');
     expect(within(notices[0]).getByRole('link')).toHaveAttribute('href', '/config#settings-recovery');
     expect(notices[1]).toHaveTextContent('Cloudflare API');
     expect(within(notices[1]).getByRole('link')).toHaveAttribute('href', '/plugins/cfg-1');

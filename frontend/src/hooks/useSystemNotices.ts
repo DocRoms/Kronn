@@ -11,6 +11,18 @@ import { safeSetItem } from '../lib/safeStorage';
 import { useAuthFailureNotices } from './useAuthFailureNotices';
 
 export const UPDATE_DISMISS_KEY = 'kronn:update-dismissed-version';
+/** "Later" on the advice to protect the secrets: the time it comes back. */
+export const PROTECT_SNOOZE_KEY = 'kronn:protect-secrets-snoozed-until';
+export const PROTECT_SNOOZE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function protectSnoozed(now: number): boolean {
+  try {
+    const until = Number(localStorage.getItem(PROTECT_SNOOZE_KEY));
+    return Number.isFinite(until) && until > now;
+  } catch {
+    return false;
+  }
+}
 
 export function useSystemNotices(resetError: string | null, dismissResetError: () => void): void {
   const { t } = useT();
@@ -28,8 +40,17 @@ export function useSystemNotices(resetError: string | null, dismissResetError: (
           const clear = (status.clear_credentials ?? []).map(c => clearCredentialLabel(c, t)).join(', ');
           notices.push({ id: 'locked', kind: 'key_locked', args: clear ? [clear] : [], link: recovery, category: 'kronn' });
         } else {
-          if (status.config_holds_key) {
-            notices.push({ id: 'beside-data', kind: 'key_beside_data', link: recovery, category: 'kronn' });
+          // Advice, not an alert: a recovery phrase already answers it, and
+          // "Later" puts it away for a week. Settings > Recovery keeps saying it.
+          const answered = status.configured && status.matches_key;
+          if (status.config_holds_key && !answered && !protectSnoozed(Date.now())) {
+            notices.push({
+              id: 'beside-data',
+              kind: 'key_beside_data',
+              link: recovery,
+              category: 'kronn',
+              dismiss: () => safeSetItem(PROTECT_SNOOZE_KEY, String(Date.now() + PROTECT_SNOOZE_MS)),
+            });
           }
           if (status.credentials_unavailable) {
             notices.push({ id: 'credentials', kind: 'credentials_unavailable', args: [status.credentials_unavailable], category: 'kronn' });

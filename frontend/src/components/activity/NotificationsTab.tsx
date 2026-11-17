@@ -153,8 +153,10 @@ function NoticeRow({ entry, onClose }: { entry: NoticeEntry; onClose?: () => voi
       linkText = t('keyLocked.restoreLink');
       break;
     case 'key_beside_data':
-      body = t('keyLocked.keyBesideData');
-      linkText = t('keyLocked.keyBesideDataLink');
+      // Plain words here; the technical detail is in Settings > Recovery.
+      title = t('notif.protect.title');
+      body = t('notif.protect.body');
+      linkText = t('notif.protect.create');
       break;
     case 'credentials_unavailable':
       body = t('keyLocked.credentialsUnavailable', first);
@@ -187,8 +189,8 @@ function NoticeRow({ entry, onClose }: { entry: NoticeEntry; onClose?: () => voi
             ))}
             {entry.dismiss && (
               <button type="button" className="notif-btn" data-testid={`notif-notice-dismiss-${entry.id}`} onClick={() => dismissNotice(entry.id)}>
-                <Check size={10} aria-hidden="true" />
-                {t('notif.error.ack')}
+                {entry.kind !== 'key_beside_data' && <Check size={10} aria-hidden="true" />}
+                {t(entry.kind === 'key_beside_data' ? 'notif.protect.later' : 'notif.error.ack')}
               </button>
             )}
           </span>

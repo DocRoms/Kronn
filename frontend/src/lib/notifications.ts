@@ -159,6 +159,12 @@ export function setNotices(source: string, reports: readonly NoticeReport[]): vo
   commit({ ...state, notices: [...kept, ...next] });
 }
 
+/** Its cause is gone: the notice leaves the list, and its source is not told. */
+export function dropNotice(id: string): void {
+  if (!state.notices.some(notice => notice.id === id)) return;
+  commit({ ...state, notices: state.notices.filter(notice => notice.id !== id) });
+}
+
 /** The owner put a notice away: its source is told, and it leaves the list. */
 export function dismissNotice(id: string): void {
   const notice = state.notices.find(candidate => candidate.id === id);
