@@ -100,21 +100,59 @@ describe('refreshLivePageDetail', () => {
 });
 
 describe('createRequestSequence', () => {
-  it('keeps only the latest request started current', () => {
-    const requests = createRequestSequence();
-    const older = requests.next();
-    expect(requests.isCurrent(older)).toBe(true);
-    const newer = requests.next();
-    // The older answer may arrive first or last: it is dropped either way.
-    expect(requests.isCurrent(older)).toBe(false);
-    expect(requests.isCurrent(newer)).toBe(true);
+  it('applies an answer unless a later read was already applied', () => {
+    const reads = createRequestSequence();
+    const older = reads.next('page-1');
+    const newer = reads.next('page-1');
+    expect(reads.apply(newer)).toBe(true);
+    // The older answer arrives last: what is shown is newer.
+    expect(reads.apply(older)).toBe(false);
   });
 
-  it('drops every request in flight once invalidated (page left, view unmounted)', () => {
-    const requests = createRequestSequence();
-    const inFlight = requests.next();
-    requests.invalidate();
-    expect(requests.isCurrent(inFlight)).toBe(false);
-    expect(requests.isCurrent(requests.next())).toBe(true);
+  it('keeps an older answer when the read started after it brings nothing', () => {
+    const reads = createRequestSequence();
+    const older = reads.next('page-1');
+    const failed = reads.next('page-1');
+    expect(reads.wanted(failed)).toBe(true);
+    // The newer read failed and applied nothing: the older answer still counts.
+    expect(reads.apply(older)).toBe(true);
+    expect(reads.wanted(failed)).toBe(true);
+  });
+
+  it('applies every answer of a burst in the order they arrive', () => {
+    const reads = createRequestSequence();
+    const tickets = [reads.next('page-1'), reads.next('page-1'), reads.next('page-1')];
+    expect(tickets.map(ticket => reads.apply(ticket))).toEqual([true, true, true]);
+  });
+
+  it('drops every read in flight when a read of another page starts', () => {
+    const reads = createRequestSequence();
+    const left = reads.next('page-1');
+    const opened = reads.next('page-2');
+    expect(reads.wanted(left)).toBe(false);
+    expect(reads.apply(left)).toBe(false);
+    expect(reads.apply(opened)).toBe(true);
+  });
+
+  it('lets a read follow the page in view only, without moving the view', () => {
+    const reads = createRequestSequence();
+    expect(reads.follow('page-1')).toBeNull();
+    const load = reads.next('page-2');
+    // An event for the page that was left starts nothing and drops nothing.
+    expect(reads.follow('page-1')).toBeNull();
+    const followed = reads.follow('page-2');
+    expect(followed).not.toBeNull();
+    expect(reads.apply(load)).toBe(true);
+    expect(reads.apply(followed as number)).toBe(true);
+  });
+
+  it('drops every read in flight once the view is left', () => {
+    const reads = createRequestSequence();
+    const inFlight = reads.next('page-1');
+    reads.leave();
+    expect(reads.wanted(inFlight)).toBe(false);
+    expect(reads.apply(inFlight)).toBe(false);
+    expect(reads.follow('page-1')).toBeNull();
+    expect(reads.apply(reads.next('page-1'))).toBe(true);
   });
 });

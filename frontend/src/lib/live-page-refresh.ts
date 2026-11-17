@@ -37,22 +37,45 @@ export async function refreshLivePageDetail(pageRef: string, current: LivePageDe
 }
 
 /**
- * Orders the reads of one view: only the answer to the latest request started
- * is applied, so a slow answer never replaces a newer one, and nothing is
- * applied once the view left the Page (`invalidate`).
+ * Orders the reads of one view. An answer is applied unless a read started
+ * after it was applied first, so a failed or slow read never costs the view
+ * an older good answer, and nothing is applied for a page the view left.
  */
 export interface RequestSequence {
-  /** A ticket for a request that starts now; it makes every earlier one stale. */
-  next: () => number;
-  isCurrent: (ticket: number) => boolean;
-  invalidate: () => void;
+  /** A ticket for a read of `page`. Reading another page drops every read in flight. */
+  next: (page: string) => number;
+  /** A ticket for a read that follows `page`, `null` when the view is not on it. */
+  follow: (page: string) => number | null;
+  /** Whether the answer of this read can still be used. */
+  wanted: (ticket: number) => boolean;
+  /** `true` when the answer of this read is the one to show; it then counts as shown. */
+  apply: (ticket: number) => boolean;
+  /** The view closed or shows no page: every read in flight is dropped. */
+  leave: () => void;
 }
 
 export function createRequestSequence(): RequestSequence {
-  let latest = 0;
+  let issued = 0;
+  let applied = 0;
+  let page: string | null = null;
+  const wanted = (ticket: number) => ticket > applied;
   return {
-    next: () => { latest += 1; return latest; },
-    isCurrent: ticket => ticket === latest,
-    invalidate: () => { latest += 1; },
+    next: target => {
+      if (target !== page) { page = target; applied = issued; }
+      issued += 1;
+      return issued;
+    },
+    follow: target => {
+      if (target !== page) return null;
+      issued += 1;
+      return issued;
+    },
+    wanted,
+    apply: ticket => {
+      if (!wanted(ticket)) return false;
+      applied = ticket;
+      return true;
+    },
+    leave: () => { page = null; applied = issued; },
   };
 }

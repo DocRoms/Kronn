@@ -306,18 +306,19 @@ export function PagesPage({
   const detailRef = useRef<LivePageDetail | null>(null);
   useEffect(() => { detailRef.current = detail; }, [detail]);
 
-  // Only the latest read started sets the Page shown, and only the latest
-  // load its panels: an answer that arrives late, or for a Page since left,
-  // is dropped.
+  // Answers are applied in the order their reads started, for the Page being
+  // read only: one that arrives after a newer one was shown, or for a Page
+  // since left, is dropped. The panels follow the same rule on their own.
   const [detailReads] = useState(createRequestSequence);
   const [pageLoads] = useState(createRequestSequence);
-  useEffect(() => () => { detailReads.invalidate(); pageLoads.invalidate(); }, [detailReads, pageLoads]);
+  // The Page `htmlDraft` was loaded from: a draft is saved into that Page only.
+  const draftPageRef = useRef<string | null>(null);
 
   // `incremental` is for the timer: an action the user took reads the whole Page.
   const loadDetail = useCallback(async (pageId: string, incremental = false) => {
     const known = incremental && detailRef.current?.id === pageId ? detailRef.current : null;
-    const read = detailReads.next();
-    const load = pageLoads.next();
+    const read = detailReads.next(pageId);
+    const load = pageLoads.next(pageId);
     const [[nextDetail, workflows, publications, discussions, pageRevisions, usage]] = await Promise.all([
       Promise.all([
         refreshLivePageDetail(pageId, known),
@@ -330,15 +331,19 @@ export function PagesPage({
       ]),
       reloadPageActions(pageId),
     ]);
-    if (detailReads.isCurrent(read)) setDetail(nextDetail);
-    if (!pageLoads.isCurrent(load)) return;
+    // The draft always comes with the Page it was read from.
+    if (detailReads.apply(read)) {
+      setDetail(nextDetail);
+      setHtmlDraft(nextDetail.revision.html);
+      draftPageRef.current = nextDetail.id;
+    }
+    if (!pageLoads.apply(load)) return;
     setDatasetUsage(usage);
     setLinkedWorkflows(workflows);
     setRecentPublications(publications);
     setLinkedDiscussions(discussions);
     setRevisions(pageRevisions);
     setComparisonRevisionId(null);
-    setHtmlDraft(nextDetail.revision.html);
   }, [detailReads, pageLoads, reloadPageActions]);
 
   const refresh = useCallback(async (selectedOverride?: string | null, incremental = false) => {
@@ -359,8 +364,9 @@ export function PagesPage({
       if (target) {
         await loadDetail(target, incremental);
       } else {
-        detailReads.invalidate();
-        pageLoads.invalidate();
+        detailReads.leave();
+        pageLoads.leave();
+        draftPageRef.current = null;
         setDetail(null);
         setDatasetUsage([]);
         setLinkedWorkflows([]);
@@ -413,12 +419,13 @@ export function PagesPage({
   // A publish reaches the open Page at once; HTML edits in progress are kept.
   useLivePageDataPush(selectedId, () => {
     const pageId = selectedId;
-    if (!pageId) return;
-    const known = detailRef.current?.id === pageId ? detailRef.current : null;
-    const read = detailReads.next();
-    void Promise.all([refreshLivePageDetail(pageId, known), reloadPageActions(pageId)]).then(([next]) => {
-      if (!detailReads.isCurrent(read)) return;
-      setDetail(current => (current && current.id === next.id ? next : current));
+    // The first load of a Page brings it with its panels: nothing to follow before.
+    if (!pageId || detailRef.current?.id !== pageId) return;
+    const read = detailReads.follow(pageId);
+    if (read === null) return;
+    void Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([next]) => {
+      if (detailRef.current?.id !== next.id || !detailReads.apply(read)) return;
+      setDetail(next);
     }).catch(() => { /* the poll retries */ });
   });
 
@@ -570,7 +577,7 @@ export function PagesPage({
   });
 
   const saveHtml = useCallback(() => {
-    if (!detail || !htmlDraft.trim()) return;
+    if (!detail || draftPageRef.current !== detail.id || !htmlDraft.trim()) return;
     void persistHtml(detail.id, htmlDraft);
   }, [detail, htmlDraft, persistHtml]);
 

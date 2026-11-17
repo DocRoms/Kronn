@@ -301,7 +301,7 @@ const zh: TranslationDict = {
   "pages.syncHistory": "同步历史",
   "pages.autoRefresh": "自动刷新",
   "pages.recentChangesHint": "最近 3 次更改数据的发布",
-  "pages.noRecentRefreshes": "尚无工作流刷新。",
+  "pages.noRecentRefreshes": "尚无工作流更改此页面的数据。",
   "pages.directPublication": "直接发布",
   "pages.refreshSynced": "已同步",
   "pages.refreshWaiting": "等待首次运行",

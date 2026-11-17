@@ -536,18 +536,24 @@ describe('PagesPage', () => {
   describe('answers out of order (KT-1819)', () => {
     function deferred<T>() {
       let resolve!: (value: T) => void;
-      const promise = new Promise<T>(done => { resolve = done; });
-      return { promise, resolve };
+      let reject!: (cause: Error) => void;
+      const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+      return { promise, resolve, reject };
     }
+    const other: LivePage = { ...page, id: 'page-2', title: 'Second', slug: 'second' };
+    const otherDetail: LivePageDetail = {
+      ...detail, ...other,
+      revision: { ...detail.revision, id: 'rev-b', page_id: other.id, html: '<h1>Second</h1>' },
+    };
     const revisionsPosted = (post: { mock: { calls: unknown[][] } }) => post.mock.calls
       .map(([message]) => message as { type?: string; data?: { page: { data_revision: number } } })
       .filter(message => message.type === 'kronn:page-data')
       .map(message => message.data!.page.data_revision);
-    const publish = async (revision: number) => {
+    const publish = async (revision: number, pageId = page.id) => {
       const { useWebSocket } = await import('../../hooks/useWebSocket');
       const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
       await act(async () => {
-        handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: revision }));
+        handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: pageId, data_revision: revision }));
       });
     };
 
@@ -570,25 +576,145 @@ describe('PagesPage', () => {
       expect(revisionsPosted(post)).toEqual([4]);
     });
 
-    it('drops a delta that answers after a full read started later', async () => {
+    it('shows a newly selected Page when a publish for it arrives during its first load', async () => {
+      const first = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      let reads = 0;
+      vi.mocked(pagesApi.get).mockImplementation(id => {
+        if (id !== other.id) return Promise.resolve(detail);
+        reads += 1;
+        return reads === 1 ? first.promise : Promise.resolve(otherDetail);
+      });
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(reads).toBe(1));
+      // The publish is read and answered while the first load is still out.
+      await publish(4, other.id);
+
+      await act(async () => { first.resolve(otherDetail); });
+
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+      // What the editor saves is the Page shown, with its own HTML.
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Second</h1>');
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1));
+      expect(pagesApi.updateHtml).toHaveBeenCalledWith(other.id, { html: '<h1>Second</h1>', created_by_agent: null });
+    });
+
+    it('never saves the HTML of one Page into another', async () => {
+      const first = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      let reads = 0;
+      vi.mocked(pagesApi.get).mockImplementation(id => {
+        if (id !== other.id) return Promise.resolve(detail);
+        reads += 1;
+        return reads === 1 ? first.promise : Promise.resolve(otherDetail);
+      });
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(reads).toBe(1));
+      await publish(4, other.id);
+      await act(async () => { first.resolve(otherDetail); });
+
+      // Whatever Page the editor is on, the HTML saved is that Page's own.
+      fireEvent.click(await screen.findByText('pages.editHtml'));
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1));
+
+      const [savedInto, saved] = vi.mocked(pagesApi.updateHtml).mock.calls[0];
+      const own = savedInto === other.id ? otherDetail.revision.html : detail.revision.html;
+      expect(saved.html).toBe(own);
+    });
+
+    it('opens the Page when a publish for it arrives during the very first load', async () => {
+      const first = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.get).mockReturnValueOnce(first.promise);
+      render(<PagesPage />);
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      await publish(4);
+
+      await act(async () => { first.resolve(detail); });
+
+      expect(await screen.findByTestId('live-page-frame')).toBeInTheDocument();
+    });
+
+    it('shows what an older read brought when the read started after it fails', async () => {
       render(<PagesPage />);
       const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
       const post = vi.spyOn(frame.contentWindow!, 'postMessage');
       const slow = deferred<{ page: LivePage; full: null; datasets: [] }>();
       vi.mocked(pagesApi.data).mockReturnValue(slow.promise);
       await publish(4);
-      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, data_revision: 5 });
+      // A full reload starts after it and fails on one of its panels.
+      vi.mocked(pagesApi.workflows).mockRejectedValueOnce(new Error('panel away'));
       fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
-      await waitFor(() => expect(revisionsPosted(post)).toEqual([5]));
+      await waitFor(() => expect(screen.getByText('panel away')).toBeInTheDocument());
 
       await act(async () => { slow.resolve({ page: { ...page, data_revision: 4 }, full: null, datasets: [] }); });
 
-      expect(revisionsPosted(post)).toEqual([5]);
+      expect(revisionsPosted(post)).toEqual([4]);
+    });
+
+    it('keeps updating during a burst of publishes that each start before the last one answered', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const answers = [4, 5, 6].map(() => deferred<{ page: LivePage; full: null; datasets: [] }>());
+      let burst = 0;
+      vi.mocked(pagesApi.data).mockImplementation(() => answers[burst].promise);
+      await publish(4);
+      burst = 1;
+      await publish(5);
+      burst = 2;
+      await publish(6);
+
+      await act(async () => { answers[0].resolve({ page: { ...page, data_revision: 4 }, full: null, datasets: [] }); });
+      expect(revisionsPosted(post).at(-1)).toBe(4);
+      await act(async () => { answers[1].resolve({ page: { ...page, data_revision: 5 }, full: null, datasets: [] }); });
+      expect(revisionsPosted(post).at(-1)).toBe(5);
+    });
+
+    it('shows nothing new of the Page it left while the next one is still loading', async () => {
+      const late = deferred<LivePageDetail>();
+      const next = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      vi.mocked(pagesApi.get).mockClear();
+      vi.mocked(pagesApi.get).mockImplementation(id => (id === other.id ? next.promise : late.promise));
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(page.id));
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(other.id));
+
+      await act(async () => { late.resolve({ ...detail, title: 'Adobe late' }); });
+
+      expect(screen.queryByRole('heading', { name: 'Adobe late' })).toBeNull();
+      await act(async () => { next.resolve(otherDetail); });
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+    });
+
+    it('stays empty when the read of a Page answers after the library lost every Page', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      const late = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.get).mockReturnValue(late.promise);
+      vi.mocked(pagesApi.get).mockClear();
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      vi.mocked(pagesApi.list).mockResolvedValue([]);
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(screen.queryByTestId('live-page-frame')).toBeNull());
+
+      await act(async () => { late.resolve(detail); });
+
+      expect(screen.queryByTestId('live-page-frame')).toBeNull();
     });
 
     it('ignores the late answer of the Page it left: neither its detail nor its panels come back', async () => {
-      const other: LivePage = { ...page, id: 'page-2', title: 'Second' };
-      const otherDetail: LivePageDetail = { ...detail, ...other };
       const late = deferred<LivePageDetail>();
       vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
       render(<PagesPage />);

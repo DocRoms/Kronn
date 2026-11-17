@@ -57,21 +57,20 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
     reload: reloadPageActions,
   } = useLivePageActions(() => setActionUnavailable(true));
 
-  // Only the answer to the latest read started for this Page is applied.
+  // Answers are applied in the order their reads started; one that arrives
+  // after a newer one was shown, or for a Page since left, is dropped.
   const [reads] = useState(createRequestSequence);
 
   useEffect(() => {
-    const ticket = reads.next();
+    const ticket = reads.next(pageId);
     Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
-      if (!reads.isCurrent(ticket)) return;
+      if (!reads.apply(ticket)) return;
       setDetail(page);
       setError(null);
     }).catch(cause => {
-      if (!reads.isCurrent(ticket)) return;
-      setError(userError(cause));
+      // Not when a read started later already brought the Page.
+      if (reads.wanted(ticket)) setError(userError(cause));
     });
-    // Leaving the Page (or closing the tab) drops every read in flight.
-    return () => { reads.invalidate(); };
   }, [pageId, reads, reloadPageActions]);
 
   // The snapshot a refresh starts from: only what changed since is read.
@@ -83,9 +82,12 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
   // by postMessage; the document is only rebuilt when the Page's HTML
   // changes, so scroll and open rows survive a refresh.
   const followPage = useCallback(() => {
-    const ticket = reads.next();
+    const ticket = reads.follow(pageId);
+    if (ticket === null) return;
     Promise.all([refreshLivePageDetail(pageId, detailRef.current), reloadPageActions(pageId)]).then(([page]) => {
-      if (reads.isCurrent(ticket)) setDetail(page);
+      if (!reads.apply(ticket)) return;
+      setDetail(page);
+      setError(null);
     }).catch(() => { /* keep the last view; the next read retries */ });
   }, [pageId, reads, reloadPageActions]);
 

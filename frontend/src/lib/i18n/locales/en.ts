@@ -302,7 +302,7 @@ const en: TranslationDict = {
   'pages.syncHistory': 'Sync history',
   'pages.autoRefresh': 'Automatic refresh',
   'pages.recentChangesHint': '3 latest publications that changed data',
-  'pages.noRecentRefreshes': 'No workflow refresh yet.',
+  'pages.noRecentRefreshes': 'No workflow has changed this Page\'s data yet.',
   'pages.directPublication': 'Direct publication',
   'pages.refreshSynced': 'Synced',
   'pages.refreshWaiting': 'Waiting for the first run',
