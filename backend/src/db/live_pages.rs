@@ -547,17 +547,18 @@ pub fn update_live_page_html(
 }
 
 /// A save refused because the Page's HTML moved past the revision the edit
-/// started from. Carries the current revision id.
+/// started from. Carries the current revision id, `None` for a Page left
+/// without one.
 #[derive(Debug)]
-pub struct HtmlRevisionConflict(pub String);
+pub struct HtmlRevisionConflict(pub Option<String>);
 
 impl std::fmt::Display for HtmlRevisionConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "The Page HTML changed since this edit started: its current revision is {}",
-            self.0
-        )
+        f.write_str("The Page HTML changed since this edit started: ")?;
+        match &self.0 {
+            Some(current) => write!(f, "its current revision is {current}"),
+            None => f.write_str("it has no current revision"),
+        }
     }
 }
 
@@ -576,12 +577,13 @@ pub fn update_live_page_html_from(
     let canonical_page_id =
         resolve_live_page_id(&tx, page_id)?.ok_or_else(|| anyhow!("Page not found"))?;
     if let Some(base) = base_revision_id {
-        let current: String = tx.query_row(
+        // The column is nullable: no revision is a state, never the base.
+        let current: Option<String> = tx.query_row(
             "SELECT current_revision_id FROM live_pages WHERE id = ?1",
             [&canonical_page_id],
             |row| row.get(0),
         )?;
-        if current != base {
+        if current.as_deref() != Some(base) {
             return Err(HtmlRevisionConflict(current).into());
         }
     }

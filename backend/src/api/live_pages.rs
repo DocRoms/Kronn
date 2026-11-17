@@ -453,12 +453,28 @@ pub async fn unlink_discussion(
 }
 
 pub async fn update_html(
+    state: State<AppState>,
+    id: Path<String>,
+    request: Json<UpdateLivePageHtmlRequest>,
+) -> Json<ApiResponse<LivePageRevision>> {
+    Json(save_html(state, id, request).await.0)
+}
+
+/// A save refused for a stale base: the revision the Page has now, if any.
+struct HtmlConflict(Option<String>);
+
+/// The answer of an HTML save and, when it was refused for a stale base,
+/// the conflict it names.
+async fn save_html(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<UpdateLivePageHtmlRequest>,
-) -> Json<ApiResponse<LivePageRevision>> {
+) -> (ApiResponse<LivePageRevision>, Option<HtmlConflict>) {
     if let Err(message) = validate_page_html(&request.html) {
-        return Json(ApiResponse::err_coded(ApiErrorCode::Validation, message));
+        return (
+            ApiResponse::err_coded(ApiErrorCode::Validation, message),
+            None,
+        );
     }
     let notice = page_html_weight_notice(request.html.len());
     let html = request.html;
@@ -477,34 +493,54 @@ pub async fn update_html(
         })
         .await
     {
-        Ok(revision) => Json(ApiResponse::ok(revision).with_notice(notice)),
-        Err(error) if error.to_string().contains("Page not found") => Json(ApiResponse::err_coded(
-            ApiErrorCode::NotFound,
-            "Page not found",
-        )),
-        Err(error) if error.is::<crate::db::live_pages::HtmlRevisionConflict>() => Json(
-            ApiResponse::err_coded(ApiErrorCode::Conflict, error.to_string()),
+        Ok(revision) => (ApiResponse::ok(revision).with_notice(notice), None),
+        Err(error) if error.to_string().contains("Page not found") => (
+            ApiResponse::err_coded(ApiErrorCode::NotFound, "Page not found"),
+            None,
         ),
-        Err(error) => Json(ApiResponse::err_coded(
-            ApiErrorCode::Internal,
-            format!("Unable to update Page HTML: {error}"),
-        )),
+        Err(error) => match error.downcast_ref::<crate::db::live_pages::HtmlRevisionConflict>() {
+            Some(conflict) => (
+                ApiResponse::err_coded(ApiErrorCode::Conflict, error.to_string()),
+                Some(HtmlConflict(conflict.0.clone())),
+            ),
+            None => (
+                ApiResponse::err_coded(
+                    ApiErrorCode::Internal,
+                    format!("Unable to update Page HTML: {error}"),
+                ),
+                None,
+            ),
+        },
     }
 }
 
-/// `PUT /api/pages/{id}/html`: a save refused for a stale base answers 409.
+/// The 409 of an HTML save: the usual envelope and the revision to save over.
+#[derive(serde::Serialize)]
+struct HtmlConflictAnswer {
+    #[serde(flatten)]
+    envelope: ApiResponse<LivePageRevision>,
+    current_revision_id: Option<String>,
+}
+
+/// `PUT /api/pages/{id}/html`: a save refused for a stale base answers 409
+/// and names the Page's current revision in `current_revision_id`.
 pub async fn update_html_route(
     state: State<AppState>,
     id: Path<String>,
     request: Json<UpdateLivePageHtmlRequest>,
-) -> (axum::http::StatusCode, Json<ApiResponse<LivePageRevision>>) {
-    let Json(response) = update_html(state, id, request).await;
-    let status = if response.error_code.as_deref() == Some(ApiErrorCode::Conflict.as_str()) {
-        axum::http::StatusCode::CONFLICT
-    } else {
-        axum::http::StatusCode::OK
-    };
-    (status, Json(response))
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match save_html(state, id, request).await {
+        (envelope, Some(HtmlConflict(current_revision_id))) => (
+            axum::http::StatusCode::CONFLICT,
+            Json(HtmlConflictAnswer {
+                envelope,
+                current_revision_id,
+            }),
+        )
+            .into_response(),
+        (envelope, None) => Json(envelope).into_response(),
+    }
 }
 
 pub async fn create(

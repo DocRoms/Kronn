@@ -3570,6 +3570,58 @@ async fn artifact_roundtrip_imports_legacy_values_exports_bare_and_reuses_previo
 }
 
 #[tokio::test]
+async fn a_page_html_save_from_a_stale_base_answers_409_with_the_current_revision() {
+    let app = build_router_with_auth(test_state(), false);
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/pages",
+        serde_json::json!({"title": "Board", "slug": "board", "html": "<p>first</p>", "datasets": []}),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap();
+    let first = created["data"]["current_revision_id"].as_str().unwrap();
+    let uri = format!("/api/pages/{id}/html");
+
+    let (status, second) = put_json_root(
+        app.clone(),
+        &uri,
+        serde_json::json!({"html": "<p>second</p>", "base_revision_id": first}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+
+    let (status, refused) = put_json_root(
+        app.clone(),
+        &uri,
+        serde_json::json!({"html": "<p>stale</p>", "base_revision_id": first}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["success"], false, "{refused}");
+    assert_eq!(refused["error_code"], "conflict", "{refused}");
+    assert_eq!(
+        refused["current_revision_id"], second["data"]["id"],
+        "{refused}"
+    );
+
+    // A caller that names no base saves as before.
+    let (status, third) = put_json_root(
+        app.clone(),
+        &uri,
+        serde_json::json!({"html": "<p>third</p>"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{third}");
+    assert_eq!(third["data"]["revision"], 3, "{third}");
+    let (_, detail) = get_json(app, &format!("/api/pages/{id}")).await;
+    assert_eq!(
+        detail["data"]["revision"]["html"], "<p>third</p>",
+        "{detail}"
+    );
+}
+
+#[tokio::test]
 async fn an_imported_artifact_is_read_incrementally_like_any_other_page() {
     let (source, _) = workflow_portability_fixture().await;
     let (_, exported) = get_json(

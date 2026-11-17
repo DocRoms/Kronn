@@ -569,12 +569,14 @@ async fn updated_html_falls_back_to_the_full_state() {
     assert!(current.full.is_none(), "the reader shows the current HTML");
 }
 
+/// The status and the JSON body of `PUT /api/pages/board/html`.
 async fn save_html(
     state: &AppState,
     html: &str,
     base: Option<&str>,
-) -> (axum::http::StatusCode, ApiResponse<LivePageRevision>) {
-    let (status, Json(response)) = update_html_route(
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use axum::response::IntoResponse;
+    let response = update_html_route(
         State(state.clone()),
         Path("board".into()),
         Json(UpdateLivePageHtmlRequest {
@@ -583,8 +585,13 @@ async fn save_html(
             base_revision_id: base.map(str::to_owned),
         }),
     )
-    .await;
-    (status, response)
+    .await
+    .into_response();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
 }
 
 #[tokio::test]
@@ -594,18 +601,19 @@ async fn an_html_save_from_a_stale_base_is_refused_and_writes_nothing() {
 
     let (status, saved) = save_html(&state, "<p>second</p>", Some(first)).await;
     assert_eq!(status, axum::http::StatusCode::OK, "the base is current");
-    let second = saved.data.expect("saved").id;
+    let second = saved["data"]["id"].as_str().expect("saved").to_owned();
 
     // Another editor still holds the first revision.
     let (status, refused) = save_html(&state, "<p>stale</p>", Some(first)).await;
 
     assert_eq!(status, axum::http::StatusCode::CONFLICT);
-    assert!(!refused.success);
-    assert_eq!(refused.error_code.as_deref(), Some("conflict"));
-    assert!(
-        refused.error.unwrap().contains(&second),
-        "the refusal names the current revision"
+    assert_eq!(refused["success"], false);
+    assert_eq!(refused["error_code"], "conflict");
+    assert_eq!(
+        refused["current_revision_id"], second,
+        "the refusal names the current revision: {refused}"
     );
+    assert!(refused["error"].as_str().unwrap().contains(&second));
     let page = detail(&state).await;
     assert_eq!(page.revision.id, second);
     assert_eq!(page.revision.html, "<p>second</p>");
@@ -615,7 +623,31 @@ async fn an_html_save_from_a_stale_base_is_refused_and_writes_nothing() {
     // Saving over it names the revision the user was shown.
     let (status, over) = save_html(&state, "<p>stale</p>", Some(&second)).await;
     assert_eq!(status, axum::http::StatusCode::OK);
-    assert_eq!(detail(&state).await.revision.id, over.data.unwrap().id);
+    assert_eq!(detail(&state).await.revision.id, over["data"]["id"]);
+}
+
+#[tokio::test]
+async fn an_html_save_from_a_base_is_refused_when_the_page_has_no_revision() {
+    let (state, created) = seeded().await;
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute("UPDATE live_pages SET current_revision_id = NULL", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (status, refused) = save_html(&state, "<p>stale</p>", Some(&created.revision.id)).await;
+
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error_code"], "conflict");
+    assert!(refused["current_revision_id"].is_null(), "{refused}");
+
+    // A save that names no base gives the Page a revision again.
+    let (status, saved) = save_html(&state, "<p>back</p>", None).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{saved}");
+    assert_eq!(detail(&state).await.revision.html, "<p>back</p>");
 }
 
 #[tokio::test]
@@ -626,7 +658,7 @@ async fn an_html_save_without_a_base_is_never_refused() {
     let (status, saved) = save_html(&state, "<p>third</p>", None).await;
 
     assert_eq!(status, axum::http::StatusCode::OK);
-    assert!(saved.success, "{:?}", saved.error);
+    assert_eq!(saved["success"], true, "{saved}");
     assert_eq!(detail(&state).await.revision.html, "<p>third</p>");
 }
 
