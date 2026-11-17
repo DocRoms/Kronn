@@ -12615,7 +12615,12 @@ export type UpdateLivePageDatasetRequest = { max_points?: number, max_age_days?:
 
 export type UpdateLivePageDatasetResult = { dataset: LivePageDataset, points_removed: number, data_revision: number, };
 
-export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
+export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null,
+/**
+ * The HTML revision this edit started from. When given and no longer
+ * the Page's current one, the save is refused instead of overwriting.
+ */
+base_revision_id?: string, };
 
 export type UpdateLivePageRequest = { title?: string | null,
 /**

@@ -287,6 +287,11 @@ pub struct LinkLivePageDiscussionRequest {
 pub struct UpdateLivePageHtmlRequest {
     pub html: String,
     pub created_by_agent: Option<String>,
+    /// The HTML revision this edit started from. When given and no longer
+    /// the Page's current one, the save is refused instead of overwriting.
+    #[serde(default)]
+    #[ts(optional)]
+    pub base_revision_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

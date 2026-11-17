@@ -63,6 +63,7 @@ import {
 import { useLivePageDataPush } from '../hooks/useLivePageDataPush';
 import { createRequestSequence, refreshLivePageDetail, replacesShown } from '../lib/live-page-refresh';
 import { userError } from '../lib/userError';
+import { ApiRequestError } from '../lib/apiRequestError';
 import {
   livePageMosaicLayouts,
   standaloneLivePageMosaicUrl,
@@ -284,7 +285,6 @@ export function PagesPage({
   } = useLivePageActions(() => setError(t('disc.action.unavailablePageAction')));
   const [bridgeChannel] = useState(channelId);
   const selectedIdRef = useRef(selectedId);
-  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   // The ref moves with the choice, not a render later: a reload that returns
   // from the network checks it before it touches the view.
   const choosePage = useCallback((pageId: string | null) => {
@@ -332,7 +332,6 @@ export function PagesPage({
   // Nothing typed for one Page stays open over another.
   const closeEditors = useCallback(() => {
     setEditingHtml(false);
-    setHtmlConflict(false);
     setEditingTitle(false);
     setTitleError(null);
   }, []);
@@ -414,10 +413,8 @@ export function PagesPage({
     }
   }, [choosePage, closeEditors, detailReads, loadDetail, pageLoads, putDetail, reloadPageActions]);
 
-  // `refresh` is rebuilt whenever `selectedId` changes, including from inside
-  // its own call and from `select`. Depending on it directly would re-run the
-  // mount effect on every such change and double the GET /pages/{id} that
-  // call already made — read the latest closure through a ref instead.
+  // The mount effect and the timer call `refresh` through a ref: depending
+  // on it directly would run them again each time it is rebuilt.
   const refreshRef = useRef(refresh);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
 
@@ -589,12 +586,26 @@ export function PagesPage({
     };
   }, [sidePanel, closeSidePanel]);
 
-  const persistHtml = useAsyncGuard(async (pageId: string, html: string) => {
+  // `base` is the HTML revision the draft started from: the server refuses
+  // the save when the Page has another one by then, whoever saved it.
+  const persistHtml = useAsyncGuard(async (pageId: string, html: string, base: string | null) => {
     setSavingHtml(true);
     try {
-      await pagesApi.updateHtml(pageId, { html, created_by_agent: null });
+      let saved: LivePageRevision;
+      try {
+        saved = await pagesApi.updateHtml(pageId, { html, created_by_agent: null, base_revision_id: base ?? undefined });
+      } catch (cause) {
+        if (!(cause instanceof ApiRequestError) || cause.code !== 'conflict') throw cause;
+        if (selectedIdRef.current !== pageId) return;
+        setHtmlConflict(true);
+        // Bring the HTML that was saved meanwhile: the draft stays as typed.
+        await loadDetail(pageId).catch(() => undefined);
+        return;
+      }
       // Saved for a Page the user has left: the view stays where it is.
       if (selectedIdRef.current !== pageId) return;
+      // The draft now starts from the revision it just created.
+      draftBaseRef.current = saved.id;
       await loadDetail(pageId);
       if (selectedIdRef.current !== pageId) return;
       setEditingHtml(false);
@@ -622,19 +633,16 @@ export function PagesPage({
 
   const saveHtml = useCallback(() => {
     if (!detail || !htmlDraft.trim()) return;
-    // Someone saved other HTML since the editor opened: the user decides.
-    if (draftBaseRef.current !== detail.revision.id) {
-      setHtmlConflict(true);
-      return;
-    }
-    void persistHtml(detail.id, htmlDraft);
+    // The server compares the base with the Page's HTML: it alone knows.
+    void persistHtml(detail.id, htmlDraft, draftBaseRef.current);
   }, [detail, htmlDraft, persistHtml]);
 
   const overwriteHtml = useCallback(() => {
     if (!detail || !htmlDraft.trim()) return;
+    // Over the revision shown, and only that one: a later one is refused again.
     draftBaseRef.current = detail.revision.id;
     setHtmlConflict(false);
-    void persistHtml(detail.id, htmlDraft);
+    void persistHtml(detail.id, htmlDraft, detail.revision.id);
   }, [detail, htmlDraft, persistHtml]);
 
   const reloadHtmlDraft = useCallback(() => {
@@ -1442,8 +1450,8 @@ export function PagesPage({
                 {htmlConflict && (
                   <div className="live-pages-error live-pages-editor-conflict" role="alert">
                     <span>{t('pages.htmlChangedElsewhere')}</span>
-                    <button type="button" onClick={reloadHtmlDraft}>{t('pages.htmlReloadDraft')}</button>
-                    <button type="button" onClick={overwriteHtml} disabled={savingHtml}>{t('pages.htmlOverwrite')}</button>
+                    <button type="button" className="live-pages-restore-revision" onClick={reloadHtmlDraft}>{t('pages.htmlReloadDraft')}</button>
+                    <button type="button" className="live-pages-restore-revision" onClick={overwriteHtml} disabled={savingHtml}>{t('pages.htmlOverwrite')}</button>
                   </div>
                 )}
                 {comparisonRevision ? (

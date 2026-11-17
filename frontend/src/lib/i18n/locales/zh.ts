@@ -302,7 +302,7 @@ const zh: TranslationDict = {
   "pages.autoRefresh": "自动刷新",
   "pages.recentChangesHint": "最近 3 次更改数据的发布",
   "pages.noRecentRefreshes": "尚无工作流更改此页面的数据。",
-  "pages.htmlChangedElsewhere": "自您打开编辑器以来，此页面的 HTML 已更改。",
+  "pages.htmlChangedElsewhere": "自您打开编辑器以来，此页面的 HTML 已更改。采用新的 HTML 将丢弃您输入的内容。",
   "pages.htmlReloadDraft": "采用新的 HTML",
   "pages.htmlOverwrite": "覆盖保存",
   "pages.directPublication": "直接发布",

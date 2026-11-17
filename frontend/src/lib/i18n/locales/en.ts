@@ -303,7 +303,7 @@ const en: TranslationDict = {
   'pages.autoRefresh': 'Automatic refresh',
   'pages.recentChangesHint': '3 latest publications that changed data',
   'pages.noRecentRefreshes': 'No workflow has changed this Page\'s data yet.',
-  'pages.htmlChangedElsewhere': 'The HTML of this Page changed since you opened the editor.',
+  'pages.htmlChangedElsewhere': 'The HTML of this Page changed since you opened the editor. Taking the new HTML discards what you typed.',
   'pages.htmlReloadDraft': 'Take the new HTML',
   'pages.htmlOverwrite': 'Save over it',
   'pages.directPublication': 'Direct publication',

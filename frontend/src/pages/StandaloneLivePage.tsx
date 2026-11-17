@@ -58,8 +58,8 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
   } = useLivePageActions(() => setActionUnavailable(true));
 
   // The snapshot a refresh starts from: only what changed since is read.
+  // Written with the state, never a render later.
   const detailRef = useRef<LivePageDetail | null>(null);
-  useEffect(() => { detailRef.current = detail; }, [detail]);
 
   // Answers are applied in the order their reads started; one that arrives
   // after a newer one was shown, or for a Page since left, is dropped.

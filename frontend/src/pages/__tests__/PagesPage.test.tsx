@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { ApiRequestError } from '../../lib/apiRequestError';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -600,7 +601,7 @@ describe('PagesPage', () => {
       expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Second</h1>');
       fireEvent.click(screen.getByText('pages.saveRevision'));
       await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1));
-      expect(pagesApi.updateHtml).toHaveBeenCalledWith(other.id, { html: '<h1>Second</h1>', created_by_agent: null });
+      expect(pagesApi.updateHtml).toHaveBeenCalledWith(other.id, { html: '<h1>Second</h1>', created_by_agent: null, base_revision_id: 'rev-b' });
     });
 
     it('never saves the HTML of one Page into another', async () => {
@@ -781,39 +782,166 @@ describe('PagesPage', () => {
       expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
     });
 
-    it('asks before saving over HTML that changed since the editor opened', async () => {
+    // Another editor saved r3 while this one was open on r2: nothing told this view.
+    const anotherEditorSaved = (current: LivePageDetail = agentDetail) => {
+      vi.mocked(pagesApi.updateHtml).mockRejectedValueOnce(new ApiRequestError('The Page HTML changed', 'conflict'));
+      vi.mocked(pagesApi.get).mockResolvedValue(current);
+    };
+    const typeHtml = async (html = '<h1>typed</h1>') => {
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      fireEvent.change(screen.getByLabelText('pages.htmlTitle'), { target: { value: html } });
+    };
+    const savedWith = () => vi.mocked(pagesApi.updateHtml).mock.calls.map(([, request]) => request);
+
+    it('asks before saving over HTML the server says changed since the editor opened', async () => {
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');
-      fireEvent.click(screen.getByText('pages.editHtml'));
-      fireEvent.change(screen.getByLabelText('pages.htmlTitle'), { target: { value: '<h1>typed</h1>' } });
-      await agentSavesHtml();
+      await typeHtml();
+      anotherEditorSaved();
 
       fireEvent.click(screen.getByText('pages.saveRevision'));
 
       expect(await screen.findByText('pages.htmlChangedElsewhere')).toBeInTheDocument();
-      expect(pagesApi.updateHtml).not.toHaveBeenCalled();
+      expect(savedWith()).toEqual([{ html: '<h1>typed</h1>', created_by_agent: null, base_revision_id: 'rev-2' }]);
       expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
 
+      // Saving over it names the revision the user was just told about.
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(2));
+      vi.mocked(pagesApi.updateHtml).mockResolvedValue({ ...agentDetail.revision, id: 'rev-4', revision: 4 });
       fireEvent.click(screen.getByText('pages.htmlOverwrite'));
-      await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledWith(page.id, { html: '<h1>typed</h1>', created_by_agent: null }));
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1]).toEqual({ html: '<h1>typed</h1>', created_by_agent: null, base_revision_id: 'rev-3' });
+    });
+
+    it('asks again when yet another revision lands before the user saves over the first', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      anotherEditorSaved();
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('pages.htmlChangedElsewhere');
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(2));
+      const fourth: LivePageDetail = {
+        ...agentDetail, current_revision_id: 'rev-4',
+        revision: { ...agentDetail.revision, id: 'rev-4', revision: 4, html: '<h1>fourth</h1>' },
+      };
+      anotherEditorSaved(fourth);
+
+      fireEvent.click(screen.getByText('pages.htmlOverwrite'));
+
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1].base_revision_id).toBe('rev-3');
+      // Refused again: the notice is back, the fourth revision was not overwritten.
+      expect(await screen.findByText('pages.htmlChangedElsewhere')).toBeInTheDocument();
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>typed</h1>');
     });
 
     it('lets the user take the HTML that changed instead of saving over it', async () => {
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');
-      fireEvent.click(screen.getByText('pages.editHtml'));
-      fireEvent.change(screen.getByLabelText('pages.htmlTitle'), { target: { value: '<h1>typed</h1>' } });
-      await agentSavesHtml();
+      await typeHtml();
+      anotherEditorSaved();
       fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('pages.htmlChangedElsewhere');
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(2));
 
-      fireEvent.click(await screen.findByText('pages.htmlReloadDraft'));
+      fireEvent.click(screen.getByText('pages.htmlReloadDraft'));
 
       expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml);
       expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
-      expect(pagesApi.updateHtml).not.toHaveBeenCalled();
       // The draft now starts from that revision: saving it is no conflict.
+      vi.mocked(pagesApi.updateHtml).mockResolvedValue({ ...agentDetail.revision, id: 'rev-4', revision: 4 });
       fireEvent.click(screen.getByText('pages.saveRevision'));
-      await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledWith(page.id, { html: agentHtml, created_by_agent: null }));
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1]).toEqual({ html: agentHtml, created_by_agent: null, base_revision_id: 'rev-3' });
+    });
+
+    it('does not conflict with its own save when the reload after it fails', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      vi.mocked(pagesApi.workflows).mockRejectedValueOnce(new Error('panel away'));
+
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('panel away');
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith().map(request => request.base_revision_id)).toEqual(['rev-2', 'rev-3']);
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+    });
+
+    it('saves again from the revision it just created', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      vi.mocked(pagesApi.get).mockResolvedValue({
+        ...agentDetail, revision: { ...agentDetail.revision, html: '<h1>typed</h1>' },
+      });
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await waitFor(() => expect(screen.queryByLabelText('pages.htmlTitle')).toBeNull());
+
+      vi.mocked(pagesApi.updateHtml).mockResolvedValue({ ...agentDetail.revision, id: 'rev-4', revision: 4 });
+      await typeHtml('<h1>again</h1>');
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+
+      await waitFor(() => expect(savedWith()).toHaveLength(2));
+      expect(savedWith()[1]).toEqual({ html: '<h1>again</h1>', created_by_agent: null, base_revision_id: 'rev-3' });
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+    });
+
+    it('forgets the conflict when the editor is closed', async () => {
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      anotherEditorSaved();
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('pages.htmlChangedElsewhere');
+
+      fireEvent.click(screen.getByText('pages.closeEditor'));
+      fireEvent.click(screen.getByText('pages.editHtml'));
+
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+    });
+
+    it('forgets the conflict when the user opens another Page', async () => {
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      anotherEditorSaved();
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('pages.htmlChangedElsewhere');
+      vi.mocked(pagesApi.get).mockImplementation(async id => (id === other.id ? otherDetail : agentDetail));
+
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+      fireEvent.click(screen.getByText('pages.editHtml'));
+
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Second</h1>');
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+    });
+
+    it('leaves a whole-Page answer with older data to the next incremental read', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      vi.mocked(pagesApi.data).mockResolvedValue({ page: { ...page, data_revision: 4 }, full: null, datasets: [] });
+      await publish(4);
+      await waitFor(() => expect(revisionsPosted(post).at(-1)).toBe(4));
+      // A whole-Page read answers with revision 3: served early, or a restored database.
+      vi.mocked(pagesApi.get).mockClear();
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+      expect(revisionsPosted(post).at(-1)).toBe(4);
+
+      // The incremental read says the server really is at 3: its full answer is shown.
+      vi.mocked(pagesApi.data).mockResolvedValue({ page, full: detail, datasets: [] });
+      await publish(3);
+
+      await waitFor(() => expect(revisionsPosted(post).at(-1)).toBe(3));
+      expect(vi.mocked(pagesApi.data).mock.calls.at(-1)?.[1]).toBe(4);
     });
 
     it('never saves a title typed on one Page into another', async () => {
@@ -1183,6 +1311,7 @@ describe('PagesPage', () => {
     await waitFor(() => expect(pagesApi.updateHtml).toHaveBeenCalledWith(page.id, {
       html: '<h1>Nouvelle révision</h1>',
       created_by_agent: null,
+      base_revision_id: 'rev-2',
     }));
     expect(pagesApi.updateHtml).toHaveBeenCalledTimes(1);
   });

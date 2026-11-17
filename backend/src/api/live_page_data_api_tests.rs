@@ -569,6 +569,67 @@ async fn updated_html_falls_back_to_the_full_state() {
     assert!(current.full.is_none(), "the reader shows the current HTML");
 }
 
+async fn save_html(
+    state: &AppState,
+    html: &str,
+    base: Option<&str>,
+) -> (axum::http::StatusCode, ApiResponse<LivePageRevision>) {
+    let (status, Json(response)) = update_html_route(
+        State(state.clone()),
+        Path("board".into()),
+        Json(UpdateLivePageHtmlRequest {
+            html: html.into(),
+            created_by_agent: None,
+            base_revision_id: base.map(str::to_owned),
+        }),
+    )
+    .await;
+    (status, response)
+}
+
+#[tokio::test]
+async fn an_html_save_from_a_stale_base_is_refused_and_writes_nothing() {
+    let (state, created) = seeded().await;
+    let first = created.revision.id.as_str();
+
+    let (status, saved) = save_html(&state, "<p>second</p>", Some(first)).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "the base is current");
+    let second = saved.data.expect("saved").id;
+
+    // Another editor still holds the first revision.
+    let (status, refused) = save_html(&state, "<p>stale</p>", Some(first)).await;
+
+    assert_eq!(status, axum::http::StatusCode::CONFLICT);
+    assert!(!refused.success);
+    assert_eq!(refused.error_code.as_deref(), Some("conflict"));
+    assert!(
+        refused.error.unwrap().contains(&second),
+        "the refusal names the current revision"
+    );
+    let page = detail(&state).await;
+    assert_eq!(page.revision.id, second);
+    assert_eq!(page.revision.html, "<p>second</p>");
+    let Json(history) = revisions(State(state.clone()), Path("board".into())).await;
+    assert_eq!(history.data.unwrap().len(), 2, "no revision was written");
+
+    // Saving over it names the revision the user was shown.
+    let (status, over) = save_html(&state, "<p>stale</p>", Some(&second)).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(detail(&state).await.revision.id, over.data.unwrap().id);
+}
+
+#[tokio::test]
+async fn an_html_save_without_a_base_is_never_refused() {
+    let (state, _) = seeded().await;
+    save_html(&state, "<p>second</p>", None).await;
+
+    let (status, saved) = save_html(&state, "<p>third</p>", None).await;
+
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(saved.success, "{:?}", saved.error);
+    assert_eq!(detail(&state).await.revision.html, "<p>third</p>");
+}
+
 #[tokio::test]
 async fn a_pruned_journal_falls_back_to_the_full_state() {
     let (state, created) = seeded().await;

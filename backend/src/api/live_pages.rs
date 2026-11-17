@@ -463,10 +463,17 @@ pub async fn update_html(
     let notice = page_html_weight_notice(request.html.len());
     let html = request.html;
     let actor = request.created_by_agent;
+    let base = request.base_revision_id;
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::live_pages::update_live_page_html(conn, &id, &html, actor.as_deref())
+            crate::db::live_pages::update_live_page_html_from(
+                conn,
+                &id,
+                &html,
+                actor.as_deref(),
+                base.as_deref(),
+            )
         })
         .await
     {
@@ -475,11 +482,29 @@ pub async fn update_html(
             ApiErrorCode::NotFound,
             "Page not found",
         )),
+        Err(error) if error.is::<crate::db::live_pages::HtmlRevisionConflict>() => Json(
+            ApiResponse::err_coded(ApiErrorCode::Conflict, error.to_string()),
+        ),
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
             format!("Unable to update Page HTML: {error}"),
         )),
     }
+}
+
+/// `PUT /api/pages/{id}/html`: a save refused for a stale base answers 409.
+pub async fn update_html_route(
+    state: State<AppState>,
+    id: Path<String>,
+    request: Json<UpdateLivePageHtmlRequest>,
+) -> (axum::http::StatusCode, Json<ApiResponse<LivePageRevision>>) {
+    let Json(response) = update_html(state, id, request).await;
+    let status = if response.error_code.as_deref() == Some(ApiErrorCode::Conflict.as_str()) {
+        axum::http::StatusCode::CONFLICT
+    } else {
+        axum::http::StatusCode::OK
+    };
+    (status, Json(response))
 }
 
 pub async fn create(

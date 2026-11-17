@@ -543,9 +543,48 @@ pub fn update_live_page_html(
     html: &str,
     created_by_agent: Option<&str>,
 ) -> Result<LivePageRevision> {
+    update_live_page_html_from(conn, page_id, html, created_by_agent, None)
+}
+
+/// A save refused because the Page's HTML moved past the revision the edit
+/// started from. Carries the current revision id.
+#[derive(Debug)]
+pub struct HtmlRevisionConflict(pub String);
+
+impl std::fmt::Display for HtmlRevisionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The Page HTML changed since this edit started: its current revision is {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for HtmlRevisionConflict {}
+
+/// Saves a new HTML revision. With `base_revision_id`, only if that is still
+/// the Page's current revision: the check and the write share a transaction.
+pub fn update_live_page_html_from(
+    conn: &Connection,
+    page_id: &str,
+    html: &str,
+    created_by_agent: Option<&str>,
+    base_revision_id: Option<&str>,
+) -> Result<LivePageRevision> {
     let tx = conn.unchecked_transaction()?;
     let canonical_page_id =
         resolve_live_page_id(&tx, page_id)?.ok_or_else(|| anyhow!("Page not found"))?;
+    if let Some(base) = base_revision_id {
+        let current: String = tx.query_row(
+            "SELECT current_revision_id FROM live_pages WHERE id = ?1",
+            [&canonical_page_id],
+            |row| row.get(0),
+        )?;
+        if current != base {
+            return Err(HtmlRevisionConflict(current).into());
+        }
+    }
     let next_revision: i64 = tx.query_row(
         "SELECT COALESCE(MAX(revision), 0) + 1 FROM live_page_revisions WHERE page_id = ?1",
         [&canonical_page_id],

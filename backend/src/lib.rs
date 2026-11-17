@@ -1599,7 +1599,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route(
             "/api/pages/{id}/html",
-            put(api::live_pages::update_html)
+            put(api::live_pages::update_html_route)
                 .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route(
