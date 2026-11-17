@@ -976,6 +976,37 @@ describe('PagesPage', () => {
       await conflictShown();
     });
 
+    it('leaves nothing of a conflict on the Page the user opens while its HTML is still being read', async () => {
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      await typeHtml();
+      refusedFor('rev-3');
+      let arrive: (detail: LivePageDetail) => void = () => {};
+      vi.mocked(pagesApi.get).mockReturnValueOnce(new Promise(resolve => { arrive = resolve; }));
+      fireEvent.click(screen.getByText('pages.saveRevision'));
+      await screen.findByText('pages.htmlChangedElsewhere');
+      vi.mocked(pagesApi.get).mockImplementation(async id => (id === other.id ? otherDetail : agentDetail));
+
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+      // The read of the first Page lands late: the second one stays as it is.
+      await act(async () => { arrive(agentDetail); });
+      expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument();
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue('<h1>Second</h1>');
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+
+      // Back on the first Page, the editor opens on its HTML with no notice left.
+      fireEvent.click(getCanonicalPageRow(page.title));
+      await waitFor(() => expect(screen.getByRole('heading', { name: page.title })).toBeInTheDocument());
+      fireEvent.click(screen.getByText('pages.editHtml'));
+      expect(screen.getByLabelText('pages.htmlTitle')).toHaveValue(agentHtml);
+      expect(screen.queryByText('pages.htmlChangedElsewhere')).toBeNull();
+      expect(screen.getByText('pages.saveRevision')).toBeEnabled();
+    });
+
     it('saves over the revision the server named, not a later one the view has read', async () => {
       render(<PagesPage />);
       await screen.findByTestId('live-page-frame');

@@ -603,7 +603,11 @@ export function PagesPage({
   // user is asked about out of the view.
   const readConflictingHtml = useCallback(async (pageId: string) => {
     const read = detailReads.follow(pageId);
-    if (read === null) return;
+    if (read === null) {
+      // The view is not reading this Page right now: say so, the retry reads it.
+      setHtmlConflict(conflict => conflict && { ...conflict, read: 'failed' });
+      return;
+    }
     setHtmlConflict(conflict => conflict && { ...conflict, read: 'reading' });
     try {
       const fresh = await pagesApi.get(pageId);
