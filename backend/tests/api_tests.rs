@@ -32932,6 +32932,125 @@ async fn workflow_import_accepts_a_shadow_pin_to_a_bundled_skill_absent_locally(
     assert!(imported.get("notice").is_none(), "{imported}");
 }
 
+/// A pin to a version neither the file nor this Kronn has is reported, for a
+/// shadow and for a bundled Quick Prompt: both would load nothing for it.
+#[tokio::test]
+async fn workflow_import_reports_a_pinned_version_that_exists_nowhere() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_import_reports_a_pinned_version_that_exists_nowhere",
+    ) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(test_state(), false);
+    let skill = create_skill(app.clone(), "Versioned review", "Check the versions.").await;
+    let (_, prompt) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({
+            "name": "Versioned prompt", "prompt_template": "Review", "variables": [],
+            "skill_ids": [format!("{skill}@1")],
+        }),
+    )
+    .await;
+    assert_eq!(prompt["success"], true, "{prompt}");
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Versioned", "project_id": null, "trigger": {"type": "Manual"},
+            "steps": [
+                {"name": "review", "step_type": {"type": "Agent"},
+                 "prompt_template": "Review", "skill_ids": [skill],
+                 "shadows": [{"id": "pinned", "skills": {skill.clone(): format!("{skill}@1")}}]},
+                {"name": "prompt", "step_type": {"type": "Agent"}, "prompt_template": "Review",
+                 "quick_prompt_id": prompt["data"]["id"]},
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let workflow = created["data"]["id"].as_str().unwrap();
+    let (_, mut exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+    // The file now pins versions it does not carry.
+    let (shadow_pin, prompt_pin) = (format!("{skill}@3"), format!("{skill}@2"));
+    exported["workflow"]["steps"][0]["shadows"][0]["skills"][&skill] =
+        Value::String(shadow_pin.clone());
+    exported["referenced_quick_prompts"][0]["skill_ids"] = serde_json::json!([prompt_pin]);
+    let file = serde_json::to_string(&exported).unwrap();
+
+    // This Kronn has the skill, at its first version only.
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    create_skill(target.clone(), "Versioned review", "Check the versions.").await;
+    let request = serde_json::json!({"content": file, "project_id": null, "skill_choices": []});
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request.clone(),
+    )
+    .await;
+    let missing = preview["data"]["missing_skills"].as_array().unwrap();
+    for pin in [&shadow_pin, &prompt_pin] {
+        assert!(
+            missing.iter().any(|id| id == pin.as_str()),
+            "{pin}: {preview}"
+        );
+    }
+
+    let (_, imported) = post_json(target, "/api/workflows/import", request).await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let notice = imported["notice"].as_str().unwrap_or_default();
+    for pin in [&shadow_pin, &prompt_pin] {
+        assert!(notice.contains(pin.as_str()), "{pin}: {imported}");
+    }
+}
+
+/// A step pinned to a version that exists nowhere: the preview says so, and
+/// the import refuses it for the same reason.
+#[tokio::test]
+async fn workflow_import_preview_reports_the_step_pin_the_import_refuses() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_import_preview_reports_the_step_pin_the_import_refuses",
+    ) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(test_state(), false);
+    let skill = create_skill(app.clone(), "Stepped review", "Check the step.").await;
+    let workflow = skill_workflow(app.clone(), serde_json::json!([format!("{skill}@1")])).await;
+    let (_, mut exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+    let pin = format!("{skill}@3");
+    exported["workflow"]["steps"][0]["skill_ids"] = serde_json::json!([pin]);
+    let file = serde_json::to_string(&exported).unwrap();
+
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    create_skill(target.clone(), "Stepped review", "Check the step.").await;
+    let request = serde_json::json!({"content": file, "project_id": null, "skill_choices": []});
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(
+        preview["data"]["missing_skills"],
+        serde_json::json!([pin]),
+        "{preview}"
+    );
+    let (_, imported) = post_json(target, "/api/workflows/import", request).await;
+    assert_eq!(imported["success"], false, "{imported}");
+    assert!(
+        imported["error"].as_str().unwrap().contains(&pin),
+        "{imported}"
+    );
+}
+
 /// A skill a JsonData step lists by id (for a script that loads it) travels
 /// with the workflow, and the imported payload names the created copy.
 #[tokio::test]

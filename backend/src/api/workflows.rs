@@ -4778,10 +4778,10 @@ fn missing_skills<'a>(
         .into_iter()
         .map(|skill| skill.id)
         .collect();
-    // A pinned version (`custom-x@1`) is missing only when its skill is.
-    let unknown = |id: &str| {
-        let base = crate::core::skill_versions::split_pin(id).map_or(id, |(base, _)| base);
-        !known.contains(base)
+    // A pin (`custom-x@3`) is known only when that version exists here.
+    let unknown = |id: &str| match crate::core::skill_versions::split_pin(id) {
+        Ok((_, Some(_))) => crate::core::skill_versions::pinned_skill(id).is_none(),
+        _ => !known.contains(id),
     };
     named
         .into_iter()
