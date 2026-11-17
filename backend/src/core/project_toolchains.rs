@@ -133,6 +133,478 @@ pub fn select_roots(
     (kept, unknown)
 }
 
+// ─── KT-1747 — every toolchain of a checkout ──────────────────────────────
+
+/// The package manager of a Node project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeManager {
+    Npm,
+    Yarn,
+    Pnpm,
+}
+
+/// A toolchain a repository builds with, found from its manifests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolchainKind {
+    Node(NodeManager),
+    Composer,
+    Cargo,
+    CocoaPods,
+    Xcode,
+    Make,
+}
+
+impl ToolchainKind {
+    /// The short name shown to a worker and in the settings.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Node(NodeManager::Npm) => "npm",
+            Self::Node(NodeManager::Yarn) => "yarn",
+            Self::Node(NodeManager::Pnpm) => "pnpm",
+            Self::Composer => "composer",
+            Self::Cargo => "cargo",
+            Self::CocoaPods => "cocoapods",
+            Self::Xcode => "xcode",
+            Self::Make => "make",
+        }
+    }
+
+    /// The directory, next to the manifest, that holds the installed
+    /// dependencies: what a lane layers read-only from the main checkout. `None`
+    /// for a toolchain that installs nothing there (Cargo's live in `target/`,
+    /// which the lane warm-up owns).
+    pub fn dependency_dir(self) -> Option<&'static str> {
+        match self {
+            Self::Node(_) => Some("node_modules"),
+            Self::Composer => Some("vendor"),
+            Self::CocoaPods => Some("Pods"),
+            Self::Cargo | Self::Xcode | Self::Make => None,
+        }
+    }
+
+    /// The command that fills [`ToolchainKind::dependency_dir`] from the lock
+    /// file, run in the toolchain's directory of the MAIN checkout (a lane never
+    /// installs: it has no network). `None` where nothing is installed.
+    pub fn install_command(self) -> Option<&'static str> {
+        match self {
+            Self::Node(NodeManager::Npm) => Some("npm ci"),
+            Self::Node(NodeManager::Yarn) => Some("yarn install --frozen-lockfile"),
+            Self::Node(NodeManager::Pnpm) => Some("pnpm install --frozen-lockfile"),
+            Self::Composer => Some("composer install"),
+            Self::CocoaPods => Some("pod install"),
+            Self::Cargo | Self::Xcode | Self::Make => None,
+        }
+    }
+
+    /// KT-1751 — the variable that moves this package manager's download cache
+    /// out of the user's home, with the name of its folder under the lane's
+    /// cache directory. A lane may write only its worktree and its target, so a
+    /// manager that caches in `~/.npm`, `~/.cache/yarn` or `~/.composer` would
+    /// fail on the first install and could never share a cache with the owner's
+    /// real one. `None` for a toolchain with no home cache to move: pnpm's store
+    /// is the host's read-only one by design, Cargo's is the lane's `CARGO_HOME`.
+    pub fn cache_env(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Node(NodeManager::Npm) => Some(("npm_config_cache", "npm")),
+            Self::Node(NodeManager::Yarn) => Some(("YARN_CACHE_FOLDER", "yarn")),
+            Self::Composer => Some(("COMPOSER_CACHE_DIR", "composer")),
+            Self::Node(NodeManager::Pnpm)
+            | Self::Cargo
+            | Self::CocoaPods
+            | Self::Xcode
+            | Self::Make => None,
+        }
+    }
+
+    /// Order inside one directory; build tools come after package managers.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Node(_) => 0,
+            Self::Composer => 1,
+            Self::Cargo => 2,
+            Self::CocoaPods => 3,
+            Self::Xcode => 4,
+            Self::Make => 5,
+        }
+    }
+}
+
+/// One toolchain at one directory of a checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageRoot {
+    pub kind: ToolchainKind,
+    /// The directory of its manifest, relative to the repository root (empty
+    /// for the root itself).
+    pub rel_dir: PathBuf,
+    /// KT-1747 review — for a package of a Node workspace (npm or yarn `workspaces`,
+    /// or `pnpm-workspace.yaml` in an ancestor up to the repository root), the
+    /// workspace root, relative to the repository: its dependencies are installed
+    /// there, never by the package itself. `None` otherwise.
+    pub workspace: Option<PathBuf>,
+}
+
+impl PackageRoot {
+    /// The relative directory as shown to a worker: `.` for the root.
+    pub fn label(&self) -> String {
+        if self.rel_dir.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            self.rel_dir
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/")
+        }
+    }
+
+    /// The directory name its dependencies are installed in (see
+    /// [`ToolchainKind::dependency_dir`]).
+    pub fn dependency_dir(&self) -> Option<&'static str> {
+        self.kind.dependency_dir()
+    }
+
+    /// Its dependency directory relative to the repository root, `/` separated.
+    pub fn dependency_path(&self) -> Option<String> {
+        let dir = self.dependency_dir()?;
+        let label = self.label();
+        Some(if label == "." {
+            dir.to_string()
+        } else {
+            format!("{label}/{dir}")
+        })
+    }
+}
+
+/// A repository with more toolchain roots than this is not described one by one.
+const MAX_PROFILE_ROOTS: usize = 40;
+/// Never entered when looking for a manifest, besides [`SKIPPED_DIRS`]: the
+/// CocoaPods dependency tree and Xcode's build output.
+const SKIPPED_DEPENDENCY_DIRS: [&str; 2] = ["Pods", "DerivedData"];
+/// Never entered either (KT-1747 review): test fixtures, examples and build
+/// output hold manifests that are not toolchains of the project.
+const SKIPPED_PROFILE_DIRS: [&str; 4] = ["fixtures", "examples", "dist", "build"];
+
+fn package_json(dir: &Path) -> Option<serde_json::Value> {
+    std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+}
+
+/// `dir` and its ancestors up to `repo_root` (included), nearest first.
+fn up_to_root<'a>(dir: &'a Path, repo_root: &'a Path) -> impl Iterator<Item = &'a Path> {
+    dir.ancestors()
+        .take_while(move |ancestor| ancestor.starts_with(repo_root))
+}
+
+/// What one directory says about its package manager: the `packageManager`
+/// field of its `package.json`, then its lock file.
+fn declared_manager(dir: &Path) -> Option<NodeManager> {
+    let declared = package_json(dir).and_then(|value| {
+        value
+            .get("packageManager")
+            .and_then(|field| field.as_str())
+            .map(|field| field.split('@').next().unwrap_or_default().to_string())
+    });
+    match declared.as_deref() {
+        Some("pnpm") => return Some(NodeManager::Pnpm),
+        Some("yarn") => return Some(NodeManager::Yarn),
+        Some("npm") => return Some(NodeManager::Npm),
+        _ => {}
+    }
+    lock_file_manager(dir)
+}
+
+/// The manager a directory's own lock file names, if it has one.
+fn lock_file_manager(dir: &Path) -> Option<NodeManager> {
+    if dir.join("pnpm-lock.yaml").is_file() {
+        Some(NodeManager::Pnpm)
+    } else if dir.join("yarn.lock").is_file() {
+        Some(NodeManager::Yarn)
+    } else if dir.join("package-lock.json").is_file() {
+        Some(NodeManager::Npm)
+    } else {
+        None
+    }
+}
+
+/// The package manager a `package.json` directory uses: what the nearest
+/// directory from it up to the repository root declares (a workspace keeps its
+/// lock and `packageManager` at its root), else npm.
+fn node_manager(dir: &Path, repo_root: &Path) -> NodeManager {
+    up_to_root(dir, repo_root)
+        .find_map(declared_manager)
+        .unwrap_or(NodeManager::Npm)
+}
+
+/// KT-1747 review — the root of the Node workspace `dir` is a package of,
+/// relative to the repository: the nearest strict ancestor up to the
+/// repository root with `pnpm-workspace.yaml` or a `workspaces` field. A
+/// package with its own lock file is installed on its own, never hoisted.
+fn node_workspace_of(dir: &Path, repo_root: &Path) -> Option<PathBuf> {
+    if lock_file_manager(dir).is_some() {
+        return None;
+    }
+    up_to_root(dir, repo_root)
+        .skip(1)
+        .find(|ancestor| {
+            ancestor.join("pnpm-workspace.yaml").is_file()
+                || package_json(ancestor).is_some_and(|value| value.get("workspaces").is_some())
+        })
+        .map(|ancestor| {
+            ancestor
+                .strip_prefix(repo_root)
+                .unwrap_or(ancestor)
+                .to_path_buf()
+        })
+}
+
+fn has_make_file(dir: &Path) -> bool {
+    ["Makefile", "makefile", "GNUmakefile"]
+        .iter()
+        .any(|name| dir.join(name).is_file())
+}
+
+fn has_xcode_project(entries: &[PathBuf]) -> bool {
+    entries.iter().any(|path| {
+        path.extension()
+            .is_some_and(|ext| ext == "xcworkspace" || ext == "xcodeproj")
+    })
+}
+
+/// Every toolchain of the checkout at `repo_root`, at any depth up to
+/// [`MAX_DEPTH`]: Node (npm, yarn or pnpm), Composer, Cargo, CocoaPods, Xcode
+/// and Make. Found from manifests and lock files only, so a repository of a
+/// shape Kronn has never seen is described as well as its own. Dependency trees,
+/// hidden directories and Xcode bundles are never entered.
+///
+/// Ordered by directory, package managers before build tools.
+pub fn detect_toolchains(repo_root: &Path) -> Vec<PackageRoot> {
+    let mut found: Vec<PackageRoot> = rust_roots(repo_root)
+        .into_iter()
+        .map(|root| PackageRoot {
+            kind: ToolchainKind::Cargo,
+            rel_dir: root.rel_dir,
+            workspace: None,
+        })
+        .collect();
+    collect_toolchains(repo_root, repo_root, 0, &mut found);
+    found.sort_by(|a, b| {
+        let key = |root: &PackageRoot| {
+            (
+                root.kind == ToolchainKind::Make,
+                root.rel_dir.clone(),
+                root.kind.rank(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    found.truncate(MAX_PROFILE_ROOTS);
+    found
+}
+
+fn collect_toolchains(repo_root: &Path, dir: &Path, depth: usize, found: &mut Vec<PackageRoot>) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let entries: Vec<PathBuf> = read.flatten().map(|entry| entry.path()).collect();
+    let rel_dir = dir.strip_prefix(repo_root).unwrap_or(dir).to_path_buf();
+    let mut push = |kind: ToolchainKind| {
+        let workspace = match kind {
+            ToolchainKind::Node(_) => node_workspace_of(dir, repo_root),
+            _ => None,
+        };
+        found.push(PackageRoot {
+            kind,
+            rel_dir: rel_dir.clone(),
+            workspace,
+        });
+    };
+    if dir.join("package.json").is_file() {
+        push(ToolchainKind::Node(node_manager(dir, repo_root)));
+    }
+    if dir.join("composer.json").is_file() {
+        push(ToolchainKind::Composer);
+    }
+    if dir.join("Podfile").is_file() {
+        push(ToolchainKind::CocoaPods);
+    }
+    if has_xcode_project(&entries) {
+        push(ToolchainKind::Xcode);
+    }
+    if has_make_file(dir) {
+        push(ToolchainKind::Make);
+    }
+    if depth >= MAX_DEPTH {
+        return;
+    }
+    let mut children: Vec<PathBuf> = entries
+        .into_iter()
+        // A real directory: a link is never followed (KT-1747 review).
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir()))
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            !name.starts_with('.')
+                && !SKIPPED_DIRS.contains(&name.as_str())
+                && !SKIPPED_DEPENDENCY_DIRS.contains(&name.as_str())
+                && !SKIPPED_PROFILE_DIRS.contains(&name.as_str())
+                && !name.ends_with(".xcodeproj")
+                && !name.ends_with(".xcworkspace")
+        })
+        .collect();
+    children.sort();
+    for child in children {
+        collect_toolchains(repo_root, &child, depth + 1, found);
+    }
+}
+
+/// The dependency directories (relative to the repository, `/` separated) a lane
+/// layers read-only from the main checkout: the detected ones, or exactly the
+/// ones the project names (`Some`, possibly empty to layer nothing). A named
+/// entry that is not a directory inside the repository (absolute, `..`) is
+/// returned in the second list and never used.
+pub fn dependency_dirs(
+    profile: &[PackageRoot],
+    wanted: Option<&[String]>,
+) -> (Vec<String>, Vec<String>) {
+    let Some(wanted) = wanted else {
+        let mut detected: Vec<String> = profile
+            .iter()
+            .filter_map(PackageRoot::dependency_path)
+            .collect();
+        detected.sort();
+        detected.dedup();
+        return (detected, Vec::new());
+    };
+    let mut chosen: Vec<String> = Vec::new();
+    let mut rejected = Vec::new();
+    for entry in wanted {
+        let normalized = crate::models::normalize_lane_root(entry);
+        let inside = !normalized.is_empty()
+            && normalized != "."
+            && !normalized.contains('\0')
+            && Path::new(&normalized)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)));
+        if !inside {
+            rejected.push(entry.clone());
+        } else if !chosen.contains(&normalized) {
+            chosen.push(normalized);
+        }
+    }
+    chosen.sort();
+    (chosen, rejected)
+}
+
+/// What a launch tells the owner when the main checkout has not installed the
+/// dependency directory `path` (relative to the repository): the directory and
+/// the command that installs it, in the toolchain's own directory. The command
+/// comes from the detected toolchain that owns `path`; a directory the project
+/// named itself gets the generic wording.
+/// KT-1751 — the cache variables of a project's package managers, once per
+/// variable, in the profile's order (see [`ToolchainKind::cache_env`]).
+pub fn cache_env(profile: &[PackageRoot]) -> Vec<(&'static str, &'static str)> {
+    let mut found: Vec<(&'static str, &'static str)> = Vec::new();
+    for root in profile {
+        if let Some(entry) = root.kind.cache_env() {
+            if !found.contains(&entry) {
+                found.push(entry);
+            }
+        }
+    }
+    found
+}
+
+pub fn missing_dependency_notice(profile: &[PackageRoot], path: &str) -> String {
+    let owner = profile
+        .iter()
+        .find(|root| root.dependency_path().as_deref() == Some(path));
+    // A workspace package is installed by its workspace root.
+    let owner = match owner.and_then(|root| root.workspace.as_ref()) {
+        Some(workspace) => profile
+            .iter()
+            .find(|root| &root.rel_dir == workspace && matches!(root.kind, ToolchainKind::Node(_)))
+            .or(owner),
+        None => owner,
+    };
+    match owner.and_then(|root| root.kind.install_command().map(|cmd| (cmd, root.label()))) {
+        Some((command, dir)) => {
+            let place = if dir == "." {
+                "the repository root".to_string()
+            } else {
+                format!("`{dir}`")
+            };
+            format!(
+                "`{path}` is not installed in the main checkout, so this lane has no \
+                 dependencies there: run `{command}` in {place} of the main checkout \
+                 (a lane never installs)"
+            )
+        }
+        None => format!(
+            "`{path}` is not installed in the main checkout, so this lane has no dependencies \
+             there: install the project's dependencies in the main checkout (a lane never installs)"
+        ),
+    }
+}
+
+/// One line per toolchain for the "Project conventions" section of a worker's
+/// brief: what the project builds with and where it keeps its dependencies.
+/// Empty when nothing was detected.
+pub fn conventions_lines(profile: &[PackageRoot]) -> Vec<String> {
+    conventions_lines_in(profile, false)
+}
+
+/// [`conventions_lines`] in the room's language (`fr`: French).
+pub fn conventions_lines_in(profile: &[PackageRoot], fr: bool) -> Vec<String> {
+    let (at, deps) = if fr {
+        ("à", "dépendances dans")
+    } else {
+        ("at", "dependencies in")
+    };
+    profile
+        .iter()
+        .map(|root| match root.dependency_path() {
+            Some(path) => format!(
+                "{} {at} `{}` ({deps} `{path}/`)",
+                root.kind.name(),
+                root.label()
+            ),
+            None => format!("{} {at} `{}`", root.kind.name(), root.label()),
+        })
+        .collect()
+}
+
+/// The "Project conventions" section of a worker's brief (KT-1747), composed
+/// from the toolchains detected in the worktree: what the project builds with and
+/// where it keeps its dependencies, so a worker uses the project's own tools
+/// instead of assuming Kronn's. Empty when nothing was detected.
+pub fn conventions_section(profile: &[PackageRoot], fr: bool) -> String {
+    conventions_section_from(&conventions_lines_in(profile, fr), fr)
+}
+
+/// [`conventions_section`] from the lines already composed (toolchains, the
+/// project's own agent instructions, its commit format).
+pub fn conventions_section_from(lines: &[String], fr: bool) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let (heading, intro) = if fr {
+        (
+            "## Conventions du projet",
+            "Détectées depuis les manifestes du dépôt ; utilise les outils du projet, pas ceux d'un autre :",
+        )
+    } else {
+        (
+            "## Project conventions",
+            "Detected from the repository's manifests; use the project's own tools, not another project's:",
+        )
+    };
+    let list: String = lines.iter().map(|line| format!("- {line}\n")).collect();
+    format!("{heading}\n{intro}\n{list}\n")
+}
+
 /// Does the package at `manifest_dir` have a library target.
 pub fn has_lib_target(manifest_dir: &Path) -> bool {
     manifest_dir.join("src").join("lib.rs").is_file()
@@ -275,3 +747,7 @@ pub fn host_cargo_metadata(manifest_dir: &Path) -> Result<CargoMetadata, String>
 #[cfg(test)]
 #[path = "project_toolchains_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "project_toolchains_detect_test.rs"]
+mod detect_tests;

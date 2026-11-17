@@ -6,6 +6,15 @@ use super::*;
 
 #[test]
 fn briefs_ask_for_ui_captures_before_the_tests_section() {
+    // KT-1747: asked of a project that has a web UI (a Node root with a UI
+    // framework), not of every project.
+    let worktree = tempfile::tempdir().unwrap();
+    std::fs::write(
+        worktree.path().join("package.json"),
+        r#"{"dependencies":{"react":"18"}}"#,
+    )
+    .unwrap();
+    let worktree_path = worktree.path().to_string_lossy().into_owned();
     for lang in [RoomLang::Fr, RoomLang::En] {
         for (can_run_shell, projection) in [(true, true), (true, false), (false, true)] {
             let brief = worker_brief_markdown_in(
@@ -14,7 +23,7 @@ fn briefs_ask_for_ui_captures_before_the_tests_section() {
                 "Captures",
                 "Objective",
                 &[],
-                "/wt/kt1682",
+                &worktree_path,
                 "kronn/task/KT-1682",
                 "abc1234",
                 can_run_shell,

@@ -290,6 +290,8 @@ async fn bootstrap_in(
     {
         return Json(ApiResponse::err(format!("DB error: {}", e)));
     }
+    // KT-1751: the project owns its tree from now on.
+    crate::core::task_worker_lane_settings::register_project(std::path::Path::new(&project.path));
 
     // Sync .mcp.json for the new project if MCPs were linked
     if !req.mcp_config_ids.is_empty() {

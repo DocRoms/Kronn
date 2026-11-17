@@ -24,6 +24,8 @@ export interface LaneWarmDraft {
   timeout: string;
   /** KT-1742 — Rust roots to warm, one directory per line; blank = every detected root (a project's own). */
   rootsText: string;
+  /** KT-1751 — executables the project's validations may run, one per line (a project's own). */
+  executablesText: string;
 }
 
 export const EMPTY_LANE_WARM_DRAFT: LaneWarmDraft = {
@@ -33,6 +35,7 @@ export const EMPTY_LANE_WARM_DRAFT: LaneWarmDraft = {
   command: '',
   timeout: '',
   rootsText: '',
+  executablesText: '',
 };
 
 export function draftOf(config: LaneWarmConfig | null | undefined): LaneWarmDraft {
@@ -49,6 +52,7 @@ export function draftOf(config: LaneWarmConfig | null | undefined): LaneWarmDraf
       ? ''
       : String(config.first_build_timeout_min),
     rootsText: (config.rust_roots ?? []).join('\n'),
+    executablesText: (config.validation_executables ?? []).join('\n'),
   };
 }
 
@@ -66,8 +70,25 @@ export function rootLines(text: string): string[] {
   return roots;
 }
 
+/**
+ * KT-1751 — the validation executables of a draft: one bare name or
+ * repository-relative path per line, a leading `./` dropped where the rest
+ * is still a path.
+ */
+export function executableLines(text: string): string[] {
+  const entries: string[] = [];
+  for (const line of envLines(text)) {
+    // `./vendor/bin/x` is stored as `vendor/bin/x`, but `./gradlew` keeps its
+    // `./`: without it, it would be a bare name, a program on the PATH.
+    const rest = line.replace(/^\.\//, '');
+    const entry = rest.includes('/') ? rest : line;
+    if (rest !== '' && !entries.includes(entry)) entries.push(entry);
+  }
+  return entries;
+}
+
 /** The first problem of a draft, as the part of the form it is in. */
-export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' | null {
+export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' | 'executables' | null {
   const raw = draft.timeout.trim();
   if (raw !== '') {
     const minutes = Number(raw);
@@ -80,12 +101,35 @@ export function draftProblem(draft: LaneWarmDraft): 'timeout' | 'env' | 'roots' 
   }
   // A root is a directory inside the repository: relative, no `..`.
   if (rootLines(draft.rootsText).some(root => root.startsWith('/') || root.split('/').includes('..'))) return 'roots';
+  // An executable is a bare name or a path inside the repository (the server
+  // also refuses a shell).
+  if (executableLines(draft.executablesText).some(entry =>
+    entry.startsWith('/') || entry.startsWith('-') || entry.includes('\\') || entry.split('/').includes('..'))) {
+    return 'executables';
+  }
   return null;
 }
 
-/** The entry to store; an untouched field is left out, so it keeps inheriting. */
-export function configOf(draft: LaneWarmDraft): LaneWarmConfig {
+/** The fields the form has an input for; everything else of a stored entry is carried through. */
+const FORM_FIELDS: ReadonlySet<string> = new Set([
+  'seed_alignment', 'compiler_env', 'first_build_command', 'first_build_timeout_min', 'rust_roots',
+  'validation_executables',
+]);
+
+/**
+ * The entry to store; an untouched field is left out, so it keeps inheriting.
+ *
+ * `stored` is the entry as it is now: a field the form has no input for
+ * (`dependency_dirs`, set through the workspace API) goes back as it was, so a
+ * save of the others never deletes it.
+ */
+export function configOf(draft: LaneWarmDraft, stored?: LaneWarmConfig | null): LaneWarmConfig {
   const config: LaneWarmConfig = {};
+  for (const [key, value] of Object.entries(stored ?? {})) {
+    if (!FORM_FIELDS.has(key) && value !== undefined) {
+      (config as Record<string, unknown>)[key] = value;
+    }
+  }
   if (draft.seedAlignment !== '') config.seed_alignment = draft.seedAlignment === 'on';
   if (draft.envMode === 'none') config.compiler_env = [];
   if (draft.envMode === 'custom') config.compiler_env = envLines(draft.envText);
@@ -95,6 +139,8 @@ export function configOf(draft: LaneWarmDraft): LaneWarmConfig {
   if (timeout !== '') config.first_build_timeout_min = Number(timeout);
   const roots = rootLines(draft.rootsText);
   if (roots.length > 0) config.rust_roots = roots;
+  const executables = executableLines(draft.executablesText);
+  if (executables.length > 0) config.validation_executables = executables;
   return config;
 }
 
@@ -104,5 +150,6 @@ export function sameDraft(a: LaneWarmDraft, b: LaneWarmDraft): boolean {
     && (a.envMode !== 'custom' || envLines(a.envText).join('\n') === envLines(b.envText).join('\n'))
     && a.command.trim() === b.command.trim()
     && a.timeout.trim() === b.timeout.trim()
-    && rootLines(a.rootsText).join('\n') === rootLines(b.rootsText).join('\n');
+    && rootLines(a.rootsText).join('\n') === rootLines(b.rootsText).join('\n')
+    && executableLines(a.executablesText).join('\n') === executableLines(b.executablesText).join('\n');
 }

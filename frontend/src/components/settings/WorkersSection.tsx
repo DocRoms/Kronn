@@ -180,7 +180,9 @@ export function WorkersSection({ t }: Props) {
         // Nothing set is no key at all, as the backend stores it.
         ...(commitSettingsOf(commitFieldsNow) ? { commit: commitSettingsOf(commitFieldsNow) } : {}),
         managed_worktree_roots: rootList,
-        lane_warm: configOf(laneWarm),
+        // Validation executables are a project's own setting (KT-1751): the global
+        // entry never carries them, so a stale one is dropped, not refused.
+        lane_warm: configOf({ ...laneWarm, executablesText: '' }, saved.lane_warm),
       });
       setSaved(next);
       setRounds(String(next.default_max_review_rounds));

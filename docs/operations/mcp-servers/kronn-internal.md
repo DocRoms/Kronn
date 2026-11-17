@@ -100,7 +100,7 @@ routing and idempotency guarantees as an answered one — they cannot drift apar
 as a message that says it is not a decision, and the question stays pending.
 In the card, a checked option can be clicked again to take it back.
 Discussion list items expose `pending_question_count`, including pagination.
-`[src: file: backend/src/lib.rs:2994-3042#decline]`
+`[src: file: backend/src/lib.rs:3053-3101#decline]`
 `[src: file: backend/src/db/discussion_questions.rs:655-770#publish_human_resolution]`
 `[src: file: backend/src/db/discussion_questions.rs:166-193#pending_question_count]`
 `[src: file: backend/src/api/discussions/crud.rs:22-88#with_pending_counts]`
@@ -529,7 +529,7 @@ for a command that could never run; `task_exec_launch` refuses it the same way
 before anything is created, so a bad gate is no longer found at integration,
 after the worker delivered and the review passed. The contract is served by
 `tool_manual({tool: "task_exec_prepare"})`.
-`[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:302-349#check_command_line]`
+`[src: file: backend/src/core/quick_exec.rs:50-66#ALLOWED_BINARIES]` `[src: file: backend/src/core/quick_exec.rs:416-463#check_command_line]`
 `[src: file: backend/src/api/orchestration.rs:12410-12420#validations_refusal]`
 
 To correct the gates of an execution that already exists, the principal calls

@@ -92,6 +92,7 @@ fn probe(program: &str, args: &[&str], cwd: &Path) -> ProbeCommand {
 fn provisioned() -> Provisioned {
     Provisioned {
         frontend_deps: crate::core::task_worker_env::FrontendDeps::NotApplicable,
+        dependency_layers: Vec::new(),
         cargo_home_ready: false,
         shared_cargo_home: None,
         warnings: Vec::new(),

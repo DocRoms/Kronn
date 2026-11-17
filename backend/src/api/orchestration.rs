@@ -137,8 +137,13 @@ pub(crate) fn validate_new_validation_specs(
             serde_json::to_string(bad).unwrap_or_default()
         ));
     }
+    // KT-1751: a name some project lists is not refused here; the run checks it
+    // against the project it runs in (that check is the authoritative one).
+    let listed = crate::core::task_worker_lane_settings::all_validation_executables();
     for spec in validations {
-        if let Err(rejection) = crate::core::quick_exec::check_command_line(&spec.command) {
+        if let Err(rejection) =
+            crate::core::quick_exec::check_command_line_with(&spec.command, &listed)
+        {
             return Err(format!(
                 "validation `{}` can never run: {rejection}",
                 spec.command
@@ -6804,7 +6809,62 @@ const TEST_FAILURE_MARKERS: &[&str] = &[
     "tests failed",
     "failures:",
     "--- fail:",
+    // PHPUnit's summary lines (failed assertions, errors).
+    "failures!",
+    "errors!",
 ];
+
+/// A runner's own per-file failure line: vitest and jest print `FAIL path`.
+fn reports_failed_file(output_lower: &str) -> bool {
+    output_lower
+        .lines()
+        .any(|line| line.trim_start().starts_with("fail "))
+}
+
+/// KT-1753 review — did a test runner run and report a failure? The markers
+/// above, vitest / jest's `FAIL path`, pytest's `FAILED|ERROR path::test` and
+/// its `=== 1 failed in 0.1s ===` summary, mocha's `N failing` and jest's
+/// `Tests: 1 failed` summary. `output` is as printed (pytest's prefixes are
+/// upper-case), `lower` the same lower-cased.
+fn test_runner_failed(output: &str, lower: &str) -> bool {
+    TEST_FAILURE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+        || reports_failed_file(lower)
+        || output.lines().any(|line| {
+            let line = line.trim_start();
+            (line.starts_with("FAILED ") || line.starts_with("ERROR ")) && line.contains("::")
+        })
+        || lower.lines().any(|line| {
+            let line = line.trim();
+            let pytest_summary = line.starts_with('=')
+                && line.contains(" in ")
+                && (line.contains(" failed") || line.contains(" error"));
+            let mocha = line.strip_suffix(" failing").is_some_and(|count| {
+                !count.is_empty() && count.chars().all(|c| c.is_ascii_digit())
+            });
+            let jest = line.starts_with("tests:") && line.contains(" failed");
+            pytest_summary || mocha || jest
+        })
+        || unittest_failed(lower)
+}
+
+/// Python unittest / Django: `Ran N test(s) in …`, then `FAILED (errors=1)`.
+fn unittest_failed(lower: &str) -> bool {
+    let mut ran = false;
+    lower.lines().any(|line| {
+        let line = line.trim();
+        if line
+            .strip_prefix("ran ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|count| !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()))
+            && line.contains(" test")
+        {
+            ran = true;
+        }
+        ran && line.starts_with("failed (")
+    })
+}
 
 /// `Some` when `failure` comes from the host rather than the worker's code:
 /// Docker unreachable, or a launch the sandbox refused. `None` means the
@@ -6834,13 +6894,14 @@ fn environment_cause(
         .rev()
         .take(DOCKER_REFUSAL_TAIL_LINES)
         .collect();
-    let refusal = tail
+    let test_failed = test_runner_failed(&failure.output, &output);
+    let Some(refusal) = tail
         .iter()
-        .find(|line| DOCKER_REFUSALS.iter().any(|refusal| line.contains(refusal)))?;
-    if TEST_FAILURE_MARKERS
-        .iter()
-        .any(|marker| output.contains(marker))
-    {
+        .find(|line| DOCKER_REFUSALS.iter().any(|refusal| line.contains(refusal)))
+    else {
+        return lane_environment_cause(failure.exit_code, &tail, test_failed);
+    };
+    if test_failed {
         return None;
     }
     let denied =
@@ -6867,6 +6928,113 @@ fn environment_cause(
             fix: "Docker ne répond pas. Démarre-le (OrbStack, Docker Desktop ou Colima), vérifie `docker info`, puis reprends l'intégration.".to_string(),
             docker_elevation: false,
         },
+    })
+}
+
+/// What the OS sandbox of a lane prints when it refuses an operation (lower-cased).
+const SANDBOX_REFUSALS: &[&str] = &[
+    "operation not permitted",
+    "deny file-write",
+    "read-only file system",
+];
+
+/// What a tool prints when the network is not there (lower-cased): the lane's
+/// sandbox opens no outbound connection.
+const OFFLINE_MARKERS: &[&str] = &[
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "getaddrinfo eai_again",
+    "getaddrinfo enotfound",
+    "failed to lookup address information",
+    "name or service not known",
+    "network is unreachable",
+];
+
+/// What `docker compose exec` / `run` prints when the service it targets is not
+/// up (lower-cased).
+const COMPOSE_MARKERS: &[&str] = &[
+    "no such service",
+    "no such container",
+    "no configuration file provided",
+];
+
+/// The programs whose own `<name>: …` line reports a command they could not
+/// find: the shells, and `env` of a `#!/usr/bin/env tool` script.
+const NOT_FOUND_REPORTERS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "env"];
+
+/// KT-1753 review — a shell's own report of a missing command, by its shape
+/// (lower-cased line): bash `bash: line 1: x: command not found`, zsh
+/// `zsh: command not found: x`, dash `/bin/sh: 1: x: not found`, env
+/// `env: 'x': no such file or directory`. A test's own `Not Found` (an HTTP
+/// 404, a missing route) is not one: its line does not start with a shell.
+fn shell_reported_not_found(line: &str) -> bool {
+    let Some((head, rest)) = line.split_once(':') else {
+        return false;
+    };
+    let program = head.rsplit('/').next().unwrap_or(head).trim();
+    if !NOT_FOUND_REPORTERS.contains(&program) {
+        return false;
+    }
+    let rest = rest.trim_end();
+    rest.contains("command not found")
+        || rest.ends_with(": not found")
+        || (program == "env" && rest.ends_with("no such file or directory"))
+}
+
+/// GNU make's own report of a recipe that exited 127 (`make: *** [t] Error 127`),
+/// not `Error 1270`.
+fn make_reported_127(line: &str) -> bool {
+    line.match_indices("error 127").any(|(at, found)| {
+        !line[at + found.len()..]
+            .chars()
+            .next()
+            .is_some_and(|next| next.is_ascii_digit())
+    })
+}
+
+/// KT-1753 — a failure the lane's environment caused, for any project: the
+/// command is not installed (exit 127), the OS sandbox refused an operation, the
+/// network is not there, or a compose service is down. Judged from the last
+/// lines of the output and never when a test runner reported a failure, so a
+/// log that merely quotes such a message and then fails on an assertion stays
+/// the worker's. `tail` is the last non-empty output lines, lower-cased, last
+/// first.
+fn lane_environment_cause(
+    exit_code: Option<i32>,
+    tail: &[&str],
+    test_failed: bool,
+) -> Option<EnvironmentCause> {
+    if test_failed {
+        return None;
+    }
+    let any = |markers: &[&str]| {
+        tail.iter()
+            .any(|line| markers.iter().any(|marker| line.contains(marker)))
+    };
+    // A shell exits 127 for a command it cannot find; GNU make exits 2 and says
+    // `Error 127`, and a runner may exit 1 after `command not found`.
+    let missing_tool = exit_code == Some(127)
+        || tail
+            .iter()
+            .any(|line| shell_reported_not_found(line) || make_reported_127(line));
+    let fix = if missing_tool {
+        "La commande de la validation (code 127) n'existe pas sur cette machine ou dans le PATH de la lane : installe l'outil (ou donne-le à la lane), puis reprends l'intégration."
+    } else if any(SANDBOX_REFUSALS) {
+        "Le bac à sable de la lane a refusé une opération (écriture hors de ses racines, par exemple). Ce n'est pas une erreur du code livré : ouvre ce chemin au profil du projet ou lance la validation sur l'hôte, puis reprends l'intégration."
+    } else if any(OFFLINE_MARKERS) {
+        "La validation a besoin du réseau, que la lane n'a pas (dépendances à récupérer, hôte à résoudre). Mets les dépendances en cache ou dans le dépôt, ou lance la validation sur l'hôte, puis reprends l'intégration."
+    } else if any(COMPOSE_MARKERS)
+        || tail
+            .iter()
+            .any(|line| line.contains("service \"") && line.contains("is not running"))
+    {
+        "La validation exécute une commande dans un service compose qui n'est pas démarré. Démarre la pile compose du projet, puis reprends l'intégration."
+    } else {
+        return None;
+    };
+    Some(EnvironmentCause {
+        fix: fix.to_string(),
+        docker_elevation: false,
     })
 }
 
@@ -7497,11 +7665,15 @@ where
             _ => quick_exec::Summariser::Generic,
         },
     };
-    let validated = match quick_exec::validate(&quick, &[cwd.to_path_buf()]) {
-        Ok(v) => v,
-        // A refused command is a failed validation, never a silent skip.
-        Err(rejection) => return (None, 0, format!("refused: {rejection}")),
-    };
+    // KT-1751: what the project of this tree lists for its validations.
+    let project_executables =
+        crate::core::task_worker_lane_settings::validation_executables_for(cwd);
+    let validated =
+        match quick_exec::validate_with(&quick, &[cwd.to_path_buf()], &project_executables) {
+            Ok(v) => v,
+            // A refused command is a failed validation, never a silent skip.
+            Err(rejection) => return (None, 0, format!("refused: {rejection}")),
+        };
     let (code, duration, summary) = match run(validated).await {
         Ok(result) => (result.exit_code, result.duration_ms as i64, result.summary),
         Err(e) => (None, 0, format!("validation could not run: {e}")),
@@ -10763,8 +10935,15 @@ fn build_brief(
         project_signs_off(worktree_path),
     );
     if let Some(toolchain) = toolchain {
-        content = insert_toolchain_section(content, toolchain, lang);
+        let profile =
+            crate::core::project_toolchains::detect_toolchains(std::path::Path::new(worktree_path));
+        content = insert_toolchain_section_in(content, toolchain, Some(&profile), lang);
     }
+    let content = brief_for_agent(
+        content,
+        prepared.execution.worker_agent_type.as_deref(),
+        lang,
+    );
     orchestrator_message(
         format!(
             "orch-brief:{}:{}",
@@ -10776,7 +10955,27 @@ fn build_brief(
 
 /// The brief's "what you can run" section (KT-1246), from the launch-time smoke
 /// check: the worker reads it instead of discovering a refusal mid-task.
+#[cfg(test)]
 fn toolchain_brief_section(toolchain: &ToolchainCapabilities, lang: RoomLang) -> String {
+    toolchain_brief_section_in(toolchain, None, lang)
+}
+
+/// [`toolchain_brief_section`] limited to the toolchains of `profile` (KT-1753): a
+/// project without Cargo is told nothing about `cargo nextest` or its target
+/// directory, one without Node nothing about Vite. `None` describes everything.
+/// The ports are named by the lane's variables, and no default port is free.
+fn toolchain_brief_section_in(
+    toolchain: &ToolchainCapabilities,
+    profile: Option<&[crate::core::project_toolchains::PackageRoot]>,
+    lang: RoomLang,
+) -> String {
+    use crate::core::project_toolchains::ToolchainKind;
+    let has = |wanted: fn(ToolchainKind) -> bool| {
+        profile.is_none_or(|roots| roots.iter().any(|root| wanted(root.kind)))
+    };
+    let cargo = has(|kind| kind == ToolchainKind::Cargo);
+    let node = has(|kind| matches!(kind, ToolchainKind::Node(_)));
+    let en = lang == RoomLang::En;
     let line = |label: &str, capability: &Capability| {
         format!(
             "- {label}{} {} — {}\n",
@@ -10789,57 +10988,167 @@ fn toolchain_brief_section(toolchain: &ToolchainCapabilities, lang: RoomLang) ->
             capability.reason
         )
     };
-    if lang == RoomLang::En {
-        return format!(
-            "## Test capabilities (verified at launch)\n\
-             {rust}{frontend}{port}\
-             Servers: a Kronn backend or a Vite that you start listens on `$KRONN_PORT` / \
-             `$VITE_DEV_PORT` (already in your environment; Vite proxies to \
-             `$KRONN_VITE_BACKEND_URL`). Run your lane's binary (`$CARGO_TARGET_DIR/debug/kronn`). \
-             Never listen on 3140 or 5173: that is the host's Kronn, and you would hijack the UI \
-             and the other workers. What you start stops with your turn: Kronn ends every \
-             process launched by your session when the dispatch finishes.\n\
-             Vite and vitest run as they are (`vitest run`, `vite --port $VITE_DEV_PORT`): your \
+    let mut out = String::from(if en {
+        "## Test capabilities (verified at launch)\n"
+    } else {
+        "## Capacités de test (vérifiées au lancement)\n"
+    });
+    if cargo {
+        out.push_str(&line(
+            if en {
+                "Rust tests (`cargo`)"
+            } else {
+                "Tests Rust (`cargo`)"
+            },
+            &toolchain.rust_tests,
+        ));
+    }
+    // A Node project that does not test with vitest is not told its tests are
+    // "unavailable": it runs its own (see the project conventions).
+    let vitest_line = node && !toolchain.frontend_tests.is_not_applicable();
+    if vitest_line {
+        out.push_str(&line(
+            if en {
+                "Frontend tests (`vitest`)"
+            } else {
+                "Tests frontend (`vitest`)"
+            },
+            &toolchain.frontend_tests,
+        ));
+    }
+    out.push_str(&line(
+        if en {
+            "Loopback port binding"
+        } else {
+            "Binding de port loopback"
+        },
+        &toolchain.port_binding,
+    ));
+    let ports = match (en, node) {
+        (true, true) => {
+            "`$KRONN_PORT` for a backend and `$VITE_DEV_PORT` for a front-end dev server (Vite \
+             proxies to `$KRONN_VITE_BACKEND_URL`)"
+        }
+        (false, true) => {
+            "`$KRONN_PORT` pour un backend et `$VITE_DEV_PORT` pour un serveur de dev front \
+             (Vite proxifie vers `$KRONN_VITE_BACKEND_URL`)"
+        }
+        (_, false) => "`$KRONN_PORT`",
+    };
+    out.push_str(&if en {
+        format!(
+            "Servers: anything you start (an API, a dev server, a preview) listens on a port of \
+             your environment: {ports}. Never listen on a default port (3140, 5173, 3000, \
+             8080…): those belong to the host's own services, and you would hijack them and the \
+             other workers. What you start stops with your turn: Kronn ends every process \
+             launched by your session when the dispatch finishes.\n"
+        )
+    } else {
+        format!(
+            "Serveurs : tout ce que tu démarres (une API, un serveur de dev, une prévisualisation) \
+             écoute sur un port de ton environnement : {ports}. N'écoute jamais sur un port par \
+             défaut (3140, 5173, 3000, 8080…) : ils sont ceux des services de l'hôte, et tu les \
+             détournerais, avec les autres workers. Ce que tu démarres s'arrête avec ton tour : \
+             Kronn termine tout processus lancé par ta session quand le dispatch finit.\n"
+        )
+    });
+    if cargo {
+        out.push_str(if en {
+            "A binary your build produces runs from your lane's target (`$CARGO_TARGET_DIR/debug`).\n"
+        } else {
+            "Un binaire que ton build produit se lance depuis la cible de ta lane \
+             (`$CARGO_TARGET_DIR/debug`).\n"
+        });
+    }
+    if vitest_line {
+        out.push_str(if en {
+            "Vite and vitest run as they are (`vitest run`, `vite --port $VITE_DEV_PORT`): your \
              lane's `node_modules` is a writable folder, Vite writes its config bundle there. If \
              you see `EPERM` on `node_modules/.vite-temp`, run again with \
-             `--configLoader native`.\n\
-             Run only what is ✅. A ❌ validation is never asserted: report it `skipped` with the \
-             reason above, the principal will run it. `tests_executed` states explicitly whether \
-             at least one test actually ran and which.\n\n",
-            rust = line("Rust tests (`cargo nextest`)", &toolchain.rust_tests),
-            frontend = line("Frontend tests (`vitest`)", &toolchain.frontend_tests),
-            port = line("Loopback port binding", &toolchain.port_binding),
-        );
+             `--configLoader native`.\n"
+        } else {
+            "Vite et vitest se lancent tels quels (`vitest run`, `vite --port $VITE_DEV_PORT`) : \
+             le `node_modules` de ta lane est un dossier inscriptible, Vite y écrit son bundle de \
+             configuration. Si tu vois `EPERM` sur `node_modules/.vite-temp`, relance avec \
+             `--configLoader native`.\n"
+        });
     }
-    format!(
-        "## Capacités de test (vérifiées au lancement)\n\
-         {rust}{frontend}{port}\
-         Serveurs : un backend Kronn ou un Vite que tu démarres écoute sur `$KRONN_PORT` / \
-         `$VITE_DEV_PORT` (déjà dans ton environnement ; Vite proxifie vers \
-         `$KRONN_VITE_BACKEND_URL`). Lance le binaire de ta lane (`$CARGO_TARGET_DIR/debug/kronn`). \
-         N'écoute jamais sur 3140 ni 5173 : c'est le Kronn de l'hôte, et tu détournerais l'UI \
-         et les autres workers. Ce que tu démarres s'arrête avec ton tour : Kronn termine tout \
-         processus lancé par ta session quand le dispatch finit.\n\
-         Vite et vitest se lancent tels quels (`vitest run`, `vite --port $VITE_DEV_PORT`) : le \
-         `node_modules` de ta lane est un dossier inscriptible, Vite y écrit son bundle de \
-         configuration. Si tu vois `EPERM` sur `node_modules/.vite-temp`, relance avec \
-         `--configLoader native`.\n\
-         Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
+    out.push_str(if en {
+        "Run only what is ✅. A ❌ validation is never asserted: report it `skipped` with the \
+         reason above, the principal will run it. `tests_executed` states explicitly whether at \
+         least one test actually ran and which.\n"
+    } else {
+        "Lance uniquement ce qui est ✅. Une validation ❌ ne s'affirme jamais : reporte-la \
          `skipped` avec la raison ci-dessus, le principal l'exécutera. `tests_executed` dit \
-         explicitement si au moins un test a réellement tourné et lesquels.\n\n",
-        rust = line("Tests Rust (`cargo nextest`)", &toolchain.rust_tests),
-        frontend = line("Tests frontend (`vitest`)", &toolchain.frontend_tests),
-        port = line("Binding de port loopback", &toolchain.port_binding),
-    )
+         explicitement si au moins un test a réellement tourné et lesquels.\n"
+    });
+    // The checks above cover Rust and vitest only. A project's own test commands
+    // are not "unavailable": they are simply not probed.
+    if profile.is_some() {
+        out.push_str(if en {
+            "This check covers only the tests listed above. For any other toolchain, run the \
+             project's own test commands (see Project conventions): they are not unavailable, \
+             just not probed here.\n"
+        } else {
+            "Cette vérification ne couvre que les tests listés ci-dessus. Pour toute autre \
+             chaîne d'outils, lance les commandes de test propres au projet (voir Conventions du \
+             projet) : elles ne sont pas indisponibles, simplement non sondées ici.\n"
+        });
+    }
+    out.push('\n');
+    out
+}
+
+/// The brief of a task worker of `agent_type` (KT-1753). A Codex worker's sandbox
+/// cannot write the worktree's git directory, so the section that tells a worker
+/// to `git merge` the target is replaced by the line saying the principal does it.
+fn brief_for_agent(content: String, agent_type: Option<&str>, lang: RoomLang) -> String {
+    if agent_type != Some("Codex") {
+        return content;
+    }
+    let (heading, replacement) = if lang == RoomLang::En {
+        (
+            "## Integrate the target branch\n",
+            "## Integrate the target branch\n\
+             Your sandbox cannot write this worktree's git directory: the principal integrates \
+             the target branch into your branch when it is needed, you do not merge.\n\n",
+        )
+    } else {
+        (
+            "## Intégrer la branche cible\n",
+            "## Intégrer la branche cible\n\
+             Ta sandbox ne peut pas écrire le dossier git de ce worktree : le principal intègre \
+             la branche cible dans ta branche quand c'est nécessaire, tu ne fusionnes pas.\n\n",
+        )
+    };
+    let Some(start) = content.find(heading) else {
+        return content;
+    };
+    let after = start + heading.len();
+    let end = content[after..]
+        .find("\n## ")
+        .map_or(content.len(), |at| after + at + 1);
+    format!("{}{replacement}{}", &content[..start], &content[end..])
 }
 
 /// Put the capability section right before the brief's `## Tests` section.
+#[cfg(test)]
 fn insert_toolchain_section(
     content: String,
     toolchain: &ToolchainCapabilities,
     lang: RoomLang,
 ) -> String {
-    let section = toolchain_brief_section(toolchain, lang);
+    insert_toolchain_section_in(content, toolchain, None, lang)
+}
+
+/// [`insert_toolchain_section`] limited to the toolchains of `profile` (KT-1753).
+fn insert_toolchain_section_in(
+    content: String,
+    toolchain: &ToolchainCapabilities,
+    profile: Option<&[crate::core::project_toolchains::PackageRoot]>,
+    lang: RoomLang,
+) -> String {
+    let section = toolchain_brief_section_in(toolchain, profile, lang);
     match content.find("## Tests\n") {
         Some(at) => format!("{}{section}{}", &content[..at], &content[at..]),
         None => format!("{content}\n\n{section}"),
@@ -11542,6 +11851,13 @@ fn build_token_budget_escalation_message(
     )
 }
 
+/// The validation gate of a project that builds with Cargo (Kronn's own CI gate).
+const RUST_GATE_EN: &str = "The default validations are fmt + clippy + targeted lib tests (`cargo test --lib <filter>`): the full suite is owned by the PR's CI, never by a local run. For a Rust change the lint gate is EXACTLY `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` (the CI gate: `--lib`, `--lib --tests` or a filtered output do not lint `tests/`); report each exit code in the evidence of its `tests` entry.";
+const RUST_GATE_FR: &str = "Les validations par défaut sont fmt + clippy + tests lib ciblés (`cargo test --lib <filtre>`) : la suite complète appartient à la CI de la PR, jamais à un run local. Pour un changement Rust, le gate de lint est EXACTEMENT `cargo fmt --check` et `cargo clippy --all-targets -- -D warnings` (le gate de la CI : `--lib`, `--lib --tests` ou une sortie filtrée ne lintent pas `tests/`) ; reporte le code de sortie de chacun dans la preuve de son entrée `tests`.";
+/// The gate of any other project: its own formatter, linter and tests.
+const GENERIC_GATE_EN: &str = "The default validations are the project's own formatter, linter and targeted tests (see the project conventions): the full suite is owned by the PR's CI, never by a local run. Report each command you ran and its exit code in the evidence of its `tests` entry.";
+const GENERIC_GATE_FR: &str = "Les validations par défaut sont le formateur, le linter et les tests ciblés propres au projet (voir les conventions du projet) : la suite complète appartient à la CI de la PR, jamais à un run local. Reporte chaque commande lancée et son code de sortie dans la preuve de son entrée `tests`.";
+
 /// Whether the project of the worktree signs its commits off (KT-1750): what the
 /// worker brief names, so it never asks for a trailer the project does not use.
 fn project_signs_off(worktree_path: &str) -> bool {
@@ -11883,15 +12199,20 @@ fn worker_brief_markdown_in(
     // (`worker_completed_without_delivery`, twice on KT-847). The long gates the
     // principal persisted are Kronn's to run at integration; the worker's job is the
     // targeted tests, then commit and deliver in the same turn.
+    // KT-1751 — the cargo lint gate is for a project that builds with Cargo. Any
+    // other project, one whose toolchain Kronn does not know included (Python,
+    // Go, Gradle), is told to use its own formatter, linter and tests.
+    let worktree_dir = std::path::Path::new(worktree_path);
+    let toolchains = crate::core::project_toolchains::detect_toolchains(worktree_dir);
+    let cargo_gate = toolchains
+        .iter()
+        .any(|root| root.kind == crate::core::project_toolchains::ToolchainKind::Cargo);
     let tests = if can_run_shell && !fr {
-        "Run the **targeted** tests that cover your change and report each result \
+        format!(
+            "Run the **targeted** tests that cover your change and report each result \
          (`pass`/`fail`/`skipped` + non-empty evidence) in `tests`. A `pass` without a \
          verifiable command or output is refused.\n\
-         The default validations are fmt + clippy + targeted lib tests (`cargo test --lib \
-         <filter>`): the full suite is owned by the PR's CI, never by a local run. For a Rust \
-         change the lint gate is EXACTLY `cargo fmt --check` and `cargo clippy --all-targets -- \
-         -D warnings` (the CI gate: `--lib`, `--lib --tests` or a filtered output do not lint \
-         `tests/`); report each exit code in the evidence of its `tests` entry. The long \
+         {gate} The long \
          validations persisted by the principal are run by Kronn at integration, after the \
          review: do not replay them in full. The shell tool \
          cuts a command at the per-command cap of Settings > Workers (60 min by default). A cold \
@@ -11901,8 +12222,13 @@ fn worker_brief_markdown_in(
          one to wait for it later: your process ends as soon as you hand the turn back, takes \
          the build with it, and the execution ends without a delivery; if you must background \
          a command, wait for it in the same turn. Chain it all in the same turn: targeted \
-         tests, commit, then `task_exec_deliver`."
-            .to_string()
+         tests, commit, then `task_exec_deliver`.",
+            gate = if cargo_gate {
+                RUST_GATE_EN
+            } else {
+                GENERIC_GATE_EN
+            }
+        )
     } else if !fr {
         "You have no shell: never claim to have run `cargo`, `pnpm`, `make` or any other \
          command. You may write the tests that are needed, then report the commands the \
@@ -11911,15 +12237,11 @@ fn worker_brief_markdown_in(
          `ReviewDecision`."
             .to_string()
     } else if can_run_shell {
-        "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
+        format!(
+            "Lance les tests **ciblés** qui couvrent ton changement et reporte chaque résultat \
          (`pass`/`fail`/`skipped` + preuve non vide) dans `tests`. Un `pass` sans \
          commande ou sortie vérifiable est refusé.\n\
-         Les validations par défaut sont fmt + clippy + tests lib ciblés (`cargo test --lib \
-         <filtre>`) : la suite complète appartient à la CI de la PR, jamais à un run local. \
-         Pour un changement Rust, le gate de lint est EXACTEMENT `cargo fmt --check` et \
-         `cargo clippy --all-targets -- -D warnings` (le gate de la CI : `--lib`, `--lib \
-         --tests` ou une sortie filtrée ne lintent pas `tests/`) ; reporte le code de sortie \
-         de chacun dans la preuve de son entrée `tests`. Les validations longues persistées par le principal sont \
+         {gate} Les validations longues persistées par le principal sont \
          jouées par Kronn à l'intégration, après la revue : ne les rejoue pas en entier. \
          L'outil shell coupe une commande au plafond par commande de Settings > Workers \
          (60 min par défaut). Un build à froid du profil de test peut durer de nombreuses \
@@ -11929,8 +12251,13 @@ fn worker_brief_markdown_in(
          jamais une pour l'attendre plus tard : ton processus s'arrête dès que tu rends la \
          main, emporte le build, et l'exécution finit sans livraison ; si tu dois mettre une \
          commande en arrière-plan, attends sa fin dans le même tour. Enchaîne dans le même \
-         tour : tests ciblés, commit, puis `task_exec_deliver`."
-            .to_string()
+         tour : tests ciblés, commit, puis `task_exec_deliver`.",
+            gate = if cargo_gate {
+                RUST_GATE_FR
+            } else {
+                GENERIC_GATE_FR
+            }
+        )
     } else {
         "Tu n'as pas de shell : n'affirme jamais avoir exécuté `cargo`, `pnpm`, `make` \
          ou une autre commande. Tu peux écrire les tests nécessaires, puis reporte les \
@@ -12271,7 +12598,10 @@ fn worker_brief_markdown_in(
     };
     // KT-1669 — a lane re-anchors only the citations its own gate reads; the
     // integration settles a citation-only conflict, never the lane.
-    let citations = if !fr {
+    // KT-1747 — only for a project whose docs carry `[src:]` citations.
+    let citations = if !crate::core::brief_conventions::has_doc_citations(worktree_dir) {
+        ""
+    } else if !fr {
         "## Doc citations\n\
          Keep the `[src:]` citations of the docs you edit resolving: that is your own \
          gate. Do not re-anchor the citations of docs you did not edit, nor the anchors a merge \
@@ -12290,7 +12620,13 @@ fn worker_brief_markdown_in(
          renvoyer ton travail. Une citation que ton changement casse pour de bon (symbole \
          supprimé ou renommé) est à toi : l'intégration te la renvoie avec la liste exacte.\n\n"
     };
-    let ui_captures = crate::core::ui_captures::brief_section(lang);
+    // Screen captures are asked of a project that has a web UI, not of every one.
+    let ui_captures = if crate::core::brief_conventions::has_web_ui(worktree_dir, &toolchains) {
+        crate::core::ui_captures::brief_section(lang)
+    } else {
+        ""
+    };
+    let conventions = crate::core::brief_conventions::section(worktree_dir, &toolchains, fr);
     if !fr {
         return format!(
             "# {task_reference} — {task_title}\n\n\
@@ -12313,7 +12649,7 @@ fn worker_brief_markdown_in(
              - Stay within the DoD's scope.\n\
              {time_limit_rule}\n\
              {target_integration}\
-             {citations}{ui_captures}\
+             {citations}{ui_captures}{conventions}\
              ## Tests\n\
              {tests}\n\n\
              ## Workspace\n\
@@ -12355,7 +12691,7 @@ fn worker_brief_markdown_in(
          - Reste dans le périmètre de la DoD.\n\
          {time_limit_rule}\n\
          {target_integration}\
-         {citations}{ui_captures}\
+         {citations}{ui_captures}{conventions}\
          ## Tests\n\
          {tests}\n\n\
          ## Workspace\n\
@@ -21788,11 +22124,130 @@ pub(crate) mod tests {
         }
     }
 
+    /// KT-1751 — the Rust lint gate (`cargo fmt`, `cargo clippy`) is for a
+    /// project that builds with Cargo: a worker of a PHP/Node/iOS project, or of
+    /// one whose toolchain Kronn does not know, is never told to run it.
+    #[test]
+    fn the_cargo_gate_text_is_only_for_projects_that_build_with_cargo() {
+        let brief = |lang, path: &str| {
+            worker_brief_markdown_in(
+                lang,
+                "KT-1751",
+                "Gate",
+                "Objective",
+                &[],
+                path,
+                "kronn/task/KT-1751",
+                "abc1234",
+                true,
+                true,
+                None,
+                true,
+            )
+        };
+        let php = tempfile::tempdir().unwrap();
+        std::fs::write(php.path().join("composer.json"), "{}").unwrap();
+        std::fs::write(php.path().join("Makefile"), "").unwrap();
+        let rust = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rust.path().join("backend")).unwrap();
+        std::fs::write(rust.path().join("backend/Cargo.toml"), "").unwrap();
+        std::fs::write(rust.path().join("Makefile"), "").unwrap();
+        let php = php.path().to_string_lossy().into_owned();
+        let rust = rust.path().to_string_lossy().into_owned();
+
+        for lang in [RoomLang::En, RoomLang::Fr] {
+            let other = brief(lang, &php);
+            assert!(!other.contains("cargo clippy"), "{other}");
+            assert!(!other.contains("cargo fmt"), "{other}");
+            assert!(!other.contains("cargo test --lib"), "{other}");
+            // Still told how to evidence a result, and where the conventions are.
+            assert!(other.contains("exit code") || other.contains("code de sortie"));
+            assert!(other.contains("task_exec_deliver"), "{other}");
+
+            let kept = brief(lang, &rust);
+            assert!(kept.contains("cargo clippy --all-targets -- -D warnings"));
+            assert!(kept.contains("cargo fmt --check"));
+            // Y2: a worktree whose toolchains Kronn does not know (Python, Go,
+            // Gradle) is not given the cargo gate either.
+            let unknown = brief(lang, "/wt/unknown");
+            assert!(!unknown.contains("cargo clippy"), "{unknown}");
+        }
+    }
+
+    /// KT-1747 — the brief carries a "Project conventions" section composed from
+    /// the toolchains found in the worktree (any project), in the room's
+    /// language, and none for a worktree that has none.
+    #[test]
+    fn worker_brief_composes_project_conventions_from_the_detected_toolchains() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("composer.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.path().join("assets/front")).unwrap();
+        std::fs::write(dir.path().join("assets/front/package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("assets/front/yarn.lock"), "").unwrap();
+        std::fs::write(dir.path().join("Makefile"), "").unwrap();
+        let worktree = dir.path().to_string_lossy().into_owned();
+        let brief = |lang, path: &str| {
+            worker_brief_markdown_in(
+                lang,
+                "KT-1747",
+                "Conventions",
+                "Objective",
+                &[],
+                path,
+                "kronn/task/KT-1747",
+                "abc1234",
+                true,
+                true,
+                None,
+                true,
+            )
+        };
+
+        let english = brief(RoomLang::En, &worktree);
+        assert!(english.contains("## Project conventions"), "{english}");
+        assert!(
+            english.contains("- composer at `.` (dependencies in `vendor/`)"),
+            "{english}"
+        );
+        assert!(
+            english.contains(
+                "- yarn at `assets/front` (dependencies in `assets/front/node_modules/`)"
+            ),
+            "{english}"
+        );
+        assert!(english.contains("- make at `.`"), "{english}");
+        // Placed before the tests the worker runs.
+        assert!(
+            english.find("## Project conventions") < english.find("## Tests"),
+            "{english}"
+        );
+
+        let french = brief(RoomLang::Fr, &worktree);
+        assert!(french.contains("## Conventions du projet"), "{french}");
+        assert!(
+            french.contains("- composer à `.` (dépendances dans `vendor/`)"),
+            "{french}"
+        );
+
+        let none = brief(RoomLang::En, "/wt/no-such-worktree");
+        assert!(!none.contains("Project conventions"), "{none}");
+        assert!(!brief(RoomLang::Fr, "/wt/no-such-worktree").contains("Conventions du projet"));
+    }
+
     /// KT-1669 — the brief asks a lane to keep only its own citations green and
     /// says the integration settles a citation-only conflict, whatever the
     /// transport and language.
     #[test]
     fn worker_brief_leaves_citation_only_conflicts_to_the_integration() {
+        // KT-1747: carried by a project whose docs carry `[src:]` citations.
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(worktree.path().join("docs")).unwrap();
+        std::fs::write(
+            worktree.path().join("docs/guide.md"),
+            "The entry point [src: file: src/main.rs:1].\n",
+        )
+        .unwrap();
+        let worktree_path = worktree.path().to_string_lossy().into_owned();
         for lang in [RoomLang::Fr, RoomLang::En] {
             for (can_run_shell, projection) in [(true, true), (true, false), (false, true)] {
                 let brief = worker_brief_markdown_in(
@@ -21801,7 +22256,7 @@ pub(crate) mod tests {
                     "Citations",
                     "Objective",
                     &[],
-                    "/wt/kt1669",
+                    &worktree_path,
                     "kronn/task/KT-1669",
                     "abc1234",
                     can_run_shell,
@@ -25361,12 +25816,16 @@ pub(crate) mod tests {
     /// KT-1636 — the worker brief names the default gates and who owns the suite.
     #[test]
     fn shell_worker_brief_names_the_default_validations_and_the_ci_owned_suite() {
+        // The cargo gate is for a project that builds with Cargo (KT-1751).
+        let rust = tempfile::tempdir().unwrap();
+        std::fs::write(rust.path().join("Cargo.toml"), "").unwrap();
+        let rust_path = rust.path().to_string_lossy().into_owned();
         let brief = worker_brief_markdown(
             "KT-1636",
             "CI owns the suite",
             "Objective",
             &[],
-            "/wt/kt1636",
+            &rust_path,
             "kronn/task/KT-1636",
             "abc1234",
             true,
@@ -25381,13 +25840,16 @@ pub(crate) mod tests {
     /// exact lint gate and ask for its exit code, so a worker never guesses.
     #[test]
     fn worker_brief_names_the_exact_lint_gate_and_the_exit_code() {
+        let rust = tempfile::tempdir().unwrap();
+        std::fs::write(rust.path().join("Cargo.toml"), "").unwrap();
+        let rust_path = rust.path().to_string_lossy().into_owned();
         let en = worker_brief_markdown_in(
             RoomLang::En,
             "KT-1654",
             "Lint gate",
             "Objective",
             &[],
-            "/wt/kt1654",
+            &rust_path,
             "kronn/task/KT-1654",
             "abc1234",
             true,
@@ -25400,7 +25862,7 @@ pub(crate) mod tests {
             "Lint gate",
             "Objective",
             &[],
-            "/wt",
+            &rust_path,
             "b",
             "abc1234",
             true,
@@ -25831,6 +26293,169 @@ pub(crate) mod tests {
                 "a real red validation stays the worker's: {}",
                 red.output
             );
+        }
+    }
+
+    /// KT-1753 — a validation that never reached the project's code because the
+    /// lane's environment stopped it (a missing tool, the sandbox, no network, a
+    /// compose service that is down) is the host's to fix, whatever the project
+    /// builds with; one that ran and failed stays the worker's.
+    #[test]
+    fn a_validation_stopped_by_the_lane_environment_is_not_the_workers_to_fix() {
+        use crate::models::ValidationsAccess::Sandbox;
+        let host = |code, output: &str, needle: &str| {
+            let cause = environment_cause(Sandbox, None, &failure(code, output))
+                .unwrap_or_else(|| panic!("`{output}` is the environment's"));
+            assert!(!cause.docker_elevation, "{}", cause.fix);
+            assert!(cause.fix.contains(needle), "{}", cause.fix);
+        };
+        // Exit 127: the tool is not installed or not on the lane's PATH.
+        host(Some(127), "sh: composer: command not found", "127");
+        // GNU make never exits 127: a tool missing behind a recipe makes it print
+        // `Error 127` and exit 2.
+        host(
+            Some(2),
+            "make: pnpm: No such file or directory\nmake: *** [Makefile:4: test] Error 127",
+            "127",
+        );
+        host(
+            Some(2),
+            "/bin/sh: composer: command not found\nmake: *** [test] Error 127",
+            "127",
+        );
+        // Any runner that says the command is not found, with no test result.
+        host(Some(1), "bash: line 1: phpunit: command not found", "127");
+        host(Some(1), "/bin/sh: 1: yarn: not found", "127");
+        // The OS sandbox refused an operation.
+        host(
+            Some(1),
+            "Error: EPERM: operation not permitted, mkdir '/Users/me/.cache/tool'",
+            "bac à sable",
+        );
+        // No network in the lane.
+        host(
+            Some(6),
+            "curl: (6) Could not resolve host: registry.example.com",
+            "réseau",
+        );
+        host(
+            Some(1),
+            "npm ERR! request to https://registry.npmjs.org/x failed, reason: getaddrinfo EAI_AGAIN registry.npmjs.org",
+            "réseau",
+        );
+        host(
+            Some(101),
+            "error: failed to get `serde` as a dependency\nCaused by: failed to lookup address information: nodename nor servname provided, or not known",
+            "réseau",
+        );
+        // A compose service the validation `exec`s into is not up.
+        host(Some(1), "service \"php\" is not running", "compose");
+        host(Some(1), "no such service: php", "compose");
+
+        for red in [
+            // The tool ran, the test failed — even if the log quotes an environment error.
+            failure(
+                Some(1),
+                "getaddrinfo EAI_AGAIN example.test\nAssertionError: expected the retry\n1 tests failed",
+            ),
+            failure(
+                Some(127),
+                "test result: FAILED. 1 passed; 1 failed\nfailures:\n  cmd::missing",
+            ),
+            failure(Some(1), "FAIL src/a.test.ts\nexpected 1 to be 2"),
+            failure(Some(1), "error: operation not permitted was the expected message\nAssertionError"),
+            failure(Some(101), "error[E0308]: mismatched types"),
+            failure(Some(2), "make: *** [test] Error 1"),
+            // `Error 127` as the prefix of another number is not the missing-tool code.
+            failure(Some(2), "make: *** [test] Error 1270"),
+            // A test log that quotes the message and then reports a failed test
+            // (vitest / jest, PHPUnit).
+            failure(
+                Some(2),
+                "bash: x: command not found\nFAIL src/a.test.ts\nexpected 1 to be 2\nmake: *** [test] Error 1",
+            ),
+            failure(
+                Some(2),
+                "sh: tool: command not found\nFAILURES!\nTests: 3, Assertions: 4, Failures: 1.\nmake: *** [test] Error 1",
+            ),
+        ] {
+            assert!(
+                environment_cause(Sandbox, None, &red).is_none(),
+                "a real red validation stays the worker's: {}",
+                red.output
+            );
+        }
+    }
+
+    /// KT-1753 review — a red run of pytest, mocha, jest or PHPUnit is the
+    /// worker's even when a failing test's own line says `Not Found`,
+    /// `Operation not permitted` or `Read-only file system`; only a shell's own
+    /// not-found report (or exit 127) means a missing tool.
+    #[test]
+    fn a_red_test_run_of_any_runner_never_reads_as_the_environment() {
+        use crate::models::ValidationsAccess::Sandbox;
+        for red in [
+            // pytest: the per-test line, then the summary.
+            failure(
+                Some(1),
+                "FAILED tests/test_api.py::test_get - requests.exceptions.HTTPError: 404 Client Error: Not Found for url: http://x/api\n=== 1 failed in 0.12s ===",
+            ),
+            failure(
+                Some(1),
+                "FAILED tests/test_io.py::test_write - PermissionError: [Errno 1] Operation not permitted: '/x'\n========== 1 failed, 3 passed in 0.40s ==========",
+            ),
+            failure(
+                Some(1),
+                "ERROR tests/test_io.py::test_tmp - OSError: [Errno 30] Read-only file system: '/x'\n=== 1 error in 0.10s ===",
+            ),
+            // mocha: `N failing`, then the failure with the server's answer.
+            failure(
+                Some(1),
+                "  3 passing (20ms)\n  1 failing\n\n  1) api\n       GET /x:\n     Error: expected 200 \"OK\", got 404 \"Not Found\"",
+            ),
+            // jest's summary line.
+            failure(
+                Some(1),
+                "Error: user: not found\nTests:       1 failed, 4 passed, 5 total",
+            ),
+            // PHPUnit's summary for errors (not only failures).
+            failure(
+                Some(2),
+                "1) App\\Tests\\FileTest::testWrite\nfile_put_contents(/x): Failed to open stream: Read-only file system\n\nERRORS!\nTests: 3, Assertions: 2, Errors: 1.",
+            ),
+            // An application message that merely ends in `: not found`.
+            failure(Some(1), "lookup failed: route /x: not found"),
+            // Python unittest / Django: `Ran N test(s)`, then `FAILED (…)`.
+            failure(
+                Some(1),
+                "ERROR: test_write (app.tests.FileTest)\nPermissionError: [Errno 1] Operation not permitted: '/x'\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nFAILED (errors=1)",
+            ),
+            failure(
+                Some(1),
+                "OSError: [Errno 30] Read-only file system: '/x'\nRan 12 tests in 0.300s\n\nFAILED (failures=1, errors=2)",
+            ),
+            failure(
+                Some(1),
+                "socket.gaierror: [Errno 8] nodename nor servname provided, or not known\nTemporary failure in name resolution\nRan 3 tests in 0.020s\nFAILED (errors=1)",
+            ),
+        ] {
+            assert!(
+                environment_cause(Sandbox, None, &red).is_none(),
+                "a real red test run stays the worker's: {}",
+                red.output
+            );
+        }
+        // The shells' own shapes still mean a missing tool.
+        for missing in [
+            "zsh: command not found: pnpm",
+            "/bin/sh: 1: yarn: not found",
+            "sh: phpunit: not found",
+            "bash: line 1: composer: command not found",
+            "env: 'node': No such file or directory",
+        ] {
+            let cause = environment_cause(Sandbox, None, &failure(Some(1), missing))
+                .unwrap_or_else(|| panic!("`{missing}` is a missing tool"));
+            assert!(cause.fix.contains("127"), "{}", cause.fix);
         }
     }
 
@@ -32694,7 +33319,104 @@ pub(crate) mod tests {
         assert!(brief.contains("`$VITE_DEV_PORT`"), "{brief}");
         assert!(brief.contains("--configLoader native"), "{brief}");
         assert!(brief.contains("s'arrête avec ton tour"), "{brief}");
-        assert!(brief.contains("jamais sur 3140 ni 5173"), "{brief}");
+        assert!(brief.contains("jamais sur un port par défaut"), "{brief}");
+    }
+
+    /// KT-1753 — the capability section describes the project, not Kronn: a PHP
+    /// project is told nothing about `cargo nextest`, Vite or Kronn's own binary,
+    /// ports are named by the lane's variables and no default port is free, and a
+    /// project that does build with Cargo and Node keeps its lines.
+    #[test]
+    fn the_capability_section_names_only_the_toolchains_the_project_has() {
+        let root = |kind, dir: &str| crate::core::project_toolchains::PackageRoot {
+            kind,
+            rel_dir: dir.into(),
+            workspace: None,
+        };
+        use crate::core::project_toolchains::{NodeManager, ToolchainKind};
+        let php = [root(ToolchainKind::Composer, "")];
+        let full = [
+            root(ToolchainKind::Cargo, ""),
+            root(ToolchainKind::Node(NodeManager::Npm), "frontend"),
+        ];
+
+        for lang in [RoomLang::En, RoomLang::Fr] {
+            let section = toolchain_brief_section_in(&sample_toolchain(), Some(&php), lang);
+            for kronn_only in [
+                "cargo nextest",
+                "vitest",
+                "Vite",
+                "debug/kronn",
+                "Kronn backend",
+            ] {
+                assert!(!section.contains(kronn_only), "{kronn_only}: {section}");
+            }
+            assert!(section.contains("`$KRONN_PORT`"), "{section}");
+            assert!(
+                section.contains("3140") && section.contains("8080"),
+                "{section}"
+            );
+            assert!(section.contains("tests_executed"), "{section}");
+
+            let both = toolchain_brief_section_in(&sample_toolchain(), Some(&full), lang);
+            assert!(both.contains("cargo nextest"), "{both}");
+            assert!(both.contains("vitest"), "{both}");
+            assert!(both.contains("$VITE_DEV_PORT"), "{both}");
+            assert!(both.contains("$CARGO_TARGET_DIR/debug"), "{both}");
+        }
+    }
+
+    /// KT-1753 — a Codex worker cannot write the worktree's git directory, so a
+    /// brief that tells it to `git merge` the target sets it up to fail: it gets
+    /// no merge section, only the line saying the principal integrates the
+    /// target. Every other runtime keeps the section.
+    #[test]
+    fn a_codex_brief_has_no_merge_section() {
+        for lang in [RoomLang::En, RoomLang::Fr] {
+            let brief = worker_brief_markdown_in(
+                lang,
+                "KT-1",
+                "T",
+                "Objective",
+                &[],
+                "/wt",
+                "b",
+                "abc",
+                true,
+                true,
+                None,
+                true,
+            );
+            let heading = if lang == RoomLang::En {
+                "## Integrate the target branch"
+            } else {
+                "## Intégrer la branche cible"
+            };
+            assert!(brief.contains(heading), "{brief}");
+
+            let codex = brief_for_agent(brief.clone(), Some("Codex"), lang);
+            assert_eq!(codex.matches(heading).count(), 1, "{codex}");
+            assert!(!codex.contains("git merge"), "{codex}");
+            assert!(!codex.contains("MERGE_HEAD"), "{codex}");
+            assert!(brief.contains("MERGE_HEAD"), "the other runtimes keep it");
+            assert!(
+                codex.contains(if lang == RoomLang::En {
+                    "the principal integrates the target branch"
+                } else {
+                    "le principal intègre la branche cible"
+                }),
+                "{codex}"
+            );
+            // The sections around it survive.
+            assert!(codex.contains("## Tests"), "{codex}");
+            assert!(codex.contains("## Workspace"), "{codex}");
+
+            assert_eq!(
+                brief_for_agent(brief.clone(), Some("ClaudeCode"), lang),
+                brief
+            );
+            assert_eq!(brief_for_agent(brief.clone(), None, lang), brief);
+        }
     }
 
     /// KT-1316 — every brief variant reads in the room's language: an English
@@ -32882,6 +33604,9 @@ pub(crate) mod tests {
             worktree::task_worktree_layout(repo, &task_ref, exec_short(&exec.id)).unwrap();
         std::fs::create_dir_all(worktree.join("backend")).unwrap();
         std::fs::write(worktree.join("backend").join("Cargo.toml"), "").unwrap();
+        // Kronn's shape: its backend configures nextest, so nextest is probed.
+        std::fs::create_dir_all(worktree.join("backend/.config")).unwrap();
+        std::fs::write(worktree.join("backend/.config/nextest.toml"), "").unwrap();
         std::fs::create_dir_all(worktree.join("frontend")).unwrap();
         std::fs::write(worktree.join("frontend").join("package.json"), "{}").unwrap();
         let bin = repo.join("frontend").join("node_modules").join(".bin");
@@ -34230,6 +34955,61 @@ pub(crate) mod tests {
             resumed.sub_discussion_id, blocked.sub_discussion_id,
             "resume reuses its own sub-discussion (keyed by the execution)"
         );
+    }
+
+    /// KT-1753 (B2) — `build_brief` itself hands the execution's agent type to the
+    /// Codex adjustment: a Codex execution's brief has no merge steps, any other
+    /// worker's keeps them. `brief_for_agent` alone cannot show that the launch
+    /// path passes the type.
+    #[test]
+    fn build_brief_gives_a_codex_execution_no_merge_section_and_keeps_it_for_the_others() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let repo = "/tmp/whatever";
+        crate::db::projects::insert_project(&conn, &test_project("p", repo)).unwrap();
+        crate::db::discussions::insert_discussion(&conn, &plain_discussion("parent", "p")).unwrap();
+        let task = create_todo_task(&conn, "p", "Task");
+        let mut launch = crate::models::LaunchSingleTaskInput::new(&task.summary.id, "parent");
+        launch.project_id = Some("p".into());
+        launch.worker_target_kind = Some(MessageTargetKind::Agent);
+        launch.worker_agent_type = Some("ClaudeCode".into());
+        let outcome =
+            crate::db::orchestration::launch_single_task(&conn, &launch, &test_actor()).unwrap();
+        let execution = advance_to_provisioning(&conn, outcome.execution, &test_actor()).unwrap();
+
+        let brief_of = |agent: &str, lang: RoomLang| {
+            let mut execution = execution.clone();
+            execution.worker_agent_type = Some(agent.to_string());
+            let prepared = Prepared {
+                execution,
+                project_id: "p".into(),
+                repo_path: repo.into(),
+                task_reference: task.summary.reference.clone(),
+                task_title: task.summary.title.clone(),
+                task_description: "x".into(),
+                dod: task.definition_of_done.clone(),
+                target_branch: "main".into(),
+                already_launched: false,
+            };
+            build_brief(
+                &prepared,
+                "/tmp/wt",
+                "kronn/task/kt-x",
+                "deadbeef",
+                None,
+                lang,
+            )
+            .content
+        };
+        for lang in [RoomLang::En, RoomLang::Fr] {
+            let codex = brief_of("Codex", lang);
+            assert!(!codex.contains("git merge"), "{codex}");
+            assert!(!codex.contains("MERGE_HEAD"), "{codex}");
+            let claude = brief_of("ClaudeCode", lang);
+            assert!(claude.contains("git merge"), "{claude}");
+            assert!(claude.contains("MERGE_HEAD"), "{claude}");
+        }
     }
 
     // ── Direct sync test of the atomic checkpoint's rollback integrality ──
@@ -53110,3 +53890,7 @@ mod orchestration_trust_tests;
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "orchestration_ui_capture_tests.rs"]
 mod orchestration_ui_capture_tests;
+
+#[cfg(all(test, feature = "full-tests"))]
+#[path = "orchestration_generic_brief_tests.rs"]
+mod orchestration_generic_brief_tests;

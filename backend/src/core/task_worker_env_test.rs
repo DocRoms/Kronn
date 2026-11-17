@@ -38,6 +38,16 @@ impl Fixture {
         std::fs::write(self.worktree.join("frontend").join("package.json"), "{}").unwrap();
         std::fs::create_dir_all(self.worktree.join("backend")).unwrap();
         std::fs::write(self.worktree.join("backend").join("Cargo.toml"), "").unwrap();
+        // Kronn's own shape: its backend configures nextest.
+        std::fs::create_dir_all(self.worktree.join("backend").join(".config")).unwrap();
+        std::fs::write(
+            self.worktree
+                .join("backend")
+                .join(".config")
+                .join("nextest.toml"),
+            "",
+        )
+        .unwrap();
     }
 
     fn lane(&self) -> WorkerLane {
@@ -990,6 +1000,44 @@ fn a_failing_nextest_marks_rust_unavailable_and_says_why() {
     assert_eq!(runner.calls.lock().unwrap().len(), 3);
 }
 
+/// KT-1747 review — a Cargo project that does not configure nextest tests with
+/// `cargo test`: a host without nextest must not turn its Rust line red (the
+/// brief would then tell the worker to skip tests that run).
+#[test]
+fn a_cargo_project_that_does_not_configure_nextest_is_probed_for_cargo_test() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(
+        fx.worktree.join("redis-flush").join("Cargo.toml"),
+        "[package]\nname = \"redis-flush\"\n",
+    )
+    .unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::failing_on("nextest");
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(
+        capabilities.rust_tests.available,
+        "{:?}",
+        capabilities.rust_tests
+    );
+    assert!(
+        capabilities.rust_tests.reason.contains("cargo test"),
+        "{}",
+        capabilities.rust_tests.reason
+    );
+    let calls = runner.calls.lock().unwrap();
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.args.iter().any(|arg| arg == "nextest")),
+        "nextest was probed for a project that does not use it"
+    );
+}
+
 #[test]
 fn an_offline_cache_gap_marks_rust_unavailable() {
     let (_fx, _home, lane, provisioned) = ready_lane();
@@ -1090,6 +1138,112 @@ fn a_project_without_cargo_or_frontend_reports_not_applicable() {
         .reason
         .starts_with("not applicable"));
     assert!(runner.calls.lock().unwrap().is_empty());
+}
+
+/// KT-1747 — the probes follow the project's own toolchain roots, not Kronn's
+/// layout. A root Node app (a front-end repository), a Cargo crate in a
+/// sub-directory (a PHP project with a Rust helper).
+#[test]
+fn a_root_node_app_has_its_vitest_probed_where_it_lives() {
+    let fx = fixture();
+    std::fs::write(fx.worktree.join("package.json"), "{}").unwrap();
+    std::fs::write(fx.worktree.join("yarn.lock"), "").unwrap();
+    std::fs::write(fx.worktree.join("Makefile"), "test:\n\ttrue\n").unwrap();
+    std::fs::create_dir_all(fx.worktree.join("application")).unwrap();
+    std::fs::write(fx.worktree.join("application/composer.json"), "{}").unwrap();
+    let bin = fx.repo.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("vitest"), "#!/bin/sh\n").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(capabilities.frontend_tests.available, "{capabilities:?}");
+    assert!(
+        capabilities
+            .frontend_tests
+            .reason
+            .contains("runs from node_modules"),
+        "{}",
+        capabilities.frontend_tests.reason
+    );
+    assert!(capabilities.rust_tests.is_not_applicable());
+    let calls = runner.calls.lock().unwrap();
+    assert_eq!(calls[0].cwd, fx.worktree);
+}
+
+#[test]
+fn a_node_app_that_does_not_use_vitest_is_not_told_its_tests_are_unavailable() {
+    let fx = fixture();
+    std::fs::write(fx.worktree.join("package.json"), "{}").unwrap();
+    let bin = fx.repo.join("node_modules/.bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("jest"), "#!/bin/sh\n").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(
+        capabilities.frontend_tests.is_not_applicable(),
+        "{capabilities:?}"
+    );
+    assert!(runner.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_cargo_crate_in_a_sub_directory_is_probed_in_its_own_directory() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(fx.worktree.join("redis-flush/Cargo.toml"), "").unwrap();
+    std::fs::create_dir_all(fx.worktree.join("tools/second")).unwrap();
+    std::fs::write(fx.worktree.join("tools/second/Cargo.toml"), "").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::passing();
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(capabilities.rust_tests.available, "{capabilities:?}");
+    let calls = runner.calls.lock().unwrap();
+    let fetches: Vec<_> = calls
+        .iter()
+        .filter(|call| call.args.first().is_some_and(|arg| arg == "fetch"))
+        .map(|call| call.cwd.clone())
+        .collect();
+    assert_eq!(
+        fetches,
+        [
+            fx.worktree.join("redis-flush"),
+            fx.worktree.join("tools/second")
+        ]
+    );
+}
+
+#[test]
+fn an_unreachable_crate_among_several_names_itself() {
+    let fx = fixture();
+    std::fs::create_dir_all(fx.worktree.join("redis-flush")).unwrap();
+    std::fs::write(fx.worktree.join("redis-flush/Cargo.toml"), "").unwrap();
+    let home = fake_cargo_home(true);
+    let lane = fx.lane();
+    let provisioned = lane.provision(&caches_of(&home, &fx));
+    let runner = ScriptedRunner::failing_on("fetch");
+
+    let capabilities = smoke_check_with(&lane, &provisioned, true, &runner, &bind_ok);
+
+    assert!(!capabilities.rust_tests.available);
+    assert!(
+        capabilities.rust_tests.reason.contains("redis-flush"),
+        "{}",
+        capabilities.rust_tests.reason
+    );
 }
 
 #[test]

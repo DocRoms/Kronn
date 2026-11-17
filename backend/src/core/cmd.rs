@@ -72,33 +72,35 @@ fn raw_sync(program: &OsStr) -> std::process::Command {
     cmd
 }
 
-/// Environment flag that arms the real-agent guard in a build that is not the
-/// library's own test build — the integration crates in `backend/tests` link the
-/// library without `cfg(test)`. Set (to anything but `0`) by `tests/it.rs`
-/// before any test runs; never set by Kronn itself (KT-1189).
-///
-/// Only read when the `test-support` cargo feature is compiled in, which only
-/// the test build of the integration crates does: a shipped `kronn` ignores
-/// it (see [`ignored_test_flag`]).
-pub const NO_REAL_AGENTS_ENV: &str = "KRONN_TEST_NO_REAL_AGENTS";
+/// Set by [`arm_real_agent_guard_for_tests`], read by [`real_agents_forbidden`].
+static REAL_AGENT_GUARD_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-/// Whether `flag` (the value of [`NO_REAL_AGENTS_ENV`]) arms the guard, given
-/// whether the `test-support` feature is compiled in (`gate`). The gate is a
-/// parameter so a test can prove a build without it ignores a set flag.
-fn forbidden_by(flag: Option<&OsStr>, gate: bool) -> bool {
-    gate && flag.is_some_and(|value| !value.is_empty() && value != "0")
+/// Arms the real-agent guard for the rest of this process. The integration
+/// crates in `backend/tests` link the library without `cfg(test)`, so the guard
+/// the library's own tests get from `cfg(test)` reaches them through this call,
+/// made once by `tests/it.rs` before any test runs (KT-1189).
+///
+/// A call, not an environment variable and not a cargo feature (KT-1744): a
+/// feature enabled by the package being its own dev-dependency made every
+/// `cargo test --lib` compile the library twice. Nothing Kronn ships calls it,
+/// and no environment variable arms the guard in any build: a user's shell
+/// cannot turn it on in a `kronn` they run.
+#[doc(hidden)]
+pub fn arm_real_agent_guard_for_tests() {
+    REAL_AGENT_GUARD_ARMED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether [`arm_real_agent_guard_for_tests`] was called in this process.
+pub fn real_agent_guard_armed() -> bool {
+    REAL_AGENT_GUARD_ARMED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Whether a test is running that must not start a real agent CLI: the
-/// library's own test build, or an integration test binary (feature
-/// `test-support`) carrying [`NO_REAL_AGENTS_ENV`]. `false` in every
-/// production process, whatever its environment holds.
+/// library's own test build, or an integration test binary that armed the
+/// guard. `false` in every production process, whatever its environment holds.
 pub fn real_agents_forbidden() -> bool {
-    let armed = cfg!(test)
-        || forbidden_by(
-            crate::core::child_env::var_os(NO_REAL_AGENTS_ENV).as_deref(),
-            cfg!(feature = "test-support"),
-        );
+    let armed = cfg!(test) || real_agent_guard_armed();
     armed && !real_agent_guard::live_probe_open()
 }
 
@@ -108,7 +110,7 @@ pub fn real_agents_forbidden() -> bool {
 pub const REAL_SANDBOX_ENV: &str = "KRONN_TEST_REAL_SANDBOX";
 
 /// Why the OS sandbox launcher of the machine must not be started, when this is
-/// an integration test binary that armed [`NO_REAL_AGENTS_ENV`] and was not
+/// an integration test binary that armed the guard ([`arm_real_agent_guard_for_tests`]) and was not
 /// opted in with [`REAL_SANDBOX_ENV`]; `None` everywhere else (production, the
 /// library's own unit tests, an opted-in run).
 ///
@@ -125,15 +127,6 @@ pub fn real_sandbox_refusal() -> Option<String> {
     (!opted_in).then(|| {
         format!("an integration test does not start the OS sandbox of the machine ({REAL_SANDBOX_ENV}=1 opts in)")
     })
-}
-
-/// `true` when [`NO_REAL_AGENTS_ENV`] is set in a build that ignores it: the
-/// startup of the binary warns about it once, so a user who exported it learns
-/// it does nothing instead of wondering why.
-pub fn ignored_test_flag() -> bool {
-    !cfg!(feature = "test-support")
-        && !cfg!(test)
-        && crate::core::child_env::var_os(NO_REAL_AGENTS_ENV).is_some()
 }
 
 /// Whether `path` is a program a test controls: a stub written under the
@@ -1128,22 +1121,65 @@ mod tests {
         drop(cmd);
     }
 
-    /// KT-1189: `KRONN_TEST_NO_REAL_AGENTS` only arms the guard when the
-    /// `test-support` feature is compiled in. A build without it (every build a
-    /// user runs) ignores the variable, so a user who exported it keeps every
-    /// installed agent and no launch aborts the backend. Reverting the `gate &&`
-    /// in `forbidden_by` fails the first assertion.
+    /// KT-1744 — the package is not its own dev-dependency: that made every
+    /// `cargo test --lib` compile the library twice (once with a feature for the
+    /// integration binary, once as the unit-test binary), 8 min 25 s of a 32 min
+    /// 56 s warm-up. The integration binary arms the real-agent guard with a call,
+    /// so no cargo feature is needed.
     #[test]
-    fn the_flag_is_ignored_by_a_build_without_the_test_support_feature() {
-        let set = Some(OsStr::new("1"));
-        // Production build: flag set, gate off.
-        assert!(!forbidden_by(set, false));
-        assert!(!forbidden_by(Some(OsStr::new("anything")), false));
-        // Test-support build: flag set arms it, unset / empty / "0" does not.
-        assert!(forbidden_by(set, true));
-        assert!(!forbidden_by(None, true));
-        assert!(!forbidden_by(Some(OsStr::new("")), true));
-        assert!(!forbidden_by(Some(OsStr::new("0")), true));
+    fn the_package_is_not_its_own_dev_dependency() {
+        let manifest =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
+        let dev = manifest
+            .split("[dev-dependencies]")
+            .nth(1)
+            .expect("dev-dependencies table");
+        let dev = dev.split("\n[").next().unwrap();
+        assert!(
+            !dev.lines()
+                .any(|line| line.trim_start().starts_with("kronn ")
+                    || line.trim_start().starts_with("kronn=")),
+            "the package depends on itself: {dev}"
+        );
+        assert!(
+            !manifest.contains("test-support"),
+            "no cargo feature arms the guard any more"
+        );
+    }
+
+    /// KT-1744 — the guard is armed by one call, made by `tests/it.rs` and by no
+    /// code Kronn ships: nothing under `src/` (the library and the binary) calls it,
+    /// and no environment variable arms it in any build, so a user who exports
+    /// the old `KRONN_TEST_NO_REAL_AGENTS` changes nothing.
+    #[test]
+    fn nothing_that_ships_arms_the_real_agent_guard() {
+        fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, hits);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    for needle in [
+                        "arm_real_agent_guard_for_tests(",
+                        "KRONN_TEST_NO_REAL_AGENTS",
+                    ] {
+                        let calls = text.matches(needle).count();
+                        // This file names both once or twice: its definition and docs.
+                        if calls > 0 && !path.ends_with("core/cmd.rs") {
+                            hits.push(format!("{}: {needle}", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut hits,
+        );
+        assert!(hits.is_empty(), "{hits:?}");
+        assert!(!real_agent_guard_armed(), "armed by nothing in a unit test");
     }
 
     /// KT-1189: a program resolved outside the directories a test controls is

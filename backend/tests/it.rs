@@ -3,12 +3,11 @@
 //! per file. Add a new file to this list; Cargo does not discover it.
 
 /// No test of this binary may start an agent CLI installed on the machine
-/// (KT-1189). The library arms its guard from `KRONN_TEST_NO_REAL_AGENTS`, a
-/// variable it reads only in a build with the `test-support` feature (this
-/// package's own dev-dependency turns it on for this binary and no other
-/// build). It is set here, before `main`, so every test of every module has it whatever
-/// helper it builds its state with — a flag each module had to remember to set
-/// would be missing the day a module forgets it.
+/// (KT-1189). The guard is armed here by one call, before `main`, so every test
+/// of every module has it whatever helper it builds its state with — a call each
+/// module had to remember to make would be missing the day a module forgets it.
+/// No cargo feature and no environment variable arms it (KT-1744): the package
+/// is not its own dev-dependency, so `cargo test --lib` compiles the library once.
 #[used]
 #[cfg_attr(
     any(target_os = "linux", target_os = "android"),
@@ -18,7 +17,7 @@
 #[cfg_attr(windows, link_section = ".CRT$XCU")]
 static ARM_THE_REAL_AGENT_GUARD: extern "C" fn() = {
     extern "C" fn arm() {
-        kronn::core::child_env::set_var(kronn::core::cmd::NO_REAL_AGENTS_ENV, "1");
+        kronn::core::cmd::arm_real_agent_guard_for_tests();
     }
     arm
 };
@@ -178,10 +177,7 @@ fn every_test_file_is_a_module_of_this_binary() {
 fn the_real_agent_guard_is_armed_for_every_integration_test() {
     assert!(
         kronn::core::cmd::real_agents_forbidden(),
-        "KRONN_TEST_NO_REAL_AGENTS is not set in the integration test binary"
+        "the real-agent guard is not armed in the integration test binary"
     );
-    assert_eq!(
-        kronn::core::child_env::var(kronn::core::cmd::NO_REAL_AGENTS_ENV).as_deref(),
-        Ok("1")
-    );
+    assert!(kronn::core::cmd::real_agent_guard_armed());
 }

@@ -68,6 +68,60 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     }));
   });
 
+  // KT-1747 — `dependency_dirs` is set through the workspace API (the form has no
+  // input for it yet): a save of the other fields must not delete it.
+  it('keeps the dependency directories the project names when it saves the warm-up', async () => {
+    getMock.mockResolvedValue({
+      hooks: {},
+      lane_warm: { rust_roots: ['backend'], dependency_dirs: ['vendor', 'assets/front/node_modules'] },
+    });
+    setMock.mockResolvedValue(true);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-roots')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-roots'), { target: { value: 'backend\nredis-flush' } });
+    fireEvent.click(screen.getByTestId('project-lane-warm-save'));
+
+    await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', {
+      hooks: {},
+      lane_warm: {
+        dependency_dirs: ['vendor', 'assets/front/node_modules'],
+        rust_roots: ['backend', 'redis-flush'],
+      },
+    }));
+  });
+
+  // KT-1751 review — the executables a project's validations may run are set
+  // here, where Quick Exec's refusal sends the human.
+  it('lists the validation executables and stores them with the override', async () => {
+    getMock.mockResolvedValue({ hooks: {}, lane_warm: { validation_executables: ['composer'] } });
+    setMock.mockResolvedValue(true);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-executables')).not.toBeDisabled());
+    expect(screen.getByTestId('project-lane-warm-executables')).toHaveValue('composer');
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-executables'), {
+      target: { value: 'composer\n./vendor/bin/phpunit\n./gradlew\n' },
+    });
+    fireEvent.click(screen.getByTestId('project-lane-warm-save'));
+
+    await waitFor(() => expect(setMock).toHaveBeenCalledWith('p1', {
+      hooks: {},
+      lane_warm: { validation_executables: ['composer', 'vendor/bin/phpunit', './gradlew'] },
+    }));
+  });
+
+  it('refuses a validation executable outside the repository before saving', async () => {
+    getMock.mockResolvedValue(null);
+    render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
+    await waitFor(() => expect(screen.getByTestId('project-lane-warm-executables')).not.toBeDisabled());
+
+    fireEvent.change(screen.getByTestId('project-lane-warm-executables'), { target: { value: '/usr/bin/php' } });
+
+    expect(screen.getByTestId('project-lane-warm-executables-invalid')).toBeInTheDocument();
+    expect(screen.getByTestId('project-lane-warm-save')).toBeDisabled();
+  });
+
   it('refuses a root outside the repository before saving', async () => {
     getMock.mockResolvedValue(null);
     render(<ProjectLaneWarmSetting projectId="p1" t={t} />);
@@ -134,12 +188,26 @@ describe('ProjectLaneWarmSetting (KT-1742)', () => {
     await waitFor(() => expect(screen.getByTestId('project-lane-warm-command')).not.toBeDisabled());
 
     const groups = screen.getByTestId('project-lane-warm-fields').querySelectorAll(':scope > .lane-warm-group');
-    expect(groups).toHaveLength(5);
+    expect(groups).toHaveLength(6);
     for (const group of Array.from(groups)) {
       expect(group.querySelectorAll('label')).toHaveLength(1);
       expect(group.querySelector('p.text-faint')).not.toBeNull();
     }
     expect(screen.getByTestId('project-lane-warm-title')).toHaveTextContent('laneWarm.projectTitle');
+  });
+
+  it('says in every locale that a root wrapper is typed with ./ while a bare name is a PATH program (KT-1751)', async () => {
+    const locales = await Promise.all([
+      import('../../lib/i18n/locales/en'),
+      import('../../lib/i18n/locales/fr'),
+      import('../../lib/i18n/locales/es'),
+      import('../../lib/i18n/locales/zh'),
+    ]);
+    for (const { default: dict } of locales) {
+      const help = dict['laneWarm.executablesHelp'];
+      expect(help).toContain('./gradlew');
+      expect(help).toContain('PATH');
+    }
   });
 
   it('tells when KRONN_WORKER_FIRST_BUILD_TIMEOUT_SECS is set on the host, as a fallback for an empty field', async () => {

@@ -53,8 +53,8 @@ pub const WARM_START_EVENT_ACTION: &str = "lane_warm_start";
 
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 2;
 /// KT-1742: 60 min, not 30. Even from a perfect seed, the `kronn` crate's own
-/// two compiles (lib with `test-support`, then the lib test binary) took 32 min
-/// 56 s at host load 14 with 3 jobs, so a 30-min bound killed a healthy warm-up
+/// two compiles (then a lib with a feature and the lib test binary; since KT-1744
+/// only the latter) took 32 min 56 s at host load 14, so a 30-min bound killed a healthy warm-up
 /// and threw its work away. See `docs/operations/worktree-build-artifacts.md`.
 const DEFAULT_FIRST_BUILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 

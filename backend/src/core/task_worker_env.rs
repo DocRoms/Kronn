@@ -359,7 +359,56 @@ impl WorkerLane {
         if let Some(source) = self.frontend_deps_source().filter(|path| path.is_dir()) {
             roots.push(source);
         }
+        for (path, _) in self.layered_dependency_dirs().0 {
+            if let Some(source) = self
+                .main_checkout
+                .as_ref()
+                .map(|root| root.join(&path))
+                .filter(|source| source.is_dir() && !roots.contains(source))
+            {
+                roots.push(source);
+            }
+        }
         roots
+    }
+
+    /// KT-1747 — the dependency directories this lane layers besides the
+    /// frontend's own (which keeps its dedicated link, see
+    /// [`WorkerLane::link_frontend_deps`]): the ones detected from the
+    /// worktree's manifests at any depth, or exactly the project's own list
+    /// ([`crate::core::task_worker_lane_settings`]). Each is paired with its
+    /// path relative to the repository; the second list holds the entries of
+    /// the project's list that name no directory inside the repository.
+    fn layered_dependency_dirs(&self) -> (Vec<(String, PathBuf)>, Vec<String>) {
+        let settings = crate::core::task_worker_lane_settings::effective_for(
+            &self.worktree,
+            self.main_checkout.as_deref(),
+        );
+        let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+        let (dirs, rejected) = crate::core::project_toolchains::dependency_dirs(
+            &profile,
+            settings.dependency_dirs.as_deref(),
+        );
+        let frontend = format!("{FRONTEND_DIR}/{NODE_MODULES}");
+        let dirs = dirs
+            .into_iter()
+            .filter(|dir| *dir != frontend)
+            .map(|dir| {
+                let destination = self.worktree.join(&dir);
+                (dir, destination)
+            })
+            .collect();
+        (dirs, rejected)
+    }
+
+    /// KT-1751 review — every dependency directory this lane takes from the
+    /// main checkout (relative to the repository, `/` separated): the layered
+    /// ones and the frontend's own link.
+    pub(crate) fn dependency_paths(&self) -> Vec<String> {
+        let (layered, _) = self.layered_dependency_dirs();
+        std::iter::once(format!("{FRONTEND_DIR}/{NODE_MODULES}"))
+            .chain(layered.into_iter().map(|(path, _)| path))
+            .collect()
     }
 
     /// Environment a task worker gets so no env-prefixed command is needed.
@@ -388,10 +437,29 @@ impl WorkerLane {
         ));
         env.push((E2E_CHROMIUM_SINGLE_PROCESS_ENV, OsString::from("1")));
         env.extend(self.compiler_temp_env());
+        env.extend(self.package_manager_cache_env());
         if let Some(home) = self.effective_cargo_home(provisioned) {
             env.push((CARGO_HOME_ENV, home.into_os_string()));
         }
         env
+    }
+
+    /// KT-1751 — the download cache of each package manager the project uses
+    /// (npm, yarn, composer, found from the manifests at any depth), moved to
+    /// `<data dir>/cache/<name>`: inside the lane, so inside a write root, instead
+    /// of the user's home, which a lane may not write. Nothing is added for a
+    /// project that uses none of them (Kronn's own lanes are unchanged).
+    fn package_manager_cache_env(&self) -> Vec<(&'static str, OsString)> {
+        let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+        crate::core::project_toolchains::cache_env(&profile)
+            .into_iter()
+            .map(|(variable, folder)| {
+                (
+                    variable,
+                    self.data_dir.join("cache").join(folder).into_os_string(),
+                )
+            })
+            .collect()
     }
 
     /// The C compiler's environment of this lane (KT-1736, KT-1742): what keeps
@@ -511,8 +579,73 @@ impl WorkerLane {
                 warnings.push(format!("cannot ignore the node_modules link: {error}"));
             }
         }
+        let (layered, rejected) = self.layered_dependency_dirs();
+        warnings.extend(rejected.into_iter().map(|entry| {
+            format!(
+                "dependency_dirs entry `{entry}` is not a directory inside the repository: \
+                 ignored"
+            )
+        }));
+        let mut dependency_layers = Vec::new();
+        for (path, destination) in layered {
+            let source = self
+                .main_checkout
+                .as_ref()
+                .map(|root| root.join(&path))
+                .filter(|source| source.is_dir());
+            let state = self.link_deps_at(&destination, source);
+            if matches!(state, FrontendDeps::Linked(_)) && self.worktree.join(".git").exists() {
+                // KT-1595, as for the frontend link above: judged from the
+                // lane, written to the REGISTERED checkout's exclude, never to
+                // wherever the lane's (agent-writable) `.git` pointer says.
+                let written = match self.main_checkout.as_deref() {
+                    Some(root) => crate::core::worktree::ensure_local_git_exclude_pinned_for(
+                        &self.worktree,
+                        root,
+                        &format!("/{path}"),
+                    ),
+                    None => Err("the lane has no registered checkout".to_string()),
+                };
+                if let Err(error) = written {
+                    warnings.push(format!("cannot ignore the {path} layer: {error}"));
+                }
+            }
+            dependency_layers.push(DependencyLayer { path, state });
+        }
+        // KT-1747: a dependency directory the main checkout has not installed
+        // is a launch warning, not a silent gap: it names the command.
+        let missing: Vec<String> =
+            std::iter::once((format!("{FRONTEND_DIR}/{NODE_MODULES}"), &frontend_deps))
+                .chain(
+                    dependency_layers
+                        .iter()
+                        .map(|layer| (layer.path.clone(), &layer.state)),
+                )
+                .filter(|(_, state)| **state == FrontendDeps::SourceMissing)
+                .map(|(path, _)| path)
+                .collect();
+        if !missing.is_empty() {
+            let profile = crate::core::project_toolchains::detect_toolchains(&self.worktree);
+            // A package of a Node workspace has no install of its own (its
+            // dependencies are hoisted to the workspace root, whose own layer
+            // carries the warning when it is missing).
+            let workspace_package = |path: &str| {
+                profile.iter().any(|root| {
+                    root.workspace.is_some() && root.dependency_path().as_deref() == Some(path)
+                })
+            };
+            warnings.extend(
+                missing
+                    .iter()
+                    .filter(|path| !workspace_package(path))
+                    .map(|path| {
+                        crate::core::project_toolchains::missing_dependency_notice(&profile, path)
+                    }),
+            );
+        }
         Provisioned {
             frontend_deps,
+            dependency_layers,
             cargo_home_ready,
             shared_cargo_home,
             warnings,
@@ -553,6 +686,14 @@ impl WorkerLane {
         }
         let destination = frontend.join(NODE_MODULES);
         let source = self.frontend_deps_source().filter(|path| path.is_dir());
+        self.link_deps_at(&destination, source)
+    }
+
+    /// Make `destination` (a dependency directory of the worktree) available
+    /// from `source` (the main checkout's): layered entry by entry, never
+    /// replacing a directory the project has of its own.
+    fn link_deps_at(&self, destination: &Path, source: Option<PathBuf>) -> FrontendDeps {
+        let destination = destination.to_path_buf();
         match std::fs::symlink_metadata(&destination) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 // KT-1246 linked the whole directory, so Vite's config loader
@@ -624,25 +765,13 @@ impl WorkerLane {
     }
 }
 
-/// Link every entry of `source` into `destination`, except what a tool writes
-/// at run time (those stay the lane's own, in the real directory).
-fn link_entries(source: &Path, destination: &Path) -> Result<(), String> {
-    let entries = std::fs::read_dir(source)
-        .map_err(|error| format!("cannot read {}: {error}", source.display()))?;
-    // One entry that cannot be linked (a real directory the lane already has)
-    // must not leave the entries after it unlinked: go on, report the first.
-    let mut first_error = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if NODE_MODULES_LANE_OWNED.iter().any(|owned| name == *owned) {
-            continue;
-        }
-        if let Err(error) = ensure_symlink(&entry.path(), &destination.join(&name)) {
-            first_error.get_or_insert(error);
-        }
-    }
-    first_error.map_or(Ok(()), Err)
-}
+#[path = "task_worker_env_layers.rs"]
+mod layers;
+use layers::link_entries;
+#[path = "task_worker_env_probes.rs"]
+mod probes;
+pub(crate) use probes::check_frontend;
+use probes::check_rust;
 
 /// How the worktree's frontend dependencies were made available.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -664,10 +793,22 @@ fn private_cargo_home_requested() -> bool {
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
 }
 
+/// KT-1747 — how one dependency directory of the project (any toolchain, any
+/// depth) was made available to the lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyLayer {
+    /// The directory, relative to the repository, `/` separated.
+    pub path: String,
+    pub state: FrontendDeps,
+}
+
 /// What [`WorkerLane::provision`] managed to prepare.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provisioned {
     pub frontend_deps: FrontendDeps,
+    /// Every other dependency directory the lane layers (KT-1747): `vendor/`,
+    /// `Pods/`, a nested package's `node_modules/`.
+    pub dependency_layers: Vec<DependencyLayer>,
     pub cargo_home_ready: bool,
     /// The host's own `CARGO_HOME`, when the lane runs with it rather than with
     /// its private one (see [`CARGO_HOME_ENV`]).
@@ -926,6 +1067,12 @@ impl Capability {
             available: false,
             reason: reason.into(),
         }
+    }
+
+    /// The project has no such toolchain, or does not test with this tool: the
+    /// brief says nothing about it instead of calling it unavailable.
+    pub fn is_not_applicable(&self) -> bool {
+        !self.available && self.reason.starts_with("not applicable")
     }
 }
 
@@ -1285,123 +1432,6 @@ fn bind_loopback_port() -> std::io::Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-fn check_rust(
-    lane: &WorkerLane,
-    env: &[(String, OsString)],
-    runner: &dyn ProbeRunner,
-) -> Capability {
-    let Some(manifest_dir) = [lane.worktree.clone(), lane.worktree.join("backend")]
-        .into_iter()
-        .find(|dir| dir.join("Cargo.toml").is_file())
-    else {
-        return Capability::no("not applicable: no Cargo.toml at the worktree root or in backend/");
-    };
-    if let Err(error) = probe_writable(&lane.cargo_target_dir) {
-        return Capability::no(format!(
-            "the lane target directory {} is not writable: {error}",
-            lane.cargo_target_dir.display()
-        ));
-    }
-    let probe = |args: &[&str], timeout: Duration| ProbeCommand {
-        program: "cargo".into(),
-        args: args.iter().map(|arg| arg.to_string()).collect(),
-        cwd: manifest_dir.clone(),
-        env: env.to_vec(),
-        timeout,
-        priority: Priority::Normal,
-        clean_env: false,
-    };
-    let nextest = runner.run(&probe(&["nextest", "--version"], NEXTEST_TIMEOUT));
-    if !nextest.success {
-        return Capability::no(format!(
-            "`cargo nextest --version` failed: {}",
-            nextest.detail
-        ));
-    }
-    // A cold `cargo check` would compile the whole dependency graph; resolving
-    // it offline from the cache proves the part a sandbox actually breaks.
-    let fetch = runner.run(&probe(
-        &["fetch", "--offline", "--locked"],
-        OFFLINE_FETCH_TIMEOUT,
-    ));
-    if !fetch.success {
-        return Capability::no(format!(
-            "offline dependency resolution failed (`cargo fetch --offline --locked`): {}",
-            fetch.detail
-        ));
-    }
-    Capability::yes(format!(
-        "cargo nextest and the offline dependency cache work; lane target {}",
-        lane.cargo_target_dir.display()
-    ))
-}
-
-pub(crate) fn check_frontend(
-    lane: &WorkerLane,
-    provisioned: &Provisioned,
-    env: &[(String, OsString)],
-    runner: &dyn ProbeRunner,
-) -> Capability {
-    match &provisioned.frontend_deps {
-        FrontendDeps::NotApplicable => {
-            Capability::no("not applicable: the worktree has no frontend/package.json")
-        }
-        FrontendDeps::SourceMissing => Capability::no(
-            "the main checkout has no frontend/node_modules to reuse and a worker never installs \
-             from the network",
-        ),
-        FrontendDeps::Failed(error) => Capability::no(format!(
-            "frontend/node_modules could not be linked: {error}"
-        )),
-        FrontendDeps::Linked(_) | FrontendDeps::AlreadyPresent => {
-            let frontend = lane.frontend_dir();
-            let vitest = frontend.join(NODE_MODULES).join(".bin").join("vitest");
-            if !vitest.exists() {
-                return Capability::no("frontend/node_modules/.bin/vitest is missing");
-            }
-            let outcome = runner.run(&ProbeCommand {
-                program: vitest.to_string_lossy().into_owned(),
-                args: vec!["--version".into()],
-                cwd: frontend,
-                env: env.to_vec(),
-                timeout: VITEST_TIMEOUT,
-                priority: Priority::Normal,
-                clean_env: false,
-            });
-            if !outcome.success {
-                return Capability::no(format!("`vitest --version` failed: {}", outcome.detail));
-            }
-            let version = outcome.detail;
-            // `--version` never loads the config, which is where Vite writes
-            // (`node_modules/.vite-temp`) and where a lane failed with EPERM
-            // (KT-1266): a run that selects no test file loads it and exits.
-            let config = runner.run(&ProbeCommand {
-                program: vitest.to_string_lossy().into_owned(),
-                args: vec![
-                    "run".into(),
-                    "--passWithNoTests".into(),
-                    VITEST_CONFIG_PROBE_FILTER.into(),
-                ],
-                cwd: lane.frontend_dir(),
-                env: env.to_vec(),
-                timeout: VITEST_CONFIG_TIMEOUT,
-                priority: Priority::Normal,
-                clean_env: false,
-            });
-            if config.success {
-                Capability::yes(format!(
-                    "vitest {version} runs from frontend/node_modules and loads its config in the lane"
-                ))
-            } else {
-                Capability::no(format!(
-                    "vitest cannot load its config in the lane (`vitest run --passWithNoTests`): {}",
-                    config.detail
-                ))
-            }
-        }
-    }
-}
-
 fn check_port_binding(
     loopback_binding_allowed: bool,
     bind: &dyn Fn() -> std::io::Result<u16>,
@@ -1428,3 +1458,7 @@ fn probe_writable(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 #[path = "task_worker_env_test.rs"]
 mod task_worker_env_test;
+
+#[cfg(test)]
+#[path = "task_worker_env_deps_test.rs"]
+mod task_worker_env_deps_test;

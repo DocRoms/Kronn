@@ -125,7 +125,7 @@ encrypted with the instance key in the `stored_credentials` table since 0.14.3
 `config.toml` without them. `#[ts(skip)]` only keeps the value out of the
 generated TypeScript model. See [key-management.md](key-management.md).
 [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
-[src: file: backend/src/models/setup.rs:1082-1087#ApiKey]
+[src: file: backend/src/models/setup.rs:1221-1226#ApiKey]
 
 Deletion is not transactional across SQLite and the local configuration. Kronn
 deletes the connection row first, then removes the matching token entry from a
@@ -196,7 +196,7 @@ At startup, Kronn backfills the former single LiteLLM and NVIDIA settings into
 stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
-configuration did not contain one. [src: file: backend/src/lib.rs:187-210#bootstrap_external_api_connections]
+configuration did not contain one. [src: file: backend/src/lib.rs:222-245#bootstrap_external_api_connections]
 [src: file: backend/src/db/external_api_connections.rs:359-390#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
@@ -249,7 +249,7 @@ those tokens ahead of the call.
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
   [src: file: backend/src/core/token_checks.rs:326-344#spawn_scheduler]
-  [src: file: backend/src/lib.rs:2560-2562#check_token]
+  [src: file: backend/src/lib.rs:2592-2594#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
   OAuth / token-exchange refresh included), with the 15 s timeout of the

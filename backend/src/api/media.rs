@@ -1701,7 +1701,6 @@ const CAPABILITY_UNKNOWN_TTL_SECS: i64 = 60;
 /// Forgets every cached catalogue answer. Tests call it first: a mock server
 /// may reuse a port a previous test's catalogue was cached under.
 #[doc(hidden)]
-#[cfg(any(test, feature = "test-support"))]
 pub fn clear_capability_cache() {
     if let Some(cache) = CAPABILITY_CACHE.get() {
         if let Ok(mut guard) = cache.lock() {

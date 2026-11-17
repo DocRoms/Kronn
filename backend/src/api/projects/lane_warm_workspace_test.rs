@@ -66,6 +66,7 @@ async fn stored(state: &AppState, id: &str) -> Option<ProjectWorkspace> {
 
 #[tokio::test]
 async fn a_projects_lane_warm_settings_are_stored_published_and_cleared() {
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
     let state = test_state();
     let dir = tempfile::tempdir().unwrap();
     seed_project(&state, "p1", dir.path()).await;
@@ -148,6 +149,8 @@ async fn a_projects_lane_warm_settings_are_stored_published_and_cleared() {
 
 #[tokio::test]
 async fn a_workspace_with_neither_hooks_nor_lane_settings_is_not_stored() {
+    // A save publishes to the snapshot: never while a test rebuilds it.
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
     let state = test_state();
     let dir = tempfile::tempdir().unwrap();
     seed_project(&state, "p2", dir.path()).await;
@@ -159,4 +162,97 @@ async fn a_workspace_with_neither_hooks_nor_lane_settings_is_not_stored() {
     .await;
     assert!(saved.0.success);
     assert!(stored(&state, "p2").await.is_none());
+}
+
+/// KT-1751 review — a single-segment repository path (`./gradlew`) keeps its
+/// `./` through the real save: stored as typed, it admits `./gradlew test` and
+/// never a bare `gradlew` from the PATH; a bare name stays a PATH program and
+/// never admits a repository file `./composer`.
+#[tokio::test]
+async fn a_saved_repository_wrapper_keeps_its_dot_slash_and_a_bare_name_stays_a_name() {
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
+    let state = test_state();
+    let dir = tempfile::tempdir().unwrap();
+    seed_project(&state, "p3", dir.path()).await;
+    let saved = set_project_workspace(
+        State(state.clone()),
+        Path("p3".into()),
+        Json(Some(ProjectWorkspace {
+            lane_warm: LaneWarmConfig {
+                validation_executables: Some(vec![
+                    " ./gradlew ".into(),
+                    "composer".into(),
+                    "./vendor/bin/phpunit".into(),
+                ]),
+                ..LaneWarmConfig::default()
+            },
+            ..ProjectWorkspace::default()
+        })),
+    )
+    .await;
+    assert!(saved.0.success, "{:?}", saved.0.error);
+    let listed = stored(&state, "p3")
+        .await
+        .expect("stored")
+        .lane_warm
+        .validation_executables
+        .expect("listed");
+    assert!(listed.contains(&"./gradlew".to_string()), "{listed:?}");
+    let worktree = dir.path().join(".kronn/worktrees/task-kt-1751-dot");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let published = crate::core::task_worker_lane_settings::validation_executables_for(&worktree);
+    crate::core::task_worker_lane_settings::set_project(dir.path(), None);
+
+    let check = |line: &str| crate::core::quick_exec::check_command_line_with(line, &published);
+    assert!(
+        check("./gradlew test").is_ok(),
+        "{:?}",
+        check("./gradlew test").err()
+    );
+    assert!(
+        check("gradlew test").is_err(),
+        "a bare gradlew is a PATH program"
+    );
+    assert!(check("composer install").is_ok());
+    assert!(
+        check("./composer install").is_err(),
+        "a repository file `./composer`"
+    );
+    assert!(check("vendor/bin/phpunit").is_ok());
+    assert!(check("./vendor/bin/phpunit").is_ok());
+}
+
+/// KT-1751 third review — the path branch of a validation executable refuses,
+/// through the real save, every spelling that leaves the repository or hides a
+/// `.`/`..`/empty segment, and nothing of the refused entry is stored.
+#[tokio::test]
+async fn a_saved_validation_path_that_escapes_or_hides_a_segment_is_refused() {
+    let _shared = crate::core::task_worker_lane_settings::test_guard::shared_async().await;
+    let state = test_state();
+    let dir = tempfile::tempdir().unwrap();
+    seed_project(&state, "p4", dir.path()).await;
+    for entry in ["./..", "./../x", ".//x", "./a/../b", "././x", "/abs", "./"] {
+        let saved = set_project_workspace(
+            State(state.clone()),
+            Path("p4".into()),
+            Json(Some(ProjectWorkspace {
+                lane_warm: LaneWarmConfig {
+                    validation_executables: Some(vec![entry.into()]),
+                    ..LaneWarmConfig::default()
+                },
+                ..ProjectWorkspace::default()
+            })),
+        )
+        .await;
+        assert!(!saved.0.success, "`{entry}` was accepted");
+        assert!(
+            saved
+                .0
+                .error
+                .unwrap_or_default()
+                .contains("validation_executables"),
+            "the refusal of `{entry}` names the field"
+        );
+        assert!(stored(&state, "p4").await.is_none(), "`{entry}` was stored");
+    }
 }

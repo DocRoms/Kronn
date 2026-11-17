@@ -354,6 +354,20 @@ impl WorkersConfig {
             }
         }
         validate_managed_worktree_roots(&self.managed_worktree_roots)?;
+        // KT-1751 review: a project's own setting; the global entry is never
+        // read for it, so storing one there would be silently ignored.
+        if self
+            .lane_warm
+            .validation_executables
+            .as_ref()
+            .is_some_and(|entries| !entries.is_empty())
+        {
+            return Err(
+                "lane_warm.validation_executables is a project's own setting: set it \
+                 on the project card (Lane warm-up), not in Settings > Workers"
+                    .to_string(),
+            );
+        }
         if !(1..=MAX_BASH_TIMEOUT_MIN_LIMIT).contains(&self.bash_max_timeout_min) {
             return Err(format!(
                 "bash_max_timeout_min must be between 1 and {MAX_BASH_TIMEOUT_MIN_LIMIT}"
@@ -427,6 +441,22 @@ pub struct LaneWarmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub rust_roots: Option<Vec<String>>,
+    /// KT-1747 — the dependency directories a lane layers read-only from the main
+    /// checkout (`node_modules`, `vendor`, `Pods`, … at any depth), as
+    /// directories relative to the repository. `None` = the ones detected from
+    /// the manifests; a list = exactly those; an empty list = none. A project's
+    /// own setting only, like `rust_roots`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dependency_dirs: Option<Vec<String>>,
+    /// KT-1751 — the executables this project's validations may run beyond
+    /// Kronn's own allowlist: a bare name (`composer`, `go`, `pytest`) or a
+    /// repository-relative path (`vendor/bin/phpunit`). The human's decision for
+    /// one project, set in its workspace settings: no agent tool writes it and the
+    /// global entry is not read for it. A shell is never accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub validation_executables: Option<Vec<String>>,
 }
 
 /// KT-1742 — default bound of a lane's first build, in minutes (measured: the
@@ -493,6 +523,31 @@ impl LaneWarmConfig {
                 kept
             })
             .filter(|roots| !roots.is_empty());
+        // An empty list is kept: it says "layer nothing", not "detect".
+        self.dependency_dirs = self.dependency_dirs.map(|dirs| {
+            let mut kept: Vec<String> = Vec::new();
+            for dir in dirs {
+                let dir = normalize_lane_root(&dir);
+                if !dir.is_empty() && !kept.contains(&dir) {
+                    kept.push(dir);
+                }
+            }
+            kept
+        });
+        // A blank list is no executable at all.
+        self.validation_executables = self
+            .validation_executables
+            .map(|entries| {
+                let mut kept: Vec<String> = Vec::new();
+                for entry in entries {
+                    let entry = normalize_validation_executable(&entry);
+                    if !entry.is_empty() && !kept.contains(&entry) {
+                        kept.push(entry);
+                    }
+                }
+                kept
+            })
+            .filter(|entries| !entries.is_empty());
         self
     }
 
@@ -522,6 +577,35 @@ impl LaneWarmConfig {
                 validate_lane_root(root)?;
             }
         }
+        if let Some(dirs) = &self.dependency_dirs {
+            if dirs.len() > MAX_LANE_ROOTS {
+                return Err(format!(
+                    "dependency_dirs is limited to {MAX_LANE_ROOTS} entries"
+                ));
+            }
+            for dir in dirs.iter().filter(|dir| !dir.trim().is_empty()) {
+                validate_lane_root(dir)
+                    .ok()
+                    .filter(|_| normalize_lane_root(dir) != ".")
+                    .ok_or_else(|| {
+                        format!(
+                            "dependency_dirs entry `{}` must be a directory inside the \
+                             repository (relative, no `..`, not the root itself)",
+                            normalize_lane_root(dir)
+                        )
+                    })?;
+            }
+        }
+        if let Some(entries) = &self.validation_executables {
+            if entries.len() > MAX_LANE_EXECUTABLES {
+                return Err(format!(
+                    "validation_executables is limited to {MAX_LANE_EXECUTABLES} entries"
+                ));
+            }
+            for entry in entries.iter().filter(|entry| !entry.trim().is_empty()) {
+                validate_validation_executable(entry)?;
+            }
+        }
         if let Some(entries) = &self.compiler_env {
             if entries.len() > MAX_LANE_ENV_ENTRIES {
                 return Err(format!(
@@ -533,6 +617,61 @@ impl LaneWarmConfig {
             }
         }
         Ok(())
+    }
+}
+
+const MAX_LANE_EXECUTABLES: usize = 32;
+
+/// KT-1751 — one entry of `validation_executables`: a bare program name or a
+/// path inside the repository, in plain characters (a validation is a literal
+/// argv, so nothing a shell would read), and never a program that runs a command
+/// line of its own.
+fn validate_validation_executable(entry: &str) -> Result<(), String> {
+    let entry = entry.trim();
+    // `./gradlew` is a repository path, `gradlew` a program on the PATH.
+    let is_path = entry.contains('/');
+    let entry = entry.strip_prefix("./").unwrap_or(entry);
+    let plain = entry
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '@' | '/'));
+    let refused = |why: &str| {
+        Err(format!(
+            "validation_executables entry `{entry}` {why}: use a program name \
+             (`composer`) or a path inside the repository (`vendor/bin/phpunit`)"
+        ))
+    };
+    if entry.is_empty() || entry.len() > 200 || !plain {
+        return refused("holds characters a program name or path does not");
+    }
+    if is_path {
+        let inside = !entry.starts_with('/')
+            && entry
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..");
+        return if inside {
+            Ok(())
+        } else {
+            refused("is not a path inside the repository")
+        };
+    }
+    if entry.starts_with('-') {
+        return refused("is an option, not a program");
+    }
+    if crate::core::quick_exec::DENIED_BINARIES.contains(&entry) {
+        return refused("runs a command line of its own, which a validation never does");
+    }
+    Ok(())
+}
+
+/// KT-1751 review — a stored validation executable: trimmed, and a leading
+/// `./` dropped only where the rest is still a path (`./vendor/bin/phpunit` →
+/// `vendor/bin/phpunit`). A single-segment repository file keeps it
+/// (`./gradlew`): without it, it would be a bare name, a program on the PATH.
+pub fn normalize_validation_executable(entry: &str) -> String {
+    let entry = entry.trim();
+    match entry.strip_prefix("./") {
+        Some(rest) if rest.contains('/') => rest.to_string(),
+        _ => entry.to_string(),
     }
 }
 

@@ -63,6 +63,18 @@ macOS-only test code outside the four suites: no CI job compiles it any more.
 [src: file: backend/src/core/power_guard.rs:255]
 [src: file: backend/Cargo.toml:23-31]
 
+KT-1744 removed the `kronn = { path = ".", features = ["test-support"] }`
+self dev-dependency. That entry kept default features on, so it silently
+re-enabled `full-tests` under `--no-default-features` and the gate had been
+compiling the whole lib-test binary for weeks while it looked green. Now the
+flag really applies: five test modules that had been added since 22/10 with a
+plain `#[cfg(test)]` while using fixtures that exist only under `full-tests`
+(`api::other_projects_fixture`, `mcp_scanner::host_sync_tests`,
+`resource_identities::tests`) failed with E0433 and were gated like the rest
+(`activity_tests`, `briefing_docs_tests`, `cross_audit_tests`,
+`setup_workers_tests`, `default_docs_dir_tests`). `cargo test --lib
+--no-default-features --no-run` builds again.
+
 Adding a test module: use the gated attribute unless production code under
 `cfg(test)` calls into it; `cargo check --lib --profile test --no-default-features`
 tells you in a minute.

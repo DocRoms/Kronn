@@ -56,7 +56,9 @@ export function ProjectLaneWarmSetting({ projectId, t }: Props) {
       const next: ProjectWorkspace = {
         ...current,
         hooks: current?.hooks ?? {},
-        lane_warm: configOf(draft),
+        // Fields the form has no input for (the dependency directories) go back
+        // as they are in the entry read just above.
+        lane_warm: configOf(draft, current?.lane_warm),
       };
       await projectsApi.setWorkspace(projectId, next);
       setWorkspace(next);

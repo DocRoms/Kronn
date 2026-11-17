@@ -113,12 +113,6 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     tracing::info!("tracing initialized — filter: {}", filter_src);
     tracing::info!("timezone: {}", kronn::core::timezone::current());
     kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
-    if kronn::core::cmd::ignored_test_flag() {
-        tracing::warn!(
-            "{} is set but only test builds read it: ignored, agent CLIs stay available",
-            kronn::core::cmd::NO_REAL_AGENTS_ENV
-        );
-    }
 
     tracing::info!("Kronn — Entering the grid...");
     if app_config.server.debug_mode {
@@ -458,19 +452,11 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         // below, before the first lane of this boot.
         kronn::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
     }
-    match state.db.with_conn(kronn::db::projects::list_projects).await {
-        Ok(projects) => {
-            for project in projects {
-                kronn::core::task_worker_lane_settings::set_project(
-                    std::path::Path::new(&project.path),
-                    project
-                        .workspace
-                        .as_ref()
-                        .map(|workspace| &workspace.lane_warm),
-                );
-            }
-        }
-        Err(error) => tracing::warn!("project lane settings not loaded: {error}"),
+    // KT-1751 fourth review — every project registered and its lane entry
+    // published, shared with the desktop boot.
+    let lane_warm = state.config.read().await.workers.lane_warm.clone();
+    if let Err(error) = kronn::arm_lane_settings(&state.db, &lane_warm).await {
+        tracing::warn!("project lane settings not loaded: {error}");
     }
     // KT-1633 — ask the host once whether its priority launcher runs, off the
     // async path, before recovery can dispatch a worker. A spawn only reads the answer.

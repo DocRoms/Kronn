@@ -56,6 +56,8 @@ fn the_macos_clang_default_applies_only_to_a_project_that_builds_c_through_cc() 
 
 #[test]
 fn detection_reads_the_projects_own_lock_files() {
+    // Reads the snapshot's global entry: never while a test rebuilds it.
+    let _shared = test_guard::shared();
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path();
     std::fs::create_dir_all(repo.join("redis-flush")).unwrap();
@@ -91,6 +93,8 @@ fn the_global_entry_overrides_every_detected_default() {
         first_build_command: Some("  make deps  ".into()),
         first_build_timeout_min: Some(90),
         rust_roots: None,
+        dependency_dirs: None,
+        validation_executables: None,
     };
 
     let effective = resolve(&global, None, never_detected);
@@ -128,6 +132,8 @@ fn a_project_field_wins_over_the_global_one_and_the_rest_is_inherited() {
         first_build_command: Some("make deps".into()),
         first_build_timeout_min: Some(90),
         rust_roots: None,
+        dependency_dirs: None,
+        validation_executables: None,
     };
     let project = LaneWarmConfig {
         first_build_timeout_min: Some(20),
@@ -185,6 +191,9 @@ fn a_project_with_nothing_set_follows_detection() {
 /// main checkout, so every lane of that project (and no other) gets it.
 #[test]
 fn a_projects_entry_reaches_the_lanes_of_that_project_only() {
+    // KT-1751 fifth review — publishes then reads the snapshot: a concurrent
+    // test's rebuild must not wipe the entry in between.
+    let _shared = test_guard::shared();
     let project = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     let worktree = project
@@ -300,6 +309,8 @@ fn the_settings_are_validated_before_they_are_stored() {
         first_build_command: Some("composer install".into()),
         first_build_timeout_min: Some(45),
         rust_roots: None,
+        dependency_dirs: None,
+        validation_executables: None,
         seed_alignment: Some(true),
     };
     assert_eq!(ok.validate(), Ok(()));
@@ -365,6 +376,8 @@ fn the_workers_config_carries_the_global_entry_and_it_survives_a_toml_round_trip
             first_build_command: Some("npm ci".into()),
             first_build_timeout_min: Some(30),
             rust_roots: None,
+            dependency_dirs: None,
+            validation_executables: None,
         },
         ..WorkersConfig::default()
     };

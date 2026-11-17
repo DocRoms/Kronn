@@ -753,6 +753,6 @@ pub async fn cross_audit_estimate(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "full-tests"))]
 #[path = "cross_audit_tests.rs"]
 mod tests;

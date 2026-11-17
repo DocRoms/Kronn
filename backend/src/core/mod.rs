@@ -19,6 +19,7 @@ pub mod background_priority;
 pub mod backup;
 pub mod bridge_admit;
 pub mod bridge_token;
+pub mod brief_conventions;
 pub mod briefing_docs;
 pub mod checkout_release;
 pub mod checksums;
