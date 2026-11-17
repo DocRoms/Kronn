@@ -463,7 +463,10 @@ where
                 // A sweep that keeps dying, or a runtime that drops the task
                 // at once, is started again further and further apart. `done`
                 // is held meanwhile: a caller cancelled here frees the others.
-                tokio::time::sleep(restart_backoff(empty_rounds)).await;
+                let pause = restart_backoff(empty_rounds);
+                if !pause.is_zero() {
+                    tokio::time::sleep(pause).await;
+                }
                 tokio::spawn(run_detect_all_refresh(
                     detect(),
                     generation,
@@ -2294,6 +2297,58 @@ mod tests {
             !DETECT_ALL_CACHE.lock().unwrap().refreshing,
             "no sweep is announced as running"
         );
+        // The next caller does not wait on a sweep nobody runs.
+        let next = tokio::spawn(detect_all_cached_with(false, || async { one_detection() }));
+        assert_eq!(caller_outcome(next).await.len(), 1);
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_caller_arriving_while_the_starter_waits_to_restart_starts_no_sweep() {
+        use std::sync::atomic::Ordering;
+        reset_detect_cache(None);
+        let (detect, sweeps) = counted_sweeps(|call| async move {
+            assert!(call > 1, "the first sweep dies");
+            two_detections()
+        });
+        let starter = tokio::spawn(detect_all_cached_with(false, detect.clone()));
+        // Past the first sweep, inside the wait before the second.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let arriving = tokio::spawn(detect_all_cached_with(false, detect));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert_eq!(
+            sweeps.load(Ordering::SeqCst),
+            1,
+            "it waits with the starter"
+        );
+
+        let (first, second) = (
+            caller_outcome(starter).await,
+            caller_outcome(arriving).await,
+        );
+
+        assert_eq!((first.len(), second.len()), (2, 2));
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
+        invalidate_detect_cache();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_first_sweep_starts_at_once() {
+        use std::future::Future;
+        use std::sync::atomic::Ordering;
+        reset_detect_cache(None);
+        let (detect, sweeps) = counted_sweeps(|_| async { one_detection() });
+        let mut caller = Box::pin(detect_all_cached_with(false, detect));
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+
+        // One poll, no timer in between: the sweep is already handed over.
+        assert!(caller.as_mut().poll(&mut context).is_pending());
+        assert_eq!(sweeps.load(Ordering::SeqCst), 1);
+
+        assert_eq!(caller.await.len(), 1);
         invalidate_detect_cache();
     }
 
