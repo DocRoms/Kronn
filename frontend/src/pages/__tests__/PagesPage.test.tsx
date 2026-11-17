@@ -2,6 +2,10 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import en from '../../lib/i18n/locales/en';
+import es from '../../lib/i18n/locales/es';
+import fr from '../../lib/i18n/locales/fr';
+import zh from '../../lib/i18n/locales/zh';
 import { resolve } from 'node:path';
 import type { LivePage, LivePageAction, LivePageDetail, LivePagePublication, LivePageRevision, LivePageRevisionSummary } from '../../types/generated';
 
@@ -506,6 +510,107 @@ describe('PagesPage', () => {
     }), '*'));
     expect(pagesApi.data).toHaveBeenCalledWith('page-1', 3, 'rev-2');
     expect(pagesApi.get).not.toHaveBeenCalled();
+  });
+
+  it('words the sync panel for what the journal holds: publications that changed data', async () => {
+    vi.mocked(pagesApi.workflows).mockResolvedValue([
+      { id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] },
+      // Publishes identical data: it runs, and leaves no journal entry.
+      { id: 'wf-quiet', name: 'Quiet cron', enabled: true, step_names: ['publish'] },
+    ]);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
+    const workflows = within(screen.getByTestId('live-page-sync-workflows'));
+    expect(workflows.getByText(/^pages\.workflowLastChange/)).toBeInTheDocument();
+    expect(workflows.getByText('pages.workflowNoRecentChange')).toBeInTheDocument();
+    expect(within(screen.getByTestId('live-page-sync-history')).getByText('pages.recentChangesHint')).toBeInTheDocument();
+    // The words themselves: a change, never "no publication" under a fresh "Synced".
+    for (const [locale, change] of [[en, /change/i], [fr, /change|modifi/i], [es, /cambi/i], [zh, /更改/]] as const) {
+      for (const key of ['pages.workflowLastChange', 'pages.workflowNoRecentChange', 'pages.recentChangesHint']) {
+        expect(locale[key]).toMatch(change);
+      }
+    }
+  });
+
+  describe('answers out of order (KT-1819)', () => {
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>(done => { resolve = done; });
+      return { promise, resolve };
+    }
+    const revisionsPosted = (post: { mock: { calls: unknown[][] } }) => post.mock.calls
+      .map(([message]) => message as { type?: string; data?: { page: { data_revision: number } } })
+      .filter(message => message.type === 'kronn:page-data')
+      .map(message => message.data!.page.data_revision);
+    const publish = async (revision: number) => {
+      const { useWebSocket } = await import('../../hooks/useWebSocket');
+      const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+      await act(async () => {
+        handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: revision }));
+      });
+    };
+
+    it('keeps what a publish brought when a full read started before it answers late', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const full = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.get).mockClear();
+      vi.mocked(pagesApi.get).mockReturnValue(full.promise);
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
+      vi.mocked(pagesApi.data).mockResolvedValue({ page: { ...page, data_revision: 4 }, full: null, datasets: [] });
+      await publish(4);
+      await waitFor(() => expect(revisionsPosted(post)).toEqual([4]));
+
+      // The full read was asked before the publication: it still holds revision 3.
+      await act(async () => { full.resolve(detail); });
+
+      expect(revisionsPosted(post)).toEqual([4]);
+    });
+
+    it('drops a delta that answers after a full read started later', async () => {
+      render(<PagesPage />);
+      const frame = await screen.findByTestId('live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const slow = deferred<{ page: LivePage; full: null; datasets: [] }>();
+      vi.mocked(pagesApi.data).mockReturnValue(slow.promise);
+      await publish(4);
+      vi.mocked(pagesApi.get).mockResolvedValue({ ...detail, data_revision: 5 });
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(revisionsPosted(post)).toEqual([5]));
+
+      await act(async () => { slow.resolve({ page: { ...page, data_revision: 4 }, full: null, datasets: [] }); });
+
+      expect(revisionsPosted(post)).toEqual([5]);
+    });
+
+    it('ignores the late answer of the Page it left: neither its detail nor its panels come back', async () => {
+      const other: LivePage = { ...page, id: 'page-2', title: 'Second' };
+      const otherDetail: LivePageDetail = { ...detail, ...other };
+      const late = deferred<LivePageDetail>();
+      vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+      render(<PagesPage />);
+      await screen.findByTestId('live-page-frame');
+      // A full read of the first Page is in flight when the second is opened.
+      vi.mocked(pagesApi.get).mockClear();
+      vi.mocked(pagesApi.get).mockImplementation(id => (id === other.id ? Promise.resolve(otherDetail) : late.promise));
+      vi.mocked(pagesApi.workflows).mockImplementation(async id => (
+        id === other.id ? [] : [{ id: 'wf-1', name: 'Adobe cron', enabled: true, step_names: ['publish'] }]
+      ));
+      fireEvent.click(screen.getByRole('button', { name: 'pages.refresh' }));
+      await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(page.id));
+      fireEvent.click(getCanonicalPageRow('Second'));
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument());
+
+      await act(async () => { late.resolve(detail); });
+
+      expect(screen.getByRole('heading', { name: 'Second' })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Adobe Signals' })).toBeNull();
+      fireEvent.click(screen.getByTestId('live-page-refresh-menu'));
+      expect(within(screen.getByTestId('live-page-sync-workflows')).queryByText('Adobe cron')).toBeNull();
+    });
   });
 
   it('fetches a newly selected Page detail exactly once, not twice', async () => {

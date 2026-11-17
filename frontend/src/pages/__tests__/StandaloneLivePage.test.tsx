@@ -52,6 +52,7 @@ vi.mock('../../components/RunStatusCard', () => ({
 }));
 
 import { pages as pagesApi } from '../../lib/api';
+import { useWebSocket as useWebSocketMock } from '../../hooks/useWebSocket';
 import { LIVE_PAGE_CSP, runtimeData } from '../../lib/live-page-sandbox';
 import { StandaloneLivePage } from '../StandaloneLivePage';
 
@@ -85,6 +86,12 @@ function dataset(name: string, current: unknown): LivePageDatasetView {
   } as LivePageDatasetView;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 function pageDataPosts(post: { mock: { calls: unknown[][] } }): unknown[] {
   return post.mock.calls
     .map(([message]) => message as { type?: string; data?: unknown })
@@ -96,6 +103,8 @@ beforeEach(() => {
   linkRelay.connect.mockClear();
   linkRelay.dispose.mockClear();
   linkRelay.onAction = null;
+  // Handlers of the views earlier specs rendered must not answer this one's events.
+  vi.mocked(useWebSocketMock).mockClear();
   vi.mocked(pagesApi.get).mockReset().mockResolvedValue(detail);
   vi.mocked(pagesApi.data).mockReset().mockResolvedValue(delta());
   vi.mocked(pagesApi.actions).mockResolvedValue([]);
@@ -128,6 +137,107 @@ describe('StandaloneLivePage', () => {
     expect(pagesApi.data).toHaveBeenCalledWith('page-1', 2, 'rev-1');
     expect(pagesApi.get).toHaveBeenCalledTimes(1);
     expect(frame.getAttribute('srcdoc')).toBe(documentBefore);
+  });
+
+  it('takes a full answer even when its revision is lower than the snapshot shown', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    render(<StandaloneLivePage pageId="page-1" />);
+    const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    // The Page went back (restored, replaced): the server says so with the full state.
+    const restored: LivePageDetail = { ...detail, data_revision: 1, datasets: [dataset('summary', { restored: true })] };
+    vi.mocked(pagesApi.data).mockResolvedValue({ page: summary(restored), full: restored, datasets: [] });
+
+    const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+    await act(async () => {
+      handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: 1 }));
+    });
+
+    await waitFor(() => expect(pageDataPosts(post)).toEqual([runtimeData(restored, {})]));
+  });
+
+  it('drops the answer of an older read that arrives after a newer one', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    render(<StandaloneLivePage pageId="page-1" />);
+    const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    const older = deferred<LivePageDataDelta>();
+    let newerAsked = false;
+    vi.mocked(pagesApi.data).mockImplementation(() => (
+      newerAsked ? Promise.resolve(delta({ data_revision: 4 })) : older.promise
+    ));
+    const publish = async (revision: number) => {
+      const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+      await act(async () => {
+        handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: revision }));
+      });
+    };
+    await publish(3);
+    newerAsked = true;
+    await publish(4);
+    await waitFor(() => expect(pageDataPosts(post)).toHaveLength(1));
+
+    await act(async () => { older.resolve(delta({ data_revision: 3 })); });
+
+    expect(pageDataPosts(post)).toEqual([expect.objectContaining({ page: expect.objectContaining({ data_revision: 4 }) })]);
+  });
+
+  it('keeps the read a publish started when the 30 s poll it overlapped answers late', async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<StandaloneLivePage pageId="page-1" />);
+      const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+      const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+      const poll = deferred<LivePageDataDelta>();
+      let published = false;
+      vi.mocked(pagesApi.data).mockImplementation(() => (
+        published ? Promise.resolve(delta({ data_revision: 3 })) : poll.promise
+      ));
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(pagesApi.data).toHaveBeenCalledTimes(1);
+      published = true;
+      const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
+      await act(async () => {
+        handlers.forEach(handler => handler({ type: 'live_page_data_changed', page_id: 'page-1', data_revision: 3 }));
+      });
+      await waitFor(() => expect(pageDataPosts(post)).toHaveLength(1));
+
+      // The poll was asked before the publish: it still says revision 2.
+      await act(async () => { poll.resolve(delta()); });
+
+      expect(pageDataPosts(post)).toEqual([expect.objectContaining({ page: expect.objectContaining({ data_revision: 3 }) })]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores the late answer of the Page it left', async () => {
+    const first = deferred<LivePageDetail>();
+    const second: LivePageDetail = { ...detail, id: 'page-2', title: 'Second page', slug: 'second' };
+    vi.mocked(pagesApi.get).mockImplementation(id => (id === 'page-1' ? first.promise : Promise.resolve(second)));
+    const view = render(<StandaloneLivePage pageId="page-1" />);
+    view.rerender(<StandaloneLivePage pageId="page-2" />);
+    const frame = await screen.findByTestId('standalone-live-page-frame');
+    expect(frame).toHaveAttribute('title', 'Second page');
+
+    await act(async () => { first.resolve(detail); });
+
+    expect(screen.getByTestId('standalone-live-page-frame')).toHaveAttribute('title', 'Second page');
+  });
+
+  it('sets nothing when an answer arrives after the tab is closed', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const late = deferred<LivePageDetail>();
+    vi.mocked(pagesApi.get).mockReturnValue(late.promise);
+    const view = render(<StandaloneLivePage pageId="page-1" />);
+    const titleBefore = document.title;
+    view.unmount();
+
+    await act(async () => { late.resolve(detail); });
+
+    expect(document.title).toBe(titleBefore);
+    expect(errors).not.toHaveBeenCalled();
   });
 
   it('polls the revision alone: an unchanged Page reads no dataset and posts nothing', async () => {

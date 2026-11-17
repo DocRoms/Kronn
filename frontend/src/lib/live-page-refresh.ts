@@ -36,7 +36,23 @@ export async function refreshLivePageDetail(pageRef: string, current: LivePageDe
   return mergeLivePageData(current, delta) ?? pagesApi.get(pageRef);
 }
 
-/** A response that arrives late never replaces a newer snapshot of the same Page. */
-export function newestLivePageDetail(current: LivePageDetail | null, next: LivePageDetail): LivePageDetail {
-  return current && current.id === next.id && next.data_revision < current.data_revision ? current : next;
+/**
+ * Orders the reads of one view: only the answer to the latest request started
+ * is applied, so a slow answer never replaces a newer one, and nothing is
+ * applied once the view left the Page (`invalidate`).
+ */
+export interface RequestSequence {
+  /** A ticket for a request that starts now; it makes every earlier one stale. */
+  next: () => number;
+  isCurrent: (ticket: number) => boolean;
+  invalidate: () => void;
+}
+
+export function createRequestSequence(): RequestSequence {
+  let latest = 0;
+  return {
+    next: () => { latest += 1; return latest; },
+    isCurrent: ticket => ticket === latest,
+    invalidate: () => { latest += 1; },
+  };
 }

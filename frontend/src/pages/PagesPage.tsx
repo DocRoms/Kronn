@@ -61,7 +61,7 @@ import {
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
 import { useLivePageDataPush } from '../hooks/useLivePageDataPush';
-import { newestLivePageDetail, refreshLivePageDetail } from '../lib/live-page-refresh';
+import { createRequestSequence, refreshLivePageDetail } from '../lib/live-page-refresh';
 import { userError } from '../lib/userError';
 import {
   livePageMosaicLayouts,
@@ -306,9 +306,18 @@ export function PagesPage({
   const detailRef = useRef<LivePageDetail | null>(null);
   useEffect(() => { detailRef.current = detail; }, [detail]);
 
+  // Only the latest read started sets the Page shown, and only the latest
+  // load its panels: an answer that arrives late, or for a Page since left,
+  // is dropped.
+  const [detailReads] = useState(createRequestSequence);
+  const [pageLoads] = useState(createRequestSequence);
+  useEffect(() => () => { detailReads.invalidate(); pageLoads.invalidate(); }, [detailReads, pageLoads]);
+
   // `incremental` is for the timer: an action the user took reads the whole Page.
   const loadDetail = useCallback(async (pageId: string, incremental = false) => {
     const known = incremental && detailRef.current?.id === pageId ? detailRef.current : null;
+    const read = detailReads.next();
+    const load = pageLoads.next();
     const [[nextDetail, workflows, publications, discussions, pageRevisions, usage]] = await Promise.all([
       Promise.all([
         refreshLivePageDetail(pageId, known),
@@ -321,7 +330,8 @@ export function PagesPage({
       ]),
       reloadPageActions(pageId),
     ]);
-    setDetail(current => (known ? newestLivePageDetail(current, nextDetail) : nextDetail));
+    if (detailReads.isCurrent(read)) setDetail(nextDetail);
+    if (!pageLoads.isCurrent(load)) return;
     setDatasetUsage(usage);
     setLinkedWorkflows(workflows);
     setRecentPublications(publications);
@@ -329,7 +339,7 @@ export function PagesPage({
     setRevisions(pageRevisions);
     setComparisonRevisionId(null);
     setHtmlDraft(nextDetail.revision.html);
-  }, [reloadPageActions]);
+  }, [detailReads, pageLoads, reloadPageActions]);
 
   const refresh = useCallback(async (selectedOverride?: string | null, incremental = false) => {
     try {
@@ -349,6 +359,8 @@ export function PagesPage({
       if (target) {
         await loadDetail(target, incremental);
       } else {
+        detailReads.invalidate();
+        pageLoads.invalidate();
         setDetail(null);
         setDatasetUsage([]);
         setLinkedWorkflows([]);
@@ -367,7 +379,7 @@ export function PagesPage({
     } finally {
       setLoading(false);
     }
-  }, [loadDetail, reloadPageActions, selectedId]);
+  }, [detailReads, loadDetail, pageLoads, reloadPageActions, selectedId]);
 
   // `refresh` is rebuilt whenever `selectedId` changes, including from inside
   // its own call and from `select`. Depending on it directly would re-run the
@@ -403,8 +415,10 @@ export function PagesPage({
     const pageId = selectedId;
     if (!pageId) return;
     const known = detailRef.current?.id === pageId ? detailRef.current : null;
+    const read = detailReads.next();
     void Promise.all([refreshLivePageDetail(pageId, known), reloadPageActions(pageId)]).then(([next]) => {
-      setDetail(current => (current && current.id === next.id ? newestLivePageDetail(current, next) : current));
+      if (!detailReads.isCurrent(read)) return;
+      setDetail(current => (current && current.id === next.id ? next : current));
     }).catch(() => { /* the poll retries */ });
   });
 
@@ -1484,6 +1498,7 @@ export function PagesPage({
                 <ul className="live-pages-sync-workflows">
                   {linkedWorkflows.map(workflow => {
                     const run = workflowRuns[workflow.id];
+                    // The journal holds publications that changed data: a run that changed nothing is not there.
                     const lastPublication = recentPublications.find(publication => publication.workflow_id === workflow.id);
                     const runLabel = workflow.enabled ? t('pages.runLinkedWorkflow', workflow.name) : t('pages.runDisabledWorkflow');
                     return (
@@ -1532,12 +1547,12 @@ export function PagesPage({
                             <small data-kind="skipped">{t('pages.workflowSkipped')}</small>
                           ) : lastPublication ? (
                             <small>
-                              {t('pages.workflowLastPublished')}{' '}
+                              {t('pages.workflowLastChange')}{' '}
                               <time title={new Date(lastPublication.published_at).toLocaleString(locale)}>
                                 {formatRelativeTime(lastPublication.published_at, locale)}
                               </time>
                             </small>
-                          ) : <small>{t('pages.workflowNeverPublished')}</small>}
+                          ) : <small>{t('pages.workflowNoRecentChange')}</small>}
                         </div>
                         {run && <RunStatusCard runId={run.card.id === workflow.id ? undefined : run.card.id} model={run.card} />}
                       </li>
@@ -1569,7 +1584,7 @@ export function PagesPage({
             <section className="live-pages-sync-section" data-testid="live-page-sync-history" aria-label={t('pages.syncHistory')}>
               <header>
                 <h3><History size={12} />{t('pages.syncHistory')}</h3>
-                <span className="live-pages-sync-total">{t('pages.recentRefreshesHint')}</span>
+                <span className="live-pages-sync-total">{t('pages.recentChangesHint')}</span>
               </header>
                     <div className="live-pages-refresh-timeline">
                       {recentPublications.length > 0 ? recentPublications.map(publication => {

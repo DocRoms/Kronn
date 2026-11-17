@@ -4,7 +4,7 @@ import type { LivePage, LivePageDataDelta, LivePageDatasetView, LivePageDetail }
 vi.mock('../api', () => ({ pages: { get: vi.fn(), data: vi.fn() } }));
 
 import { pages as pagesApi } from '../api';
-import { mergeLivePageData, newestLivePageDetail, refreshLivePageDetail } from '../live-page-refresh';
+import { createRequestSequence, mergeLivePageData, refreshLivePageDetail } from '../live-page-refresh';
 import { runtimeData } from '../live-page-sandbox';
 
 const page: LivePage = {
@@ -99,12 +99,22 @@ describe('refreshLivePageDetail', () => {
   });
 });
 
-describe('newestLivePageDetail', () => {
-  it('drops a late answer older than the snapshot shown, for the same Page only', () => {
-    const older = { ...held, data_revision: 3 };
-    expect(newestLivePageDetail(held, older)).toBe(held);
-    expect(newestLivePageDetail(held, { ...held, title: 'Same revision' }).title).toBe('Same revision');
-    expect(newestLivePageDetail(held, { ...older, id: 'page-2' }).id).toBe('page-2');
-    expect(newestLivePageDetail(null, older)).toBe(older);
+describe('createRequestSequence', () => {
+  it('keeps only the latest request started current', () => {
+    const requests = createRequestSequence();
+    const older = requests.next();
+    expect(requests.isCurrent(older)).toBe(true);
+    const newer = requests.next();
+    // The older answer may arrive first or last: it is dropped either way.
+    expect(requests.isCurrent(older)).toBe(false);
+    expect(requests.isCurrent(newer)).toBe(true);
+  });
+
+  it('drops every request in flight once invalidated (page left, view unmounted)', () => {
+    const requests = createRequestSequence();
+    const inFlight = requests.next();
+    requests.invalidate();
+    expect(requests.isCurrent(inFlight)).toBe(false);
+    expect(requests.isCurrent(requests.next())).toBe(true);
   });
 });
