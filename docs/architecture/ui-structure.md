@@ -75,7 +75,7 @@ like any other.
   `[src: file: frontend/src/routes/appRoutes.tsx:14-31]`
   `[src: file: frontend/src/routes/dashboardRoutes.tsx:19-41#dashboardRoutes]`
   `[src: file: frontend/src/App.tsx:209-210#Outlet]`
-  `[src: file: frontend/src/pages/Dashboard.tsx:1215-1218#Outlet]`
+  `[src: file: frontend/src/pages/Dashboard.tsx:1219-1222#Outlet]`
 - **Paths** — spelled out once, in `lib/routes.ts`. Components navigate with
   `useKronnNavigate()`, never with a literal path.
   `[src: file: frontend/src/lib/routes.ts:1-8]`
@@ -254,7 +254,7 @@ named in `unavailable_sources` and the panel says the list may be incomplete; th
 sources are unaffected. The route is operator-only: it is not on the bridge-token route
 table.
 [src: file: backend/src/api/activity.rs:166-235#AgentTurnSource]
-[src: file: backend/src/api/activity.rs:503-521#overview]
+[src: file: backend/src/api/activity.rs:438-456#overview]
 
 **Stalled** means a running row whose last sign of life is older than 15 minutes
 (`STALL_AFTER_SECS`): « No activity for 21m 00s », a hint to look, not a verdict (the
@@ -360,11 +360,11 @@ categories only temporarily.
 `[src: file: frontend/src/pages/WorkflowsPage.tsx:2660-2665#isGroupCollapsed]`
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
-`[src: file: frontend/src/pages/PagesPage.tsx:78-79#PAGE_NAVIGATION_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:79-80#PAGE_NAVIGATION_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:94-113#readPageNavigation]`
 `[src: file: frontend/src/pages/PagesPage.tsx:294-300#PAGE_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/PagesPage.tsx:325-350#refresh]`
-`[src: file: frontend/src/pages/PagesPage.tsx:705-708#isSectionCollapsed]`
+`[src: file: frontend/src/pages/PagesPage.tsx:332-357#refresh]`
+`[src: file: frontend/src/pages/PagesPage.tsx:713-716#isSectionCollapsed]`
 Project detail restores the last valid tab across project switches and falls back to Overview
 when a stale value is found.
 `[src: file: frontend/src/components/ProjectCard.tsx:79-92#readProjectDetailView]`

@@ -21,7 +21,7 @@ mobile collection sidebar cover its controls. The panel therefore uses a body
 portal and viewport-bounded fixed positioning, updated on scroll and resize.
 Coarse-pointer controls have a 44px minimum target.
 [src: file: frontend/src/components/activity/ActivityPanel.tsx:165-173#createPortal]
-[src: file: frontend/src/components/activity/ActivityPanel.css:376-382#coarse]
+[src: file: frontend/src/components/activity/ActivityPanel.css:383-389#coarse]
 [src: file: frontend/src/hooks/useActivityPopover.ts:37-47#position]
 [src: file: frontend/src/hooks/useActivityPopover.ts:66-67#position]
 
