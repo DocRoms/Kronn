@@ -378,10 +378,11 @@ impl SensitiveSubstrings {
         self.texts.push((text, source.to_string()));
     }
 
-    /// The sensitive file sharing with `content` 32 characters in a row
-    /// or more that read as a value (`reads_as_a_value`), and where: a value
-    /// whole, glued to a name, cut short or extended, whatever its share of
-    /// digits.
+    /// The sensitive file sharing with `content` a stretch that reads as a
+    /// value (`reads_as_a_value`), and where. A stretch is every character
+    /// covered by 32 in a row that a sensitive file holds, one after the
+    /// other: a value whole, glued to a name, cut short or extended, held
+    /// in one place of a file or across several.
     fn shared(&self, content: &str) -> Option<(String, usize)> {
         if self.windows.is_empty() {
             return None;
@@ -392,56 +393,39 @@ impl SensitiveSubstrings {
             if bytes.get(end).is_some_and(|&b| is_token_char(b as char)) {
                 continue;
             }
-            let mut at = start;
-            while at + HIGH_ENTROPY_MIN_LEN <= end {
-                let window = &bytes[at..at + HIGH_ENTROPY_MIN_LEN];
-                // The hash only sorts: the text decides.
-                let stretch = self
-                    .windows
-                    .contains(&window_hash(window))
-                    .then(|| self.longest_shared(&bytes[at..end]))
-                    .flatten();
-                let Some((length, source)) = stretch else {
-                    at += 1;
-                    continue;
-                };
-                if reads_as_a_value(&bytes[at..at + length]) {
-                    return Some((source.to_string(), at));
+            // Windows of this run; one turn more closes a stretch at its end.
+            let windows = (end + 1 - start).saturating_sub(HIGH_ENTROPY_MIN_LEN);
+            // First window of the stretch being followed.
+            let mut first: Option<usize> = None;
+            for at in start..=start + windows {
+                let held = at < start + windows
+                    && self
+                        .windows
+                        .contains(&window_hash(&bytes[at..at + HIGH_ENTROPY_MIN_LEN]));
+                match (first, held) {
+                    (None, true) => first = Some(at),
+                    (Some(from), false) => {
+                        first = None;
+                        let stretch = from..at - 1 + HIGH_ENTROPY_MIN_LEN;
+                        if !reads_as_a_value(&bytes[stretch.clone()]) {
+                            continue;
+                        }
+                        // The hash only sorts: a text names the file.
+                        let source = (from..at).find_map(|window| {
+                            let window = &content[window..window + HIGH_ENTROPY_MIN_LEN];
+                            let held = self.texts.iter().find(|(text, _)| text.contains(window));
+                            held.map(|(_, source)| source.clone())
+                        });
+                        if let Some(source) = source {
+                            return Some((source, from));
+                        }
+                    }
+                    _ => {}
                 }
-                // Every window inside that stretch reads the same.
-                at += length - HIGH_ENTROPY_MIN_LEN + 1;
             }
             start = end + 1;
         }
         None
-    }
-
-    /// How far `run` and a sensitive text go on together from the first 32
-    /// characters of `run`, and in which file: the longest of the first
-    /// places the text holds them.
-    fn longest_shared(&self, run: &[u8]) -> Option<(usize, &str)> {
-        const MAX_PLACES: usize = 64;
-        let window = std::str::from_utf8(&run[..HIGH_ENTROPY_MIN_LEN]).ok()?;
-        let mut best: Option<(usize, &str)> = None;
-        for (text, source) in &self.texts {
-            let mut from = 0;
-            for _ in 0..MAX_PLACES {
-                let Some(found) = text[from..].find(window) else {
-                    break;
-                };
-                let at = from + found;
-                let length = run
-                    .iter()
-                    .zip(&text.as_bytes()[at..])
-                    .take_while(|(a, b)| a == b)
-                    .count();
-                if best.is_none_or(|(known, _)| length > known) {
-                    best = Some((length, source.as_str()));
-                }
-                from = at + 1;
-            }
-        }
-        best
     }
 
     /// Everything `other` tracks, added to this.
@@ -833,16 +817,18 @@ pub async fn audit_docs_writes(
             ));
             continue;
         };
-        // An image or a PDF is no document to read: what was known of it
-        // still holds.
-        let Some(content) = document_text(&bytes) else {
-            continue;
-        };
+        let (content, is_text) = document_text(&bytes);
         let content = content.as_ref();
         audit.inspected.push(document_path_label(&path));
         // Only the first known secret is named: every line worth a look is
         // told, the rejected one too (it can hold another run).
-        let lines = possible_secret_lines(content);
+        // An image or a PDF is searched for known secrets like any other
+        // document; its long runs are no possible secrets.
+        let lines = if is_text {
+            possible_secret_lines(content)
+        } else {
+            Vec::new()
+        };
         if let Err(reason) = check_docs_content(content, sensitive) {
             audit.rejections.push((document_path_label(&path), reason));
         }
@@ -862,21 +848,23 @@ pub async fn audit_docs_writes(
 
 /// The text of a document as its reader sees it: a byte-order mark and NUL
 /// bytes dropped (UTF-16), bytes that are no UTF-8 replaced. Lines keep
-/// their numbers. `None`: too much of it is no text (an image, a PDF).
-fn document_text(bytes: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
+/// their numbers. The flag says whether it is text: an image or a PDF is
+/// full of control bytes, prose in any encoding has none.
+fn document_text(bytes: &[u8]) -> (std::borrow::Cow<'_, str>, bool) {
     let bytes = match bytes {
         [0xff, 0xfe, rest @ ..] | [0xfe, 0xff, rest @ ..] => rest,
         _ => bytes,
     };
+    let control = bytes
+        .iter()
+        .filter(|&&b| b < 0x20 && !matches!(b, 0 | b'\t' | b'\n' | 0x0c | b'\r' | 0x1b))
+        .count();
+    let is_text = control * 100 <= bytes.len();
     let text = String::from_utf8_lossy(bytes);
-    let replaced = text.matches('\u{fffd}').count();
-    if replaced > 1 && replaced * 50 > text.len() {
-        return None;
-    }
     if text.contains('\0') {
-        return Some(text.replace('\0', "").into());
+        return (text.replace('\0', "").into(), is_text);
     }
-    Some(text)
+    (text, is_text)
 }
 
 /// Recursively walk a directory, calling `cb` on each FILE. Skips
@@ -1950,14 +1938,79 @@ mod tests {
         assert_eq!(audit.rejections.len(), 1);
     }
 
-    /// An image or a PDF is no text: neither read nor counted as inspected.
+    /// An image or a PDF is no text to warn about, and no place to hide a
+    /// known secret either.
     #[tokio::test]
-    async fn a_binary_document_is_not_read() {
-        let mut bytes: Vec<u8> = (0..4096u32).map(|i| (i * 131 % 251) as u8 | 0x80).collect();
+    async fn a_binary_document_warns_of_nothing_and_hides_nothing() {
+        let noise: Vec<u8> = (0..4096u32).map(|i| (i * 131 % 251) as u8).collect();
+        let mut bytes = noise.clone();
         bytes.extend_from_slice(format!("\n/ID <{HEX_TOKEN}>\n").as_bytes());
         let audit = audit_of_bytes(&bytes, &SensitiveSubstrings::new()).await;
-        assert!(audit.inspected.is_empty(), "{:?}", audit.inspected);
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
         assert_eq!(audit.possible_secrets, vec![]);
+
+        let mut bytes = noise;
+        bytes.extend_from_slice(b"\nkey sk-1234567890abcdefghijklmnopqrstuvwxyz\n");
+        let audit = audit_of_bytes(&bytes, &SensitiveSubstrings::new()).await;
+        assert_eq!(audit.rejections.len(), 1);
+    }
+
+    /// Prose in an 8-bit encoding is text: accents are no reason to skip it.
+    #[tokio::test]
+    async fn a_document_in_a_legacy_encoding_is_read_as_text() {
+        // Latin-1: one byte per accented letter, no UTF-8.
+        let prose = "Pr\u{e9}sentation g\u{e9}n\u{e9}rale de la cl\u{e9} d\u{e9}ploy\u{e9}e \u{e0} l'\u{e9}t\u{e9}.\n";
+        let latin1 = |text: &str| -> Vec<u8> { text.chars().map(|c| c as u8).collect() };
+        let known = latin1(&format!(
+            "{prose}cl\u{e9} : sk-1234567890abcdefghijklmnopqrstuvwxyz\n"
+        ));
+        let audit = audit_of_bytes(&known, &SensitiveSubstrings::new()).await;
+        assert_eq!(audit.rejections.len(), 1);
+
+        let possible = latin1(&format!("{prose}valeur {BASE64_TOKEN}\n"));
+        let audit = audit_of_bytes(&possible, &SensitiveSubstrings::new()).await;
+        assert!(audit.rejections.is_empty(), "{:?}", audit.rejections);
+        assert_eq!(
+            audit.possible_secrets,
+            vec![("docs/notes.md".to_string(), vec![2])]
+        );
+    }
+
+    /// Two places of a sensitive file can each hold a part of what the
+    /// document quotes: what they hold together is judged, not each alone.
+    #[tokio::test]
+    async fn a_value_held_in_two_places_of_a_sensitive_file_fails_the_step() {
+        let head = format!("aBcDeFg{}", "h".repeat(33));
+        let secret = format!("{head}iJkLmN");
+        let decoys: String = (0..70)
+            .map(|index| format!("  \"k{index}\": \"x_{head}iJ\",\n"))
+            .collect();
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secrets.path().join("credentials.json"),
+            format!("{{\n{decoys}  \"client_secret\": \"{secret}\"\n}}\n"),
+        )
+        .unwrap();
+        let subs = scan_sensitive_files(secrets.path());
+        for line in [
+            format!("rotation note: x_{secret}"),
+            format!("secret {secret}"),
+        ] {
+            let audit = audit_of(&[line.as_str()], &subs).await;
+            assert_eq!(audit.rejections.len(), 1, "{line}");
+        }
+
+        let serial = format!("0123456789{}", "0".repeat(31));
+        let secrets = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secrets.path().join(".env"),
+            format!("# serial: {serial}\n# api_secret: {}ab\n", &serial[1..]),
+        )
+        .unwrap();
+        let subs = scan_sensitive_files(secrets.path());
+        let line = format!("value {serial}ab");
+        let audit = audit_of(&[line.as_str()], &subs).await;
+        assert_eq!(audit.rejections.len(), 1);
     }
 
     /// A document that is not plain UTF-8 is still read: UTF-16 text, or

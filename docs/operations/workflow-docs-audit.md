@@ -2,7 +2,7 @@
 
 Before launching an Agent step, Kronn records content fingerprints of regular
 files in the project's detected documentation directory (`docs/`, `doc/` or
-legacy `ai/`). [src: file: backend/src/core/docs_write_filter.rs:752-774#snapshot_docs] [src: file: backend/src/workflows/runner.rs:2742-2753#docs_before] The scope is Git-tracked files and non-ignored untracked files,
+legacy `ai/`). [src: file: backend/src/core/docs_write_filter.rs:735-757#snapshot_docs] [src: file: backend/src/workflows/runner.rs:2742-2753#docs_before] The scope is Git-tracked files and non-ignored untracked files,
 enumerated with `git ls-files --cached --others --exclude-standard`; tracked
 files remain included even if an ignore pattern matches them. Non-Git projects
 remain outside this audit, as in earlier releases. [src: file: backend/src/core/docs_write_filter.rs:675-750#document_paths]
@@ -11,7 +11,7 @@ access, including non-UTF-8 names. Diagnostics preserve ordinary Unicode names;
 invalid names, control characters and literal backslashes use an explicit
 `[escaped path bytes]` label with byte escapes instead of replacement characters.
 The label is never used to open a file. Platforms without Unix byte paths keep
-the UTF-8 conversion and fail explicitly if a Git path cannot be represented. [src: file: backend/src/core/docs_write_filter.rs:632-673#native_document_path]
+the UTF-8 conversion and fail explicitly if a Git path cannot be represented. [src: file: backend/src/core/docs_write_filter.rs:616-657#native_document_path]
 After the step, it checks new or changed text for credential
 patterns and overlaps with the run's sensitive-file scan: either one fails the
 step, and the rejection names the file and the line, never the content. A
@@ -23,15 +23,17 @@ least 15 % digits, as a whole or in a part between `=` or `/`, so that a name
 glued to a value does not hide it) is a possible secret, not a known one: its form cannot tell
 a token from a dated identifier or a hash the document cites. It is a known
 secret, and fails the step, when a sensitive file of the worktree holds it:
-the run itself or a part of it between `=` or `/`, found anywhere in the text
-of the file (also read without NUL bytes, for UTF-16, and with the escapes of
-a JSON string undone, `\uXXXX` included), or 32 characters in a row or more
-that the document and the file share and that read as a value: six different
-characters, and either a digit with a letter or letters whose case keeps
-changing (a value whole, glued to a name, cut short or extended; not a rule,
-a variable name or a plain path). A document that is not plain UTF-8 is read
-all the same (byte-order mark and NUL bytes dropped, invalid bytes replaced)
-unless most of it is no text (an image, a PDF): that one is not read. A
+a value or a line of the file found in the document, or a stretch the
+document shares with the text of the files (also read without NUL bytes, for
+UTF-16, and with the escapes of a JSON string undone, `\uXXXX` included)
+that reads as a value: every character covered by 32 in a row
+that a sensitive file holds, with six different characters and either a
+digit with a letter or letters whose case keeps changing (a value whole,
+glued to a name, cut short or extended; not a rule, a variable name or a
+plain path). A document in any encoding is read (byte-order mark and NUL
+bytes dropped, bytes that are no UTF-8 replaced); one full of control bytes
+(an image, a PDF) is searched for known secrets only, its long runs are not
+reported. A
 changed document that cannot be read whole (over 16 MiB, unreadable) fails
 the step once what the others hold is recorded. The
 sensitive files are scanned at the start of the run and again at each audit.
@@ -61,7 +63,7 @@ step is outside this audit. Changes committed during the step are still checked.
 A document's size alone is not a leak signal. Fingerprinting uses a streaming
 hash; the post-step check retains at most 16 MiB per file and inspects the same
 bytes that were hashed. An unchanged larger file is allowed; a changed larger
-file fails with an explicit incomplete-audit diagnostic and remains intact. [src: file: backend/src/core/docs_write_filter.rs:590-630#MAX_AUDIT_BUFFER_BYTES] [src: file: backend/src/core/docs_write_filter.rs:793-881#audit_docs_writes]
+file fails with an explicit incomplete-audit diagnostic and remains intact. [src: file: backend/src/core/docs_write_filter.rs:590-630#MAX_AUDIT_BUFFER_BYTES] [src: file: backend/src/core/docs_write_filter.rs:776-864#audit_docs_writes]
 
 The audit never restores, deletes, stages or commits files. A change observed
 during the step may have been written concurrently by a person or another
@@ -77,8 +79,7 @@ behavior. This audit is a post-step check, not a sandbox: it cannot undo an
 agent's earlier external effects or commits, and it does not prevent a later
 manual commit of the preserved file. Inspect flagged content before committing
 or publishing it. Unchanged preexisting credentials are not reclassified as
-new agent writes. Non-UTF-8 content and symbolic links are not inspected; links
-are not followed. The existing curated `AGENTS.md` / `index.md` exemptions are
+new agent writes. Symbolic links are not inspected and not followed. The existing curated `AGENTS.md` / `index.md` exemptions are
 preserved.
 
 ## Earlier releases and recovery
