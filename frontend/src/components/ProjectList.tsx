@@ -17,9 +17,10 @@ import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discus
 import {
   Folder, ChevronRight, AlertTriangle,
   MessageSquare, Workflow, Puzzle, ShieldCheck, Loader2, FileCode, Clock, Plus,
-  ArrowUpDown, CheckSquare2, Filter, Star, Trash2, Container,
+  ArrowUpDown, CheckSquare2, Filter, Search, Star, Trash2, Container,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
+import { DetectRepositoriesDialog } from './DetectRepositoriesDialog';
 
 const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
 type ProjectFilter = 'visible' | 'attention' | 'validated' | 'docker' | 'missing' | 'hidden' | 'all';
@@ -118,6 +119,7 @@ export function ProjectList({
   const { t } = useT();
   const isMobile = useIsMobile();
 
+  const [detectOpen, setDetectOpen] = useState(false);
   const [projectSearch, setProjectSearch] = useState('');
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>('visible');
   const [projectSort, setProjectSort] = useState<ProjectSort>('name');
@@ -291,6 +293,9 @@ export function ProjectList({
 
   return (
     <div className="project-page">
+      {detectOpen && (
+        <DetectRepositoriesDialog onClose={() => setDetectOpen(false)} onAdded={onRefetch} toast={toast} />
+      )}
       {missingPathProjects.length > 0 && (
         <div className="dash-missing-banner" role="status" data-testid="missing-path-banner">
           <AlertTriangle size={15} className="dash-missing-banner-icon" />
@@ -333,16 +338,30 @@ export function ProjectList({
           onSelect={selectProject}
           selectedIds={selectedIds}
           onSelectedIdsChange={setSelectedIds}
-          headerActions={onAddProject && <button
-            type="button"
-            className="collection-shell-icon collection-shell-primary-action"
-            data-tour-id="new-project-btn"
-            onClick={onAddProject}
-            aria-label={t('projects.bootstrap')}
-            title={t('projects.bootstrap')}
-          >
-            <Plus size={16} />
-          </button>}
+          headerActions={onAddProject && <>
+            {/* KT-1684 — the old global Scan: it lists what it found and adds only what is kept. */}
+            <button
+              type="button"
+              className="collection-shell-icon"
+              data-tour-id="scan-btn"
+              data-testid="detect-repos-btn"
+              onClick={() => setDetectOpen(true)}
+              aria-label={t('projects.detect.title')}
+              title={t('projects.detect.title')}
+            >
+              <Search size={16} />
+            </button>
+            <button
+              type="button"
+              className="collection-shell-icon collection-shell-primary-action"
+              data-tour-id="new-project-btn"
+              onClick={onAddProject}
+              aria-label={t('projects.bootstrap')}
+              title={t('projects.bootstrap')}
+            >
+              <Plus size={16} />
+            </button>
+          </>}
           actions={[{
             id: 'delete',
             label: t('collection.deleteSelected'),

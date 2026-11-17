@@ -1069,6 +1069,7 @@ pub fn default_config() -> AppConfig {
             ],
             scan_depth: 4,
             default_docs_dir: None,
+            hidden_repos: vec![],
         },
         comfyui: crate::models::ComfyUiConfig::default(),
         media_reference_limits: Vec::new(),

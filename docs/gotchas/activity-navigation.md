@@ -10,9 +10,9 @@ popovers, so there is no longer a second disclosure to keep exclusive). Tour
 anchors stay on the navigation tabs. The bell sets `aria-controls` only while its
 dialog exists. See [ui-structure.md](../architecture/ui-structure.md) § Attention
 center for what the panel lists.
-[src: file: frontend/src/pages/Dashboard.tsx:722-736#data-tour-id]
-[src: file: frontend/src/pages/Dashboard.tsx:787-801#ActivityBell]
-[src: file: frontend/src/components/activity/ActivityBell.tsx:29-33#ActivityBell]
+[src: file: frontend/src/pages/Dashboard.tsx:699-713#data-tour-id]
+[src: file: frontend/src/pages/Dashboard.tsx:770-784#ActivityBell]
+[src: file: frontend/src/components/activity/ActivityBell.tsx:36-42#ActivityBell]
 
 ## Overlay and focus ownership
 
@@ -20,8 +20,8 @@ Rendering inside the sticky navigation clipped the tray at 390/1100px and let th
 mobile collection sidebar cover its controls. The panel therefore uses a body
 portal and viewport-bounded fixed positioning, updated on scroll and resize.
 Coarse-pointer controls have a 44px minimum target.
-[src: file: frontend/src/components/activity/ActivityPanel.tsx:102-110#createPortal]
-[src: file: frontend/src/components/activity/ActivityPanel.css:264-270#coarse]
+[src: file: frontend/src/components/activity/ActivityPanel.tsx:165-173#createPortal]
+[src: file: frontend/src/components/activity/ActivityPanel.css:376-382#coarse]
 [src: file: frontend/src/hooks/useActivityPopover.ts:37-47#position]
 [src: file: frontend/src/hooks/useActivityPopover.ts:66-67#position]
 
@@ -42,7 +42,7 @@ the document body; intentional outside focus is preserved.
 Actions use a synchronous per-action ref guard as well as the disabled UI.
 Failures show a localized alert on the row, permit an explicit retry and refresh
 the parent's snapshot after settlement; they never navigate from the action button.
-[src: file: frontend/src/components/activity/ActivityPanel.tsx:77-111#perform]
+[src: file: frontend/src/components/activity/ActivityPanel.tsx:101-135#perform]
 
 ## Regression evidence
 

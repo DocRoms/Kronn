@@ -427,13 +427,13 @@ from a dedicated output directory.
 - `frontend/src/hooks/__tests__/useWebSocket.test.ts` pins first connect,
   reconnect resync, pong deadlines, half-open close, backoff reset, stale socket
   callbacks and unmount cleanup.
-- `frontend/src/components/__tests__/BackendStatus.test.tsx` pins fast outage
+- `frontend/src/hooks/__tests__/useBackendMonitor.test.tsx` pins fast outage
   recovery plus `online` and tab-visibility probes without healthy-state noise.
 - `frontend/src/pages/__tests__/DiscussionsPage.test.tsx` pins the reconnecting
   explanation, active-room resync, interrupted-run cleanup and pre-receipt send
   rollback.
-- `frontend/e2e/specs/ws-reconnect.spec.ts` proves the global outage indicator
-  appears and clears in a real browser.
+- `frontend/e2e/specs/ws-reconnect.spec.ts` proves the bell's outage alert and
+  its single Notifications entry appear and clear in a real browser.
 - `frontend/e2e/specs/disc-send-receipt-resilience.spec.ts` proves a failed
   pre-receipt send restores the exact draft and removes the optimistic message.
 
@@ -507,7 +507,7 @@ process ownership and creates a flaky global side effect.
 ```bash
 cd frontend
 pnpm vitest run src/hooks/__tests__/useWebSocket.test.ts
-pnpm vitest run src/components/__tests__/BackendStatus.test.tsx
+pnpm vitest run src/hooks/__tests__/useBackendMonitor.test.tsx
 pnpm vitest run src/pages/__tests__/DiscussionsPage.test.tsx
 pnpm playwright test e2e/specs/ws-reconnect.spec.ts \
   e2e/specs/disc-send-receipt-resilience.spec.ts

@@ -186,7 +186,7 @@ the owner** (always zero until the decision compartment is filled). Its accessib
 name states the counts. It owns its polling (3 s while something moves, 15 s idle,
 once more on open and when the tab returns), so a refresh re-renders the bell and
 its panel, not the dashboard.
-[src: file: frontend/src/pages/Dashboard.tsx:787-801#ActivityBell]
+[src: file: frontend/src/pages/Dashboard.tsx:770-784#ActivityBell]
 [src: file: frontend/src/components/activity/ActivityBell.tsx:25-96#ActivityBell]
 [src: file: frontend/src/components/activity/ActivityBell.css:14-44#data-running]
 [src: file: frontend/src/hooks/useActivityOverview.ts:12-52#useActivityOverview]
@@ -198,7 +198,7 @@ while focus is inside, Close/Escape restore the bell, an outside pointer closes
 without stealing focus, and coarse-pointer controls are 44px. A synchronous per-action
 guard as well as the disabled button prevents a double stop; a failure shows a
 localized alert and allows an explicit retry.
-[src: file: frontend/src/components/activity/ActivityPanel.tsx:53-110#ActivityPanel]
+[src: file: frontend/src/components/activity/ActivityPanel.tsx:66-123#ActivityPanel]
 [src: file: frontend/src/hooks/useActivityPopover.ts:9-81#useActivityPopover]
 [src: file: frontend/src/components/activity/ActivityPanel.css:1-20#activity-panel]
 
@@ -239,7 +239,7 @@ type no locale file names.
 [src: file: backend/src/models/activity.rs:87-139#ActivityRow]
 [src: file: backend/src/api/activity.rs:61-90#collect_activity]
 [src: file: backend/src/api/activity_tests.rs:382-405#a_new_row_type_is_one_new_source_and_nothing_else]
-[src: file: frontend/src/lib/activity.ts:116-135#ACTIVITY_ACTION_HANDLERS]
+[src: file: frontend/src/lib/activity.ts:139-158#ACTIVITY_ACTION_HANDLERS]
 
 What each source counts, and leaves out (so nothing is listed twice and nothing that
 waits on a person is called « running »): an agent turn is a `Running` dispatch job
@@ -336,8 +336,8 @@ Prompt, Quick API or Quick Exec header is the single visible content header.
 The Projects initial loading state keeps the complete master/detail shell
 mounted. Its indicators render inside the sidebar and detail slots rather than
 as a sibling above the layout, so asynchronous fleet loading cannot shift the
-page structure. `[src: file: frontend/src/components/ProjectList.tsx:434-439#project-detail-loading]`
-`[src: file: frontend/src/components/ProjectList.tsx:481-485#project-sidebar-loading]`
+page structure. `[src: file: frontend/src/components/ProjectList.tsx:455-460#project-detail-loading]`
+`[src: file: frontend/src/components/ProjectList.tsx:501-505#project-sidebar-loading]`
 `[src: file: frontend/src/routes/ProjectsRoute.tsx:37#projectsLoading]`
 
 **Task orchestration (0.11.0):** an actionable task in a discussion plan exposes

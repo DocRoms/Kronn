@@ -277,6 +277,26 @@ Release notes for 0.9.3 and earlier are available in the
   at 12 generations (`KRONN_WORKFLOW_MEDIA_JOBS_PER_RUN`, at most 100), on top of
   six per step, and a dry-run Test no longer bills. A reference that matches
   nothing gets the one scope refusal (KT-1605, #502).
+- UI: a cleaner header, with the bell on the right next to the help button
+  (KT-1684). The bell leaves the main tabs and its panel gets two tabs: « In
+  progress » (what the bell showed so far) and « Notifications », with an unread
+  counter. A stopped backend is ONE red System entry (« Local service unreachable
+  since 0:42 — reconnecting… », with Retry, then « Back after 1 min 12 »); the bell
+  turns red with a « ! » meanwhile (a steady red under reduced motion), and the
+  panel opens on Notifications by itself after about 10 s, then closes by itself
+  when the backend is back. In progress shows the last known state greyed, « as of
+  hh:mm ». Other 5xx are orange entries grouped by status, method and route, that
+  can be acknowledged and copied (the message is the one the server already
+  redacted); they no longer stack as toasts (at most one short « see in the bell »).
+  Resolved entries stay in the history for the session, with « clear all ». Each tab
+  has All / Discussions / Automations / Kronn filters with counts (All groups the
+  list in three sections, the last filter is remembered per tab, red alerts stay
+  pinned). The BackendStatus banner is gone.
+- Projects: the global « Scan » button is replaced by « Detect repositories » next
+  to « New project ». It lists the repositories found (checked by default) and adds
+  only the ones you keep; « Hide » keeps one from coming back. The hidden list is
+  stored in the scan config (`hidden_repos`) and `POST /api/projects/scan/hide`
+  adds to it.
 
 ### Changed
 

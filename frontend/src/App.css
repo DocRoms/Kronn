@@ -108,48 +108,6 @@
   opacity: 1;
 }
 
-/* ── Backend health indicator (BackendStatus.tsx) ────────────────────
- * Hidden while the backend answers /api/health. A restart is the usual
- * reason it stops answering, so the pill reads as "reconnecting", not as a
- * failure. */
-.kronn-backend-status {
-  position: fixed;
-  top: 48px; /* sits below the UpdateBanner pill */
-  right: 12px;
-  z-index: var(--kr-z-toast);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border-radius: 999px;
-  font-size: var(--kr-fs-xs);
-  font-weight: 500;
-  background: rgba(var(--kr-warning-rgb), 0.12);
-  color: var(--kr-warning);
-  border: 1px solid rgba(var(--kr-warning-rgb), 0.30);
-  box-shadow: var(--kr-shadow-sm);
-  backdrop-filter: blur(4px);
-}
-
-.kronn-backend-status-spinner {
-  flex-shrink: 0;
-  animation: kronn-backend-spin 1s linear infinite;
-}
-
-@keyframes kronn-backend-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .kronn-backend-status-spinner { animation: none; }
-}
-
-.kronn-backend-status-text {
-  font-family: var(--kr-font-mono);
-  white-space: nowrap;
-}
-
-
 /* LoadingState inside the page area, after start-up. */
 .kronn-loading-state {
   display: flex;

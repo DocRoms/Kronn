@@ -138,9 +138,19 @@ describe('Dashboard — the permanent activity bell (KT-1658)', () => {
       expect(screen.queryByTestId('active-audits-trigger')).toBeNull();
       expect(document.querySelector('.dash-running-badge')).toBeNull();
       expect(screen.queryByText(/en cours$/)).toBeNull();
-      // The bell sits in the header's activity group, after the page tabs.
+      // KT-1684 — the bell leaves the tab group: it sits at the right, after the
+      // spacer and before the help button, and Scan is gone from the bar.
       const group = document.querySelector('.dash-nav-activity-group');
       expect(group?.contains(screen.getByTestId('activity-bell'))).toBe(true);
+      const bar = Array.from(group?.parentElement?.children ?? []);
+      const spacer = bar.findIndex(el => el.classList.contains('dash-nav-spacer'));
+      expect(spacer).toBeGreaterThan(-1);
+      expect(bar.indexOf(group as Element)).toBeGreaterThan(spacer);
+      const help = bar.findIndex(el => el.getAttribute('aria-label') === 'Relancer le tour guidé');
+      expect(help).toBe(bar.length - 1);
+      expect(bar.indexOf(group as Element)).toBe(help - 1);
+      expect(document.querySelector('[data-tour-id="scan-btn"]')).toBeNull();
+      expect(document.querySelector('.dash-scan-btn')).toBeNull();
       // The tabs themselves still navigate and keep their passive counts.
       expect(document.querySelector('[data-tour-id="nav-projects"]')?.querySelector('button')).toBeNull();
       expect(document.querySelector('[data-tour-id="nav-workflows"]')?.querySelector('button')).toBeNull();

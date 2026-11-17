@@ -244,6 +244,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       docsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       setDocsLocation: resolve({ override_dir: null, default_dir: null, effective_dir: 'docs', source: 'detected', refused: null }),
       scan: resolve([]),
+      hideScanned: resolve(undefined),
       create: resolve({}),
       addFolder: resolve({}),
       update: resolve({}),

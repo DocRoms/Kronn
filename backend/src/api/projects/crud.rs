@@ -243,6 +243,7 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
 
     let ignore = config.scan.ignore.clone();
     let depth = config.scan.scan_depth;
+    let hidden_repos = config.scan.hidden_repos.clone();
     drop(config);
 
     let existing_paths: Vec<String> = state
@@ -258,11 +259,48 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
         Ok(mut repos) => {
             for repo in &mut repos {
                 repo.has_project = existing_paths.contains(&repo.path);
+                repo.hidden = repo.hidden || hidden_repos.contains(&repo.path);
             }
             Json(ApiResponse::ok(repos))
         }
         Err(e) => Json(ApiResponse::err(format!("Scan failed: {}", e))),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct HideRepoRequest {
+    pub path: String,
+}
+
+/// Remembers `path` as hidden; `false` when it already was.
+fn remember_hidden_repo(scan: &mut ScanConfig, path: &str) -> bool {
+    if scan.hidden_repos.iter().any(|hidden| hidden == path) {
+        return false;
+    }
+    scan.hidden_repos.push(path.to_string());
+    true
+}
+
+/// POST /api/projects/scan/hide (KT-1684)
+/// "Hide" in the Detect repositories preview: the scan reports this repository
+/// `hidden` from now on, so it never comes back in the list.
+pub async fn hide_scanned_repo(
+    State(state): State<AppState>,
+    Json(req): Json<HideRepoRequest>,
+) -> Json<ApiResponse<()>> {
+    let path = req.path.trim();
+    if path.is_empty() || scanner::contains_parent_dir(path) {
+        return Json(ApiResponse::err(
+            "Repository path is empty or contains '..' components",
+        ));
+    }
+    let mut config = state.config.write().await;
+    if remember_hidden_repo(&mut config.scan, path) {
+        if let Err(e) = crate::core::config::save(&config).await {
+            return Json(ApiResponse::err(format!("Failed to save: {}", e)));
+        }
+    }
+    Json(ApiResponse::ok(()))
 }
 
 /// POST /api/projects

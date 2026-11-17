@@ -3794,6 +3794,88 @@ mod tests {
         assert!(body["success"].as_bool().unwrap());
     }
 
+    /// KT-1684 — "Hide" in the Detect repositories preview: the scan reports a
+    /// hidden repository `hidden` from then on, the others are untouched, and
+    /// hiding twice changes nothing.
+    #[tokio::test]
+    async fn hidden_repo_stays_out_of_the_scan_until_forever() {
+        // Not `TempDir::new()`: its `.tmpXXXX` name makes the scanner flag every repo hidden.
+        let root = tempfile::Builder::new()
+            .prefix("kt1684-scan-")
+            .tempdir()
+            .unwrap();
+        for name in ["repo-a", "repo-b"] {
+            std::fs::create_dir_all(root.path().join(name).join(".git")).unwrap();
+        }
+        let state = test_state();
+        state.config.write().await.scan.paths = vec![root.path().to_string_lossy().into_owned()];
+        let scan = |state: AppState| async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/projects/scan")
+                .body(Body::empty())
+                .unwrap();
+            send(state, false, req).await.1
+        };
+
+        let first = scan(state.clone()).await;
+        let repos = first["data"].as_array().expect("repos");
+        let repo_a = repos
+            .iter()
+            .find(|r| r["name"] == "repo-a")
+            .expect("repo-a found");
+        assert_eq!(repo_a["hidden"], false);
+        let repo_a_path = repo_a["path"].as_str().unwrap().to_string();
+
+        for _ in 0..2 {
+            let (status, body) = send(
+                state.clone(),
+                false,
+                json_post(
+                    "/api/projects/scan/hide",
+                    serde_json::json!({ "path": repo_a_path }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["success"], true);
+        }
+        assert_eq!(
+            state.config.read().await.scan.hidden_repos,
+            vec![repo_a_path]
+        );
+
+        let second = scan(state.clone()).await;
+        let hidden_of = |name: &str| {
+            second["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["name"] == name)
+                .map(|r| r["hidden"].clone())
+        };
+        assert_eq!(hidden_of("repo-a"), Some(serde_json::json!(true)));
+        assert_eq!(hidden_of("repo-b"), Some(serde_json::json!(false)));
+    }
+
+    #[tokio::test]
+    async fn hide_scanned_repo_refuses_an_empty_or_traversing_path() {
+        for path in ["  ", "/home/me/../etc"] {
+            let state = test_state();
+            let (_, body) = send(
+                state.clone(),
+                false,
+                json_post(
+                    "/api/projects/scan/hide",
+                    serde_json::json!({ "path": path }),
+                ),
+            )
+            .await;
+            assert_eq!(body["success"], false, "{path:?} must be refused");
+            assert!(state.config.read().await.scan.hidden_repos.is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn config_tokens_get() {
         let state = test_state();
