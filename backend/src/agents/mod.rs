@@ -365,16 +365,18 @@ pub(crate) fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
 /// batch/WF was spawning agents. Once a result exists it is always returned
 /// immediately; an expired entry starts one background refresh.
 /// `force = true` bypasses + refreshes (right after an install/uninstall).
+/// The list returned is always the result of a sweep that ended: a caller
+/// whose sweep was invalidated or died waits for the next one, or starts it.
 pub async fn detect_all_cached(force: bool) -> Vec<AgentDetection> {
     if force {
         if let Ok(mut cache) = RUNTIME_CACHE.lock() {
             cache.clear();
         }
     }
-    detect_all_cached_with(force, detect_all()).await
+    detect_all_cached_with(force, detect_all).await
 }
 
-async fn detect_all_cached_with<F>(force: bool, detection: F) -> Vec<AgentDetection>
+async fn detect_all_cached_with<F>(force: bool, detect: impl Fn() -> F) -> Vec<AgentDetection>
 where
     F: std::future::Future<Output = Vec<AgentDetection>> + Send + 'static,
 {
@@ -388,31 +390,12 @@ where
         },
     }
 
-    let mut detection = Some(detection);
     let mut force_refresh = force;
-    let mut joined = false;
 
     loop {
         // Subscribe before inspecting `refreshing`, otherwise a very fast
         // sweep could finish between the inspection and the await.
         let mut refreshed = DETECT_ALL_REFRESHED.subscribe();
-        if detection.is_none() {
-            let spent = {
-                let cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-                spent_starter_action(&cache, joined)
-            };
-            match spent {
-                SpentStarter::Return(detections) => return detections,
-                SpentStarter::Join => {
-                    joined = true;
-                    refreshed
-                        .changed()
-                        .await
-                        .expect("refresh signal remains open");
-                    continue;
-                }
-            }
-        }
         let action = {
             let mut cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
             if !force_refresh {
@@ -469,17 +452,18 @@ where
                 stale_len,
                 return_stale,
             } => {
-                let Some(detection) = detection.take() else {
-                    // Unreachable: a spent caller returned above.
-                    return Vec::new();
-                };
                 let done = RefreshDone;
                 tokio::spawn(run_detect_all_refresh(
-                    detection, generation, stale_len, done,
+                    detect(),
+                    generation,
+                    stale_len,
+                    done,
                 ));
                 if let Some(stale) = return_stale {
                     return stale;
                 }
+                // A sweep that was invalidated, or died, stored nothing: the
+                // next loop waits on the sweep running now or starts one.
                 refreshed
                     .changed()
                     .await
@@ -487,25 +471,6 @@ where
                 force_refresh = false;
             }
         }
-    }
-}
-
-/// What a caller does once the sweep it started has ended and left it nothing
-/// fresh (invalidated meanwhile, over budget, or dead).
-enum SpentStarter {
-    Return(Vec<AgentDetection>),
-    /// Wait for the sweep another caller is running.
-    Join,
-}
-
-/// It never starts again: its detection is spent. It serves the cached list,
-/// even expired; with none it joins one sweep another caller runs, which
-/// always signals its end, and otherwise answers with an empty list.
-fn spent_starter_action(cache: &DetectAllCache, joined: bool) -> SpentStarter {
-    match cache.value.as_ref() {
-        Some((cached, _)) => SpentStarter::Return(cached.clone()),
-        None if cache.refreshing && !joined => SpentStarter::Join,
-        None => SpentStarter::Return(Vec::new()),
     }
 }
 
@@ -1943,14 +1908,14 @@ mod tests {
         };
         let first = runtime();
         let waited = first.block_on(async {
-            let sweep = detect_all_cached_with(false, std::future::pending());
+            let sweep = detect_all_cached_with(false, std::future::pending);
             tokio::time::timeout(std::time::Duration::from_millis(50), sweep).await
         });
         assert!(waited.is_err(), "the sweep never ends");
         drop(first);
 
         let next = runtime().block_on(async {
-            let sweep = detect_all_cached_with(false, async { Vec::new() });
+            let sweep = detect_all_cached_with(false, || async { Vec::new() });
             tokio::time::timeout(std::time::Duration::from_secs(5), sweep).await
         });
         assert!(
@@ -2015,8 +1980,8 @@ mod tests {
 
         let before = Instant::now();
         let (first, second) = tokio::join!(
-            detect_all_cached_with(false, make_detection()),
-            detect_all_cached_with(false, make_detection()),
+            detect_all_cached_with(false, &make_detection),
+            detect_all_cached_with(false, &make_detection),
         );
         assert!(first.is_empty() && second.is_empty());
         assert!(
@@ -2058,8 +2023,8 @@ mod tests {
         };
 
         let (first, second) = tokio::join!(
-            detect_all_cached_with(false, make_detection()),
-            detect_all_cached_with(false, make_detection()),
+            detect_all_cached_with(false, &make_detection),
+            detect_all_cached_with(false, &make_detection),
         );
         assert!(first.is_empty() && second.is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -2085,95 +2050,167 @@ mod tests {
         cache.generation = cache.generation.wrapping_add(1);
     }
 
-    /// The caller's answer, or the panic it died of, within five seconds.
-    async fn starter_outcome<F>(
-        force: bool,
-        detection: F,
-    ) -> Result<Vec<AgentDetection>, tokio::task::JoinError>
+    /// A sweep factory whose n-th call (from 1) runs `sweep(n)`, and the
+    /// number of sweeps it started.
+    fn counted_sweeps<F>(
+        sweep: impl Fn(usize) -> F + Send + Sync + 'static,
+    ) -> (
+        impl Fn() -> F + Send + Sync + Clone + 'static,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    )
     where
         F: std::future::Future<Output = Vec<AgentDetection>> + Send + 'static,
     {
-        let caller = tokio::spawn(detect_all_cached_with(force, detection));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let sweep = std::sync::Arc::new(sweep);
+        let counter = calls.clone();
+        (
+            move || sweep(counter.fetch_add(1, Ordering::SeqCst) + 1),
+            calls,
+        )
+    }
+
+    /// The caller's answer, or the panic it died of, within five seconds.
+    async fn caller_outcome(
+        caller: tokio::task::JoinHandle<Vec<AgentDetection>>,
+    ) -> Vec<AgentDetection> {
         tokio::time::timeout(std::time::Duration::from_secs(5), caller)
             .await
             .expect("the caller ends")
+            .expect("the caller does not panic")
+    }
+
+    fn two_detections() -> Vec<AgentDetection> {
+        [one_detection(), one_detection()].concat()
     }
 
     #[tokio::test]
     #[serial]
-    async fn a_starter_whose_detection_panics_ends_with_an_empty_list() {
+    async fn a_detection_that_panics_once_gives_the_caller_the_next_sweep_s_list() {
+        use std::sync::atomic::Ordering;
         reset_detect_cache(None);
-        let outcome = starter_outcome(false, async { panic!("detection died") }).await;
-        assert!(
-            outcome.expect("the caller does not panic").is_empty(),
-            "nothing cached, no sweep running"
-        );
+        let (detect, sweeps) = counted_sweeps(|call| async move {
+            assert!(call > 1, "the first sweep dies");
+            one_detection()
+        });
+
+        let list = caller_outcome(tokio::spawn(detect_all_cached_with(false, detect))).await;
+
+        assert_eq!(list.len(), 1, "the list of the sweep that ended");
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
         invalidate_detect_cache();
     }
 
     #[tokio::test]
     #[serial]
-    async fn a_starter_invalidated_mid_sweep_ends_without_starting_again() {
+    async fn a_caller_invalidated_mid_sweep_gets_the_list_of_the_new_sweep() {
+        use std::sync::atomic::Ordering;
         use std::sync::Arc;
         reset_detect_cache(None);
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let detection = {
+        let (detect, sweeps) = {
             let (started, release) = (started.clone(), release.clone());
-            async move {
-                started.notify_one();
-                release.notified().await;
-                one_detection()
-            }
+            counted_sweeps(move |call| {
+                let (started, release) = (started.clone(), release.clone());
+                async move {
+                    if call > 1 {
+                        return two_detections();
+                    }
+                    started.notify_one();
+                    release.notified().await;
+                    // Read before the invalidation: nobody may be served this.
+                    one_detection()
+                }
+            })
         };
-        let caller = tokio::spawn(detect_all_cached_with(false, detection));
+        let caller = tokio::spawn(detect_all_cached_with(false, detect));
         started.notified().await;
+        // An install ended while the sweep ran: twice, as two installs would.
+        invalidate_detect_cache();
         invalidate_detect_cache();
         release.notify_one();
 
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), caller)
-            .await
-            .expect("the caller ends");
-        assert!(
-            outcome.expect("the caller does not panic").is_empty(),
-            "a list read before the invalidation is not served"
-        );
-        assert!(DETECT_ALL_CACHE.lock().unwrap().value.is_none());
+        let list = caller_outcome(caller).await;
+
+        assert_eq!(list.len(), 2, "the sweep started after the invalidation");
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
+        let cached = DETECT_ALL_CACHE.lock().unwrap().value.clone();
+        assert_eq!(cached.map(|(list, _)| list.len()), Some(2));
         invalidate_detect_cache();
     }
 
     #[tokio::test]
     #[serial]
-    async fn a_forced_starter_whose_sweep_brings_nothing_returns_the_previous_list() {
-        let expired = Instant::now() - DETECT_ALL_TTL - std::time::Duration::from_secs(1);
-        reset_detect_cache(Some((one_detection(), expired)));
-        let outcome = starter_outcome(true, async { panic!("detection died") }).await;
+    async fn callers_of_a_discarded_sweep_share_the_next_one() {
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        reset_detect_cache(None);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (detect, sweeps) = {
+            let (started, release) = (started.clone(), release.clone());
+            counted_sweeps(move |call| {
+                let (started, release) = (started.clone(), release.clone());
+                async move {
+                    if call > 1 {
+                        tokio::task::yield_now().await;
+                        return two_detections();
+                    }
+                    started.notify_one();
+                    release.notified().await;
+                    one_detection()
+                }
+            })
+        };
+        let starter = tokio::spawn(detect_all_cached_with(false, detect.clone()));
+        started.notified().await;
+        invalidate_detect_cache();
+        // A second caller arrives on the sweep that will be discarded.
+        let waiter = tokio::spawn(detect_all_cached_with(false, detect));
+        tokio::task::yield_now().await;
         assert_eq!(
-            outcome.expect("the caller does not panic").len(),
+            sweeps.load(Ordering::SeqCst),
             1,
-            "the previous list, even expired"
+            "it waits on the running sweep, it does not start its own"
+        );
+        release.notify_one();
+
+        let (first, second) = (caller_outcome(starter).await, caller_outcome(waiter).await);
+
+        assert_eq!((first.len(), second.len()), (2, 2));
+        assert_eq!(
+            sweeps.load(Ordering::SeqCst),
+            2,
+            "the discarded sweep, then one sweep for both callers"
         );
         invalidate_detect_cache();
     }
 
-    #[test]
-    fn a_spent_starter_serves_the_cache_joins_one_running_sweep_or_answers_empty() {
-        let cache = |value: Option<Vec<AgentDetection>>, refreshing| DetectAllCache {
-            value: value.map(|list| (list, Instant::now() - DETECT_ALL_TTL * 2)),
-            refreshing,
-            generation: 0,
-        };
-        let served = |cache: &DetectAllCache, joined| match spent_starter_action(cache, joined) {
-            SpentStarter::Return(list) => Some(list.len()),
-            SpentStarter::Join => None,
-        };
-        // A cached list wins, even expired, whatever else is going on.
-        assert_eq!(served(&cache(Some(one_detection()), true), false), Some(1));
-        // Nothing cached: join the sweep another caller runs, once.
-        assert_eq!(served(&cache(None, true), false), None);
-        assert_eq!(served(&cache(None, true), true), Some(0));
-        // Nothing cached, nothing running: an empty list, never a new sweep.
-        assert_eq!(served(&cache(None, false), false), Some(0));
+    #[tokio::test]
+    #[serial]
+    async fn a_forced_caller_whose_sweep_dies_gets_the_previous_list_and_a_new_sweep() {
+        use std::sync::atomic::Ordering;
+        let expired = Instant::now() - DETECT_ALL_TTL - std::time::Duration::from_secs(1);
+        reset_detect_cache(Some((one_detection(), expired)));
+        let mut completed = DETECT_ALL_REFRESHED.subscribe();
+        let (detect, sweeps) = counted_sweeps(|call| async move {
+            assert!(call > 1, "the first sweep dies");
+            two_detections()
+        });
+
+        let list = caller_outcome(tokio::spawn(detect_all_cached_with(true, detect))).await;
+
+        assert_eq!(list.len(), 1, "the previous sweep, a real list");
+        // The refresh it left running stores the new list.
+        while DETECT_ALL_CACHE.lock().unwrap().refreshing {
+            completed.changed().await.unwrap();
+        }
+        assert_eq!(sweeps.load(Ordering::SeqCst), 2);
+        let cached = DETECT_ALL_CACHE.lock().unwrap().value.clone();
+        assert_eq!(cached.map(|(list, _)| list.len()), Some(2));
+        invalidate_detect_cache();
     }
 
     // ─── check_prerequisite ──────────────────────────────────────────────────
