@@ -364,7 +364,7 @@ fallback when a saved Page was removed.
 `[src: file: frontend/src/pages/PagesPage.tsx:94-113#readPageNavigation]`
 `[src: file: frontend/src/pages/PagesPage.tsx:294-300#PAGE_COLLAPSED_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:344-369#refresh]`
-`[src: file: frontend/src/pages/PagesPage.tsx:727-730#isSectionCollapsed]`
+`[src: file: frontend/src/pages/PagesPage.tsx:734-737#isSectionCollapsed]`
 Project detail restores the last valid tab across project switches and falls back to Overview
 when a stale value is found.
 `[src: file: frontend/src/components/ProjectCard.tsx:79-92#readProjectDetailView]`

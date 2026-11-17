@@ -124,7 +124,7 @@ Workflow run when that provenance still exists. A publication that changes no
 dataset at all writes no ledger entry (KT-1819), so the timeline lists data
 updates; the "Synced" time next to it is the Page's `last_published_at`, which
 every successful publication moves, changed or not.
-`[src: file: frontend/src/pages/PagesPage.tsx:745#lastRefreshAt]`
+`[src: file: frontend/src/pages/PagesPage.tsx:752#lastRefreshAt]`
 Every enabled linked Workflow also exposes a compact run
 action in this control; disabled Workflows remain visible but cannot be launched
 until the operator enables them from the Workflow screen.
@@ -299,7 +299,7 @@ normalization per observation and retain `observed_at` plus
 `workflow_run_id`. `[src: file: frontend/src/lib/live-page-csv.ts:1-106#ExportCell]` The
 export uses a semicolon for French and Spanish UI locales so spreadsheet tools
 configured with those regional separators open columns directly; other locales
-keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:607-619#exportDatasetCsv]`
+keep the standard comma. `[src: file: frontend/src/pages/PagesPage.tsx:614-626#exportDatasetCsv]`
 
 ## Theme and refresh behavior
 
@@ -375,12 +375,21 @@ Pages view, still reads the whole Page.
 `[src: file: frontend/src/lib/live-page-refresh.ts:33-37#refreshLivePageDetail]`
 
 Reads of one view can overlap (an event during the 30 s poll, a full read
-while a delta is in flight). Each read takes a ticket when it starts and its
-answer is applied only if no later read started and the view is still on that
-Page: the latest request wins whatever revision its answer carries, a full
-answer with a lower revision included, and nothing is applied after the view
-closed or moved to another Page.
-`[src: file: frontend/src/lib/live-page-refresh.ts:51-58#createRequestSequence]`
+while a delta is in flight, a burst of publications). Each read takes a ticket
+when it starts, and its answer is applied unless the answer of a read started
+after it was applied first. Whatever revision an answer carries plays no
+part, so a full answer with a lower revision is taken. A read that fails
+applies nothing, so it never costs the view the answer of an older read, and
+during a burst every answer that arrives in order is shown. The error of the
+first read is shown only while no later read has brought the Page.
+`[src: file: frontend/src/lib/live-page-refresh.ts:57-81#createRequestSequence]`
+
+A read of another Page drops every read in flight, and so does a view that no
+longer shows any Page. In the Pages view a publication is followed only once
+the Page is shown: its first load brings the Page, its panels and the HTML
+draft together, and the draft is saved only into the Page it was loaded from.
+`[src: file: frontend/src/pages/PagesPage.tsx:318-347#loadDetail]`
+`[src: file: frontend/src/pages/PagesPage.tsx:579-582#saveHtml]`
 
 ## « Ma Todo », the default board (KT-1030)
 

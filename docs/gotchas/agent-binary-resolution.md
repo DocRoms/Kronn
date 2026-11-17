@@ -5,7 +5,7 @@ native macOS backend must keep a CLI even when its directory is listed in
 `KRONN_HOST_BIN`. In a container, resolution continues through PATH after a
 skipped host binary so a later Linux installation can still win.
 [src: file: backend/src/agents/mod.rs:172-188#should_skip_darwin_host_binary]
-[src: file: backend/src/agents/mod.rs:1365-1447#find_binary_in_paths]
+[src: file: backend/src/agents/mod.rs:1330-1412#find_binary_in_paths]
 
 Agent detection exposes the installed `path`, or a `fallback_command` containing
 the resolved npx executable and arguments. The version comes from that command's
@@ -13,11 +13,11 @@ successful `--version` output; failed or empty output leaves it unknown. Setting
 shows the command and explicitly warns about npx fallback. Refreshing detection
 also clears cached fallback versions.
 [src: file: backend/src/models/setup.rs:1927-1930#fallback_command]
-[src: file: backend/src/agents/mod.rs:666-693#fallback_command]
-[src: file: backend/src/agents/mod.rs:1115-1185#probe_npx_invocation]
-[src: file: backend/src/agents/mod.rs:1480-1507#version_from_output]
-[src: file: backend/src/agents/mod.rs:367-374#detect_all_cached]
-[src: file: backend/src/agents/mod.rs:561-574#invalidate_detect_cache]
+[src: file: backend/src/agents/mod.rs:631-658#fallback_command]
+[src: file: backend/src/agents/mod.rs:1080-1150#probe_npx_invocation]
+[src: file: backend/src/agents/mod.rs:1445-1472#version_from_output]
+[src: file: backend/src/agents/mod.rs:370-377#detect_all_cached]
+[src: file: backend/src/agents/mod.rs:526-539#invalidate_detect_cache]
 [src: file: frontend/src/components/settings/AgentsSection.tsx:1221-1234#fallback_command]
 
 A direct CLI spawn failure can also trigger npx. The launch records the fallback
@@ -34,16 +34,16 @@ project's run. A missing version remains unknown.
 [src: file: backend/src/workflows/steps.rs:1455-1476#npx_fallback_command]
 [src: file: backend/src/workflows/template.rs:182-223#set_step_provenance]
 [src: file: backend/src/agents/mod.rs:54-59#RUNTIME_CACHE]
-[src: file: backend/src/agents/mod.rs:1144-1154#cache_key]
-[src: file: backend/src/agents/mod.rs:1074-1096#probe_runtime]
-[src: file: backend/src/agents/mod.rs:367-374#detect_all_cached]
+[src: file: backend/src/agents/mod.rs:1109-1119#cache_key]
+[src: file: backend/src/agents/mod.rs:1039-1061#probe_runtime]
+[src: file: backend/src/agents/mod.rs:370-377#detect_all_cached]
 
 When the backend's current directory cannot be read, only the PATH scan is
 skipped; absolute host-bin directories are still scanned with the same native
 versus container rules.
-[src: file: backend/src/agents/mod.rs:1234-1241#current_dir]
-[src: file: backend/src/agents/mod.rs:1373-1378#which_in_all]
-[src: file: backend/src/agents/mod.rs:1347-1384#host_dirs]
+[src: file: backend/src/agents/mod.rs:1199-1206#current_dir]
+[src: file: backend/src/agents/mod.rs:1338-1343#which_in_all]
+[src: file: backend/src/agents/mod.rs:1312-1349#host_dirs]
 
 For a version-mismatch investigation, retain the **same backend process's**
 `find_binary('codex')` debug lines: PATH, host directories, container/host flags,
@@ -51,8 +51,8 @@ and the selected or skipped path. Record its `KRONN_HOST_BIN` value and compare
 the reported installed version with the command that was actually selected.
 The debug entry reads the backend environment; a terminal's PATH alone is not
 that evidence.
-[src: file: backend/src/agents/mod.rs:1194-1212#find_binary_on_machine]
-[src: file: backend/src/agents/mod.rs:1387-1398#should_skip_darwin_host_binary]
+[src: file: backend/src/agents/mod.rs:1179-1197#find_binary_on_machine]
+[src: file: backend/src/agents/mod.rs:1352-1363#should_skip_darwin_host_binary]
 
 The native/container regression and fake npx tests establish resolver behavior;
 they do not establish the cause of the colleague's reported KT-665 version
