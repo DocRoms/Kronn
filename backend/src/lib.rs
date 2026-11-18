@@ -118,6 +118,74 @@ pub mod workflows {
     pub mod interrupted_worktrees;
 }
 
+/// The hooks a lower crate calls into and whose provider is missing from this
+/// binary. Empty in the server: a hook left without its provider would turn a
+/// call into an error (or a silent no-op) only when the path is taken.
+pub fn missing_uplinks() -> Vec<&'static str> {
+    use crate::core::{uplink, uplink_state};
+    fn name<T: inventory::Collect>() -> Option<&'static str> {
+        uplink::linked::<T>()
+            .is_none()
+            .then(std::any::type_name::<T>)
+    }
+    [
+        name::<uplink::AgentMessageIngest>(),
+        name::<uplink::MessageQuestionIngest>(),
+        name::<uplink::PageActionIngest>(),
+        name::<uplink::TaskExecutionLookup>(),
+        name::<uplink::TaskDodAdoption>(),
+        name::<uplink::TrustWithdrawal>(),
+        name::<uplink::ApiCallSecrets>(),
+        name::<uplink::LoadableToolDeclarations>(),
+        name::<uplink::PageResources>(),
+        name::<uplink::ConfigApplied>(),
+        name::<uplink::ConfigMigration>(),
+        name::<uplink_state::DiscussionCreate>(),
+        name::<uplink_state::EscalatedFallback>(),
+        name::<uplink_state::WorkflowRoomTools>(),
+        name::<uplink_state::WorkflowTestTools>(),
+        name::<crate::db::BootStep>(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+#[cfg(test)]
+mod uplink_tests {
+    #[test]
+    fn every_hook_has_its_provider_in_the_top_crate() {
+        assert_eq!(super::missing_uplinks(), Vec::<&str>::new());
+    }
+
+    /// A hook added to a lower crate is checked at boot too.
+    #[test]
+    fn missing_uplinks_names_every_declared_hook() {
+        let src = std::path::Path::new(crate::BACKEND_DIR).join("src");
+        let checked = std::fs::read_to_string(src.join("lib.rs")).unwrap();
+        for file in ["core/uplink.rs", "core/uplink_state.rs", "db/mod.rs"] {
+            let text = std::fs::read_to_string(src.join(file)).unwrap();
+            for declared in text.split("inventory::collect!(").skip(1) {
+                let hook = declared.split(')').next().unwrap();
+                assert!(
+                    checked.contains(&format!("::{hook}>()")),
+                    "{hook} ({file}) is not listed in missing_uplinks"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_database_boot_steps_are_all_linked_and_ordered_apart() {
+        let mut orders: Vec<u16> = inventory::iter::<crate::db::BootStep>
+            .into_iter()
+            .map(|step| step.order)
+            .collect();
+        orders.sort_unstable();
+        assert_eq!(orders, [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    }
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod api_tests;
 

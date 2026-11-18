@@ -1495,6 +1495,8 @@ mod tests {
             .filter(|(_, n)| *n > 0)
             .collect();
         let expected: std::collections::BTreeMap<String, usize> = [
+            // test support only: the scripted agent of the ACP tests
+            ("backend/src/acp.rs", 1),
             // raw_async, raw_sync, open_in_system (open::commands, isolated)
             ("backend/src/core/cmd.rs", 3),
             // var, var_os, vars_os, set_var, remove_var,

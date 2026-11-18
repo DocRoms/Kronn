@@ -12,6 +12,14 @@ use kronn::{
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 fn main() -> anyhow::Result<()> {
+    // The crates below the top one call up through hooks: a provider left out
+    // of the link must stop the server here, not fail a request later.
+    let missing = kronn::missing_uplinks();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "this binary was linked without {}",
+        missing.join(", ")
+    );
     let args: Vec<String> = std::env::args().skip(1).collect();
     match kronn::core::cli_args::cli_action(&args) {
         kronn::core::cli_args::CliAction::Run => {}
