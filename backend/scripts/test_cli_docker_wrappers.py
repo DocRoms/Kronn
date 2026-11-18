@@ -185,7 +185,11 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates", report_job)
         self.assertIn("needs: [require-ci-label, test-backend-build, test-backend-shard]", report_job)
         self.assertIn("pattern: backend-profraw-*", report_job)
-        self.assertIn("cargo llvm-cov report --summary-only", report_job)
+        # Without `--workspace` the report keeps the top crate only, and both
+        # floors would be judged on a fraction of the backend.
+        self.assertIn("cargo llvm-cov report --workspace --summary-only", report_job)
+        keymgmt = (ROOT / "scripts" / "check-keymgmt-coverage.sh").read_text()
+        self.assertIn("cargo llvm-cov report --workspace --json", keymgmt)
         self.assertIn("-E 'test(export_bindings)'", report_job)
         self.assertIn("target/llvm-cov-target/debug/.fingerprint", backend)
         self.assertIn("target/llvm-cov-target/debug/build", backend)

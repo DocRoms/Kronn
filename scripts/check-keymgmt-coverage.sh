@@ -28,7 +28,9 @@ TARGETS=(
 # Reuse the instrumented build/profdata from the repo-wide floor step if it ran;
 # otherwise produce it here. --ignore-run-fail so pre-existing env-flaky tests
 # (git-worktree / mcp_scanner parallelism) don't abort the coverage report.
-json="$(cargo llvm-cov report --json 2>/dev/null \
+# `--workspace` (cargo-llvm-cov 0.9+): these modules live in the lower crates,
+# which a report of the top crate alone leaves out.
+json="$(cargo llvm-cov report --workspace --json 2>/dev/null \
         || cargo llvm-cov --workspace --lib --ignore-run-fail --json)"
 
 fail=0

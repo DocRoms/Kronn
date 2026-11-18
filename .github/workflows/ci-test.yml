@@ -445,7 +445,8 @@ jobs:
         run: |
           export CARGO_TARGET_DIR="$KRONN_COV_TARGET"
           eval "$(cargo llvm-cov show-env --sh)"
-          cargo llvm-cov report --summary-only \
+          # `--workspace`: without it the report keeps the top crate only.
+          cargo llvm-cov report --workspace --summary-only \
             --fail-under-lines 83 \
             --fail-under-functions 83 \
             --fail-under-regions 83

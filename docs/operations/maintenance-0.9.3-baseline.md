@@ -94,7 +94,7 @@ side-by-side arrangement keeps `@typescript/typescript6` aliased as the
 `typescript` package and exposes its `tsc6` binary through
 `typecheck:legacy`. Both compiler paths are explicit CI gates.
 [src: file: frontend/package.json:11-13#tsc6] [src: file: frontend/package.json:57#native] [src: file: frontend/package.json:65#typescript]
-[src: file: .github/workflows/ci-test.yml:707-714#typecheck] [src: url:
+[src: file: .github/workflows/ci-test.yml:708-715#typecheck] [src: url:
 https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/]
 
 The earlier preview pilot produced zero diagnostics with both compilers on the
