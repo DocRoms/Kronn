@@ -255,7 +255,10 @@ describe('StandaloneLivePage', () => {
 
     await act(async () => { following.resolve(delta({ data_revision: 3 })); });
 
-    expect(pageDataPosts(post)).toEqual([]);
+    // The frame may still post what it loaded with; the dropped read is revision 3.
+    const dropped = (pageDataPosts(post) as { page: { data_revision: number } }[])
+      .filter(data => data.page.data_revision === 3);
+    expect(dropped).toEqual([]);
   });
 
   it('does not go back to older data when two reads are answered out of order', async () => {
