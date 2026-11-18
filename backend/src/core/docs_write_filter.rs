@@ -1057,11 +1057,20 @@ mod tests {
             .unwrap()
             .set_len((MAX_AUDIT_BUFFER_BYTES + 1) as u64)
             .unwrap();
-        let error = audit_rejections(root, &SensitiveSubstrings::new(), &before)
+        // The document that cannot be read whole is told apart, and never
+        // hides the known secret of the other one.
+        let audit = audit_docs_writes(root, &SensitiveSubstrings::new(), &before)
             .await
-            .unwrap_err();
+            .unwrap();
+        let [error] = audit.incomplete.as_slice() else {
+            panic!("{:?}", audit.incomplete);
+        };
         assert!(error.contains(r"[escaped path bytes] docs/notes-\xff.md"));
         assert!(error.contains("content was not inspected and the file was preserved"));
+        let [(rejected, _)] = audit.rejections.as_slice() else {
+            panic!("{:?}", audit.rejections);
+        };
+        assert_eq!(rejected, r"[escaped path bytes] docs/notes-\xfe.md");
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
             (MAX_AUDIT_BUFFER_BYTES + 1) as u64

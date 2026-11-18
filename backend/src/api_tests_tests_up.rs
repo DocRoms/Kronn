@@ -3797,7 +3797,10 @@ async fn config_scan_paths_get() {
 /// hidden repository `hidden` from then on, the others are untouched, and
 /// hiding twice changes nothing.
 #[tokio::test]
+#[serial]
 async fn hidden_repo_stays_out_of_the_scan_until_forever() {
+    // Hiding a repository saves the config.
+    isolate_config_dir();
     // Not `TempDir::new()`: its `.tmpXXXX` name makes the scanner flag every repo hidden.
     let root = tempfile::Builder::new()
         .prefix("kt1684-scan-")
