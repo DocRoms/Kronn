@@ -702,7 +702,7 @@ pub fn update_project_default_profile(
 pub fn delete_project_discussions(conn: &Connection, project_id: &str) -> Result<()> {
     // KT-1492: their trust settings are gone (trigger); what those levels
     // approved is taken back in the same transaction.
-    crate::db::trust::delete_and_withdraw(conn, "Kronn (project rooms deleted)", |conn| {
+    crate::core::uplink::delete_and_withdraw(conn, "Kronn (project rooms deleted)", |conn| {
         conn.execute(
             "DELETE FROM discussions WHERE project_id = ?1",
             params![project_id],

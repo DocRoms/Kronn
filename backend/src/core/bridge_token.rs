@@ -2021,7 +2021,11 @@ pub fn residence(
         // Same resolution as the orchestration tools: an execution id, or a
         // task reference standing for its active or latest execution.
         let Some(execution) =
-            crate::api::orchestration::resolve_task_execution_reference(conn, execution_id)?
+            (crate::core::uplink::required::<crate::core::uplink::TaskExecutionLookup>()?.0)(
+                conn,
+                execution_id,
+                crate::core::uplink::ExecutionOf::Reference,
+            )?
         else {
             return Ok(None);
         };

@@ -710,7 +710,12 @@ impl QuotaRechecker {
                 if verdict == Some(false) {
                     let usable = self.usable_agents();
                     for escalation in group {
-                        match crate::api::discussions::agent_fallback::offer_to_escalated_execution_among(
+                        let Some(offer) = crate::core::uplink::linked::<
+                            crate::core::uplink_state::EscalatedFallback,
+                        >() else {
+                            continue;
+                        };
+                        match (offer.0)(
                             state,
                             &escalation.execution_id,
                             usable.clone(),

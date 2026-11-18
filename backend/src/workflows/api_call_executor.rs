@@ -197,6 +197,8 @@ async fn execute_core_gated(
 /// [`is_public_config`]): masking a base URL would rewrite the links of the
 /// data handed to the next steps (`***/browse/EW-1`). The resolved auth adds
 /// its wire forms (Basic decoded to its password, bearer and header tokens).
+inventory::submit! { crate::core::uplink::ApiCallSecrets(call_secrets) }
+
 pub(crate) fn call_secrets(
     plugin: &McpServer,
     env: &HashMap<String, String>,

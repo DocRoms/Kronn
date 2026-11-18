@@ -24,6 +24,7 @@ pub mod discussion_ceiling_requests;
 pub mod discussion_effort;
 pub mod discussion_important;
 pub(crate) mod discussion_launch_settings;
+pub mod message_ingest;
 pub mod discussion_monitor;
 pub mod discussion_questions;
 pub mod discussion_scope;
@@ -304,7 +305,11 @@ impl Database {
         // from its pre-step snapshot (or marked partial) now — never before
         // the agent is gone, and never left half-written and unmarked until
         // the next launch.
-        match crate::api::audit::step_guard::stop_agents_and_settle_at_boot(&conn) {
+        let settled = match crate::core::uplink::linked::<crate::core::uplink::AuditBootSettle>() {
+            Some(hook) => (hook.0)(&conn),
+            None => Ok(0),
+        };
+        match settled {
             Ok(0) => {}
             Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
             Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),

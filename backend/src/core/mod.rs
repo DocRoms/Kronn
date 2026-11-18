@@ -186,6 +186,8 @@ pub mod vibe_trust;
 pub mod worktree;
 pub mod ws_client;
 pub mod yaml_lite;
+pub mod uplink;
+pub mod uplink_state;
 
 // crypto_test.rs removed 2026-07-01 — it was a strict subset of crypto.rs's
 // richer inline `tests` module (roundtrip / wrong-key / base64 / parse / mask),

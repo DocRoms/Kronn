@@ -16487,6 +16487,27 @@ fn execution_party_is_authorized(
         || execution.worker_cli_session_id == Some(session.id))
 }
 
+fn execution_lookup(
+    conn: &rusqlite::Connection,
+    reference: &str,
+    of: crate::core::uplink::ExecutionOf,
+) -> Result<Option<TaskExecution>> {
+    use crate::core::uplink::ExecutionOf;
+    match of {
+        ExecutionOf::ActiveForTask => {
+            crate::db::orchestration::get_active_execution_for_task(conn, reference)
+        }
+        ExecutionOf::LatestForTask => {
+            crate::db::orchestration::get_latest_execution_for_task(conn, reference)
+        }
+        ExecutionOf::Reference => resolve_task_execution_reference(conn, reference),
+    }
+}
+inventory::submit! { crate::core::uplink::TaskExecutionLookup(execution_lookup) }
+inventory::submit! {
+    crate::core::uplink::TaskDodAdoption(crate::db::orchestration::adopt_task_dod_into_live_executions)
+}
+
 pub(crate) fn resolve_task_execution_reference(
     conn: &rusqlite::Connection,
     reference: &str,

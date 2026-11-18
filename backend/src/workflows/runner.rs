@@ -7,7 +7,6 @@ use anyhow::Result;
 use chrono::Utc;
 use std::future::Future;
 
-use crate::api::agent_tools::KronnToolExecutor;
 use crate::models::*;
 use crate::AppState;
 
@@ -2918,7 +2917,7 @@ async fn execute_run_body(
                         let mut fallback_hops = 0;
                         let mut outcome = loop {
                             let full_access = agents_config.full_access_for(&current_step.agent);
-                            let native_tools = Some(KronnToolExecutor::workflow_room_arc(
+                            let native_tools = crate::core::uplink::linked::<crate::core::uplink_state::WorkflowRoomTools>().map(|tools| (tools.0)(
                                 state.clone(),
                                 workflow.project_id.clone(),
                                 run.id.clone(),
@@ -4194,7 +4193,7 @@ async fn execute_run_body(
                             ),
                             Ok(step_room) => {
                                 let full_access = agents_config.full_access_for(&rb_step.agent);
-                                let native_tools = Some(KronnToolExecutor::workflow_room_arc(
+                                let native_tools = crate::core::uplink::linked::<crate::core::uplink_state::WorkflowRoomTools>().map(|tools| (tools.0)(
                                     state.clone(),
                                     workflow.project_id.clone(),
                                     run.id.clone(),

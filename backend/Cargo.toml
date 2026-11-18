@@ -107,6 +107,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 regex-lite = "0.1"
 thiserror = "2"
 anyhow = "1"
+# Link-time registry: a lower crate calls into a higher one (core::uplink).
+inventory = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "6"     # XDG paths

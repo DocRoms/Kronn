@@ -589,31 +589,12 @@ fn take_back(
     Ok(())
 }
 
-/// A room or a workflow is deleted (or a batch of them): `work` runs, then
-/// every grant is judged again against the level now in force — the deleted
-/// scopes' settings went with them (trigger), so what they alone covered is
-/// taken back — all in one transaction on the one connection. The deletion and
-/// the withdrawal stand or fall together: a failed withdrawal rolls the
-/// deletion back (the scope keeps its setting and its grants, nothing is left
-/// approved without a level behind it), and a deletion that fails withdraws
-/// nothing. Inside a transaction the caller already holds, `work` and the
-/// withdrawal simply join it.
-pub fn delete_and_withdraw<T>(
-    conn: &Connection,
-    by: &str,
-    work: impl FnOnce(&Connection) -> Result<T>,
-) -> Result<T> {
-    if !conn.is_autocommit() {
-        let out = work(conn)?;
-        withdraw(conn, by)?;
-        return Ok(out);
-    }
-    let tx = conn.unchecked_transaction()?;
-    let out = work(&tx)?;
-    withdraw(&tx, by)?;
-    tx.commit()?;
-    Ok(out)
+pub use crate::core::uplink::delete_and_withdraw;
+
+fn withdraw_for_deletion(conn: &Connection, by: &str) -> Result<()> {
+    withdraw(conn, by).map(|_| ())
 }
+inventory::submit! { crate::core::uplink::TrustWithdrawal(withdraw_for_deletion) }
 
 /// Rows kept in the journal, and days they are kept. An active grant is
 /// exempt: it is what a lowered level withdraws.

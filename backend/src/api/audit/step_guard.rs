@@ -637,6 +637,8 @@ fn reap_tagged_agents_with(
 /// that outlived the backend write after the verdict ("it had written nothing")
 /// was recorded. A run something of which may still be alive is not settled.
 /// Returns how many steps were settled.
+inventory::submit! { crate::core::uplink::AuditBootSettle(stop_agents_and_settle_at_boot) }
+
 pub(crate) fn stop_agents_and_settle_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
     stop_agents_and_settle_with(conn, &crate::core::dispatch_reaper::reap_dispatch)
 }

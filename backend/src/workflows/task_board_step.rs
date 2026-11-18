@@ -421,10 +421,8 @@ async fn discuss(
         no_agent: false,
         assistant: None,
     };
-    let created =
-        crate::api::discussions::create(axum::extract::State(state.clone()), axum::Json(request))
-            .await
-            .0;
+    let create = crate::core::uplink::required::<crate::core::uplink_state::DiscussionCreate>()?;
+    let created = (create.0)(state.clone(), request).await;
     let discussion = match (created.success, created.data) {
         (true, Some(discussion)) => discussion,
         _ => bail!(

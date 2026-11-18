@@ -6819,3 +6819,7 @@ mod tests {
         assert_eq!(summary, "Generate an image or a video.");
     }
 }
+
+inventory::submit! {
+    crate::core::uplink_state::WorkflowRoomTools(KronnToolExecutor::workflow_room_arc)
+}

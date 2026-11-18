@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use crate::core::uplink::{ExecutionOf, TaskExecutionLookup};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
@@ -529,10 +530,13 @@ fn ensure_live_check_principal(
     let session = crate::db::discussion_sessions::find_active_session(conn, agent, session_id)?
         .ok_or_else(refused)?;
     let execution = if after_integration {
-        crate::db::orchestration::get_latest_execution_for_task(conn, task_id)?
+        ExecutionOf::LatestForTask
     } else {
-        crate::db::orchestration::get_active_execution_for_task(conn, task_id)?
-    }
+        ExecutionOf::ActiveForTask
+    };
+    let execution = (crate::core::uplink::required::<TaskExecutionLookup>()?.0)(
+        conn, task_id, execution,
+    )?
     .ok_or_else(refused)?;
     if session.disc_id != execution.parent_discussion_id
         || execution.worker_cli_session_id == Some(session.id)
@@ -1958,7 +1962,7 @@ pub fn update_task(
         removed_dod = replace_dod(&transaction, task_id, items, &request.actor, None)?;
         // KT-1402 — an execution that still owes a delivery adopts the edited
         // DoD in this very transaction, so its worker is never refused for it.
-        crate::db::orchestration::adopt_task_dod_into_live_executions(
+        (crate::core::uplink::required::<crate::core::uplink::TaskDodAdoption>()?.0)(
             &transaction,
             task_id,
             &existing.definition_of_done,

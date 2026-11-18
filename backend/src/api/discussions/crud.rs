@@ -1840,3 +1840,11 @@ mod tests {
         assert!(!response.0.success);
     }
 }
+
+fn create_for_uplink(
+    state: AppState,
+    request: CreateDiscussionRequest,
+) -> crate::core::uplink_state::Async<'static, ApiResponse<Discussion>> {
+    Box::pin(async move { create(State(state), Json(request)).await.0 })
+}
+inventory::submit! { crate::core::uplink_state::DiscussionCreate(create_for_uplink) }

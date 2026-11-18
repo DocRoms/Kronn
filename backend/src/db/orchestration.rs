@@ -4070,7 +4070,7 @@ pub fn post_docker_elevation_card(conn: &Connection, exec_id: &str) -> Result<()
         &[],
         None,
     )?;
-    let invalid = crate::db::discussion_questions::ingest_message_questions(
+    let invalid = (crate::core::uplink::required::<crate::core::uplink::MessageQuestionIngest>()?.0)(
         conn,
         parent,
         &message.id,

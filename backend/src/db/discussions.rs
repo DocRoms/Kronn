@@ -1052,7 +1052,7 @@ pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
     // KT-1492: what the room's trust level approved is taken back in the same
     // transaction (the trigger drops its setting on every path that deletes it).
     let affected =
-        crate::db::trust::delete_and_withdraw(conn, "Kronn (the room was deleted)", |conn| {
+        crate::core::uplink::delete_and_withdraw(conn, "Kronn (the room was deleted)", |conn| {
             Ok(conn.execute("DELETE FROM discussions WHERE id = ?1", params![id])?)
         })?;
     Ok(affected > 0)
@@ -2992,26 +2992,11 @@ fn insert_message_inner(
             &msg.id,
             &content,
         )?;
-        super::discussion_actions::ingest_message_actions(conn, discussion_id, &msg.id, &content)?;
-        let invalid_cards = super::discussion_questions::ingest_message_questions(
-            conn,
-            discussion_id,
-            &msg.id,
-            &content,
-        )?;
-        super::discussion_questions::report_invalid_cards(
-            conn,
-            &msg.id,
-            msg.lint_report.as_ref(),
-            invalid_cards,
-        )?;
-        super::audit_validation::on_agent_message(
-            conn,
-            discussion_id,
-            &msg.id,
-            &content,
-            &msg.timestamp.to_rfc3339(),
-        )?;
+        if let Some(hook) =
+            crate::core::uplink::linked::<crate::core::uplink::AgentMessageIngest>()
+        {
+            (hook.0)(conn, discussion_id, msg, &content)?;
+        }
     }
 
     // KT-1247 — a message from the worker is activity: it pushes the silent-

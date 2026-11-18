@@ -258,7 +258,7 @@ pub(crate) fn create_live_page_in_transaction(
          VALUES (1, ?1)",
         [page.created_at.to_rfc3339()],
     )?;
-    crate::db::live_page_actions::ingest_page_actions(tx, &page.id, &revision.id, &revision.html)?;
+    ingest_page_actions(tx, &page.id, &revision.id, &revision.html)?;
     Ok(())
 }
 
@@ -617,7 +617,7 @@ pub fn update_live_page_html_from(
         "UPDATE live_pages SET current_revision_id = ?2, updated_at = ?3 WHERE id = ?1",
         params![canonical_page_id, revision.id, now.to_rfc3339()],
     )?;
-    crate::db::live_page_actions::ingest_page_actions(
+    ingest_page_actions(
         &tx,
         &canonical_page_id,
         &revision.id,
@@ -2401,4 +2401,18 @@ pub fn list_live_page_resources(
             .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(Some(found))
+}
+
+/// The actions a revision's HTML declares, stored with it by the crate that
+/// knows them.
+fn ingest_page_actions(
+    conn: &Connection,
+    page_id: &str,
+    revision_id: &str,
+    html: &str,
+) -> Result<()> {
+    match crate::core::uplink::linked::<crate::core::uplink::PageActionIngest>() {
+        Some(hook) => (hook.0)(conn, page_id, revision_id, html),
+        None => Ok(()),
+    }
 }
