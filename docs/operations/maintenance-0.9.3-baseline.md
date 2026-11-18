@@ -18,7 +18,7 @@ disabling the authoritative ESLint rules. Details and the remaining inventory
 live in the dedicated React debt entry, whose last recorded count (2026-08-11)
 is 72 warnings; the CI warning budget has since been ratcheted to 63.
 [src: file: docs/tech-debt/TD-20260509-react19-effect-rules.md:21-34#Current]
-[src: file: .github/workflows/ci-test.yml:704-705#max-warnings]
+[src: file: .github/workflows/ci-test.yml:707-708#max-warnings]
 
 ## Dependency and security outcome
 
@@ -61,12 +61,12 @@ plus the root Tauri JavaScript API. Exact transitive overrides close advisories
 in `adm-zip`, `postcss`, `flatted`, `brace-expansion`, `dompurify`, `protobufjs`
 and `sharp`. Major updates remain protected by the complete frontend
 typecheck/lint/test/build gate.
-[src: file: frontend/pnpm-workspace.yaml:50-57#overrides]
+[src: file: frontend/pnpm-workspace.yaml:61-68#overrides]
 
 `pnpm audit --audit-level=moderate` now passes and is mandatory in both the
 regular CI and aggregate dependency-review workflow. The review deliberately
 runs all three audits before failing, so one graph cannot hide findings in
-another. [src: file: .github/workflows/ci-test.yml:1012-1014#audit-level]
+another. [src: file: .github/workflows/ci-test.yml:1015-1017#audit-level]
 [src: file: .github/workflows/dependency-review.yml:35-113#continue-on-error]
 
 After the final direct-dependency refresh, `pnpm audit` reports no known
@@ -94,7 +94,7 @@ side-by-side arrangement keeps `@typescript/typescript6` aliased as the
 `typescript` package and exposes its `tsc6` binary through
 `typecheck:legacy`. Both compiler paths are explicit CI gates.
 [src: file: frontend/package.json:11-13#tsc6] [src: file: frontend/package.json:57#native] [src: file: frontend/package.json:65#typescript]
-[src: file: .github/workflows/ci-test.yml:680-687#typecheck] [src: url:
+[src: file: .github/workflows/ci-test.yml:683-690#typecheck] [src: url:
 https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/]
 
 The earlier preview pilot produced zero diagnostics with both compilers on the
