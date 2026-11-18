@@ -14,27 +14,37 @@ fn source(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// The production part of a file: what precedes its first test module (a
-/// `#[cfg(..test..)]` line directly followed by `mod`; a `#[cfg(test)]` on a
-/// constant or a statement does not end it).
-fn production(text: &str) -> &str {
-    let mut offset = 0;
+/// The production part of a file: its text without the test modules (a
+/// `#[cfg(..test..)]` line directly followed by `mod`, to the closing brace at
+/// the start of a line; a `#[cfg(test)]` on a constant or a statement is kept).
+/// A module behind `test-support` is one: helpers for the tests of other crates.
+fn production(text: &str) -> String {
+    let mut kept = String::new();
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
-        // A module behind `test-support` holds helpers the crates above use in
-        // their tests: it does not end the production part.
-        let is_test_cfg =
-            line.starts_with("#[cfg(") && line.contains("test") && !line.contains("test-support");
+        let is_test_cfg = line.starts_with("#[cfg(") && line.contains("test");
         // `#[cfg(test)]` then `mod`, with a `#[path = ".."]` line allowed between.
         let next_is_mod = lines.peek().is_some_and(|next| {
             next.starts_with("mod ") || next.starts_with("pub mod ") || next.starts_with("#[path")
         });
-        if is_test_cfg && next_is_mod {
-            return &text[..offset];
+        if !(is_test_cfg && next_is_mod) {
+            kept.push_str(line);
+            kept.push('\n');
+            continue;
         }
-        offset += line.len() + 1;
+        let mut declaration = lines.next().unwrap_or_default();
+        if declaration.starts_with("#[path") {
+            declaration = lines.next().unwrap_or_default();
+        }
+        if declaration.trim_end().ends_with('{') {
+            for inner in lines.by_ref() {
+                if inner == "}" {
+                    break;
+                }
+            }
+        }
     }
-    text
+    kept
 }
 
 /// The text of function `name`, from its signature to the closing brace at the
@@ -107,7 +117,7 @@ fn files_that_only_run_git_on_a_worktree_never_use_a_plain_git_command() {
         "api/agent_workspace_tools.rs",
     ] {
         let text = source(file);
-        let offenders = plain_git(production(&text));
+        let offenders = plain_git(&production(&text));
         assert!(
             offenders.is_empty(),
             "{file} runs a plain git command on what may be a worker's worktree; build it with \
@@ -167,7 +177,7 @@ fn the_functions_that_run_git_on_a_worktree_never_use_a_plain_git_command() {
         let text = source(file);
         let text = production(&text);
         for name in functions {
-            let offenders = plain_git(function(text, name));
+            let offenders = plain_git(function(&text, name));
             assert!(
                 offenders.is_empty(),
                 "{file}: `{name}` runs git on a worker's worktree with a plain git command; use \
@@ -222,13 +232,12 @@ const PLAIN_GIT_ALLOWED: &[(&str, usize)] = &[
     ("agents/read_only_repos.rs", 3),
     ("agents/runner.rs", 4),
     ("api/ai_docs.rs", 1),
-    ("api/orchestration.rs", 9),
+    ("api/orchestration.rs", 1),
     ("api/projects/bootstrap.rs", 1),
     ("api/projects/clone.rs", 3),
     ("api/projects/crud.rs", 2),
     ("api/projects/git.rs", 2),
     ("api/projects/template_merge.rs", 1),
-    ("api/projects/used_skills.rs", 1),
     ("core/audit_baseline.rs", 1),
     ("core/audit_run_state.rs", 1),
     ("core/briefing_docs.rs", 1),
@@ -238,6 +247,7 @@ const PLAIN_GIT_ALLOWED: &[(&str, usize)] = &[
     ("core/native_files.rs", 1),
     ("core/repo_facts.rs", 1),
     ("core/repository_resources.rs", 4),
+    ("core/repository_skills.rs", 1),
     ("core/scanner.rs", 2),
     ("core/task_worker_lane_seeds.rs", 1),
     ("core/upstream_mirror.rs", 5),
@@ -255,7 +265,7 @@ fn every_production_git_command_is_the_lane_builder_or_explained() {
             continue; // defines the plain builders
         }
         let text = source(&file);
-        let count = plain_git(production(&text)).len();
+        let count = plain_git(&production(&text)).len();
         let allowed = PLAIN_GIT_ALLOWED
             .iter()
             .find(|(name, _)| *name == file)
