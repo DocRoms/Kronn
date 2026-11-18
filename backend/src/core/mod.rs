@@ -2,6 +2,7 @@ pub mod adr;
 pub mod agent_orphans;
 pub mod agent_skill;
 pub mod anti_halluc;
+pub mod atomic_file;
 pub mod audit_documents;
 pub mod audit_mcp_filter;
 pub mod audit_run_state;

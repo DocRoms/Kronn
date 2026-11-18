@@ -746,7 +746,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_host_wraps_wsl_binaries_with_translated_paths() {
-        let (program, args, _) = crate::agents::runner::platform_agent_invocation(
+        let (program, args, _) = platform_agent_invocation(
             "/usr/bin/claude".into(),
             vec!["--mcp-config".into(), r"C:\proj\.mcp.json".into()],
             true,
@@ -765,7 +765,7 @@ mod tests {
             ]
         );
 
-        let (program, args, _) = crate::agents::runner::platform_agent_invocation(
+        let (program, args, _) = platform_agent_invocation(
             r"C:\npm\claude.cmd".into(),
             vec![r"C:\proj\.mcp.json".into()],
             false,

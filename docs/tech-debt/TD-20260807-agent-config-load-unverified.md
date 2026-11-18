@@ -5,7 +5,7 @@
 
 - **Problem (fact)**: Kronn writes MCP configuration into each agent CLI's own config file and then assumes the agent loaded it. Nothing verifies that assumption, and every supported agent can reject a syntactically valid file for reasons Kronn never sees. The proven instance is Mistral Vibe:
 
-  Kronn writes `<project>/.vibe/config.toml` [src: file: backend/src/core/mcp_scanner.rs:1918-2038#sync_vibe_project_config] and appends the `kronn-internal` bridge to it [src: file: backend/src/core/mcp_scanner.rs:1991-2001#kronn-internal]. Vibe discovers that file, then checks its workspace-trust store against the file's **parent directory** — the `.vibe/` folder, not the repository root. (Verified against the installed `mistral-vibe` 2.24.0 package: `ProjectConfigLayer._check_trust` returns `self._trust_store.is_trusted(self._config_file_path.parent)`, and `TrustedFoldersManager._closest_decision` walks ancestors. Vibe is a third-party dependency, so this is not citable to a repo path.) The **nearest** decision wins, so an untrusted `.vibe/` overrides a trusted repository root. When the verdict is untrusted, Vibe drops the entire config layer and loads **zero** MCP servers, while the file on disk plainly lists them.
+  Kronn writes `<project>/.vibe/config.toml` [src: file: backend/src/core/mcp_scanner.rs:1792-1912#sync_vibe_project_config] and appends the `kronn-internal` bridge to it [src: file: backend/src/core/mcp_scanner.rs:1865-1875#kronn-internal]. Vibe discovers that file, then checks its workspace-trust store against the file's **parent directory** — the `.vibe/` folder, not the repository root. (Verified against the installed `mistral-vibe` 2.24.0 package: `ProjectConfigLayer._check_trust` returns `self._trust_store.is_trusted(self._config_file_path.parent)`, and `TrustedFoldersManager._closest_decision` walks ancestors. Vibe is a third-party dependency, so this is not citable to a repo path.) The **nearest** decision wins, so an untrusted `.vibe/` overrides a trusted repository root. When the verdict is untrusted, Vibe drops the entire config layer and loads **zero** MCP servers, while the file on disk plainly lists them.
 
   Observed on this machine 2026-08-08: `/Users/priol/Repositories/Kronn` was trusted, `/Users/priol/Repositories/Kronn/.vibe` was in the `untrusted` list, and Vibe connected to none of the six configured MCP servers. `front_euronews` was in the same state. Neither Kronn nor Vibe emitted any diagnostic.
 
@@ -13,7 +13,7 @@
 
 - **What is fixed (2026-08-08)**: **Detection only.** Kronn now reads Vibe's trust store and reports when it has written a config Vibe will ignore:
   - `core::vibe_trust` mirrors Vibe's nearest-ancestor trust resolution [src: file: backend/src/core/vibe_trust.rs:102-118#decide].
-  - The project sync warns at write time on `kronn::host_sync` [src: file: backend/src/core/mcp_scanner.rs:2040-2059#warn_if_vibe_trust_blocks].
+  - The project sync warns at write time on `kronn::host_sync` [src: file: backend/src/core/mcp_scanner.rs:1914-1933#warn_if_vibe_trust_blocks].
   - Agent detection surfaces `vibe.project_config_untrusted` to the UI [src: file: backend/src/agents/mod.rs:1129#project_config_untrusted].
   - `kronn doctor` lists every blocked Kronn-managed config with the fix [src: file: kronn:1050-1083#Vibe].
 
@@ -34,7 +34,7 @@
 - **Suggested direction (non-binding)**:
   1. **Generalise the probe.** Introduce a small per-agent `verify_config_loadable(project)` alongside each host-sync writer, returning `Loadable | Blocked(reason) | Unknown`. Vibe's trust check is the first implementation; `Unknown` is an honest default for agents with no cheap probe.
   2. **Report, never repair.** Keep every probe read-only. Offer the user a one-click *"open the trust prompt"* action rather than editing another tool's security state.
-  3. **Fold into `kronn doctor` as the single operator surface**, mirroring how `warn_missing_host_binaries` [src: file: backend/src/core/mcp_scanner.rs:2899-2907#warn_missing_host_binaries] already routes there.
+  3. **Fold into `kronn doctor` as the single operator surface**, mirroring how `warn_missing_host_binaries` [src: file: backend/src/core/mcp_scanner.rs:2771-2779#warn_missing_host_binaries] already routes there.
   4. Consider a post-write readback for the cheap cases (config re-parsed through the agent's own schema) before reaching for anything that spawns an agent.
 
 - **Disposition**: Accepted (KT-1603).

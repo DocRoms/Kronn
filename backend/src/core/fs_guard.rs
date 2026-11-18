@@ -1295,7 +1295,7 @@ mod imp {
         if let Some(parent) = path.parent() {
             guarded_create_dir_all(root, parent)?;
         }
-        crate::core::mcp_scanner::atomic_write_bytes(path, bytes)
+        crate::core::atomic_file::atomic_write_bytes(path, bytes)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
 
@@ -1336,7 +1336,7 @@ mod imp {
         observed: &[u8],
     ) -> Result<(), String> {
         assert_contained_no_symlink(root, path)?;
-        crate::core::mcp_scanner::atomic_write_if_unchanged_preserving_permissions(
+        crate::core::atomic_file::atomic_write_if_unchanged_preserving_permissions(
             path, content, observed,
         )
     }

@@ -15,7 +15,7 @@ included, and can read a discussion back on its own.
 [src: file: backend/src/api/agent_tools.rs:1538-1557#disc_read]
 
 Vibe likewise has MCP: Kronn synchronises its servers into `.vibe/config.toml`.
-[src: file: backend/src/core/mcp_scanner.rs:1918-2038#sync_vibe_project_config]
+[src: file: backend/src/core/mcp_scanner.rs:1792-1912#sync_vibe_project_config]
 
 ## Why it matters
 

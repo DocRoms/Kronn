@@ -12,7 +12,7 @@
     allow(dead_code, unused_imports, clippy::new_without_default)
 )]
 #![cfg_attr(
-    all(test, not(feature = "full-tests")),
+    all(test, not(feature = "full-tests"), not(feature = "test-support")),
     allow(dead_code, unused_imports)
 )]
 
