@@ -1475,23 +1475,26 @@ impl Workspace {
             // would otherwise pin the run and its concurrency slot forever —
             // this await is outside the cancel race, so Stop can't reach it.
             // `kill_on_drop` ensures the timed-out child doesn't leak.
-            #[cfg(not(any(test, feature = "test-support")))]
-            const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-            #[cfg(any(test, feature = "test-support"))]
-            const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+            fn hook_timeout() -> std::time::Duration {
+                if crate::core::test_mode::on() {
+                    std::time::Duration::from_secs(2)
+                } else {
+                    std::time::Duration::from_secs(600)
+                }
+            }
             let mut command = hook_command(cmd, &self.path);
-            let output = match tokio::time::timeout(HOOK_TIMEOUT, command.output()).await {
+            let output = match tokio::time::timeout(hook_timeout(), command.output()).await {
                 Ok(res) => res.with_context(|| format!("Failed to run {} hook", hook_name))?,
                 Err(_) => {
                     tracing::warn!(
                         "Hook '{}' timed out after {}s — killing it",
                         hook_name,
-                        HOOK_TIMEOUT.as_secs()
+                        hook_timeout().as_secs()
                     );
                     return Err(anyhow::anyhow!(
                         "Failed to run {} hook: timed out after {}s",
                         hook_name,
-                        HOOK_TIMEOUT.as_secs()
+                        hook_timeout().as_secs()
                     ));
                 }
             };

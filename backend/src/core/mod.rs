@@ -82,6 +82,7 @@ pub mod strong_confirm;
 pub mod tailscale;
 pub mod task_worker_root_marks;
 pub mod td_sheet;
+pub mod test_mode;
 pub mod timezone;
 pub mod totp;
 pub mod trust_proof;

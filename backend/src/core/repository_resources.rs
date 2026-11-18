@@ -2651,10 +2651,8 @@ mod tests {
 
     #[test]
     fn the_router_skill_install_links_are_the_ones_in_the_readme() {
-        let readme = std::fs::read_to_string(
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../README.md"),
-        )
-        .unwrap();
+        let readme =
+            std::fs::read_to_string(Path::new(crate::BACKEND_DIR).join("../README.md")).unwrap();
         for url in [KRONN_RELEASES_URL, KRONN_REPOSITORY_URL] {
             assert!(readme.contains(url), "{url} is not in the README");
         }

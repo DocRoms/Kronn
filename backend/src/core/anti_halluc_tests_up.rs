@@ -1,4 +1,3 @@
-
 use super::*;
 
 #[serial_test::serial] // mutates the process-global anti-halluc mode
@@ -319,8 +318,8 @@ fn corpus_false_positive_rate_under_5_percent() {
     // change before it lands. If a real positive needs to be added
     // (i.e. a NEW kind of legitimate claim), update the corpus
     // entry's `expected_unsourced` field accordingly.
-    let fixture_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-        .join("tests/fixtures/anti_halluc_corpus.jsonl");
+    let fixture_path =
+        std::path::Path::new(crate::BACKEND_DIR).join("tests/fixtures/anti_halluc_corpus.jsonl");
     let content = std::fs::read_to_string(&fixture_path).expect("fixture must exist");
 
     let mut total = 0usize;

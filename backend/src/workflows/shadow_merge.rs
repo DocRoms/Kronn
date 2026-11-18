@@ -42,10 +42,13 @@ const MAX_TASK_BYTES: usize = 16_000;
 /// What it reads of one execution's output.
 const MAX_EXECUTION_BYTES: usize = 60_000;
 
-#[cfg(not(any(test, feature = "test-support")))]
-const POLL_INTERVAL: Duration = Duration::from_millis(500);
-#[cfg(any(test, feature = "test-support"))]
-const POLL_INTERVAL: Duration = Duration::from_millis(20);
+fn poll_interval() -> Duration {
+    if crate::core::test_mode::on() {
+        Duration::from_millis(20)
+    } else {
+        Duration::from_millis(500)
+    }
+}
 
 pub fn shadow_token(shadow_id: &str) -> String {
     format!("shadow:{shadow_id}")
@@ -253,7 +256,7 @@ async fn gather(
         if settled || Instant::now() >= deadline {
             break rows;
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(poll_interval()).await;
     };
     let mut contributors = Vec::new();
     let mut missing = Vec::new();

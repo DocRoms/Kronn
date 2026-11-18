@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// A probed MCP server, possibly chosen by a repository's `.mcp.json`,

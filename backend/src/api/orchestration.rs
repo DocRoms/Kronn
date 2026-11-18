@@ -7314,8 +7314,11 @@ pub fn host_validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch,
     crate::core::task_worker_sandbox::Confinement::for_worktree(cwd).map(ValidationLaunch::Confined)
 }
 
-#[cfg(not(any(test, feature = "test-support")))]
 pub fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
+    #[cfg(any(test, feature = "test-support"))]
+    if crate::core::test_mode::on() {
+        return test_validation_launch(cwd);
+    }
     host_validation_launch(cwd)
 }
 
@@ -7323,7 +7326,7 @@ pub fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, Stri
 /// (`Mechanism::of_host()` for the real one, `None` for a host without any);
 /// a directory they did not register runs unconfined.
 #[cfg(any(test, feature = "test-support"))]
-pub fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
+fn test_validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
     let registered = test_validation_mechanisms()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

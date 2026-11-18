@@ -6509,7 +6509,7 @@ mod tests {
         // the next bootstrap audit of Kronn itself) refreshes the root
         // copy from the embedded const. This test pins the invariant so a
         // PR that edits one without the other fails CI immediately.
-        let root_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("backend has a parent")
             .join("docs/conventions/agents-md-format-v1.md");

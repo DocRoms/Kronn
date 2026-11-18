@@ -143,6 +143,9 @@ pub(crate) use crate::http_transport::{
     bearer_credential, frontend_origins, is_local_ip, logged_uri,
 };
 pub use crate::models::AppConfig;
+
+/// The `backend/` folder, the same in every crate of the workspace.
+pub const BACKEND_DIR: &str = env!("CARGO_MANIFEST_DIR");
 pub use crate::state::*;
 pub use crate::workflows::WorkflowEngine;
 
@@ -4014,7 +4017,7 @@ mod startup_config_tests {
 
     #[test]
     fn the_public_startup_arms_the_real_mode_flag_and_no_entry_point_does_it_alone() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = std::path::Path::new(crate::BACKEND_DIR).join("..");
         let lib = std::fs::read_to_string(root.join("backend/src/lib.rs")).unwrap();
         assert!(
             lib.contains("crate::core::anti_halluc::set_mode,\n    )\n    .await"),
@@ -4031,7 +4034,7 @@ mod startup_config_tests {
 
     #[test]
     fn every_entry_point_loads_its_config_through_the_shared_startup() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = std::path::Path::new(crate::BACKEND_DIR).join("..");
         for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
             let source = std::fs::read_to_string(root.join(entry)).unwrap();
             assert!(
@@ -4047,7 +4050,7 @@ mod startup_config_tests {
 
     #[test]
     fn every_entry_point_arms_the_project_docs_locations() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = std::path::Path::new(crate::BACKEND_DIR).join("..");
         for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
             let source = std::fs::read_to_string(root.join(entry)).unwrap();
             assert!(
@@ -4148,3 +4151,7 @@ mod uptests {
     #[cfg(all(test, feature = "full-tests"))]
     mod workflows__delegate_subtasks_step__tests;
 }
+
+// This crate's test build is a unit-test binary for the crates below it.
+#[cfg(test)]
+inventory::submit! { crate::core::test_mode::UnitTestBinary }

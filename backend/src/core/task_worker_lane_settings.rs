@@ -146,19 +146,21 @@ struct Snapshot {
     armed: bool,
 }
 
-static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
-    global: LaneWarmConfig {
-        seed_alignment: None,
-        compiler_env: None,
-        first_build_command: None,
-        first_build_timeout_min: None,
-        rust_roots: None,
-        dependency_dirs: None,
-        validation_executables: None,
-    },
-    projects: BTreeMap::new(),
-    registered: BTreeSet::new(),
-    armed: cfg!(any(test, feature = "test-support")),
+static SNAPSHOT: std::sync::LazyLock<RwLock<Snapshot>> = std::sync::LazyLock::new(|| {
+    RwLock::new(Snapshot {
+        global: LaneWarmConfig {
+            seed_alignment: None,
+            compiler_env: None,
+            first_build_command: None,
+            first_build_timeout_min: None,
+            rust_roots: None,
+            dependency_dirs: None,
+            validation_executables: None,
+        },
+        projects: BTreeMap::new(),
+        registered: BTreeSet::new(),
+        armed: crate::core::test_mode::on(),
+    })
 });
 
 fn key_of(path: &Path) -> PathBuf {

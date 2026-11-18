@@ -1121,7 +1121,7 @@ fn build_under_the_os_sandbox(
 fn outside_dir() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(".kronn-sandbox-test-")
-        .tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        .tempdir_in(crate::BACKEND_DIR)
         .unwrap()
 }
 
@@ -1719,7 +1719,7 @@ fn vitest_loads_the_worker_config_under_the_os_sandbox() {
     let Some(mechanism) = live_mechanism() else {
         return;
     };
-    let installed = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+    let installed = Path::new(crate::BACKEND_DIR)
         .join("..")
         .join("frontend")
         .join("node_modules");

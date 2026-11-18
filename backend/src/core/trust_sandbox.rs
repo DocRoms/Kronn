@@ -444,15 +444,19 @@ pub fn host_sandbox() -> Result<(), String> {
 fn host_mechanism() -> Result<Mechanism, String> {
     // Unit tests do not depend on the sandbox of the machine they run on
     // (a Seatbelt cannot be applied from inside another one): they choose.
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        match test_unavailable() {
-            Some(reason) => Err(reason),
-            None => Ok(Mechanism::of_host().unwrap_or(Mechanism::Seatbelt)),
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            match test_unavailable() {
+                Some(reason) => Err(reason),
+                None => Ok(Mechanism::of_host().unwrap_or(Mechanism::Seatbelt)),
+            }
         }
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         Mechanism::usable_on_host()
     }
 }

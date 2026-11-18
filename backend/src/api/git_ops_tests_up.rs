@@ -1,4 +1,3 @@
-
 /// `gh` and `glab` start git in the repository: they get the git-host
 /// environment and the project's GitHub token, never the backend's.
 #[cfg(unix)]

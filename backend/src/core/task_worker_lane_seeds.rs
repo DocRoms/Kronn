@@ -177,17 +177,21 @@ thread_local! {
 /// The policy in force: the published one, or, under `cfg(test)`, the calling
 /// thread's own (the defaults unless [`TestSeedPolicy`] set one).
 pub fn seed_policy() -> SeedPolicy {
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        TEST_SEED_POLICY
-            .with(std::cell::Cell::get)
-            .unwrap_or(SeedPolicy {
-                copy_enabled: true,
-                adopt_suggested: false,
-            })
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            TEST_SEED_POLICY
+                .with(std::cell::Cell::get)
+                .unwrap_or(SeedPolicy {
+                    copy_enabled: true,
+                    adopt_suggested: false,
+                })
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         SeedPolicy {
             copy_enabled: COPY_ENABLED.load(Ordering::Relaxed),
             adopt_suggested: ADOPT_SUGGESTED.load(Ordering::Relaxed),

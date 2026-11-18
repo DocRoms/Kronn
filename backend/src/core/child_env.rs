@@ -613,23 +613,27 @@ pub fn with_withheld_state<T>(active: bool, vars: &[(&str, &str)], body: impl Fn
 
 /// Run `f` on the withheld state (the test override on this thread, if any).
 fn with_state<T>(f: impl FnOnce(&mut Withheld) -> T) -> T {
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        let mut f = Some(f);
-        let overridden = WITHHELD_OVERRIDE.with(|cell| {
-            cell.borrow_mut()
-                .as_mut()
-                .map(|state| (f.take().unwrap())(state))
-        });
-        if let Some(result) = overridden {
-            return result;
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let mut f = Some(f);
+            let overridden = WITHHELD_OVERRIDE.with(|cell| {
+                cell.borrow_mut()
+                    .as_mut()
+                    .map(|state| (f.take().unwrap())(state))
+            });
+            if let Some(result) = overridden {
+                return result;
+            }
+            let f = f.take().unwrap();
+            let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
+            f(&mut state)
         }
-        let f = f.take().unwrap();
-        let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
-        f(&mut state)
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut state)
     }

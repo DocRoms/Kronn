@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn database_with_signal() -> (crate::db::Database, Arc<ResourceChanges>) {

@@ -35,3 +35,13 @@ pub mod workflows {
 
 pub use crate::db::Database;
 pub use crate::models::AppConfig;
+
+/// The `backend/` folder: this crate's manifest sits two folders below it.
+pub const BACKEND_DIR: &str = {
+    let manifest = env!("CARGO_MANIFEST_DIR").as_bytes();
+    let (backend, _) = manifest.split_at(manifest.len() - "/crates/l0".len());
+    match std::str::from_utf8(backend) {
+        Ok(path) => path,
+        Err(_) => panic!("the manifest folder is not UTF-8"),
+    }
+};

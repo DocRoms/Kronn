@@ -1,4 +1,3 @@
-
 /// Compose interpolates its environment into the repository's compose
 /// file: it gets Docker's settings, never a backend secret.
 #[cfg(unix)]

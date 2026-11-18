@@ -100,7 +100,7 @@ pub fn real_agent_guard_armed() -> bool {
 /// library's own test build, or an integration test binary that armed the
 /// guard. `false` in every production process, whatever its environment holds.
 pub fn real_agents_forbidden() -> bool {
-    let armed = cfg!(any(test, feature = "test-support")) || real_agent_guard_armed();
+    let armed = crate::core::test_mode::on() || real_agent_guard_armed();
     armed && !real_agent_guard::live_probe_open()
 }
 
@@ -120,7 +120,7 @@ pub const REAL_SANDBOX_ENV: &str = "KRONN_TEST_REAL_SANDBOX";
 /// already handles (the launch runs unwrapped), so refusing here is what the
 /// test sees on a machine with no sandbox.
 pub fn real_sandbox_refusal() -> Option<String> {
-    if cfg!(any(test, feature = "test-support")) || !real_agents_forbidden() {
+    if crate::core::test_mode::on() || !real_agents_forbidden() {
         return None;
     }
     let opted_in = crate::core::child_env::var(REAL_SANDBOX_ENV).is_ok_and(|value| value == "1");
@@ -140,7 +140,7 @@ pub fn is_test_controlled(path: &std::path::Path) -> bool {
     [
         std::env::temp_dir(),
         std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+        std::path::PathBuf::from(crate::BACKEND_DIR),
     ]
     .iter()
     .any(|root| path.starts_with(real(root)))
@@ -188,12 +188,16 @@ pub mod real_agent_guard {
     /// Whether a live probe holds an allowance, so the guard stands down.
     /// Always `false` outside the library's own test build.
     pub fn live_probe_open() -> bool {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            LIVE_PROBES.load(std::sync::atomic::Ordering::SeqCst) > 0
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
+        if crate::core::test_mode::on() {
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                LIVE_PROBES.load(std::sync::atomic::Ordering::SeqCst) > 0
+            }
+            #[cfg(not(any(test, feature = "test-support")))]
+            {
+                unreachable!()
+            }
+        } else {
             false
         }
     }
@@ -1128,11 +1132,8 @@ mod tests {
     /// so no cargo feature is needed.
     #[test]
     fn the_package_is_not_its_own_dev_dependency() {
-        let manifest = std::fs::read_to_string(concat!(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../.."),
-            "/Cargo.toml"
-        ))
-        .unwrap();
+        let manifest =
+            std::fs::read_to_string(format!("{}/Cargo.toml", crate::BACKEND_DIR)).unwrap();
         let dev = manifest
             .split("[dev-dependencies]")
             .nth(1)
@@ -1144,9 +1145,14 @@ mod tests {
                     || line.trim_start().starts_with("kronn=")),
             "the package depends on itself: {dev}"
         );
+        let features = manifest
+            .split("\n[features]")
+            .nth(1)
+            .expect("features table");
+        let features = features.split("\n[").next().unwrap();
         assert!(
-            !manifest.contains("test-support"),
-            "no cargo feature arms the guard any more"
+            !features.contains("test-support"),
+            "no cargo feature of the package arms the guard any more"
         );
     }
 
@@ -1178,7 +1184,7 @@ mod tests {
         }
         let mut hits = Vec::new();
         walk(
-            &std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src"),
+            &std::path::Path::new(crate::BACKEND_DIR).join("src"),
             &mut hits,
         );
         assert!(hits.is_empty(), "{hits:?}");
@@ -1415,7 +1421,7 @@ mod tests {
     /// Every Rust file of the backend (sources and integration tests) and of
     /// the desktop crate, as (`crate/relative/path`, text).
     fn rust_sources() -> Vec<(String, String)> {
-        let backend = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let backend = std::path::Path::new(crate::BACKEND_DIR);
         let roots = [
             ("backend/src", backend.join("src")),
             ("backend/tests", backend.join("tests")),
@@ -1496,6 +1502,10 @@ mod tests {
             ("backend/src/core/child_env.rs", 6),
             // test builds only: fixtures
             ("backend/src/lib.rs", 1),
+            ("backend/src/layer0.rs", 1),
+            ("backend/src/layer1.rs", 1),
+            ("backend/src/layer2.rs", 1),
+            ("backend/src/layer3.rs", 1),
             ("backend/tests/api_tests.rs", 1),
             // macOS test only: the helper process and the ps/pgrep/lsof probes
             ("backend/tests/power_guard_orphan.rs", 1),
@@ -1508,7 +1518,7 @@ mod tests {
         assert_eq!(found, expected);
 
         // Crate-wide overrides: manifests and Cargo configurations.
-        let backend = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let backend = std::path::Path::new(crate::BACKEND_DIR);
         for manifest in [
             backend.join("Cargo.toml"),
             backend.join("../desktop/src-tauri/Cargo.toml"),
@@ -1795,7 +1805,7 @@ mod tests {
     /// relaunch the app included (B5-05).
     #[test]
     fn both_clippy_files_ban_the_same_spawn_entry_points() {
-        let backend = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let backend = std::path::Path::new(crate::BACKEND_DIR);
         let paths = |file: std::path::PathBuf| -> std::collections::BTreeSet<String> {
             std::fs::read_to_string(&file)
                 .unwrap()

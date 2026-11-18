@@ -4264,13 +4264,15 @@ mod mode_override_tests {
     /// Every `set_mode` reference outside this file, by file. A test that
     /// writes the mode directly leaks it into concurrent and later tests.
     fn mode_writers_by_file() -> BTreeMap<String, usize> {
-        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src");
+        let src = std::path::Path::new(crate::BACKEND_DIR).join("src");
         let path_ref = concat!("anti_halluc::set_", "mode");
         let mut found = BTreeMap::new();
         for entry in walkdir::WalkDir::new(&src) {
             let entry = entry.unwrap();
             if entry.path().extension().is_none_or(|ext| ext != "rs")
                 || entry.path().ends_with("core/anti_halluc.rs")
+                // this module's own tests, compiled by a crate above it
+                || entry.path().ends_with("uptests/core__anti_halluc__tests.rs")
             {
                 continue;
             }

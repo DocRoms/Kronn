@@ -1110,9 +1110,8 @@ fn every_session_keyed_request_is_reviewed() {
             "a stored row, never a request",
         ),
     ];
-    let found = deserialized_session_keyed_types(
-        &std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src"),
-    );
+    let found =
+        deserialized_session_keyed_types(&std::path::Path::new(crate::BACKEND_DIR).join("src"));
     let unreviewed: Vec<&String> = found
         .iter()
         .filter(|name| !REVIEWED.iter().any(|(reviewed, _)| reviewed == name))

@@ -6400,11 +6400,7 @@ pub fn vibe_runner_path() -> String {
         }
     }
     // 3. Dev mode: relative to cargo manifest
-    let dev_path = concat!(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../.."),
-        "/scripts/vibe-runner.py"
-    );
-    dev_path.to_string()
+    format!("{}/scripts/vibe-runner.py", crate::BACKEND_DIR)
 }
 
 /// Resolve `disc-introspection-mcp.py` using the same lookup chain as
@@ -9277,13 +9273,17 @@ pub fn record_unreadable_tool_call_failure(
 }
 
 fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        let _ = failed_attempt;
-        std::time::Duration::from_millis(1)
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let _ = failed_attempt;
+            std::time::Duration::from_millis(1)
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         // Long enough for a saturated worker slot to clear, still bounded so
         // the user is never left behind an invisible minute-long retry loop.
         std::time::Duration::from_secs(if failed_attempt == 1 { 2 } else { 5 })

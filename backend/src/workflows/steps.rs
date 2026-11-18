@@ -215,11 +215,14 @@ pub fn build_step_prompt(step: &WorkflowStep, ctx: &TemplateContext) -> Result<S
 }
 
 /// One retry step of an agent step's backoff (15 s, 30 s, 45 s… capped at 90 s).
-#[cfg(not(any(test, feature = "test-support")))]
-const RETRY_BACKOFF_UNIT: Duration = Duration::from_secs(15);
 /// Unit tests check the retry order, not the wait: same shape, in milliseconds.
-#[cfg(any(test, feature = "test-support"))]
-const RETRY_BACKOFF_UNIT: Duration = Duration::from_millis(15);
+fn retry_backoff_unit() -> Duration {
+    if crate::core::test_mode::on() {
+        Duration::from_millis(15)
+    } else {
+        Duration::from_secs(15)
+    }
+}
 
 /// Execute a single workflow step.
 ///
@@ -496,7 +499,7 @@ pub async fn execute_step(
             // rarely outlived a 429 window; 15s·attempt (15s/30s/45s, capped
             // 90s) gives a per-minute limit time to clear without stalling a
             // legitimate transient retry for minutes.
-            let delay = (RETRY_BACKOFF_UNIT * attempt).min(RETRY_BACKOFF_UNIT * 6);
+            let delay = (retry_backoff_unit() * attempt).min(retry_backoff_unit() * 6);
             tracing::info!(
                 "Step '{}' retry {}/{} after {:?}",
                 step.name,

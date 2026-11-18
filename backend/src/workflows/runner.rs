@@ -334,7 +334,7 @@ enum InFlightStepOutcome {
 /// Ordering is deliberate when multiple branches become ready in the same
 /// scheduler turn: an explicit cancellation wins, a completed step is kept,
 /// and timeout is the final fallback. `checkpoint` runs every
-/// [`TIMEOUT_CHECKPOINT_PERIOD`] while the step is in flight.
+/// [`timeout_checkpoint_period()`] while the step is in flight.
 async fn await_in_flight_step<F, C, CF>(
     step_future: F,
     cancel_token: &tokio_util::sync::CancellationToken,
@@ -348,8 +348,8 @@ where
 {
     tokio::pin!(step_future);
     let mut ticks = tokio::time::interval_at(
-        tokio::time::Instant::now() + TIMEOUT_CHECKPOINT_PERIOD,
-        TIMEOUT_CHECKPOINT_PERIOD,
+        tokio::time::Instant::now() + timeout_checkpoint_period(),
+        timeout_checkpoint_period(),
     );
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -366,10 +366,13 @@ where
 }
 
 /// How much active time a backend crash mid-step can lose from the guard.
-#[cfg(not(any(test, feature = "test-support")))]
-const TIMEOUT_CHECKPOINT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
-#[cfg(any(test, feature = "test-support"))]
-const TIMEOUT_CHECKPOINT_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+fn timeout_checkpoint_period() -> std::time::Duration {
+    if crate::core::test_mode::on() {
+        std::time::Duration::from_millis(100)
+    } else {
+        std::time::Duration::from_secs(30)
+    }
+}
 
 pub const TIMEOUT_ACTIVE_MS_STATE_KEY: &str = "__kronn.timeout_active_ms";
 

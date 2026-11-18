@@ -829,16 +829,19 @@ pub fn validate_foreach_file(path: &str) -> Result<(), String> {
 }
 
 /// How often a foreach item re-checks its child workflow's capacity.
-#[cfg(not(any(test, feature = "test-support")))]
-const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-#[cfg(any(test, feature = "test-support"))]
-const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+fn capacity_poll() -> std::time::Duration {
+    if crate::core::test_mode::on() {
+        std::time::Duration::from_millis(50)
+    } else {
+        std::time::Duration::from_secs(2)
+    }
+}
 
 /// Time kept between the end of a capacity wait and the runner's timeout, so
 /// the foreach can still record its skipped items before the runner drops it.
 fn capacity_margin(timeout_seconds: u64) -> chrono::Duration {
     let tenth = std::time::Duration::from_secs(timeout_seconds) / 10;
-    let margin = tenth.clamp(CAPACITY_POLL * 2, std::time::Duration::from_secs(60));
+    let margin = tenth.clamp(capacity_poll() * 2, std::time::Duration::from_secs(60));
     chrono::Duration::from_std(margin).unwrap_or_else(|_| chrono::Duration::seconds(60))
 }
 
@@ -880,7 +883,7 @@ where
                     )));
                 }
                 let left = (deadline - Utc::now()).to_std().unwrap_or_default();
-                tokio::time::sleep(CAPACITY_POLL.min(left)).await;
+                tokio::time::sleep(capacity_poll().min(left)).await;
             }
         }
     }

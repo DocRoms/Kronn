@@ -753,7 +753,7 @@ mod tests {
     }
 
     fn templates_root() -> PathBuf {
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates")
+        PathBuf::from(crate::BACKEND_DIR).join("../templates")
     }
 
     #[test]

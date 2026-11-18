@@ -19,7 +19,11 @@ pub mod agents {
 }
 pub mod api {
     pub use kronn_l1::api::*;
+    pub mod activity;
+    pub mod agent_api;
     pub mod agent_jobs;
+    pub mod ai_docs;
+    pub mod assistant_conversations;
     pub mod contacts;
     pub mod delivery_publication;
     pub mod disc_git;
@@ -27,6 +31,7 @@ pub mod api {
     pub mod disc_invite;
     pub mod disk;
     pub mod federation;
+    pub mod live_pages;
     pub mod mcp_remote;
     pub mod media;
     pub mod media_reference_settings;
@@ -38,53 +43,48 @@ pub mod api {
     pub mod quick_prompts;
     pub mod shared_runs;
     pub mod signal_catalog;
+    pub mod strong_confirm;
     pub mod worker_time_limit;
     pub mod workflows;
     pub mod ws;
-    pub mod ai_docs;
-    pub mod live_pages;
-    pub mod activity;
-    pub mod agent_api;
-    pub mod strong_confirm;
-    pub mod assistant_conversations;
 }
 pub mod core {
     pub use kronn_l1::core::*;
     pub mod agent_fallback;
+    pub mod approved_scripts;
     pub mod audit_validation;
+    pub mod briefing_docs;
+    pub mod cli_access_probe;
     pub mod connection_fallback;
     pub mod cross_audit;
     pub mod cross_audit_decision;
     pub mod project_profile;
+    pub mod repo_facts;
     pub mod run_notify;
+    pub mod run_retention;
+    pub mod task_worker_dep_fetch;
     pub mod task_worker_lane_seeds;
     pub mod td_decisions;
     pub mod td_review;
     pub mod td_tasks;
-    pub mod ws_client;
-    pub mod task_worker_dep_fetch;
-    pub mod repo_facts;
-    pub mod run_retention;
     pub mod upstream_mirror;
-    pub mod approved_scripts;
-    pub mod briefing_docs;
-    pub mod cli_access_probe;
+    pub mod ws_client;
 }
 pub mod db {
     pub use kronn_l1::db::*;
+    pub mod agent_jobs;
     pub mod audit_cross;
+    pub mod audit_run_cost;
     pub mod cli_worker_bindings;
+    pub mod compare;
     pub mod discussion_actions;
+    pub mod discussion_ceiling_requests;
     pub mod discussion_scope;
     pub mod kronn_action_engine;
     pub mod orchestration;
     pub mod step_shadow_merges;
     pub mod step_shadows;
     pub mod worker_offers;
-    pub mod compare;
-    pub mod agent_jobs;
-    pub mod audit_run_cost;
-    pub mod discussion_ceiling_requests;
 }
 pub use kronn_l1::delivery;
 pub use kronn_l1::http_transport;
@@ -110,6 +110,8 @@ mod uptests {
     mod db__agent_dispatch__tests;
     #[cfg(all(test, feature = "full-tests"))]
     mod db__discussion_workspaces__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__planning__tests;
     #[cfg(test)]
     mod db__schema_check__tests;
     #[cfg(all(test, feature = "full-tests"))]
@@ -125,3 +127,17 @@ mod uptests {
     #[cfg(all(test, feature = "full-tests"))]
     mod workflows__steps__provenance_tests;
 }
+
+/// The `backend/` folder: this crate's manifest sits two folders below it.
+pub const BACKEND_DIR: &str = {
+    let manifest = env!("CARGO_MANIFEST_DIR").as_bytes();
+    let (backend, _) = manifest.split_at(manifest.len() - "/crates/l2".len());
+    match std::str::from_utf8(backend) {
+        Ok(path) => path,
+        Err(_) => panic!("the manifest folder is not UTF-8"),
+    }
+};
+
+// This crate's test build is a unit-test binary for the crates below it.
+#[cfg(test)]
+inventory::submit! { crate::core::test_mode::UnitTestBinary }

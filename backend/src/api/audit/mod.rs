@@ -792,7 +792,7 @@ mod kind_dispatch_tests {
 
     #[test]
     fn public_docs_match_chained_audit_contract() {
-        let repo_root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let repo_root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("backend crate must live below the repository root");
         let readme = std::fs::read_to_string(repo_root.join("README.md"))
@@ -1230,7 +1230,7 @@ mod prompt_tests {
 
     #[test]
     fn template_internal_anchors_resolve_to_a_heading() {
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .unwrap()
             .join("templates/docs");
@@ -2009,7 +2009,7 @@ mod prompt_tests {
     fn docs_agents_md_template_teaches_the_human_decision_card() {
         // KT-1329 — colleagues' agents never asked for an arbitration because
         // nothing they read at project level mentioned the card.
-        let tpl_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let tpl_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root")
             .join("templates/docs/AGENTS.md");
@@ -2032,7 +2032,7 @@ mod prompt_tests {
         // policy, and the test policy are project parameters (set once
         // during audit), not fixed doctrine. An existing non-English doc
         // must be preserved, never force-translated.
-        let tpl_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let tpl_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root")
             .join("templates/docs/AGENTS.md");
@@ -2089,7 +2089,7 @@ mod prompt_tests {
         // doc as an orphan (non-blocking, but still a real drift signal),
         // so this test pins both halves of the contract: the link text
         // in AGENTS.md, and the linked file actually existing.
-        let workspace_root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let workspace_root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root");
         let tpl_path = workspace_root.join("templates/docs/AGENTS.md");
@@ -2148,7 +2148,7 @@ mod prompt_tests {
         // already pins for docs/architecture/overview.md.
         let step1 = &ANALYSIS_STEPS[0];
         assert_eq!(step1.target_file, "docs/AGENTS.md");
-        let tpl_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let tpl_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root")
             .join("templates/docs/AGENTS.md");
@@ -2227,8 +2227,7 @@ mod prompt_tests {
 
     #[test]
     fn a_filled_target_gets_the_reverification_prompt_and_a_template_the_fill_prompt() {
-        let templates = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-            .join("../templates");
+        let templates = std::path::Path::new(crate::BACKEND_DIR).join("../templates");
         let project = tempfile::tempdir().unwrap();
         let now = chrono::Utc::now();
         let prompt_of = |index: usize| {
@@ -2352,7 +2351,7 @@ mod prompt_tests {
         // that tells the agent to "replace {{X}}" must cite a token the
         // template it fills actually contains, or a weak model is pointed
         // at a placeholder that doesn't exist and may skip the real one.
-        let workspace_root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let workspace_root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root");
         // Generic meta-language ("replace ALL {{PLACEHOLDERS}}") — every
@@ -2429,7 +2428,7 @@ mod prompt_tests {
         assert!(step.prompt.contains("fails this step"));
         assert!(commit_context::writes_commits_doc(step.target_file));
         let template = std::fs::read_to_string(
-            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            std::path::Path::new(crate::BACKEND_DIR)
                 .parent()
                 .unwrap()
                 .join("templates/docs/workflow/commits.md"),
@@ -2472,7 +2471,7 @@ mod prompt_tests {
         // agent fills `{{ARCHITECTURE_MERMAID}}` into a section
         // that doesn't exist and the placeholder leaks into the
         // final docs/architecture/overview.md.
-        let tpl_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let tpl_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("workspace root")
             .join("templates/docs/architecture/overview.md");
@@ -3137,9 +3136,8 @@ mod prompt_tests {
     fn launch_audit_request_ts_file_covers_all_rust_fields() {
         // The .ts file lives outside the crate; resolve via
         // CARGO_MANIFEST_DIR which points at `backend/`.
-        let manifest = crate::core::child_env::var("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR set by cargo");
-        let ts_path = std::path::Path::new(&manifest)
+        let manifest = crate::BACKEND_DIR;
+        let ts_path = std::path::Path::new(manifest)
             .join("..")
             .join("frontend")
             .join("src")

@@ -793,8 +793,7 @@ fn environment_names_compare_like_the_platform() {
 #[test]
 fn the_desktop_withholds_its_environment_before_the_webview_starts() {
     let main = std::fs::read_to_string(
-        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-            .join("../desktop/src-tauri/src/main.rs"),
+        std::path::Path::new(crate::BACKEND_DIR).join("../desktop/src-tauri/src/main.rs"),
     )
     .unwrap();
     let withhold = main
@@ -968,7 +967,7 @@ fn withholding_merges_and_activates() {
 /// (B9-01).
 #[test]
 fn live_environment_writes_happen_before_threads() {
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let root = std::path::Path::new(crate::BACKEND_DIR);
     let desktop = std::fs::read_to_string(root.join("../desktop/src-tauri/src/main.rs")).unwrap();
     let main_fn = &desktop[desktop.find("fn main() {").unwrap()..];
     let enrich = main_fn.find("enrich_path()").expect("main enriches PATH");
@@ -994,8 +993,7 @@ fn live_environment_writes_happen_before_threads() {
 #[test]
 fn the_design_note_states_the_environment_block_residual() {
     let note = std::fs::read_to_string(
-        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-            .join("../docs/design/agent-secret-boundary.md"),
+        std::path::Path::new(crate::BACKEND_DIR).join("../docs/design/agent-secret-boundary.md"),
     )
     .unwrap();
     let section = |start: &str, end: &str| -> String {

@@ -41,15 +41,20 @@ pub const ROOT_ENV: &str = "KRONN_RUN_ARTIFACTS_DIR";
 
 /// Where every run's directory lives.
 pub fn root() -> Option<PathBuf> {
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        let data = crate::core::config::config_dir().ok();
-        let cache = std::env::temp_dir().join(format!("kronn-test-cache-{}", std::process::id()));
-        let protected = crate::core::trust_sandbox::protected_dirs();
-        resolve_root(None, data.as_deref(), Some(&cache), &protected).0
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let data = crate::core::config::config_dir().ok();
+            let cache =
+                std::env::temp_dir().join(format!("kronn-test-cache-{}", std::process::id()));
+            let protected = crate::core::trust_sandbox::protected_dirs();
+            resolve_root(None, data.as_deref(), Some(&cache), &protected).0
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         static ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
         ROOT.get_or_init(|| {
             let configured = crate::core::child_env::var(ROOT_ENV).ok();

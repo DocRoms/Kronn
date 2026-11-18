@@ -2398,9 +2398,7 @@ mod tests {
         assert!(!contains_placeholder(
             "Twig {{ asset('app.css') }} and prose `{{EXAMPLE_SLOT}}`"
         ));
-        let project = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-            .parent()
-            .unwrap();
+        let project = Path::new(crate::BACKEND_DIR).parent().unwrap();
         let mut template_citations = Vec::new();
         inspect_citations(
             project,
@@ -2438,7 +2436,7 @@ mod tests {
     /// installs into `docs/conventions/` (`api/projects/template.rs:101-110`).
     fn skeleton_project() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        let templates_docs = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let templates_docs = Path::new(crate::BACKEND_DIR)
             .parent()
             .unwrap()
             .join("templates/docs");

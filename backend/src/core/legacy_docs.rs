@@ -361,8 +361,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
         let template = std::fs::read_to_string(
-            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-                .join("../templates/docs/AGENTS.md"),
+            std::path::Path::new(crate::BACKEND_DIR).join("../templates/docs/AGENTS.md"),
         )
         .unwrap();
         assert!(template.trim_start().starts_with("<!--"));

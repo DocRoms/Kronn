@@ -108,7 +108,7 @@ const DISCUSSIONS: [Discussion; 4] = [
 ];
 
 fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/db-previous-release.sqlite")
+    Path::new(crate::BACKEND_DIR).join("tests/fixtures/db-previous-release.sqlite")
 }
 
 fn applied(conn: &Connection) -> i64 {

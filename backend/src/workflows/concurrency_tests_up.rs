@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn run_for(id: &str, project: &str, status: crate::models::RunStatus) -> WorkflowRun {

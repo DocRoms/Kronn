@@ -863,7 +863,7 @@ fn a_path_said_missing_right_where_it_is_cited_is_not_a_claim() {
 #[test]
 #[ignore = "report over this repository's docs, not a regression test"]
 fn kronn_own_docs_report() {
-    let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("..");
+    let root = Path::new(crate::BACKEND_DIR).join("..");
     let report = analyze(&root, &citation_drift::check(&root));
     let mut hits: Vec<String> = Vec::new();
     for s in report.sections.iter() {

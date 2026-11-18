@@ -1,4 +1,3 @@
-
 use axum::body::Body;
 
 use axum::http::{Request, StatusCode};
@@ -8548,7 +8547,10 @@ mod home_credential_gate {
                 .unwrap()
                 .block_on(body());
         }
-        let name = format!("api_tests::tests::home_credential_gate::{test}");
+        // The harness names a test by its module path without the crate.
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let name = format!("{module}::{test}");
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &name, "--nocapture", "--test-threads=1"])
             .env(OWN_PROCESS_ENV, "1")

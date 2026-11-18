@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::acp::{
     AcpAgent, AcpCapability, AcpConfigOption, AcpError, AcpInitialize, AcpNegotiatedCapabilities,
@@ -12777,16 +12776,17 @@ fn packaged_project_mcp_config_binds_the_desktop_instance() {
         let dir = tempfile::tempdir().expect("temporary installation");
         let bridge = dir.path().join("Kronn MCP é.exe");
         std::fs::write(&bridge, b"bundle fixture").expect("bridge file");
-        let output = std::process::Command::new(
-                std::env::current_exe().expect("test executable"),
-            )
-            .args(["--exact",
-                "agents::runner::runner_test::tests::packaged_project_mcp_config_binds_the_desktop_instance",
-                "--nocapture"])
+        // The harness names a test by its module path without the crate.
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let this_test = format!("{module}::packaged_project_mcp_config_binds_the_desktop_instance");
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", &this_test, "--nocapture"])
             .env(PROBE, "1")
             .env("KRONN_INTERNAL_MCP_EXECUTABLE", &bridge)
             .env("KRONN_BACKEND_URL", "http://127.0.0.1:43127")
-            .output().expect("isolated environment probe");
+            .output()
+            .expect("isolated environment probe");
         assert!(
             output.status.success(),
             "{}\n{}",
@@ -16999,8 +16999,7 @@ async fn bench_project_doc_inline_against_pointer() {
     // measure nothing.
     if real_project.is_none() {
         let real_doc = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../docs/AGENTS.md"),
+            std::path::Path::new(crate::BACKEND_DIR).join("../docs/AGENTS.md"),
         )
         .expect("the project's own docs/AGENTS.md");
         std::fs::write(

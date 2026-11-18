@@ -10,9 +10,7 @@
 use std::path::Path;
 
 fn source(relative: &str) -> String {
-    let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-        .join("src")
-        .join(relative);
+    let path = Path::new(crate::BACKEND_DIR).join("src").join(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
@@ -23,7 +21,10 @@ fn production(text: &str) -> &str {
     let mut offset = 0;
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
-        let is_test_cfg = line.starts_with("#[cfg(") && line.contains("test");
+        // A module behind `test-support` holds helpers the crates above use in
+        // their tests: it does not end the production part.
+        let is_test_cfg =
+            line.starts_with("#[cfg(") && line.contains("test") && !line.contains("test-support");
         // `#[cfg(test)]` then `mod`, with a `#[path = ".."]` line allowed between.
         let next_is_mod = lines.peek().is_some_and(|next| {
             next.starts_with("mod ") || next.starts_with("pub mod ") || next.starts_with("#[path")
@@ -186,12 +187,13 @@ fn production_files() -> Vec<String> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             if path.is_dir() {
-                if name != "tests" {
+                if name != "tests" && name != "uptests" {
                     walk(&path, root, found);
                 }
             } else if name.ends_with(".rs")
                 && !name.ends_with("_test.rs")
                 && !name.ends_with("_tests.rs")
+                && !name.ends_with("_up.rs")
                 && name != "tests.rs"
             {
                 let relative = path.strip_prefix(root).unwrap_or(&path);
@@ -199,7 +201,7 @@ fn production_files() -> Vec<String> {
             }
         }
     }
-    let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src");
+    let root = Path::new(crate::BACKEND_DIR).join("src");
     let mut found = Vec::new();
     walk(&root, &root, &mut found);
     found.sort();

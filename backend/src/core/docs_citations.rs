@@ -1762,9 +1762,7 @@ mod tests {
     /// the scope variables; `make docs-reanchor` sets the re-anchor one.
     #[test]
     fn docs_citations_resolve_in_the_repo() {
-        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-            .parent()
-            .unwrap();
+        let root = Path::new(crate::BACKEND_DIR).parent().unwrap();
         let run =
             gate(root, &|name: &str| std::env::var(name).ok()).unwrap_or_else(|e| panic!("{e}"));
         if run.verdict.blocking.is_empty() {

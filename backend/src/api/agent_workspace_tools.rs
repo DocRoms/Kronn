@@ -4508,7 +4508,7 @@ mod real_repo_probe {
     #[test]
     #[ignore]
     fn find_files_sees_every_rs_file_of_this_repo() {
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let root = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .unwrap()
             .to_path_buf();

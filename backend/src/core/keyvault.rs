@@ -583,7 +583,7 @@ mod tests {
     /// Both entry points take the key out before any thread starts.
     #[test]
     fn both_binaries_take_the_key_override_first() {
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let root = std::path::Path::new(crate::BACKEND_DIR);
         for (file, before) in [
             (root.join("src/main.rs"), "runtime_builder()"),
             (

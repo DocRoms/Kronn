@@ -733,7 +733,7 @@ mod tests {
         // placeholder). A drift here = the section in newly-bootstrapped
         // projects diverges from what subsequent audits would refresh,
         // creating a churning loop on every re-audit.
-        let template_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let template_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .expect("backend has a parent")
             .join("templates/docs/AGENTS.md");

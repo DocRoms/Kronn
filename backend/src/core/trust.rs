@@ -232,7 +232,7 @@ mod tests {
     /// or clears a level (tests excepted).
     #[test]
     fn only_the_human_routes_set_or_clear_a_level() {
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src");
+        let root = std::path::Path::new(crate::BACKEND_DIR).join("src");
         let mut offenders = Vec::new();
         for entry in walkdir::WalkDir::new(&root)
             .into_iter()

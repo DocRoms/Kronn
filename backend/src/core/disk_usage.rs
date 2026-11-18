@@ -53,16 +53,20 @@ thread_local! {
 /// The configured number of days a Blocked or Interrupted execution's build
 /// dir must be idle to be purgeable (the calling thread's own under `cfg(test)`).
 pub fn stalled_build_days() -> u64 {
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        TEST_STALLED_DAYS
-            .with(std::cell::Cell::get)
-            .map_or(DEFAULT_DISK_STALLED_BUILD_DAYS, |days| {
-                days.max(MIN_STALLED_BUILD_DAYS)
-            })
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            TEST_STALLED_DAYS
+                .with(std::cell::Cell::get)
+                .map_or(DEFAULT_DISK_STALLED_BUILD_DAYS, |days| {
+                    days.max(MIN_STALLED_BUILD_DAYS)
+                })
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         STALLED_BUILD_DAYS
             .load(Ordering::Relaxed)
             .max(MIN_STALLED_BUILD_DAYS)
@@ -115,7 +119,6 @@ pub fn set_disk_policy(launch_min_free_gib: u64, sweep_idle_hours: u64) {
 }
 
 /// What the process-wide policy currently holds.
-#[cfg(not(any(test, feature = "test-support")))]
 fn published_policy() -> (u64, u64) {
     (
         LAUNCH_MIN_FREE_GIB.load(Ordering::Relaxed),
@@ -138,15 +141,19 @@ thread_local! {
 /// the default idle period unless [`TestDiskPolicy`] set one), never the shared
 /// one, so tests that provision workers cannot refuse one another.
 pub fn disk_policy() -> (u64, u64) {
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        TEST_POLICY
-            .with(std::cell::Cell::get)
-            .map(|(gib, hours)| (gib, effective_sweep_idle_hours(hours)))
-            .unwrap_or((0, DEFAULT_DISK_SWEEP_IDLE_HOURS))
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    {
+    if crate::core::test_mode::on() {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            TEST_POLICY
+                .with(std::cell::Cell::get)
+                .map(|(gib, hours)| (gib, effective_sweep_idle_hours(hours)))
+                .unwrap_or((0, DEFAULT_DISK_SWEEP_IDLE_HOURS))
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            unreachable!()
+        }
+    } else {
         published_policy()
     }
 }

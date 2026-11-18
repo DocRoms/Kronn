@@ -1650,7 +1650,7 @@ mod compute_audit_info_tests {
         let dir = tempdir().unwrap();
         let docs = dir.path().join("docs");
         fs::create_dir_all(&docs).unwrap();
-        let template_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        let template_path = std::path::Path::new(crate::BACKEND_DIR)
             .parent()
             .unwrap()
             .join("templates/docs/AGENTS.md");

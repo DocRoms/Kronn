@@ -162,3 +162,17 @@ mod uptests {
     #[cfg(all(test, feature = "full-tests"))]
     mod db__resource_changes__tests;
 }
+
+/// The `backend/` folder: this crate's manifest sits two folders below it.
+pub const BACKEND_DIR: &str = {
+    let manifest = env!("CARGO_MANIFEST_DIR").as_bytes();
+    let (backend, _) = manifest.split_at(manifest.len() - "/crates/l1".len());
+    match std::str::from_utf8(backend) {
+        Ok(path) => path,
+        Err(_) => panic!("the manifest folder is not UTF-8"),
+    }
+};
+
+// This crate's test build is a unit-test binary for the crates below it.
+#[cfg(test)]
+inventory::submit! { crate::core::test_mode::UnitTestBinary }

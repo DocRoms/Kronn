@@ -6,9 +6,9 @@
 
 pub mod adapter_process;
 pub mod bridge_env;
-pub mod permission_broker;
-pub mod codex_adapter;
 pub mod claude_adapter;
+pub mod codex_adapter;
+pub mod permission_broker;
 
 use async_trait::async_trait;
 pub use kronn_l0::acp::*;

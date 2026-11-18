@@ -129,11 +129,14 @@ pub struct BuildArtifactTarget {
 /// walking it took over 44 minutes — on a machine that was already unusable.
 /// A partial answer delivered now beats an exact one delivered after the disk
 /// has filled, so the walk stops and says so rather than finishing at any cost.
-#[cfg(not(any(test, feature = "test-support")))]
-const SCAN_ENTRY_BUDGET: usize = 20_000;
 /// Same walk, a budget a unit test can exceed without writing 20,000 files.
-#[cfg(any(test, feature = "test-support"))]
-const SCAN_ENTRY_BUDGET: usize = 500;
+fn scan_entry_budget() -> usize {
+    if crate::core::test_mode::on() {
+        500
+    } else {
+        20_000
+    }
+}
 
 /// An entry that exists and must not be reclaimed, carried into the inventory
 /// so a dry run never hides what it refuses to touch.
@@ -226,7 +229,7 @@ pub fn scan_build_artifacts(repo_path: &Path) -> Vec<BuildArtifactTarget> {
     found
 }
 
-/// Sum file sizes under `root`, stopping at `SCAN_ENTRY_BUDGET` entries.
+/// Sum file sizes under `root`, stopping at `scan_entry_budget()` entries.
 ///
 /// Returns `(bytes, partial)`. Symlinks are counted as entries but never
 /// followed, so a link into a huge tree cannot make this walk unbounded.
@@ -243,7 +246,7 @@ pub fn measure_real_within_budget(root: &Path) -> crate::core::disk_usage::Measu
         root,
         &[],
         crate::core::disk_usage::MeasureBudget::within(
-            SCAN_ENTRY_BUDGET,
+            scan_entry_budget(),
             std::time::Duration::from_secs(120),
         ),
     )
@@ -5434,7 +5437,7 @@ mod tests {
             .path()
             .join(".kronn/worktrees/KT-6-ffff6666/target/debug");
         fs::create_dir_all(&target).unwrap();
-        for i in 0..(SCAN_ENTRY_BUDGET + 50) {
+        for i in 0..(scan_entry_budget() + 50) {
             fs::write(target.join(format!("dep-{i}.rmeta")), b"x").unwrap();
         }
 
