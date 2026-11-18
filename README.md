@@ -25,16 +25,16 @@
 - **Code where code is enough:** workflows run the mechanical steps without tokens and give each agent a small, bounded prompt. See [the Kronn way](docs/guides/the-kronn-way.md).
 - **Your machine, your rules:** agents run in an OS sandbox that hides Kronn's vault, at the trust level you choose; with Ollama, nothing leaves your laptop.
 
-> **Status: 0.15.2 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.15.3 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-30).
 
-## What's new in 0.15.2
+## What's new in 0.15.3
 
-- **Secrets out of agents' reach:** trust levels, an OS sandbox on Kronn's data directory, strong confirmation and a safe plugin export.
-- **Quotas without lost work:** work waits, then returns to its original provider; no silent fallback.
-- **Rooms that code across projects, Docker without compiling:** grant a room `code` on another project's checkout; `start` pulls multi-arch release images.
+- **Workflows that decide and compare:** a Decide step with its own decision model, shadows per step with an optional merged result, and one "Models and fallbacks" chain per mode on every agent card.
+- **Workers that fit your project:** lanes follow the project's own toolchains (Cargo, Node, Composer, Xcode, Make), a worker stopped by the time limit keeps its work, and an integration never touches your checkout.
+- **Safer by default, easier to share:** git on a worker's worktree runs nothing the worker wrote, a possible secret in a document is reported, and an export says what it names but does not carry.
 
-Full list of changes in the [CHANGELOG](CHANGELOG.md#0152---2026-11-08).
+Full list of changes in the [CHANGELOG](CHANGELOG.md#0153---2026-11-19).
 
 ## One workflow, any engine
 
@@ -51,7 +51,7 @@ Import a lane: [cloud](docs/examples/design-system-first-visual.cloud.json), [10
 
 ## Contents
 
-- [What's new in 0.15.2](#whats-new-in-0152)
+- [What's new in 0.15.3](#whats-new-in-0153)
 - [One workflow, any engine](#one-workflow-any-engine)
 - [Key capabilities](#key-capabilities)
 - [The Kronn way](#the-kronn-way-engineering-not-incantation)
@@ -135,7 +135,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### Docker: published images
 
 ```bash
-git clone --branch 0.15.2 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.15.3 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker) → http://localhost:3140
 ```

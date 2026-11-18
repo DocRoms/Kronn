@@ -25,16 +25,16 @@
 - **Du code là où le code suffit :** les workflows exécutent les étapes mécaniques sans token et donnent à chaque agent un petit prompt borné. Voir [l'approche Kronn](docs/guides/the-kronn-way.md).
 - **Ta machine, tes règles :** les agents tournent dans un bac à sable de l'OS qui leur cache le coffre de Kronn, au niveau de confiance que tu choisis ; avec Ollama, rien ne quitte ton ordinateur.
 
-> **Statut : 0.15.2 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.15.3 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-30).
 
-## Nouveautés de la 0.15.2
+## Nouveautés de la 0.15.3
 
-- **Des secrets hors de portée des agents :** niveaux de confiance, bac à sable de l'OS sur le dossier de données, confirmation forte et export de plugin sûr.
-- **Des quotas sans travail perdu :** le travail attend puis revient à son fournisseur d'origine, sans repli silencieux.
-- **Des rooms qui codent dans d'autres projets, Docker sans compilation :** une room peut recevoir `code` sur le checkout d'un autre projet ; `start` récupère les images multi-architectures publiées.
+- **Des workflows qui décident et comparent :** une étape Decide avec son propre modèle de décision, des shadows par étape avec un résultat fusionné optionnel, et une chaîne « Modèles et replis » par mode sur chaque carte d'agent.
+- **Des workers adaptés à votre projet :** les lanes suivent les outils du projet (Cargo, Node, Composer, Xcode, Make), un worker arrêté par la limite de temps garde son travail, et une intégration ne touche jamais à votre checkout.
+- **Plus sûr par défaut, plus simple à partager :** git sur le worktree d'un worker n'exécute rien de ce que le worker a écrit, un secret possible dans un document est signalé, et un export dit ce qu'il nomme sans le contenir.
 
-La liste complète des changements est dans le [CHANGELOG](CHANGELOG.md#0152---2026-11-08).
+La liste complète des changements est dans le [CHANGELOG](CHANGELOG.md#0153---2026-11-19).
 
 ## Un workflow, n'importe quel moteur
 
@@ -51,7 +51,7 @@ Importe un couloir : [cloud](docs/examples/design-system-first-visual.cloud.json
 
 ## Sommaire
 
-- [Nouveautés de la 0.15.2](#nouveautés-de-la-0152)
+- [Nouveautés de la 0.15.3](#nouveautés-de-la-0153)
 - [Un workflow, n'importe quel moteur](#un-workflow-nimporte-quel-moteur)
 - [Capacités clés](#capacités-clés)
 - [L'approche Kronn](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
@@ -135,7 +135,7 @@ Télécharge l'installeur de ton OS depuis les [Releases](https://github.com/Doc
 ### Docker : images publiées
 
 ```bash
-git clone --branch 0.15.2 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière version stable
+git clone --branch 0.15.3 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière version stable
 cd Kronn
 ./kronn start        # installation guidée et lancement (Docker) → http://localhost:3140
 ```
