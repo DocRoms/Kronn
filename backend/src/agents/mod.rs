@@ -319,6 +319,10 @@ static DETECT_ALL_REFRESHED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>
 /// Whether the last detection sweep found this agent installed. `true` while
 /// no sweep has completed, so a cold start never drops a CLI's files (KT-971).
 pub fn installed_or_unknown(agent: &AgentType) -> bool {
+    #[cfg(test)]
+    if COLD_DETECTION_HOLDS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        return true;
+    }
     let cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     match cache.value.as_ref() {
         Some((detections, _)) => detections
@@ -340,21 +344,34 @@ pub fn cached_version(agent: &AgentType) -> Option<String> {
     })
 }
 
-/// Run `f` as if no detection sweep had completed yet, then restore the cache:
-/// for tests that need every CLI's files regardless of what ran before them.
+#[cfg(test)]
+static COLD_DETECTION_HOLDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// While held, [`installed_or_unknown`] answers as if no detection sweep had
+/// completed, whatever sweep another test completes meanwhile.
+#[cfg(test)]
+pub(crate) struct ColdDetection(());
+
+#[cfg(test)]
+impl Drop for ColdDetection {
+    fn drop(&mut self) {
+        COLD_DETECTION_HOLDS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn hold_cold_detection() -> ColdDetection {
+    COLD_DETECTION_HOLDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ColdDetection(())
+}
+
+/// Run `f` as if no detection sweep had completed yet: for tests that need
+/// every CLI's files regardless of what ran before or beside them.
 #[cfg(test)]
 pub(crate) fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
-    let saved = DETECT_ALL_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .value
-        .take();
-    let result = f();
-    DETECT_ALL_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .value = saved;
-    result
+    let _cold = hold_cold_detection();
+    f()
 }
 
 /// Cached agent-detection sweep. `detect_all` spawns `<binary> --version` for
@@ -1639,6 +1656,14 @@ mod tests {
             !installed_or_unknown(&AgentType::GeminiCli),
             "not found = not installed"
         );
+
+        // A test that needs every CLI's files is not told otherwise by a sweep
+        // another test completes meanwhile.
+        {
+            let _cold = hold_cold_detection();
+            assert!(installed_or_unknown(&AgentType::Kiro));
+        }
+        assert!(!installed_or_unknown(&AgentType::Kiro));
 
         DETECT_ALL_CACHE.lock().unwrap().value = saved;
     }

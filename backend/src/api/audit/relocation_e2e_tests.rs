@@ -1293,6 +1293,9 @@ fn default_root_snapshot(project: &Path, prompts: &[String]) -> String {
 #[serial_test::serial]
 #[serial_test::serial(kronn_templates_env)]
 async fn a_default_docs_root_audit_is_byte_identical_to_its_golden() {
+    // The golden lists every CLI's MCP file: a sweep completed by a test
+    // running beside this one must not drop some.
+    let _cold = crate::agents::hold_cold_detection();
     let h = harness().await;
     let prompts = audited(&h, &DocsRoot::default_root()).await;
     let actual = default_root_snapshot(h.project.path(), &prompts);
