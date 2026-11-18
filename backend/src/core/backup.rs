@@ -88,14 +88,7 @@ pub fn prune_old_backups(dir: &Path, keep_n: usize) -> usize {
 /// disk they need and race for the same free space.
 pub(crate) static MAINTENANCE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Free space a full copy of `live_bytes` needs: the copy itself, a tenth for
-/// what is written meanwhile, and a floor so the disk is not left full.
-pub fn required_free_bytes(live_bytes: u64) -> u64 {
-    const FLOOR: u64 = 512 * 1024 * 1024;
-    live_bytes
-        .saturating_add(live_bytes / 10)
-        .saturating_add(FLOOR)
-}
+pub use crate::db::migrations::required_free_bytes;
 
 /// Bytes of the pages the database actually uses: what `VACUUM INTO` writes.
 pub fn live_bytes(conn: &rusqlite::Connection) -> anyhow::Result<u64> {

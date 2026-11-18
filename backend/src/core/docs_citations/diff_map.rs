@@ -205,7 +205,7 @@ impl<'a> DiffMap<'a> {
 /// Merge-base with the repository's default branch. A non-Git repository or
 /// one without a resolvable default branch has no diff fallback.
 pub(super) fn default_merge_base(root: &Path) -> Result<Option<String>, String> {
-    let Some(target) = crate::core::project_profile::default_branch_ref(root) else {
+    let Some(target) = crate::core::lane_git::default_branch_ref(root) else {
         return Ok(None);
     };
     let output = crate::core::lane_git::git(root)?

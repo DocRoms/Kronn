@@ -22,22 +22,11 @@ use crate::models::{
     RepositoryResourceFileDiff, ResourceAdrLevel, Skill, UpdateLivePageRequest, Workflow,
 };
 use crate::AppState;
+pub(super) use crate::core::repository_skills::{read_repository_file, side_text};
+#[cfg(all(test, feature = "full-tests"))]
+use crate::core::repository_skills::MAX_CONTENT_BYTES;
 
-/// Where skills are looked for. `kronn/skills` is where Kronn used to write
-/// them: it is still read (and offered for migration), never written.
-pub(crate) const PROJECT_SKILL_ROOTS: &[&str] = &[
-    "kronn/skills",
-    ".claude/skills",
-    ".agents/skills",
-    ".codex/skills",
-    ".github/skills",
-    ".opencode/skills",
-    ".opencode/skill",
-    ".cursor/skills",
-    ".vibe/skills",
-    ".kiro/skills",
-    ".gemini/skills",
-];
+pub(crate) use crate::core::repository_skills::PROJECT_SKILL_ROOTS;
 
 /// Every directory whose files the listing dates: `kronn/` and the native
 /// skill folders.
@@ -403,32 +392,6 @@ fn kind_needs_approval(kind: ProjectRepositoryResourceKind) -> bool {
             | ProjectRepositoryResourceKind::QuickApi
             | ProjectRepositoryResourceKind::QuickExec
     )
-}
-
-pub(super) fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
-    let path = root.join(relative);
-    crate::core::fs_guard::assert_contained_no_symlink(root, &path).ok()?;
-    std::fs::read(path).ok()
-}
-
-/// What the sheet carries of one side of one file: a longer text is cut here
-/// and flagged, so a large artifact cannot turn the answer into megabytes. The
-/// diff is built from the whole file, whatever is cut.
-const MAX_CONTENT_BYTES: usize = 512 * 1024;
-
-/// The text of one side of one file as the answer carries it: masked first,
-/// whichever side it comes from, then cut — so a secret straddling the cut is
-/// never half shown.
-pub(super) fn side_text(bytes: &[u8]) -> (String, bool) {
-    let text = crate::core::repository_resources::masked_text(bytes);
-    if text.len() <= MAX_CONTENT_BYTES {
-        return (text.as_str().to_string(), false);
-    }
-    let mut end = MAX_CONTENT_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_string(), true)
 }
 
 /// Every file a resource has on either side, with its text on each, both masked

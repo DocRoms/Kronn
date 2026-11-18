@@ -797,6 +797,35 @@ pub(crate) async fn return_quota_escalations_past_reset(state: &AppState) -> Vec
     returned
 }
 
+/// Stop the processes a task worker's dispatch left behind (KT-1266). Only a
+/// dispatch that is a worker's launch has any; an ordinary turn costs one read.
+pub(crate) async fn reap_task_worker_processes(state: &AppState, dispatch_job_id: &str) {
+    let lookup = dispatch_job_id.to_string();
+    let is_worker = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::orchestration::get_execution_for_dispatch(conn, &lookup)
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if is_worker {
+        crate::core::dispatch_reaper::reap_dispatch_async(dispatch_job_id).await;
+    }
+}
+
+/// KT-1758 — how much of a refusal the rooms quote. The native ACP refusal is
+/// about 230 characters; the whole sentence is the point.
+pub(crate) const LAUNCH_REFUSAL_DETAIL_CHARS: usize = 600;
+
+/// KT-1758 — consecutive deferrals of a task worker's dispatch for the same
+/// unavailable-runtime reason before Kronn stops retrying and says why: ten
+/// tries at 30 s is five minutes, longer than any start that is only slow. A
+/// refusal that never changes used to be retried forever (live: a native ACP
+/// agent refused as a task worker, every 30 s for 1h35).
+pub(crate) const RUNTIME_UNAVAILABLE_MAX_DEFERRALS: u32 = 10;
+
 /// KT-1758 — how long a quota fallback's dispatch may stay `Pending` before the
 /// room is told why. A free slot starts it within seconds, so five minutes is
 /// already a dispatch that something is holding.
@@ -826,9 +855,9 @@ pub(crate) fn fallback_dispatch_wait_reason(
         let detail: String = detail
             .trim()
             .chars()
-            .take(crate::api::discussions::agent_fallback::LAUNCH_REFUSAL_DETAIL_CHARS)
+            .take(LAUNCH_REFUSAL_DETAIL_CHARS)
             .collect();
-        let bound = crate::api::discussions::runtime::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
+        let bound = RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
         return match lang {
             RoomLang::Fr => format!(
                 "le runtime `{provider}` n'a pas pu démarrer ({detail}) ; Kronn réessaie toutes les 30 s ({deferrals}/{bound} essais) puis s'arrête"
@@ -1171,7 +1200,7 @@ pub fn start_resilience_watchdog(state: AppState) {
                 }
                 // KT-1266 — the run is gone (a restarted backend, a lost
                 // stream): what the worker started under it is not.
-                crate::api::discussions::runtime::reap_task_worker_processes(&state, &job.id).await;
+                reap_task_worker_processes(&state, &job.id).await;
                 let job_id = job.id.clone();
                 let transition = state
                     .db
@@ -17040,7 +17069,7 @@ async fn bounded_http_worker_reachability(state: &AppState) -> Vec<(AgentType, b
         .map(str::to_string);
     let timeout = std::time::Duration::from_secs(4);
     let (ollama, lite_llm, nvidia) = tokio::join!(
-        tokio::time::timeout(timeout, crate::api::ollama::health(State(state.clone()))),
+        tokio::time::timeout(timeout, crate::api::ollama_health::health(State(state.clone()))),
         tokio::time::timeout(timeout, crate::api::lite_llm::health(State(state.clone()))),
         tokio::time::timeout(
             timeout,

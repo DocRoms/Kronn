@@ -11,9 +11,50 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use crate::agents::runner::{
-    RoomAgentBridgeContext, TaskWorkerBridgeContext, WorkflowStepBridgeContext,
-};
+/// Server-derived identity for one CLI-backed discussion agent executing a
+/// durable task. The child process forwards this opaque context through the
+/// Kronn MCP bridge; the backend still revalidates every field against the
+/// execution and dispatch rows before accepting a delivery.
+/// Identity of a room's own native agent for the current turn, derived by the
+/// dispatcher from the running dispatch job. Like the worker context it only
+/// travels in the process environment, never in the prompt or tool arguments.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoomAgentBridgeContext {
+    pub discussion_id: String,
+    pub agent_type: String,
+    pub dispatch_job_id: String,
+    pub source_message_id: String,
+}
+
+/// Capability of a workflow Agent step whose `room_id` names a room (KT-793).
+/// Like the room agent's identity it only travels in the process environment;
+/// the backend accepts it while that very step runs, and only for that room.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowStepBridgeContext {
+    pub discussion_id: String,
+    pub run_id: String,
+    pub step_key: String,
+    pub capability: String,
+}
+
+impl std::fmt::Debug for WorkflowStepBridgeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkflowStepBridgeContext")
+            .field("discussion_id", &self.discussion_id)
+            .field("run_id", &self.run_id)
+            .field("step_key", &self.step_key)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TaskWorkerBridgeContext {
+    pub execution_id: String,
+    pub discussion_id: String,
+    pub agent_type: String,
+    pub dispatch_job_id: String,
+    pub source_message_id: String,
+}
 
 /// Variable the bridge reads its per-launch token from (layer B).
 pub const BRIDGE_TOKEN_ENV: &str = "KRONN_BRIDGE_TOKEN";
@@ -911,6 +952,7 @@ impl AgentLaunch<'_> {
 /// Apply one agent launch's own values: temporary directory beside the
 /// project, room and workflow contexts, backend URL, bridge token and key.
 /// `backend_url` is resolved by the caller (WSL-aware on the direct route).
+/// The caller also keeps `.kronn/tmp/` out of `git status` (`mcp_scanner::ensure_local_exclude`).
 pub fn apply_agent_launch(
     command: &mut std::process::Command,
     work_dir: &Path,
@@ -921,9 +963,6 @@ pub fn apply_agent_launch(
     // into the work tree never crosses devices (EXDEV under Docker VirtioFS).
     let agent_tmpdir = work_dir.join(".kronn/tmp");
     let _ = std::fs::create_dir_all(&agent_tmpdir);
-    if let Some(project_path) = work_dir.to_str() {
-        crate::core::mcp_scanner::ensure_local_exclude(project_path, ".kronn/tmp/");
-    }
     command.env("TMPDIR", &agent_tmpdir);
     command.env("TEMP", &agent_tmpdir);
     command.env("TMP", &agent_tmpdir);

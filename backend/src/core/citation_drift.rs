@@ -330,7 +330,7 @@ fn citations_of(content: &str, per_anchor: bool) -> Vec<DocCitation> {
         // `[src: …]` in a template's own text, `<path>` and `src/*.rs` show the
         // syntax: they name no file, so no file can be missing (KT-1489).
         if !is_plain_relative(Path::new(&file))
-            || crate::core::docs_citations::is_placeholder(&file)
+            || crate::core::anti_halluc::is_placeholder(&file)
         {
             continue;
         }
@@ -536,7 +536,7 @@ pub fn partial_docs(project_path: &Path) -> Vec<String> {
         .into_iter()
         .filter(|doc| {
             read_doc(project_path, doc)
-                .is_some_and(|content| crate::api::audit::step_guard::has_partial_marker(&content))
+                .is_some_and(|content| crate::core::audit_run_state::has_partial_marker(&content))
         })
         .collect()
 }
@@ -1263,38 +1263,15 @@ pub fn reverify_projects(project_paths: &[PathBuf]) -> Vec<(PathBuf, ScheduledCh
     out
 }
 
-/// One scheduler tick, called by the workflow engine loop.
-pub async fn scheduled_tick(state: &crate::AppState) {
+/// Whether the re-verification cron fired since the previous call; the first
+/// call only arms the clock.
+pub fn tick_is_due(cron: Option<&str>) -> bool {
     let now = chrono::Utc::now();
     let since = {
         let mut last = LAST_TICK.lock().unwrap_or_else(|p| p.into_inner());
         last.replace(now).unwrap_or(now)
     };
-    let cron = state.config.read().await.audit_reverify_cron.clone();
-    if !reverify_due(
-        cron.as_deref(),
-        crate::core::timezone::current(),
-        since,
-        now,
-    ) {
-        return;
-    }
-    let projects = match state
-        .db
-        .with_read_conn(crate::db::projects::list_projects)
-        .await
-    {
-        Ok(projects) => projects,
-        Err(e) => {
-            tracing::warn!("Citation re-verification skipped: {e}");
-            return;
-        }
-    };
-    let paths: Vec<PathBuf> = projects
-        .iter()
-        .map(|p| crate::core::scanner::resolve_host_path(&p.path))
-        .collect();
-    let _ = tokio::task::spawn_blocking(move || reverify_projects(&paths)).await;
+    reverify_due(cron, crate::core::timezone::current(), since, now)
 }
 
 #[cfg(test)]

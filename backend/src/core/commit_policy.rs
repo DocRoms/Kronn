@@ -479,7 +479,7 @@ fn briefing_signoff(root: &Path, repo_path: &Path) -> BriefingYesNo {
         let Ok(notes) = std::fs::read_to_string(file) else {
             continue;
         };
-        if let Some(answers) = crate::api::audit::project_doc::parse_answers(&notes) {
+        if let Some(answers) = crate::models::projects::parse_answers(&notes) {
             return answers.signoff_required;
         }
     }

@@ -71,7 +71,73 @@ pub struct LaneGit {
 }
 
 fn canonical(path: &Path) -> PathBuf {
-    without_verbatim_prefix(crate::core::task_worker_sandbox::real_path(path))
+    without_verbatim_prefix(crate::core::fs_guard::real_path(path))
+}
+
+pub(crate) fn git_output(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    // KT-1745 — also asked of a worker's worktree (the doc citations gate): the
+    // repository is the registered one, never what the worktree's `.git` names.
+    let output = git(repo)
+        .ok()?
+        .args(args)
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+fn ref_exists(repo: &Path, refname: &str) -> bool {
+    git_output(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{refname}^{{commit}}"),
+        ],
+    )
+    .is_some()
+}
+
+/// The full ref the profile is read from, or `None` outside a git repository
+/// or when no default branch exists.
+pub fn default_branch_ref(repo: &Path) -> Option<String> {
+    default_branch_refs(repo).into_iter().next()
+}
+
+/// Every ref that currently holds the default branch, the local branch first.
+/// Both are consulted to learn whether a commit reached it: after a GitHub
+/// merge only the fetched `refs/remotes/origin/<name>` moves, the local branch
+/// stays behind until a pull (KT-1519).
+pub fn default_branch_refs(repo: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(head) = git_output(
+        repo,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    ) {
+        let head = String::from_utf8_lossy(&head).trim().to_string();
+        if let Some(name) = head.strip_prefix("refs/remotes/origin/") {
+            names.push(name.to_string());
+        }
+    }
+    for name in ["main", "master"] {
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_string());
+        }
+    }
+    let refs_of = |name: &String| {
+        [
+            format!("refs/heads/{name}"),
+            format!("refs/remotes/origin/{name}"),
+        ]
+        .into_iter()
+        .filter(|refname| ref_exists(repo, refname))
+        .collect::<Vec<_>>()
+    };
+    names
+        .iter()
+        .map(refs_of)
+        .find(|found| !found.is_empty())
+        .unwrap_or_default()
 }
 
 /// `path` as git can open it: on Windows `canonicalize` gives `\\?\C:\…`,

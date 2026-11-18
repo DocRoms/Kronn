@@ -1027,6 +1027,164 @@ pub(crate) fn strip_inline_code(text: &str) -> String {
     partition_inline_code(text).0
 }
 
+/// Count `{{IDENT}}` shaped placeholders in a markdown body. Conservative:
+/// only counts uppercase-snake tokens to avoid matching legitimate Twig /
+/// Liquid / Mermaid syntax that uses `{{` for its own purposes (e.g.
+/// `{{ asset('foo') }}` in a Twig snippet inside coding-rules.md, or
+/// `{{ DECISION_1 }}` is matched, but `{{ asset(...) }}` is not).
+/// Fenced blocks and inline code spans are invisible to the counter —
+/// documenting a placeholder is not the same as leaving one unfilled
+/// (benchmark run 1 false positive: the TD index mentioning
+/// `{{DO_NOT_1}}` in inline code made a 43-TD file read as "still the
+/// template"). Reuses the anti-hallu strippers: inline spans pair
+/// N-backtick runs (an UNCLOSED run keeps its text — a stray backtick can
+/// never hide a real slot, bounded pairing on hostile lines); fences are
+/// lexical, and an UNCLOSED fence restores everything it withheld,
+/// opening line included.
+pub(crate) fn count_raw_placeholders(content: &str) -> usize {
+    raw_placeholder_names(content).len()
+}
+
+/// The `{{TOKEN}}` placeholders still in `content`, in order, outside code.
+pub(crate) fn raw_placeholder_names(content: &str) -> Vec<String> {
+    let stripped = strip_inline_code(&strip_fenced_code(content));
+    // Match `{{IDENT}}` and `{{ IDENT }}` where IDENT is
+    // UPPERCASE_SNAKE (with optional digits + _). The trailing
+    // boundary is a literal `}}`, not just `}`, to avoid hits on
+    // Twig double-brace blocks that contain spaces / parens.
+    let mut names = Vec::new();
+    let mut rest = stripped.as_str();
+    while let Some(start) = rest.find("{{") {
+        let after_open = &rest[start + 2..];
+        // Find closing `}}`
+        let Some(end) = after_open.find("}}") else {
+            break;
+        };
+        let inside = after_open[..end].trim();
+        // Must be a single UPPERCASE_SNAKE token (letters / digits / _).
+        // No spaces, no parens, no quotes. This excludes Twig.
+        let is_placeholder = !inside.is_empty()
+            && inside
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && inside.chars().any(|c| c.is_ascii_uppercase());
+        if is_placeholder {
+            names.push(inside.to_string());
+        }
+        rest = &after_open[end + 2..];
+    }
+    names
+}
+
+pub(crate) struct SectionSpan {
+    pub(crate) name: String,
+    pub(crate) is_human: bool,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+/// Fence characters that hide a `kronn:section` marker from the ownership
+/// parser. A `~~~` block is code to a renderer exactly like a ``` one.
+const OWNERSHIP_FENCE_CHARS: [char; 2] = ['`', '~'];
+
+/// Which lines of `text` sit inside a fenced code block. A marker on such a
+/// line is documentation (an example, a quoted report), never a live section
+/// boundary: it neither opens nor closes a protected section.
+///
+/// An unclosed fence is read leniently (its lines stay visible, so a stray
+/// fence in a human's own document does not strip protection) — except when
+/// `strict_unclosed` is set, where it is CommonMark's block-to-end-of-file.
+pub(crate) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
+    scan_fences(text, &OWNERSHIP_FENCE_CHARS, strict_unclosed)
+}
+
+/// Scan `lines` for `<!-- kronn:section name="X" ... -->` … `<!-- kronn:section:end -->`
+/// pairs. `in_code` flags the lines inside fenced code (index-aligned with
+/// `lines`, shorter is fine): their markers are ignored on both ends. An
+/// opener with no matching closer is skipped — there is nothing well-formed to
+/// protect there.
+pub(crate) fn parse_named_sections(lines: &[&str], in_code: &[bool]) -> Vec<SectionSpan> {
+    let is_code = |idx: usize| in_code.get(idx).copied().unwrap_or(false);
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if !is_code(i)
+            && trimmed.starts_with("<!-- kronn:section")
+            && !trimmed.starts_with("<!-- kronn:section:end")
+        {
+            if let Some(name) = extract_attr(lines[i], "name") {
+                let is_human = is_human_owned_marker(lines[i]);
+                if let Some(end) = ((i + 1)..lines.len()).find(|&j| {
+                    !is_code(j) && lines[j].trim_start().starts_with("<!-- kronn:section:end")
+                }) {
+                    spans.push(SectionSpan {
+                        name,
+                        is_human,
+                        start: i,
+                        end,
+                    });
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    spans
+}
+
+pub(crate) fn extract_attr(line: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=\"");
+    let start = line.find(&needle)? + needle.len();
+    let end = line[start..].find('"')?;
+    Some(line[start..start + end].to_string())
+}
+
+pub(crate) fn is_human_owned_marker(line: &str) -> bool {
+    line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
+}
+
+/// One live named section: its text (markers included) and 0-based line span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedSection {
+    pub name: String,
+    pub block: String,
+    pub human: bool,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Every live named section of `content`; fenced examples are not sections.
+pub fn named_sections(content: &str) -> Vec<NamedSection> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let scan = code_line_mask(content, false);
+    parse_named_sections(&lines, &scan.in_fence)
+        .into_iter()
+        .map(|span| NamedSection {
+            block: lines[span.start..=span.end].join("\n"),
+            name: span.name,
+            human: span.is_human,
+            start: span.start,
+            end: span.end,
+        })
+        .collect()
+}
+
+/// A syntax example such as `<path>:<line>` or `src/{a,b}.rs`, not a citation.
+pub(crate) fn is_placeholder(citation: &str) -> bool {
+    citation.contains(['<', '>', '{', '}', '*', '…']) || citation.contains("...")
+}
+
+/// A doc still holding a raw `{{SLOT}}`, a `<!-- TODO:` line or a bare `PLACEHOLDER` line.
+pub(crate) fn contains_placeholder(s: &str) -> bool {
+    count_raw_placeholders(s) > 0
+        || strip_inline_code(&strip_fenced_code(s)).lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("<!-- TODO:") || trimmed == "PLACEHOLDER"
+        })
+}
+
 /// [`strip_inline_code`]'s prose, plus the inner text of every dropped span,
 /// one span per line.
 pub(crate) fn partition_inline_code(text: &str) -> (String, String) {

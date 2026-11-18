@@ -844,23 +844,6 @@ pub fn count_ai_todos(project_path: &str) -> u32 {
     count
 }
 
-/// Count the active tech debts of a project: the entries of
-/// `td_index::debt_entries` that are not settled (a rejected finding or an
-/// accepted trade-off is not debt). The tech-debt review lists the very same
-/// entries, so the card and the review cannot count different debts; the
-/// health score's severity tally applies the same sheet rule.
-pub fn count_tech_debt(project_path: &str) -> u32 {
-    let path = resolve_host_path(project_path);
-    let docs_dir = detect_docs_dir(&path);
-    if !docs_dir.is_dir() {
-        return 0;
-    }
-    crate::core::td_index::debt_entries(&docs_dir)
-        .iter()
-        .filter(|entry| entry.is_active())
-        .count() as u32
-}
-
 /// Expand ~ in paths
 fn shellexpand(path: &str) -> String {
     // Handle both Unix (~/) and Windows (~\) tilde expansion
@@ -1220,7 +1203,7 @@ mod tests {
         let migration = needs_docs_migration(&root);
         let todos = count_ai_todos(&path);
         let before_audit = detect_audit_status(&path);
-        let recorded = crate::core::kronn_state::record_audit(&root, "full");
+        let recorded = crate::core::template_manifest::record_audit(&root, "full");
         let after_audit = detect_audit_status(&path);
         crate::core::docs_location::set_project_override(&path, None);
 
@@ -1266,7 +1249,7 @@ mod tests {
         let path = root.to_string_lossy().into_owned();
         crate::core::docs_location::set_project_override(&path, Some(".ai"));
         let status = detect_audit_status(&path);
-        let write = crate::core::kronn_state::record_audit(&root, "full");
+        let write = crate::core::template_manifest::record_audit(&root, "full");
         crate::core::docs_location::set_project_override(&path, None);
         assert_eq!(status, crate::models::AiAuditStatus::NoTemplate);
         assert!(write.unwrap_err().contains("symlink"));

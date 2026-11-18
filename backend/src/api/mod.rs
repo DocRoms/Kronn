@@ -61,6 +61,7 @@ pub mod media_request_guard;
 pub mod model_catalog;
 pub mod nvidia;
 pub mod ollama;
+pub mod ollama_health;
 pub mod openapi;
 pub mod orchestration;
 #[cfg(all(test, feature = "full-tests"))]

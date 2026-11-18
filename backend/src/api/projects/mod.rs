@@ -241,7 +241,7 @@ pub(crate) fn enrich_audit_status_with_runs(project: &mut Project, completed_ful
     project.audit_status =
         scanner::detect_audit_status_with_runs(&project.path, completed_full_run);
     project.ai_todo_count = scanner::count_ai_todos(&project.path);
-    project.tech_debt_count = scanner::count_tech_debt(&project.path);
+    project.tech_debt_count = crate::core::td_index::count_tech_debt(&project.path);
     project.needs_docs_migration = scanner::needs_docs_migration(&resolved);
     // Read paths must not write (Codex A2). Two heals used to fire from here on
     // every list and every get:

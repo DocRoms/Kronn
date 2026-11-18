@@ -241,7 +241,7 @@ pub struct Project {
     /// Total tech-debt entries detected in the project's docs tree:
     /// one count per file under `docs/tech-debt/` plus one count per
     /// table row in `docs/inconsistencies-tech-debt.md`. Computed by
-    /// `scanner::count_tech_debt` and surfaced as a badge on the
+    /// `td_index::count_tech_debt` and surfaced as a badge on the
     /// project card so users see at a glance how many TD items remain
     /// to address. Not persisted in DB.
     #[serde(default)]
@@ -2650,6 +2650,21 @@ pub struct BriefingProjectAnswers {
     /// cannot say. Omitted when empty so older machine copies stay identical.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub notes: std::collections::BTreeMap<BriefingFact, String>,
+}
+
+/// Machine-readable copy of the answers, one line, invisible once rendered.
+pub(crate) const ANSWERS_PREFIX: &str = "<!-- kronn:project-answers v1 ";
+pub(crate) const ANSWERS_SUFFIX: &str = " -->";
+
+/// The answers recorded in a briefing, if any.
+pub(crate) fn parse_answers(notes: &str) -> Option<BriefingProjectAnswers> {
+    notes.lines().find_map(|line| {
+        let json = line
+            .trim()
+            .strip_prefix(ANSWERS_PREFIX)?
+            .strip_suffix(ANSWERS_SUFFIX)?;
+        serde_json::from_str(json).ok()
+    })
 }
 
 /// A project fact a briefing note can be attached to (KT-1196).

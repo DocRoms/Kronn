@@ -113,6 +113,25 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// `path` with its longest existing ancestor canonicalized: a Cargo target that
+/// does not exist yet still resolves through `/tmp` → `/private/tmp`.
+pub(crate) fn real_path(path: &Path) -> PathBuf {
+    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(real) = current.canonicalize() {
+            return missing.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// The payload of the `PermissionDenied` error a read-like `guarded_*` call
 /// returns when the lstat walk refuses the path (a link at the name or in a
 /// parent, or a path that leaves the root). It lets a caller tell "refused

@@ -1226,7 +1226,7 @@ pub fn spawn_periodic_sweep(db: std::sync::Arc<Database>) {
             crate::api::orchestration::release_finished_worktrees(&db).await;
             // KT-1645 — and the clean worktrees of archived reviews, which
             // are disposable and otherwise count against the worktree cap.
-            let reviews = crate::api::discussions::crud::sweep_archived_review_worktrees(&db).await;
+            let reviews = crate::api::disc_git::sweep_archived_review_worktrees(&db).await;
             if reviews > 0 {
                 tracing::info!(reviews, "periodic sweep released archived review worktrees");
             }

@@ -576,7 +576,7 @@ fn take_back(
                 return Ok(());
             };
             // Already revoked by a human: nothing is left to take back.
-            let _ = crate::db::discussion_scope::revoke(
+            let _ = crate::db::discussion_scope_grants::revoke(
                 conn,
                 room,
                 object_id,

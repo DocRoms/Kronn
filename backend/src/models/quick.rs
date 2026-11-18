@@ -9,6 +9,72 @@ use ts_rs::TS;
 
 use super::{AgentSettings, AgentType, ExtractSpec, ModelTier, PaginationSpec};
 
+/// An agent as Kronn launched it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentIdentity {
+    pub agent_type: AgentType,
+    /// The concrete model, when Kronn resolved one at launch.
+    pub model: Option<String>,
+}
+
+// `AgentType` has unit variants only, so equality is total.
+impl Eq for AgentIdentity {}
+
+/// Who asks the broker for a call.
+#[derive(Debug, Clone)]
+pub enum ApiCaller {
+    /// A person in the UI (Quick API launcher, wizard test).
+    Human,
+    /// An agent; `identity: None` means no Kronn-issued identity (no token),
+    /// which is treated as a remote agent.
+    Agent {
+        identity: Option<AgentIdentity>,
+        discussion_ids: Vec<String>,
+        workflow_run_id: Option<String>,
+    },
+    /// A non-agent step of a human-enabled workflow; its data reaches the
+    /// workflow's agents, listed here (`None` = an agent Kronn cannot name).
+    Workflow { agents: Vec<Option<AgentIdentity>> },
+}
+
+impl ApiCaller {
+    /// An agent without any Kronn-issued identity.
+    pub fn unidentified_agent() -> Self {
+        Self::Agent {
+            identity: None,
+            discussion_ids: Vec::new(),
+            workflow_run_id: None,
+        }
+    }
+}
+
+/// Whether `name` belongs to Kronn's built-ins (`run.*`, `time.*`, `now*`,
+/// the repository profile's `project.*` and the workflow's `refs.*`).
+/// No declared variable, trigger field or launch value may use it, since a
+/// built-in is trusted for what produced it, not for its name.
+pub fn is_reserved_name(name: &str) -> bool {
+    let base = name.split('|').next().unwrap_or_default().trim();
+    base == "run"
+        || base.starts_with("run.")
+        || base == "time"
+        || base.starts_with("time.")
+        || base.starts_with("now")
+        || base.starts_with("project.")
+        || base == "refs"
+        || base.starts_with("refs.")
+}
+
+/// The first reserved name among `names`, as a user-facing refusal.
+pub fn refuse_reserved_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    match names.into_iter().find(|name| is_reserved_name(name)) {
+        Some(name) => Err(format!(
+            "Le nom de variable `{}` est réservé à Kronn (`run.*`, `time.*`, `now*`, `project.*`, `refs.*`) ; choisis un autre nom.",
+            name.trim()
+        )),
+        None => Ok(()),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Quick Prompts (reusable prompt templates with variables)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -223,7 +289,7 @@ pub fn validate_prompt_variables(variables: &[PromptVariable]) -> Result<(), Str
         if variable.name.trim().is_empty() || !names.insert(variable.name.trim()) {
             return Err("Variable names must be non-empty and unique".into());
         }
-        crate::workflows::template::refuse_reserved_names([variable.name.as_str()])?;
+        refuse_reserved_names([variable.name.as_str()])?;
         variable.validate_source()?;
         variable.validate_control()?;
     }
@@ -866,7 +932,7 @@ pub struct RunQuickApiRequest {
     /// (KT-1026); `None` with no bridge token = a person in the UI.
     #[serde(skip)]
     #[ts(skip)]
-    pub caller: Option<crate::core::api_access::ApiCaller>,
+    pub caller: Option<ApiCaller>,
 }
 
 /// Response from `POST /api/quick-apis/:id/run`. Mirrors the

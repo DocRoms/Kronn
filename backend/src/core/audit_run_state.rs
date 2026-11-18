@@ -130,6 +130,14 @@ pub fn step_key(index: u32) -> String {
     format!("{index:03}")
 }
 
+pub(crate) const PARTIAL_OPEN: &str = "<!-- kronn:partial-step -->";
+pub(crate) const PARTIAL_CLOSE: &str = "<!-- kronn:partial-step:end -->";
+
+/// Whether `content` starts with a partial marker.
+pub(crate) fn has_partial_marker(content: &str) -> bool {
+    content.trim_start().starts_with(PARTIAL_OPEN)
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()

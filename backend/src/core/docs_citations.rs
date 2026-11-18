@@ -73,10 +73,7 @@ pub struct MovedAnchor {
     pub total: usize,
 }
 
-/// A syntax example such as `<path>:<line>` or `src/{a,b}.rs`, not a citation.
-pub(crate) fn is_placeholder(citation: &str) -> bool {
-    citation.contains(['<', '>', '{', '}', '*', '…']) || citation.contains("...")
-}
+pub(crate) use crate::core::anti_halluc::is_placeholder;
 
 /// `None` when the citation holds, else why it does not.
 fn check_reference(

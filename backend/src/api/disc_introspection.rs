@@ -29,8 +29,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::agents::agent_display_name;
 use crate::models::*;
 use crate::AppState;
+use std::time::Duration;
 
 /// Compact metadata returned by `disc_meta` — everything the agent might
 /// need to decide whether to fetch context, without leaking the full
@@ -656,6 +658,281 @@ pub async fn disc_note_list(
     }
 }
 
+/// Resolve the configurable absolute timeout captured when each run starts.
+pub(crate) fn configured_agent_global_timeout(minutes: u32) -> Duration {
+    let minutes = crate::models::clamp_agent_global_timeout_min(u64::from(minutes));
+    Duration::from_secs(u64::from(minutes) * 60)
+}
+
+pub(crate) async fn checked_launch_connection(
+    state: &AppState,
+    agent: &AgentType,
+    connection_id: Option<&str>,
+    tier: ModelTier,
+    model_tiers: &crate::models::setup::ModelTiersConfig,
+) -> Result<(Option<ExternalApiConnection>, Option<String>), String> {
+    crate::http_transport::validate_connection_target(state, agent, connection_id).await?;
+    let connection = match connection_id {
+        Some(id) => {
+            let lookup = id.to_string();
+            Some(
+                state
+                    .db
+                    .with_read_conn(move |conn| {
+                        crate::db::external_api_connections::get(conn, &lookup)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("External API connection {id} was not found"))?,
+            )
+        }
+        None => None,
+    };
+    if let Some(connection) = connection.as_ref() {
+        let actual_agent =
+            crate::db::external_api_connections::target_for_connection(connection).agent_type;
+        if actual_agent != *agent {
+            return Err(format!(
+                "External API connection {} no longer matches agent {:?}",
+                connection.id, agent
+            ));
+        }
+        if connection
+            .endpoint
+            .as_deref()
+            .is_none_or(|endpoint| endpoint.trim().is_empty())
+        {
+            return Err(format!(
+                "External API connection {} has no HTTP endpoint",
+                connection.id
+            ));
+        }
+    }
+    let runtime_target_id = connection
+        .as_ref()
+        .map(|connection| crate::db::model_catalog::http_runtime_target_id(&connection.id));
+    let model = connection
+        .as_ref()
+        .and_then(|connection| crate::http_transport::connection_tier_model(connection, tier));
+    let preflight = crate::core::model_catalog::preflight_resolve(
+        &state.db,
+        runtime_target_id.as_deref(),
+        agent.clone(),
+        tier,
+        model.as_deref(),
+        Some(model_tiers),
+    )
+    .await
+    .map_err(|failure| {
+        format!(
+            "model_catalog_preflight_failed:{}",
+            serde_json::to_string(&failure).unwrap_or_default()
+        )
+    })?;
+    Ok((connection, preflight.effective_model))
+}
+
+/// On-demand summarizer used by `disc_introspection::disc_summarize`.
+///
+/// Like `maybe_generate_summary` (the Auto-strategy auto-fire above) but
+/// the caller picks the message range explicitly. Returns the generated
+/// text + a coarse token estimate (0 for now — proper accounting is
+/// queued with the ranged-cache work in Phase B). The eco-tier model of
+/// the discussion's own agent is used. Cache is NOT updated here:
+/// ranged summaries don't fit the existing `summary_cache` shape (which
+/// is keyed only by `summary_up_to_msg_idx`). When a follow-up brings a
+/// proper ranged cache, this function is the single place to update.
+pub async fn generate_summary_on_demand(
+    state: &AppState,
+    disc: &Discussion,
+    from_idx: u32,
+    to_idx: u32,
+    tokens: &TokensConfig,
+    include_notes: bool,
+) -> Result<(String, u64, Option<String>), String> {
+    use crate::agents::runner;
+
+    if from_idx >= to_idx {
+        return Err(format!("Invalid range: from {} >= to {}", from_idx, to_idx));
+    }
+    let non_system: Vec<&DiscussionMessage> = disc
+        .messages
+        .iter()
+        .filter(|m| {
+            (include_notes || matches!(m.channel, crate::models::MessageChannel::Main))
+                && !matches!(m.role, MessageRole::System)
+        })
+        .collect();
+    let total = non_system.len() as u32;
+    let from = from_idx.min(total) as usize;
+    let to = to_idx.min(total) as usize;
+    if from >= to {
+        return Err("Empty range after clamping".into());
+    }
+    let slice = &non_system[from..to];
+    if slice.is_empty() {
+        return Err("Empty message slice".into());
+    }
+    let lines: Vec<String> = slice
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                MessageRole::User => "User".to_string(),
+                MessageRole::Agent => m
+                    .agent_type
+                    .as_ref()
+                    .map(agent_display_name)
+                    .unwrap_or_else(|| "Agent".into()),
+                MessageRole::System => "System".to_string(),
+            };
+            format!("{}: {}", role, m.content)
+        })
+        .collect();
+    let block = lines.join("\n\n");
+    // UTF-8-safe truncation at 20K chars.
+    let max_input = 20_000usize;
+    let block_truncated = if block.len() <= max_input {
+        block.as_str()
+    } else {
+        let start = block.len() - max_input;
+        let safe_start = block.ceil_char_boundary(start);
+        &block[safe_start..]
+    };
+    let lang = if !disc.language.is_empty() {
+        disc.language.clone()
+    } else {
+        let cfg = state.config.read().await;
+        cfg.language.clone()
+    };
+    let summary_prompt = match lang.as_str() {
+        "fr" => format!(
+            "Tu es un résumeur. Produis UNIQUEMENT le résumé, sans introduction.\n\
+            Résume les messages ci-dessous en 3 à 10 phrases (400 mots max).\n\
+            Conserve : décisions prises, identifiants techniques, questions ouvertes, état actuel.\n\
+            Faits uniquement. Remplace tout secret par [REDACTED].\n\n<messages>\n{}\n</messages>",
+            block_truncated
+        ),
+        "es" => format!(
+            "Eres un sintetizador. Produce SOLO el resumen, sin introducción.\n\
+            Resume los mensajes en 3 a 10 frases (400 palabras máx).\n\
+            Conserva: decisiones, identificadores técnicos, preguntas abiertas, estado actual.\n\
+            Solo hechos. Reemplaza cualquier secreto por [REDACTED].\n\n<messages>\n{}\n</messages>",
+            block_truncated
+        ),
+        _ => format!(
+            "You are a summarizer. Output ONLY the summary, no preamble.\n\
+            Summarize the messages below in 3-10 sentences (400 words max).\n\
+            Keep: decisions made, technical identifiers, open questions, current state.\n\
+            Facts only. Replace any secret with [REDACTED].\n\n<messages>\n{}\n</messages>",
+            block_truncated
+        ),
+    };
+    let (model_tiers, http_endpoints, ollama_context_overrides, http_request_timeout, full_access) = {
+        let cfg = state.config.read().await;
+        (
+            cfg.agents.model_tiers.clone(),
+            crate::models::setup::HttpEndpoints::from_agents(&cfg.agents),
+            cfg.server.ollama_context_overrides.clone(),
+            configured_agent_global_timeout(if disc.agent == AgentType::Ollama {
+                cfg.server.local_agent_global_timeout_min
+            } else {
+                cfg.server.agent_global_timeout_min
+            }),
+            // A native runtime needs its own full-access setting, like any
+            // other launch of the discussion's agent.
+            cfg.agents.full_access_for(&disc.agent),
+        )
+    };
+    let (connection, model_override) = checked_launch_connection(
+        state,
+        &disc.agent,
+        disc.connection_id.as_deref(),
+        ModelTier::Economy,
+        &model_tiers,
+    )
+    .await?;
+    let external_http = connection
+        .as_ref()
+        .and_then(|connection| crate::http_transport::external_http_runtime(connection, tokens));
+    let mut process = runner::start_agent_with_config(runner::AgentStartConfig {
+        mcp_context_override: Some(""),
+        tier: ModelTier::Economy,
+        ollama_context_overrides: Some(&ollama_context_overrides),
+        http_request_timeout: Some(http_request_timeout),
+        model_tiers: Some(&model_tiers),
+        http_endpoints: Some(&http_endpoints),
+        external_http: external_http.as_ref(),
+        model_override: model_override.as_deref(),
+        // Same boundary as automatic summarisation: the requested message
+        // slice is already in the prompt, so tools add risk but no capability.
+        tools: None,
+        full_access,
+        ..runner::AgentStartConfig::new(&disc.agent, "", &summary_prompt, tokens)
+    })
+    .await
+    .map_err(|e| format!("agent start failed: {}", e))?;
+
+    let mut out = String::new();
+    let mut text_blocks = runner::TextBlockJoiner::default();
+    // Stream-json reports token counts inline via the `result` event.
+    // We accumulate them as we go so the `tokens_used` returned to the
+    // agent reflects the actual eco-tier cost of THIS summary call —
+    // not zero like Phase A's placeholder.
+    let mut stream_json_tokens: u64 = 0;
+    let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+    // Ollama streams raw token fragments (no '\n' re-join); CLI text agents
+    // stream lines.
+    let raw_stream = process.raw_token_stream();
+    while let Some(line) = process.next_line().await {
+        if is_stream_json {
+            match runner::parse_claude_stream_line(&line) {
+                runner::StreamJsonEvent::Text(text) => out.push_str(&text_blocks.join(text)),
+                runner::StreamJsonEvent::ToolEnd => text_blocks.block_ended(),
+                runner::StreamJsonEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => {
+                    let total = input_tokens.saturating_add(output_tokens);
+                    stream_json_tokens = stream_json_tokens.max(total);
+                }
+                _ => {}
+            }
+        } else {
+            if !raw_stream && !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&line);
+        }
+    }
+    let _ = process.child.wait().await;
+
+    if out.trim().is_empty() {
+        return Err("Agent returned an empty summary".into());
+    }
+
+    // Token accounting: prefer the inline stream-json count when present,
+    // else fall back to `parse_token_usage` which scrapes stderr for
+    // agents that don't emit structured tokens (Codex, Vibe, Kiro). The
+    // resolved-model-flag string ("claude-3-5-haiku-latest", "gpt-5-mini",
+    // "devstral-small-latest"…) is captured and persisted alongside the
+    // ranged-cache row so usage dashboards can attribute the call.
+    let stderr_lines = process.captured_stderr_flushed().await;
+    let (_cleaned, parsed_tokens) = runner::parse_token_usage(&disc.agent, &out, &stderr_lines);
+    let tokens_used = if stream_json_tokens > 0 {
+        stream_json_tokens
+    } else if let Some(reported) = process.reported_token_usage() {
+        reported
+    } else {
+        // The summary cache column is NOT NULL, so unmeasured is stored as 0.
+        parsed_tokens.unwrap_or(0)
+    };
+    let model_name =
+        runner::resolve_model_flag(&disc.agent, ModelTier::Economy, Some(&model_tiers))
+            .map(|s| s.to_string());
+    Ok((out, tokens_used, model_name))
+}
+
 /// `POST /api/discussions/{id}/summarize`
 ///
 /// Re-uses the cached summary when the requested range matches what's
@@ -742,7 +1019,7 @@ pub async fn disc_summarize(
     }
 
     let tokens_config = state.config.read().await.tokens.clone();
-    match crate::api::discussions::orchestration::generate_summary_on_demand(
+    match generate_summary_on_demand(
         &state,
         &disc,
         from_idx,

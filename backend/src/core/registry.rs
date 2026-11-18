@@ -19,6 +19,17 @@ pub struct ApiReadinessProbe {
     pub query_from_config: &'static [(&'static str, &'static str)],
 }
 
+/// Whether Kronn can probe this server's credentials: the same rule as the
+/// readiness probe (a declared probe, or a custom API's selected/identity
+/// endpoint).
+pub fn has_token_probe(server: &crate::models::McpServer) -> bool {
+    let Some(spec) = server.api_spec.as_ref() else {
+        return false;
+    };
+    api_readiness_probe(&server.id).is_some()
+        || (server.id.starts_with("custom-") && spec.probe_endpoint().is_some())
+}
+
 pub fn api_readiness_probe(server_id: &str) -> Option<ApiReadinessProbe> {
     let probe = match server_id {
         "mcp-github" => ApiReadinessProbe {

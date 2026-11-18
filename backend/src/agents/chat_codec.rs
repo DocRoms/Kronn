@@ -170,11 +170,7 @@ impl ChatCodec for OpenAiCodec {
     }
 }
 
-/// A provider-reported USD amount as integer micro-USD, so usage stays `Eq`.
-/// Negative or non-finite amounts are not a cost.
-pub(crate) fn usd_to_micros(usd: f64) -> Option<u64> {
-    (usd.is_finite() && usd >= 0.0).then(|| (usd * 1_000_000.0).round() as u64)
-}
+pub(crate) use crate::core::pricing::usd_to_micros;
 
 /// Request body for an OpenAI-compatible endpoint. Mirrors
 /// `build_ollama_chat_body`'s determinism (temperature 0, fixed seed) and

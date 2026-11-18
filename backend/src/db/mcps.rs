@@ -884,7 +884,7 @@ pub fn list_configs_display(
             let token_check = token_checks.remove(&c.id);
             let token_probe = server_map
                 .get(&c.server_id)
-                .is_some_and(|server| crate::core::token_checks::has_token_probe(server));
+                .is_some_and(|server| crate::core::registry::has_token_probe(server));
 
             McpConfigDisplay {
                 id: c.id,

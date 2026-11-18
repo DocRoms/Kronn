@@ -167,13 +167,17 @@ pub fn set_lane_seeds(conn: &Connection, project_id: &str, seeds: &[String]) -> 
     Ok(changed > 0)
 }
 
+/// The secret-looking files a human has seen and accepted, by declared seed
+/// (repository-relative paths). A file that is not listed here holds its seed.
+pub type ConfirmedSecrets = std::collections::BTreeMap<String, Vec<String>>;
+
 /// The secret-looking files a human confirmed inside each declared lane seed
 /// (KT-1438). An unknown project or an unreadable value reads as nothing
 /// confirmed, which holds every seed that has such a file.
 pub fn lane_seeds_confirmed(
     conn: &Connection,
     project_id: &str,
-) -> Result<crate::core::task_worker_lane_seeds::ConfirmedSecrets> {
+) -> Result<ConfirmedSecrets> {
     let value: Option<Option<String>> = conn
         .query_row(
             "SELECT lane_seeds_confirmed_json FROM projects WHERE id = ?1",
@@ -194,7 +198,7 @@ pub fn set_lane_seeds_confirmed(
     conn: &Connection,
     project_id: &str,
     seeds: &[String],
-    confirmed: &crate::core::task_worker_lane_seeds::ConfirmedSecrets,
+    confirmed: &ConfirmedSecrets,
 ) -> Result<bool> {
     let changed = conn.execute(
         "UPDATE projects SET lane_seeds_json = ?2, lane_seeds_confirmed_json = ?3 WHERE id = ?1",

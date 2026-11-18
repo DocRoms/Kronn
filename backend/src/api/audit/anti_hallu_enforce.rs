@@ -13,9 +13,13 @@
 //! testable; the streaming generator in [`super::full`] owns the IO and the
 //! retry loop, and only calls into these helpers.
 
-use crate::core::anti_halluc::{self, scan_fences, FenceScan, SourceCheck};
+use crate::core::anti_halluc::{self, SourceCheck};
 use crate::core::version_sources::{verify_dep_marker, DependencySnapshot};
 use std::path::Path;
+
+pub use crate::core::anti_halluc::{named_sections, NamedSection};
+pub(crate) use crate::core::anti_halluc::{code_line_mask, parse_named_sections};
+pub(super) use crate::core::anti_halluc::{extract_attr, is_human_owned_marker};
 
 /// Total attempts (1 initial + retries) allowed per step in enforce mode.
 /// Design caps the corrective loop at 2-3 attempts: the agent already carries
@@ -214,75 +218,6 @@ pub struct HumanSectionDiff {
     pub post_block: Option<String>,
 }
 
-struct SectionSpan {
-    name: String,
-    is_human: bool,
-    start: usize,
-    end: usize,
-}
-
-/// Fence characters that hide a `kronn:section` marker from the ownership
-/// parser. A `~~~` block is code to a renderer exactly like a ``` one.
-const OWNERSHIP_FENCE_CHARS: [char; 2] = ['`', '~'];
-
-/// Which lines of `text` sit inside a fenced code block. A marker on such a
-/// line is documentation (an example, a quoted report), never a live section
-/// boundary: it neither opens nor closes a protected section.
-///
-/// An unclosed fence is read leniently (its lines stay visible, so a stray
-/// fence in a human's own document does not strip protection) — except when
-/// `strict_unclosed` is set, where it is CommonMark's block-to-end-of-file.
-pub(crate) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
-    scan_fences(text, &OWNERSHIP_FENCE_CHARS, strict_unclosed)
-}
-
-/// Scan `lines` for `<!-- kronn:section name="X" ... -->` … `<!-- kronn:section:end -->`
-/// pairs. `in_code` flags the lines inside fenced code (index-aligned with
-/// `lines`, shorter is fine): their markers are ignored on both ends. An
-/// opener with no matching closer is skipped — there is nothing well-formed to
-/// protect there.
-fn parse_named_sections(lines: &[&str], in_code: &[bool]) -> Vec<SectionSpan> {
-    let is_code = |idx: usize| in_code.get(idx).copied().unwrap_or(false);
-    let mut spans = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let trimmed = lines[i].trim_start();
-        if !is_code(i)
-            && trimmed.starts_with("<!-- kronn:section")
-            && !trimmed.starts_with("<!-- kronn:section:end")
-        {
-            if let Some(name) = extract_attr(lines[i], "name") {
-                let is_human = is_human_owned_marker(lines[i]);
-                if let Some(end) = ((i + 1)..lines.len()).find(|&j| {
-                    !is_code(j) && lines[j].trim_start().starts_with("<!-- kronn:section:end")
-                }) {
-                    spans.push(SectionSpan {
-                        name,
-                        is_human,
-                        start: i,
-                        end,
-                    });
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-        i += 1;
-    }
-    spans
-}
-
-pub(super) fn extract_attr(line: &str, attr: &str) -> Option<String> {
-    let needle = format!("{attr}=\"");
-    let start = line.find(&needle)? + needle.len();
-    let end = line[start..].find('"')?;
-    Some(line[start..start + end].to_string())
-}
-
-pub(super) fn is_human_owned_marker(line: &str) -> bool {
-    line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
-}
-
 /// `content` with every human-owned section blanked (line count kept), and
 /// each of those sections as `(name, text)`, markers included.
 pub fn split_human_owned_sections(content: &str) -> (String, Vec<(String, String)>) {
@@ -298,32 +233,6 @@ pub fn split_human_owned_sections(content: &str) -> (String, Vec<(String, String
         }
     }
     (lines.join("\n"), human)
-}
-
-/// One live named section: its text (markers included) and 0-based line span.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamedSection {
-    pub name: String,
-    pub block: String,
-    pub human: bool,
-    pub start: usize,
-    pub end: usize,
-}
-
-/// Every live named section of `content`; fenced examples are not sections.
-pub fn named_sections(content: &str) -> Vec<NamedSection> {
-    let lines: Vec<&str> = content.split('\n').collect();
-    let scan = code_line_mask(content, false);
-    parse_named_sections(&lines, &scan.in_fence)
-        .into_iter()
-        .map(|span| NamedSection {
-            block: lines[span.start..=span.end].join("\n"),
-            name: span.name,
-            human: span.is_human,
-            start: span.start,
-            end: span.end,
-        })
-        .collect()
 }
 
 pub fn contains_human_owned_section(content: &str) -> bool {

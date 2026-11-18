@@ -356,7 +356,7 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
             },
             "steps": steps_without_outputs(&run.step_results),
             // KT-811 — a card reads "quota", not "running", while the run waits.
-            "quota": crate::workflows::quota_wait::pending_wait(run),
+            "quota": super::workflows::pending_wait(run),
         })),
         diagnostic: None,
         created_at: run.started_at,

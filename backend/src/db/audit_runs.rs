@@ -1398,7 +1398,7 @@ impl StepTokens {
 
     /// The usage a structured transport (an ACP session, an HTTP provider)
     /// reported for the run. `None` when it reported nothing.
-    pub fn from_reported(usage: Option<crate::agents::runner::ReportedUsage>) -> Self {
+    pub fn from_reported(usage: Option<crate::models::ReportedUsage>) -> Self {
         let Some(usage) = usage else {
             return Self::UNKNOWN;
         };
@@ -1736,7 +1736,7 @@ pub fn price_steps(conn: &Connection, steps: &mut [AuditRunStep]) -> Result<()> 
         );
         step.estimated_cost_usd_micros = priced
             .cost_usd
-            .and_then(crate::agents::chat_codec::usd_to_micros);
+            .and_then(crate::core::pricing::usd_to_micros);
         step.cost_unknown_reason = priced.cost_unknown.map(|reason| reason.reason().to_owned());
     }
     Ok(())
@@ -2344,7 +2344,7 @@ mod tests {
             )),
         )
         .usd()
-        .and_then(crate::agents::chat_codec::usd_to_micros);
+        .and_then(crate::core::pricing::usd_to_micros);
         assert!(expected.is_some_and(|micros| micros > 0));
         assert_eq!(steps[0].estimated_cost_usd_micros, expected);
         assert_eq!(
@@ -3106,7 +3106,7 @@ mod tests {
 
     #[test]
     fn a_reported_usage_becomes_parts_and_a_headline_total() {
-        use crate::agents::runner::{PromptCacheUsage, ReportedUsage};
+        use crate::models::{PromptCacheUsage, ReportedUsage};
         let tokens = StepTokens::from_reported(Some(ReportedUsage {
             input_tokens: 6_126,
             output_tokens: 28,

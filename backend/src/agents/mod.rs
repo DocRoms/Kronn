@@ -188,6 +188,68 @@ pub(crate) fn should_skip_darwin_host_binary(
     in_container && host_managed && host_is_macos && MACOS_HOST_BIN_SKIP.contains(&name)
 }
 
+/// Human-readable agent name (used in summaries, attribution lines, etc.).
+pub fn agent_display_name(agent_type: &AgentType) -> String {
+    match agent_type {
+        AgentType::ClaudeCode => "Claude Code".into(),
+        AgentType::Codex => "Codex".into(),
+        AgentType::OpenCode => "OpenCode".into(),
+        AgentType::Vibe => "Vibe".into(),
+        AgentType::GeminiCli => "Gemini CLI".into(),
+        AgentType::Kiro => "Kiro".into(),
+        AgentType::CopilotCli => "GitHub Copilot".into(),
+        AgentType::Ollama => "Ollama".into(),
+        AgentType::LiteLlm => "LiteLLM".into(),
+        AgentType::Nvidia => "NVIDIA".into(),
+        AgentType::Custom => "Custom".into(),
+    }
+}
+
+pub(crate) const AGENT_ALIASES: [(&str, AgentType); 10] = [
+    ("@claude", AgentType::ClaudeCode),
+    ("@codex", AgentType::Codex),
+    ("@opencode", AgentType::OpenCode),
+    ("@vibe", AgentType::Vibe),
+    ("@gemini", AgentType::GeminiCli),
+    ("@kiro", AgentType::Kiro),
+    ("@copilot", AgentType::CopilotCli),
+    ("@ollama", AgentType::Ollama),
+    ("@litellm", AgentType::LiteLlm),
+    ("@nvidia", AgentType::Nvidia),
+];
+
+/// Canonical agent aliases found in generated prose. This is useful for
+/// display/introspection only: automatic delegation requires the explicit
+/// marker parsed by `extract_agent_handoff_markers`. Mentions in Markdown
+/// code are ignored and word boundaries reject email-like text.
+pub fn agent_mentions_in_prose(content: &str) -> Vec<AgentType> {
+    let prose = crate::core::anti_halluc::strip_inline_code(
+        &crate::core::anti_halluc::strip_fenced_code(content),
+    );
+    let lower = prose.to_lowercase();
+    let mut found = Vec::new();
+    for (alias, agent) in AGENT_ALIASES {
+        for (index, _) in lower.match_indices(alias) {
+            let before = lower[..index].chars().next_back();
+            let after = lower[index + alias.len()..].chars().next();
+            let valid_before = before.is_none_or(|ch| ch.is_whitespace() || "([{\"'".contains(ch));
+            let valid_after =
+                after.is_none_or(|ch| ch.is_whitespace() || ")]}>,.!?;:\"'".contains(ch));
+            if valid_before && valid_after {
+                found.push((index, agent.clone()));
+            }
+        }
+    }
+    found.sort_by_key(|(index, _)| *index);
+    let mut agents = Vec::new();
+    for (_, agent) in found {
+        if !agents.contains(&agent) {
+            agents.push(agent);
+        }
+    }
+    agents
+}
+
 /// Public accessor so `/api/health` can stamp the host label into its body
 /// (used by the "Report bug" flow to pre-fill a GitHub issue template).
 /// Keeping the core helper private preserves the module boundary.

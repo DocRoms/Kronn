@@ -74,6 +74,33 @@ pub(crate) enum AdmissionMark {
     WatchOccurrence(crate::db::workflow_watch_state::WatchOccurrence),
 }
 
+/// One citation re-verification tick, called by the engine loop.
+async fn citation_drift_tick(state: &crate::AppState) {
+    let cron = state.config.read().await.audit_reverify_cron.clone();
+    if !crate::core::citation_drift::tick_is_due(cron.as_deref()) {
+        return;
+    }
+    let projects = match state
+        .db
+        .with_read_conn(crate::db::projects::list_projects)
+        .await
+    {
+        Ok(projects) => projects,
+        Err(e) => {
+            tracing::warn!("Citation re-verification skipped: {e}");
+            return;
+        }
+    };
+    let paths: Vec<std::path::PathBuf> = projects
+        .iter()
+        .map(|p| crate::core::scanner::resolve_host_path(&p.path))
+        .collect();
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::core::citation_drift::reverify_projects(&paths)
+    })
+    .await;
+}
+
 /// The workflow engine — runs in the background, checks triggers, spawns runs.
 pub struct WorkflowEngine {
     state: AppState,
@@ -130,7 +157,7 @@ impl WorkflowEngine {
             self.quota_rechecker
                 .recheck_pass(&self.state, Utc::now())
                 .await;
-            crate::core::citation_drift::scheduled_tick(&self.state).await;
+            citation_drift_tick(&self.state).await;
         }
     }
 

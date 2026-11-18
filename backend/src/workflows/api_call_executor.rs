@@ -969,6 +969,123 @@ fn uses_cached_token(plugin: &McpServer) -> bool {
     })
 }
 
+/// Same rule as [`quick_prompt_for`] for a Quick API.
+pub fn quick_api_for(
+    conn: &rusqlite::Connection,
+    run_id: Option<&str>,
+    id: &str,
+) -> anyhow::Result<std::result::Result<Option<QuickApi>, String>> {
+    crate::db::workflow_run_pins::pinned_or_live(
+        conn,
+        run_id,
+        crate::db::workflow_run_pins::QUICK_API, "Quick API",
+        id,
+        |conn, id| crate::db::quick_apis::get_quick_api(conn, id),
+    )
+}
+
+/// Tag pour le diagnostic d'erreur — quel step type a déclenché l'hydratation.
+fn step_kind_label(step: &WorkflowStep) -> &'static str {
+    match step.step_type {
+        crate::models::StepType::BatchApiCall => "BatchApiCall",
+        crate::models::StepType::ApiCall => "ApiCall",
+        _ => "ApiCall-like",
+    }
+}
+
+/// Si `step.quick_api_id` est set, charge le QuickApi correspondant et applique
+/// l'override per-field (step wins). Mutate `step` in place.
+///
+/// Retourne `Err(message)` si :
+///   - Le QuickApi référencé est introuvable
+///   - L'accès DB échoue
+///
+/// No-op si `quick_api_id` est `None`.
+/// `run_id` is the workflow run executing the step: a pinned run gets its
+/// pinned revision (KT-1096).
+pub async fn hydrate_step_from_quick_api(
+    step: &mut WorkflowStep,
+    db: &crate::db::Database,
+    run_id: Option<&str>,
+) -> Result<(), String> {
+    let qa_id = match step.quick_api_id.clone() {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+    let kind = step_kind_label(step);
+
+    let qa_lookup = qa_id.clone();
+    let pinned_run = run_id.map(str::to_string);
+    let qa = match db
+        .with_read_conn(move |conn| {
+            let api = match quick_api_for(
+                conn,
+                pinned_run.as_deref(),
+                &qa_lookup,
+            )? {
+                Ok(api) => api,
+                Err(reason) => return Ok(Err(reason)),
+            };
+            if let Some(api) = &api {
+                crate::core::repository_resources::ensure_quick_api_execution_approved(conn, api)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            Ok(Ok(api))
+        })
+        .await
+    {
+        Ok(Err(reason)) => return Err(reason),
+        Ok(Ok(Some(q))) => q,
+        Ok(Ok(None)) => {
+            return Err(format!(
+                "{} step references QuickApi `{}` which does not exist.",
+                kind, qa_id
+            ));
+        }
+        Err(e) => return Err(format!("QuickApi preflight failed: {}", e)),
+    };
+
+    // Per-field override : la valeur du step gagne si présente, sinon fallback
+    // sur la valeur du QuickApi. Aligne batch + single sur la même règle.
+    if step.api_plugin_slug.is_none() {
+        step.api_plugin_slug = Some(qa.api_plugin_slug);
+    }
+    if step.api_config_id.is_none() {
+        step.api_config_id = Some(qa.api_config_id);
+    }
+    if step.api_endpoint_path.is_none() {
+        step.api_endpoint_path = Some(qa.api_endpoint_path);
+    }
+    if step.api_method.is_none() {
+        step.api_method = qa.api_method;
+    }
+    if step.api_query.is_none() {
+        step.api_query = qa.api_query;
+    }
+    if step.api_path_params.is_none() {
+        step.api_path_params = qa.api_path_params;
+    }
+    if step.api_headers.is_none() {
+        step.api_headers = qa.api_headers;
+    }
+    if step.api_body.is_none() {
+        step.api_body = qa.api_body;
+    }
+    if step.api_extract.is_none() {
+        step.api_extract = qa.api_extract;
+    }
+    if step.api_pagination.is_none() {
+        step.api_pagination = qa.api_pagination;
+    }
+    if step.api_timeout_ms.is_none() {
+        step.api_timeout_ms = qa.api_timeout_ms;
+    }
+    if step.api_max_retries.is_none() {
+        step.api_max_retries = qa.api_max_retries;
+    }
+    Ok(())
+}
+
 /// The step hydrated from its Quick API, its plugin and its decrypted env:
 /// what every broker call sends from. Dynamic credentials are not minted yet,
 /// so an access decision can run before any token exists.
@@ -984,7 +1101,7 @@ async fn load_broker_target(
     // un appel canonique côté QuickApi et de le réutiliser dans un step
     // ApiCall single sans tout re-saisir.
     let mut step_owned = step.clone();
-    crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
+    hydrate_step_from_quick_api(
         &mut step_owned,
         &state.db,
         pinned_run_id,

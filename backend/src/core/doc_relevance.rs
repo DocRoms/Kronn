@@ -1074,7 +1074,7 @@ fn is_generated_output(path: &str) -> bool {
         ".kronn-document-budgets.json",
         "checksums.json",
         citation_drift::CITATIONS_FILENAME,
-        crate::core::doc_provenance::PROVENANCE_FILENAME,
+        crate::core::kronn_state::PROVENANCE_FILENAME,
         crate::core::kronn_state::KRONN_STATE_FILENAME,
         crate::core::audit_run_state::RUN_STATE_FILENAME,
     ]
@@ -1127,7 +1127,7 @@ impl<'a> PathResolver<'a> {
 /// A doc that still holds raw `{{PLACEHOLDER}}` slots is the Kronn template,
 /// not yet this project's: the example paths it carries are not claims.
 fn is_unfilled_template(content: &str) -> bool {
-    crate::api::audit::validation::count_raw_placeholders(content) > 0
+    crate::core::anti_halluc::count_raw_placeholders(content) > 0
 }
 
 /// The paths of one section's prose no citation of that section covers.

@@ -13,17 +13,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::core::project_profile::{project_key, ProfileSnapshot, ProfileSnapshots};
 use crate::db::workflow_run_pins as rows;
+use crate::db::workflow_run_pins::pinned_or_live;
 use crate::models::{
     AgentProfile, Directive, QuickApi, QuickPrompt, Skill, StepType, Workflow, WorkflowRun,
 };
 
 pub const QUICK_PROMPT: &str = "quick_prompt";
-pub const QUICK_API: &str = "quick_api";
+pub use crate::db::workflow_run_pins::QUICK_API;
 pub const WORKFLOW: &str = "workflow";
 pub const SKILL: &str = "skill";
 pub const DIRECTIVE: &str = "directive";
@@ -32,25 +32,8 @@ pub const RESOLUTION: &str = "resolution";
 /// The repository profile a run read (KT-920), keyed by its project id.
 pub const PROJECT_PROFILE: &str = "project_profile";
 
-#[derive(Serialize, Deserialize)]
-struct RunHeader {
-    pinned_at: DateTime<Utc>,
-    /// `None` for a BatchQuickPrompt run, which has no workflow of its own.
-    #[serde(default)]
-    workflow: Option<Workflow>,
-    /// [`revision_fingerprint`] at pin time; `None` when inherited.
-    #[serde(default)]
-    fingerprint: Option<String>,
-    /// Zone of the run's `{{time.now}}` (KT-1103); absent (pinned before
-    /// zones existed) means UTC.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    timezone: Option<String>,
-    /// [`revision_fingerprint`] of the pinned closure without repository
-    /// profiles: what a human-validated workflow scope (KT-1270) is compared
-    /// with. `None` when inherited or pinned before scopes existed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    scope_revision: Option<String>,
-}
+pub(crate) use crate::db::workflow_run_pins::{header, RunHeader};
+pub use crate::db::workflow_run_pins::pinned_workflow;
 
 /// Pins `workflow` and its dependencies the first time `run` executes and
 /// returns it; afterwards returns the pinned definition. `Ok(Err(reason))`
@@ -185,11 +168,6 @@ fn pin_fresh(
         &serde_json::to_string(&header)?,
     )?;
     Ok(Ok(workflow.clone()))
-}
-
-/// The definition `run` pinned, if it has one.
-pub fn pinned_workflow(conn: &Connection, run_id: &str) -> Result<Option<Workflow>> {
-    Ok(header(conn, run_id)?.and_then(|header| header.workflow))
 }
 
 /// Applies the structured `ref:` resolutions `run_id` recorded for this
@@ -416,16 +394,7 @@ pub fn chain_prompt_for(
     quick_prompt_for(conn, batch_run.as_deref(), id)
 }
 
-/// Same rule as [`quick_prompt_for`] for a Quick API.
-pub fn quick_api_for(
-    conn: &Connection,
-    run_id: Option<&str>,
-    id: &str,
-) -> Result<std::result::Result<Option<QuickApi>, String>> {
-    pinned_or_live(conn, run_id, QUICK_API, "Quick API", id, |conn, id| {
-        crate::db::quick_apis::get_quick_api(conn, id)
-    })
-}
+pub use super::api_call_executor::quick_api_for;
 
 /// The sub-workflow a parent run starts. Its `enabled` says whether the
 /// parent may run it: enabled when pinned, and not switched off by a human
@@ -573,38 +542,6 @@ fn canonical(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn header(conn: &Connection, run_id: &str) -> Result<Option<RunHeader>> {
-    match rows::get(conn, run_id, rows::RUN_KIND, "")? {
-        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
-        None => Ok(None),
-    }
-}
-
-fn pinned_or_live<T: DeserializeOwned>(
-    conn: &Connection,
-    run_id: Option<&str>,
-    kind: &str,
-    label: &str,
-    id: &str,
-    live: impl Fn(&Connection, &str) -> Result<Option<T>>,
-) -> Result<std::result::Result<Option<T>, String>> {
-    let Some(run_id) = run_id.filter(|run_id| rows::has_pin(conn, run_id).unwrap_or(false)) else {
-        return Ok(Ok(live(conn, id)?));
-    };
-    let Some(json) = rows::get(conn, run_id, kind, id)? else {
-        return Ok(Err(format!(
-            "{label} `{id}` is not part of the revision this run started with: launch a new run to use it."
-        )));
-    };
-    // The pinned revision runs only while the resource still exists.
-    if live(conn, id)?.is_none() {
-        return Ok(Err(format!(
-            "{label} `{id}` was deleted while this run was in progress: the run cannot load it."
-        )));
-    }
-    Ok(Ok(Some(serde_json::from_str(&json)?)))
-}
-
 /// An agent's change (or an import) disabled the workflow after `since`.
 fn changed_since(
     conn: &Connection,
@@ -688,11 +625,11 @@ impl Deps {
         // left out and stops its step by name.
         for (context, ids) in &deps.repository_skill_ids {
             let ids: Vec<String> = ids.iter().cloned().collect();
-            let repository = crate::api::projects::used_skills::resolve_repository_skills_from(
+            let repository = crate::core::repository_skills::resolve_repository_skills_from(
                 conn,
                 (!context.is_empty()).then_some(context.as_str()),
                 &ids,
-                crate::api::projects::used_skills::RepositorySkillSource::DefaultBranch,
+                crate::core::repository_skills::RepositorySkillSource::DefaultBranch,
             )?;
             for skill in repository.resolved {
                 deps.skills.insert(skill.id.clone(), skill);
@@ -728,7 +665,7 @@ impl Deps {
     ) {
         self.skill_ids.extend(skills.iter().cloned());
         let repository = skills.iter().filter(|id| {
-            crate::api::projects::used_skills::parse_repository_skill_id(id).is_some()
+            crate::core::repository_skills::parse_repository_skill_id(id).is_some()
         });
         self.repository_skill_ids
             .entry(project_id.unwrap_or_default().to_string())

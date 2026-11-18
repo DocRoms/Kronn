@@ -2053,37 +2053,7 @@ struct AgentUsage {
     recent: super::activity::RecentActivity,
 }
 
-/// Prompt-cache tokens a runtime reported beside its input and output.
-/// `None` means not reported, never zero.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct PromptCacheUsage {
-    pub cached_prompt_tokens: Option<u64>,
-    pub cache_write_prompt_tokens: Option<u64>,
-}
-
-/// One run's reported usage, parts kept apart. `input_tokens` is as the agent
-/// reports it, so whether it already contains the cached share depends on the
-/// agent (see `core::pricing::TokenCounters::from_agent_report`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReportedUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub prompt_cache: PromptCacheUsage,
-}
-
-impl PromptCacheUsage {
-    /// Read Anthropic's `cache_read_input_tokens` / `cache_creation_input_tokens`.
-    pub fn from_anthropic_usage(usage: &serde_json::Value) -> Self {
-        Self {
-            cached_prompt_tokens: usage
-                .get("cache_read_input_tokens")
-                .and_then(serde_json::Value::as_u64),
-            cache_write_prompt_tokens: usage
-                .get("cache_creation_input_tokens")
-                .and_then(serde_json::Value::as_u64),
-        }
-    }
-}
+pub use crate::models::{PromptCacheUsage, ReportedUsage};
 
 impl AgentProcess {
     /// Keep the launch's bridge token alive exactly as long as this process.
@@ -2779,50 +2749,9 @@ pub fn fix_file_ownership(work_dir: &Path) {
     }
 }
 
-/// Server-derived identity for one CLI-backed discussion agent executing a
-/// durable task. The child process forwards this opaque context through the
-/// Kronn MCP bridge; the backend still revalidates every field against the
-/// execution and dispatch rows before accepting a delivery.
-/// Identity of a room's own native agent for the current turn, derived by the
-/// dispatcher from the running dispatch job. Like the worker context it only
-/// travels in the process environment, never in the prompt or tool arguments.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RoomAgentBridgeContext {
-    pub discussion_id: String,
-    pub agent_type: String,
-    pub dispatch_job_id: String,
-    pub source_message_id: String,
-}
-
-/// Capability of a workflow Agent step whose `room_id` names a room (KT-793).
-/// Like the room agent's identity it only travels in the process environment;
-/// the backend accepts it while that very step runs, and only for that room.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct WorkflowStepBridgeContext {
-    pub discussion_id: String,
-    pub run_id: String,
-    pub step_key: String,
-    pub capability: String,
-}
-
-impl std::fmt::Debug for WorkflowStepBridgeContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkflowStepBridgeContext")
-            .field("discussion_id", &self.discussion_id)
-            .field("run_id", &self.run_id)
-            .field("step_key", &self.step_key)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TaskWorkerBridgeContext {
-    pub execution_id: String,
-    pub discussion_id: String,
-    pub agent_type: String,
-    pub dispatch_job_id: String,
-    pub source_message_id: String,
-}
+pub use crate::core::child_env::{
+    RoomAgentBridgeContext, TaskWorkerBridgeContext, WorkflowStepBridgeContext,
+};
 
 /// Codex intentionally forwards only named parent-process variables to stdio
 /// MCP children. Keep the allowlist narrow and shared with the global config
@@ -15124,6 +15053,9 @@ pub(crate) fn try_spawn_granted(
         bridge_token,
         api_key: api_key.map(|key| (env_key, key)),
     };
+    if let Some(project_path) = work_dir.to_str() {
+        crate::core::mcp_scanner::ensure_local_exclude(project_path, ".kronn/tmp/");
+    }
     crate::core::child_env::apply_agent_launch(cmd.as_std_mut(), work_dir, &launch, backend_url)?;
     // KT-1645 — no agent moves the owner's main checkout (checkout, switch, reset,
     // stash) without the human's confirmation. Not for an agent in WSL, whose

@@ -1056,7 +1056,7 @@ pub async fn refresh_if_stale(
 ) -> anyhow::Result<ModelCatalogView> {
     let runtime_target_id = db::agent_runtime_target_id(&agent_type);
     if agent_type == AgentType::Ollama && force {
-        let base = crate::api::ollama::resolve_base_url_pub(None);
+        let base = crate::api::ollama_health::resolve_base_url_pub(None);
         return refresh_ollama_catalog_at(db, &base)
             .await
             .map(|(view, _)| view);

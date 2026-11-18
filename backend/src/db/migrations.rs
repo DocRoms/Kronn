@@ -1180,9 +1180,18 @@ fn apply_migration(tx: &rusqlite::Transaction<'_>, name: &str, sql: &str) -> Res
     }
     if name == "296_step_shadows" {
         // Reads each workflow's steps to place its shadow, which SQL cannot do.
-        crate::workflows::shadow::migrate_workflow_shadows(tx)?;
+        crate::db::legacy_shadow::migrate_workflow_shadows(tx)?;
     }
     Ok(())
+}
+
+/// Free space a full copy of `live_bytes` needs: the copy itself, a tenth for
+/// what is written meanwhile, and a floor so the disk is not left full.
+pub fn required_free_bytes(live_bytes: u64) -> u64 {
+    const FLOOR: u64 = 512 * 1024 * 1024;
+    live_bytes
+        .saturating_add(live_bytes / 10)
+        .saturating_add(FLOOR)
 }
 
 fn ensure_openrouter_preset(tx: &rusqlite::Transaction<'_>) -> Result<()> {
@@ -1363,7 +1372,7 @@ pub(crate) fn backup_before_migration(
     let mib = |bytes: u64| bytes / (1024 * 1024);
     let available = available_space(dir)
         .map_err(|e| anyhow::anyhow!("cannot read the free space in {}: {e}", dir.display()))?;
-    let required = crate::core::backup::required_free_bytes(size);
+    let required = required_free_bytes(size);
     if available < required {
         anyhow::bail!(
             "not enough free space to back up the database before upgrading it: \

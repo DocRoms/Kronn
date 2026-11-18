@@ -15,32 +15,7 @@ use chrono::{DateTime, Datelike, Duration, SecondsFormat, TimeZone, Timelike, Ut
 use chrono_tz::Tz;
 use std::collections::HashMap;
 
-/// Whether `name` belongs to Kronn's built-ins (`run.*`, `time.*`, `now*`,
-/// the repository profile's `project.*` and the workflow's `refs.*`).
-/// No declared variable, trigger field or launch value may use it, since a
-/// built-in is trusted for what produced it, not for its name.
-pub fn is_reserved_name(name: &str) -> bool {
-    let base = name.split('|').next().unwrap_or_default().trim();
-    base == "run"
-        || base.starts_with("run.")
-        || base == "time"
-        || base.starts_with("time.")
-        || base.starts_with("now")
-        || base.starts_with("project.")
-        || base == "refs"
-        || base.starts_with("refs.")
-}
-
-/// The first reserved name among `names`, as a user-facing refusal.
-pub fn refuse_reserved_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
-    match names.into_iter().find(|name| is_reserved_name(name)) {
-        Some(name) => Err(format!(
-            "Le nom de variable `{}` est réservé à Kronn (`run.*`, `time.*`, `now*`, `project.*`, `refs.*`) ; choisis un autre nom.",
-            name.trim()
-        )),
-        None => Ok(()),
-    }
-}
+pub use crate::models::quick::{is_reserved_name, refuse_reserved_names};
 
 /// Template context holding all available variables.
 #[derive(Debug, Clone)]

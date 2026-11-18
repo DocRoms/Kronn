@@ -2044,9 +2044,7 @@ pub fn create_discussion_worktree(
     })
 }
 
-/// Workspace mode of a discussion that reviews a commit (KT-1645): it owns a
-/// detached worktree and never falls back to the project's main checkout.
-pub const REVIEW_WORKSPACE_MODE: &str = "Review";
+pub use crate::db::discussions::REVIEW_WORKSPACE_MODE;
 
 /// What [`create_review_worktree`] hands back: the checkout and the commits the
 /// review was pinned to.

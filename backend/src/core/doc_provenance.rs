@@ -14,9 +14,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use ts_rs::TS;
 
-use crate::api::audit::anti_hallu_enforce::{named_sections, NamedSection};
+use crate::core::anti_halluc::{named_sections, NamedSection};
 
-pub const PROVENANCE_FILENAME: &str = "provenance.json";
+pub use crate::core::kronn_state::PROVENANCE_FILENAME;
 
 const README: &str = "Managed by Kronn. Which docs a human validated, as digests of the \
 validated text. A doc whose text no longer matches is to reconfirm. Commit it with the docs.";
@@ -817,7 +817,7 @@ pub fn confirm(project: &Path, docs: &[String]) -> Result<Vec<String>, String> {
     // documents keep the established behavior of removing their old record.
     for doc in &targets {
         if read_doc(project, doc).is_some_and(|content| {
-            crate::core::document_optimization::contains_placeholder(&content)
+            crate::core::anti_halluc::contains_placeholder(&content)
         }) {
             return Err(format!(
                 "Cannot confirm `{doc}`: unresolved template or TODO placeholders remain."

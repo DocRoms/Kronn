@@ -933,6 +933,7 @@ fn native_command(
         crate::core::child_env::var("KRONN_BACKEND_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:3140".into())
     });
+    crate::core::mcp_scanner::ensure_local_exclude(cwd, ".kronn/tmp/");
     child_env::apply_agent_launch(
         command.as_std_mut(),
         std::path::Path::new(cwd),

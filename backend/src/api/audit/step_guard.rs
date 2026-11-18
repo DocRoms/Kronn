@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 use super::validation::{target_snapshot, TargetSnapshot};
 use crate::core::fs_guard::assert_contained_no_symlink;
 
-pub(crate) const PARTIAL_OPEN: &str = "<!-- kronn:partial-step -->";
-pub(crate) const PARTIAL_CLOSE: &str = "<!-- kronn:partial-step:end -->";
+pub(crate) use crate::core::audit_run_state::{has_partial_marker, PARTIAL_CLOSE, PARTIAL_OPEN};
 
 /// `target_state` of a step whose target was put back.
 pub(crate) const STATE_RESTORED: &str = "restored";
@@ -39,11 +38,6 @@ pub(crate) fn partial_banner(step: u32, reason: &str) -> String {
         "{PARTIAL_OPEN}\n> ⚠️ **Partial document** — audit step {step} did not complete ({bounded}). \
 Kronn kept what the agent wrote: retry the step, or accept it as it stands.\n{PARTIAL_CLOSE}\n\n"
     )
-}
-
-/// Whether `content` starts with a partial marker.
-pub(crate) fn has_partial_marker(content: &str) -> bool {
-    content.trim_start().starts_with(PARTIAL_OPEN)
 }
 
 /// `content` without its partial marker; `None` when it has none.

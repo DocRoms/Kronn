@@ -471,14 +471,14 @@ pub async fn execute_step(
     // discussion message: the model's context window, under the configured
     // hard ceiling. Refused here, once, rather than sent to be truncated.
     let no_pinned_windows = std::collections::HashMap::new();
-    let prompt_limit = crate::api::discussions::prompt_limit::limit_for(
+    let prompt_limit = crate::core::prompt_limit::limit_for(
         &step.agent,
         effective_model.as_deref(),
         ollama_context_overrides.unwrap_or(&no_pinned_windows),
-        crate::api::discussions::prompt_limit::saved_hard_ceiling(),
+        crate::core::prompt_limit::saved_hard_ceiling(),
     );
     if let Err(refusal) =
-        crate::api::discussions::prompt_limit::check(prompt.len(), &prompt_limit, "Prompt")
+        crate::core::prompt_limit::check(prompt.len(), &prompt_limit, "Prompt")
     {
         return refusal_outcome(step, refusal);
     }
@@ -996,7 +996,7 @@ pub async fn execute_step(
                 );
                 // KT-811 — a quota refusal does not clear within the retry
                 // backoff; retrying only spends the run's attempts.
-                if let Some(quota) = super::quota_wait::classify(&last_error, chrono::Utc::now()) {
+                if let Some(quota) = crate::core::quota_text::classify(&last_error, chrono::Utc::now()) {
                     provenance.selected_attempt = None;
                     return StepOutcome {
                         result: StepResult {
@@ -1275,7 +1275,7 @@ pub(super) fn step_skills(
     project_id: Option<&str>,
     run_id: Option<&str>,
 ) -> Result<(Vec<String>, Vec<crate::models::Skill>)> {
-    use crate::api::projects::used_skills::parse_repository_skill_id;
+    use crate::core::repository_skills::parse_repository_skill_id;
     let mut catalog = Vec::new();
     let mut repository = Vec::new();
     for id in skill_ids {

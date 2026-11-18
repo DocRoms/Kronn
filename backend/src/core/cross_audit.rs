@@ -44,10 +44,41 @@ const TEXT_MAX: usize = 600;
 
 // ── Option ──────────────────────────────────────────────────────────────────
 
+/// Agents eligible to RUN an audit: the pipeline's only deliverable is
+/// files written into `docs/`, so an agent that cannot write there can only
+/// produce a silent no-op that the validator then flags step by step.
+///
+/// Two kinds of agent can: a CLI with its own filesystem, and an HTTP agent
+/// whose file tools Kronn executes on its behalf (KT-338), scoped to the
+/// project by `agent_launch` (KT-924). Every HTTP agent is admitted (KT-980):
+/// sending the repository to a hosted provider is the user's choice, warned
+/// about in the UI. A `Custom` agent is only launched with a validated named
+/// connection (`AuditAgentLauncher::for_request`).
+///
+/// ALLOWLIST, not denylist (Codex A4 v2): a new/unknown variant must force
+/// a compiler decision here instead of being audit-capable by default.
+/// Mirrored by the UI's `canRunAudit`, enforced here because MCP/bridge
+/// callers bypass the UI entirely.
+pub(crate) fn agent_can_audit(agent: &AgentType) -> bool {
+    match agent {
+        AgentType::ClaudeCode
+        | AgentType::Codex
+        | AgentType::OpenCode
+        | AgentType::GeminiCli
+        | AgentType::Kiro
+        | AgentType::CopilotCli
+        | AgentType::Ollama
+        | AgentType::LiteLlm
+        | AgentType::Nvidia
+        | AgentType::Custom => true,
+        AgentType::Vibe => false,
+    }
+}
+
 /// Agents a cross-agent audit may use: audit-capable and launchable without a
 /// named connection.
 pub fn eligible_agent(agent: &AgentType) -> bool {
-    crate::api::audit::agent_can_audit(agent) && *agent != AgentType::Custom
+    agent_can_audit(agent) && *agent != AgentType::Custom
 }
 
 /// The briefing line for `agents`.

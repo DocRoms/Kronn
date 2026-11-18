@@ -36,29 +36,7 @@ use std::sync::Arc;
 
 use crate::core::docs_location::DocsRoot;
 
-/// Files and folders outside the root that Kronn (or the agent CLI it
-/// launches) owns: root pointers, per-agent instruction and MCP config.
-pub(crate) const KRONN_OWNED: &[&str] = &[
-    "AGENTS.md",
-    "CLAUDE.md",
-    "GEMINI.md",
-    ".cursorrules",
-    ".cursor",
-    ".windsurfrules",
-    ".clinerules",
-    ".github/copilot-instructions.md",
-    ".github/instructions",
-    ".kiro",
-    ".vibe",
-    ".claude",
-    ".codex",
-    ".gemini",
-    ".opencode",
-    ".mcp.json",
-    "opencode.json",
-    "opencode.jsonc",
-    ".kronn",
-];
+pub(crate) use crate::agents::read_only_repos::KRONN_OWNED;
 
 fn kronn_owned(rel: &str) -> bool {
     KRONN_OWNED

@@ -392,17 +392,7 @@ fn gitlab_host_from_process_env() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// Normalize a repo URL for comparison (strip .git suffix, lowercase, strip protocol prefix)
-pub(crate) fn normalize_repo_url(url: &str) -> String {
-    url.to_lowercase()
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .replace("https://github.com/", "github:")
-        .replace("https://gitlab.com/", "gitlab:")
-        .replace("git@github.com:", "github:")
-        .replace("git@gitlab.com:", "gitlab:")
-        .to_string()
-}
+pub(crate) use crate::core::github_connection::normalize_repo_url;
 
 /// Fetch all repos for the authenticated GitHub user, including organization repos.
 /// Bounded per request: discovery paginates in a loop inside a GET handler —

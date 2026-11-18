@@ -1483,7 +1483,7 @@ async fn installing_never_turns_a_human_folder_with_an_earlier_audit_into_kronns
     let project = h.project.path();
     human_docs(project);
     // An earlier audit is recorded, yet no file carries a Kronn marker.
-    crate::core::kronn_state::record_audit(project, "full").unwrap();
+    crate::core::template_manifest::record_audit(project, "full").unwrap();
     let is_human = |project: &Path| {
         matches!(
             crate::core::docs_folder::folder_state(project, "docs"),
@@ -1521,7 +1521,7 @@ async fn template_files_the_human_overwrote_are_theirs_again_and_asked_about() {
     let h = harness().await;
     let project = h.project.path();
     install_template_route(&h).await;
-    crate::core::kronn_state::record_audit(project, "full").unwrap();
+    crate::core::template_manifest::record_audit(project, "full").unwrap();
     assert_eq!(
         crate::core::docs_folder::folder_state(project, "docs"),
         crate::core::docs_folder::DocsFolderState::KronnManaged

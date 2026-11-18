@@ -132,7 +132,7 @@ impl Trigger {
 /// else — in particular the stall or timeout of the work itself, which says
 /// nothing about the provider: a fallback would only repeat the same wait.
 pub fn classify_trigger(error: &str) -> Option<Trigger> {
-    use crate::api::discussions::orchestration::is_hard_quota_exhausted;
+    use crate::core::quota_text::is_hard_quota_exhausted;
     let lower = error.to_lowercase();
     if lower.contains("agent stalled") || lower.contains("global timeout") {
         return None;

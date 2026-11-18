@@ -2222,7 +2222,7 @@ pub(crate) async fn run_partial_pipeline(
             let write_res = tokio::task::spawn_blocking(move || -> Result<(), String> {
                 crate::core::checksums::write_checksums_file(&pp, &merged, &rewritten)?;
                 if completed {
-                    if let Err(e) = crate::core::kronn_state::record_audit(&pp, "partial") {
+                    if let Err(e) = crate::core::template_manifest::record_audit(&pp, "partial") {
                         tracing::warn!("Failed to record partial audit in .kronn.json: {e}");
                     }
                 }

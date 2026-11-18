@@ -15,9 +15,8 @@ use crate::models::{
 
 /// Heading of the answers section inside `docs/briefing.md`.
 pub(crate) const FACTS_HEADING: &str = "## Project facts";
-/// Machine-readable copy of the answers, one line, invisible once rendered.
-const ANSWERS_PREFIX: &str = "<!-- kronn:project-answers v1 ";
-const ANSWERS_SUFFIX: &str = " -->";
+pub(crate) use crate::models::projects::parse_answers;
+use crate::models::projects::{ANSWERS_PREFIX, ANSWERS_SUFFIX};
 /// First line of a `docs/project.md` Kronn may regenerate. Removing it hands
 /// the file over to humans: the audit then never rewrites it.
 pub(crate) const GENERATED_MARKER: &str = "<!-- kronn:generated=\"briefing\"";
@@ -502,17 +501,6 @@ pub(crate) fn render_facts_section(answers: &BriefingProjectAnswers) -> Option<S
         .replace('>', "\\u003e");
     out.push_str(&format!("{ANSWERS_PREFIX}{json}{ANSWERS_SUFFIX}\n"));
     Some(out)
-}
-
-/// The answers recorded in a briefing, if any.
-pub(crate) fn parse_answers(notes: &str) -> Option<BriefingProjectAnswers> {
-    notes.lines().find_map(|line| {
-        let json = line
-            .trim()
-            .strip_prefix(ANSWERS_PREFIX)?
-            .strip_suffix(ANSWERS_SUFFIX)?;
-        serde_json::from_str(json).ok()
-    })
 }
 
 /// `notes` without the sections under `headings` (each from its heading to the

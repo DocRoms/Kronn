@@ -110,7 +110,7 @@ pub(crate) fn limit_for(
         bytes: from_window.min(hard_ceiling),
         model: model_name
             .map(str::to_owned)
-            .unwrap_or_else(|| crate::api::disc_helpers::agent_display_name(agent)),
+            .unwrap_or_else(|| crate::agents::agent_display_name(agent)),
         window_tokens,
         ceiling_bound,
     }

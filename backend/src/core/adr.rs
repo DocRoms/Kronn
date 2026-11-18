@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::core::audit_validation::{
+use crate::core::td_sheet::{
     append_history_entry, replace_current_status, td_decision, TdDecision, STATUS_ACCEPTED_DECISION,
 };
 
@@ -424,7 +424,7 @@ fn td_sheets_guarded(
         .iter()
         .filter_map(|name| {
             let id = name.to_str()?.strip_suffix(".md")?.to_string();
-            crate::core::td_index::is_td_id(&id).then(|| (id, td_dir.join(name)))
+            crate::core::td_sheet::is_td_id(&id).then(|| (id, td_dir.join(name)))
         })
         .collect();
     sheets.sort();

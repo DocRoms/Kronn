@@ -2,6 +2,30 @@ use std::path::{Path, PathBuf};
 
 use crate::models::AgentType;
 
+/// Files and folders outside the root that Kronn (or the agent CLI it
+/// launches) owns: root pointers, per-agent instruction and MCP config.
+pub(crate) const KRONN_OWNED: &[&str] = &[
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    ".cursorrules",
+    ".cursor",
+    ".windsurfrules",
+    ".clinerules",
+    ".github/copilot-instructions.md",
+    ".github/instructions",
+    ".kiro",
+    ".vibe",
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".opencode",
+    ".mcp.json",
+    "opencode.json",
+    "opencode.jsonc",
+    ".kronn",
+];
+
 /// Invocation-local policy shared by the adapters and direct CLI route.
 #[derive(Debug)]
 pub(crate) struct ReadOnlyRepos {
@@ -176,7 +200,7 @@ fn secret_rules(tools: &[&str], root: &str) -> Vec<String> {
 fn executable_names() -> impl Iterator<Item = &'static &'static str> {
     CODE_ROOT_EXECUTABLE_PATHS
         .iter()
-        .chain(crate::api::audit::step_remit::KRONN_OWNED)
+        .chain(KRONN_OWNED)
 }
 
 /// Claude permission rules refusing writes to what a later program runs.

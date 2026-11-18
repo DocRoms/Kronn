@@ -697,56 +697,7 @@ pub(crate) fn unproven_reason(count: usize, list: &str) -> String {
     )
 }
 
-/// Count `{{IDENT}}` shaped placeholders in a markdown body. Conservative:
-/// only counts uppercase-snake tokens to avoid matching legitimate Twig /
-/// Liquid / Mermaid syntax that uses `{{` for its own purposes (e.g.
-/// `{{ asset('foo') }}` in a Twig snippet inside coding-rules.md, or
-/// `{{ DECISION_1 }}` is matched, but `{{ asset(...) }}` is not).
-/// Fenced blocks and inline code spans are invisible to the counter —
-/// documenting a placeholder is not the same as leaving one unfilled
-/// (benchmark run 1 false positive: the TD index mentioning
-/// `{{DO_NOT_1}}` in inline code made a 43-TD file read as "still the
-/// template"). Reuses the anti-hallu strippers: inline spans pair
-/// N-backtick runs (an UNCLOSED run keeps its text — a stray backtick can
-/// never hide a real slot, bounded pairing on hostile lines); fences are
-/// lexical, and an UNCLOSED fence restores everything it withheld,
-/// opening line included.
-pub(crate) fn count_raw_placeholders(content: &str) -> usize {
-    raw_placeholder_names(content).len()
-}
-
-/// The `{{TOKEN}}` placeholders still in `content`, in order, outside code.
-pub(crate) fn raw_placeholder_names(content: &str) -> Vec<String> {
-    let stripped = crate::core::anti_halluc::strip_inline_code(
-        &crate::core::anti_halluc::strip_fenced_code(content),
-    );
-    // Match `{{IDENT}}` and `{{ IDENT }}` where IDENT is
-    // UPPERCASE_SNAKE (with optional digits + _). The trailing
-    // boundary is a literal `}}`, not just `}`, to avoid hits on
-    // Twig double-brace blocks that contain spaces / parens.
-    let mut names = Vec::new();
-    let mut rest = stripped.as_str();
-    while let Some(start) = rest.find("{{") {
-        let after_open = &rest[start + 2..];
-        // Find closing `}}`
-        let Some(end) = after_open.find("}}") else {
-            break;
-        };
-        let inside = after_open[..end].trim();
-        // Must be a single UPPERCASE_SNAKE token (letters / digits / _).
-        // No spaces, no parens, no quotes. This excludes Twig.
-        let is_placeholder = !inside.is_empty()
-            && inside
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-            && inside.chars().any(|c| c.is_ascii_uppercase());
-        if is_placeholder {
-            names.push(inside.to_string());
-        }
-        rest = &after_open[end + 2..];
-    }
-    names
-}
+pub(crate) use crate::core::anti_halluc::{count_raw_placeholders, raw_placeholder_names};
 
 /// Placeholders whose value Kronn knows for certain, not the model: filled
 /// by the pipeline so a step never fails on a date it could not see.

@@ -242,9 +242,7 @@ async fn plan(
     })
 }
 
-/// KT-1758 — how much of a refusal the rooms quote. The native ACP refusal is
-/// about 230 characters; the whole sentence is the point.
-pub(crate) const LAUNCH_REFUSAL_DETAIL_CHARS: usize = 600;
+pub(crate) use crate::api::orchestration::LAUNCH_REFUSAL_DETAIL_CHARS;
 
 pub(super) fn system_notice(
     content: String,

@@ -758,14 +758,7 @@ pub fn suggest_skills(filename: &str) -> Vec<String> {
     }
 }
 
-/// A context file entry for prompt building (text or image reference).
-pub struct ContextEntry {
-    /// The context file's id — what `media_generate` takes as a reference.
-    pub id: String,
-    pub filename: String,
-    pub text: String,
-    pub disk_path: Option<String>,
-}
+pub use crate::db::discussions::ContextEntry;
 
 /// Build the `=== CONTEXT FILES ===` prompt section.
 /// Text files: inline content. Images: reference path for agent to read.

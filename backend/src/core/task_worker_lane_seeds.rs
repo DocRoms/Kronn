@@ -271,9 +271,7 @@ pub struct LaneSeedSecretFinding {
     pub held: bool,
 }
 
-/// The secret-looking files a human has seen and accepted, by declared seed
-/// (repository-relative paths). A file that is not listed here holds its seed.
-pub type ConfirmedSecrets = BTreeMap<String, Vec<String>>;
+pub use crate::db::projects::ConfirmedSecrets;
 
 /// How many secret-looking paths one finding lists.
 const MAX_SECRET_FILES_LISTED: usize = 10;

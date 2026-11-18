@@ -444,7 +444,7 @@ pub async fn report(
             let bytes = manifest_of(name)?.size_bytes?;
             Some(OllamaSuggestionSize {
                 name: name.clone(),
-                size: crate::api::ollama::format_size(bytes),
+                size: format_size(bytes),
             })
         })
         .collect();
@@ -1178,3 +1178,14 @@ mod tests {
         assert!(registry.cache.lock().unwrap().len() <= MAX_CACHE_ENTRIES);
     }
 }
+/// Format bytes into human-readable size (e.g. "4.1 GB").
+pub(crate) fn format_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+    } else if bytes >= 1_000_000 {
+        format!("{:.0} MB", bytes as f64 / 1_000_000.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+

@@ -3494,7 +3494,7 @@ pub async fn full_audit(
                     &rewritten,
                 )?;
                 // Best-effort state marker — informational, not contractual.
-                if let Err(e) = crate::core::kronn_state::record_audit(&pp, "full") {
+                if let Err(e) = crate::core::template_manifest::record_audit(&pp, "full") {
                     tracing::warn!("Failed to record audit in .kronn.json: {}", e);
                 }
                 Ok(mappings.len())
@@ -6797,7 +6797,7 @@ mod cluster_tests {
         fs::create_dir_all(&docs).unwrap();
         // Record a finished audit. This is the exact scenario the user
         // hit : a successful audit, then a relaunch + cancel.
-        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        crate::core::template_manifest::record_audit(project, "full").unwrap();
 
         let action = classify_docs_dir_for_cancel(project, &docs);
         assert_eq!(
@@ -6887,7 +6887,7 @@ mod cluster_tests {
         let project = dir.path();
         let docs = project.join("docs");
         fs::create_dir_all(&docs).unwrap();
-        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        crate::core::template_manifest::record_audit(project, "full").unwrap();
         // Remove every file in docs/ except .kronn.json.
         for entry in fs::read_dir(&docs).unwrap().filter_map(|e| e.ok()) {
             let n = entry.file_name();
@@ -6964,7 +6964,7 @@ mod cluster_tests {
         fs::create_dir_all(project.join("docs")).unwrap();
         fs::write(project.join("docs/AGENTS.md"), "# Project context").unwrap();
         fs::write(project.join("docs/architecture.md"), "# Arch overview").unwrap();
-        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        crate::core::template_manifest::record_audit(project, "full").unwrap();
         fs::write(project.join("CLAUDE.md"), "redirector").unwrap();
 
         cleanup_audit_files(project).unwrap();
@@ -7016,7 +7016,7 @@ mod cluster_tests {
         let project = dir.path();
         let docs = project.join("docs");
         fs::create_dir_all(&docs).unwrap();
-        crate::core::kronn_state::record_audit(project, "full").unwrap();
+        crate::core::template_manifest::record_audit(project, "full").unwrap();
         fs::write(docs.join("AGENTS.md"), "...").unwrap();
 
         let action = classify_docs_dir_for_cancel(project, &docs);

@@ -67,11 +67,7 @@ const RUN_COLS: &str = "id, kind, discussion_id, project_id, target_workspace_id
     default_worker_json, auto_continue, quota_fallback, quota_fallback_agents_json, \
     reviewer_json";
 
-fn parse_dt(value: String) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(&value)
-        .map(|date| date.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
-}
+use super::execution_activity::parse_dt;
 
 fn parse_opt_dt(value: Option<String>) -> Option<DateTime<Utc>> {
     value.map(parse_dt)
@@ -247,26 +243,7 @@ pub(crate) fn agent_type_to_db(a: &AgentType) -> String {
     .to_string()
 }
 
-/// Parse a stored `worker_agent_type` back to the typed identity (defense-in-depth
-/// like [`parse_target_kind`]): a value outside the domain is a corrupt row,
-/// surfaced as a hard error rather than silently dropping the worker's provider
-/// when the saga reconstructs the `MessageTarget` on resume.
-pub(crate) fn agent_type_from_db(s: &str) -> Result<AgentType> {
-    Ok(match s {
-        "ClaudeCode" => AgentType::ClaudeCode,
-        "Codex" => AgentType::Codex,
-        "OpenCode" => AgentType::OpenCode,
-        "Vibe" => AgentType::Vibe,
-        "GeminiCli" => AgentType::GeminiCli,
-        "Kiro" => AgentType::Kiro,
-        "CopilotCli" => AgentType::CopilotCli,
-        "Ollama" => AgentType::Ollama,
-        "LiteLlm" => AgentType::LiteLlm,
-        "Nvidia" => AgentType::Nvidia,
-        "Custom" => AgentType::Custom,
-        other => bail!("unknown worker_agent_type: {other}"),
-    })
-}
+pub(crate) use super::agent_dispatch::agent_type_from_db;
 
 fn model_tier_to_db(tier: &ModelTier) -> &'static str {
     match tier {
@@ -1178,19 +1155,6 @@ pub fn discussion_is_execution_room(conn: &Connection, discussion_id: &str) -> R
         )
         .optional()?;
     Ok(found.is_some())
-}
-
-/// A worker's durable assignment owns its room even when its CLI is absent,
-/// left, or not polling. Only an explicit execution reassignment changes this
-/// authority; presence must never create a second writer in the worktree.
-pub fn discussion_has_cli_worker(conn: &Connection, discussion_id: &str) -> Result<bool> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM task_executions
-          WHERE sub_discussion_id = ?1 AND worker_target_kind = 'cli')",
-        [discussion_id],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
 }
 
 /// Resolve the durable execution that owns a worker room, including any
@@ -2207,40 +2171,6 @@ fn launch_dod_snapshot(
             .map(|(id, sentence)| serde_json::json!({ "id": id, "sentence": sentence }))
             .collect(),
     ))
-}
-
-/// KT-1291 — the sentence the execution was launched with for DoD item
-/// `dod_id`; `None` for an execution launched before the snapshot recorded
-/// sentences.
-pub fn execution_dod_sentence(
-    conn: &Connection,
-    exec_id: &str,
-    dod_id: &str,
-) -> Result<Option<String>> {
-    let payloads = conn
-        .prepare(
-            "SELECT changes_json FROM task_execution_events
-              WHERE task_execution_id = ?1 AND action = 'created'
-              ORDER BY created_at ASC, rowid ASC",
-        )?
-        .query_map(params![exec_id], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for payload in payloads {
-        let Ok(changes) = serde_json::from_str::<serde_json::Value>(&payload) else {
-            continue;
-        };
-        let found = changes
-            .get("worker_dod")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(dod_id))
-            .and_then(|item| item.get("sentence").and_then(serde_json::Value::as_str));
-        if let Some(sentence) = found {
-            return Ok(Some(sentence.to_string()));
-        }
-    }
-    Ok(None)
 }
 
 /// Atomically add one ordered, policy-compliant task to an existing campaign.
@@ -8203,15 +8133,17 @@ fn recovery_row(row: &Row) -> rusqlite::Result<TaskExecutionRecovery> {
     })
 }
 
-/// KT-1247 — a silent worker must be detectable even when the campaign set no
-/// resilience policy (every campaign so far). Twenty minutes without a tool
-/// call, a message, a commit or a delivery is the default; both defaults can be
-/// moved globally through the environment, and per campaign through the
-/// `orchestration_run_resilience_policy` row, which always wins.
-pub const DEFAULT_ACTIVITY_TIMEOUT_SECS: u32 = 20 * 60;
-/// How long a delivery may sit unreviewed before the principal is alerted.
-pub const DEFAULT_REVIEW_TIMEOUT_SECS: u32 = 4 * 60 * 60;
-const ACTIVITY_TIMEOUT_ENV: &str = "KRONN_TASK_ACTIVITY_TIMEOUT_SECS";
+pub use super::execution_activity::{
+    default_activity_timeout_secs, default_review_timeout_secs, discussion_has_cli_worker,
+    execution_dod_sentence,
+    note_dispatch_activity,
+    note_room_activity, touch_execution_activity, DEFAULT_ACTIVITY_TIMEOUT_SECS,
+    DEFAULT_REVIEW_TIMEOUT_SECS,
+};
+use super::execution_activity::{
+    effective_activity_secs, effective_review_secs, timeout_secs_from_env,
+};
+
 /// How long a single tool call (a cold `cargo build`, a full test suite) may
 /// run before the worker counts as silent again.
 const TOOL_IN_FLIGHT_CAP_ENV: &str = "KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS";
@@ -8233,30 +8165,12 @@ fn tool_in_flight(phase: Option<&str>, started: Option<DateTime<Utc>>, now: Date
             started + chrono::Duration::seconds(i64::from(tool_in_flight_cap_secs())) > now
         })
 }
-const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
+
 /// KT-1689 — how long a `Working` execution may wait for its worker's turn (the
 /// task-worker cap, the agent caps) before the principal is told. The wait is not
 /// silence, so it never interrupts: it raises one event per dispatch.
 pub const DEFAULT_QUEUE_TIMEOUT_SECS: u32 = 6 * 60 * 60;
 const QUEUE_TIMEOUT_ENV: &str = "KRONN_TASK_QUEUE_TIMEOUT_SECS";
-
-fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
-    crate::core::child_env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .filter(|seconds| *seconds > 0)
-        .unwrap_or(fallback)
-}
-
-/// Global default activity timeout (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`).
-pub fn default_activity_timeout_secs() -> u32 {
-    timeout_secs_from_env(ACTIVITY_TIMEOUT_ENV, DEFAULT_ACTIVITY_TIMEOUT_SECS)
-}
-
-/// Global default review timeout (`KRONN_TASK_REVIEW_TIMEOUT_SECS`).
-pub fn default_review_timeout_secs() -> u32 {
-    timeout_secs_from_env(REVIEW_TIMEOUT_ENV, DEFAULT_REVIEW_TIMEOUT_SECS)
-}
 
 /// Global queue deadline (`KRONN_TASK_QUEUE_TIMEOUT_SECS`).
 pub fn default_queue_timeout_secs() -> u32 {
@@ -8275,20 +8189,6 @@ fn queue_wait_reported(conn: &Connection, exec_id: &str, dispatch_id: &str) -> R
         |row| row.get(0),
     )
     .map_err(Into::into)
-}
-
-/// The activity clock a status owes. A worker owes activity only while it is
-/// `Working`; the default therefore arms nowhere else, so an `Interrupted`,
-/// `AwaitingReview` or `Escalated` row is never "silent". An explicit campaign
-/// policy keeps the clock it always armed.
-fn effective_activity_secs(policy: Option<i64>, status: TaskExecutionStatus) -> Option<i64> {
-    policy.or_else(|| {
-        (status == TaskExecutionStatus::Working).then(|| i64::from(default_activity_timeout_secs()))
-    })
-}
-
-fn effective_review_secs(policy: Option<i64>) -> i64 {
-    policy.unwrap_or_else(|| i64::from(default_review_timeout_secs()))
 }
 
 pub fn get_resilience_policy(
@@ -8447,126 +8347,6 @@ pub fn set_execution_recovery(
     )?;
     get_execution_recovery(conn, &execution.id)?
         .ok_or_else(|| anyhow::anyhow!("recovery decision vanished after upsert"))
-}
-
-pub fn touch_execution_activity(conn: &Connection, exec_id: &str) -> Result<()> {
-    let now = Utc::now();
-    type RecoveryClocks = (
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        String,
-        String,
-    );
-    let clocks: Option<RecoveryClocks> = conn
-        .query_row(
-            "SELECT p.activity_timeout_secs, p.review_timeout_secs, \
-                    p.human_wait_timeout_secs, r.timeout_secs, e.created_at, e.status \
-             FROM task_executions e \
-             JOIN orchestration_runs r ON r.id = e.orchestration_run_id \
-             LEFT JOIN orchestration_run_resilience_policy p \
-               ON p.orchestration_run_id = e.orchestration_run_id \
-             WHERE e.id = ?1",
-            [exec_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((activity_secs, review_secs, _human_secs, total_secs, created_at, status)) = clocks
-    else {
-        return Ok(());
-    };
-    let current_status = TaskExecutionStatus::from_str(&status)?;
-    let deadline = effective_activity_secs(activity_secs, current_status)
-        .map(|seconds| now + chrono::Duration::seconds(seconds));
-    let review_deadline = if current_status == TaskExecutionStatus::AwaitingReview {
-        Some(now + chrono::Duration::seconds(effective_review_secs(review_secs)))
-    } else {
-        None
-    };
-    let human_started = if status == TaskExecutionStatus::Escalated.as_str() {
-        Some(now)
-    } else {
-        None
-    };
-    let total_deadline =
-        total_secs.map(|seconds| parse_dt(created_at.clone()) + chrono::Duration::seconds(seconds));
-    conn.execute(
-        "INSERT OR IGNORE INTO task_execution_recovery (\
-             task_execution_id, recovery_action, recovery_reason, last_activity_at, \
-             total_deadline_at, activity_deadline_at, review_deadline_at, \
-             human_wait_started_at, assignment_generation, pending, updated_at\
-         ) VALUES (?1, 'resume_worker', 'runtime clocks', ?2, ?3, ?4, ?5, ?6, 0, 0, ?2)",
-        params![
-            exec_id,
-            now.to_rfc3339(),
-            total_deadline.map(|value| value.to_rfc3339()),
-            deadline.map(|value| value.to_rfc3339()),
-            review_deadline.map(|value| value.to_rfc3339()),
-            human_started.map(|value| value.to_rfc3339()),
-        ],
-    )?;
-    conn.execute(
-        "UPDATE task_execution_recovery SET last_activity_at = ?2, \
-                activity_deadline_at = ?3, review_deadline_at = ?4, \
-                human_wait_started_at = ?5, updated_at = ?2 \
-         WHERE task_execution_id = ?1",
-        params![
-            exec_id,
-            now.to_rfc3339(),
-            deadline.map(|value| value.to_rfc3339()),
-            review_deadline.map(|value| value.to_rfc3339()),
-            human_started.map(|value| value.to_rfc3339()),
-        ],
-    )?;
-    Ok(())
-}
-
-/// Push the silent-worker clock of the `Working` execution owning this dispatch.
-/// Best effort by design: failing to move a clock must never fail the progress
-/// write or the message that carries the activity.
-pub fn note_dispatch_activity(conn: &Connection, dispatch_id: &str) -> Result<()> {
-    let exec_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM task_executions \
-             WHERE dispatch_job_id = ?1 AND status = 'Working' LIMIT 1",
-            [dispatch_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(exec_id) = exec_id {
-        if let Err(error) = touch_execution_activity(conn, &exec_id) {
-            tracing::warn!(execution_id = %exec_id, "could not push activity clock: {error}");
-        }
-    }
-    Ok(())
-}
-
-/// Same, keyed by the worker room a message was posted in.
-pub fn note_room_activity(conn: &Connection, discussion_id: &str) -> Result<()> {
-    let exec_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM task_executions \
-             WHERE sub_discussion_id = ?1 AND status = 'Working' LIMIT 1",
-            [discussion_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(exec_id) = exec_id {
-        if let Err(error) = touch_execution_activity(conn, &exec_id) {
-            tracing::warn!(execution_id = %exec_id, "could not push activity clock: {error}");
-        }
-    }
-    Ok(())
 }
 
 /// Expired clocks with their precise semantic kind. Human waits are reported,

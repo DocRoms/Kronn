@@ -1665,13 +1665,48 @@ impl Residence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal(pub String);
 
+/// What the active grants of a set of discussions open, the primary project
+/// excepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GrantedProjects {
+    pub read: HashSet<String>,
+    /// Projects whose planning the room changes (`plan` and `code`).
+    pub write: HashSet<String>,
+    /// Projects whose checkout the room's agent edits (`code`, KT-1491). Always
+    /// also in `write` and `read`; a code grant opens nothing more in Kronn's
+    /// tools than a plan grant does.
+    pub code: HashSet<String>,
+    /// Every project, at most `plan`: `code` names one project.
+    pub all: Option<crate::models::discussion_scope::ScopeAccess>,
+    /// A room without a project may write the general resources.
+    pub general: bool,
+    /// The general resources these rooms created, as `(kind, id)`: the only
+    /// ones « General · write » lets their agents edit.
+    pub general_own: HashSet<(String, String)>,
+}
+
+impl GrantedProjects {
+    /// Everything `other` opens, added to `self`.
+    pub fn merge(&mut self, other: GrantedProjects) {
+        self.read.extend(other.read);
+        self.write.extend(other.write);
+        self.code.extend(other.code);
+        self.general |= other.general;
+        self.general_own.extend(other.general_own);
+        self.all = match (self.all, other.all) {
+            (Some(a), Some(b)) => Some(a.stronger(b)),
+            (a, b) => a.or(b),
+        };
+    }
+}
+
 /// What a token reaches (KT-1270): its frozen project, plus the projects a
 /// human granted to its rooms. Grants never reach credentials, never run a
 /// shared resource elsewhere, and a project-less token reaches none of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reach {
     pub bound: Option<String>,
-    pub granted: crate::db::discussion_scope::GrantedProjects,
+    pub granted: GrantedProjects,
 }
 
 impl Reach {

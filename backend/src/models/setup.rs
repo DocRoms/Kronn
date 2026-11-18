@@ -622,6 +622,36 @@ impl LaneWarmConfig {
 
 const MAX_LANE_EXECUTABLES: usize = 32;
 
+/// Names that are refused even if they appear in the allowlist.
+///
+/// The allowlist is a source file, so it will be edited. This is what makes DoD
+/// "no `sh -c`" hold against a future edit rather than against today's list: a
+/// shell added above is still rejected here, and the rejection names why.
+pub const DENIED_BINARIES: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "csh",
+    "tcsh",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "pwsh",
+    "env",
+    "eval",
+    "xargs",
+    "nohup",
+    "setsid",
+    "sudo",
+    "doas",
+    "ssh",
+    "perl",
+    "ruby",
+];
+
 /// KT-1751 — one entry of `validation_executables`: a bare program name or a
 /// path inside the repository, in plain characters (a validation is a literal
 /// argv, so nothing a shell would read), and never a program that runs a command
@@ -657,7 +687,7 @@ fn validate_validation_executable(entry: &str) -> Result<(), String> {
     if entry.starts_with('-') {
         return refused("is an option, not a program");
     }
-    if crate::core::quick_exec::DENIED_BINARIES.contains(&entry) {
+    if DENIED_BINARIES.contains(&entry) {
         return refused("runs a command line of its own, which a validation never does");
     }
     Ok(())

@@ -2887,12 +2887,21 @@ pub fn list_active_runs(
         .collect())
 }
 
+/// The quota wait a `WaitingQuota` run is parked on: its trailing step.
+pub fn pending_wait(run: &WorkflowRun) -> Option<&QuotaWait> {
+    (run.status == RunStatus::WaitingQuota)
+        .then(|| run.step_results.last())
+        .flatten()
+        .filter(|step| step.status == RunStatus::WaitingQuota)
+        .and_then(|step| step.quota_wait.as_ref())
+}
+
 /// A run's row on the active board; `workflow_name` falls back to the id.
 pub fn active_run_summary(
     run: &WorkflowRun,
     workflow_name: Option<String>,
 ) -> crate::models::ActiveRunSummary {
-    let quota = crate::workflows::quota_wait::pending_wait(run).map(|wait| {
+    let quota = pending_wait(run).map(|wait| {
         let step = run.step_results.last();
         crate::models::ActiveRunQuota {
             step_name: step.map(|s| s.step_name.clone()).unwrap_or_default(),

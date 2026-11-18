@@ -2403,7 +2403,7 @@ fn dod_sentence_for_carry(
     dod_id: &str,
 ) -> Result<Option<String>> {
     if let Some(sentence) =
-        crate::db::orchestration::execution_dod_sentence(conn, execution_id, dod_id)?
+        crate::db::execution_activity::execution_dod_sentence(conn, execution_id, dod_id)?
     {
         return Ok(Some(sentence));
     }

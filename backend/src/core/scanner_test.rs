@@ -1,6 +1,7 @@
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use crate::core::scanner::*;
+    use crate::core::td_index::count_tech_debt;
     use serial_test::serial;
 
     #[test]
@@ -219,7 +220,7 @@ mod tests {
             "# My Project\nIf you see an unfilled `{{...}}`, say NOT_FOUND.\n",
         )
         .unwrap();
-        crate::core::kronn_state::record_audit(&tmp, "full").unwrap();
+        crate::core::template_manifest::record_audit(&tmp, "full").unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
         assert!(
             matches!(status, crate::models::AiAuditStatus::Audited),
@@ -252,7 +253,7 @@ mod tests {
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(ai_dir.join("index.md"), "# My Project\nFilled content\n").unwrap();
-        crate::core::kronn_state::record_audit(&tmp, "full").unwrap();
+        crate::core::template_manifest::record_audit(&tmp, "full").unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
         assert!(matches!(status, crate::models::AiAuditStatus::Audited));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -332,7 +333,7 @@ mod tests {
         std::fs::create_dir_all(tmp.join("docs")).unwrap();
         std::fs::write(tmp.join("docs/AGENTS.md"), "# Project\nContent\n").unwrap();
         crate::core::kronn_state::mark_bootstrapped(&tmp).unwrap();
-        crate::core::kronn_state::record_audit(&tmp, "full").unwrap();
+        crate::core::template_manifest::record_audit(&tmp, "full").unwrap();
         assert!(matches!(
             detect_audit_status(&tmp.to_string_lossy()),
             crate::models::AiAuditStatus::Audited

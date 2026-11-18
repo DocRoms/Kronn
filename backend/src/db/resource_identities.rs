@@ -295,7 +295,7 @@ fn match_by_slug(
                     let present = !slug.contains(['/', '\\'])
                         && slug != "."
                         && slug != ".."
-                        && crate::api::projects::resources::PROJECT_SKILL_ROOTS
+                        && crate::core::repository_skills::PROJECT_SKILL_ROOTS
                             .iter()
                             .filter(|skill_root| {
                                 !(**skill_root == ".agents/skills" && slug == "kronn")

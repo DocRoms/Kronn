@@ -67,16 +67,7 @@ impl std::fmt::Display for CheckError {
     }
 }
 
-/// Whether Kronn can probe this server's credentials: the same rule as the
-/// readiness probe (a declared probe, or a custom API's selected/identity
-/// endpoint).
-pub fn has_token_probe(server: &McpServer) -> bool {
-    let Some(spec) = server.api_spec.as_ref() else {
-        return false;
-    };
-    registry::api_readiness_probe(&server.id).is_some()
-        || (server.id.starts_with("custom-") && spec.probe_endpoint().is_some())
-}
+pub use crate::core::registry::has_token_probe;
 
 /// Connections being probed right now: a second request for one of them gets
 /// the stored answer instead of a second call to the provider.

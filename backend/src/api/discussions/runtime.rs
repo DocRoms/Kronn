@@ -14,12 +14,7 @@ use super::SseStream;
 
 const RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS: i64 = 30;
 
-/// KT-1758 — consecutive deferrals of a task worker's dispatch for the same
-/// unavailable-runtime reason before Kronn stops retrying and says why: ten
-/// tries at 30 s is five minutes, longer than any start that is only slow. A
-/// refusal that never changes used to be retried forever (live: a native ACP
-/// agent refused as a task worker, every 30 s for 1h35).
-pub(crate) const RUNTIME_UNAVAILABLE_MAX_DEFERRALS: u32 = 10;
+pub(crate) use crate::api::orchestration::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
 
 struct DispatchHandoffGuard {
     state: Option<AppState>,
@@ -78,55 +73,7 @@ pub(crate) struct DispatchSettlement {
     batch_run: Option<crate::models::WorkflowRun>,
 }
 
-/// Most refusals the undelivered-worker notice and the delivery summary repeat.
-const REFUSED_TOOL_CALLS_MAX: usize = 3;
-
-/// KT-1541 — the tool calls the worker's CLI refused, read back from its
-/// transcript (the lines `parse_claude_worker_stream_line` writes), most recent
-/// first and without repeats. A worker that stops after a refused edit says
-/// nothing else, so the principal otherwise sees only "no delivery"; one that
-/// delivers anyway worked around a refusal its report should name. Empty when
-/// nothing was refused. The reasons come first-hand, not a count.
-///
-/// Only the current attempt counts: the worker's room outlives its review
-/// rounds, and each round opens with a User message (the brief, then the
-/// reviewer's findings), so a refusal from before the last one was met by an
-/// earlier attempt. And only a line that starts with the exact prefix the writer
-/// emits counts, so a worker that quotes the words in its prose creates none.
-pub(crate) fn refused_tool_calls_of_worker(
-    conn: &rusqlite::Connection,
-    discussion_id: &str,
-) -> anyhow::Result<Vec<String>> {
-    let mut statement = conn.prepare(
-        "SELECT content FROM messages
-         WHERE discussion_id = ?1 AND role = 'Agent' AND content LIKE ?2
-           AND sort_order > COALESCE(
-               (SELECT MAX(sort_order) FROM messages
-                 WHERE discussion_id = ?1 AND role = 'User'), -1)
-         ORDER BY sort_order DESC LIMIT 20",
-    )?;
-    let prefix = crate::agents::runner::REFUSED_TOOL_CALL_LINE_PREFIX;
-    let contents = statement
-        .query_map(
-            rusqlite::params![discussion_id, format!("%{prefix}%")],
-            |row| row.get::<_, String>(0),
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut reasons: Vec<String> = Vec::new();
-    for content in contents {
-        for line in content.lines().rev() {
-            let Some(reason) = line.strip_prefix(prefix) else {
-                continue;
-            };
-            let reason = reason.trim().to_string();
-            if !reason.is_empty() && !reasons.contains(&reason) {
-                reasons.push(reason);
-            }
-        }
-    }
-    reasons.truncate(REFUSED_TOOL_CALLS_MAX);
-    Ok(reasons)
-}
+use crate::api::delivery_publication::refused_tool_calls_of_worker;
 
 /// The refusals as a sentence for the undelivered-worker notice; empty when the
 /// worker was refused nothing.
@@ -838,23 +785,7 @@ pub(crate) async fn settle_preflight_failure(
     ensure_failure_visible(state, job, diagnostic).await;
 }
 
-/// Stop the processes a task worker's dispatch left behind (KT-1266). Only a
-/// dispatch that is a worker's launch has any; an ordinary turn costs one read.
-pub(crate) async fn reap_task_worker_processes(state: &AppState, dispatch_job_id: &str) {
-    let lookup = dispatch_job_id.to_string();
-    let is_worker = state
-        .db
-        .with_read_conn(move |conn| {
-            crate::db::orchestration::get_execution_for_dispatch(conn, &lookup)
-        })
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    if is_worker {
-        crate::core::dispatch_reaper::reap_dispatch_async(dispatch_job_id).await;
-    }
-}
+pub(crate) use crate::api::orchestration::reap_task_worker_processes;
 
 pub(super) fn dispatch_target_tier(
     targets: &[crate::models::MessageTarget],

@@ -202,6 +202,26 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
     .map_err(Into::into)
 }
 
+/// Parse a stored `worker_agent_type` back to the typed identity: a value outside
+/// the domain is a corrupt row, surfaced as a hard error rather than silently
+/// dropping the worker's provider.
+pub(crate) fn agent_type_from_db(s: &str) -> Result<AgentType> {
+    Ok(match s {
+        "ClaudeCode" => AgentType::ClaudeCode,
+        "Codex" => AgentType::Codex,
+        "OpenCode" => AgentType::OpenCode,
+        "Vibe" => AgentType::Vibe,
+        "GeminiCli" => AgentType::GeminiCli,
+        "Kiro" => AgentType::Kiro,
+        "CopilotCli" => AgentType::CopilotCli,
+        "Ollama" => AgentType::Ollama,
+        "LiteLlm" => AgentType::LiteLlm,
+        "Nvidia" => AgentType::Nvidia,
+        "Custom" => AgentType::Custom,
+        other => anyhow::bail!("unknown worker_agent_type: {other}"),
+    })
+}
+
 /// The running native turn a room agent's bridge context names, when it is
 /// genuinely that turn: same room, same trigger, still Running, not a delegated
 /// worker's dispatch, and run by `agent`. Anything else is `None`, so a forged
@@ -219,7 +239,11 @@ pub fn running_room_agent_job(
     if job.discussion_id != discussion_id
         || job.trigger_message_id != source_message_id
         || job.status != DispatchStatus::Running
-        || super::orchestration::get_execution_for_dispatch(conn, dispatch_job_id)?.is_some()
+        || conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_executions WHERE dispatch_job_id = ?1)",
+            [dispatch_job_id],
+            |row| row.get::<_, bool>(0),
+        )?
     {
         return Ok(None);
     }
@@ -234,7 +258,7 @@ pub fn running_room_agent_job(
                 )
                 .optional()?;
             match room_agent {
-                Some(value) => super::orchestration::agent_type_from_db(&value)?,
+                Some(value) => agent_type_from_db(&value)?,
                 None => return Ok(None),
             }
         }
@@ -1045,7 +1069,7 @@ pub fn claim_with_limits(
         if claimed.is_some() {
             // KT-1689 — the worker's turn starts here, not when it was queued:
             // the silent-worker clock restarts at the claim.
-            let _ = super::orchestration::note_dispatch_activity(conn, id);
+            let _ = super::execution_activity::note_dispatch_activity(conn, id);
             return Ok(claimed);
         }
 
@@ -1275,7 +1299,7 @@ pub fn mark_agent_started(conn: &Connection, id: &str) -> Result<bool> {
     }
     if changed > 0 {
         // KT-1689 — the agent really starts: the silent-worker clock starts too.
-        let _ = super::orchestration::note_dispatch_activity(conn, id);
+        let _ = super::execution_activity::note_dispatch_activity(conn, id);
     }
     Ok(changed > 0)
 }
@@ -1297,7 +1321,7 @@ pub fn mark_progress(
     if changed {
         // KT-1247 — a provider/tool boundary is worker activity: it pushes the
         // silent-worker clock of the execution this dispatch belongs to.
-        let _ = super::orchestration::note_dispatch_activity(conn, id);
+        let _ = super::execution_activity::note_dispatch_activity(conn, id);
     }
     Ok(changed)
 }

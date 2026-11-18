@@ -920,7 +920,7 @@ async fn fetch_remote_branch_once(
     if output.status.success() {
         return Ok(());
     }
-    let stderr = crate::api::projects::clone::redact_url_credentials(
+    let stderr = crate::core::secret_scrub::redact_url_credentials(
         String::from_utf8_lossy(&output.stderr).trim(),
     );
     let stderr: String = stderr.chars().take(400).collect();

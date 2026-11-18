@@ -540,7 +540,7 @@ async fn the_review_lists_every_sheet_the_card_counts() {
         ids,
         ["CQ-001", "CQ-002", "PERF-20261016-deep-clone", A, B, C]
     );
-    let card = crate::core::scanner::count_tech_debt(tmp.path().to_str().unwrap());
+    let card = crate::core::td_index::count_tech_debt(tmp.path().to_str().unwrap());
     assert_eq!(
         listed.items.len() as u32,
         card,
@@ -679,7 +679,7 @@ async fn card_and_review_count_the_same_debts_with_a_decided_sheet_and_a_sheetle
     let items = crate::core::td_review::read_items(&docs);
     let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
     assert_eq!(ids, [A, B, C], "the sheetless row is listed, not hidden");
-    let card = crate::core::scanner::count_tech_debt(path);
+    let card = crate::core::td_index::count_tech_debt(path);
     let (counts, _) = crate::core::td_review::counts(&items);
     assert_eq!(card, 2, "TD-a and TD-c are the active debts");
     assert_eq!(
@@ -706,7 +706,7 @@ async fn card_and_review_count_the_same_debts_with_a_decided_sheet_and_a_sheetle
     .unwrap();
     let items = crate::core::td_review::read_items(&docs);
     let (counts, _) = crate::core::td_review::counts(&items);
-    assert_eq!(crate::core::scanner::count_tech_debt(path), 1);
+    assert_eq!(crate::core::td_index::count_tech_debt(path), 1);
     assert_eq!(counts.pending + counts.confirmed + counts.deferred, 1);
     assert_eq!(items.len(), 2);
 }
@@ -750,7 +750,7 @@ async fn a_debt_only_the_index_lists_can_be_decided_and_gets_its_sheet() {
     assert_eq!(after.counts.rejected, 1);
     assert_eq!(
         review_active(&after),
-        crate::core::scanner::count_tech_debt(tmp.path().to_str().unwrap())
+        crate::core::td_index::count_tech_debt(tmp.path().to_str().unwrap())
     );
 }
 
@@ -784,7 +784,7 @@ async fn an_index_status_stands_in_for_a_sheet_that_states_none() {
     // The file says Open: the file decides.
     assert_eq!(state_of("CQ-002"), TdReviewState::Pending);
     assert_eq!(
-        crate::core::scanner::count_tech_debt(tmp.path().to_str().unwrap()),
+        crate::core::td_index::count_tech_debt(tmp.path().to_str().unwrap()),
         1
     );
 }

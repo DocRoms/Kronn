@@ -10,44 +10,7 @@ use crate::models::{
     StepType, WorkflowStep,
 };
 
-/// An agent as Kronn launched it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentIdentity {
-    pub agent_type: AgentType,
-    /// The concrete model, when Kronn resolved one at launch.
-    pub model: Option<String>,
-}
-
-// `AgentType` has unit variants only, so equality is total.
-impl Eq for AgentIdentity {}
-
-/// Who asks the broker for a call.
-#[derive(Debug, Clone)]
-pub enum ApiCaller {
-    /// A person in the UI (Quick API launcher, wizard test).
-    Human,
-    /// An agent; `identity: None` means no Kronn-issued identity (no token),
-    /// which is treated as a remote agent.
-    Agent {
-        identity: Option<AgentIdentity>,
-        discussion_ids: Vec<String>,
-        workflow_run_id: Option<String>,
-    },
-    /// A non-agent step of a human-enabled workflow; its data reaches the
-    /// workflow's agents, listed here (`None` = an agent Kronn cannot name).
-    Workflow { agents: Vec<Option<AgentIdentity>> },
-}
-
-impl ApiCaller {
-    /// An agent without any Kronn-issued identity.
-    pub fn unidentified_agent() -> Self {
-        Self::Agent {
-            identity: None,
-            discussion_ids: Vec::new(),
-            workflow_run_id: None,
-        }
-    }
-}
+pub use crate::models::quick::{AgentIdentity, ApiCaller};
 
 /// An agent the data may reach, with its locality already decided.
 #[derive(Debug, Clone)]
@@ -563,7 +526,7 @@ pub async fn principal_for(
     state: &crate::AppState,
     caller: &ApiCaller,
 ) -> Result<Principal, String> {
-    let base_url = crate::api::ollama::resolve_base_url_pub(None);
+    let base_url = crate::api::ollama_health::resolve_base_url_pub(None);
     let member = |identity: Option<AgentIdentity>| Member {
         local: identity.as_ref().is_some_and(|i| is_local(i, &base_url)),
         identity,
@@ -601,7 +564,7 @@ pub async fn principal_for(
                     // editable one; a run without a readable pin is unknown.
                     let workflow = match run_id {
                         Some(run_id) => {
-                            Some(crate::workflows::run_pins::pinned_workflow(conn, &run_id)?)
+                            Some(crate::db::workflow_run_pins::pinned_workflow(conn, &run_id)?)
                         }
                         None => None,
                     };

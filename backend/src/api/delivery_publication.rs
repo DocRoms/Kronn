@@ -578,7 +578,7 @@ pub async fn publish_accepted_delivery(
             };
             let refused_tool_calls = match sub_discussion_id.as_deref() {
                 Some(child) => {
-                    crate::api::discussions::runtime::refused_tool_calls_of_worker(conn, child)?
+                    refused_tool_calls_of_worker(conn, child)?
                 }
                 None => Vec::new(),
             };
@@ -673,6 +673,56 @@ fn render_stored(stored: &crate::db::delivery_summaries::StoredDeliverySummary) 
             stored.execution_id, stored.attempt_no, stored.correlation_id
         ),
     }
+}
+
+/// Most refusals the undelivered-worker notice and the delivery summary repeat.
+const REFUSED_TOOL_CALLS_MAX: usize = 3;
+
+/// KT-1541 — the tool calls the worker's CLI refused, read back from its
+/// transcript (the lines `parse_claude_worker_stream_line` writes), most recent
+/// first and without repeats. A worker that stops after a refused edit says
+/// nothing else, so the principal otherwise sees only "no delivery"; one that
+/// delivers anyway worked around a refusal its report should name. Empty when
+/// nothing was refused. The reasons come first-hand, not a count.
+///
+/// Only the current attempt counts: the worker's room outlives its review
+/// rounds, and each round opens with a User message (the brief, then the
+/// reviewer's findings), so a refusal from before the last one was met by an
+/// earlier attempt. And only a line that starts with the exact prefix the writer
+/// emits counts, so a worker that quotes the words in its prose creates none.
+pub(crate) fn refused_tool_calls_of_worker(
+    conn: &rusqlite::Connection,
+    discussion_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT content FROM messages
+         WHERE discussion_id = ?1 AND role = 'Agent' AND content LIKE ?2
+           AND sort_order > COALESCE(
+               (SELECT MAX(sort_order) FROM messages
+                 WHERE discussion_id = ?1 AND role = 'User'), -1)
+         ORDER BY sort_order DESC LIMIT 20",
+    )?;
+    let prefix = crate::agents::runner::REFUSED_TOOL_CALL_LINE_PREFIX;
+    let contents = statement
+        .query_map(
+            rusqlite::params![discussion_id, format!("%{prefix}%")],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut reasons: Vec<String> = Vec::new();
+    for content in contents {
+        for line in content.lines().rev() {
+            let Some(reason) = line.strip_prefix(prefix) else {
+                continue;
+            };
+            let reason = reason.trim().to_string();
+            if !reason.is_empty() && !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+    }
+    reasons.truncate(REFUSED_TOOL_CALLS_MAX);
+    Ok(reasons)
 }
 
 fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {

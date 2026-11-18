@@ -25,44 +25,10 @@ use axum::{extract::State, Json};
 /// provider can never borrow the other's key.
 pub const PROVIDER: &str = "nvidia";
 
-/// The hosted OpenAI-compatible endpoint. Deliberately without the `/v1` suffix:
-/// the shared codec appends `/v1/chat/completions` and the probes append
-/// `/v1/models`, exactly as they do for a LiteLLM proxy.
-const DEFAULT_BASE_URL: &str = "https://integrate.api.nvidia.com";
-
-/// Public accessor for the runner, which holds the saved endpoint (if any) but
-/// not this module's fallback chain.
-pub fn resolve_base_url_pub(stored: Option<&str>) -> String {
-    resolve_base_url(stored)
-}
-
-/// Saved endpoint → `NVIDIA_BASE_URL` → the hosted default. A trailing slash is
-/// dropped and a bare host gains a scheme, so a pasted value behaves.
-fn resolve_base_url(stored: Option<&str>) -> String {
-    let raw = stored
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            crate::core::child_env::var("NVIDIA_BASE_URL")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-    normalize_url(&raw)
-}
-
-fn normalize_url(raw: &str) -> String {
-    let trimmed = raw.trim().trim_end_matches('/');
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        trimmed.to_string()
-    } else {
-        // A hosted endpoint is never plain HTTP; assume TLS rather than
-        // downgrading a pasted host silently.
-        format!("https://{trimmed}")
-    }
-}
+pub use crate::db::external_api_connections::nvidia_resolve_base_url_pub as resolve_base_url_pub;
+use crate::db::external_api_connections::nvidia_resolve_base_url as resolve_base_url;
+#[cfg(test)]
+use crate::db::external_api_connections::NVIDIA_DEFAULT_BASE_URL as DEFAULT_BASE_URL;
 
 fn client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()

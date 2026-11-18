@@ -264,24 +264,7 @@ impl SandboxPolicy {
     }
 }
 
-/// `path` with its longest existing ancestor canonicalized: a Cargo target that
-/// does not exist yet still resolves through `/tmp` → `/private/tmp`.
-pub(crate) fn real_path(path: &Path) -> PathBuf {
-    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut current = path;
-    loop {
-        if let Ok(real) = current.canonicalize() {
-            return missing.iter().rev().fold(real, |acc, part| acc.join(part));
-        }
-        match (current.parent(), current.file_name()) {
-            (Some(parent), Some(name)) => {
-                missing.push(name);
-                current = parent;
-            }
-            _ => return path.to_path_buf(),
-        }
-    }
-}
+pub(crate) use crate::core::fs_guard::real_path;
 
 /// `path` with its parent resolved through symlinks and its own last component
 /// kept as is: a file replaced by a symlink is still that file's name.

@@ -1517,13 +1517,7 @@ fn measure(path: &str, content: &str) -> DocumentMeasure {
 fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }
-pub(crate) fn contains_placeholder(s: &str) -> bool {
-    crate::api::audit::validation::count_raw_placeholders(s) > 0
-        || visible_markdown(s).lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("<!-- TODO:") || trimmed == "PLACEHOLDER"
-        })
-}
+pub(crate) use crate::core::anti_halluc::contains_placeholder;
 fn visible_markdown(s: &str) -> String {
     crate::core::anti_halluc::strip_inline_code(&crate::core::anti_halluc::strip_fenced_code(s))
 }
