@@ -1017,6 +1017,42 @@ mod tests {
     }
 
     #[test]
+    fn every_probe_code_reads_back_from_its_stored_text() {
+        use ProbeDiagnosticCode::*;
+        for code in [
+            Ok,
+            Unauthorized,
+            Forbidden,
+            NotFound,
+            InvalidHeader,
+            UnexpectedOutput,
+            Network,
+            CliMissing,
+            CliVersionTooOld,
+            CliNotAuthenticated,
+            Other,
+        ] {
+            assert_eq!(parse_probe_code(probe_code_to_str(code)), code);
+        }
+        assert_eq!(parse_probe_code("a value of a later version"), Other);
+    }
+
+    #[test]
+    fn every_auth_failure_kind_reads_back_from_its_stored_text() {
+        use McpAuthFailureKind::*;
+        for kind in [Refused, Forbidden, RefreshFailed] {
+            assert_eq!(
+                parse_auth_failure_kind(auth_failure_kind_to_str(kind)),
+                kind
+            );
+        }
+        assert_eq!(
+            parse_auth_failure_kind("a value of a later version"),
+            Refused
+        );
+    }
+
+    #[test]
     fn list_servers_empty_returns_empty_vec() {
         let conn = test_conn();
         assert!(list_servers(&conn).unwrap().is_empty());

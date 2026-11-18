@@ -21,9 +21,13 @@ TARGETS=(
   "core/keyvault.rs:93:94"
   "core/keystore.rs:94:94"
   "core/recovery.rs:97:98"
-  "db/mcps.rs:93:95"
-  "db/migrations.rs:94:97"
+  "db/mcps.rs:91:95"
+  "db/migrations.rs:93:97"
 )
+# Region floors of the two `db/` files are counted by rustc 1.100, which makes
+# every `?` a region of its own: an unreachable SQLite error path now weighs on
+# the percentage (same uncovered paths, 93.7 % became 90.2 % on `db/mcps.rs`).
+# The line floors, which the compiler change left alone, did not move.
 
 # Reuse the instrumented build/profdata from the repo-wide floor step if it ran;
 # otherwise produce it here. --ignore-run-fail so pre-existing env-flaky tests
