@@ -128,10 +128,8 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::Mutex;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
@@ -4087,6 +4085,7 @@ mod startup_config_tests {
 
 // Tests of lower modules that need this layer.
 #[cfg(test)]
+#[allow(non_snake_case)] // <module path>__<test module>
 mod uptests {
     #[cfg(all(test, feature = "full-tests"))]
     mod agents__runner_test__tests;

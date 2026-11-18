@@ -25,7 +25,6 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::sync::Semaphore;
 
-use crate::core::registry;
 use crate::models::{McpServer, McpTokenCheck, McpTokenCheckOutcome, McpTokenCheckResult};
 use crate::workflows::api_call_executor::SecurityPolicy;
 use crate::AppState;

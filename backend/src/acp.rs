@@ -33,6 +33,7 @@ pub use permission_broker::{
 
 /// Shared by the Claude/Codex adapter test modules.
 #[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::disallowed_methods)] // test fixtures: a scripted agent warmed up once
 pub mod test_support {
     use std::fs;
     #[cfg(unix)]

@@ -1,8 +1,5 @@
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
-
 use crate::core::{docs_location::DocsRoot, fs_guard, kronn_state, scanner};
 use crate::models::PlaceholderDoc;
 

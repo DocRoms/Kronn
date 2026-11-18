@@ -103,7 +103,7 @@ pub fn apply(command: &mut std::process::Command, work_dir: &Path) {
 #[cfg(not(unix))]
 pub fn apply(_command: &mut std::process::Command, _work_dir: &Path) {}
 
-#[cfg(all(any(test, feature = "test-support"), unix))] // runs the #!/bin/sh git shim git_guard.sh
+#[cfg(all(test, unix))] // runs the #!/bin/sh git shim git_guard.sh
 mod tests {
     use super::*;
     use std::process::{Command, Output};

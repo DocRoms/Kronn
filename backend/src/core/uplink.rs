@@ -55,9 +55,10 @@ pub struct TaskExecutionLookup(
 inventory::collect!(TaskExecutionLookup);
 
 /// A task's edited DoD adopted by its live executions, in the caller's transaction.
-pub struct TaskDodAdoption(
-    pub fn(&Connection, &str, &[PlanningDodItem], &PlanningActor) -> Result<Vec<String>>,
-);
+pub struct TaskDodAdoption(pub DodAdoptionFn);
+/// (connection, task id, edited DoD, actor) -> the executions that adopted it.
+pub type DodAdoptionFn =
+    fn(&Connection, &str, &[PlanningDodItem], &PlanningActor) -> Result<Vec<String>>;
 inventory::collect!(TaskDodAdoption);
 
 /// Approvals taken back once what they covered is deleted: (connection, by).

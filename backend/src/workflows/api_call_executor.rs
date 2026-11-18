@@ -192,13 +192,13 @@ async fn execute_core_gated(
     outcome
 }
 
+inventory::submit! { crate::core::uplink::ApiCallSecrets(call_secrets) }
+
 /// Every value this call takes from the env or the credential store is a
 /// secret wherever it lands, except the config values that are public (see
 /// [`is_public_config`]): masking a base URL would rewrite the links of the
 /// data handed to the next steps (`***/browse/EW-1`). The resolved auth adds
 /// its wire forms (Basic decoded to its password, bearer and header tokens).
-inventory::submit! { crate::core::uplink::ApiCallSecrets(call_secrets) }
-
 pub fn call_secrets(
     plugin: &McpServer,
     env: &HashMap<String, String>,
@@ -983,7 +983,7 @@ pub fn quick_api_for(
         crate::db::workflow_run_pins::QUICK_API,
         "Quick API",
         id,
-        |conn, id| crate::db::quick_apis::get_quick_api(conn, id),
+        crate::db::quick_apis::get_quick_api,
     )
 }
 

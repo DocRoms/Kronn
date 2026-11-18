@@ -1,6 +1,7 @@
 use super::*;
 use crate::core::td_sheet::comment_start;
 
+#[allow(dead_code)] // kept with the module it was written for
 fn td(status: &str) -> String {
     format!(
             "---\nname: td-test\nmetadata:\n  type: tech-debt\n  audit_history:\n    - date: 2026-09-01\n      status: {status}\n      reviewer: Full audit\n---\n\n# TD-test\n\n- **Severity**: High\n- **Status**: {status}\n"

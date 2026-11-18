@@ -767,7 +767,7 @@ mod tests {
 /// KT-1595 — `apply` runs on every audit (resumes included) and from the
 /// inject route; these tests are not behind `full-tests` because they are the
 /// swap guarantee.
-#[cfg(all(any(test, feature = "test-support"), unix))] // creates symlinks through std::os::unix
+#[cfg(all(test, unix))] // creates symlinks through std::os::unix
 mod apply_link_tests {
     use super::*;
 

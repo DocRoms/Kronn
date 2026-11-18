@@ -1498,8 +1498,9 @@ mod tests {
             // raw_async, raw_sync, open_in_system (open::commands, isolated)
             ("backend/src/core/cmd.rs", 3),
             // var, var_os, vars_os, set_var, remove_var,
-            // take_process_environment_where: the live reads and writes
-            ("backend/src/core/child_env.rs", 6),
+            // take_process_environment_where: the live reads and writes;
+            // the test fixtures of the spawn sites (`probe`)
+            ("backend/src/core/child_env.rs", 7),
             // test builds only: fixtures
             ("backend/src/lib.rs", 1),
             ("backend/src/layer0.rs", 1),
@@ -2037,7 +2038,7 @@ mod tests {
 
 /// KT-1633. Not behind `full-tests`: the macOS portability leg builds without
 /// it and must still prove the argv of a background spawn.
-#[cfg(all(any(test, feature = "test-support"), unix))] // asserts the taskpolicy/nice launchers, POSIX only
+#[cfg(all(test, unix))] // asserts the taskpolicy/nice launchers, POSIX only
 mod background_argv_tests {
     use super::*;
     use background_priority::{plan, HostOs};

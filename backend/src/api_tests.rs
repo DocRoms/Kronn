@@ -17,30 +17,8 @@ pub mod tests {
         build_router_with_auth, core::config::default_config, db::Database, AppState,
         DEFAULT_MAX_CONCURRENT_AGENTS,
     };
-    use serial_test::serial;
 
     // ─── Helper: build a test AppState with an in-memory DB ──────────────────
-
-    /// Handlers under test call config::save — without KRONN_DATA_DIR that
-    /// writes the developer's REAL config.toml (2026-07-13 incident; the
-    /// persist_atomic guard now panics instead).
-    fn isolate_config_dir() {
-        // Called ONLY by the #[serial] tests whose handlers SAVE config —
-        // a global call from test_state() would mutate KRONN_DATA_DIR from
-        // non-serial tests and race the serialized env family. Re-set on
-        // every call because config env tests legitimately remove it.
-        let dir = std::env::temp_dir().join(format!("kronn-libtest-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).ok();
-        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
-    }
-
-    /// A project directory of this test process only: parallel runs never share it.
-    fn tmp_project(name: &str) -> String {
-        std::env::temp_dir()
-            .join(format!("{name}-{}", std::process::id()))
-            .to_string_lossy()
-            .into_owned()
-    }
 
     fn test_state() -> AppState {
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
@@ -114,16 +92,6 @@ pub mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["success"], false);
         assert_eq!(body["error"], "Run not found");
-    }
-
-    /// Build a test AppState with a specific auth token configured.
-    fn test_state_with_token(token: &str) -> AppState {
-        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
-        let mut config = default_config();
-        config.server.auth_token = Some(token.to_string());
-        config.server.auth_enabled = true;
-        let config_arc = Arc::new(RwLock::new(config));
-        AppState::new_defaults(config_arc, db, DEFAULT_MAX_CONCURRENT_AGENTS)
     }
 
     /// Send a request and collect the response body as parsed JSON.

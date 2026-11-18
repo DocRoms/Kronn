@@ -1070,6 +1070,7 @@ pub fn isolate(command: &mut std::process::Command, route: ChildRoute) {
 
 /// Test helpers shared by the spawn sites' environment tests.
 #[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+#[allow(clippy::disallowed_methods)] // test fixtures: a planted variable, a probe script
 pub mod probe {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};

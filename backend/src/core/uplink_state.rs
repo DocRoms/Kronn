@@ -1,4 +1,5 @@
 //! As `uplink`, for the calls that carry the application state.
+#![allow(clippy::type_complexity)] // each hook states its whole signature
 
 use crate::agents::tools::ToolExecutor;
 use crate::models::{AgentType, ApiResponse, CreateDiscussionRequest, Discussion};

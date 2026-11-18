@@ -5,6 +5,12 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 // Without `full-tests` (the macOS portability job) most unit-test modules are
 // configured out, so test-only helpers that remain `cfg(test)` go unused.
+// Built with `test-support`, the helpers of this crate's tests are compiled
+// without the tests that use them.
+#![cfg_attr(
+    feature = "test-support",
+    allow(dead_code, unused_imports, clippy::new_without_default)
+)]
 #![cfg_attr(
     all(test, not(feature = "full-tests")),
     allow(dead_code, unused_imports)

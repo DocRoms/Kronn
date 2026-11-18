@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+#[allow(dead_code)] // kept with the module it was written for
 fn observed(
     outcome: crate::core::endpoint_reachability::ProbeOutcome,
     age: chrono::Duration,
