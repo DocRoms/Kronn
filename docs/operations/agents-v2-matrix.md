@@ -96,7 +96,7 @@ or change session-resume and pricing limitations.
 The orchestration database must also read back every native provider name it
 writes. OpenCode launch, reload and idempotent replay are covered as one native
 execution, with no fallback to Custom; unknown provider strings remain errors.
-[src: file: backend/src/db/orchestration.rs:250-264#agent_type_from_db]
+[src: file: backend/src/db/agent_dispatch.rs:204-218#agent_type_from_db]
 [src: file: backend/src/db/orchestration_tests.rs:4563-4596#opencode_worker_launch_reload_and_replay_keep_one_native_execution]
 
 ## Known asymmetries
@@ -116,7 +116,7 @@ the same job.
   not qualify live model behavior or KT-577's long-lived Claude process.
   See [native ACP continuity](../gotchas/native-acp-resume-continuity.md) for the
   negotiated `session/resume` contract and exact proof boundaries.
-  [src: file: backend/src/agents/runner.rs:2951-3011#load_completed_checkpoint]
+  [src: file: backend/src/agents/runner.rs:2860-2920#load_completed_checkpoint]
   [src: file: backend/src/api/discussions/streaming.rs:2626-2757#resume_with_delta_if_possible]
   [src: file: backend/src/api/discussions/streaming.rs:8941-9262#two_turns_through_the_real_decision_and_spawn_chain_survive_a_db_reopen]
 - **Kronn does not yet normalize ACP's optional session cost.** The current
@@ -151,7 +151,7 @@ the same job.
   nor the worker permission scope. `task_worker_route_policy` decides this for
   worker preparation and for every launch route; an exact joined CLI session
   of the same agent stays eligible.
-  [src: file: backend/src/agents/runner.rs:4023-4041#task_worker_route_policy]
+  [src: file: backend/src/agents/runner.rs:3929-3947#task_worker_route_policy]
   The direct Copilot worker preflight keeps a four-second deadline and awaits
   process collection on timeout. Its [timeout regression](../gotchas/copilot-preflight-timeout.md)
   uses controlled time and an owned child, not a startup PID-file race.
@@ -171,8 +171,8 @@ successful run. The runner tests exercise this path with a fake ACP transport
 for creation, resume and its existing fallback, streaming, usage, cancellation,
 and prompt/persistence failures. They do not invoke an agent CLI, and ACP token
 usage still has no implied price.
-[src: file: backend/src/agents/runner.rs:6245-6255#acp_failure_diagnostic]
-[src: file: backend/src/agents/runner.rs:16395-16676#run_acp_session_streams_usage_through_agent_process]
+[src: file: backend/src/agents/runner.rs:6148-6158#acp_failure_diagnostic]
+[src: file: backend/src/agents/runner.rs:16232-16513#run_acp_session_streams_usage_through_agent_process]
 [src: file: backend/src/core/redact.rs:707-735#redact_for_audit_artifact]
 
 ## Settings catalogue correction (KT-531 / KT-597)
@@ -193,7 +193,7 @@ See [Claude discovery and freshness](../gotchas/claude-catalogue-discovery.md).
 [src: file: frontend/src/components/settings/AgentsSection.tsx:891-903#SearchableSelect]
 [src: file: frontend/src/lib/modelCatalogSelection.ts:110-172#catalogModelOptions]
 [src: file: frontend/src/hooks/useModelCatalogSnapshot.ts:32-74#useModelCatalogSnapshot]
-[src: file: backend/src/core/model_catalog/mod.rs:423-433#discover_inner]
+[src: file: backend/src/core/model_catalog/mod.rs:420-430#discover_inner]
 
 Saving a tier rereads the current settings and replaces only the selected
 field, preserving other agents' values and showing the new value only after

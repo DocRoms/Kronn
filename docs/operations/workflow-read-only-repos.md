@@ -23,7 +23,7 @@ includes external Git metadata for linked worktrees. Missing/non-Git paths,
 permission-pattern characters, overlap with the working directory, unsupported
 agents and native Windows launches are rejected before dispatch. The list does
 not accept workflow template expressions.
-[src: file: backend/src/agents/read_only_repos.rs:672-776#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:690-794#resolve_with_dirs]
 [src: file: backend/src/agents/read_only_repos.rs:701-731#canonical_directory]
 [src: file: backend/src/api/workflow_step_schema.json:18#read_only_repos]
 
@@ -35,7 +35,7 @@ extending `:workspace`, with explicit `read` entries and approval policy `never`
 It keeps the standard broad filesystem read access; the declared directories
 are never added as writable roots, including when they live under a temporary
 directory. `--strict-config` rejects unsupported Codex settings.
-[src: file: backend/src/agents/read_only_repos.rs:1025-1142#args]
+[src: file: backend/src/agents/read_only_repos.rs:1043-1160#args]
 [Claude permission rules](https://code.claude.com/docs/en/permissions)
 [Claude sandbox](https://code.claude.com/docs/en/sandboxing)
 [Codex permissions](https://learn.chatgpt.com/docs/permissions)
@@ -48,11 +48,11 @@ host probe confirmed that Python, Write and shell redirection were all refused.
 Both the default [ACP adapters](acp-adapters.md) and the direct CLI route use
 this policy, overriding `full_access`. The Claude process cannot inherit the
 container sandbox-bypass marker when a mandatory sandbox policy is present.
-[src: file: backend/src/agents/runner.rs:4770-4775#read_only_repos]
-[src: file: backend/src/agents/runner.rs:4806-4808#read_only_repos]
-[src: file: backend/src/agents/read_only_repos.rs:1001-1010#apply]
-[src: file: backend/src/agents/runner.rs:14949-14954#sandbox_required]
-[src: file: backend/src/agents/runner.rs:15183-15194#CLAUDE_CODE_BUBBLEWRAP]
+[src: file: backend/src/agents/runner.rs:4676-4681#read_only_repos]
+[src: file: backend/src/agents/runner.rs:4712-4714#read_only_repos]
+[src: file: backend/src/agents/read_only_repos.rs:1019-1028#apply]
+[src: file: backend/src/agents/runner.rs:14839-14844#sandbox_required]
+[src: file: backend/src/agents/runner.rs:15076-15087#CLAUDE_CODE_BUBBLEWRAP]
 [src: file: backend/src/acp/codex_adapter.rs:464-478#worker_args]
 
 All Codex `exec` launches, with or without `--strict-config`, receive one
@@ -60,8 +60,8 @@ All Codex `exec` launches, with or without `--strict-config`, receive one
 applicable, its `KRONN_HOST_HOME` alias for `/host-home`. The same launcher
 handles direct CLI, adapter, worker and resumed turns. Path keys are serialized
 as TOML; identical aliases are deduplicated.
-[src: file: backend/src/agents/runner.rs:14806-14825#codex_project_trust_override]
-[src: file: backend/src/agents/runner.rs:14956-14970#is_codex]
+[src: file: backend/src/agents/runner.rs:14696-14715#codex_project_trust_override]
+[src: file: backend/src/agents/runner.rs:14846-14860#is_codex]
 
 The principal's 2026-09-28 check found that Codex 0.156.1 rejects the previous
 dotted `projects."<path>".trust_level` override under `--strict-config`, even
@@ -103,7 +103,7 @@ two launch routes (the direct CLI and the ACP adapter) build their arguments fro
 the same policy at every launch, so a revoke applies from the next turn; revoking
 a `code` grant (or lowering the trust level that gave it) also stops the room's
 running turn, which still holds the checkout open.
-[src: file: backend/src/agents/read_only_repos.rs:806-862#resolve_room]
+[src: file: backend/src/agents/read_only_repos.rs:824-880#resolve_room]
 [src: file: backend/src/api/discussions/messaging.rs:1556-1585#stop_running_turn]
 
 A writable root never opens what a later program runs or what is secret, whether
@@ -173,7 +173,7 @@ requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
 an explicit `read` entry for Codex. Other agents receive no grant.
 [src: file: backend/src/workflows/run_artifacts.rs:202-211#ensure]
 [src: file: backend/src/workflows/steps.rs:126-147#artifacts_read_only_dirs]
-[src: file: backend/src/agents/read_only_repos.rs:672-702#resolve_with_dirs]
+[src: file: backend/src/agents/read_only_repos.rs:690-720#resolve_with_dirs]
 
 ```json
 [
@@ -244,9 +244,9 @@ rename, or across volumes a copy that skips links, made under a temporary name
 and renamed into place, so a crash never leaves a partial run). Failures are
 logged and the directory is left where it was. The file work runs off the
 async executor.
-[src: file: backend/src/workflows/run_artifacts.rs:74-122#resolve_root]
-[src: file: backend/src/workflows/run_artifacts.rs:124-140#refusal]
-[src: file: backend/src/workflows/run_artifacts.rs:161-190#open_root]
+[src: file: backend/src/workflows/run_artifacts.rs:79-127#resolve_root]
+[src: file: backend/src/workflows/run_artifacts.rs:129-145#refusal]
+[src: file: backend/src/workflows/run_artifacts.rs:166-195#open_root]
 [src: file: backend/src/workflows/run_artifacts.rs:247-257#open_run_dir]
 [src: file: backend/src/core/rooted_fd.rs:362-400#remove_child]
 [src: file: backend/src/workflows/run_artifacts.rs:350-391#migrate_from]
@@ -341,7 +341,7 @@ path, since the cwd is the copy. The copy goes with the artifacts directory.
 The automated policy and dispatch regressions use temporary repositories and
 fake CLI processes. They verify declarations and arguments; they do not prove
 vendor sandbox enforcement.
-[src: file: backend/src/agents/read_only_repos.rs:1182-1203#fixture]
+[src: file: backend/src/agents/read_only_repos.rs:1200-1221#fixture]
 [src: file: backend/tests/adapter_worker_policy.rs:41#default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries]
 
 The dispatch regression checks initial and resumed Codex adapter arguments:
@@ -353,7 +353,7 @@ including ordinary non-strict and direct launches. Unit coverage checks host
 aliases, duplicate aliases and path escaping.
 [src: file: backend/tests/adapter_worker_policy.rs:193-223#trust_overrides]
 [src: file: backend/tests/adapter_worker_policy.rs:226-316#config_keys]
-[src: file: backend/src/agents/runner_test.rs:12500-12561#codex_project_trust_override_preserves_paths_and_host_alias]
+[src: file: backend/src/agents/runner_test_tests_up.rs:12484-12545#codex_project_trust_override_preserves_paths_and_host_alias]
 [src: file: backend/src/acp/codex_adapter.rs:479-490#codex_project_mcp_override]
 
 Run the opt-in host probe with authenticated Claude Code and Codex installations

@@ -17,7 +17,7 @@ session-limit refusal is not retried: the run waits for the announced reset on
 the same provider (KT-811), or is parked for a human. The user then has to
 notice the failed run, edit Claude to Codex (for example), and replay it by hand.
 [src: file: backend/src/models/workflows.rs:2019-2025#RetryConfig]
-[src: file: backend/src/workflows/steps.rs:492-508#RETRY_BACKOFF_UNIT]
+[src: file: backend/src/workflows/steps.rs:496-502#retry_backoff_unit]
 [src: file: backend/src/workflows/steps.rs:993-1000#classify]
 [src: user: 2026-08-10: unattended workflow steps should continue on an
 explicit fallback and make the switch visible]
@@ -54,7 +54,7 @@ discussion identity. Switching Claude to Codex or Ollama changes more than the
 Kronn already has the useful abstraction needed for routing: `ModelTier` plus a
 per-agent `ModelTierConfig`. Concrete models are resolved independently for
 Claude, Codex, Gemini, Copilot, Ollama, and LiteLLM. An explicit per-step model
-currently wins over the tier. [src: file: backend/src/models/setup.rs:1753-1799#ModelTier]
+currently wins over the tier. [src: file: backend/src/models/setup.rs:1783-1829#ModelTier]
 [src: file: backend/src/agents/runner.rs:3707-3741#resolve_model_flag]
 
 Consequently, a fallback target must be represented as:
@@ -70,7 +70,7 @@ FallbackTarget {
 “Installed” is not enough to select that target. Current detection separately
 tracks installed, enabled, runtime-available, authentication-ready, and runtime
 warning states. HTTP providers additionally need endpoint health, model
-availability, and model capability checks. [src: file: backend/src/models/setup.rs:1911-1986#AgentDetection]
+availability, and model capability checks. [src: file: backend/src/models/setup.rs:1941-2016#AgentDetection]
 
 ## Policy and precedence
 
@@ -119,9 +119,9 @@ The execution boundary currently exposes strings for start failures and only
 three coarse discussion outcomes (`Finished { success }`, `PreflightFailed`,
 `RuntimeUnavailable`). The richer rate-limit/auth/server detection is a
 presentation helper that scans raw output after execution; it is not a routing
-contract. [src: file: backend/src/agents/runner.rs:4048-4049#start_agent_with_config]
+contract. [src: file: backend/src/agents/runner.rs:3954-3955#start_agent_with_config]
 [src: file: backend/src/api/discussions/streaming.rs:1270-1275#AgentExecutionOutcome]
-[src: file: backend/src/api/discussions/orchestration.rs:1742-1882#detect_agent_error_hint]
+[src: file: backend/src/api/discussions/orchestration.rs:1272-1412#detect_agent_error_hint]
 
 Fallback first needs a runner-level, provider-normalized error such as:
 
@@ -191,7 +191,7 @@ the fallback router should reuse the same principle. Agent and Batch Quick
 Prompt steps are currently outside that uncertain-effect journal, so they need
 an equivalent durable attempt intent before automatic fallback can be
 restart-safe. [src: file: backend/src/workflows/runner.rs:500-522#uncertain_side_effect_type]
-[src: file: backend/src/workflows/runner.rs:5058-5067#retry_uncertain_effect]
+[src: file: backend/src/workflows/runner.rs:5059-5068#retry_uncertain_effect]
 
 Additional workflow invariants:
 
@@ -233,7 +233,7 @@ project/run-scoped catalogue without Planning mutations, and no per-model
 capability gate checks that the model can call tools. A local Ollama
 model therefore cannot safely replace every CLI step merely because the model
 is pulled. [src: file: backend/src/api/agent_tools.rs:205-226#workflow_arc]
-[src: file: backend/src/workflows/runner.rs:2915-2921#workflow_room_arc]
+[src: file: backend/src/api/agent_tools.rs:220-231#workflow_room_arc]
 [src: file: docs/tech-debt/TD-20260808-http-agents-no-tool-calling.md:51-53#capability]
 
 No-capability declaration should mean “unknown/ineligible”, not “probably
@@ -250,19 +250,19 @@ The current spawn audit found these distinct Kronn-owned paths:
 | Current spawn path | What it covers |
 |---|---|
 | Discussion streaming | Normal replies, manual/forced runs, durable dispatch, and Quick Prompt / Batch Quick Prompt child discussions. HTTP tools are attached here, on workflow Agent steps and on audit steps. [src: file: backend/src/api/discussions/streaming.rs:4591-4634#native_http_tools] |
-| Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:695-791#ToolFreeSummary] |
+| Debate pre-summary | Compresses the shared context before debate. [src: file: backend/src/api/discussions/orchestration.rs:629-725#ToolFreeSummary] |
 | Debate participants | Starts every participant/round independently. [src: file: backend/src/api/discussions/orchestration.rs:803-1020#start_agent_with_config] |
-| Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:1032-1189#synthesis_external_http] |
+| Debate final synthesis | Starts the primary synthesis agent. [src: file: backend/src/api/discussions/orchestration.rs:966-1123#synthesis_external_http] |
 | Automatic discussion summary | None any more: removed in 0.13.0, a summary only exists on demand. [src: file: backend/src/models/discussions.rs:510-534#SummaryStrategy] |
-| Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/discussions/orchestration.rs:1291-1490#generate_summary_on_demand] |
-| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1840-2081#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4145-4225#execute_step] |
+| Explicit discussion summary | User-triggered summary path. [src: file: backend/src/api/disc_introspection.rs:732-931#generate_summary_on_demand] |
+| Workflow Agent helper | Normal attempts, retries, structured-output repair, current Ollama quality escalation, multi-agent review turns, and rollback Agent steps. [src: file: backend/src/workflows/steps.rs:465-749#run_agent_with_timeout] [src: file: backend/src/workflows/steps.rs:1840-2081#run_multi_agent_debate] [src: file: backend/src/workflows/runner.rs:4147-4232#execute_step] |
 | Full audit | Reasoning-tier filesystem audit. [src: file: backend/src/api/audit/full.rs:327-380#audit_tier] [src: file: backend/src/api/audit/full.rs:1911-1925#start] |
 | Drift audit | Reasoning-tier partial audit. [src: file: backend/src/api/audit/drift.rs:483-506#audit_tier] [src: file: backend/src/api/audit/drift.rs:1117-1127#start] |
 
 Audits still refuse Vibe, which has no file tools Kronn can scope to the
 project; every HTTP provider is admitted since KT-924 and KT-980, a `Custom`
 target only with a validated named connection. Eligibility is therefore a
-property of each surface, not of an agent being installed. [src: file: backend/src/api/audit/mod.rs:740-771#agent_can_audit]
+property of each surface, not of an agent being installed. [src: file: backend/src/core/cross_audit.rs:62-76#agent_can_audit]
 
 | Surface | Desired behavior | Initial rollout |
 |---|---|---:|

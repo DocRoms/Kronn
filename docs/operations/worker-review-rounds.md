@@ -8,14 +8,14 @@ way to set the limit, so every principal-driven lane was capped at the SQL defau
 
 A task execution gets `max_review_rounds` rounds of `request_changes`. `N` allows `N` re-offers and
 escalates on the `N+1`-th (`new_rounds > max_review_rounds`).
-`[src: file: backend/src/db/orchestration.rs:5078-5174#commit_review_checkpoint]`
+`[src: file: backend/src/db/orchestration.rs:5004-5100#commit_review_checkpoint]`
 
 - **Integer:** 1 to 1000. `0` is refused at every boundary.
-  `[src: file: backend/src/models/setup.rs:760-781#parse_review_rounds_arg]`
+  `[src: file: backend/src/models/setup.rs:790-811#parse_review_rounds_arg]`
 - **Unlimited:** no cap. It is stored in the existing `NOT NULL INTEGER` columns as a **sentinel**,
   `UNLIMITED_REVIEW_ROUNDS = u32::MAX` (4294967295) — never `0`, so the `> max` comparison simply never
   fires and no migration is needed. APIs and the UI show it as `unlimited` / `∞`.
-  `[src: file: backend/src/models/setup.rs:756-758#UNLIMITED_REVIEW_ROUNDS]`
+  `[src: file: backend/src/models/setup.rs:786-788#UNLIMITED_REVIEW_ROUNDS]`
 
 Unlimited removes the **round** cap only. The escalations for real stalls (no delivery, watchdog,
 quota, integration failures) are unchanged. What it does not bound is a worker looping on a review that
@@ -27,7 +27,7 @@ the extend form say so next to the checkbox.
 A campaign's `token_budget` (`NULL` = none; single-task launches have none) is checked, against the tokens
 its executions' messages already consumed, before **every additional worker attempt**, not only when
 picking new tasks. `execution_token_budget_stop` is the one check;
-`[src: file: backend/src/db/orchestration.rs:1708#execution_token_budget_stop]`
+`[src: file: backend/src/db/orchestration.rs:1672#execution_token_budget_stop]`
 three places use it, whatever the round limit (including unlimited):
 
 - **`request_changes`:** inside the review checkpoint transaction. A spent budget parks the execution
@@ -60,7 +60,7 @@ defaults. `[src: file: backend/src/models/setup.rs:100-110#WorkersConfig]`
 |---|---|
 | Campaign dialog (`TaskLaunchDialog`) | pre-filled from the setting, editable per run, `unlimited` checkbox with the same warning; an existing campaign shows its own. While the setting is loading, or if reading it fails, the field stays empty and the dialog **omits** the limit (the server then applies the setting); it never substitutes a built-in figure, and a value the human typed is always sent |
 | `POST /api/orchestration/campaigns` | `max_review_rounds` omitted → the setting; an integer or `"unlimited"` otherwise; anything else is a 400 |
-| `task_exec_prepare` / `task_exec_launch` (MCP, native tool, REST) | optional `max_review_rounds` (integer or `"unlimited"`); omitted → the setting `[src: file: backend/src/api/orchestration.rs:2284-2309#provision_single_task_execution_with_options]` |
+| `task_exec_prepare` / `task_exec_launch` (MCP, native tool, REST) | optional `max_review_rounds` (integer or `"unlimited"`); omitted → the setting `[src: file: backend/src/api/orchestration.rs:2311-2336#provision_single_task_execution_with_options]` |
 | `DelegateSubtasks` workflow step | its own `max_review_rounds` (1-10) when set, else the setting `[src: file: backend/src/workflows/delegate_subtasks_step.rs:621]` |
 
 The value is read **at launch** and copied onto the run and the execution: changing the setting never
@@ -96,14 +96,14 @@ The browser's « Extend rounds » button on the execution card calls
   A token that owns both rooms (a principal that adopted the child room) is refused as well; that principal
   extends from a token owning only the parent room, or from the UI.
 - The limit changes on that execution only, and the change is journaled (`review_rounds_extended`: actor,
-  reason, previous and new limit). `[src: file: backend/src/db/orchestration.rs:7930-7935#extend_review_rounds]`
+  reason, previous and new limit). `[src: file: backend/src/db/orchestration.rs:7856-7861#extend_review_rounds]`
 - At the cap but still `AwaitingReview`, extending is all it takes: the next `request_changes` is
   accepted instead of escalating.
 - An execution **the limit itself escalated** is also re-offered: the stored findings (the exhausted
   `request_changes` never delivered them) are posted to its worker's room, then it takes the ordinary
   reassignment to the *same* worker, unless the campaign's token budget is spent (see above). Only the
   LATEST entry into `Escalated` counts: a watchdog or quota stall after an older budget escalation is
-  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:17643-17648#extend_execution_review_rounds]`
+  extended but not re-offered. `[src: file: backend/src/api/orchestration.rs:18476-18481#extend_execution_review_rounds]`
 - Refused once the execution is Done, Failed or Cancelled, when it already has no cap, and without a reason.
 
 The escalation message posted to the principal names this option.

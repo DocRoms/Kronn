@@ -31,7 +31,7 @@ Send `response_format.type: "json_schema"` with
 `response_format.json_schema.strict: false` on the OpenAI wire, preserving the
 supplied schema. This is an explicit request setting, not an error-triggered
 fallback. Requests without a schema omit `response_format`.
-[src: file: backend/src/agents/chat_codec.rs:179-214#build_openai_chat_body]
+[src: file: backend/src/agents/chat_codec.rs:175-210#build_openai_chat_body]
 
 Rationale: preserve optional-field omission and open objects instead of
 normalizing arbitrary author schemas. Making an optional string required and
@@ -42,7 +42,7 @@ their actual type to the authored string type.
 
 Ollama still receives the same envelope through its native `format` field,
 with a non-streaming request. No change to its decoding schema is required.
-[src: file: backend/src/agents/runner.rs:8339-8393#build_ollama_chat_body]
+[src: file: backend/src/agents/runner.rs:8245-8299#build_ollama_chat_body]
 [src: file: backend/src/workflows/steps.rs:1353-1355#ollama_envelope_format]
 
 ## Guarantees and regression coverage
@@ -55,17 +55,17 @@ for full provider-enforced validation. For example, it does not enforce
 `additionalProperties` or resolve `$ref`.
 [src: file: backend/src/workflows/steps.rs:556-579#validate_envelope_against_schema]
 [src: file: backend/src/workflows/steps.rs:773-791#on_invalid]
-[src: file: backend/src/workflows/template.rs:1378-1398#validate_envelope_against_schema]
+[src: file: backend/src/workflows/template.rs:1353-1373#validate_envelope_against_schema]
 
 Body regressions cover explicit `strict: false`, preservation of nested optional
 properties, array items and dictionary schemas, both streaming settings, and
 absence of `response_format` when no schema is supplied. The workflow regression
 passes the actual envelope to both request builders and checks the unchanged
 Ollama `format` and the non-strict OpenAI schema.
-[src: file: backend/src/agents/chat_codec.rs:506-571#build_openai_chat_body]
+[src: file: backend/src/agents/chat_codec.rs:502-567#build_openai_chat_body]
 [src: file: backend/src/workflows/steps.rs:2331-2369#build_openai_chat_body]
 
 Schema errors still do not trigger the KT-709 unsupported-feature fallback;
 the existing refusal regressions exercise that distinction.
-[src: file: backend/src/agents/runner_test.rs:5323-5426]
-[src: file: backend/src/agents/runner_test.rs:5428-5490]
+[src: file: backend/src/agents/runner_test_tests_up.rs:5301-5404]
+[src: file: backend/src/agents/runner_test_tests_up.rs:5406-5468]

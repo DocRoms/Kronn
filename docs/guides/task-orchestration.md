@@ -223,10 +223,10 @@ without that tool asks the principal to relay it. This follows the accepted
 KT-635 brief policy, not a guarantee that every external host CLI obeys it.
 An unreviewed delivery never appears as an accepted report. After approval,
 Kronn derives one fixed-layout report; replay does not produce another.
-[src: file: backend/src/api/orchestration.rs:11342-11346#has_room_publication]
-[src: file: backend/src/api/orchestration.rs:11350-11399#parent_milestones]
-[src: file: backend/src/api/orchestration.rs:9575-9599#publish_accepted_delivery_or_warn]
-[src: file: backend/src/api/orchestration.rs:41018-41119#approving_a_delivery_publishes_one_derived_report_in_the_parent]
+[src: file: backend/src/api/orchestration.rs:11985#has_room_publication]
+[src: file: backend/src/api/orchestration.rs:12039-12063#parent_milestones]
+[src: file: backend/src/api/orchestration.rs:10033-10057#publish_accepted_delivery_or_warn]
+[src: file: backend/src/api/orchestration_tests_up.rs:22096-22206#approving_a_delivery_publishes_one_derived_report_in_the_parent]
 
 Native conversational handoffs are a separate opt-in from launching a planning
 task. Their paid/unknown allowance is configurable and shared by the originating
@@ -234,8 +234,8 @@ human turn. Removing that allowance explicitly does not remove structural
 guards: only attached, not-already-scheduled targets can run, delegation depth
 remains bounded and local handoffs retain a fixed ceiling. A typed wake to a
 joined CLI never silently substitutes a native responder.
-[src: file: backend/src/models/setup.rs:1040-1056#agent_handoff_paid_limit]
-[src: file: backend/src/db/discussions.rs:1702-1703#MAX_AGENT_HANDOFF_DEPTH]
+[src: file: backend/src/models/setup.rs:1070-1086#agent_handoff_paid_limit]
+[src: file: backend/src/db/discussions.rs:1703-1704#MAX_AGENT_HANDOFF_DEPTH]
 [src: file: backend/src/db/discussions.rs:1711-1746#agent_handoff_root]
 [src: file: backend/src/db/discussions.rs:1921-1961#cli_mention_targets]
 [src: file: backend/src/db/discussions.rs:2020-2063#already_scheduled]
@@ -258,7 +258,7 @@ The activity clock default is 20 minutes
 (`KRONN_TASK_ACTIVITY_TIMEOUT_SECS`, or the campaign's resilience policy, which
 wins). A tool call in flight (a cold build run by the worker itself) is activity
 up to `KRONN_TASK_TOOL_IN_FLIGHT_CAP_SECS` (2 h by default).
-[src: file: backend/src/db/orchestration.rs:8206-8211#DEFAULT_ACTIVITY_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8135-8140#DEFAULT_ACTIVITY_TIMEOUT_SECS]
 
 **Queue deadline.** An execution queued longer than the queue deadline is
 reported, never interrupted: the principal room receives one orchestration
@@ -269,8 +269,8 @@ deadline is 6 hours by default and is set host-wide with
 `KRONN_TASK_QUEUE_TIMEOUT_SECS` (a positive number of seconds; an unusable value
 falls back to the default). It counts from the creation of the queued dispatch.
 A resumed execution queues a new dispatch and gets its own deadline.
-[src: file: backend/src/db/orchestration.rs:8237-8240#DEFAULT_QUEUE_TIMEOUT_SECS]
-[src: file: backend/src/db/orchestration.rs:8266-8268#queue_wait_reported]
+[src: file: backend/src/db/orchestration.rs:8163-8166#DEFAULT_QUEUE_TIMEOUT_SECS]
+[src: file: backend/src/db/orchestration.rs:8174-8176#queue_wait_reported]
 
 ### Highlight a message without changing the task
 
@@ -304,8 +304,8 @@ delivery manifest and diff, then choose one of:
   compare-and-swap transaction; a target no worktree has checked out advances
   by a `git update-ref` compare-and-swap instead.
   [src: file: backend/src/core/worktree.rs:2796-2824#write_backup_ref]
-  [src: file: backend/src/core/worktree.rs:3578-3598#fast_forward_target_to]
-  [src: file: backend/src/core/worktree.rs:3523-3576#update_ref_target_to]
+  [src: file: backend/src/core/worktree.rs:3594-3614#fast_forward_target_to]
+  [src: file: backend/src/core/worktree.rs:3539-3592#update_ref_target_to]
 - **Request changes** — enter concrete feedback. The same worker, discussion,
   branch and worktree resume for the next bounded review round.
 
@@ -319,7 +319,7 @@ files in the one checkout stop the operation without switching or overwriting
 another checkout. Unrelated changes in the registered project's
 main checkout do not block a clean target in another worktree. See
 [`pinned-target-worktree.md`](../testing/pinned-target-worktree.md).
-[src: file: backend/src/core/worktree.rs:3217-3224#integration_target]
+[src: file: backend/src/core/worktree.rs:3215-3222#integration_target]
 
 Worker-written DoD claims, a checked box in the live Planning task and a
 principal approval without attempt-scoped evidence are all insufficient. This

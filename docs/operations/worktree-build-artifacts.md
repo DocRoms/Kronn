@@ -161,7 +161,7 @@ debug information, disable incremental compilation, and explicitly retain
 debug assertions and overflow checks. A developer needing full debug info may
 use Cargo's explicit command-line override, for example
 `cargo build --config 'profile.dev.debug=true'`; this is a local choice and is
-not a global Cargo setting. [src: file: backend/Cargo.toml:168-179#profile.dev]
+not a global Cargo setting. [src: file: backend/Cargo.toml:248-259#profile.dev]
 [src: file: desktop/src-tauri/Cargo.toml:49-55#profile.dev]
 
 Qualification validation resolves a Cargo validation's effective target through
@@ -174,10 +174,10 @@ real directory; an existing symlink, non-directory, or inspection failure is
 refused. Non-Cargo
 validations use their declared working directory. A critical-space refusal is
 stored as a refused validation rather than a pass. [src: file: backend/src/core/worktree.rs:1263-1327#ensure_build_disk_headroom]
-[src: file: backend/src/api/orchestration.rs:6918-6975#validation_build_path]
-[src: file: backend/src/api/orchestration.rs:6977-7073#validation_metadata_command]
-[src: file: backend/src/api/orchestration.rs:6808-6825#run_one_validation_with]
-[src: file: backend/src/api/orchestration.rs:7202-7268#run_one_validation_checked_with_runner]
+[src: file: backend/src/api/orchestration.rs:7362-7419#validation_build_path]
+[src: file: backend/src/api/orchestration.rs:7421-7517#validation_metadata_command]
+[src: file: backend/src/api/orchestration.rs:7249-7266#run_one_validation_with]
+[src: file: backend/src/api/orchestration.rs:7646-7712#run_one_validation_checked_with_runner]
 
 There is intentionally no automatic lifecycle cleanup for the interactive
 target or unknown qualification caches. The only automatic reclamation remains
@@ -315,7 +315,7 @@ answer is known a spawn runs at normal priority while a re-check, at most every
 [src: file: backend/src/core/cmd.rs:395-404#sync_cmd_with]
 [src: file: backend/src/core/task_worker_env.rs:849]
 [src: file: backend/src/core/task_worker_lane_warm.rs:843]
-[src: file: backend/src/agents/runner.rs:14773-14782#agent_launch_priority]
+[src: file: backend/src/agents/runner.rs:14663-14672#agent_launch_priority]
 [src: file: backend/src/core/quick_exec.rs:626-650#build_command]
 [src: file: backend/src/workflows/steps.rs:1411]
 [src: file: backend/src/workflows/exec_step.rs:74-90#EXEC_STEP_PRIORITY]
@@ -481,11 +481,11 @@ project whose seed lacks a fresh `aws-lc-sys`, then read `lane_warm_start`
 [src: file: backend/src/core/task_worker_env.rs:1324-1366#drain_output]
 [src: file: backend/src/core/task_worker_env.rs:72-84#CLANG_KEEP_TEMPS_IN_OBJ_DIR]
 [src: file: backend/src/core/task_worker_env.rs:153-173#compiler_temp_env_for]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1777-1777#first_build_args]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1153#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1780#first_build_args]
 [src: file: backend/src/core/project_toolchains.rs:609#has_lib_target]
-[src: file: backend/src/core/task_worker_sandbox.rs:323-374#seatbelt_profile_with]
-[src: file: backend/src/api/orchestration.rs:10913-10944#warm_failure_notice]
+[src: file: backend/src/core/task_worker_sandbox.rs:306-357#seatbelt_profile_with]
+[src: file: backend/src/api/orchestration.rs:11509-11540#warm_failure_notice]
 
 ## Seed and lane agree on the C flags (KT-1742)
 
@@ -914,9 +914,9 @@ project, read each `lane_warm_start` (`seed.aligned`, `crates`,
 `.kronn-warm.json` in the lane target.
 
 [src: file: backend/src/core/task_worker_lane_warm.rs:59-59#DEFAULT_FIRST_BUILD_TIMEOUT]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1150-1150#warm_lane_cancellable]
-[src: file: backend/src/core/task_worker_lane_warm.rs:962-962#warm_units]
-[src: file: backend/src/core/task_worker_lane_warm.rs:1789-1789#first_build_pending]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1153#warm_lane_cancellable]
+[src: file: backend/src/core/task_worker_lane_warm.rs:965#warm_units]
+[src: file: backend/src/core/task_worker_lane_warm.rs:1792#first_build_pending]
 [src: file: backend/src/core/task_worker_root_marks.rs:68-68#root_key]
 [src: file: backend/src/core/task_worker_root_marks.rs:131-131#cached_failure]
 [src: file: backend/src/core/task_worker_seed_align.rs:275-275#align_seed]
@@ -996,9 +996,9 @@ load, not a performance guarantee.
 [src: file: backend/src/models/setup.rs:131-145#bash_max_timeout_min]
 [src: file: backend/src/models/setup.rs:329-336#effective_bash_timeouts_ms]
 [src: file: backend/src/core/task_worker_env.rs:1036-1046#apply_bash_timeouts]
-[src: file: backend/src/agents/runner.rs:15229-15231#apply_bash_timeouts]
-[src: file: backend/src/core/config.rs:705-706#set_bash_timeouts]
-[src: file: backend/src/core/child_env.rs:280-281#BASH_DEFAULT_TIMEOUT_MS]
+[src: file: backend/src/agents/runner.rs:15122-15124#apply_bash_timeouts]
+[src: file: backend/src/core/worktree.rs:3452-3453#set_bash_timeouts]
+[src: file: backend/src/core/child_env.rs:321-322#BASH_DEFAULT_TIMEOUT_MS]
 [src: file: backend/src/api/orchestration.rs:11346-11356]
 [src: file: backend/src/core/task_worker_lane_warm.rs:872]
 [src: file: frontend/src/components/settings/WorkersSection.tsx:63#WorkersSection]

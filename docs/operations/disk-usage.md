@@ -201,8 +201,8 @@ and the next sweep judges the checkout again. A finished execution cannot be rea
 (`reassign_execution_worker_keeping_origin` and `extend_review_rounds` refuse a terminal one), so there is no
 released checkout to provision again; the claim guards the gap between the check and the removal.
 
-[src: file: backend/src/api/orchestration.rs:4760-4772#cleanup_integrated_execution]
-[src: file: backend/src/api/orchestration.rs:14394-14405#settle_cancelled_workspace]
+[src: file: backend/src/api/orchestration.rs:5038-5050#cleanup_integrated_execution]
+[src: file: backend/src/api/orchestration.rs:15121-15132#settle_cancelled_workspace]
 
 ### The sweeper's rules
 
@@ -250,8 +250,8 @@ asking for its purge is refused. A `Working`, `AwaitingReview`... execution's la
 The removal of a stalled lane is recorded on its execution (`lane_target_reclaimed`).
 [src: file: backend/src/api/disk.rs:158-215#lane_entry_state]
 [src: file: backend/src/api/disk.rs:242-270#ownerless_entry_state]
-[src: file: backend/src/db/orchestration.rs:577-620#stalled_execution_blocker]
-[src: file: backend/src/db/orchestration.rs:643-660#workspace_row_names_path]
+[src: file: backend/src/db/orchestration.rs:554-597#stalled_execution_blocker]
+[src: file: backend/src/db/orchestration.rs:620-637#workspace_row_names_path]
 [src: file: backend/src/core/worktree.rs:507-570#remove_ownerless_worktree]
 
 ## The launch guard
@@ -266,7 +266,7 @@ Kronn reads the free space of the volume holding the worktrees and `target/` (O(
    space is free) and posts a system message in the **principal room**.
 
 [src: file: backend/src/api/disk.rs:1132-1200#ensure_launch_headroom]
-[src: file: backend/src/api/orchestration.rs:10592-10615#post_disk_pressure_alert]
+[src: file: backend/src/api/orchestration.rs:11188-11211#post_disk_pressure_alert]
 
 Until a config is published at boot the guard is off (`0`), so a process that never loaded one — a unit
 test — is never refused by a threshold nobody chose.
@@ -305,7 +305,7 @@ once quiet), `foreign` (not Kronn's: no sweep ever touches it, a quiet one is `p
 per-entry delete) and `stalled` (an execution Blocked or Interrupted whose build dir has been idle for
 `server.disk_stalled_build_days`: confirmed per-entry delete only). `purgeable` is what the per-entry
 Purge button reads.
-[src: file: backend/src/core/disk_usage.rs:203-218#DiskState]
+[src: file: backend/src/core/disk_usage.rs:210-225#DiskState]
 
 ## Settings
 

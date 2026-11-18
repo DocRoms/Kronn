@@ -65,7 +65,7 @@ does not make a hidden hard-coded fallback reappear.
 [src: file: backend/src/api/external_api_connections.rs:1417-1429#catalog_declares_modality]
 [src: file: backend/src/api/external_api_connections.rs:1435-1489#catalog_models_from_body]
 [src: file: backend/src/api/external_api_connections.rs:1491-1506#merge_catalog]
-[src: file: backend/src/core/model_catalog/mod.rs:765-780#reconcile_http_catalog]
+[src: file: backend/src/core/model_catalog/mod.rs:762-777#reconcile_http_catalog]
 
 ## Where OpenCode's models come from (KT-928)
 
@@ -128,7 +128,7 @@ that lists no models keeps its own default: there is nothing to match. A
 session that lists models without the chosen one used to be left on OpenCode's
 own default while every screen showed the chosen model; the launch is now
 refused, naming the model, before any prompt is sent.
-[src: file: backend/src/agents/runner.rs:5897-5951#offers_model_catalogue]
+[src: file: backend/src/agents/runner.rs:5800-5854#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1948-1957#offers_model_catalogue]
 [src: file: backend/src/acp.rs:1963-1994#select_model]
 
@@ -162,7 +162,7 @@ classic batch, which runs the Quick Prompt's own agent, still inherits it.
 A connection Kronn cannot route to yet — no endpoint, or no model on any tier —
 is shown in the target list with that reason instead of being dropped from it
 in silence.
-[src: file: backend/src/db/workflows.rs:504-519#connection_for_batch_item]
+[src: file: backend/src/db/workflows.rs:497-512#connection_for_batch_item]
 [src: file: frontend/src/lib/externalAgentIdentity.ts:44-58#unusableExternalAgentTargets]
 
 `AgentSwitchPicker` remains the common selector on discussion, QP/compare and
@@ -186,7 +186,7 @@ alongside each tier's model (`economy_effort`/`default_effort`/
 deserializes every new field to `None`. Without an execution override or a
 preset, no effort flag is sent: the runtime's own default applies, never a
 silently assigned `high`/`max`.
-[src: file: backend/src/models/setup.rs:1790-1820#ModelTierConfig]
+[src: file: backend/src/models/setup.rs:1820-1850#ModelTierConfig]
 
 Resolution is a single precedence, mirrored on `effective_model_flag`:
 `runner::resolve_reasoning_effort` — explicit per-step/per-QP
@@ -211,17 +211,17 @@ candidate differs from an advertised mode only by case or whitespace, the
 refusal names that mode instead of the generic "catalogue does not list
 that combination" message, which otherwise reads as if the mode is entirely
 absent (KT-656).
-[src: file: backend/src/agents/runner.rs:3745-3923#agent_supports_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:3654-3829#agent_supports_reasoning_effort]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does
 not add resume to the direct Codex runner. Delegated task workers take the
 same route as ordinary turns, with their isolated worker arguments.
-[src: file: backend/src/agents/runner.rs:13979-13996#reasoning_effort]
-[src: file: backend/src/agents/runner.rs:14111-14142#model_reasoning_effort]
+[src: file: backend/src/agents/runner.rs:13887-13904#reasoning_effort]
+[src: file: backend/src/agents/runner.rs:14019-14050#model_reasoning_effort]
 [src: file: backend/src/acp/claude_adapter.rs:311-324#reasoning_effort]
 [src: file: backend/src/acp/codex_adapter.rs:462-501#model_reasoning_effort]
-[src: file: backend/src/agents/runner.rs:5236-5264#adapter_task_worker_args]
+[src: file: backend/src/agents/runner.rs:5142-5170#adapter_task_worker_args]
 
 Both standalone and embedded-desktop startup await catalog bootstrap before
 starting workflows or serving requests. Even after the one-time migration is
@@ -230,7 +230,7 @@ durable catalog. Bootstrap failures are logged; an unavailable projection
 does not silently authorize an effort. Discussion preflight may refresh the
 catalog afterward, but the first scheduled workflow does not depend on opening
 Settings first.
-[src: file: backend/src/main.rs:314-318#migrate_hardcoded_catalog_once]
+[src: file: backend/src/main.rs:322-326#migrate_hardcoded_catalog_once]
 [src: file: desktop/src-tauri/src/main.rs:721-725#migrate_hardcoded_catalog_once]
 [src: file: backend/src/core/model_catalog/mod.rs:156-276#refresh_runtime_cache]
 
@@ -266,7 +266,7 @@ These snapshots are local execution state, not a portable QP setting. Exporting
 or importing a QP preserves its editable `agent_settings`, while it does not
 reconstruct historic discussion launch overrides.
 [src: file: backend/src/db/discussion_effort.rs:1#Immutable]
-[src: file: backend/src/models/quick.rs:800-810#QuickPromptExportEnvelope]
+[src: file: backend/src/models/quick.rs:866-876#QuickPromptExportEnvelope]
 [src: file: backend/src/api/quick_prompts.rs:365-436#export_qp]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.
@@ -287,7 +287,7 @@ preceding registered migration (161, the ACP session migration). Tests pin manua
 disappearance/reappearance, refresh errors, cache staleness, provider media
 capability isolation and same-model isolation across HTTP connections.
 Generated TypeScript remains owned by `make typegen`.
-[src: file: backend/src/db/migrations.rs:2071-2105#model_catalog_upgrades_from_its_immediate_predecessor]
+[src: file: backend/src/db/migrations.rs:2080-2114#model_catalog_upgrades_from_its_immediate_predecessor]
 [src: file: backend/src/db/sql/162_model_catalog.sql:32-42#model_catalog_refresh_log]
 [src: file: backend/src/db/model_catalog.rs:1088-1134#reconcile_live_promotes_manual_entry_preserving_overrides]
 [src: file: backend/src/db/model_catalog.rs:1136-1158#reconcile_live_is_idempotent]

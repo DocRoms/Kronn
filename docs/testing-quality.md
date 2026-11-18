@@ -109,7 +109,7 @@ standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
 `[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:155-195#find_violations]`
-`[src: file: .github/workflows/ci-test.yml:525-529#with_conn]`
+`[src: file: .github/workflows/ci-test.yml:535-539#with_conn]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:
 a termination signal can arrive between the fork and that assignment, leaving
@@ -215,8 +215,8 @@ The archive build compiles the crates of this repository one at a time
 (`RUSTC_WORKSPACE_WRAPPER`, a file lock; dependencies stay parallel), so two
 of them never share a hosted runner's 16 GB, and records the peak memory of
 each compilation.
-[src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot] [src: file: .github/workflows/ci-test.yml:243-276#mark-backend-cache]
-[src: file: .github/workflows/ci-test.yml:208-243#archive] [src: file: .github/workflows/ci-test.yml:278-329#test-backend-shard] [src: file: .github/workflows/ci-test.yml:359-437#test-backend] [src: file: scripts/ci/backend_ci_slo.mjs:46-62#collapseBackendJobs] [src: file: scripts/ci/rustc_one_at_a_time.sh:1-12#flock]
+[src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot] [src: file: .github/workflows/ci-test.yml:243-284#mark-backend-cache]
+[src: file: .github/workflows/ci-test.yml:208-243#archive] [src: file: .github/workflows/ci-test.yml:278-329#test-backend-shard] [src: file: .github/workflows/ci-test.yml:359-437#test-backend] [src: file: scripts/ci/backend_ci_slo.mjs:46-62#collapseBackendJobs] [src: file: scripts/ci/rustc_one_at_a_time.sh:19-30#flock]
 
 The clippy, e2e dev-profile, release and portability caches follow the same
 restore-on-pull-request, save-on-main model: Actions scopes a cache created by
@@ -235,8 +235,8 @@ aggregates accept those skips only for a push. A save runs only on
 `success()`: a half-built tree saved under the exact key would be restored
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
-[src: file: .github/workflows/ci-test.yml:230-242#archive] [src: file: .github/workflows/ci-test.yml:458-491#cache-clippy] [src: file: .github/workflows/ci-test.yml:769-796#cache-e2e-dev]
-[src: file: .github/workflows/ci-build.yml:238-279#cache-portability] [src: file: .github/workflows/ci-build.yml:319-344#cache-release]
+[src: file: .github/workflows/ci-test.yml:230-242#archive] [src: file: .github/workflows/ci-test.yml:466-501#cache-clippy] [src: file: .github/workflows/ci-test.yml:790-817#cache-e2e-dev]
+[src: file: .github/workflows/ci-build.yml:238-279#cache-portability] [src: file: .github/workflows/ci-build.yml:321-346#cache-release]
 
 The backend performance observer publishes the duration for every eligible run
 and reports a warning rather than failing a green functional run when a hot
@@ -253,9 +253,9 @@ statistics use only successful same-branch pull-request runs whose job records
 a verified restored compiled cache. The v3 key cannot restore the former
 debug layout, so the first run is an explicit warmup.
 [src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:166-191#main] [src: file: scripts/ci/backend_ci_slo.mjs:100-104#effectiveMeasurementMode] [src: file: scripts/ci/backend_ci_slo.mjs:83-94#comparableSuccessfulHotRuns]
-[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1034-1071#backend-ci-performance]
+[src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1055-1092#backend-ci-performance]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:632-639#SLO]
+[src: file: .github/workflows/ci-test.yml:653-660#SLO]
 
 Each shard fails its artifact step when nextest does not produce the expected
 JUnit report, then uploads it as `backend-junit-N` (N = 1 to 3). nextest writes its
@@ -280,7 +280,7 @@ for seconds, classname, name in sorted(cases, reverse=True)[:10]:
 PY
 ```
 
-[src: file: .github/workflows/ci-test.yml:373-384#junit]
+[src: file: .github/workflows/ci-test.yml:381-392#junit]
 
 Run `CI Tests` manually with `cache_mode=hot` for a warmed compiled-artifact
 measurement or `cache_mode=cold` for a current-run-only cold measurement.
@@ -343,8 +343,8 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:95#timeout-minutes] [src: file: .github/workflows/ci-test.yml:393#timeout-minutes] [src: file: .github/workflows/ci-test.yml:753#timeout-minutes] [src: file: .github/workflows/ci-build.yml:234-238#timeout-minutes] [src: file: .github/workflows/ci-build.yml:335#timeout-minutes]
-[src: file: .github/workflows/ci-test.yml:975-1017#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
+[src: file: .github/workflows/ci-test.yml:95#timeout-minutes] [src: file: .github/workflows/ci-test.yml:401#timeout-minutes] [src: file: .github/workflows/ci-test.yml:774#timeout-minutes] [src: file: .github/workflows/ci-build.yml:234-238#timeout-minutes] [src: file: .github/workflows/ci-build.yml:337#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:996-1038#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Crate size
 

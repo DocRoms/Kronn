@@ -168,7 +168,7 @@ rest of the workflow. Measured on the pull-request review above, two different
 first passes merged find more than either alone; but a shadow on a small local
 model may invent a finding, so the merge **verifies every point before it keeps
 it**.
-[src: file: backend/src/workflows/shadow_merge.rs:757#merge_step]
+[src: file: backend/src/workflows/shadow_merge.rs:760#merge_step]
 
 - **Which shadows merge**: one, several or all of the step's shadows
   (`shadows`, empty means all). The others still run and are compared.
@@ -215,7 +215,7 @@ step is. A `PublishPageData` step writes it into a dataset with
 `value_from: "steps.advise.shadows"`, and the Page then shows the merged shadow
 and the identical one beside the step's own agent.
 [src: file: backend/src/workflows/shadow_summary.rs:297#summarize]
-[src: file: backend/src/workflows/template.rs:229#set_step_shadows]
+[src: file: backend/src/workflows/template.rs:204#set_step_shadows]
 
 ```json
 { "step": "advise",
@@ -267,7 +267,7 @@ and the identical one beside the step's own agent.
 A Page shows, in its **Quick Prompts and skills** panel, every Quick Prompt and
 skill used by the workflows behind it, step by step, with the version each step
 loads and the one each of its shadows tests.
-[src: file: backend/src/db/live_pages.rs:2250-2404#list_live_page_resources]
+[src: file: backend/src/db/live_pages.rs:2244-2266#list_live_page_resources]
 **Promote** hands the version a shadow tested to its step in one click:
 
 - a skill: the step now loads the tested version, pinned (a skill the shadow
@@ -289,9 +289,9 @@ of a flat shadow is named `shadow`, a lane keeps its id, label, projects,
 sampling, skills, prompt and budget, and an agent set for a named step goes to
 that step. The role (`witness`, `contributor`) is gone. The migration moves only
 the stored shadow: the steps are left as they were.
-[src: file: backend/src/workflows/shadow.rs:1442-1445#legacy_shadow_to_steps]
-[src: file: backend/src/workflows/shadow.rs:1493-1496#migrate_workflow_shadows]
-[src: file: backend/src/db/workflows.rs:2985#split_shadows]
+[src: file: backend/src/workflows/shadow.rs:1376#legacy_shadow_to_steps]
+[src: file: backend/src/workflows/shadow.rs:1376#migrate_workflow_shadows]
+[src: file: backend/src/db/workflows.rs:2987#split_shadows]
 
 Runs the former shadow recorded stay in the run list with a **Shadow** badge.
 An export written before this change carries a `shadow` key that an import now

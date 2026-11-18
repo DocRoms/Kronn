@@ -4,7 +4,7 @@ Kronn running as a Windows program (desktop app or native backend) can start an
 agent CLI that exists only inside WSL. `find_binary` finds it through
 `wsl.exe` (`via_wsl`) and the launch becomes
 `wsl.exe --cd <linux dir> -e <agent> <args…>`.
-[src: file: backend/src/agents/mod.rs:1202#via_wsl]
+[src: file: backend/src/agents/mod.rs:1252#via_wsl]
 [src: file: backend/src/agents/wsl.rs:34-52#wrap_invocation]
 
 Kronn running *inside* WSL (Linux build) is not affected: nothing crosses the

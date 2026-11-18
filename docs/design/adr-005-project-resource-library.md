@@ -238,12 +238,12 @@ lacks the key; a workflow that reads none is unaffected. A completed Full
 audit drafts a starter profile and stores it with the audit run, shown
 read-only with a Copy button in the audit view; it never writes into the
 checkout, and only a human publishes it
-[src: file: backend/src/core/project_profile.rs:408-476#default_branch_ref]
+[src: file: backend/src/core/lane_git.rs:96-164#default_branch_ref]
 [src: file: backend/src/core/project_profile.rs:203-254#schema_error]
 [src: file: backend/src/workflows/run_pins.rs:33#PROJECT_PROFILE]
-[src: file: backend/src/workflows/run_pins.rs:263-283#record_project_profile]
-[src: file: backend/src/workflows/run_pins.rs:485-497#revision_fingerprint_with_profiles]
-[src: file: backend/src/core/project_profile.rs:856-875#draft_if_missing]
+[src: file: backend/src/workflows/run_pins.rs:241-261#record_project_profile]
+[src: file: backend/src/workflows/run_pins.rs:454-466#revision_fingerprint_with_profiles]
+[src: file: backend/src/core/project_profile.rs:793-812#draft_if_missing]
 [src: file: docs/guides/project-profile.md:166-177].
 
 ### Other resources
@@ -312,9 +312,9 @@ A workflow Agent step also loads the project's repository skills: the run pin
 reads each one as committed on the default branch and pins it, so neither the
 checkout's branch nor the run's worktree changes it; one the pin lacks stops
 the step by name. A discussion still reads the checkout as it is.
-`[src: file: backend/src/workflows/run_pins.rs:686-700#DefaultBranch]`
-`[src: file: backend/src/api/projects/used_skills.rs:506-539#default_branch_commit]`
-`[src: file: backend/src/api/projects/used_skills.rs:554-570#resolve_repository_skills]`
+`[src: file: backend/src/workflows/run_pins.rs:623-637#DefaultBranch]`
+`[src: file: backend/src/core/repository_skills.rs:339-372#default_branch_commit]`
+`[src: file: backend/src/api/projects/used_skills.rs:25-41#resolve_repository_skills]`
 
 ## Identity
 

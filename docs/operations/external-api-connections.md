@@ -101,7 +101,7 @@ the stable connection identifier. Re-running a comparison keeps the provider
 and reasoning tier while resolving the model currently mapped to that tier, so
 an unavailable or deliberately replaced model is not forced back into a retry.
 [src: file: frontend/src/pages/WorkflowsPage.tsx:123-136#externalConnectionSwitchTarget]
-[src: file: backend/src/models/quick.rs:436-440#connection_id]
+[src: file: backend/src/models/quick.rs:502-506#connection_id]
 [src: file: frontend/src/lib/compareTargets.ts:5-9#CompareTarget]
 [src: file: backend/src/db/workflows.rs:955-1004#connection_tier_model]
 
@@ -125,7 +125,7 @@ encrypted with the instance key in the `stored_credentials` table since 0.14.3
 `config.toml` without them. `#[ts(skip)]` only keeps the value out of the
 generated TypeScript model. See [key-management.md](key-management.md).
 [src: file: backend/src/core/credential_store.rs:346-349#sync_for_save]
-[src: file: backend/src/models/setup.rs:1221-1226#ApiKey]
+[src: file: backend/src/models/setup.rs:1251-1256#ApiKey]
 
 Deletion is not transactional across SQLite and the local configuration. Kronn
 deletes the connection row first, then removes the matching token entry from a
@@ -157,7 +157,7 @@ identity source once the detailed discussion is loaded. OpenAI-compatible
 usage markers are also counted for `Custom`, so OpenRouter token totals follow
 the same per-turn aggregation as LiteLLM and NVIDIA.
 [src: file: frontend/src/lib/externalAgentIdentity.ts:81-107#discussionConnectionId]
-[src: file: backend/src/agents/runner.rs:15630-15661#ollama_tokens]
+[src: file: backend/src/agents/runner.rs:15523-15554#ollama_tokens]
 
 Aliases are unique without regard to case. If an alias is already owned by
 another connection, create or update fails instead of silently routing to the
@@ -196,8 +196,8 @@ At startup, Kronn backfills the former single LiteLLM and NVIDIA settings into
 stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
-configuration did not contain one. [src: file: backend/src/lib.rs:222-245#bootstrap_external_api_connections]
-[src: file: backend/src/db/external_api_connections.rs:359-390#backfill_legacy_config]
+configuration did not contain one. [src: file: backend/src/lib.rs:364-387#bootstrap_external_api_connections]
+[src: file: backend/src/db/external_api_connections.rs:403-434#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
 their endpoint and Economy, Default and Reasoning models. Saving either card
@@ -242,14 +242,14 @@ those tokens ahead of the call.
   (GitHub `/user`, Fastly `/current_user`…) or, for a custom API, a selected or
   identity-named GET endpoint without path parameters — the endpoint the card's
   "Test" already calls. A connection without one cannot be checked.
-  [src: file: backend/src/core/token_checks.rs:73-79#has_token_probe]
+  [src: file: backend/src/core/registry.rs:25-31#has_token_probe]
 - **When.** About 20 seconds after Kronn starts, then every 24 hours, for every
   connection that has a probe; on demand with the **Check** button on the
   connection card (`POST /api/mcps/configs/{id}/check-token`) and **Check all
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
-  [src: file: backend/src/core/token_checks.rs:326-344#spawn_scheduler]
-  [src: file: backend/src/lib.rs:2596-2598#check_token]
+  [src: file: backend/src/core/token_checks.rs:316-334#spawn_scheduler]
+  [src: file: backend/src/lib.rs:2181-2183#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
   OAuth / token-exchange refresh included), with the 15 s timeout of the
@@ -284,8 +284,8 @@ those tokens ahead of the call.
   The in-flight guard is taken before the stored row is read, so a check that
   finishes in between cannot make a second request judge a stale row and probe
   again.
-  [src: file: backend/src/core/token_checks.rs:34-34#MIN_RECHECK]
-  [src: file: backend/src/core/token_checks.rs:43-43#CHECK_CONCURRENCY]
+  [src: file: backend/src/core/token_checks.rs:33#MIN_RECHECK]
+  [src: file: backend/src/core/token_checks.rs:42#CHECK_CONCURRENCY]
 
 ## Troubleshooting
 
@@ -317,7 +317,7 @@ those tokens ahead of the call.
   tried instead. The catalogue now answers in every discussion, and a
   generation accepts the connection's id, alias or display name; a refusal
   lists the connections that can generate the requested modality.
-  [src: file: backend/src/api/orchestration.rs:16609-16618#task_worker_catalogue]
+  [src: file: backend/src/api/orchestration.rs:17440-17449#task_worker_catalogue]
   [src: file: backend/scripts/disc-introspection-mcp.py:6183-6198#call_agent_list]
   [src: file: backend/src/db/external_api_connections.rs:167-185#resolve]
   [src: file: backend/src/api/media.rs:150-206#ConnectionReference]

@@ -77,7 +77,7 @@ but:
   worker commits (`orch-commit-identity:<execution>:worker|principal`, so a resume
   cannot post it twice): *Ce projet n'a pas d'identité de commit : Kronn utilise
   `<email>`. Règle-la dans la carte du projet.*
-  [src: file: backend/src/api/orchestration.rs:12100#announce_global_commit_identity]
+  [src: file: backend/src/api/orchestration.rs:12787-12791#announce_global_commit_identity]
 - the project card shows the same warning (`global_identity`).
 
 An identity set in Settings › Workers is a decision, so it raises no notice.
@@ -96,5 +96,5 @@ published to the process by `config::save` and at boot
   [src: file: backend/src/core/worktree.rs:1874-1876#ensure_os_junk_excluded]
 - A checkout that holds only junk is not dirty: delivery and cleanup go through.
   A *tracked* junk file that changed is still work.
-  [src: file: backend/src/core/worktree.rs:4714-4720#worktree_dirty_files]
+  [src: file: backend/src/core/worktree.rs:4730-4736#worktree_dirty_files]
 - A type change (`T`, a file replaced by a symlink) is delivered as *Modified*.

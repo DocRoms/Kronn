@@ -103,7 +103,7 @@ definitions and import identities, and refuses stale decisions. All resources,
 datasets, points, origin mappings and the library activation commit in one
 SQLite transaction; an error rolls everything back. Origin mappings identify
 earlier imported copies without overwriting their source or local definitions.
-[src: file: backend/src/lib.rs:1546-1567#artifact_portability]
+[src: file: backend/src/lib.rs:1131-1152#artifact_portability]
 [src: file: backend/src/api/artifact_portability/import.rs:1157-1159#preview_digest]
 [src: file: backend/src/db/sql/188_artifact_import_origins.sql:4-9#artifact_import_origins]
 
@@ -268,7 +268,7 @@ A dataset can be emptied, re-limited and deleted after creation:
   the publication ledger like any write, from the API or a `PublishPageData`
   step. Only `clear` may omit `value` (API) or `value_from` (step); the other
   operations still require them, an explicit `null` value included.
-  `[src: file: backend/src/db/live_pages.rs:1055-1078#Clear]`
+  `[src: file: backend/src/db/live_pages.rs:1050-1073#Clear]`
 - **Limits.** `PATCH /api/pages/{id}/datasets/{name}` with `max_points` and/or
   `max_age_days` (`null` lifts the age limit) prunes the points beyond the new
   limits in the same transaction, then moves the Page to a new data revision
@@ -358,15 +358,15 @@ costs. The route answers with the **full state** in `full`, and an empty
 - `revision` is given and is not the Page's current HTML revision (the HTML
   was updated). A caller that holds no HTML omits `revision`.
 
-`[src: file: backend/src/db/live_pages.rs:745-778#read_live_page_data]`
-`[src: file: backend/src/db/live_pages.rs:784-812#datasets_changed_since]`
+`[src: file: backend/src/db/live_pages.rs:740-773#read_live_page_data]`
+`[src: file: backend/src/db/live_pages.rs:779-807#datasets_changed_since]`
 
 Adding a dataset therefore moves the Page to a new data revision and tells
 open views, like deleting one; declaring an existing dataset again changes
 nothing and tells nobody. A repository re-import that replaces the datasets
 of a stored Page always moves the revision, even when the file declares no
 dataset, so a reader that sends no `revision` still gets the full state.
-`[src: file: backend/src/db/live_pages.rs:824-939#add_live_page_dataset]`
+`[src: file: backend/src/db/live_pages.rs:819-934#add_live_page_dataset]`
 `[src: file: backend/src/api/live_pages.rs:684-739#add_dataset]`
 `[src: file: backend/src/db/live_page_datasets.rs:202-210#clear_live_page_datasets]`
 
@@ -749,9 +749,9 @@ preserve an existing execution when reassignment is possible, and present a
 resource wait separately from a failed plan. Do not send a generation request
 merely to guess whether a quota is available.
 [src: file: backend/src/models/orchestration.rs:1230-1253#TaskWorkerTier]
-[src: file: backend/src/api/orchestration.rs:15062-15251#reassign_execution]
-[src: file: backend/src/api/orchestration.rs:16371-16413#bounded_provider_quota_details]
-[src: file: backend/src/api/orchestration.rs:16608-16650#task_worker_catalogue]
+[src: file: backend/src/api/orchestration.rs:15864-16053#reassign_execution]
+[src: file: backend/src/api/orchestration.rs:17203-17245#bounded_provider_quota_details]
+[src: file: backend/src/api/orchestration.rs:17440-17482#task_worker_catalogue]
 [src: file: backend/src/api/orchestration.rs:16652-16722#task_exec_prepare]
 
 A `user_input` value may also carry a `<page.…>` `source_ref`: when the card
@@ -880,7 +880,7 @@ bridge-token list and the handlers refuse a bridge caller.
   and one action allows 30 per minute.
 - **Revocation.** Deletes the row; the next click opens the card.
 [src: file: backend/src/api/workflows.rs:5350-5546#create_manual_run_admitted]
-[src: file: backend/src/workflows/run_pins.rs:98-108#pin_within]
+[src: file: backend/src/workflows/run_pins.rs:81-91#pin_within]
 [src: file: backend/src/db/live_page_action_trusts.rs:31-35#ROW_MIN_INTERVAL_SECS]
 
 Embed permission (third-party embeds) is a separate mechanism and is not

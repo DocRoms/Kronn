@@ -26,7 +26,7 @@ does run the program).
 ## The rule: one builder, pinned to the registration
 
 Every git command Kronn runs on a worker's worktree is built by
-[src: file: backend/src/core/lane_git.rs:803-805#git]
+[src: file: backend/src/core/lane_git.rs:865-867#git]
 ([src: file: backend/src/core/lane_git.rs:63#LaneGit]), never by `git_cmd()`:
 
 - **The repository is pinned, not discovered.** The command carries
@@ -35,10 +35,10 @@ Every git command Kronn runs on a worker's worktree is built by
   (`<repo>/.kronn/worktrees/<lane>`), its git directory is read from that
   checkout, and the `<lane>` entry is the one git itself registered for this
   worktree (`<admin>/gitdir`)
-  ([src: file: backend/src/core/lane_git.rs:148-150#registered_admin_dir]). Neither
+  ([src: file: backend/src/core/lane_git.rs:210-212#registered_admin_dir]). Neither
   the worktree's `.git` file nor a `commondir` is consulted.
 - **The pointer is verified before every command**
-  ([src: file: backend/src/core/lane_git.rs:674-676#verify]). If `<worktree>/.git`
+  ([src: file: backend/src/core/lane_git.rs:736-738#verify]). If `<worktree>/.git`
   no longer reads `gitdir: <that admin dir>` (absolute or Kronn's portable
   relative form), nothing runs and the operation fails with
   `WorktreeTampered: …` — the text `task_exec_commit` returns to the worker, and
@@ -53,7 +53,7 @@ Every git command Kronn runs on a worker's worktree is built by
 - A path that is not a managed worktree is the owner's own checkout: it keeps
   git's discovery and gets the same switches. A **push** keeps the owner's hooks
   there (`pre-push`)
-  ([src: file: backend/src/core/lane_git.rs:848-851#git_keeping_owner_hooks]); from a
+  ([src: file: backend/src/core/lane_git.rs:910-913#git_keeping_owner_hooks]); from a
   managed worktree it is pinned and hook-less like the rest
   ([src: file: backend/src/api/git_ops.rs:1756-1759#run_git_push]), and the token-bearing
   authenticated push therefore reads the registered repository's configuration
@@ -70,7 +70,7 @@ HTTP agent's `git_status` / `git_diff` / `git_log`, the sub-task diff, the
 time-limit checkpoint, the release and review checkouts' evidence patches and
 status, the workflow Gate checkpoint and the sub-workflow engine commits (workflow
 worktrees are agent-written too). A test fails when any of those functions calls a
-plain `git_cmd()` ([src: file: backend/src/core/lane_git_guard_test.rs:76#plain_git]),
+plain `git_cmd()` ([src: file: backend/src/core/lane_git_guard_test.rs:87#plain_git]),
 and a second one is **deny-by-default**: it scans every production file and fails
 when a plain git spawn (`git_cmd()`, `async_git_cmd()`, `project_git_cmd()`,
 `Command::new("git")`) appears that is neither marked `lane-git-allow: <why>` nor
@@ -98,11 +98,11 @@ Also pinned, because a worker's worktree can be their argument:
   get the pin through the environment — `GIT_DIR`, `GIT_WORK_TREE`,
   `GIT_CONFIG_*` for hooks off, no file-system monitor — and, in a worktree whose
   pointer was redirected, a `GIT_DIR` that does not exist, so they run nothing
-  ([src: file: backend/src/core/lane_git.rs:809-815#pin_foreign_command]);
+  ([src: file: backend/src/core/lane_git.rs:871-877#pin_foreign_command]);
 - the Git panel of a workspace Kronn refuses to run git in says why (an
   unregistered directory under `.kronn/worktrees`, a redirected pointer, a
   submodule whose configuration was rewritten) instead of showing an empty answer
-  ([src: file: backend/src/api/disc_git.rs:305#git_allowed_in]);
+  ([src: file: backend/src/api/disc_git.rs:407-410#git_allowed_in]);
 - the read helpers of the Git panel and the discussion routes (`run_git_status`,
   `run_git_diff`, `run_git_blame`, `run_git_commit_patch`, the commit and range
   pages, `disc_pr_template`, `disc_workspace`'s `git_value`) use
@@ -141,7 +141,7 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
   `status`, `diff` and `diff-index` also carry `--ignore-submodules=dirty` ON THE
   COMMAND LINE inside a managed worktree, which beats a worker-written
   `.gitmodules` `ignore = none`
-  ([src: file: backend/src/core/lane_git.rs:882-887#ignore_submodules]): they still show a
+  ([src: file: backend/src/core/lane_git.rs:944-949#ignore_submodules]): they still show a
   moved gitlink but never run `git status` inside the submodule;
 - a gitlink is staged by its sha (`update-index --cacheinfo 160000,<sha>,<path>`,
   the sha read through the submodule's own pinned lane), never with `git add`, which
@@ -159,19 +159,19 @@ and would run a `filter.*.clean` it names, as the host. Three layers:
   submodule: git registered it, so it is pinned to its own registration and its own
   pointer is verified like any managed worktree's; a directory the worker made is not
   registered and stays refused
-  ([src: file: backend/src/core/lane_git.rs:634#child]);
+  ([src: file: backend/src/core/lane_git.rs:696#child]);
 - before every command the builder lists the index's gitlinks (from the worktree's
   root, whatever directory the command starts in) and refuses
   (`NestedRepoUnsafe`) while one carries something it does not trust
-  ([src: file: backend/src/core/lane_git.rs:552#check_nested_repos],
-  [src: file: backend/src/core/lane_git.rs:463#vet_nested_dot_git]): a nested
+  ([src: file: backend/src/core/lane_git.rs:614#check_nested_repos],
+  [src: file: backend/src/core/lane_git.rs:525#vet_nested_dot_git]): a nested
   `.git/config` with any key outside `core.*` plumbing, `extensions.objectformat` /
   `extensions.refstorage` (a reftable clone), `remote.*.url|fetch`,
   `branch.*.remote|merge`, `user.*` (so no `filter.*`, `core.fsmonitor`,
   `include.*`, `gpg.*`). The keys are listed BY GIT, not by a parser of Kronn's
   (`git --git-dir=/dev/null config --file <config> --no-includes --null --name-only --list`,
   no system or global configuration, no repository discovery)
-  ([src: file: backend/src/core/lane_git.rs:342#nested_config_keys]): git accepts
+  ([src: file: backend/src/core/lane_git.rs:395-404#nested_config_keys]): git accepts
   a second `[section]` header on one line (`[remote "origin"][filter "a.url=b"]clean = …`
   is `filter.a.url=b.clean`), a quoted sub-section holding `]` or `=`, an old-style
   `[section.sub]` and a backslash-continued value, and a line parser that disagrees
@@ -197,7 +197,7 @@ argument that is a file the worktree holds), passes
 `-c filter.<x>.clean= -c filter.<x>.smudge= -c filter.<x>.process= -c filter.<x>.required=false`
 (`merge.<x>.driver=false`, `diff.<x>.textconv=`/`command=` likewise), and logs it
 once per key
-([src: file: backend/src/core/lane_git.rs:250-254#neutralised_programs]). An absolute
+([src: file: backend/src/core/lane_git.rs:312-316#neutralised_programs]). An absolute
 program (`/usr/bin/git-lfs`) or a bare command name (`git-lfs clean -- %f`) is the
 owner's own and is left alone.
 
@@ -214,14 +214,14 @@ cover it.
 - Kronn's Seatbelt profile denies writes to the pointer and, by a case-insensitive
   regular expression per directory, to the `.git` of the worktree and of each
   nested repository found at launch
-  ([src: file: backend/src/core/task_worker_sandbox.rs:518#seatbelt_profile_read_only]);
+  ([src: file: backend/src/core/task_worker_sandbox.rs:500-501#seatbelt_profile_read_only]);
   bubblewrap binds the pointer and every nested `.git` that exists at launch
   read-only
-  ([src: file: backend/src/core/task_worker_sandbox.rs:598-601#bubblewrap_args_read_only]);
+  ([src: file: backend/src/core/task_worker_sandbox.rs:581-584#bubblewrap_args_read_only]);
 - Claude's task-worker settings carry `sandbox.filesystem.denyWrite` for the
   pointer and for each existing nested `.git` (and its content), and
   `Edit/Write/MultiEdit/NotebookEdit` permission denies
-  ([src: file: backend/src/agents/runner.rs:13233-13243#claude_task_worker_settings]);
+  ([src: file: backend/src/agents/runner.rs:13143-13153#claude_task_worker_settings]);
 - the HTTP agents' write tools refuse any path with a `.git` component
   (compared without regard to case, explicitly) and a symlink to one
   ([src: file: backend/src/api/agent_workspace_tools.rs:434#resolve_writable_in_workspace]);
@@ -279,7 +279,7 @@ output (20 lines / 2 000 characters), never a conflict
 - `task_exec_commit` / `git_commit` fail with `HookRefused (pre-commit): <output>`
   and commit nothing;
 - the candidate build returns `CandidateOutcome::HookRefused { hook, output }`
-  ([src: file: backend/src/core/worktree.rs:2790#HookRefused]), undoes the merge
+  ([src: file: backend/src/core/worktree.rs:2788#HookRefused]), undoes the merge
   and is reported to the principal and worker with the hook's output.
 
 A `git merge` refused before it starts (a dirty tree, unrelated histories) is an

@@ -30,17 +30,17 @@ keeps an existing generated `project.md`; a newly installed template still
 gets its default fields filled. The report exposes `kept_without_answers`.
 [src: file: backend/src/api/audit/full.rs:939-944#sync_briefing_file]
 [src: file: backend/src/api/audit/full.rs:1056-1068#fill_project_doc_for_audit]
-[src: file: backend/src/api/audit/project_doc.rs:1202-1211#ProjectDocReport]
-[src: file: backend/src/api/audit/project_doc.rs:1266-1284#fill_project_doc_for_audit]
-[src: file: backend/src/api/audit/project_doc.rs:1286-1306#write_project_page]
+[src: file: backend/src/api/audit/project_doc.rs:1188-1197#ProjectDocReport]
+[src: file: backend/src/api/audit/project_doc.rs:1251-1269#fill_project_doc_for_audit]
+[src: file: backend/src/api/audit/project_doc.rs:1274-1294#write_project_page]
 
 The project facts include the external documentation (Confluence, Notion, a
 wiki, other): https addresses only, no credentials, at most six. A Confluence
 space is read back with one read-only GET through the project's Atlassian
 connection; a space the connection cannot see is "not verified", never a
 mismatch, because Confluence may live on another host than Jira.
-[src: file: backend/src/api/audit/project_doc.rs:928-941#confluence_space_key]
-[src: file: backend/src/api/audit/project_doc.rs:943-995#check_external_doc]
+[src: file: backend/src/api/audit/project_doc.rs:916-929#confluence_space_key]
+[src: file: backend/src/api/audit/project_doc.rs:931-983#check_external_doc]
 
 The same hook then seeds `gotchas/known-traps.md`, `people/team.md` and
 `conventions/git-workflow.md` from what the briefing states, and lists in each
@@ -51,7 +51,7 @@ the briefing no longer feeds is removed only while it still carries the marker.
 The report exposes `operating_docs`.
 [src: file: backend/src/api/audit/operating_seed.rs:305-390#seed]
 [src: file: backend/src/api/audit/operating_seed.rs:176-260#legacy_pointers]
-[src: file: backend/src/api/audit/project_doc.rs:1266-1284#fill_project_doc_for_audit]
+[src: file: backend/src/api/audit/project_doc.rs:1251-1269#fill_project_doc_for_audit]
 
 The regression suite covers HTTP reads and cards, stale database options,
 empty/unreadable files, explicit workflow defaults, clone preservation and a

@@ -23,7 +23,7 @@ Sources:
 - `Completed` or `Interrupted`, with the validation discussion, is one transaction. [src: file: backend/src/api/audit/full.rs:4222-4228#write_terminal_state]
 - `Interrupted` only moves a `Running` row. [src: file: backend/src/db/audit_runs.rs:893-900#mark_interrupted]
 - The worker marks a cancel before it acknowledges it. [src: file: backend/src/api/audit/full.rs:1403-1455#mark_cancelled_at_step] [src: file: backend/src/db/audit_runs.rs:184-213#mark_cancelled_at_step]
-- At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/mod.rs:284-316#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:910-941#reconcile_stale_runs]
+- At boot, every `Running` row is a zombie and becomes `Interrupted`. [src: file: backend/src/db/audit_runs.rs:1745-1752#reconcile_stale_runs] [src: file: backend/src/db/audit_runs.rs:910-941#reconcile_stale_runs]
 - A run is resumable when it is the project's latest, `Interrupted`, with at least one done step. [src: file: backend/src/db/audit_runs.rs:1006-1008#latest_resumable]
 
 ## What counts as a done step
@@ -124,7 +124,7 @@ this degrades and continues.
   refuses any bridge caller. It is refused when the target is missing, empty
   or still holds template placeholders. It is also refused when the run is not
   the latest `Interrupted` run, or while the audit lease is held.
-  [src: file: backend/src/lib.rs:2190-2195#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:280-282#DocsWriteLease]
+  [src: file: backend/src/lib.rs:1775-1780#accept_audit_step] [src: file: backend/src/api/audit/accept.rs:137-145#BridgeCaller] [src: file: backend/src/api/audit/accept.rs:59-81#check_target] [src: file: backend/src/api/audit/accept.rs:174-184#latest] [src: file: backend/src/api/audit/accept.rs:280-282#DocsWriteLease]
 - Once no failed step is left, the resume runs no agent step and only
   finalizes the run. It goes to `Completed`, writes its validation discussion,
   which lists the accepted steps apart, and makes the project validatable.
@@ -199,13 +199,13 @@ this degrades and continues.
   `lease_orphaned`. The cleanup action (`POST /api/audit-runs/cleanup`) never
   touches a live audit. It settles the stale `Running` rows and releases the
   orphaned leases.
-  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/lib.rs:320-321#lease_orphaned] [src: file: backend/src/api/audit/run.rs:328#lease_orphaned] [src: file: backend/src/api/audit/run.rs:191-223#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:962-1003#reconcile_running_except]
+  [src: file: backend/src/api/audit/full.rs:125-165#orphaned_leases] [src: file: backend/src/state.rs:80-81#lease_orphaned] [src: file: backend/src/api/audit/run.rs:328#lease_orphaned] [src: file: backend/src/api/audit/run.rs:191-223#audit_runs_cleanup] [src: file: backend/src/db/audit_runs.rs:962-1003#reconcile_running_except]
 - **Validation agents.** Before an audit touches `docs/`, it stops any agent
   still answering in a validation discussion linked to one of the project's
   runs. While an audit of the project shows progress, such an agent is not
   started: its dispatch goes back to the queue with its attempts intact. A
   run clears its progress before it spawns its own validation agent.
-  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:1825-1828#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1825-1828#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1832-1853#progress] [src: file: backend/src/api/audit/full.rs:3876-3879#clear_progress]
+  [src: file: backend/src/api/audit/full.rs:773-775#stop_validation_agents] [src: file: backend/src/api/audit/full.rs:223-258#stop_validation_agents] [src: file: backend/src/api/discussions/runtime.rs:1756-1759#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1756-1759#hold_validation_during_audit] [src: file: backend/src/api/discussions/runtime.rs:1763-1784#progress] [src: file: backend/src/api/audit/full.rs:3876-3879#clear_progress]
 - **Cancel.** A cancel waits for the worker to acknowledge it. Without that
   acknowledgement it answers with an error, and the UI keeps the audit shown,
   marked "cancel pending". It deletes only the validation discussion linked to
@@ -365,7 +365,7 @@ sections.
   no agent and writes no doc. It is a human action only: the route is not on
   the bridge list, and the handler refuses any bridge caller. It takes the
   audit lease.
-  [src: file: backend/src/lib.rs:2094-2097#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:864-895#acknowledge_sections]
+  [src: file: backend/src/lib.rs:1679-1682#acknowledge_drift] [src: file: backend/src/api/audit/drift.rs:102-107#bridge] [src: file: backend/src/api/audit/drift.rs:112-116#DocsWriteLease] [src: file: backend/src/api/audit/docs_write.rs:25-29#try_acquire_lease] [src: file: backend/src/core/checksums.rs:864-895#acknowledge_sections]
 
 ## The action offered in each state
 
@@ -506,7 +506,7 @@ as human-validated evidence until its trust conditions hold again.
   as `validation_started_by` when the validation is opened, and as
   `validated_by` when it is validated, on the run row and in
   `docs/.kronn.json` (`validated_by`, `validation_started_by`).
-  [src: file: backend/src/core/kronn_state.rs:343-359#mark_validated_by]
+  [src: file: backend/src/core/kronn_state.rs:354-370#mark_validated_by]
   [src: file: backend/src/db/audit_validation.rs:125-140#set_started_by]
 - **Boot repair.** At startup, completions already visible in the messages are
   stamped, and open validations an older audit left behind are archived only
@@ -549,7 +549,7 @@ re-records the fingerprints and the provenance, stamps the unowned docs as read,
 moves the previous `validated_at` / `validated_by` to `validation_history` in
 `docs/.kronn.json`, and dates the new validation.
 [src: file: backend/src/api/audit/validate_version.rs:51-73#broken_citations]
-[src: file: backend/src/core/kronn_state.rs:364-377#revalidate_current]
+[src: file: backend/src/core/kronn_state.rs:375-388#revalidate_current]
 
 Nothing is left half done. The records it depends on (`.kronn.json`,
 `provenance.json` and `citations.json`) are read strictly before the first write, so an unreadable
@@ -625,7 +625,7 @@ it ran the audit, from the committed copy otherwise.
 | A rescan, a resume, a validation | Only a file identical to `HEAD` (a human committed it). An uncommitted file is shown, flagged as not committed, and never used to resume or validate. |
 | A step | Trusted when its file still has the recorded digest. A changed or missing file is « à revérifier »: never trusted, replayed on resume, and it blocks a validation from the repository. |
 
-[src: file: backend/src/core/audit_run_state.rs:277-296#probe]
+[src: file: backend/src/core/audit_run_state.rs:285-304#probe]
 
 **What the UI shows.** `GET /api/projects/:id/audit-latest`,
 `audit-timeline` and `audit-repo-state` carry the repository's run, read off
@@ -666,8 +666,8 @@ version is independent of the application's release version; the first tracked
 catalogue uses `kronn:doc-version="1.1"`. A version or catalogue mismatch, or
 missing files, stays visible even on an audited project. Filled project docs
 are not compared against template bytes to decide whether an update exists.
-[src: file: backend/src/core/kronn_state.rs:107-108#template]
-[src: file: backend/src/core/template_manifest.rs:66-80#snapshot]
+[src: file: backend/src/core/kronn_state.rs:114-120#template]
+[src: file: backend/src/core/template_manifest.rs:33-47#snapshot]
 [src: file: templates/docs/AGENTS.md:1#kronn]
 
 The project's update notice and MCP `audit_prepare.template_update` list missing
@@ -676,7 +676,7 @@ update, then use the existing placeholder action to run only those steps.
 Files without an owning step, including `environments.md`, workflow files and
 `operations/mcp-servers.md`, are listed for manual completion; the registry does
 not assign them an audit step.
-[src: file: backend/src/core/template_manifest.rs:82-109#check]
+[src: file: backend/src/core/template_manifest.rs:49-76#check]
 [src: file: backend/src/api/audit/helpers.rs:173-178#template_update]
 [src: file: frontend/src/components/TemplateUpdateNotice.tsx:34-40#installTemplate]
 [src: file: backend/scripts/disc-introspection-mcp.py:2746-2754#audit_prepare]
@@ -688,7 +688,7 @@ rename is inferred for projects without a recorded manifest. The older
 `ai/index.md` to `docs/AGENTS.md` layout conversion remains the separate legacy
 migration, as recorded in the actual template history.
 [src: file: backend/src/core/template_manifest.rs:110-146#renames]
-[src: file: backend/src/core/template_manifest.rs:184-210#apply_renames]
+[src: file: backend/src/core/template_manifest.rs:151-177#apply_renames]
 [src: commit: 2ff8a178f]
 
 The bundled anti-hallucination spec is refreshed only when its bytes match the
@@ -696,7 +696,7 @@ last recorded installed hash or an exact historical bundled revision. Local
 edits survive and are reported. Reinstall uses the scanner's uppercase
 placeholder grammar, so ordinary Vue, Jinja and Twig expressions are filled
 content, not preselected damage.
-[src: file: backend/src/core/template_manifest.rs:210-252#record_install]
+[src: file: backend/src/core/template_manifest.rs:177-219#record_install]
 [src: file: backend/src/api/projects/template_reinstall.rs:262-279#has_unfilled_placeholder]
 
 Standalone install and reinstall snapshot provenance before writing and record
@@ -729,14 +729,14 @@ category.
   cannot restore it, but its step still never ended and so still needs the
   override). A new run drops the snapshots of the project's earlier runs and
   deleting a run cascades.
-  [src: file: backend/src/api/audit/step_guard.rs:104-125#restore_target] [src: file: backend/src/api/audit/step_guard.rs:221-238#KilledOutcome] [src: file: backend/src/api/audit/step_guard.rs:272-281#target_state] [src: file: backend/src/db/audit_runs.rs:281-314#MAX_SNAPSHOT_BYTES] [src: file: backend/src/db/audit_runs.rs:32-39#audit_step_snapshots] [src: file: backend/src/db/sql/265_audit_cancel_and_integrity.sql:20-31#audit_step_snapshots]
+  [src: file: backend/src/api/audit/step_guard.rs:98-119#restore_target] [src: file: backend/src/api/audit/step_guard.rs:215-232#KilledOutcome] [src: file: backend/src/api/audit/step_guard.rs:266-275#target_state] [src: file: backend/src/db/audit_runs.rs:281-314#MAX_SNAPSHOT_BYTES] [src: file: backend/src/db/audit_runs.rs:32-39#audit_step_snapshots] [src: file: backend/src/db/sql/265_audit_cancel_and_integrity.sql:20-31#audit_step_snapshots]
 - **A crash is settled at boot, not at the next launch.** Right after the
   recorded agents are killed, every step that never ended and has a snapshot
   is put back (or marked) and recorded failed with a `stopped during step N
   (the backend stopped)` reason. Until then the doc would sit half-written
   with no marker. A step that never ended and has no verdict is a blocker of
   its own (`NeverEnded`): accepting it needs the override too.
-  [src: file: backend/src/api/audit/step_guard.rs:562-589#settle_unfinished_at_boot] [src: file: backend/src/db/mod.rs:303-307#stop_agents_and_settle_at_boot] [src: file: backend/src/api/audit/step_guard.rs:897-912#AcceptBlocker]
+  [src: file: backend/src/api/audit/step_guard.rs:552-579#settle_unfinished_at_boot] [src: file: backend/src/api/audit/step_guard.rs:636-638#stop_agents_and_settle_at_boot] [src: file: backend/src/api/audit/step_guard.rs:887-902#AcceptBlocker]
 - **Settling never destroys what the agent did not write.** The audit
   watches the target on the activity tick and keeps the fingerprint of what it
   saw the agent write (`audit_step_snapshots.observed_hash`, migration 264).
@@ -748,7 +748,7 @@ category.
   restores, but content it cannot vouch for is first copied to
   `<target>.kronn-displaced-<UTC timestamp>` and the step's reason names the
   path; if the copy cannot be made the target is not replaced.
-  [src: file: backend/src/api/audit/step_guard.rs:328-409#settle_killed] [src: file: backend/src/api/audit/step_guard.rs:127-160#save_aside]
+  [src: file: backend/src/api/audit/step_guard.rs:328-409#settle_killed] [src: file: backend/src/api/audit/step_guard.rs:121-154#save_aside]
 - **Settling never writes outside the project.** Every read, restore, marker
   and displaced copy goes through the project-containment check (no symlink
   on the path, no `..`), every write then resolves through the project's
@@ -760,7 +760,7 @@ category.
   [fs-guard-rooted-writes](../operations/fs-guard-rooted-writes.md)). A project root that does not exist
   (an unmounted volume) is never recreated: its steps stay open, snapshot
   kept, and are settled by the next boot or launch that finds the root.
-  [src: file: backend/src/api/audit/step_guard.rs:61-76#contained_path] [src: file: backend/src/api/audit/step_guard.rs:97-102#write_atomically]
+  [src: file: backend/src/api/audit/step_guard.rs:55-70#contained_path] [src: file: backend/src/api/audit/step_guard.rs:91-96#write_atomically]
 - **File work stays off the writer connection.** The launch-time net reads
   the pending snapshots, settles the files, then records the verdicts, in three
   separate steps (`pending_steps`, `settle_pending`, `record_settled`).
@@ -768,13 +768,13 @@ category.
   wrote its target, Kronn keeps the text (a human may accept it) under a
   `<!-- kronn:partial-step -->` banner and records `target_state = partial`.
   A later success, or an acceptance, removes the banner.
-  [src: file: backend/src/api/audit/step_guard.rs:16-22#PARTIAL_OPEN] [src: file: backend/src/api/audit/step_guard.rs:200-219#settle_failed_target] [src: file: backend/src/api/audit/step_guard.rs:187-198#clear_partial_marker]
+  [src: file: backend/src/api/audit/step_guard.rs:16-22#PARTIAL_OPEN] [src: file: backend/src/api/audit/step_guard.rs:194-213#settle_failed_target] [src: file: backend/src/api/audit/step_guard.rs:181-192#clear_partial_marker]
 - **Accept refuses an unsound step.** A step that failed for truncation,
   citations that do not resolve, an undisposed detector signal, incomplete
   coverage, or a stop is accepted only with `override_unsound: true`. The
   refusal starts with `override_required:` and carries a bounded diff against
   the pre-step content. The override is recorded in the acceptance reason.
-  [src: file: backend/src/api/audit/step_guard.rs:897-915#AcceptBlocker] [src: file: backend/src/api/audit/accept.rs:34-36#OVERRIDE_REQUIRED_PREFIX] [src: file: backend/src/api/audit/accept.rs:261-275#OVERRIDE_REQUIRED_PREFIX]
+  [src: file: backend/src/api/audit/step_guard.rs:887-905#AcceptBlocker] [src: file: backend/src/api/audit/accept.rs:34-36#OVERRIDE_REQUIRED_PREFIX] [src: file: backend/src/api/audit/accept.rs:261-275#OVERRIDE_REQUIRED_PREFIX]
 - **Boot kills an agent the previous backend left.** The run records the
   agent's process group and the start stamp of its leader (`agent_pgid`,
   `agent_started_marker`). At boot, before the lease is freed, the group is

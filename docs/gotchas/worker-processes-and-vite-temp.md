@@ -12,11 +12,11 @@ cancelled) or the watchdog finds its run gone, the processes carrying that id
 get SIGTERM, then SIGKILL, and the table is re-read for what was started
 meanwhile. Only the ended dispatch's id is matched.
 [src: file: backend/src/core/dispatch_reaper.rs:29-30#DISPATCH_ENV]
-[src: file: backend/src/core/child_env.rs:941-953#DISPATCH_ENV]
-[src: file: backend/src/api/discussions/runtime.rs:841-843#reap_task_worker_processes]
-[src: file: backend/src/api/orchestration.rs:1169-1171#reap_task_worker_processes]
-[src: file: backend/src/api/discussions/runtime.rs:841-857#reap_task_worker_processes]
-[src: file: backend/src/core/dispatch_reaper.rs:638-693#reap_dispatch]
+[src: file: backend/src/core/child_env.rs:980-992#DISPATCH_ENV]
+[src: file: backend/src/api/orchestration.rs:800-802#reap_task_worker_processes]
+[src: file: backend/src/api/orchestration.rs:800-802#reap_task_worker_processes]
+[src: file: backend/src/api/orchestration.rs:800-816#reap_task_worker_processes]
+[src: file: backend/src/core/dispatch_reaper.rs:644-699#reap_dispatch]
 
 What is taken, and what is not:
 
@@ -39,8 +39,8 @@ What is taken, and what is not:
   session is read again right before each signal (SIGTERM and SIGKILL).
   A process whose stamp could not be read is never a target.
 [src: file: backend/src/core/dispatch_reaper.rs:147-187#run_processes]
-[src: file: backend/src/core/dispatch_reaper.rs:476-512#macos_procargs]
-[src: file: backend/src/core/dispatch_reaper.rs:583-616#is_still_ours]
+[src: file: backend/src/core/dispatch_reaper.rs:482-518#macos_procargs]
+[src: file: backend/src/core/dispatch_reaper.rs:589-622#is_still_ours]
 
 - macOS hides the environment of platform binaries (`/bin/sh`, `/bin/sleep`,
   `/usr/bin/*`), as `ps eww` does: such a process is found only as a descendant
@@ -48,13 +48,13 @@ What is taken, and what is not:
   visible. A test that needs a tagged process must not use a system binary.
 - The table is read with libproc and `KERN_PROCARGS2` on macOS and `/proc` on
   Linux: no `ps`, which the worker sandbox refuses to execute.
-  [src: file: backend/src/core/dispatch_reaper.rs:365-428#process_table]
-  [src: file: backend/src/core/dispatch_reaper.rs:430-474#process_table]
+  [src: file: backend/src/core/dispatch_reaper.rs:371-434#process_table]
+  [src: file: backend/src/core/dispatch_reaper.rs:436-480#process_table]
 - On Linux the kernel refuses `/proc/<pid>/environ` of a zombie and of a
   process of the same user that is not dumpable (`(sd-pam)`, `ssh-agent`).
   A zombie is skipped; any other such process makes the reap unverified only
   when it is the backend's child or descends from a run process.
-  [src: file: backend/src/core/dispatch_reaper.rs:303-332#hidden_kin]
+  [src: file: backend/src/core/dispatch_reaper.rs:309-338#hidden_kin]
 [src: file: backend/src/core/dispatch_reaper_test.rs:195-199#start_python_under_shell]
 - Nothing sweeps at boot: a lane's own backend (started by a worker, with its
   own scratch database) would otherwise kill every worker of the host.
@@ -83,4 +83,4 @@ lane's first build (KT-1255): the deny-default profile, never the backend's own
 rights. If vitest cannot load its config under that profile the frontend reads
 as unavailable, with the command's output as the reason.
 [src: file: backend/src/core/task_worker_env.rs:1370-1430#check_frontend]
-[src: file: backend/src/api/orchestration.rs:2678-2698#worker_probe_runner]
+[src: file: backend/src/api/orchestration.rs:2888-2908#worker_probe_runner]
