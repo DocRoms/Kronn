@@ -325,7 +325,7 @@ pub fn preserve_rows(dir: &Path, rows: &[(String, String)]) {
 
 /// Test seam: data directories whose next credential boot fails.
 #[cfg(test)]
-pub(crate) static FAIL_BOOT: LazyLock<std::sync::Mutex<HashSet<PathBuf>>> =
+pub static FAIL_BOOT: LazyLock<std::sync::Mutex<HashSet<PathBuf>>> =
     LazyLock::new(Default::default);
 
 /// Whether credentials of `dir` live in the encrypted store.
@@ -345,7 +345,7 @@ pub fn disarm(dir: &Path) {
 /// Called by `config::save` before it writes `config.toml`. Returns `true`
 /// when the credentials are stored (encrypted, read back), so the file must
 /// leave them out; `false` when the store is not armed for `dir`.
-pub(crate) async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool> {
+pub async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool> {
     let Some(armed) = armed_for(dir) else {
         // Not armed after a boot: config.toml may keep only what it already
         // held; a credential it did not hold is refused, never written in clear.
@@ -617,7 +617,7 @@ pub async fn boot(
 
 /// Whether a config.toml text carries a token or credential value (the key
 /// itself aside: a backup encrypted under that key would protect nothing).
-pub(crate) fn toml_holds_credentials(text: &str) -> bool {
+pub fn toml_holds_credentials(text: &str) -> bool {
     let Ok(table) = text.parse::<toml::Table>() else {
         // Unparseable: treat as sensitive rather than skip the backup.
         return true;
@@ -650,7 +650,7 @@ pub(crate) fn toml_holds_credentials(text: &str) -> bool {
 
 /// Encrypt the current config.toml to [`BACKUP_FILENAME`] (0600) when it still
 /// holds secrets. An existing backup is kept: it is the oldest original.
-pub(crate) fn back_up_config_if_it_holds_secrets(
+pub fn back_up_config_if_it_holds_secrets(
     dir: &Path,
     key_hex: &str,
 ) -> Result<Option<PathBuf>> {

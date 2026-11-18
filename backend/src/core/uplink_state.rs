@@ -34,3 +34,8 @@ pub struct WorkflowRoomTools(
     ) -> Arc<dyn ToolExecutor>,
 );
 inventory::collect!(WorkflowRoomTools);
+
+/// The Kronn tools of a step run from its Test button:
+/// (state, project, step name, dry run).
+pub struct WorkflowTestTools(pub fn(AppState, Option<String>, String, bool) -> Arc<dyn ToolExecutor>);
+inventory::collect!(WorkflowTestTools);

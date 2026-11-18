@@ -306,7 +306,7 @@ pub fn update_config(
 
 /// Serialize HostSyncMode → SQL TEXT. Stable wire format independent of
 /// serde so a future enum rename doesn't break the migration.
-pub(crate) fn host_sync_to_str(mode: &HostSyncMode) -> &'static str {
+pub fn host_sync_to_str(mode: &HostSyncMode) -> &'static str {
     match mode {
         HostSyncMode::None => "None",
         HostSyncMode::GlobalOnly => "GlobalOnly",
@@ -316,7 +316,7 @@ pub(crate) fn host_sync_to_str(mode: &HostSyncMode) -> &'static str {
 
 /// Parse SQL TEXT → HostSyncMode. Unknown values fall back to `None`
 /// (safer than failing — preserves data, never auto-syncs).
-pub(crate) fn parse_host_sync(s: &str) -> HostSyncMode {
+pub fn parse_host_sync(s: &str) -> HostSyncMode {
     match s {
         "GlobalOnly" => HostSyncMode::GlobalOnly,
         "MirrorAll" => HostSyncMode::MirrorAll,
@@ -324,7 +324,7 @@ pub(crate) fn parse_host_sync(s: &str) -> HostSyncMode {
     }
 }
 
-pub(crate) fn plugin_interface_to_str(interface: PluginInterface) -> &'static str {
+pub fn plugin_interface_to_str(interface: PluginInterface) -> &'static str {
     match interface {
         PluginInterface::Api => "api",
         PluginInterface::Mcp => "mcp",
@@ -332,7 +332,7 @@ pub(crate) fn plugin_interface_to_str(interface: PluginInterface) -> &'static st
     }
 }
 
-pub(crate) fn parse_plugin_interface(value: &str) -> PluginInterface {
+pub fn parse_plugin_interface(value: &str) -> PluginInterface {
     match value {
         "api" => PluginInterface::Api,
         "cli" => PluginInterface::Cli,
@@ -467,7 +467,7 @@ pub fn find_config_for_server(
 
 /// Serialize `ProbeDiagnosticCode` → SQL TEXT. Stable wire format independent
 /// of serde so a future enum rename doesn't break stored rows.
-pub(crate) fn probe_code_to_str(code: ProbeDiagnosticCode) -> &'static str {
+pub fn probe_code_to_str(code: ProbeDiagnosticCode) -> &'static str {
     match code {
         ProbeDiagnosticCode::Ok => "ok",
         ProbeDiagnosticCode::Unauthorized => "unauthorized",
@@ -485,7 +485,7 @@ pub(crate) fn probe_code_to_str(code: ProbeDiagnosticCode) -> &'static str {
 
 /// Parse SQL TEXT → `ProbeDiagnosticCode`. Unknown values fall back to
 /// `Other` — safer than failing a whole config list over one stale row.
-pub(crate) fn parse_probe_code(value: &str) -> ProbeDiagnosticCode {
+pub fn parse_probe_code(value: &str) -> ProbeDiagnosticCode {
     match value {
         "ok" => ProbeDiagnosticCode::Ok,
         "unauthorized" => ProbeDiagnosticCode::Unauthorized,

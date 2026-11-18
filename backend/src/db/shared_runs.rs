@@ -166,13 +166,13 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<SharedRun>> {
 }
 /// Action reconciliation needs lifecycle metadata, never the potentially large
 /// result or stderr. Keep those columns out of the writer's read path.
-pub(crate) struct SharedRunLifecycle {
+pub struct SharedRunLifecycle {
     pub status: SharedRunStatus,
     pub diagnostic: Option<String>,
     pub finished_at: Option<DateTime<Utc>>,
 }
 
-pub(crate) fn lifecycle(conn: &Connection, id: &str) -> Result<Option<SharedRunLifecycle>> {
+pub fn lifecycle(conn: &Connection, id: &str) -> Result<Option<SharedRunLifecycle>> {
     Ok(conn
         .query_row(
             "SELECT status, diagnostic, finished_at FROM shared_runs WHERE id=?1",

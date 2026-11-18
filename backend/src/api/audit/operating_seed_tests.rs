@@ -274,7 +274,7 @@ fn the_template_ships_and_routes_every_box_of_the_operating_docs() {
     // KT-819 DoD 11 — process, templates (gabarits), environments, skills,
     // examples, and the three agent-writable folders all exist in the shipped
     // template and are reachable from `docs/AGENTS.md`.
-    let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs");
+    let templates = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs");
     let read = |rel: &str| {
         std::fs::read_to_string(templates.join(rel))
             .unwrap_or_else(|e| panic!("templates/docs/{rel}: {e}"))

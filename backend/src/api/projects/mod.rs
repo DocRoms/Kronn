@@ -61,7 +61,7 @@ pub use used_skills::{used_skill_file, used_skills};
 /// "read this NOW" framing — this is a doc artifact the agent reads
 /// on-demand. Returns `None` when there are no companion repos so
 /// the caller can `unlink` the file (avoids stub clutter).
-pub(crate) fn format_linked_repos_for_docs(repos: &[LinkedRepo]) -> Option<String> {
+pub fn format_linked_repos_for_docs(repos: &[LinkedRepo]) -> Option<String> {
     format_linked_repos_for_docs_with(repos, &crate::core::linked_repo_docs::status_of)
 }
 
@@ -106,7 +106,7 @@ fn linked_repo_lines(
 
 const HOW_TO_READ: &str = "Each entry says which context entry point Kronn found in that repo: start there. `docs/AGENTS.md` is Kronn's entry point, but a repo may have only a legacy `ai/index.md`, a README, or nothing; only fall back to file scans when the entry point given doesn't answer.";
 
-pub(crate) fn format_linked_repos_for_docs_with(
+pub fn format_linked_repos_for_docs_with(
     repos: &[LinkedRepo],
     status_of: &dyn Fn(&LinkedRepo) -> LinkedRepoDocStatus,
 ) -> Option<String> {
@@ -136,7 +136,7 @@ pub(crate) fn format_linked_repos_for_docs_with(
 ///     Phase 1 which already knows the exact docs path. `root` is the
 ///     project: the write and the removal run through the rooted primitives
 ///     of `fs_guard`, never through a link below it.
-pub(crate) fn sync_linked_repos_doc(
+pub fn sync_linked_repos_doc(
     project_path: &std::path::Path,
     repos: &[LinkedRepo],
 ) -> std::io::Result<()> {
@@ -147,7 +147,7 @@ pub(crate) fn sync_linked_repos_doc(
     sync_linked_repos_doc_in(project_path, &docs_dir, repos)
 }
 
-pub(crate) fn sync_linked_repos_doc_in(
+pub fn sync_linked_repos_doc_in(
     root: &std::path::Path,
     docs_dir: &std::path::Path,
     repos: &[LinkedRepo],
@@ -171,11 +171,11 @@ pub(crate) fn sync_linked_repos_doc_in(
 /// only ones the user linked to the project themselves. The prompt goes to the
 /// model provider, so nothing else about the machine's other Kronn projects is
 /// ever rendered into an agent prompt: there is no pool of candidates.
-pub(crate) fn format_linked_repos_for_prompt(repos: &[LinkedRepo]) -> Option<String> {
+pub fn format_linked_repos_for_prompt(repos: &[LinkedRepo]) -> Option<String> {
     format_linked_repos_for_prompt_with(repos, &crate::core::linked_repo_docs::status_of)
 }
 
-pub(crate) fn format_linked_repos_for_prompt_with(
+pub fn format_linked_repos_for_prompt_with(
     repos: &[LinkedRepo],
     status_of: &dyn Fn(&LinkedRepo) -> LinkedRepoDocStatus,
 ) -> Option<String> {
@@ -194,7 +194,7 @@ pub(crate) fn format_linked_repos_for_prompt_with(
 
 /// An existing briefing file is authoritative, including empty or unreadable
 /// files. The DB is only a fallback before the file has been installed.
-pub(crate) fn resolve_briefing_notes(
+pub fn resolve_briefing_notes(
     project_path: &std::path::Path,
     db_notes: &Option<String>,
 ) -> Option<String> {
@@ -215,13 +215,13 @@ pub(crate) fn resolve_briefing_notes(
 /// `docs/index.md` generation shipped — if `docs/AGENTS.md` is there
 /// but `docs/index.md` is missing, we drop one in. Idempotent and
 /// silent (best-effort write, debug-logs on failure).
-pub(crate) fn enrich_audit_status(project: &mut Project) {
+pub fn enrich_audit_status(project: &mut Project) {
     enrich_audit_status_with_runs(project, false);
 }
 
 /// `completed_full_run`: this instance recorded a Completed Full audit of the
 /// project, which counts as audited when the branch carries no evidence file.
-pub(crate) fn enrich_audit_status_with_runs(project: &mut Project, completed_full_run: bool) {
+pub fn enrich_audit_status_with_runs(project: &mut Project, completed_full_run: bool) {
     let resolved = scanner::resolve_host_path(&project.path);
     // A project whose directory is gone — e.g. after a cross-OS import where
     // absolute paths don't translate (WSL `/home/...` ⇄ macOS `/Users/...`) —
@@ -317,7 +317,7 @@ pub(super) async fn determine_parent_dir(state: &AppState) -> Result<String, Str
 /// Best-effort: every step logs on failure and never fails the caller.
 /// MCP sync is skipped when no encryption secret is configured (the env
 /// secrets can't be decrypted to write them out).
-pub(crate) async fn resync_project_assets(state: &AppState, project_id: &str) {
+pub async fn resync_project_assets(state: &AppState, project_id: &str) {
     let secret = state.config.read().await.encryption_secret.clone();
     let pid = project_id.to_string();
     let _ = state

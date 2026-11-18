@@ -305,7 +305,7 @@ pub fn peer_client(timeout: Duration) -> Result<SafeClient, String> {
 }
 
 #[cfg(test)]
-pub(crate) fn client_with_lookup(
+pub fn client_with_lookup(
     policy: SafeHttpPolicy,
     options: ClientOptions,
     lookup: LookupFn,

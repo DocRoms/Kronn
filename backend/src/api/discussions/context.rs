@@ -108,7 +108,7 @@ pub async fn upload_context_file(
 }
 
 /// Who an attachment belongs to when it is stored.
-pub(crate) enum ContextFileOwner {
+pub enum ContextFileOwner {
     /// A composer upload, pinned to the user's next message.
     Pending,
     /// A frame taken out of the clip with this asset id.
@@ -119,7 +119,7 @@ pub(crate) enum ContextFileOwner {
 
 /// Store one attachment: extract its content, write the file, record it.
 /// Shared by the upload route and by the files agents link in their messages.
-pub(crate) async fn store_context_file(
+pub async fn store_context_file(
     state: &AppState,
     discussion_id: String,
     filename: String,
@@ -283,7 +283,7 @@ pub(crate) async fn store_context_file(
 /// its files; this must not silently edit an already-persisted message.
 /// Only files under the run's own folder or its project are taken; secrets
 /// and Kronn's data dir never are.
-pub(crate) async fn attach_files_linked_in_message(
+pub async fn attach_files_linked_in_message(
     state: &AppState,
     discussion_id: &str,
     message_id: &str,
@@ -441,7 +441,7 @@ pub(crate) async fn attach_files_linked_in_message(
 /// Remove only files staged for a message whose insertion failed. Some callers
 /// can report an error after committing the message, so check its existence
 /// under the database lock before deleting anything.
-pub(crate) async fn discard_uncommitted_message_files(
+pub async fn discard_uncommitted_message_files(
     state: &AppState,
     discussion_id: &str,
     message_id: &str,

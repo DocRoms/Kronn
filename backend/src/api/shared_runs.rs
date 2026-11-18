@@ -86,7 +86,7 @@ pub async fn publish_media_job(state: &AppState, job_id: &str) -> anyhow::Result
 /// What the woken agent is told. A notification is not a request: it reports a
 /// result and asks for nothing, and the wording says so, because a model that
 /// reads "did not complete" as "try again" is how one sentence became ten jobs.
-pub(crate) fn media_wake_reason(job: &crate::db::media_jobs::MediaJob) -> String {
+pub fn media_wake_reason(job: &crate::db::media_jobs::MediaJob) -> String {
     let (outcome, instruction) = match job.status {
         MediaJobStatus::Completed => (
             "is ready",

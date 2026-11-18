@@ -59,7 +59,7 @@ const TEXT_MAX: usize = 600;
 /// a compiler decision here instead of being audit-capable by default.
 /// Mirrored by the UI's `canRunAudit`, enforced here because MCP/bridge
 /// callers bypass the UI entirely.
-pub(crate) fn agent_can_audit(agent: &AgentType) -> bool {
+pub fn agent_can_audit(agent: &AgentType) -> bool {
     match agent {
         AgentType::ClaudeCode
         | AgentType::Codex

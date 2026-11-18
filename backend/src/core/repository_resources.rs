@@ -396,7 +396,7 @@ pub fn render_memo_has_room() -> bool {
 /// Whether rendering `source` (the resource as JSON) under `slug` would be
 /// served from the render memo right now.
 #[cfg(test)]
-pub(crate) fn render_is_memoized(
+pub fn render_is_memoized(
     kind: ProjectRepositoryResourceKind,
     slug: &str,
     updated_at: DateTime<Utc>,
@@ -1218,7 +1218,7 @@ fn remove_owned_file(root: &Path, relative: &str, previous: &RepositoryLock) -> 
 
 /// Removes `path`'s parent folders while they are empty, never `root` itself
 /// nor the top-level folder under it (`kronn/`, `.agents/`).
-pub(crate) fn remove_empty_parents(root: &Path, path: &Path) {
+pub fn remove_empty_parents(root: &Path, path: &Path) {
     let mut current = path.parent();
     while let Some(directory) = current {
         let depth = directory
@@ -2652,7 +2652,7 @@ mod tests {
     #[test]
     fn the_router_skill_install_links_are_the_ones_in_the_readme() {
         let readme =
-            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../README.md"))
+            std::fs::read_to_string(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../README.md"))
                 .unwrap();
         for url in [KRONN_RELEASES_URL, KRONN_REPOSITORY_URL] {
             assert!(readme.contains(url), "{url} is not in the README");

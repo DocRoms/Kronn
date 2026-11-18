@@ -77,7 +77,7 @@ impl ManagerKind {
 
 /// Every manager label the watch can carry, for the tests that must cover them all.
 #[cfg(test)]
-pub(crate) fn manager_labels() -> Vec<&'static str> {
+pub fn manager_labels() -> Vec<&'static str> {
     ManagerKind::ALL.iter().map(|kind| kind.label()).collect()
 }
 

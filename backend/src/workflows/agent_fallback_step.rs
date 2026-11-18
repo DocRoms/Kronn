@@ -22,7 +22,7 @@ use crate::AppState;
 use super::steps::StepOutcome;
 
 /// What the runner does next with a step that was launched.
-pub(crate) enum Next {
+pub enum Next {
     /// Done: the outcome stands (it succeeded, or the failure is not the
     /// provider's, or no fallback is configured).
     Keep,
@@ -117,7 +117,7 @@ fn tier_of(step: &WorkflowStep) -> crate::models::ModelTier {
 
 /// Before the first launch: `step` itself, or its copy on the fallback while
 /// its agent is on cooldown. The notice is for the step's output.
-pub(crate) async fn start_on_fallback(
+pub async fn start_on_fallback(
     state: &AppState,
     agents: &AgentsConfig,
     step: &WorkflowStep,
@@ -125,7 +125,7 @@ pub(crate) async fn start_on_fallback(
     start_on_fallback_among(state, agents, step, None).await
 }
 
-pub(crate) async fn start_on_fallback_among(
+pub async fn start_on_fallback_among(
     state: &AppState,
     agents: &AgentsConfig,
     step: &WorkflowStep,
@@ -177,7 +177,7 @@ pub(crate) async fn start_on_fallback_among(
 
 /// After a launch: what to do with `outcome`. `origin` is the agent the step
 /// started on (its chain is the one walked), `step` what was just launched.
-pub(crate) async fn continue_after(
+pub async fn continue_after(
     state: &AppState,
     agents: &AgentsConfig,
     origin: &AgentType,
@@ -187,7 +187,7 @@ pub(crate) async fn continue_after(
     continue_after_among(state, agents, origin, step, outcome, None).await
 }
 
-pub(crate) async fn continue_after_among(
+pub async fn continue_after_among(
     state: &AppState,
     agents: &AgentsConfig,
     origin: &AgentType,
@@ -308,7 +308,7 @@ pub(crate) async fn continue_after_among(
 /// KT-1657 — a run parked on a quota whose provider still refuses at its
 /// re-check: the link of the step's chain that can take over, if any. The caller
 /// switches the step to it, the same gesture as the owner's "switch agent".
-pub(crate) async fn link_for_waiting_step_among(
+pub async fn link_for_waiting_step_among(
     state: &AppState,
     agents: &AgentsConfig,
     step: &WorkflowStep,
@@ -351,7 +351,7 @@ pub(crate) async fn link_for_waiting_step_among(
 
 /// The notices go first in the step's output, as quoted lines the run view
 /// shows with the step's result.
-pub(crate) fn with_notices(output: String, notices: &[String]) -> String {
+pub fn with_notices(output: String, notices: &[String]) -> String {
     if notices.is_empty() {
         return output;
     }

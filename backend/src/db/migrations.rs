@@ -1104,7 +1104,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
 /// key to encrypt under, no copy is written. An older snapshot with other
 /// content is kept under a timestamped name; the clear copies 0.15.x left are
 /// converted first.
-pub(crate) fn backup_config_sealed(dir: &Path) -> std::io::Result<()> {
+pub fn backup_config_sealed(dir: &Path) -> std::io::Result<()> {
     use crate::core::config_copies as copies;
     let cfg = dir.join("config.toml");
     // The raw bytes: sealed as they are, not as a lossy string.
@@ -1146,7 +1146,7 @@ pub(crate) fn backup_config_sealed(dir: &Path) -> std::io::Result<()> {
 
 /// Keep the current snapshot under a timestamped name (a reset sets it aside,
 /// since it may hold another key): a clear one is encrypted first.
-pub(crate) fn rotate_config_backup(dir: &Path) -> std::io::Result<()> {
+pub fn rotate_config_backup(dir: &Path) -> std::io::Result<()> {
     use crate::core::config_copies as copies;
     let sealing = copies::sealing(dir, true);
     copies::protect_copies(dir, &sealing);
@@ -1340,7 +1340,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
 
 /// Every migration on a fresh database, with no backup and no schema check: the
 /// reference the boot check diffs a live database against.
-pub(crate) fn build_reference_schema(conn: &Connection) -> Result<()> {
+pub fn build_reference_schema(conn: &Connection) -> Result<()> {
     run_with_backup_checked(conn, None, |dir| fs2::available_space(dir))
 }
 
@@ -1354,7 +1354,7 @@ fn backup_disabled() -> bool {
 /// full disk never replaces the previous good backup. A failed copy stops the
 /// upgrade: migrating without a way back is the user's call, made with
 /// `KRONN_MIGRATION_BACKUP=0`, never a warning in a log.
-pub(crate) fn backup_before_migration(
+pub fn backup_before_migration(
     path: &Path,
     available_space: impl Fn(&Path) -> std::io::Result<u64>,
 ) -> Result<()> {
@@ -1649,7 +1649,7 @@ fn drop_retired_workflow_observer_column(conn: &Connection) {
 /// test can build an older schema, seed pre-migration data, then run the
 /// remaining migrations through [`run`]. Panics on an unknown migration name.
 #[cfg(test)]
-pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
+pub fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _migrations (
             id INTEGER PRIMARY KEY,

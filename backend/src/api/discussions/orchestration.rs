@@ -1264,7 +1264,7 @@ fn provider_status_line(agent_type: &crate::models::AgentType) -> String {
     format!("Provider status: {url}")
 }
 
-pub(crate) use crate::core::quota_text::{
+pub use crate::core::quota_text::{
     announced_quota_reset, is_hard_quota_exhausted, is_transient_provider_overload,
     is_transient_upstream_auth_error,
 };
@@ -1273,7 +1273,7 @@ pub(crate) use crate::core::quota_text::{
 /// `agent_type` is used to point error messages at the right provider
 /// status page (Anthropic / OpenAI / Google / GitHub / …) — see
 /// [`provider_status_line`].
-pub(crate) fn detect_agent_error_hint(
+pub fn detect_agent_error_hint(
     output: &str,
     agent_type: &crate::models::AgentType,
 ) -> Option<String> {
@@ -1427,7 +1427,7 @@ pub(crate) fn detect_agent_error_hint(
 /// cut, the string SAYS so — a summariser told its history is partial can
 /// qualify its answer; one told nothing presents a fragment as the whole
 /// conversation.
-pub(crate) fn build_debate_context(prior_msgs: &[crate::models::DiscussionMessage]) -> String {
+pub fn build_debate_context(prior_msgs: &[crate::models::DiscussionMessage]) -> String {
     if prior_msgs.is_empty() {
         return String::new();
     }

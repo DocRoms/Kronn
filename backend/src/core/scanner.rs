@@ -282,7 +282,7 @@ async fn read_git_branch(path: &Path) -> Result<String> {
 
 /// Convert a container mount path back to the original host path.
 /// e.g. /host-home/Repositories/foo -> /home/priol/Repositories/foo
-pub(crate) fn restore_host_path(path: &Path) -> String {
+pub fn restore_host_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     if let Some(relative) = s.strip_prefix("/host-home") {
         if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
@@ -438,7 +438,7 @@ pub fn writable_repo_roots() -> Vec<String> {
 ///
 /// Exposed as `pub(crate)` so the scanner tests can sanity-check the
 /// alias expansion logic in isolation.
-pub(crate) fn host_home_aliases() -> Vec<String> {
+pub fn host_home_aliases() -> Vec<String> {
     let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") else {
         return Vec::new();
     };
@@ -588,7 +588,7 @@ pub fn needs_docs_migration(project_path: &Path) -> bool {
 /// `{{PROJECT_NAME}}` — anchored to all-caps + underscore so it doesn't
 /// false-positive on Twig (`{{ user.name }}`), GitHub Actions (`${{ secrets.FOO }}`),
 /// or instructional text that mentions `{{...}}` as an example.
-pub(crate) fn has_unfilled_placeholder(content: &str) -> bool {
+pub fn has_unfilled_placeholder(content: &str) -> bool {
     regex_lite::Regex::new(r"\{\{[A-Z_]+\}\}")
         .ok()
         .map(|re| re.is_match(content))

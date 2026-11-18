@@ -2,14 +2,14 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
-pub(crate) use crate::core::td_sheet::{
+pub use crate::core::td_sheet::{
     append_history_entry, replace_current_status, STATUS_ACCEPTED_DECISION, STATUS_CONFIRMED,
     STATUS_DEFERRED, STATUS_REJECTED,
 };
 pub use crate::core::td_sheet::{index_status_decision, td_decision, TdDecision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TdResolutionAction {
+pub enum TdResolutionAction {
     Confirm,
     Reject,
     AcceptDecision,
@@ -17,7 +17,7 @@ pub(crate) enum TdResolutionAction {
 }
 
 impl TdResolutionAction {
-    pub(crate) fn from_option_id(value: &str) -> Option<Self> {
+    pub fn from_option_id(value: &str) -> Option<Self> {
         match value {
             "confirm" => Some(Self::Confirm),
             "reject" => Some(Self::Reject),
@@ -63,7 +63,7 @@ impl TdResolutionAction {
 /// Where a human took a TD decision. Both are human decisions: the ADR an
 /// acceptance appends is trusted the same way (KT-1174).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TdDecisionOrigin {
+pub enum TdDecisionOrigin {
     Card,
     Review,
 }
@@ -85,7 +85,7 @@ impl TdDecisionOrigin {
 }
 
 /// `td_decision` of `<td_dir>/<id>.md`; `None` when the sheet is unreadable.
-pub(crate) fn read_td_decision(td_dir: &Path, td_id: &str) -> Option<TdDecision> {
+pub fn read_td_decision(td_dir: &Path, td_id: &str) -> Option<TdDecision> {
     if !valid_td_id(td_id) {
         return None;
     }
@@ -95,9 +95,9 @@ pub(crate) fn read_td_decision(td_dir: &Path, td_id: &str) -> Option<TdDecision>
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TdResolution {
-    pub(crate) td_id: String,
-    pub(crate) action: TdResolutionAction,
+pub struct TdResolution {
+    pub td_id: String,
+    pub action: TdResolutionAction,
 }
 
 /// A sheet the review lists (`TD-*`, and the `CQ-*` / `PERF-*` detail files of
@@ -344,9 +344,9 @@ The audit records this finding as a decision, not debt. Reopen it only with new 
 /// What a TD card recorded: the TDs written, and the ones that could not be,
 /// each with the reason (KT-1348).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct TdCardOutcome {
-    pub(crate) applied: Vec<String>,
-    pub(crate) failed: Vec<(String, String)>,
+pub struct TdCardOutcome {
+    pub applied: Vec<String>,
+    pub failed: Vec<(String, String)>,
 }
 
 fn failure_lines(failed: &[(String, String)]) -> String {
@@ -366,7 +366,7 @@ fn failure_lines(failed: &[(String, String)]) -> String {
 impl TdCardOutcome {
     /// The lines a card answer shows for the TDs that were not recorded; empty
     /// when every one was.
-    pub(crate) fn failure_note(&self) -> String {
+    pub fn failure_note(&self) -> String {
         if self.failed.is_empty() {
             return String::new();
         }
@@ -384,7 +384,7 @@ impl TdCardOutcome {
 /// never blocks the others, and its error names it. The whole batch is tried as
 /// one atomic write first; only when that fails is each TD tried on its own.
 /// Fails only when no TD at all could be recorded.
-pub(crate) fn apply_td_resolutions(
+pub fn apply_td_resolutions(
     conn: &Connection,
     discussion_id: &str,
     resolutions: &[TdResolution],
@@ -445,7 +445,7 @@ pub(crate) fn apply_td_resolutions(
 /// Writes human TD decisions on the sheets of `project_path`. Every id is
 /// checked and every new content computed before the first write; a failed
 /// write restores the files already written.
-pub(crate) fn apply_td_resolutions_at(
+pub fn apply_td_resolutions_at(
     project_path: &Path,
     resolutions: &[(&TdResolution, Option<&str>)],
     origin: TdDecisionOrigin,

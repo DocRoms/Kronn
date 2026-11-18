@@ -243,7 +243,7 @@ fn compute_step_checksums_ignores_missing_files() {
 #[test]
 fn compute_step_checksums_handles_git_head() {
     // Use the Kronn repo root (works both locally and in CI)
-    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let kronn_root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .parent()
         .unwrap()
         .to_path_buf();
@@ -259,7 +259,7 @@ fn compute_step_checksums_handles_git_head() {
 
 #[test]
 fn compute_step_checksums_handles_git_ls_files() {
-    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let kronn_root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .parent()
         .unwrap()
         .to_path_buf();
@@ -633,7 +633,7 @@ fn source_tree_fingerprint_keeps_non_utf8_paths() {
 
 #[test]
 fn compute_step_checksums_handles_source_tree_sentinel() {
-    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let kronn_root = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .parent()
         .unwrap()
         .to_path_buf();

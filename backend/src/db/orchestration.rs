@@ -226,7 +226,7 @@ fn parse_target_kind(
 /// and the execution's `worker_agent_type` never diverge. Kept local + exhaustive
 /// (adding an `AgentType` fails to compile) so a new provider can't silently map
 /// to an empty string.
-pub(crate) fn agent_type_to_db(a: &AgentType) -> String {
+pub fn agent_type_to_db(a: &AgentType) -> String {
     match a {
         AgentType::ClaudeCode => "ClaudeCode",
         AgentType::Codex => "Codex",
@@ -243,7 +243,7 @@ pub(crate) fn agent_type_to_db(a: &AgentType) -> String {
     .to_string()
 }
 
-pub(crate) use super::agent_dispatch::agent_type_from_db;
+pub use super::agent_dispatch::agent_type_from_db;
 
 fn model_tier_to_db(tier: &ModelTier) -> &'static str {
     match tier {
@@ -3610,7 +3610,7 @@ pub fn citations_settled(
 
 /// The canonical stored form of a reset instant. One fixed-width UTC shape, so
 /// two stamps compare correctly as plain strings.
-pub(crate) fn quota_reset_stamp(at: DateTime<Utc>) -> String {
+pub fn quota_reset_stamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 

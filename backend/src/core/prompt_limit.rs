@@ -78,7 +78,7 @@ fn is_openai_reasoning_model(name: &str) -> bool {
 
 /// The size limit that applies to one target, and where it comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PromptLimit {
+pub struct PromptLimit {
     pub bytes: usize,
     /// Model (or, failing that, runtime) the limit was derived from.
     pub model: String,
@@ -90,7 +90,7 @@ pub(crate) struct PromptLimit {
 /// Derive the limit for `agent` running `model` (explicit override, else the
 /// tier's model). `ollama_overrides` carries the per-model `num_ctx` the user
 /// pinned, which is the real window of a local model.
-pub(crate) fn limit_for(
+pub fn limit_for(
     agent: &AgentType,
     model: Option<&str>,
     ollama_overrides: &HashMap<String, u64>,
@@ -118,7 +118,7 @@ pub(crate) fn limit_for(
 
 /// `Ok` when `len` fits, else the refusal: the limit, the model it comes from
 /// and what to do about it. `subject` is the leading noun ("Prompt"/"Message").
-pub(crate) fn check(len: usize, limit: &PromptLimit, subject: &str) -> Result<(), String> {
+pub fn check(len: usize, limit: &PromptLimit, subject: &str) -> Result<(), String> {
     if len <= limit.bytes {
         return Ok(());
     }
@@ -147,7 +147,7 @@ pub(crate) fn check(len: usize, limit: &PromptLimit, subject: &str) -> Result<()
 /// discussion's agent only: the dispatcher drops it for a per-target tier, and
 /// a different agent mentioned in the same message runs its own tier model, not
 /// the primary agent's.
-pub(crate) fn tightest_limit(
+pub fn tightest_limit(
     targets: &[MessageTarget],
     fallback_agent: &AgentType,
     discussion_tier: ModelTier,
@@ -178,7 +178,7 @@ pub(crate) fn tightest_limit(
 }
 
 /// Resolve the limit for a discussion's targets from live config.
-pub(crate) async fn resolve_for_targets(
+pub async fn resolve_for_targets(
     state: &crate::AppState,
     targets: &[MessageTarget],
     fallback_agent: &AgentType,
@@ -201,7 +201,7 @@ pub(crate) async fn resolve_for_targets(
 /// `targets` (or the discussion's own agent when none is named). A room with no
 /// native agent and no explicit target is human-only, so only the hard ceiling
 /// applies. An unknown discussion passes: the caller reports it as missing.
-pub(crate) async fn enforce_for_discussion(
+pub async fn enforce_for_discussion(
     state: &crate::AppState,
     discussion_id: &str,
     targets: &[MessageTarget],
@@ -231,7 +231,7 @@ pub(crate) async fn enforce_for_discussion(
 
 /// The configured hard ceiling alone, for entry points that have not resolved
 /// a target yet (a cheap early refusal before any DB work).
-pub(crate) async fn hard_ceiling(state: &crate::AppState) -> usize {
+pub async fn hard_ceiling(state: &crate::AppState) -> usize {
     state
         .config
         .read()
@@ -243,7 +243,7 @@ pub(crate) async fn hard_ceiling(state: &crate::AppState) -> usize {
 
 /// The hard ceiling as saved in config.toml, for a caller that holds no
 /// `AppState` (a workflow step runs below the HTTP layer).
-pub(crate) fn saved_hard_ceiling() -> usize {
+pub fn saved_hard_ceiling() -> usize {
     crate::core::config::saved_max_prompt_bytes()
         .unwrap_or(crate::models::setup::DEFAULT_MAX_PROMPT_BYTES)
         .max(MIN_MAX_PROMPT_BYTES)
@@ -251,7 +251,7 @@ pub(crate) fn saved_hard_ceiling() -> usize {
 
 /// Refusal for `len` bytes against the hard ceiling only, in the same words
 /// as the model-derived one.
-pub(crate) fn check_hard_ceiling(len: usize, ceiling: usize, subject: &str) -> Result<(), String> {
+pub fn check_hard_ceiling(len: usize, ceiling: usize, subject: &str) -> Result<(), String> {
     if len <= ceiling {
         return Ok(());
     }

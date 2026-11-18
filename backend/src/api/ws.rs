@@ -164,7 +164,7 @@ mod rate_limit {
 /// so we can unit-test the handshake policy without standing up a
 /// full WebSocket harness. Mirrors the in-line logic in `handle_socket`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PrePresenceAction {
+pub enum PrePresenceAction {
     /// Heartbeat — answer Pong, stay unverified.
     Heartbeat,
     /// Caller can run the Presence verification path.
@@ -173,7 +173,7 @@ pub(crate) enum PrePresenceAction {
     Drop,
 }
 
-pub(crate) fn classify_pre_presence(msg: &WsMessage) -> PrePresenceAction {
+pub fn classify_pre_presence(msg: &WsMessage) -> PrePresenceAction {
     match msg {
         WsMessage::Ping { .. } => PrePresenceAction::Heartbeat,
         WsMessage::Presence { .. } => PrePresenceAction::Presence,
@@ -193,7 +193,7 @@ pub(crate) fn classify_pre_presence(msg: &WsMessage) -> PrePresenceAction {
 ///
 /// Pure decision so we can unit-test the policy without mounting a
 /// full WebSocket harness.
-pub(crate) fn should_reject_empty_invite(invite_code: &str, is_local: bool) -> bool {
+pub fn should_reject_empty_invite(invite_code: &str, is_local: bool) -> bool {
     invite_code.is_empty() && !is_local
 }
 
@@ -267,7 +267,7 @@ pub async fn ws_handler(
     let has_valid_token =
         {
             let expected = config.server.auth_token.as_deref();
-            let bearer = crate::bearer_credential(&headers);
+            let bearer = crate::http_transport::bearer_credential(&headers);
             bearer.is_some_and(|bearer| {
                 crate::core::bridge_token::operator_token_matches(expected, bearer)
             }) || query.token.as_deref().is_some_and(|token| {
@@ -313,14 +313,14 @@ pub async fn ws_handler(
 }
 
 /// Subprotocol the server selects; the credential rides beside it.
-pub(crate) const WS_PROTOCOL: &str = "kronn";
+pub const WS_PROTOCOL: &str = "kronn";
 /// Prefix of the subprotocol that carries the operator token, base64url
 /// encoded: a browser cannot set headers on a WebSocket, and a URL query
 /// ends up in proxy logs.
-pub(crate) const WS_AUTH_PROTOCOL_PREFIX: &str = "kronn.auth.";
+pub const WS_AUTH_PROTOCOL_PREFIX: &str = "kronn.auth.";
 
 /// The operator token offered as a `kronn.auth.<base64url>` subprotocol.
-pub(crate) fn subprotocol_credential(headers: &HeaderMap) -> Option<String> {
+pub fn subprotocol_credential(headers: &HeaderMap) -> Option<String> {
     use base64::Engine as _;
     headers
         .get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
@@ -338,7 +338,7 @@ pub(crate) fn subprotocol_credential(headers: &HeaderMap) -> Option<String> {
 
 /// Where a WS upgrade comes from, judged by its `Origin` header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WsOrigin {
+pub enum WsOrigin {
     /// No header: not a browser (a federation peer, a CLI, a test client).
     Absent,
     /// An exact origin of this Kronn's frontend.
@@ -351,15 +351,15 @@ pub(crate) enum WsOrigin {
 /// webview included), the gateway ports under Docker only, the configured domain, the Tauri
 /// webview, the dev UI when `kronn start-dev` exported it, and the operator's
 /// own list (LAN or Tailscale aliases).
-pub(crate) fn allowed_ws_origins(
+pub fn allowed_ws_origins(
     server: &crate::models::ServerConfig,
     dev_ui: Option<&str>,
     in_docker: bool,
 ) -> Vec<String> {
     let port = server.listening_port();
-    let mut origins = crate::frontend_origins(&None, port, in_docker);
+    let mut origins = crate::http_transport::frontend_origins(&None, port, in_docker);
     if server.domain.is_some() {
-        origins.extend(crate::frontend_origins(&server.domain, port, in_docker));
+        origins.extend(crate::http_transport::frontend_origins(&server.domain, port, in_docker));
     }
     origins.extend(
         [
@@ -387,7 +387,7 @@ pub(crate) fn allowed_ws_origins(
 }
 
 /// Classify the upgrade's `Origin` against the exact allowed list.
-pub(crate) fn classify_ws_origin(origin: Option<&str>, allowed: &[String]) -> WsOrigin {
+pub fn classify_ws_origin(origin: Option<&str>, allowed: &[String]) -> WsOrigin {
     let Some(origin) = origin else {
         return WsOrigin::Absent;
     };
@@ -400,7 +400,7 @@ pub(crate) fn classify_ws_origin(origin: Option<&str>, allowed: &[String]) -> Ws
 /// Canonical `scheme://host[:port]` (lowercase, default port dropped, a
 /// trailing slash allowed), or None for anything else: paths, queries,
 /// credentials, `null`, or an authority the URL parser does not read whole.
-pub(crate) fn normalize_origin(origin: &str) -> Option<String> {
+pub fn normalize_origin(origin: &str) -> Option<String> {
     let origin = origin.trim();
     if origin.contains(['\\', ' ', '\t']) {
         return None;
@@ -480,7 +480,7 @@ mod pending {
 /// `$remote_addr`). Natively axum talks to clients directly, so the header is
 /// attacker-controlled and ignored. `X-Forwarded-For` is never read: the
 /// gateway does not set it, so it would pass through from the client as is.
-pub(crate) fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr, in_docker: bool) -> IpAddr {
+pub fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr, in_docker: bool) -> IpAddr {
     if !in_docker || !is_trusted_client_ip(socket_ip) {
         return socket_ip;
     }
@@ -493,7 +493,7 @@ pub(crate) fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr, in_docke
 
 /// Inputs of the "is this the local frontend" decision for one WS upgrade.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct WsTrust {
+pub struct WsTrust {
     pub client_ip: IpAddr,
     pub in_docker: bool,
     /// `auth_enabled` and a token configured, as in `auth_middleware`.
@@ -514,7 +514,7 @@ pub(crate) struct WsTrust {
 /// only loopback qualifies; under Docker any private source does, because
 /// Docker Desktop NATs the host browser to a network gateway whose range
 /// varies, and the HTTP API is open in that mode anyway.
-pub(crate) fn ws_client_is_local(t: WsTrust) -> bool {
+pub fn ws_client_is_local(t: WsTrust) -> bool {
     if t.has_valid_token {
         return true;
     }
@@ -522,7 +522,7 @@ pub(crate) fn ws_client_is_local(t: WsTrust) -> bool {
         return false;
     }
     let local_set = if t.in_docker {
-        crate::is_local_ip(&t.client_ip.to_string())
+        crate::http_transport::is_local_ip(&t.client_ip.to_string())
     } else {
         t.client_ip.is_loopback()
     };
@@ -539,7 +539,7 @@ pub(crate) fn ws_client_is_local(t: WsTrust) -> bool {
 /// Loopback OR private-range (RFC1918 / IPv6 ULA / link-local). Used for the
 /// Docker gateway check and the Docker auth-off trust; never on its own to
 /// grant trust natively.
-pub(crate) fn is_trusted_client_ip(ip: IpAddr) -> bool {
+pub fn is_trusted_client_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
         IpAddr::V6(v6) => {
@@ -552,7 +552,7 @@ pub(crate) fn is_trusted_client_ip(ip: IpAddr) -> bool {
 
 /// Who a connection was admitted as.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Admission {
+pub enum Admission {
     Frontend,
     /// An accepted contact, by its id: its invite code and secret were
     /// checked at Presence, and only the id is trusted from then on.
@@ -566,7 +566,7 @@ const REFUSAL_GRACE: Duration = Duration::from_secs(3);
 /// A client must present itself within this window.
 const PRESENCE_DEADLINE: Duration = Duration::from_secs(10);
 /// How often a quiet peer's authorization is read again.
-pub(crate) const PEER_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
+pub const PEER_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Minimum spacing between two answered heartbeats.
 const HEARTBEAT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -802,7 +802,7 @@ async fn handle_socket(
 }
 
 /// P2P is enabled and `contact_id` is still an accepted contact.
-pub(crate) async fn peer_authorized(state: &AppState, contact_id: &str) -> bool {
+pub async fn peer_authorized(state: &AppState, contact_id: &str) -> bool {
     PeerAuth::ContactId(contact_id.to_owned())
         .check(state)
         .await
@@ -810,7 +810,7 @@ pub(crate) async fn peer_authorized(state: &AppState, contact_id: &str) -> bool 
 
 /// Decide a connection's Presence. The empty code is the frontend's, valid
 /// only on a connection already trusted as the frontend at upgrade.
-pub(crate) async fn admit_presence(
+pub async fn admit_presence(
     state: &AppState,
     invite_code: &str,
     secret: &str,
@@ -843,7 +843,7 @@ pub(crate) async fn admit_presence(
 /// charged to the IP before any side effect; an unknown well-formed code is then
 /// recorded as a contact request (never dialled nor admitted until the operator
 /// pairs it), within the request quota.
-pub(crate) async fn admit_peer_presence(
+pub async fn admit_peer_presence(
     state: &AppState,
     invite_code: &str,
     secret: &str,
@@ -1024,14 +1024,14 @@ fn handle_discussion_invite(
 /// is always a contact id: the id was settled by the pairing secret (inbound) or
 /// by dialling the contact (outbound), never by a public invite code.
 #[derive(Debug, Clone)]
-pub(crate) enum PeerAuth {
+pub enum PeerAuth {
     ContactId(String),
 }
 
 impl PeerAuth {
     /// The id of the accepted contact behind this peer, or None once it is
     /// no longer accepted.
-    pub(crate) fn accepted_contact_id(
+    pub fn accepted_contact_id(
         &self,
         conn: &rusqlite::Connection,
     ) -> anyhow::Result<Option<String>> {
@@ -1043,13 +1043,13 @@ impl PeerAuth {
     }
 
     /// Still an accepted contact (P2P being on is checked by the callers).
-    pub(crate) fn authorized(&self, conn: &rusqlite::Connection) -> anyhow::Result<bool> {
+    pub fn authorized(&self, conn: &rusqlite::Connection) -> anyhow::Result<bool> {
         Ok(self.accepted_contact_id(conn)?.is_some())
     }
 
     /// None once the peer is no longer accepted; otherwise whether it is a
     /// member of the shared discussion `shared_id`.
-    pub(crate) fn membership(
+    pub fn membership(
         &self,
         conn: &rusqlite::Connection,
         shared_id: &str,
@@ -1067,7 +1067,7 @@ impl PeerAuth {
     }
 
     /// `membership` with P2P on; None when P2P is off or the DB fails.
-    pub(crate) async fn check_member(&self, state: &AppState, shared_id: &str) -> Option<bool> {
+    pub async fn check_member(&self, state: &AppState, shared_id: &str) -> Option<bool> {
         if !state.p2p.enabled() {
             return None;
         }
@@ -1091,7 +1091,7 @@ impl PeerAuth {
     }
 
     /// Whether `msg` may go to this peer: None to close the connection.
-    pub(crate) async fn may_receive(&self, state: &AppState, msg: &WsMessage) -> Option<bool> {
+    pub async fn may_receive(&self, state: &AppState, msg: &WsMessage) -> Option<bool> {
         match relay_shared_id(msg) {
             Some(shared_id) => self.check_member(state, shared_id).await,
             None => Some(false),
@@ -1099,7 +1099,7 @@ impl PeerAuth {
     }
 
     /// P2P on and still an accepted contact (DB errors deny).
-    pub(crate) async fn check(&self, state: &AppState) -> bool {
+    pub async fn check(&self, state: &AppState) -> bool {
         if !state.p2p.enabled() {
             return false;
         }
@@ -1118,7 +1118,7 @@ impl PeerAuth {
 }
 
 /// The shared discussion a relayable frame belongs to.
-pub(crate) fn relay_shared_id(msg: &WsMessage) -> Option<&str> {
+pub fn relay_shared_id(msg: &WsMessage) -> Option<&str> {
     match msg {
         WsMessage::ChatMessage {
             shared_discussion_id,
@@ -1146,7 +1146,7 @@ pub(crate) fn relay_shared_id(msg: &WsMessage) -> Option<&str> {
 
 /// What to do with an ingested relayable frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ingest {
+pub enum Ingest {
     /// New: broadcast it on the local bus.
     Broadcast,
     /// Duplicate, dropped or consumed: do not broadcast.
@@ -1167,7 +1167,7 @@ pub(crate) enum Ingest {
 /// Shared by the inbound `handle_socket` and the outbound `ws_client` receive
 /// halves so a frame is persisted exactly once regardless of which socket it
 /// arrives on.
-pub(crate) async fn ingest_relayable_frame(
+pub async fn ingest_relayable_frame(
     state: &AppState,
     msg: &WsMessage,
     peer: &PeerAuth,

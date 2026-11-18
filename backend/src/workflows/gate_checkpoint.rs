@@ -56,7 +56,7 @@ const GIT_ENV_OVERRIDES: &[&str] = &[
 /// caller cannot fall back to the caller's `.git`. Every git invocation in
 /// this module — production and test alike — must go through this, never
 /// `sync_cmd("git")` directly.
-pub(crate) fn git_cmd(project_path: &Path) -> std::process::Command {
+pub fn git_cmd(project_path: &Path) -> std::process::Command {
     // KT-1745: a workflow worktree is written by an agent, like a task lane. The
     // checkpoint's `add -A` / `commit` run in Kronn's process, so they go through
     // the one pinned, hook-less builder. A worktree whose repository pointer was

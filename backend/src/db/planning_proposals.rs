@@ -334,7 +334,7 @@ mod parse_tests {
 // ─── Ingestion (called from insert_message, same transaction) ────────────────
 
 impl ProposalItemAction {
-    pub(crate) fn as_db_str(self) -> &'static str {
+    pub fn as_db_str(self) -> &'static str {
         match self {
             ProposalItemAction::Create => "create",
             ProposalItemAction::Status => "status",
@@ -343,7 +343,7 @@ impl ProposalItemAction {
         }
     }
 
-    pub(crate) fn from_db_str(s: &str) -> Option<ProposalItemAction> {
+    pub fn from_db_str(s: &str) -> Option<ProposalItemAction> {
         match s {
             "create" => Some(ProposalItemAction::Create),
             "status" => Some(ProposalItemAction::Status),

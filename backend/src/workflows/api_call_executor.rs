@@ -199,7 +199,7 @@ async fn execute_core_gated(
 /// its wire forms (Basic decoded to its password, bearer and header tokens).
 inventory::submit! { crate::core::uplink::ApiCallSecrets(call_secrets) }
 
-pub(crate) fn call_secrets(
+pub fn call_secrets(
     plugin: &McpServer,
     env: &HashMap<String, String>,
 ) -> crate::core::secret_scrub::SecretSet {
@@ -295,7 +295,7 @@ fn is_public_config(spec: &ApiSpec, trusted: bool, key: &str, value: &str) -> bo
 /// credential marker, ever, and anything that can parse as a URL (a `:` or `/`)
 /// goes through the full raw URL check. Only a plain token (host, workspace
 /// id) is taken as is.
-pub(crate) fn config_value_is_clean(value: &str) -> bool {
+pub fn config_value_is_clean(value: &str) -> bool {
     if has_credential_marker(value) {
         return false;
     }
@@ -743,7 +743,7 @@ fn render_endpoint(
 }
 
 /// The path of the plugin's base URL, without its trailing slash.
-pub(crate) fn base_path(spec: &ApiSpec, env: &HashMap<String, String>) -> Result<String, String> {
+pub fn base_path(spec: &ApiSpec, env: &HashMap<String, String>) -> Result<String, String> {
     let base = interpolate_env(&spec.base_url, env);
     Url::parse(base.trim_end_matches('/'))
         .map(|u| u.path().trim_end_matches('/').to_string())
@@ -752,7 +752,7 @@ pub(crate) fn base_path(spec: &ApiSpec, env: &HashMap<String, String>) -> Result
 
 /// The method and the path relative to the plugin's base URL that this step
 /// would send, computed without any network access (KT-1026 access gate).
-pub(crate) fn request_target(
+pub fn request_target(
     step: &WorkflowStep,
     spec: &ApiSpec,
     env: &HashMap<String, String>,
@@ -1687,7 +1687,7 @@ fn render_body(body: &Option<Value>, ctx: &TemplateContext) -> anyhow::Result<Op
 /// the regex would match `{x}` (the inner pair) — so we explicitly mask
 /// double-brace runs before substitution and restore them after. Cheap
 /// and bullet-proof, no `fancy-regex` dependency needed.
-pub(crate) fn resolve_path_params(
+pub fn resolve_path_params(
     endpoint_path: &str,
     path_params: &Option<HashMap<String, String>>,
     ctx: &TemplateContext,
@@ -1930,7 +1930,7 @@ fn resolve_method(
 // ─── Watch trigger poll ─────────────────────────────────────────────────
 
 /// One conditional GET a `Watch` trigger sends from the scheduler (KT-1099).
-pub(crate) struct WatchPollRequest<'a> {
+pub struct WatchPollRequest<'a> {
     /// A synthetic ApiCall step naming the source (API + endpoint, or a Quick API).
     pub source: &'a WorkflowStep,
     /// The workflow whose runs receive the response: the audience an API
@@ -1946,7 +1946,7 @@ pub(crate) struct WatchPollRequest<'a> {
 
 /// What a poll returned; every text field has had the call's credentials removed.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct WatchPollResponse {
+pub struct WatchPollResponse {
     pub status: u16,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
@@ -1958,7 +1958,7 @@ pub(crate) struct WatchPollResponse {
 /// the API's default headers and the guarded transport, a GET only, no
 /// retry (the next poll is the retry, bar the one re-mint after a 401 on a
 /// cached bearer) and no `api_call_logs` row.
-pub(crate) async fn execute_watch_poll(
+pub async fn execute_watch_poll(
     state: &crate::AppState,
     policy: SecurityPolicy,
     request: WatchPollRequest<'_>,
@@ -2728,18 +2728,18 @@ async fn send_with_retry(
 }
 
 /// A JSON response past this size fails the step before it is held whole.
-pub(crate) const MAX_JSON_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_JSON_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 /// An error body only feeds a 512-character excerpt.
 const ERROR_BODY_READ_BYTES: u64 = 64 * 1024;
 
-pub(crate) enum CappedBody {
+pub enum CappedBody {
     Whole(Vec<u8>),
     /// Bytes read when the cap was crossed (or the declared length).
     TooLarge(u64),
 }
 
 /// Reads a body chunk by chunk and stops as soon as it crosses `max`.
-pub(crate) async fn read_body_capped(
+pub async fn read_body_capped(
     mut response: reqwest::Response,
     max: u64,
 ) -> Result<CappedBody, reqwest::Error> {
@@ -2845,7 +2845,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 /// Parse the `[SIGNAL: http_NNN]` line emitted by both success and
 /// failure paths (see `execute_api_call_step_core` + `fail()`). Returns
 /// None when no HTTP code is encoded (transport error, config error).
-pub(crate) fn extract_http_status_from_output(output: &str) -> Option<u16> {
+pub fn extract_http_status_from_output(output: &str) -> Option<u16> {
     for line in output.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("[SIGNAL: http_") {

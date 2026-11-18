@@ -17,7 +17,7 @@ use crate::AppState;
 /// The job to run: `job` itself, or — its agent overridden and pinned — the
 /// same turn moved to the fallback. Task workers are not moved here: their
 /// launch already refuses a provider with an open quota escalation.
-pub(crate) async fn start_on_fallback(state: &AppState, job: AgentDispatchJob) -> AgentDispatchJob {
+pub async fn start_on_fallback(state: &AppState, job: AgentDispatchJob) -> AgentDispatchJob {
     // Cheap exit first: a start with no cooldown anywhere costs one read.
     let any_cooldown = state
         .db
@@ -31,7 +31,7 @@ pub(crate) async fn start_on_fallback(state: &AppState, job: AgentDispatchJob) -
     start_on_fallback_among(state, job, None).await
 }
 
-pub(crate) async fn start_on_fallback_among(
+pub async fn start_on_fallback_among(
     state: &AppState,
     job: AgentDispatchJob,
     usable: Option<Vec<AgentType>>,

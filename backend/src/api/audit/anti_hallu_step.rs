@@ -141,7 +141,7 @@ pub fn apply(project_path: &Path) -> std::io::Result<AntiHalluApplyResult> {
 /// Pure transformation — extracted so we can unit-test without touching the
 /// filesystem. Takes the current file content, returns the new content +
 /// what changed.
-pub(crate) fn transform(content: &str) -> (String, AntiHalluApplyResult) {
+pub fn transform(content: &str) -> (String, AntiHalluApplyResult) {
     // First, ensure the self-describing spec-pointer header is at the top.
     // `spec_added` tracks whether we changed anything so the headline
     // result reflects a write even when the anti-hallu section is already
@@ -733,7 +733,7 @@ mod tests {
         // placeholder). A drift here = the section in newly-bootstrapped
         // projects diverges from what subsequent audits would refresh,
         // creating a churning loop on every re-audit.
-        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let template_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .parent()
             .expect("backend has a parent")
             .join("templates/docs/AGENTS.md");

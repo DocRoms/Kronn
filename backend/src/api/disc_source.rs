@@ -233,7 +233,7 @@ impl std::fmt::Debug for SessionCredential {
 
 impl SessionCredential {
     /// Deliberately crate-visible and named: every read is greppable.
-    pub(crate) fn expose(&self) -> &str {
+    pub fn expose(&self) -> &str {
         &self.0
     }
 }
@@ -1894,7 +1894,7 @@ const LOAD_OTHER_DEFAULT_WINDOW: u32 = 40;
 ///
 /// An EXPLICIT range is honoured as given: retrieval stays on demand, and a
 /// caller who names a span owns its size.
-pub(crate) fn load_other_window(from: Option<u32>, to: Option<u32>, total: u32) -> (u32, u32) {
+pub fn load_other_window(from: Option<u32>, to: Option<u32>, total: u32) -> (u32, u32) {
     let (from, to) = match (from, to) {
         (Some(from), Some(to)) => (from.min(total), to.min(total)),
         (Some(from), None) => {

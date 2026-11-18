@@ -266,7 +266,7 @@ async fn harness() -> Harness {
     let restore = TemplatesEnv(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
     crate::core::child_env::set_var(
         "KRONN_TEMPLATES_DIR",
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates"),
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates"),
     );
     let tools = tempfile::tempdir().unwrap();
     let state = fresh_state();

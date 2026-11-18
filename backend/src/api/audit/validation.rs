@@ -106,7 +106,7 @@ const COVERAGE_WARNING_PREFIX: &str = super::step_guard::COVERAGE_FRAGMENT;
 
 /// Recompute the coverage failure from the current index, including on resume.
 /// This is feedback for the agent, never a relaxation or an in-place repair.
-pub(crate) fn coverage_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
+pub fn coverage_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
     if DocsRoot::of(project_path).strip(target_file) != Some("inconsistencies-tech-debt.md") {
         return None;
     }
@@ -144,7 +144,7 @@ const FILL_HINT: &str = "<!-- Fill:";
 /// Why a companion document of `target_file` is still the template (a raw
 /// `{{...}}` placeholder, the template banner or a `<!-- Fill: -->` hint), or
 /// `None` when each is filled or absent (a project without it owes nothing).
-pub(crate) fn unfilled_companion(project_path: &Path, target_file: &str) -> Option<String> {
+pub fn unfilled_companion(project_path: &Path, target_file: &str) -> Option<String> {
     let root = DocsRoot::of(project_path);
     let within = root.strip(target_file)?;
     for companion in companion_docs(within) {
@@ -179,7 +179,7 @@ pub(crate) fn unfilled_companion(project_path: &Path, target_file: &str) -> Opti
 
 /// The targeted correction for [`unfilled_companion`], given back to the step
 /// within its attempt budget.
-pub(crate) fn companion_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
+pub fn companion_repair_feedback(project_path: &Path, target_file: &str) -> Option<String> {
     let reason = unfilled_companion(project_path, target_file)?;
     Some(format!(
         "## Commit conventions — targeted correction required\n\n\
@@ -193,7 +193,7 @@ pub(crate) fn companion_repair_feedback(project_path: &Path, target_file: &str) 
 
 /// Retain safe provider and tool-budget causes alongside the artifact failure.
 /// A recovered ceiling or negotiated provider fallback does not fail a good step.
-pub(crate) fn with_http_diagnostics(
+pub fn with_http_diagnostics(
     success: bool,
     warning: Option<StepValidationWarning>,
     stderr: &[String],
@@ -658,7 +658,7 @@ pub fn settle_unaddressed_signals(
 }
 
 /// The reason of a step whose output is cut short (size floor).
-pub(crate) fn truncated_reason(target_file: &str, dst_size: u64, template_size: u64) -> String {
+pub fn truncated_reason(target_file: &str, dst_size: u64, template_size: u64) -> String {
     format!(
         "step output {}: `{}` is {} B but template is {} B (< {}% threshold)",
         super::step_guard::TRUNCATED_FRAGMENT,
@@ -670,12 +670,12 @@ pub(crate) fn truncated_reason(target_file: &str, dst_size: u64, template_size: 
 }
 
 /// The reason of a step whose dimension coverage matrix is incomplete.
-pub(crate) fn coverage_reason(target_file: &str, detail: &str) -> String {
+pub fn coverage_reason(target_file: &str, detail: &str) -> String {
     format!("{COVERAGE_WARNING_PREFIX} in `{target_file}`: {detail} (Step 8 will be re-run)")
 }
 
 /// The reason of a step that left detector signals undisposed.
-pub(crate) fn undisposed_reason(count: usize, list: &str) -> String {
+pub fn undisposed_reason(count: usize, list: &str) -> String {
     format!(
         "{} {} in the tech-debt output: {} — emit a TD, a baseline note, or a matrix citation for each (Step 8 will be re-run)",
         count,
@@ -687,7 +687,7 @@ pub(crate) fn undisposed_reason(count: usize, list: &str) -> String {
 /// The reason of a step that dismissed detector signals without proof. It
 /// carries the detector fragment so the accept flow reads it as an
 /// undisposed signal too.
-pub(crate) fn unproven_reason(count: usize, list: &str) -> String {
+pub fn unproven_reason(count: usize, list: &str) -> String {
     format!(
         "{} {} with proof: dismissed as resolved / mitigated / false alarm / not applicable without citing the code, in the tech-debt output: {} — {} (Step 8 will be re-run)",
         count,
@@ -697,11 +697,11 @@ pub(crate) fn unproven_reason(count: usize, list: &str) -> String {
     )
 }
 
-pub(crate) use crate::core::anti_halluc::{count_raw_placeholders, raw_placeholder_names};
+pub use crate::core::anti_halluc::{count_raw_placeholders, raw_placeholder_names};
 
 /// Placeholders whose value Kronn knows for certain, not the model: filled
 /// by the pipeline so a step never fails on a date it could not see.
-pub(crate) fn fill_kronn_owned_placeholders(content: &str, today: &str) -> String {
+pub fn fill_kronn_owned_placeholders(content: &str, today: &str) -> String {
     content
         .replace("{{DATE}}", today)
         .replace("{{ DATE }}", today)
@@ -713,7 +713,7 @@ pub(crate) fn fill_kronn_owned_placeholders(content: &str, today: &str) -> Strin
 /// read and the replace go through the rooted primitive under the project, so
 /// a link at the name or in a parent (swapped in or pre-planted) is refused,
 /// never read nor written through. The replace is optimistic on the bytes read.
-pub(crate) fn fill_step_owned_placeholders(project_path: &Path, target_file: &str, today: &str) {
+pub fn fill_step_owned_placeholders(project_path: &Path, target_file: &str, today: &str) {
     if !DocsRoot::of(project_path).contains(target_file) {
         return;
     }
@@ -965,7 +965,7 @@ fn split_two_column_row(row: &str) -> Option<String> {
 
 /// KT-1364 — the matrix with its unambiguous 2-column rows split. `None` when
 /// no row needed it.
-pub(crate) fn repaired_coverage_matrix(content: &str) -> Option<String> {
+pub fn repaired_coverage_matrix(content: &str) -> Option<String> {
     let sec_start = content.find("## Dimension coverage")?;
     let body = coverage_section(content)?;
     let body_end = sec_start + body.len();
@@ -1023,7 +1023,7 @@ fn with_dependencies_source(row: &str) -> Option<String> {
 
 /// Apply [`repaired_coverage_matrix`] to the tech-debt index of this step.
 /// Returns whether the file was rewritten.
-pub(crate) fn repair_coverage_rows(project_path: &Path, target_file: &str) -> bool {
+pub fn repair_coverage_rows(project_path: &Path, target_file: &str) -> bool {
     if DocsRoot::of(project_path).strip(target_file) != Some("inconsistencies-tech-debt.md") {
         return false;
     }

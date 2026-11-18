@@ -115,14 +115,14 @@ fn origin_of(
 
 /// A level's approval of a Quick Exec, not yet journalled: it is granted in the
 /// very transaction that saves the line ([`store_quick_exec`]).
-pub(crate) struct PendingGrant {
-    pub(crate) origin: TrustOrigin,
-    pub(crate) subject: String,
-    pub(crate) project_id: Option<String>,
+pub struct PendingGrant {
+    pub origin: TrustOrigin,
+    pub subject: String,
+    pub project_id: Option<String>,
 }
 
 /// Why a save that counted on a level was refused.
-pub(crate) const TRUST_CHANGED: &str =
+pub const TRUST_CHANGED: &str =
     "The trust level changed while the Quick Exec was being saved: it \
      was not saved. Save it again.";
 
@@ -201,7 +201,7 @@ fn keep_only_a_live_trust_approval(conn: &rusqlite::Connection, saved: &mut Quic
 /// approved) or after (it withdraws the approval this save gave). An update
 /// that only retains an earlier approval re-reads it on that same connection
 /// first ([`keep_only_a_live_trust_approval`]).
-pub(crate) async fn store_quick_exec(
+pub async fn store_quick_exec(
     state: &AppState,
     item: &QuickExec,
     insert: bool,
@@ -245,7 +245,7 @@ pub(crate) async fn store_quick_exec(
 /// Create a Quick Exec. `by_agent` (bridge token or Kronn agent tools) drops
 /// any approval of unmodelled programs: only a human gives one (KT-1017).
 #[cfg(test)]
-pub(crate) async fn create_as(
+pub async fn create_as(
     state: AppState,
     request: CreateQuickExecRequest,
     by_agent: bool,
@@ -254,7 +254,7 @@ pub(crate) async fn create_as(
 }
 
 /// [`create_as`] for an agent launched from the rooms and run of `origin`.
-pub(crate) async fn create_as_in(
+pub async fn create_as_in(
     state: AppState,
     mut request: CreateQuickExecRequest,
     by_agent: bool,
@@ -356,7 +356,7 @@ pub async fn update(
 
 /// Update a Quick Exec; see [`create_as`] for `by_agent`.
 #[cfg(test)]
-pub(crate) async fn update_as(
+pub async fn update_as(
     state: AppState,
     id: String,
     request: CreateQuickExecRequest,
@@ -366,7 +366,7 @@ pub(crate) async fn update_as(
 }
 
 /// [`update_as`] for an agent launched from the rooms and run of `origin`.
-pub(crate) async fn update_as_in(
+pub async fn update_as_in(
     state: AppState,
     id: String,
     mut request: CreateQuickExecRequest,
@@ -1102,7 +1102,7 @@ fn drop_stale_approval(request: &mut CreateQuickExecRequest, agent_written: Opti
 
 /// Whether a line, written by an agent, would wait for a human's approval:
 /// only such a line carries the agent's mark (KT-1017).
-pub(crate) fn needs_agent_approval(command: &str, args: &[String]) -> bool {
+pub fn needs_agent_approval(command: &str, args: &[String]) -> bool {
     matches!(
         crate::core::inline_code::first_unsafe_placeholder_with(
             command.trim(),
@@ -1153,7 +1153,7 @@ fn waiting_program(item: &QuickExec) -> Option<String> {
 
 /// The activation card, as the room reads it: a System message holding one
 /// JSON object after the `[kronn-activate:` marker.
-pub(crate) fn activation_card_content(item: &QuickExec, program: &str) -> String {
+pub fn activation_card_content(item: &QuickExec, program: &str) -> String {
     format!(
         "[kronn-activate: {}]",
         serde_json::json!({
@@ -1167,7 +1167,7 @@ pub(crate) fn activation_card_content(item: &QuickExec, program: &str) -> String
 /// Posts the one-click activation card in the room an agent saved a waiting
 /// Quick Exec from. One card per line: saving the same line again adds none,
 /// a changed line adds a new one. The save never fails for the card.
-pub(crate) async fn announce_activation(
+pub async fn announce_activation(
     state: &AppState,
     discussion_id: Option<&str>,
     item: &QuickExec,
@@ -1364,7 +1364,7 @@ pub async fn refuse_activation(
 
 /// The [`Trust`](crate::core::argv_roles::Trust) of a saved Quick Exec: it
 /// pins no script, so a script shape needs the approval.
-pub(crate) fn quick_exec_trust(item: &QuickExec) -> crate::core::argv_roles::Trust {
+pub fn quick_exec_trust(item: &QuickExec) -> crate::core::argv_roles::Trust {
     crate::core::argv_roles::Trust {
         approved: item.unmodelled_args_approved == Some(true),
         agent_written: item.agent_written == Some(true),
@@ -1399,7 +1399,7 @@ fn validate_request(request: &CreateQuickExecRequest) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn validate_variables(
+pub fn validate_variables(
     declarations: &[PromptVariable],
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {

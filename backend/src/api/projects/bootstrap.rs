@@ -37,7 +37,7 @@ pub async fn bootstrap(
 
 /// Why `agent` cannot run a bootstrap, mirroring the form's `canAudit`: an
 /// audit-capable type that is installed (or reachable), enabled and signed in.
-pub(crate) fn bootstrap_agent_refusal(
+pub fn bootstrap_agent_refusal(
     agent: &AgentType,
     detected: &[AgentDetection],
 ) -> Option<String> {
@@ -67,7 +67,7 @@ pub(crate) fn bootstrap_agent_refusal(
 
 /// `bootstrap` under a caller-chosen project id and agent detection, so a test
 /// can hold that project's audit lease or stand in for the host's agents.
-pub(crate) async fn bootstrap_as(
+pub async fn bootstrap_as(
     state: AppState,
     req: BootstrapProjectRequest,
     project_id: String,
@@ -726,7 +726,7 @@ mod prompt_tests {
 
 /// An installed, enabled, signed-in detection of `agent`, for tests.
 #[cfg(test)]
-pub(crate) fn usable_for_tests(agent: AgentType) -> AgentDetection {
+pub fn usable_for_tests(agent: AgentType) -> AgentDetection {
     AgentDetection {
         name: format!("{agent:?}"),
         agent_type: agent,

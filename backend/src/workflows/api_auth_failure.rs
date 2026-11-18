@@ -125,7 +125,7 @@ fn one_line(raw: &str) -> String {
 /// loses the connection's own secret values (`secrets`, every wire form), then
 /// goes through the same heuristic redaction as stored run output, and only
 /// then is bounded.
-pub(crate) fn sanitize(
+pub fn sanitize(
     mut refusal: AuthRefusal,
     secrets: &crate::core::secret_scrub::SecretSet,
 ) -> AuthRefusal {
@@ -159,13 +159,13 @@ pub fn plain_words(connection: &str, plugin: &str, refusal: &AuthRefusal) -> Str
 }
 
 /// `output` led by the plain sentence and closed by the signal line.
-pub(crate) fn annotate(output: &str, sentence: &str) -> String {
+pub fn annotate(output: &str, sentence: &str) -> String {
     format!("{sentence}\n{}\n{AUTH_REFUSED_SIGNAL}", output.trim_end())
 }
 
 /// The plain sentence a refused call's output leads with, when `output` is one
 /// (a step that aggregates several calls reuses it for its own output).
-pub(crate) fn sentence_of(output: &str) -> Option<&str> {
+pub fn sentence_of(output: &str) -> Option<&str> {
     if !output.contains(AUTH_REFUSED_SIGNAL) {
         return None;
     }

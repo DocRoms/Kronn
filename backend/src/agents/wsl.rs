@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 /// Override for the backend URL given to an agent running in WSL. Needed in
 /// WSL2's default NAT networking, where `127.0.0.1` is the Linux VM itself.
-pub(crate) const WSL_BACKEND_URL_ENV: &str = "KRONN_WSL_BACKEND_URL";
+pub const WSL_BACKEND_URL_ENV: &str = "KRONN_WSL_BACKEND_URL";
 
 /// Never forwarded: WSL keeps its own home, shell and `PATH`, and `WSLENV` is
 /// the list itself.
@@ -27,13 +27,13 @@ const LINUX_SIDE_PATHS: &[&str] = &["TMPDIR", "TEMP", "TMP"];
 
 /// Whether a launch crosses into WSL: Windows-native Kronn starting a binary
 /// that was found inside WSL (or is a Linux absolute path).
-pub(crate) fn runs_in_wsl(windows_native: bool, command: &str, resolved_via_wsl: bool) -> bool {
+pub fn runs_in_wsl(windows_native: bool, command: &str, resolved_via_wsl: bool) -> bool {
     windows_native && (resolved_via_wsl || command.starts_with('/'))
 }
 
 /// `wsl.exe --cd <linux dir> -e <command> <args…>`, with every Windows path
 /// Kronn put in the arguments translated for the Linux side.
-pub(crate) fn wrap_invocation(
+pub fn wrap_invocation(
     command: String,
     args: Vec<String>,
     work_dir: &Path,
@@ -57,7 +57,7 @@ pub(crate) fn wrap_invocation(
 /// a WSL distribution seen from Windows (`\\wsl$\Ubuntu\home\x`,
 /// `\\wsl.localhost\Ubuntu\home\x`) map back to `/home/x`. Other UNC shares
 /// have no WSL equivalent and are left alone.
-pub(crate) fn windows_path_to_wsl(value: &str) -> Option<String> {
+pub fn windows_path_to_wsl(value: &str) -> Option<String> {
     let value = value.strip_prefix(r"\\?\").unwrap_or(value);
     if let Some(unc) = value.strip_prefix(r"\\") {
         let mut parts = unc.splitn(3, ['\\', '/']);
@@ -89,7 +89,7 @@ pub(crate) fn windows_path_to_wsl(value: &str) -> Option<String> {
 /// (`--add-dir C:\repo`), paths inside the inline JSON of `--mcp-config` and
 /// `--settings` (bridge command, sandbox roots) and inside Codex `-c` TOML
 /// overrides (bridge command, trusted project keys).
-pub(crate) fn translate_args(args: Vec<String>) -> Vec<String> {
+pub fn translate_args(args: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(args.len());
     for arg in args {
         let translated = match out.last().map(String::as_str) {
@@ -197,7 +197,7 @@ fn translate_toml_value(value: &mut toml::Value) -> bool {
 /// flags. Without `/u`, a variable also flows back to Windows programs the
 /// agent starts through interop — the bundled `kronn-internal.exe` bridge
 /// needs the discussion id, URL and token that way.
-pub(crate) fn wslenv_value<'a>(
+pub fn wslenv_value<'a>(
     existing: Option<&str>,
     names: impl IntoIterator<Item = &'a str>,
 ) -> Option<String> {
@@ -241,7 +241,7 @@ pub(crate) fn wslenv_value<'a>(
 /// Set `WSLENV` on a launch that crosses into WSL: every variable the launch's
 /// built environment carries that `forward` accepts. Nothing is inherited past
 /// the built environment, so this list is complete.
-pub(crate) fn apply_wslenv(command: &mut tokio::process::Command, forward: impl Fn(&str) -> bool) {
+pub fn apply_wslenv(command: &mut tokio::process::Command, forward: impl Fn(&str) -> bool) {
     let std_command = command.as_std();
     let mut set: Vec<String> = Vec::new();
     let mut existing: Option<String> = None;
@@ -263,7 +263,7 @@ pub(crate) fn apply_wslenv(command: &mut tokio::process::Command, forward: impl 
 
 /// The backend URL given to an agent: the operator's WSL override when the
 /// agent runs in WSL and one is set, otherwise the usual one.
-pub(crate) fn agent_backend_url(
+pub fn agent_backend_url(
     runs_in_wsl: bool,
     base: Option<&str>,
     wsl_override: Option<&str>,
@@ -280,7 +280,7 @@ pub(crate) fn agent_backend_url(
 }
 
 /// `networkingMode` from the `[wsl2]` section of a `.wslconfig`, lowercased.
-pub(crate) fn wslconfig_networking_mode(content: &str) -> Option<String> {
+pub fn wslconfig_networking_mode(content: &str) -> Option<String> {
     let mut in_wsl2 = false;
     let mut mode = None;
     for line in content.lines() {
@@ -307,7 +307,7 @@ pub(crate) fn wslconfig_networking_mode(content: &str) -> Option<String> {
 
 /// True when a Linux-side bridge would get `127.0.0.1` in NAT mode, where
 /// it does not reach Windows. WSL2 defaults to NAT when nothing is set.
-pub(crate) fn backend_unreachable_warning_needed(
+pub fn backend_unreachable_warning_needed(
     override_set: bool,
     networking_mode: Option<&str>,
 ) -> bool {
@@ -315,7 +315,7 @@ pub(crate) fn backend_unreachable_warning_needed(
 }
 
 /// Log once per process when a WSL agent probably cannot reach the backend.
-pub(crate) fn warn_once_if_backend_unreachable(override_set: bool) {
+pub fn warn_once_if_backend_unreachable(override_set: bool) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         let mode = crate::core::child_env::var_os("USERPROFILE")
@@ -335,7 +335,7 @@ pub(crate) fn warn_once_if_backend_unreachable(override_set: bool) {
 }
 
 /// Why a native ACP agent found only inside WSL is refused on Windows.
-pub(crate) fn native_acp_wsl_refusal(program: &str) -> String {
+pub fn native_acp_wsl_refusal(program: &str) -> String {
     format!(
         "`{program}` is installed only inside WSL. Kronn on Windows starts this agent's ACP \
          runtime as a Windows program, and does not route it through WSL. Install `{program}` \
@@ -346,7 +346,7 @@ pub(crate) fn native_acp_wsl_refusal(program: &str) -> String {
 /// Detect if we're running inside WSL (vs Windows native).
 /// In WSL, /proc/version contains "microsoft" or "WSL".
 #[allow(dead_code)]
-pub(crate) fn is_wsl() -> bool {
+pub fn is_wsl() -> bool {
     #[cfg(target_os = "linux")]
     {
         // WSL2 always sets WSL_DISTRO_NAME — most reliable check
@@ -364,7 +364,7 @@ pub(crate) fn is_wsl() -> bool {
 }
 
 /// Whether this launch crosses into WSL (Windows-native Kronn, WSL binary).
-pub(crate) fn agent_runs_in_wsl(command: &str, resolved_via_wsl: bool) -> bool {
+pub fn agent_runs_in_wsl(command: &str, resolved_via_wsl: bool) -> bool {
     runs_in_wsl(
         cfg!(target_os = "windows") && !is_wsl(),
         command,

@@ -1855,7 +1855,7 @@ fn mcp_config_hash_changes_on_args_override() {
 // Workflows CRUD
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(crate) fn sample_workflow(id: &str) -> Workflow {
+pub fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
         refs: Default::default(),
@@ -2041,7 +2041,7 @@ fn workflows_pinned_roundtrip() {
 
 // ─── Workflow Runs ───────────────────────────────────────────────────────
 
-pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
+pub fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
     let now = Utc::now();
     WorkflowRun {
         outcome: None,

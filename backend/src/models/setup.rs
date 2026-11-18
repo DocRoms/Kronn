@@ -1139,15 +1139,15 @@ fn default_anti_hallucination_mode() -> String {
 }
 /// A cold `cargo build` of this workspace writes a few GiB; the floor is set
 /// so a refused provisioning still leaves room to work, investigate and clean.
-pub(crate) const DEFAULT_DISK_CRITICAL_GIB: u64 = 5;
-pub(crate) const DEFAULT_DISK_WARNING_GIB: u64 = 20;
+pub const DEFAULT_DISK_CRITICAL_GIB: u64 = 5;
+pub const DEFAULT_DISK_WARNING_GIB: u64 = 20;
 /// KT-1318 — a worker's first build alone writes several GiB and a lane has
 /// been measured at 5-30 GiB; 30 GiB is the room a launch needs to finish.
-pub(crate) const DEFAULT_DISK_LAUNCH_MIN_FREE_GIB: u64 = 30;
-pub(crate) const DEFAULT_DISK_SWEEP_IDLE_HOURS: u64 = 6;
+pub const DEFAULT_DISK_LAUNCH_MIN_FREE_GIB: u64 = 30;
+pub const DEFAULT_DISK_SWEEP_IDLE_HOURS: u64 = 6;
 /// KT-1691 — a Blocked or Interrupted execution that left its build dir alone
 /// this long is not coming back soon; the next resume rebuilds.
-pub(crate) const DEFAULT_DISK_STALLED_BUILD_DAYS: u64 = 3;
+pub const DEFAULT_DISK_STALLED_BUILD_DAYS: u64 = 3;
 fn default_disk_launch_min_free_gib() -> u64 {
     DEFAULT_DISK_LAUNCH_MIN_FREE_GIB
 }
@@ -1164,7 +1164,7 @@ fn default_disk_critical_gib() -> u64 {
 fn default_execution_variable_retention_days() -> u32 {
     30
 }
-pub(crate) const DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS: u32 = 7;
+pub const DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS: u32 = 7;
 fn default_interrupted_worktree_ttl_days() -> u32 {
     DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS
 }
@@ -1177,7 +1177,7 @@ fn default_max_agents() -> usize {
 fn default_agent_stall_timeout() -> u32 {
     5
 }
-pub(crate) const DEFAULT_MAX_PROMPT_BYTES: usize = 4_000_000;
+pub const DEFAULT_MAX_PROMPT_BYTES: usize = 4_000_000;
 fn default_max_prompt_bytes() -> usize {
     DEFAULT_MAX_PROMPT_BYTES
 }
@@ -1185,18 +1185,18 @@ fn default_max_prompt_bytes() -> usize {
 // at ~2 h 40 of honest work. The old ceiling existed to stop hung runs from
 // squatting the agent semaphore; since an abandoned tool loop now halts itself
 // at the next round boundary, a long window no longer keeps a dead run alive.
-pub(crate) const MAX_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
-pub(crate) const DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 30;
+pub const MAX_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
+pub const DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 30;
 fn default_agent_global_timeout() -> u32 {
     DEFAULT_AGENT_GLOBAL_TIMEOUT_MIN
 }
 
-pub(crate) const DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
+pub const DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN: u32 = 240;
 fn default_local_agent_global_timeout() -> u32 {
     DEFAULT_LOCAL_AGENT_GLOBAL_TIMEOUT_MIN
 }
 
-pub(crate) fn clamp_agent_global_timeout_min(input: u64) -> u32 {
+pub fn clamp_agent_global_timeout_min(input: u64) -> u32 {
     input.clamp(1, u64::from(MAX_AGENT_GLOBAL_TIMEOUT_MIN)) as u32
 }
 
@@ -1204,10 +1204,10 @@ pub(crate) fn clamp_agent_global_timeout_min(input: u64) -> u32 {
 /// request types deserialized from the frontend (where the user may
 /// omit the field). `pub(crate)` so other model sub-modules can keep
 /// the `default = "..."` attribute working after extraction.
-pub(crate) fn default_language() -> String {
+pub fn default_language() -> String {
     "fr".into()
 }
-pub(crate) fn default_ui_language() -> String {
+pub fn default_ui_language() -> String {
     "fr".into()
 }
 

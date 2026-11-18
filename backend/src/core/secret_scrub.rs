@@ -160,7 +160,7 @@ fn replace_whole_tokens(text: &str, needle: &str) -> String {
 /// clone URL never leaks into an error message or a log line. Conservative:
 /// collapses the characters between `://` and the next `@` (when there's no `/`
 /// in between, i.e. it's really userinfo) to `***`.
-pub(crate) fn redact_url_credentials(s: &str) -> String {
+pub fn redact_url_credentials(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(pos) = rest.find("://") {

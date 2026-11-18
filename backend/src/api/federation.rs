@@ -103,7 +103,7 @@ fn federated_content(msg: &DiscussionMessage, stored: Option<String>) -> String 
 /// Announce files that were pinned after their message had already federated.
 /// This is the attachment equivalent of `federate_message`, and is a no-op for
 /// local discussions.
-pub(crate) async fn federate_attachments_for_message(
+pub async fn federate_attachments_for_message(
     state: &AppState,
     disc_id: &str,
     message_id: &str,
@@ -330,7 +330,7 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
 /// The shared cancellation of federation work: resolves once P2P is off
 /// (checked every 250 ms). Every peer socket, transfer and HTTP call to a
 /// contact races it.
-pub(crate) async fn until_p2p_off(state: &AppState) {
+pub async fn until_p2p_off(state: &AppState) {
     loop {
         if !state.p2p.enabled() {
             return;
@@ -340,7 +340,7 @@ pub(crate) async fn until_p2p_off(state: &AppState) {
 }
 
 /// Run `work` unless P2P goes off first.
-pub(crate) async fn unless_p2p_off<F: std::future::Future>(
+pub async fn unless_p2p_off<F: std::future::Future>(
     state: &AppState,
     work: F,
 ) -> Option<F::Output> {
@@ -351,7 +351,7 @@ pub(crate) async fn unless_p2p_off<F: std::future::Future>(
 }
 
 /// Where a downloaded attachment belongs, and who sent it.
-pub(crate) struct FederatedAttachment {
+pub struct FederatedAttachment {
     pub host: crate::api::ws::PeerAuth,
     pub shared_id: String,
     pub discussion_id: String,
@@ -365,7 +365,7 @@ pub(crate) struct FederatedAttachment {
 /// Publish a staged attachment and link it, in one DB call that first
 /// checks P2P, the sender's membership, the target message and the file id.
 /// A refusal drops the staged file.
-pub(crate) async fn commit_federated_attachment(
+pub async fn commit_federated_attachment(
     state: &AppState,
     staged: crate::core::context_files::StagedFile,
     attachment: FederatedAttachment,
@@ -423,7 +423,7 @@ pub(crate) async fn commit_federated_attachment(
 /// no-op. Best-effort: any failure is logged, never fatal (the text message is
 /// already delivered; the attachment can be re-announced on the next sync).
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn fetch_and_store_attachment(
+pub async fn fetch_and_store_attachment(
     state: &AppState,
     shared_id: &str,
     message_id: &str,
@@ -832,7 +832,7 @@ mod tests {
 /// Transfer cap for a fetched F8 attachment: 2× the announced size, clamped
 /// to [1 MB, 64 MB]. Pure — the announced size comes from the peer's message
 /// and is not trusted beyond sizing the allowance.
-pub(crate) fn fetch_cap_bytes(announced: i64) -> usize {
+pub fn fetch_cap_bytes(announced: i64) -> usize {
     const MAX_FETCHED_FILE_BYTES: usize = 64 * 1024 * 1024;
     (announced.max(0) as usize)
         .saturating_mul(2)
@@ -841,7 +841,7 @@ pub(crate) fn fetch_cap_bytes(announced: i64) -> usize {
 
 /// Pre-decode check on the base64 payload length (4/3 expansion + head slack)
 /// so an oversized body is refused BEFORE allocating the decoded buffer.
-pub(crate) fn b64_len_within_cap(b64_len: usize, cap: usize) -> bool {
+pub fn b64_len_within_cap(b64_len: usize, cap: usize) -> bool {
     b64_len <= cap.saturating_mul(4) / 3 + 1024
 }
 

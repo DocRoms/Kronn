@@ -15,7 +15,7 @@ use crate::models::{
 use crate::AppState;
 
 /// The address the runner will call for this HTTP agent, when Kronn knows it.
-pub(crate) fn launch_endpoint(
+pub fn launch_endpoint(
     agent_type: &AgentType,
     external_endpoint: Option<&str>,
     endpoints: &HttpEndpoints,
@@ -39,7 +39,7 @@ pub(crate) fn launch_endpoint(
 
 /// The transport verdict for a launch, bounded by `START_BUDGET` and served
 /// from the KT-697 cache when an observation is fresh.
-pub(crate) async fn unreachable_endpoint(
+pub async fn unreachable_endpoint(
     agent_type: &AgentType,
     external_endpoint: Option<&str>,
     endpoints: &HttpEndpoints,
@@ -119,7 +119,7 @@ fn unreachable_phrase(language: &str, reason: UnreachableReason) -> &'static str
 
 /// The VPN card for an endpoint nothing answers at. The address stays out of
 /// it, as it stays out of every KT-697 result.
-pub(crate) fn unreachable_card(
+pub fn unreachable_card(
     label: &str,
     language: &str,
     tier: ModelTier,
@@ -149,7 +149,7 @@ pub(crate) fn unreachable_card(
 }
 
 /// One line for `last_error`, so a refused start is diagnosable from the job.
-pub(crate) fn unreachable_diagnostic(refusal: &StartRefusal) -> String {
+pub fn unreachable_diagnostic(refusal: &StartRefusal) -> String {
     format!(
         "endpoint unreachable before start ({}), observed {}",
         refusal.reason.as_str(),
@@ -231,7 +231,7 @@ fn remedy(language: &str, action: &str, settings: &str) -> String {
 /// The sentence a catalogue refusal reads as: which model, why, since when,
 /// and the one step that applies. The date is the catalogue's own, so a
 /// refusal remembered from days ago says so.
-pub(crate) fn preflight_refusal_summary(
+pub fn preflight_refusal_summary(
     agent_type: &AgentType,
     language: &str,
     failure: &CatalogPreflightFailure,
@@ -269,7 +269,7 @@ fn detail_http_status(detail: &str) -> Option<u16> {
     (digits.len() == 3).then(|| digits.parse().ok()).flatten()
 }
 
-pub(crate) fn preflight_refusal_card(
+pub fn preflight_refusal_card(
     summary: &str,
     tier: ModelTier,
     failure: &CatalogPreflightFailure,
@@ -296,7 +296,7 @@ pub(crate) fn preflight_refusal_card(
 /// it as too large (HTTP 413, or a 400/422 naming the context window). It
 /// states the size, the limit it is held against and what to do, instead of the
 /// "model not found" a bare 400 used to read as.
-pub(crate) fn prompt_too_large_card(
+pub fn prompt_too_large_card(
     language: &str,
     status: Option<u16>,
     prompt_bytes: usize,
@@ -354,7 +354,7 @@ pub(crate) fn prompt_too_large_card(
 /// KT-1607 — the card for a run that ended with nothing written to the
 /// discussion: no reply and no refusal card of its own. `reason` is the
 /// diagnostic the dispatch settled on.
-pub(crate) fn unexplained_end_card(
+pub fn unexplained_end_card(
     language: &str,
     reason: &str,
     tier: ModelTier,
@@ -388,7 +388,7 @@ pub(crate) fn unexplained_end_card(
 /// not a paraphrase), says when the limit resets if the provider announced it, and
 /// names the two ways out: another agent for this room, or a retry once the quota
 /// is back.
-pub(crate) fn quota_exhausted_card(
+pub fn quota_exhausted_card(
     language: &str,
     provider: &str,
     provider_message: &str,
@@ -434,7 +434,7 @@ pub(crate) fn quota_exhausted_card(
 }
 
 /// Who a refused start belongs to, for the System card it leaves.
-pub(crate) struct RefusedStart<'a> {
+pub struct RefusedStart<'a> {
     pub discussion_id: &'a str,
     pub agent_type: &'a AgentType,
     pub model: Option<String>,
@@ -446,7 +446,7 @@ pub(crate) struct RefusedStart<'a> {
 
 /// Write the card the way a failed spawn writes its own: linked to its
 /// dispatch, federated, and clearing an untracked awaiting flag.
-pub(crate) async fn record_refusal_card(
+pub async fn record_refusal_card(
     state: &AppState,
     start: RefusedStart<'_>,
     content: String,

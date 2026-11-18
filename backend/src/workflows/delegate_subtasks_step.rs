@@ -36,8 +36,8 @@ use super::template::TemplateContext;
 /// server-generated UUIDs, so the prefix cannot collide with a human room.
 const DISCUSSION_PREFIX: &str = "wf-delegate-";
 const DEFAULT_CONCURRENCY: u32 = 1;
-pub(crate) const MAX_CONCURRENCY: u32 = 8;
-pub(crate) const MAX_REVIEW_ROUNDS: u32 = 10;
+pub const MAX_CONCURRENCY: u32 = 8;
+pub const MAX_REVIEW_ROUNDS: u32 = 10;
 const DEFAULT_TIMEOUT_SECS: u64 = 6 * 3600;
 /// Between two reads of the durable state when nothing moved. An SQL read,
 /// never a model call.
@@ -46,13 +46,13 @@ const DIFF_MAX_CHARS: usize = 40_000;
 /// A subtask whose approved delivery conflicts this many times stops the step.
 const CONFLICT_LIMIT: i64 = 2;
 
-pub(crate) fn is_delegation_discussion(discussion_id: &str) -> bool {
+pub fn is_delegation_discussion(discussion_id: &str) -> bool {
     discussion_id.starts_with(DISCUSSION_PREFIX)
 }
 
 /// Why the step stopped; the name is the `[SIGNAL: …]` `on_result` routes on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DelegationSignal {
+pub enum DelegationSignal {
     Ok,
     Escalated,
     Conflict,
@@ -76,7 +76,7 @@ impl DelegationSignal {
 
 /// What the reviewer receives: a fresh session's whole context.
 #[derive(Debug, Clone)]
-pub(crate) struct ReviewRequest {
+pub struct ReviewRequest {
     pub execution_id: String,
     pub attempt_no: u32,
     pub task_reference: String,
@@ -86,7 +86,7 @@ pub(crate) struct ReviewRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ReviewReply {
+pub struct ReviewReply {
     pub text: String,
     pub tokens: Option<u64>,
     pub cost_usd: Option<f64>,
@@ -101,7 +101,7 @@ pub(crate) struct ReviewReply {
 /// between two reads of the durable state. Tests drive fake workers from
 /// `idle`, so every wait there is synchronous with the step.
 #[async_trait::async_trait]
-pub(crate) trait DelegationWorld: Send + Sync {
+pub trait DelegationWorld: Send + Sync {
     async fn review(&self, request: ReviewRequest) -> ReviewReply;
     async fn idle(&self);
     fn now(&self) -> Instant {
@@ -114,7 +114,7 @@ pub(crate) trait DelegationWorld: Send + Sync {
 }
 
 /// One delegation, resolved from the step and the run.
-pub(crate) struct Delegation<'a> {
+pub struct Delegation<'a> {
     pub state: &'a AppState,
     pub run_id: &'a str,
     pub step_name: &'a str,
@@ -130,7 +130,7 @@ pub(crate) struct Delegation<'a> {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct SubtaskReport {
+pub struct SubtaskReport {
     pub task: String,
     pub title: String,
     pub status: String,
@@ -148,7 +148,7 @@ pub(crate) struct SubtaskReport {
 }
 
 #[derive(Debug)]
-pub(crate) struct DelegationReport {
+pub struct DelegationReport {
     pub signal: DelegationSignal,
     pub summary: String,
     pub discussion_id: Option<String>,
@@ -240,7 +240,7 @@ fn reassign_marker_id(execution_id: &str, attempt_no: u32) -> String {
     format!("wf-reassign:{execution_id}:{attempt_no}")
 }
 
-pub(crate) async fn run_delegation(
+pub async fn run_delegation(
     delegation: &Delegation<'_>,
     world: &dyn DelegationWorld,
 ) -> DelegationReport {
@@ -1673,7 +1673,7 @@ async fn subtask_reports(db: &Database, setup: &Setup) -> anyhow::Result<Vec<Sub
 
 /// The production world: a fresh one-shot agent session per review, no
 /// orchestration tools, and an SQL read every [`IDLE_POLL`].
-pub(crate) struct LiveWorld<'a> {
+pub struct LiveWorld<'a> {
     pub reviewer: WorkflowStep,
     pub project_path: &'a str,
     pub project_id: Option<&'a str>,
@@ -1762,7 +1762,7 @@ fn reviewer_step(step: &WorkflowStep) -> WorkflowStep {
 
 /// Runner entry point.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn execute_delegate_subtasks_step(
+pub async fn execute_delegate_subtasks_step(
     state: &AppState,
     step: &WorkflowStep,
     run_id: &str,
@@ -1850,7 +1850,7 @@ pub(crate) async fn execute_delegate_subtasks_step(
 }
 
 /// `on_failure` cannot delegate: a rollback must not launch new work.
-pub(crate) fn forbidden_in_rollback(step: &WorkflowStep) -> StepOutcome {
+pub fn forbidden_in_rollback(step: &WorkflowStep) -> StepOutcome {
     finish(
         step,
         Instant::now(),
@@ -1875,7 +1875,7 @@ impl DelegationReport {
     }
 }
 
-pub(crate) fn finish(step: &WorkflowStep, start: Instant, report: DelegationReport) -> StepOutcome {
+pub fn finish(step: &WorkflowStep, start: Instant, report: DelegationReport) -> StepOutcome {
     let signal = report.signal.as_str();
     let data = json!({
         "discussion_id": report.discussion_id,

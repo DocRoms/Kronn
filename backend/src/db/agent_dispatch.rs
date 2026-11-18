@@ -29,7 +29,7 @@ impl DispatchStatus {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+    pub fn parse(value: &str) -> Result<Self> {
         match value {
             "Pending" => Ok(Self::Pending),
             "Running" => Ok(Self::Running),
@@ -205,7 +205,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
 /// Parse a stored `worker_agent_type` back to the typed identity: a value outside
 /// the domain is a corrupt row, surfaced as a hard error rather than silently
 /// dropping the worker's provider.
-pub(crate) fn agent_type_from_db(s: &str) -> Result<AgentType> {
+pub fn agent_type_from_db(s: &str) -> Result<AgentType> {
     Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,

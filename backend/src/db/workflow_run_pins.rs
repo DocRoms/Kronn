@@ -88,26 +88,26 @@ pub fn purge(conn: &Connection, run_id: &str) -> Result<usize> {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct RunHeader {
-    pub(crate) pinned_at: DateTime<Utc>,
+pub struct RunHeader {
+    pub pinned_at: DateTime<Utc>,
     /// `None` for a BatchQuickPrompt run, which has no workflow of its own.
     #[serde(default)]
-    pub(crate) workflow: Option<Workflow>,
+    pub workflow: Option<Workflow>,
     /// `revision_fingerprint` at pin time; `None` when inherited.
     #[serde(default)]
-    pub(crate) fingerprint: Option<String>,
+    pub fingerprint: Option<String>,
     /// Zone of the run's `{{time.now}}` (KT-1103); absent (pinned before
     /// zones existed) means UTC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) timezone: Option<String>,
+    pub timezone: Option<String>,
     /// `revision_fingerprint` of the pinned closure without repository
     /// profiles: what a human-validated workflow scope (KT-1270) is compared
     /// with. `None` when inherited or pinned before scopes existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) scope_revision: Option<String>,
+    pub scope_revision: Option<String>,
 }
 
-pub(crate) fn header(conn: &Connection, run_id: &str) -> Result<Option<RunHeader>> {
+pub fn header(conn: &Connection, run_id: &str) -> Result<Option<RunHeader>> {
     match get(conn, run_id, RUN_KIND, "")? {
         Some(json) => Ok(Some(serde_json::from_str(&json)?)),
         None => Ok(None),

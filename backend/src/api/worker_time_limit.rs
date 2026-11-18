@@ -280,7 +280,7 @@ pub fn record_time_limit_stop(
     Ok(true)
 }
 
-pub(crate) fn record_stop_event(
+pub fn record_stop_event(
     conn: &Connection,
     execution_id: &str,
     dispatch_job_id: &str,

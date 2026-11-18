@@ -5,10 +5,10 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 
-pub(crate) const STATUS_CONFIRMED: &str = "Confirmed by user";
-pub(crate) const STATUS_REJECTED: &str = "Rejected";
-pub(crate) const STATUS_ACCEPTED_DECISION: &str = "Accepted decision";
-pub(crate) const STATUS_DEFERRED: &str = "Deferred";
+pub const STATUS_CONFIRMED: &str = "Confirmed by user";
+pub const STATUS_REJECTED: &str = "Rejected";
+pub const STATUS_ACCEPTED_DECISION: &str = "Accepted decision";
+pub const STATUS_DEFERRED: &str = "Deferred";
 
 /// A human decision a validation card wrote on a TD sheet. The sheet is the
 /// authority: re-audits and later validations read it back from here.
@@ -34,7 +34,7 @@ impl TdDecision {
     }
 
     /// The `Status` value a human decision writes on a sheet.
-    pub(crate) fn status_label(self) -> &'static str {
+    pub fn status_label(self) -> &'static str {
         match self {
             Self::Confirmed => STATUS_CONFIRMED,
             Self::Rejected => STATUS_REJECTED,
@@ -137,7 +137,7 @@ pub fn td_decision(content: &str) -> Option<TdDecision> {
         .and_then(TdDecision::from_status)
 }
 
-pub(crate) fn replace_current_status(lines: &mut [String], status: &str) -> Result<()> {
+pub fn replace_current_status(lines: &mut [String], status: &str) -> Result<()> {
     let body_start = if lines.first().is_some_and(|line| line.trim() == "---") {
         lines
             .iter()
@@ -269,7 +269,7 @@ fn split_flow(inner: &str) -> Vec<String> {
 /// Appends one `audit_history` entry, unless the same status by the same
 /// reviewer with the same note was already recorded today. A new note on the
 /// same status is a new entry: the reason a person types is never dropped.
-pub(crate) fn append_history_entry(
+pub fn append_history_entry(
     lines: &mut Vec<String>,
     status: &str,
     reviewer: &str,

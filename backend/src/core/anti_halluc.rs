@@ -915,7 +915,7 @@ fn is_heading_or_imperative(s: &str) -> bool {
 ///   the document ends before a valid closer: a truncated markdown must
 ///   never hide real content from a fail-closed consumer (the step-8
 ///   placeholder validator feeds on this).
-pub(crate) fn strip_fenced_code(text: &str) -> String {
+pub fn strip_fenced_code(text: &str) -> String {
     let scan = scan_fences(text, &['`'], false);
     let mut out = String::with_capacity(text.len());
     for (line, fenced) in text.lines().zip(&scan.in_fence) {
@@ -928,7 +928,7 @@ pub(crate) fn strip_fenced_code(text: &str) -> String {
 }
 
 /// Where the fenced blocks of a document sit, line by line.
-pub(crate) struct FenceScan {
+pub struct FenceScan {
     /// One entry per `text.lines()` line: `true` when the line belongs to a
     /// fenced block (its opening and closing fence lines included).
     pub in_fence: Vec<bool>,
@@ -947,7 +947,7 @@ pub(crate) struct FenceScan {
 /// CommonMark: the block runs to the end of the document) — otherwise they are
 /// restored as visible, the fail-closed choice for a consumer that must not
 /// lose sight of real content behind a stray fence.
-pub(crate) fn scan_fences(text: &str, fence_chars: &[char], unclosed_is_code: bool) -> FenceScan {
+pub fn scan_fences(text: &str, fence_chars: &[char], unclosed_is_code: bool) -> FenceScan {
     /// `Some((char, run_len, suffix))` when the line is a fence marker
     /// candidate: ≤3 leading spaces then a run of ≥3 fence characters. Tabs
     /// disqualify.
@@ -1023,7 +1023,7 @@ const MAX_BACKTICK_RUNS_PER_LINE: usize = 64;
 /// kept verbatim — backticks in plain prose never eat the rest of the line.
 /// Runs are pre-scanned once per line and their count is capped, so a long
 /// hostile line can't turn the pairing into a CPU hotspot (Copilot review).
-pub(crate) fn strip_inline_code(text: &str) -> String {
+pub fn strip_inline_code(text: &str) -> String {
     partition_inline_code(text).0
 }
 
@@ -1041,12 +1041,12 @@ pub(crate) fn strip_inline_code(text: &str) -> String {
 /// never hide a real slot, bounded pairing on hostile lines); fences are
 /// lexical, and an UNCLOSED fence restores everything it withheld,
 /// opening line included.
-pub(crate) fn count_raw_placeholders(content: &str) -> usize {
+pub fn count_raw_placeholders(content: &str) -> usize {
     raw_placeholder_names(content).len()
 }
 
 /// The `{{TOKEN}}` placeholders still in `content`, in order, outside code.
-pub(crate) fn raw_placeholder_names(content: &str) -> Vec<String> {
+pub fn raw_placeholder_names(content: &str) -> Vec<String> {
     let stripped = strip_inline_code(&strip_fenced_code(content));
     // Match `{{IDENT}}` and `{{ IDENT }}` where IDENT is
     // UPPERCASE_SNAKE (with optional digits + _). The trailing
@@ -1076,11 +1076,11 @@ pub(crate) fn raw_placeholder_names(content: &str) -> Vec<String> {
     names
 }
 
-pub(crate) struct SectionSpan {
-    pub(crate) name: String,
-    pub(crate) is_human: bool,
-    pub(crate) start: usize,
-    pub(crate) end: usize,
+pub struct SectionSpan {
+    pub name: String,
+    pub is_human: bool,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// Fence characters that hide a `kronn:section` marker from the ownership
@@ -1094,7 +1094,7 @@ const OWNERSHIP_FENCE_CHARS: [char; 2] = ['`', '~'];
 /// An unclosed fence is read leniently (its lines stay visible, so a stray
 /// fence in a human's own document does not strip protection) — except when
 /// `strict_unclosed` is set, where it is CommonMark's block-to-end-of-file.
-pub(crate) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
+pub fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
     scan_fences(text, &OWNERSHIP_FENCE_CHARS, strict_unclosed)
 }
 
@@ -1103,7 +1103,7 @@ pub(crate) fn code_line_mask(text: &str, strict_unclosed: bool) -> FenceScan {
 /// `lines`, shorter is fine): their markers are ignored on both ends. An
 /// opener with no matching closer is skipped — there is nothing well-formed to
 /// protect there.
-pub(crate) fn parse_named_sections(lines: &[&str], in_code: &[bool]) -> Vec<SectionSpan> {
+pub fn parse_named_sections(lines: &[&str], in_code: &[bool]) -> Vec<SectionSpan> {
     let is_code = |idx: usize| in_code.get(idx).copied().unwrap_or(false);
     let mut spans = Vec::new();
     let mut i = 0;
@@ -1134,14 +1134,14 @@ pub(crate) fn parse_named_sections(lines: &[&str], in_code: &[bool]) -> Vec<Sect
     spans
 }
 
-pub(crate) fn extract_attr(line: &str, attr: &str) -> Option<String> {
+pub fn extract_attr(line: &str, attr: &str) -> Option<String> {
     let needle = format!("{attr}=\"");
     let start = line.find(&needle)? + needle.len();
     let end = line[start..].find('"')?;
     Some(line[start..start + end].to_string())
 }
 
-pub(crate) fn is_human_owned_marker(line: &str) -> bool {
+pub fn is_human_owned_marker(line: &str) -> bool {
     line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
 }
 
@@ -1172,12 +1172,12 @@ pub fn named_sections(content: &str) -> Vec<NamedSection> {
 }
 
 /// A syntax example such as `<path>:<line>` or `src/{a,b}.rs`, not a citation.
-pub(crate) fn is_placeholder(citation: &str) -> bool {
+pub fn is_placeholder(citation: &str) -> bool {
     citation.contains(['<', '>', '{', '}', '*', '…']) || citation.contains("...")
 }
 
 /// A doc still holding a raw `{{SLOT}}`, a `<!-- TODO:` line or a bare `PLACEHOLDER` line.
-pub(crate) fn contains_placeholder(s: &str) -> bool {
+pub fn contains_placeholder(s: &str) -> bool {
     count_raw_placeholders(s) > 0
         || strip_inline_code(&strip_fenced_code(s)).lines().any(|line| {
             let trimmed = line.trim();
@@ -1187,7 +1187,7 @@ pub(crate) fn contains_placeholder(s: &str) -> bool {
 
 /// [`strip_inline_code`]'s prose, plus the inner text of every dropped span,
 /// one span per line.
-pub(crate) fn partition_inline_code(text: &str) -> (String, String) {
+pub fn partition_inline_code(text: &str) -> (String, String) {
     let mut out = String::with_capacity(text.len());
     let mut spans = String::new();
     for line in text.lines() {
@@ -1382,7 +1382,7 @@ pub fn lint_assertions(text: &str) -> LintReport {
 /// Hard caps to bound work at message-finalize time.
 const MAX_SOURCES_VERIFIED: usize = 50;
 /// Skip line-count verification above this file size (existence still checked).
-pub(crate) const LINE_COUNT_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
+pub const LINE_COUNT_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Extract every `[src: …]` marker from the prose, skipping fenced code blocks
 /// AND inline-backtick spans (those are [`extract_quoted_source_markers`]),
@@ -1407,7 +1407,7 @@ fn markers_in(prose: &str) -> Vec<String> {
 }
 
 /// [`markers_in`] with the char offset of each marker's `[`.
-pub(crate) fn markers_at(prose: &str) -> Vec<(usize, String)> {
+pub fn markers_at(prose: &str) -> Vec<(usize, String)> {
     let chars: Vec<char> = prose.chars().collect();
     let lower: Vec<char> = prose.to_ascii_lowercase().chars().collect();
     let needle: Vec<char> = "[src:".chars().collect();
@@ -1657,12 +1657,12 @@ fn text_can_be_a_path(s: &str) -> bool {
 
 /// The cited path and line span of a `file:` or `code-comment:` marker,
 /// cleaned exactly as the verifier cleans it. `None` for any other kind.
-pub(crate) fn file_citation(raw: &str) -> Option<(String, Option<(usize, usize)>)> {
+pub fn file_citation(raw: &str) -> Option<(String, Option<(usize, usize)>)> {
     file_citation_anchored(raw).map(|(path, lines, _)| (path, lines))
 }
 
 /// [`file_citation`] plus the `#symbol` anchor that may follow the line spec.
-pub(crate) fn file_citation_anchored(raw: &str) -> Option<FileCitation> {
+pub fn file_citation_anchored(raw: &str) -> Option<FileCitation> {
     let (kind, reference) = classify_source(raw);
     if !matches!(kind, SourceKind::File | SourceKind::CodeComment) {
         return None;
@@ -1674,14 +1674,14 @@ pub(crate) fn file_citation_anchored(raw: &str) -> Option<FileCitation> {
 }
 
 /// Path, line span and symbol anchor of a file citation.
-pub(crate) type FileCitation = (String, Option<(usize, usize)>, Option<String>);
+pub type FileCitation = (String, Option<(usize, usize)>, Option<String>);
 
 /// `(manager/package, checked date)` of a `deps:` marker, the manager and the
 /// package left joined: the manager label may itself hold a `/` (`JS / TS`), so
 /// only the producer's snapshot can tell where one ends and the other starts.
 /// The date starts after the last `@`, since a package name may hold `@`
 /// (`@types/node`).
-pub(crate) fn dep_reference(raw: &str) -> Option<(String, String)> {
+pub fn dep_reference(raw: &str) -> Option<(String, String)> {
     let (kind, reference) = classify_source(raw);
     if kind != SourceKind::Deps {
         return None;
@@ -1699,7 +1699,7 @@ pub(crate) fn dep_reference(raw: &str) -> Option<(String, String)> {
 /// `/`. Right for a bare manager (`npm`, `cargo`) and enough to tell a
 /// well-formed marker from a partial one; a label holding a `/` is split
 /// wrongly, so a check against the watch uses [`dep_reference`].
-pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
+pub fn dep_citation(raw: &str) -> Option<(String, String, String)> {
     let (head, date) = dep_reference(raw)?;
     let (manager, package) = head.split_once('/')?;
     let (manager, package) = (manager.trim(), package.trim());
@@ -1712,7 +1712,7 @@ pub(crate) fn dep_citation(raw: &str) -> Option<(String, String, String)> {
 /// The address a `url:` marker (or a bare `https://…` one) cites, without the
 /// `url:` keyword or any trailing comment. `None` for any other kind, or an
 /// empty reference.
-pub(crate) fn url_reference(raw: &str) -> Option<String> {
+pub fn url_reference(raw: &str) -> Option<String> {
     let (kind, reference) = classify_source(raw);
     if kind != SourceKind::Url {
         return None;
@@ -1773,7 +1773,7 @@ fn split_path_and_lines(reference: &str) -> (&str, Option<(usize, usize)>) {
 const PRESENCE_MARKERS: &[&str] = &["exists", "tracked"];
 
 /// Whether the text after the last `:` of a file citation is a presence marker.
-pub(crate) fn is_presence_marker(after: &str) -> bool {
+pub fn is_presence_marker(after: &str) -> bool {
     let after = after.trim();
     PRESENCE_MARKERS
         .iter()
@@ -1782,7 +1782,7 @@ pub(crate) fn is_presence_marker(after: &str) -> bool {
 
 /// Whether the presence marker claims the file is tracked by git, which the
 /// index must confirm: `exists` is settled by the file being there.
-pub(crate) fn is_tracked_marker(after: &str) -> bool {
+pub fn is_tracked_marker(after: &str) -> bool {
     after.trim().eq_ignore_ascii_case("tracked")
 }
 
@@ -1796,7 +1796,7 @@ fn untracked_claim(reference: &str, roots: &[&Path]) -> bool {
 
 /// Whether git tracks `rel` in the repository at `root`. Outside a repository,
 /// or without git, nothing is tracked.
-pub(crate) fn is_git_tracked(root: &Path, rel: &str) -> bool {
+pub fn is_git_tracked(root: &Path, rel: &str) -> bool {
     agent_git_succeeds(
         root,
         &[
@@ -1819,23 +1819,23 @@ fn agent_git_succeeds(root: &Path, args: &[&str]) -> bool {
 /// Whether git ignores `rel` in the repository at `root` (a vendored or generated
 /// path, absent from a clone), whether or not the file is on disk. Outside a
 /// repository, or without git, nothing is ignored.
-pub(crate) fn is_git_ignored(root: &Path, rel: &str) -> bool {
+pub fn is_git_ignored(root: &Path, rel: &str) -> bool {
     agent_git_succeeds(root, &["check-ignore", "-q", "--", rel])
 }
 
 /// The en and em dash, which models write where a line range wants a hyphen.
-pub(crate) const RANGE_DASHES: [char; 2] = ['\u{2013}', '\u{2014}'];
+pub const RANGE_DASHES: [char; 2] = ['\u{2013}', '\u{2014}'];
 
 /// A line spec with its en/em dashes turned into the hyphen they stand for. The
 /// one place every gate (verifier, citation drift, documentary gate) reads a
 /// range through, so none of them disagrees on what a range is.
-pub(crate) fn normalize_range_dashes(s: &str) -> String {
+pub fn normalize_range_dashes(s: &str) -> String {
     s.replace(RANGE_DASHES, "-")
 }
 
 /// `12` or `12-20` as written, without judging the numbers: `None` when a bound
 /// is missing or not a number, so a caller can say "not a line number".
-pub(crate) fn parse_line_bounds(s: &str) -> Option<(usize, usize)> {
+pub fn parse_line_bounds(s: &str) -> Option<(usize, usize)> {
     let normalized = normalize_range_dashes(s);
     let bounds: Vec<_> = normalized
         .split('-')
@@ -1868,7 +1868,7 @@ fn split_anchor(reference: &str) -> (&str, Option<&str>) {
 }
 
 /// An identifier, optionally dotted or dashed (`fn_name`, `Type.method`, `check-version`).
-pub(crate) fn is_anchor_symbol(s: &str) -> bool {
+pub fn is_anchor_symbol(s: &str) -> bool {
     let mut chars = s.chars();
     chars
         .next()
@@ -1893,7 +1893,7 @@ fn contains_word(line: &str, symbol: &str) -> bool {
 
 /// Why a `#symbol` anchor does not hold for its range.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AnchorMiss {
+pub struct AnchorMiss {
     /// What the message reports: the definitions of the symbol inside the
     /// range when one of them fails to open it, else every line holding the
     /// symbol. Possibly none.
@@ -2014,7 +2014,7 @@ fn prelude_start(text: &[&str], line: usize) -> usize {
 /// comment or attributes allowed above and up to [`ANCHOR_SIBLING_LINES`]
 /// sibling lines before them: a range that starts a whole function early
 /// drifts from the function it names.
-pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
+pub fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Option<AnchorMiss> {
     if crate::acp::secret_files::is_secret_path(path) {
         return None; // never read: the range itself is refused upstream
     }
@@ -2026,7 +2026,7 @@ pub(crate) fn anchor_miss(path: &Path, span: (usize, usize), symbol: &str) -> Op
 }
 
 /// [`anchor_miss`] on the text of a file, such as a past revision's blob.
-pub(crate) fn anchor_miss_in(
+pub fn anchor_miss_in(
     content: &str,
     span: (usize, usize),
     symbol: &str,
@@ -2099,7 +2099,7 @@ pub(crate) fn anchor_miss_in(
 
 /// [`line_bounds_status`], then the anchor: a symbol absent from the cited
 /// lines makes the range wrong, so it reads as out of bounds.
-pub(crate) fn anchored_bounds_status(
+pub fn anchored_bounds_status(
     candidate: &Path,
     line_spec: Option<(usize, usize)>,
     anchor: Option<&str>,
@@ -2117,7 +2117,7 @@ pub(crate) fn anchored_bounds_status(
     }
 }
 
-pub(crate) fn anchor_miss_detail(span: (usize, usize), symbol: &str, miss: &AnchorMiss) -> String {
+pub fn anchor_miss_detail(span: (usize, usize), symbol: &str, miss: &AnchorMiss) -> String {
     let (start, end) = span;
     let range = if start == end {
         format!("line {start}")
@@ -2166,12 +2166,12 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 }
 
 /// Bytes sniffed to tell a binary file from a text one.
-pub(crate) const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+pub const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// A file with no lines to cite (.docx, .pdf, images), told apart by content,
 /// not extension: a NUL byte, invalid UTF-8, or a PDF header in the first
 /// bytes. Such a file is cited by bare path, never `path:line`.
-pub(crate) fn is_binary_file(path: &Path) -> bool {
+pub fn is_binary_file(path: &Path) -> bool {
     use std::io::Read;
     let Ok(file) = std::fs::File::open(path) else {
         return false;
@@ -2189,7 +2189,7 @@ pub(crate) fn is_binary_file(path: &Path) -> bool {
 
 /// [`is_binary_file`] on content already read: only its first
 /// [`BINARY_SNIFF_BYTES`] are judged.
-pub(crate) fn is_binary_content(content: &[u8]) -> bool {
+pub fn is_binary_content(content: &[u8]) -> bool {
     let head = &content[..content.len().min(BINARY_SNIFF_BYTES)];
     if head.starts_with(b"%PDF-") || head.contains(&0) {
         return true;
@@ -2201,7 +2201,7 @@ pub(crate) fn is_binary_content(content: &[u8]) -> bool {
 /// Percent-decoded relative form of a cited or linked path (`My%20File.docx`),
 /// or `None` when decoding changes nothing or yields a rooted path. The caller
 /// still jails the result like any other relative path.
-pub(crate) fn percent_decoded_relative(raw: &str) -> Option<String> {
+pub fn percent_decoded_relative(raw: &str) -> Option<String> {
     let decoded = crate::core::message_file_links::percent_decode(raw)?;
     let path = Path::new(&decoded);
     let rooted = path.has_root()
@@ -2215,7 +2215,7 @@ pub(crate) fn percent_decoded_relative(raw: &str) -> Option<String> {
 /// reads as N+1 numbered lines in an editor or in Claude Code's Read tool (the
 /// last one empty), so a model that copies the number it saw cites N+1: that is
 /// accepted, and it is the one place every range check takes its end bound from.
-pub(crate) fn last_citable_line(content: &str) -> usize {
+pub fn last_citable_line(content: &str) -> usize {
     content.lines().count() + usize::from(content.ends_with('\n'))
 }
 
@@ -2224,7 +2224,7 @@ pub(crate) fn last_citable_line(content: &str) -> usize {
 /// real line — one that starts on the empty line N+1 cites nothing — and may end
 /// on N+1. Every range check goes through here, so the verifier, the documentary
 /// gate, citation drift and the bundle repair cannot disagree.
-pub(crate) fn range_is_citable(lines: usize, last: usize, start: usize, end: usize) -> bool {
+pub fn range_is_citable(lines: usize, last: usize, start: usize, end: usize) -> bool {
     start >= 1 && start <= lines && start <= end && end <= last
 }
 
@@ -2369,7 +2369,7 @@ fn secret_line_verdict() -> (SourceStatus, String) {
 /// path (`rel` under `root`) AND on `resolved`, the file the jail settled on:
 /// `.env -> settings-data` is secret by its name although its target is not.
 /// `None` for presence-only citations and ordinary files.
-pub(crate) fn secret_line_refusal(
+pub fn secret_line_refusal(
     root: &Path,
     rel: &Path,
     resolved: &Path,
@@ -2383,7 +2383,7 @@ pub(crate) fn secret_line_refusal(
 }
 
 /// Line-bounds verdict for an existing candidate file.
-pub(crate) fn line_bounds_status(
+pub fn line_bounds_status(
     candidate: &Path,
     line_spec: Option<(usize, usize)>,
 ) -> (SourceStatus, String) {
@@ -2576,7 +2576,7 @@ fn resolve_unique_path_suffix(needle: &str, roots: &[&Path]) -> BasenameResoluti
 }
 
 /// Outcome of resolving a relative path inside one root.
-pub(crate) enum Jailed {
+pub enum Jailed {
     /// The real, symlink-free path of an existing entry inside the root.
     Inside(PathBuf),
     Missing,
@@ -2590,7 +2590,7 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// Resolve `rel` under `root` one component at a time with lstat/readlink
 /// only, so an escaping symlink is refused before its target is ever stat'ed:
 /// the verdict reveals nothing about files outside the root.
-pub(crate) fn resolve_in_root(root: &Path, rel: &Path) -> Jailed {
+pub fn resolve_in_root(root: &Path, rel: &Path) -> Jailed {
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::path::Component;
@@ -3915,7 +3915,7 @@ mod tests {
         // change before it lands. If a real positive needs to be added
         // (i.e. a NEW kind of legitimate claim), update the corpus
         // entry's `expected_unsourced` field accordingly.
-        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixture_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join("tests/fixtures/anti_halluc_corpus.jsonl");
         let content = std::fs::read_to_string(&fixture_path).expect("fixture must exist");
 
@@ -7503,7 +7503,7 @@ mod anchor_citations {
     #[test]
     fn doc_comments_and_attributes_may_sit_above_the_definition() {
         let file =
-            "x\n/// Docs.\n#[derive(\n    Debug,\n)]\n#[cfg(test)]\npub(crate) struct Run;\n";
+            "x\n/// Docs.\n#[derive(\n    Debug,\n)]\n#[cfg(test)]\npub struct Run;\n";
         assert_eq!(miss(file, (2, 7), "Run"), None);
         assert_eq!(miss(file, (6, 7), "Run"), None);
         let py = "x\n@cache\n# note\ndef load():\n    pass\n";
@@ -7549,7 +7549,7 @@ mod anchor_citations {
     fn definition_keywords_and_modifiers_are_recognised() {
         for (line, symbol, defined) in [
             ("pub async fn run() {}", "run", true),
-            ("pub(crate) const fn run() {}", "run", true),
+            ("pub const fn run() {}", "run", true),
             ("pub(in crate::api) fn run() {}", "run", true),
             ("pub(in crate :: api) async fn run() {}", "run", true),
             ("pub(super) struct Run;", "Run", true),
@@ -7581,7 +7581,7 @@ mod mode_override_tests {
     /// Every `set_mode` reference outside this file, by file. A test that
     /// writes the mode directly leaks it into concurrent and later tests.
     fn mode_writers_by_file() -> BTreeMap<String, usize> {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src");
         let path_ref = concat!("anti_halluc::set_", "mode");
         let mut found = BTreeMap::new();
         for entry in walkdir::WalkDir::new(&src) {

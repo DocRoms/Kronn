@@ -82,7 +82,7 @@ pub fn model_tool_support(agent_type: &AgentType, model_id: &str) -> Option<bool
 
 /// Test seam: replace the projected tool support, `(agent, model, supported)`.
 #[cfg(all(test, feature = "full-tests"))]
-pub(crate) fn set_tool_support_for_test(models: &[(AgentType, &str, bool)]) {
+pub fn set_tool_support_for_test(models: &[(AgentType, &str, bool)]) {
     let projected = models
         .iter()
         .map(|(agent, model, supported)| {
@@ -408,7 +408,7 @@ tokio::task_local! {
 /// Test-only: a launch routed to a fixture transport has no CLI to discover, so
 /// it resolves as a runtime without live discovery; an outer test scope wins.
 #[cfg(test)]
-pub(crate) async fn test_routed_discovery<F: std::future::Future>(
+pub async fn test_routed_discovery<F: std::future::Future>(
     routed: bool,
     future: F,
 ) -> F::Output {

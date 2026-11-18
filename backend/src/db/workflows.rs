@@ -499,7 +499,7 @@ pub fn delete_batch_run_with_discussions(
 
 /// Resolve the connection from the comparison target. Inherit the Quick Prompt
 /// connection only when running its own agent without an explicit override.
-pub(crate) fn connection_for_batch_item(
+pub fn connection_for_batch_item(
     qp_agent: &crate::models::AgentType,
     qp_connection_id: Option<&str>,
     target: Option<&BatchAgentOverride>,
@@ -617,7 +617,7 @@ pub fn create_batch_run_with_identities(
 /// The single-QP launch captures provider controls in the same transaction as
 /// its child discussion and dispatch job. Legacy/compare batch callers retain
 /// their own target resolution instead of inheriting the QP's controls.
-pub(crate) fn create_batch_run_with_launch_settings(
+pub fn create_batch_run_with_launch_settings(
     conn: &Connection,
     input: CreateBatchRunInput,
     assigned_run_id: Option<String>,
@@ -1098,7 +1098,7 @@ pub fn update_workflow_as_agent(conn: &Connection, wf: &Workflow) -> Result<bool
 }
 
 /// The full-definition write; every column it sets is in `WRITTEN_COLUMNS`.
-pub(crate) const UPDATE_WORKFLOW_SQL: &str =
+pub const UPDATE_WORKFLOW_SQL: &str =
     "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
          concurrency_limit = ?9, enabled = CASE WHEN ?20 THEN MIN(enabled, ?10) ELSE ?10 END,
@@ -1111,7 +1111,7 @@ pub(crate) const UPDATE_WORKFLOW_SQL: &str =
          WHERE id = ?1";
 
 /// Every column `UPDATE_WORKFLOW_SQL` writes (a test keeps the two in sync).
-pub(crate) const WRITTEN_COLUMNS: &[&str] = &[
+pub const WRITTEN_COLUMNS: &[&str] = &[
     "name",
     "project_id",
     "trigger_json",
@@ -1762,7 +1762,7 @@ fn provenance_run_id(run: &WorkflowRun) -> Option<&str> {
 /// on any run that has a `parent_run_id`, via a SINGLE batch query (no N+1).
 /// Resolves each distinct parent run id → its workflow id/name + start time.
 /// A dangling parent (deleted run) simply leaves the fields `None`.
-pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRun]) -> Result<()> {
+pub fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRun]) -> Result<()> {
     use std::collections::HashMap;
     // Distinct, non-empty parent ids present in this batch.
     let mut ids: Vec<String> = runs
@@ -1885,7 +1885,7 @@ fn child_run_metrics(
 /// (`foreach-envelope.ts`) so the nested-marker case (`last_output` embedding a
 /// child's own `---END_STEP_OUTPUT---`) is left intact. Marker format is owned
 /// by `workflows::step_output_format::format_step_output`.
-pub(crate) fn backfill_foreach_output(
+pub fn backfill_foreach_output(
     output: &str,
     metrics: &std::collections::HashMap<String, (u64, Option<u64>)>,
 ) -> Option<String> {
@@ -3049,7 +3049,7 @@ fn refs_from_column(id: &str, raw: Option<String>) -> crate::models::WorkflowRef
 
 /// A retention that does not parse keeps every run: an unreadable setting must
 /// never widen what the purge deletes.
-pub(crate) fn retention_from_column(id: &str, raw: Option<String>) -> Option<WorkflowRetention> {
+pub fn retention_from_column(id: &str, raw: Option<String>) -> Option<WorkflowRetention> {
     let raw = raw?;
     match serde_json::from_str(&raw) {
         Ok(retention) => Some(retention),

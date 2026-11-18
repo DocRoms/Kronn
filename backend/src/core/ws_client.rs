@@ -93,7 +93,7 @@ async fn dialable_contact(state: &AppState, id: &str) -> Option<crate::models::C
 
 /// `ws(s)://host:port/api/ws` for a stored contact URL, or None when the URL
 /// is not a bare host and port.
-pub(crate) fn peer_ws_url(kronn_url: &str) -> Option<String> {
+pub fn peer_ws_url(kronn_url: &str) -> Option<String> {
     let base = crate::db::contacts::contact_base_url(kronn_url)?;
     Some(format!(
         "{}/api/ws",
@@ -223,7 +223,7 @@ const HEALTHY_SESSION: Duration = Duration::from_secs(20);
 /// the socket dies with no Close frame, neither side errors → zombie that
 /// never reconnects). Both directions ping independently, so each ~6-byte
 /// frame also refreshes the NAT entry for its direction. Cost is negligible.
-pub(crate) const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
+pub const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// If no frame (Text, Ping, or Pong) arrives from the peer within this window,
 /// the connection is treated as dead and torn down so the manager reconnects.
@@ -236,7 +236,7 @@ pub(crate) const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 /// would otherwise be dropped every cycle (reconnect loop → presence flicker
 /// and repeated notifications). 45 s tolerates a 20 s-era peer with margin
 /// while still surfacing a dead link reasonably fast.
-pub(crate) const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+pub const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Send our Presence and the F4 catch-up requests. False when the peer lost
 /// its authorization or the socket failed: the connection then ends.
@@ -491,7 +491,7 @@ async fn handle_peer_connection(
 /// connection never echoes a peer's own chat/invite frame straight back to it.
 /// FIFO eviction keeps it O(1) and memory-bounded under sustained traffic.
 #[derive(Default)]
-pub(crate) struct PeerEchoGuard {
+pub struct PeerEchoGuard {
     set: HashSet<String>,
     order: VecDeque<String>,
 }
@@ -499,7 +499,7 @@ pub(crate) struct PeerEchoGuard {
 impl PeerEchoGuard {
     const CAP: usize = 4096;
 
-    pub(crate) fn record(&mut self, key: String) {
+    pub fn record(&mut self, key: String) {
         if self.set.insert(key.clone()) {
             self.order.push_back(key);
             if self.order.len() > Self::CAP {
@@ -510,7 +510,7 @@ impl PeerEchoGuard {
         }
     }
 
-    pub(crate) fn contains(&self, key: &str) -> bool {
+    pub fn contains(&self, key: &str) -> bool {
         self.set.contains(key)
     }
 }

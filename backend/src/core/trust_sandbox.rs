@@ -201,7 +201,7 @@ pub fn argv_reaches_protected(
 }
 
 /// [`argv_reaches_protected`] with the home directory given.
-pub(crate) fn argv_reaches_protected_from(
+pub fn argv_reaches_protected_from(
     argv: &[String],
     protected: &[PathBuf],
     cwd: &Path,
@@ -256,7 +256,7 @@ fn unglue_short_flag(part: &str) -> Vec<&str> {
         .collect()
 }
 
-pub(crate) fn host_home() -> Option<PathBuf> {
+pub fn host_home() -> Option<PathBuf> {
     directories::BaseDirs::new()
         .map(|dirs| dirs.home_dir().to_path_buf())
         .or_else(|| crate::core::child_env::var("HOME").ok().map(PathBuf::from))

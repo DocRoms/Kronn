@@ -98,7 +98,7 @@ pub fn resolve_home() -> Option<PathBuf> {
 // ─── Ownership index ─────────────────────────────────────────────────────────
 
 /// Pre-computed lookup tables built once per scan. Avoids N×M comparison.
-pub(crate) struct OwnershipIndex {
+pub struct OwnershipIndex {
     /// `mcp_configs.config_hash → config_id`.
     by_hash: HashMap<String, String>,
 }
@@ -147,7 +147,7 @@ pub fn scan_all_host_mcps(conn: &Connection) -> Vec<DiscoveredHostMcp> {
 }
 
 /// Test-friendly variant. Production should call `scan_all_host_mcps`.
-pub(crate) fn scan_all_with_home(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
+pub fn scan_all_with_home(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
     let mut out = Vec::new();
     out.extend(scan_claude(home, index));
     out.extend(scan_gemini(home, index));

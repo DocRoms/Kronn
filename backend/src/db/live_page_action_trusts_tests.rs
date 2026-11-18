@@ -10,8 +10,8 @@ use crate::db::live_page_actions::{
 };
 use crate::models::{CollectApiDataConfig, CollectApiDataSource, PromptVariable};
 
-pub(crate) const PAGE: &str = "page-todo";
-pub(crate) const ACTION: &str = "page-action:page-todo:todo-move";
+pub const PAGE: &str = "page-todo";
+pub const ACTION: &str = "page-action:page-todo:todo-move";
 const ROWS: &str = r#"[{"id":"T-1"},{"id":"T-2"},{"id":"T-3"}]"#;
 
 fn connection() -> Connection {
@@ -20,16 +20,16 @@ fn connection() -> Connection {
     conn
 }
 
-pub(crate) fn block(action_ref: &str, values: &str) -> String {
+pub fn block(action_ref: &str, values: &str) -> String {
     format!(
         r#"<button data-kronn-action="{action_ref}">Go</button>
 <script type="application/kronn-action" data-action-id="{action_ref}">{{"kind":"workflow","target_id":"wf-move","values":{values}}}</script>"#
     )
 }
 
-pub(crate) const BOUND: &str = r#"[{"name":"ticket","provenance":"dynamic_binding","source_ref":"<page.dataset.todo.find(id).id>"}]"#;
+pub const BOUND: &str = r#"[{"name":"ticket","provenance":"dynamic_binding","source_ref":"<page.dataset.todo.find(id).id>"}]"#;
 
-pub(crate) fn workflow() -> Workflow {
+pub fn workflow() -> Workflow {
     let mut workflow = crate::db::tests::sample_workflow("wf-move");
     workflow.enabled = true;
     workflow.steps[0].step_type = StepType::JsonData;
@@ -58,7 +58,7 @@ fn insert_project(conn: &Connection, id: &str) {
 }
 
 /// A Todo page whose `todo-move` block targets `wf-move`, ingested as Kronn does.
-pub(crate) fn setup(
+pub fn setup(
     conn: &Connection,
     workflow: &Workflow,
     page_project: Option<&str>,

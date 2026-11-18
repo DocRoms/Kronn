@@ -115,7 +115,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// `path` with its longest existing ancestor canonicalized: a Cargo target that
 /// does not exist yet still resolves through `/tmp` → `/private/tmp`.
-pub(crate) fn real_path(path: &Path) -> PathBuf {
+pub fn real_path(path: &Path) -> PathBuf {
     let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
     let mut current = path;
     loop {
@@ -194,7 +194,7 @@ pub fn assert_contained_no_symlink(root: &Path, path: &Path) -> Result<(), Strin
 /// is shared by every thread (a route runs its filesystem work on a blocking
 /// thread), keyed by the folder, which each test takes from its own tempdir.
 #[cfg(all(test, unix))]
-pub(crate) mod swap_probe {
+pub mod swap_probe {
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -229,21 +229,21 @@ pub(crate) mod swap_probe {
 
     /// The next guarded call whose parent folder is `dir` finds it renamed to
     /// `<dir>.moved` and replaced by a symlink to `external`.
-    pub(crate) fn arm(dir: &Path, external: &Path) {
+    pub fn arm(dir: &Path, external: &Path) {
         arm_after(dir, external, 0);
     }
 
     /// [`arm`], but the swap waits for the guarded call after `skip` others
     /// under `dir`: for a caller that reads a file (a guarded call) before it
     /// writes it, so the swap lands on the write.
-    pub(crate) fn arm_after(dir: &Path, external: &Path, skip: usize) {
+    pub fn arm_after(dir: &Path, external: &Path, skip: usize) {
         arm_action(dir, Action::Swap(external.to_path_buf()), skip);
     }
 
     /// Runs `hook(dir)` once the guarded call after `skip` others under `dir`
     /// holds the folder: a deterministic race for a test (an entry appearing
     /// between the caller's read and its write).
-    pub(crate) fn arm_hook(dir: &Path, skip: usize, hook: impl FnOnce(&Path) + Send + 'static) {
+    pub fn arm_hook(dir: &Path, skip: usize, hook: impl FnOnce(&Path) + Send + 'static) {
         arm_action(dir, Action::Hook(Box::new(hook)), skip);
     }
 
@@ -256,7 +256,7 @@ pub(crate) mod swap_probe {
     }
 
     /// Whether the swap (or hook) happened (and disarms the probe).
-    pub(crate) fn fired() -> bool {
+    pub fn fired() -> bool {
         let Some(dir) = MINE.with(|mine| mine.borrow().clone()) else {
             return false;
         };

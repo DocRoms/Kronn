@@ -579,7 +579,7 @@ fn bridge_refusal<T: Serialize>() -> Json<ApiResponse<T>> {
     ))
 }
 
-pub(crate) async fn plan_for(
+pub async fn plan_for(
     state: &AppState,
     id: String,
     template_docs: PathBuf,
@@ -603,7 +603,7 @@ pub(crate) async fn plan_for(
     }
 }
 
-pub(crate) async fn reinstall_for(
+pub async fn reinstall_for(
     state: &AppState,
     id: String,
     template_docs: PathBuf,

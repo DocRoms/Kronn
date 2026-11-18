@@ -296,4 +296,4 @@ pub fn update_live_page_dataset_limits(
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "live_page_datasets_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

@@ -364,7 +364,7 @@ pub fn update(conn: &Connection, connection: &ExternalApiConnection) -> Result<(
 /// The hosted OpenAI-compatible endpoint. Deliberately without the `/v1` suffix:
 /// the shared codec appends `/v1/chat/completions` and the probes append
 /// `/v1/models`, exactly as they do for a LiteLLM proxy.
-pub(crate) const NVIDIA_DEFAULT_BASE_URL: &str = "https://integrate.api.nvidia.com";
+pub const NVIDIA_DEFAULT_BASE_URL: &str = "https://integrate.api.nvidia.com";
 
 /// Public accessor for the runner, which holds the saved endpoint (if any) but
 /// not the fallback chain.
@@ -374,7 +374,7 @@ pub fn nvidia_resolve_base_url_pub(stored: Option<&str>) -> String {
 
 /// Saved endpoint → `NVIDIA_BASE_URL` → the hosted default. A trailing slash is
 /// dropped and a bare host gains a scheme, so a pasted value behaves.
-pub(crate) fn nvidia_resolve_base_url(stored: Option<&str>) -> String {
+pub fn nvidia_resolve_base_url(stored: Option<&str>) -> String {
     let raw = stored
         .map(str::trim)
         .filter(|value| !value.is_empty())

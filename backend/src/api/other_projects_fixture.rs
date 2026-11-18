@@ -13,20 +13,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Three other projects registered in Kronn, none of them linked to the project at hand.
-pub(crate) const OTHER_PROJECTS: [(&str, &str); 3] = [
+pub const OTHER_PROJECTS: [(&str, &str); 3] = [
     ("orchid-billing-api", "/srv/zz-clients/orchid-billing-api"),
     ("zephyr-mobile-app", "/srv/zz-clients/zephyr-mobile-app"),
     ("quartz-infra", "/srv/zz-clients/quartz-infra"),
 ];
-pub(crate) const LINKED_NAME: &str = "linked-design-system";
-pub(crate) const LINKED_LOCATION: &str = "/srv/zz-clients/linked-design-system";
+pub const LINKED_NAME: &str = "linked-design-system";
+pub const LINKED_LOCATION: &str = "/srv/zz-clients/linked-design-system";
 /// In the project's briefing, which every audit step prompt carries: a turn that
 /// holds it is a step prompt, not a retry note or a validation turn.
-pub(crate) const BRIEFING_MARKER: &str = "BRIEFING-MARKER-KT926";
-pub(crate) const PROJECT_ID: &str = "proj-audited";
+pub const BRIEFING_MARKER: &str = "BRIEFING-MARKER-KT926";
+pub const PROJECT_ID: &str = "proj-audited";
 const TURN_SEPARATOR: &str = "=====KT926-TURN=====";
 
-pub(crate) fn fresh_state() -> AppState {
+pub fn fresh_state() -> AppState {
     AppState::new_defaults(
         Arc::new(tokio::sync::RwLock::new(
             crate::core::config::default_config(),
@@ -36,7 +36,7 @@ pub(crate) fn fresh_state() -> AppState {
     )
 }
 
-pub(crate) async fn register_project(
+pub async fn register_project(
     state: &AppState,
     id: &str,
     name: &str,
@@ -60,7 +60,7 @@ pub(crate) async fn register_project(
 }
 
 /// The project at hand (with a linked repo when asked) next to the three unlinked ones.
-pub(crate) async fn project_among_others(state: &AppState, dir: &Path, linked: bool) {
+pub async fn project_among_others(state: &AppState, dir: &Path, linked: bool) {
     let linked_repos = if linked {
         json!([{
             "id": "lr-1", "name": LINKED_NAME, "kind": "design",
@@ -85,7 +85,7 @@ pub(crate) async fn project_among_others(state: &AppState, dir: &Path, linked: b
 /// A scripted `claude` that records its stdin and its arguments, then ends a turn
 /// with a one-word answer. Returns the fixture program and the log it appends to.
 #[cfg(unix)] // the scripted claude is a POSIX sh script (cat, printf), which Windows cannot run
-pub(crate) fn recording_claude(tools: &Path) -> (PathBuf, PathBuf) {
+pub fn recording_claude(tools: &Path) -> (PathBuf, PathBuf) {
     let log = tools.join("turns.log");
     let script = format!(
         "{{ cat; printf '%s\\n' \"$*\"; printf '%s\\n' '{TURN_SEPARATOR}'; }} >> '{}'\n{}",
@@ -100,7 +100,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
 }
 
 /// Routes every Claude launch in `project`'s working directory to `fixture`.
-pub(crate) fn route_claude(
+pub fn route_claude(
     project: &Path,
     fixture: &Path,
 ) -> crate::agents::runner::test_acp_routes::RouteGuard {
@@ -118,7 +118,7 @@ pub(crate) fn route_claude(
 }
 
 /// Every turn the scripted agent was handed, prompt then arguments.
-pub(crate) fn recorded_turns(log: &Path) -> Vec<String> {
+pub fn recorded_turns(log: &Path) -> Vec<String> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .split(TURN_SEPARATOR)
@@ -129,7 +129,7 @@ pub(crate) fn recorded_turns(log: &Path) -> Vec<String> {
 }
 
 /// `prompt` names none of the three unlinked projects, by name or by path.
-pub(crate) fn assert_no_unlinked_project(prompt: &str, what: &str) {
+pub fn assert_no_unlinked_project(prompt: &str, what: &str) {
     for (name, path) in OTHER_PROJECTS {
         assert!(!prompt.contains(name), "{what}: prompt names {name}");
         assert!(!prompt.contains(path), "{what}: prompt names {path}");
@@ -137,7 +137,7 @@ pub(crate) fn assert_no_unlinked_project(prompt: &str, what: &str) {
 }
 
 /// `prompt` carries no trace of the retired candidate pool, whatever it lists.
-pub(crate) fn assert_no_candidate_pool(prompt: &str, what: &str) {
+pub fn assert_no_candidate_pool(prompt: &str, what: &str) {
     for retired in [
         "Suggested companion repos",
         "Other Kronn projects",

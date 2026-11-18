@@ -695,7 +695,7 @@ pub fn placeholder_paths(template: &str) -> Result<Vec<String>> {
 }
 
 /// Split the `|sh` filter off a path: `issue.title|sh` → (`issue.title`, true).
-pub(crate) fn split_shell_filter(path: &str) -> (&str, bool) {
+pub fn split_shell_filter(path: &str) -> (&str, bool) {
     match path.rsplit_once('|') {
         Some((base, filter)) if filter.trim() == "sh" && !base.trim().is_empty() => {
             (base.trim(), true)
@@ -754,7 +754,7 @@ fn split_fallback(key: &str) -> Result<(&str, Option<&str>)> {
 ///   - numbers / booleans / null → their stringified form
 ///   - arrays / objects → pretty-printed JSON (operator-friendly inside a
 ///     markdown code block, indexable downstream)
-pub(crate) fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -> Option<String> {
+pub fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -> Option<String> {
     resolve_typed_path(values, key).map(|v| stringify_json_leaf(&v))
 }
 
@@ -779,7 +779,7 @@ fn anchored_json<'a>(
 /// field (`"comments": "{{steps.review.data.inlineComments}}"` → a real array),
 /// which `stringify_json_leaf` could only express as an escaped string. Also
 /// resolves a bare `<prefix>.data` / `.data_json` to the whole parsed payload.
-pub(crate) fn resolve_typed_path(
+pub fn resolve_typed_path(
     values: &HashMap<String, String>,
     key: &str,
 ) -> Option<serde_json::Value> {

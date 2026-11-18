@@ -5,7 +5,7 @@ use crate::AppState;
 use axum::{extract::State, Json};
 
 #[derive(Clone, Debug)]
-pub(crate) enum RepoSourceAuth {
+pub enum RepoSourceAuth {
     Token {
         token: String,
         api_url: Option<String>,
@@ -16,7 +16,7 @@ pub(crate) enum RepoSourceAuth {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct AuthenticatedRepoSource {
+pub struct AuthenticatedRepoSource {
     pub source: RepoSource,
     pub auth: RepoSourceAuth,
 }
@@ -212,7 +212,7 @@ pub async fn discover_repos(
 
 /// Find all repository authentication sources from plugin configs and env vars.
 /// GitLab can use either a saved PAT or the local `glab auth login` session.
-pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<AuthenticatedRepoSource> {
+pub async fn find_all_provider_sources(state: &AppState) -> Vec<AuthenticatedRepoSource> {
     let mut sources: Vec<AuthenticatedRepoSource> = vec![];
 
     // Read encryption secret
@@ -392,7 +392,7 @@ fn gitlab_host_from_process_env() -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-pub(crate) use crate::core::github_connection::normalize_repo_url;
+pub use crate::core::github_connection::normalize_repo_url;
 
 /// Fetch all repos for the authenticated GitHub user, including organization repos.
 /// Bounded per request: discovery paginates in a loop inside a GET handler —

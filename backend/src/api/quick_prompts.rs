@@ -60,7 +60,7 @@ pub async fn create(
 
 /// [`create`] naming the creating agent, if any: a resource an agent creates
 /// can shadow a shared `ref:` and so disable the workflows using it.
-pub(crate) async fn create_as(
+pub async fn create_as(
     state: AppState,
     req: CreateQuickPromptRequest,
     creator_agent: Option<String>,
@@ -153,7 +153,7 @@ fn quick_prompt_execution(qp: &QuickPrompt) -> serde_json::Value {
     })
 }
 
-pub(crate) async fn update_as(
+pub async fn update_as(
     state: AppState,
     id: String,
     req: CreateQuickPromptRequest,

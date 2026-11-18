@@ -10,11 +10,11 @@ use crate::models::{ProjectRepositoryResourceKind, ProjectUsedSkill, Skill, Skil
 
 /// Catalog skill id by the slug Kronn writes it under: how a published skill
 /// is told from one only the repository holds.
-pub(crate) fn catalog_ids_by_slug() -> BTreeMap<String, String> {
+pub fn catalog_ids_by_slug() -> BTreeMap<String, String> {
     catalog_ids_by_slug_of(&crate::core::skills::list_all_skills())
 }
 
-pub(crate) fn catalog_ids_by_slug_of(skills: &[Skill]) -> BTreeMap<String, String> {
+pub fn catalog_ids_by_slug_of(skills: &[Skill]) -> BTreeMap<String, String> {
     let mut ids = BTreeMap::new();
     for skill in skills {
         ids.entry(crate::core::native_files::slug(&skill.id))
@@ -24,7 +24,7 @@ pub(crate) fn catalog_ids_by_slug_of(skills: &[Skill]) -> BTreeMap<String, Strin
 }
 
 /// `.agents/skills` out of `.agents/skills/<slug>/SKILL.md`.
-pub(crate) fn skill_root(relative_path: &str) -> String {
+pub fn skill_root(relative_path: &str) -> String {
     Path::new(relative_path)
         .parent()
         .and_then(Path::parent)
@@ -37,7 +37,7 @@ pub(crate) fn skill_root(relative_path: &str) -> String {
 /// published skill the catalog knows is that catalog skill; one it does not
 /// know, or a reference, is a skill only the repository holds — and a
 /// reference and a lock entry naming the same slug there are one skill.
-pub(crate) fn project_used_skills(
+pub fn project_used_skills(
     project_id: &str,
     root: &Path,
     references: &[SkillReference],
@@ -101,7 +101,7 @@ pub(crate) fn project_used_skills(
     used
 }
 
-pub(crate) fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
+pub fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8>> {
     let path = root.join(relative);
     crate::core::fs_guard::assert_contained_no_symlink(root, &path).ok()?;
     std::fs::read(path).ok()
@@ -110,12 +110,12 @@ pub(crate) fn read_repository_file(root: &Path, relative: &str) -> Option<Vec<u8
 /// What the sheet carries of one side of one file: a longer text is cut here
 /// and flagged, so a large artifact cannot turn the answer into megabytes. The
 /// diff is built from the whole file, whatever is cut.
-pub(crate) const MAX_CONTENT_BYTES: usize = 512 * 1024;
+pub const MAX_CONTENT_BYTES: usize = 512 * 1024;
 
 /// The text of one side of one file as the answer carries it: masked first,
 /// whichever side it comes from, then cut — so a secret straddling the cut is
 /// never half shown.
-pub(crate) fn side_text(bytes: &[u8]) -> (String, bool) {
+pub fn side_text(bytes: &[u8]) -> (String, bool) {
     let text = crate::core::repository_resources::masked_text(bytes);
     if text.len() <= MAX_CONTENT_BYTES {
         return (text.as_str().to_string(), false);
@@ -372,7 +372,7 @@ fn default_branch_commit(root: &Path) -> Option<String> {
 }
 
 /// `relative` as committed at `commit`, never a path out of the repository.
-pub(crate) fn read_at_commit(root: &Path, commit: &str, relative: &str) -> Option<Vec<u8>> {
+pub fn read_at_commit(root: &Path, commit: &str, relative: &str) -> Option<Vec<u8>> {
     let inside = !relative.is_empty()
         && !relative.starts_with('/')
         && relative
@@ -485,7 +485,7 @@ pub async fn repository_skills_for_discussion(
 
 /// Where skills are looked for. `kronn/skills` is where Kronn used to write
 /// them: it is still read (and offered for migration), never written.
-pub(crate) const PROJECT_SKILL_ROOTS: &[&str] = &[
+pub const PROJECT_SKILL_ROOTS: &[&str] = &[
     "kronn/skills",
     ".claude/skills",
     ".agents/skills",

@@ -32,7 +32,7 @@ pub const RESOLUTION: &str = "resolution";
 /// The repository profile a run read (KT-920), keyed by its project id.
 pub const PROJECT_PROFILE: &str = "project_profile";
 
-pub(crate) use crate::db::workflow_run_pins::{header, RunHeader};
+pub use crate::db::workflow_run_pins::{header, RunHeader};
 pub use crate::db::workflow_run_pins::pinned_workflow;
 
 /// Pins `workflow` and its dependencies the first time `run` executes and

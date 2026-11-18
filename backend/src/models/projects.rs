@@ -2653,11 +2653,11 @@ pub struct BriefingProjectAnswers {
 }
 
 /// Machine-readable copy of the answers, one line, invisible once rendered.
-pub(crate) const ANSWERS_PREFIX: &str = "<!-- kronn:project-answers v1 ";
-pub(crate) const ANSWERS_SUFFIX: &str = " -->";
+pub const ANSWERS_PREFIX: &str = "<!-- kronn:project-answers v1 ";
+pub const ANSWERS_SUFFIX: &str = " -->";
 
 /// The answers recorded in a briefing, if any.
-pub(crate) fn parse_answers(notes: &str) -> Option<BriefingProjectAnswers> {
+pub fn parse_answers(notes: &str) -> Option<BriefingProjectAnswers> {
     notes.lines().find_map(|line| {
         let json = line
             .trim()
@@ -2877,4 +2877,42 @@ pub struct TemplateUpdate {
     /// Removed upstream paths whose successor cannot be proven uniquely.
     pub unresolved_files: Vec<String>,
     pub spec_modified: bool,
+}
+
+impl ProjectRepositoryResourceKind {
+    pub fn identity_kind(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Workflow => "workflow",
+            Self::QuickPrompt => "quick_prompt",
+            Self::QuickApi => "quick_api",
+            Self::QuickExec => "quick_exec",
+            Self::Artifact => "artifact",
+        }
+    }
+
+    pub fn level(self) -> ProjectRepositoryResourceLevel {
+        match self {
+            Self::Skill | Self::QuickPrompt | Self::QuickExec => {
+                ProjectRepositoryResourceLevel::UsableWithoutKronn
+            }
+            Self::Workflow | Self::QuickApi | Self::Artifact => {
+                ProjectRepositoryResourceLevel::KronnRequired
+            }
+        }
+    }
+
+    pub fn paths(self, slug: &str) -> Vec<String> {
+        match self {
+            Self::Skill => vec![format!(".agents/skills/{slug}/SKILL.md")],
+            Self::Workflow => vec![format!("kronn/workflows/{slug}.yaml")],
+            Self::QuickPrompt => vec![format!("kronn/prompts/{slug}.md")],
+            Self::QuickApi => vec![format!("kronn/quick-apis/{slug}.yaml")],
+            Self::QuickExec => vec![format!("kronn/quick-execs/{slug}.yaml")],
+            Self::Artifact => vec![
+                format!("kronn/artifacts/{slug}/artifact.yaml"),
+                format!("kronn/artifacts/{slug}/index.html"),
+            ],
+        }
+    }
 }

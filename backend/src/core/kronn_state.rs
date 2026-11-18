@@ -169,7 +169,7 @@ fn read_for_mutation(project_path: &Path) -> Result<Option<KronnState>, String> 
 /// file, `Err` (with a warn) for an unreadable/corrupt one so the caller aborts
 /// instead of clobbering. Seeding from legacy evidence keeps a marker-only
 /// project's Validated/Bootstrapped state when its first state file is written.
-pub(crate) fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
+pub fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
     crate::core::docs_location::guard_write(project_path)?;
     read_for_mutation(project_path)
         .map(|state| {

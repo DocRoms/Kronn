@@ -273,7 +273,7 @@ pub fn kronn_owns(project: &Path, rel: &str) -> bool {
 }
 
 /// The same bounded, symlink-filtered surface used by the final audit gate.
-pub(crate) fn document_paths(project: &Path) -> Result<Vec<PathBuf>, String> {
+pub fn document_paths(project: &Path) -> Result<Vec<PathBuf>, String> {
     let mut paths = markdown_files(&docs_root(project).dir(project))?;
     paths.extend(root_adapters(project)?);
     paths.sort();
@@ -1517,7 +1517,7 @@ fn measure(path: &str, content: &str) -> DocumentMeasure {
 fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }
-pub(crate) use crate::core::anti_halluc::contains_placeholder;
+pub use crate::core::anti_halluc::contains_placeholder;
 fn visible_markdown(s: &str) -> String {
     crate::core::anti_halluc::strip_inline_code(&crate::core::anti_halluc::strip_fenced_code(s))
 }
@@ -2398,7 +2398,7 @@ mod tests {
         assert!(!contains_placeholder(
             "Twig {{ asset('app.css') }} and prose `{{EXAMPLE_SLOT}}`"
         ));
-        let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let project = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).parent().unwrap();
         let mut template_citations = Vec::new();
         inspect_citations(
             project,
@@ -2436,7 +2436,7 @@ mod tests {
     /// installs into `docs/conventions/` (`api/projects/template.rs:101-110`).
     fn skeleton_project() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        let templates_docs = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let templates_docs = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .parent()
             .unwrap()
             .join("templates/docs");

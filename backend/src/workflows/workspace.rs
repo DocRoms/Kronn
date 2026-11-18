@@ -76,7 +76,7 @@ fn hook_command(cmd: &str, dir: &std::path::Path) -> tokio::process::Command {
 #[cfg(test)]
 tokio::task_local! {
     /// Per-test wait: the env var is process-wide and tests run in parallel.
-    pub(crate) static MAIN_TREE_WAIT_FOR_TESTS: std::time::Duration;
+    pub static MAIN_TREE_WAIT_FOR_TESTS: std::time::Duration;
 }
 
 pub fn main_tree_wait() -> std::time::Duration {
@@ -421,7 +421,7 @@ async fn nested_worktrees(repo_path: &Path, parent: &Path) -> Vec<PathBuf> {
 tokio::task_local! {
     /// Runs where a refused removal used to be forced: lets a test write work
     /// after the last inspection.
-    pub(crate) static AFTER_REFUSAL: std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+    pub static AFTER_REFUSAL: std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
 }
 
 /// Removes a checkout found clean, nested worktrees first, never with
@@ -429,7 +429,7 @@ tokio::task_local! {
 /// removal, so a refusal (late work, a lock) keeps the set and says why
 /// (`Ok(Some(reason))`). The one forced removal is a checkout with initialised
 /// submodules, which git never removes otherwise, re-inspected first (KT-1809).
-pub(crate) async fn remove_inspected_checkout(
+pub async fn remove_inspected_checkout(
     repo_path: &Path,
     worktree: &Path,
 ) -> Result<Option<String>> {
@@ -642,7 +642,7 @@ async fn submodules_hold_nothing(checkout: &Path) -> std::result::Result<bool, S
 /// submodule. Forced only once a fresh inspection, made after git's refusal,
 /// finds the checkout clean and `submodules_hold_nothing`. `Err(Some(_))` says
 /// what a submodule holds; `Err(None)`: the refusal was not about submodules.
-pub(crate) async fn remove_checkout_with_submodules(
+pub async fn remove_checkout_with_submodules(
     repo_path: &Path,
     checkout: &Path,
 ) -> std::result::Result<(), Option<String>> {
@@ -677,7 +677,7 @@ pub(crate) async fn remove_checkout_with_submodules(
 
 /// Sanitize a workflow name for use in branch names and directory paths.
 /// Keeps alphanumeric, dash, and underscore; replaces everything else with `-`.
-pub(crate) fn sanitize_name(name: &str) -> String {
+pub fn sanitize_name(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '-' || c == '_' {
@@ -865,7 +865,7 @@ fn repo_fetch_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-pub(crate) async fn fetch_remote_branch(
+pub async fn fetch_remote_branch(
     repo: &Path,
     remote: &str,
     branch: &str,
@@ -930,7 +930,7 @@ async fn fetch_remote_branch_once(
 /// The commit a run starts from. A `base_ref` naming a remote branch is fetched
 /// first: the author asked for that tip, so a failed fetch refuses the run
 /// rather than silently starting from a stale copy.
-pub(crate) async fn resolve_base_ref(
+pub async fn resolve_base_ref(
     repo: &Path,
     base_ref: &str,
     fetch_timeout: std::time::Duration,
@@ -992,7 +992,7 @@ pub async fn inspect_interrupted_checkout(
 
 /// `inspect_interrupted_checkout` for a run's own worktree: the agent configs
 /// Kronn copied into it, still as copied, are not changes. Reads only.
-pub(crate) async fn inspect_run_checkout(
+pub async fn inspect_run_checkout(
     repo_path: &Path,
     worktree: &Path,
 ) -> std::result::Result<InterruptedCheckout, String> {
@@ -1167,13 +1167,13 @@ pub async fn prune_orphan_worktrees(db: &crate::db::Database) -> usize {
 }
 
 /// Build a branch name for a workflow run: `kronn/<sanitized_name>/<run_id_prefix>`.
-pub(crate) fn build_branch_name(workflow_name: &str, run_id: &str) -> String {
+pub fn build_branch_name(workflow_name: &str, run_id: &str) -> String {
     let sanitized = sanitize_name(workflow_name);
     format!("kronn/{}/{}", sanitized, &run_id[..8.min(run_id.len())])
 }
 
 /// Build the worktree directory name: `<sanitized_name>-<run_id_prefix>`.
-pub(crate) fn build_worktree_dir_name(workflow_name: &str, run_id: &str) -> String {
+pub fn build_worktree_dir_name(workflow_name: &str, run_id: &str) -> String {
     let sanitized = sanitize_name(workflow_name);
     format!("{}-{}", sanitized, &run_id[..8.min(run_id.len())])
 }

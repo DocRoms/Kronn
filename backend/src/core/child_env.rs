@@ -516,7 +516,7 @@ thread_local! {
 
 /// Runs `body` as if the backend's environment were `parent` (this thread only).
 #[cfg(test)]
-pub(crate) fn with_parent_env<T>(parent: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+pub fn with_parent_env<T>(parent: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
     let parent = parent
         .iter()
         .map(|(name, value)| (OsString::from(name), OsString::from(value)))
@@ -586,13 +586,13 @@ thread_local! {
 
 /// Runs `body` as if the desktop had withheld `vars` (this thread only).
 #[cfg(test)]
-pub(crate) fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+pub fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
     with_withheld_state(true, vars, body)
 }
 
 /// [`with_withheld_env`] with the withholding switched on or not yet.
 #[cfg(test)]
-pub(crate) fn with_withheld_state<T>(
+pub fn with_withheld_state<T>(
     active: bool,
     vars: &[(&str, &str)],
     body: impl FnOnce() -> T,
@@ -1070,7 +1070,7 @@ pub fn isolate(command: &mut std::process::Command, route: ChildRoute) {
 
 /// Test helpers shared by the spawn sites' environment tests.
 #[cfg(all(test, feature = "full-tests"))]
-pub(crate) mod probe {
+pub mod probe {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 

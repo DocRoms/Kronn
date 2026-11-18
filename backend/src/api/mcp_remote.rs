@@ -455,7 +455,7 @@ pub async fn qp_run(
 /// `qp_run` with the launches its estimate may count: `Some(project)` for an
 /// agent caller (`Some(None)`: a project-less one, which counts none),
 /// `None` for a human.
-pub(crate) async fn qp_run_scoped(
+pub async fn qp_run_scoped(
     state: &AppState,
     metrics_scope: Option<Option<String>>,
     req: McpQpRunRequest,

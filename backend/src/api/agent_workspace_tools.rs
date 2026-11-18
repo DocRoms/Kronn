@@ -81,13 +81,13 @@ const MAX_EDIT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// Stable structural-refusal marker consumed by the bounded worker loop. It is
 /// not merely prose: seeing it moves a local worker directly into its single
 /// strict correction attempt instead of granting more repository exploration.
-pub(crate) const RUST_SYNTAX_REFUSAL_PREFIX: &str = "Rust syntax validation refused";
+pub const RUST_SYNTAX_REFUSAL_PREFIX: &str = "Rust syntax validation refused";
 
 /// Byte-exact optimistic-concurrency receipt shared by read/search/edit tools.
 /// Hashing the bytes already read matters: hashing the path in a second I/O
 /// would let a concurrent writer make the receipt describe different content
 /// from the text returned to the model.
-pub(crate) fn content_sha256(bytes: &[u8]) -> String {
+pub fn content_sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -632,7 +632,7 @@ const IDENTITY_TRAILERS: &[&str] = &[
 ];
 
 /// Split a message line into `(key, value)` when it is an identity trailer.
-pub(crate) fn identity_trailer(line: &str) -> Option<(&str, &str)> {
+pub fn identity_trailer(line: &str) -> Option<(&str, &str)> {
     let (key, value) = line.trim_start().split_once(':')?;
     let key = key.trim();
     IDENTITY_TRAILERS
@@ -4508,7 +4508,7 @@ mod real_repo_probe {
     #[test]
     #[ignore]
     fn find_files_sees_every_rs_file_of_this_repo() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .parent()
             .unwrap()
             .to_path_buf();

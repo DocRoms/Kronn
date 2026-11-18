@@ -55,7 +55,7 @@ pub fn last_report() -> Option<SchemaReport> {
     LAST_REPORT.lock().ok().and_then(|report| report.clone())
 }
 
-pub(crate) fn record(report: SchemaReport) {
+pub fn record(report: SchemaReport) {
     if let Ok(mut slot) = LAST_REPORT.lock() {
         *slot = Some(report);
     }
@@ -255,7 +255,7 @@ pub fn verify_and_repair(conn: &Connection) -> Result<SchemaReport> {
 
 /// Boot entry point: verify, log, and keep the report for `/api/health`. Never
 /// fails the boot: a schema that cannot be checked is itself reported.
-pub(crate) fn check_at_boot(conn: &Connection) {
+pub fn check_at_boot(conn: &Connection) {
     let report = match verify_and_repair(conn) {
         Ok(report) => report,
         Err(error) => SchemaReport {

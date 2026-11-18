@@ -22,7 +22,7 @@ const MAX_TEXT_CHARS: usize = 200;
 /// none), holding only steps whose agent, model or effort actually change.
 pub type ResolvedStepAgents = BTreeMap<String, StepAgentOverride>;
 
-pub(crate) fn step_key(step: &WorkflowStep) -> String {
+pub fn step_key(step: &WorkflowStep) -> String {
     step.id.clone().unwrap_or_else(|| step.name.clone())
 }
 
@@ -135,7 +135,7 @@ pub fn validate(workflow: &Workflow, requested: &StepAgents) -> Result<ResolvedS
 
 /// Whether `agent` can start here. Shared with the runner's own preflight so
 /// launch and run refuse exactly the same agents.
-pub(crate) fn agent_can_launch(
+pub fn agent_can_launch(
     agent: &AgentType,
     usable: &[AgentType],
     agents_config: &AgentsConfig,
@@ -180,7 +180,7 @@ pub fn check_available(
 
 /// Replaces the step's agent, model and effort. Tier, budget and tools stay;
 /// a named connection stays only while the agent does.
-pub(crate) fn apply_to_step(step: &mut WorkflowStep, choice: &StepAgentOverride) {
+pub fn apply_to_step(step: &mut WorkflowStep, choice: &StepAgentOverride) {
     let agent_changes = step.agent != choice.agent;
     let settings = step
         .agent_settings

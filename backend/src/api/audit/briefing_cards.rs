@@ -10,14 +10,14 @@ use super::briefing::{BriefingDefaults, BriefingFormRequest};
 /// Every briefing card carries `audit-briefing:<project>:<discussion>:<set>`:
 /// the answers are accepted only in that discussion, for that project, and
 /// only for the latest set posted there.
-pub(crate) const TASK_REF_PREFIX: &str = "audit-briefing:";
+pub const TASK_REF_PREFIX: &str = "audit-briefing:";
 
-pub(crate) fn task_ref(project_id: &str, discussion_id: &str, set: &str) -> String {
+pub fn task_ref(project_id: &str, discussion_id: &str, set: &str) -> String {
     format!("{TASK_REF_PREFIX}{project_id}:{discussion_id}:{set}")
 }
 
 /// `(project, discussion, set)` of a briefing card's task reference.
-pub(crate) fn parse_task_ref(task_ref: &str) -> Option<(&str, &str, &str)> {
+pub fn parse_task_ref(task_ref: &str) -> Option<(&str, &str, &str)> {
     let mut parts = task_ref.strip_prefix(TASK_REF_PREFIX)?.splitn(3, ':');
     let parsed = (parts.next()?, parts.next()?, parts.next()?);
     (!parsed.2.is_empty()).then_some(parsed)
@@ -247,7 +247,7 @@ fn card(
 }
 
 /// The briefing as ready-to-post cards, in `language`: a new set each call.
-pub(crate) fn briefing_cards(
+pub fn briefing_cards(
     project_id: &str,
     discussion_id: &str,
     language: &str,
@@ -350,7 +350,7 @@ fn briefing_cards_set(
 }
 
 /// One answered card: the option picked and the free text, if any.
-pub(crate) struct CardAnswer<'a> {
+pub struct CardAnswer<'a> {
     pub key: &'a str,
     pub option: Option<&'a str>,
     pub text: Option<&'a str>,
@@ -364,7 +364,7 @@ fn fact<T: serde::de::DeserializeOwned + Default>(answer: Option<&CardAnswer<'_>
 }
 
 /// The briefing the answered cards describe. `None` while a card is missing.
-pub(crate) fn answers_to_form(
+pub fn answers_to_form(
     answers: &[CardAnswer<'_>],
     default_docs_dir: &str,
 ) -> Option<BriefingFormRequest> {
@@ -485,7 +485,7 @@ fn discussion_project(
         .optional()?)
 }
 
-pub(crate) enum Gate {
+pub enum Gate {
     Proceed,
     Refuse(serde_json::Value),
 }
@@ -494,7 +494,7 @@ pub(crate) enum Gate {
 /// form opens); an MCP launch gets the briefing as cards for its discussion;
 /// workflow launches also refuse until a human saves answers or explicitly
 /// chooses the form's default answers.
-pub(crate) async fn briefing_gate(
+pub async fn briefing_gate(
     state: &crate::AppState,
     project_id: &str,
     bridge: Option<&crate::core::bridge_token::BridgeCaller>,
@@ -676,7 +676,7 @@ pub async fn briefing_status(
 /// briefing's. Refuses a card answered outside its discussion or project;
 /// saves the briefing once every card of the latest set is answered, and
 /// returns what must run on disk after the answer is committed.
-pub(crate) fn on_card_answered(
+pub fn on_card_answered(
     conn: &rusqlite::Connection,
     discussion_id: &str,
     task_ref: &str,

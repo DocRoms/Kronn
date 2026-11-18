@@ -85,7 +85,7 @@ pub async fn set_briefing(
 /// Mirror the notes into `<docs>/briefing.md`: written when set, removed when
 /// cleared. No-op before the project has a docs directory (the DB column is
 /// then the only source, which `resolve_briefing_notes` falls back to).
-pub(crate) fn sync_briefing_file(
+pub fn sync_briefing_file(
     project_path: &std::path::Path,
     notes: Option<&str>,
 ) -> Result<(), String> {
@@ -107,14 +107,14 @@ pub(crate) fn sync_briefing_file(
 }
 
 /// Longest briefing, in characters, injected into each audit step prompt.
-pub(crate) const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
+pub const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
 
 /// The `## Project briefing` block appended to an audit step prompt, capped
 /// at [`BRIEFING_PROMPT_MAX_CHARS`] with an explicit truncation marker. The
 /// machine copy of the project answers is dropped: the readable facts above
 /// it say the same thing. The documentation section stays out (KT-999).
 #[cfg(test)]
-pub(crate) fn briefing_prompt_section(
+pub fn briefing_prompt_section(
     notes: &str,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> String {
@@ -125,7 +125,7 @@ pub(crate) fn briefing_prompt_section(
 /// step uses it, the documentation block follows the briefing, and the
 /// briefing text gives up the room it takes so the whole stays within
 /// [`BRIEFING_PROMPT_MAX_CHARS`].
-pub(crate) fn briefing_prompt_section_for(
+pub fn briefing_prompt_section_for(
     notes: &str,
     docs_root: &crate::core::docs_location::DocsRoot,
     target_file: &str,
@@ -195,7 +195,7 @@ fn restore_reviewed_briefing(
 /// with the form's project facts put back as answered. `project_root` is the
 /// project folder `briefing_file` lives under; every read and write of the
 /// file goes through `fs_guard` against it.
-pub(crate) async fn complete_reviewed_briefing(
+pub async fn complete_reviewed_briefing(
     state: &AppState,
     project_id: String,
     project_root: std::path::PathBuf,
@@ -436,7 +436,7 @@ pub struct BriefingFormRequest {
 
 /// Why a briefing was not saved.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum BriefingSaveError {
+pub enum BriefingSaveError {
     /// An answer is missing or malformed.
     Invalid(String),
     Busy(String),
@@ -451,7 +451,7 @@ pub(crate) enum BriefingSaveError {
 }
 
 impl BriefingSaveError {
-    pub(crate) fn message(&self) -> String {
+    pub fn message(&self) -> String {
         match self {
             Self::Invalid(m)
             | Self::Busy(m)
@@ -495,7 +495,7 @@ pub enum BriefingDocsDirSource {
 /// override, else the folder it already documents itself in, else the global
 /// default, else `docs` (KT-1192). An existing folder wins over the global
 /// default so a documented project is never proposed a move.
-pub(crate) fn briefing_defaults(
+pub fn briefing_defaults(
     project_root: &std::path::Path,
     stored_override: Option<&str>,
     global_default: Option<&str>,
@@ -625,7 +625,7 @@ fn apply_briefing_docs_dir(
 /// What a saved briefing still does outside the database. A rename cannot be
 /// rolled back, so it runs only once the briefing's rows are committed.
 #[must_use = "apply it once the transaction is committed"]
-pub(crate) struct BriefingAfterCommit {
+pub struct BriefingAfterCommit {
     project_path: String,
     root: std::path::PathBuf,
     docs_override: Option<Option<String>>,
@@ -638,7 +638,7 @@ impl BriefingAfterCommit {
     /// The override, the explicit legacy move, then `briefing.md` in the
     /// folder. Pre-bootstrap projects have no docs folder yet: the DB only,
     /// and the audit's Phase 1 install picks it up via `resolve_briefing_notes`.
-    pub(crate) fn apply(self) -> Result<(), BriefingSaveError> {
+    pub fn apply(self) -> Result<(), BriefingSaveError> {
         if let Some(stored) = &self.docs_override {
             crate::core::docs_location::set_project_override(&self.project_path, stored.as_deref());
         }
@@ -701,7 +701,7 @@ fn check_answers(form: &BriefingFormRequest) -> Result<(), BriefingSaveError> {
 /// Save the briefing answers: validation, docs folder and DB notes, in the
 /// caller's transaction; the returned effects run once it is committed.
 /// Shared by the form and the briefing cards (KT-1192).
-pub(crate) fn save_briefing_in(
+pub fn save_briefing_in(
     conn: &rusqlite::Connection,
     project: &Project,
     form: &BriefingFormRequest,
@@ -768,7 +768,7 @@ pub(crate) fn save_briefing_in(
 }
 
 /// `save_briefing_in` for a project id, on the database's connection.
-pub(crate) async fn save_briefing_answers(
+pub async fn save_briefing_answers(
     state: &AppState,
     id: &str,
     form: BriefingFormRequest,
@@ -847,7 +847,7 @@ pub async fn save_briefing_form(
 
 /// `docs/briefing.md` from the form: the six questions, then the rendered
 /// form sections in their order, then the Kronn options.
-pub(crate) fn compose_briefing(
+pub fn compose_briefing(
     form: &BriefingFormRequest,
     project_facts: Option<String>,
     docs_section: Option<String>,
@@ -886,12 +886,12 @@ pub(crate) fn compose_briefing(
 /// Appends the Kronn options section, only when an option is set, so a
 /// briefing without one keeps its historical shape.
 #[cfg(test)]
-pub(crate) fn with_kronn_options(body: String, td_to_tasks: bool) -> String {
+pub fn with_kronn_options(body: String, td_to_tasks: bool) -> String {
     with_all_kronn_options(body, td_to_tasks, &[])
 }
 
 /// Every Kronn option under one heading; no heading when none is set.
-pub(crate) fn with_all_kronn_options(
+pub fn with_all_kronn_options(
     mut body: String,
     td_to_tasks: bool,
     cross_audit_agents: &[AgentType],

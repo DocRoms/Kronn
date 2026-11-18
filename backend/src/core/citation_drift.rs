@@ -299,7 +299,7 @@ struct DocCitation {
     anchor: Option<String>,
 }
 
-pub(crate) fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
+pub fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
     match lines {
         None => file.to_string(),
         Some((s, e)) if s == e => format!("{file}:{s}"),
@@ -491,7 +491,7 @@ fn write(project_path: &Path, file: &mut CitationsFile) -> Result<(), String> {
 }
 
 /// Markdown docs under the docs dir, as paths relative to the project root.
-pub(crate) fn doc_files(project_path: &Path) -> Vec<String> {
+pub fn doc_files(project_path: &Path) -> Vec<String> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     let mut out = Vec::new();
     let mut stack = vec![docs_dir.clone()];
@@ -525,7 +525,7 @@ pub(crate) fn doc_files(project_path: &Path) -> Vec<String> {
 }
 
 /// Whether a project-relative file (or folder) a doc names still exists.
-pub(crate) fn cited_file_exists(project_path: &Path, file: &str) -> bool {
+pub fn cited_file_exists(project_path: &Path, file: &str) -> bool {
     resolve_cited(project_path, file).is_some_and(|path| path.exists())
 }
 
@@ -694,7 +694,7 @@ pub fn acknowledge_docs(
 }
 
 /// The distinct citation labels a text carries, as the store names them.
-pub(crate) fn cite_labels(content: &str) -> BTreeSet<String> {
+pub fn cite_labels(content: &str) -> BTreeSet<String> {
     doc_citations(content).into_iter().map(|c| c.cite).collect()
 }
 
@@ -1085,7 +1085,7 @@ fn probe_unrecorded(project_path: &Path, citation: &DocCitation) -> CitationStat
 /// checked, also a second one on lines already cited, and on the new lines of a
 /// block that only moved. A recorded citation that
 /// drifted is `check`'s to report. Deterministic, reads the code only (KT-1489).
-pub(crate) fn unrecorded_problems(project_path: &Path) -> Vec<(String, CitationStatus)> {
+pub fn unrecorded_problems(project_path: &Path) -> Vec<(String, CitationStatus)> {
     let recorded = read_strict(project_path).ok().flatten().unwrap_or_default();
     let mut out = Vec::new();
     for doc in doc_files(project_path) {

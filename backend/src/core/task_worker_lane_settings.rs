@@ -190,7 +190,7 @@ fn spellings_of(path: &Path) -> [PathBuf; 2] {
 /// and the FULL project list: every project registered, each one's lane entry
 /// published, nothing left of a project that is not in the list. Called
 /// wherever the project table is first read or replaced (both boots, an
-/// import, a reset), through `crate::arm_lane_settings`.
+/// import, a reset), through `crate::core::task_worker_lane_settings::arm_lane_settings`.
 pub fn rebuild(global: &LaneWarmConfig, projects: &[crate::models::Project]) {
     let mut fresh = Snapshot {
         global: global.clone(),
@@ -453,8 +453,40 @@ fn intern(name: &str) -> &'static str {
 /// that rebuilds as a side effect leaves the others' entries alone).
 /// A tokio lock (held across awaits by async tests, as clippy requires); a sync
 /// test takes it with the `blocking_` forms, an async one with `.await`.
+/// KT-1751 fourth review — load the lane snapshot from the database: every
+/// project registered (with a lane entry or not) and each one's lane entry
+/// published, beside the global entry. Both boots call it before the first
+/// launch; an import and a reset call it once the project table is replaced.
+pub async fn arm_lane_settings(
+    database: &std::sync::Arc<crate::db::Database>,
+    global: &crate::models::LaneWarmConfig,
+) -> anyhow::Result<()> {
+    let listed = database
+        .with_read_conn(crate::db::projects::list_projects)
+        .await;
+    #[cfg(test)]
+    let listed = listed.and_then(|projects| {
+        if test_guard::listing_fails() {
+            anyhow::bail!("the project table could not be read (test)")
+        }
+        Ok(projects)
+    });
+    // KT-1751 fifth review — a listing that fails leaves no snapshot in force:
+    // emptied and unarmed, so neither a stale list nor a registry later filled
+    // by saves alone applies outside the managed layout.
+    let projects = match listed {
+        Ok(projects) => projects,
+        Err(error) => {
+            disarm(global);
+            return Err(error);
+        }
+    };
+    rebuild(global, &projects);
+    Ok(())
+}
+
 #[cfg(test)]
-pub(crate) mod test_guard {
+pub mod test_guard {
     use std::cell::Cell;
     use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -464,15 +496,15 @@ pub(crate) mod test_guard {
         static OWNER: Cell<bool> = const { Cell::new(false) };
     }
 
-    pub(crate) fn shared() -> RwLockReadGuard<'static, ()> {
+    pub fn shared() -> RwLockReadGuard<'static, ()> {
         GUARD.blocking_read()
     }
 
-    pub(crate) async fn shared_async() -> RwLockReadGuard<'static, ()> {
+    pub async fn shared_async() -> RwLockReadGuard<'static, ()> {
         GUARD.read().await
     }
 
-    pub(crate) struct Exclusive {
+    pub struct Exclusive {
         _guard: RwLockWriteGuard<'static, ()>,
     }
 
@@ -493,15 +525,15 @@ pub(crate) mod test_guard {
         Exclusive { _guard: guard }
     }
 
-    pub(crate) fn exclusive() -> Exclusive {
+    pub fn exclusive() -> Exclusive {
         own(GUARD.blocking_write())
     }
 
-    pub(crate) async fn exclusive_async() -> Exclusive {
+    pub async fn exclusive_async() -> Exclusive {
         own(GUARD.write().await)
     }
 
-    pub(crate) fn owns_snapshot() -> bool {
+    pub fn owns_snapshot() -> bool {
         OWNER.with(Cell::get)
     }
 
@@ -509,9 +541,9 @@ pub(crate) mod test_guard {
         static LISTING_FAILS: Cell<bool> = const { Cell::new(false) };
     }
 
-    /// While held, `crate::arm_lane_settings` on this thread fails as if the
+    /// While held, `crate::core::task_worker_lane_settings::arm_lane_settings` on this thread fails as if the
     /// project table could not be read (a `#[tokio::test]` runs on one thread).
-    pub(crate) struct FailingListing;
+    pub struct FailingListing;
 
     impl Drop for FailingListing {
         fn drop(&mut self) {
@@ -519,12 +551,12 @@ pub(crate) mod test_guard {
         }
     }
 
-    pub(crate) fn fail_listing() -> FailingListing {
+    pub fn fail_listing() -> FailingListing {
         LISTING_FAILS.with(|fails| fails.set(true));
         FailingListing
     }
 
-    pub(crate) fn listing_fails() -> bool {
+    pub fn listing_fails() -> bool {
         LISTING_FAILS.with(Cell::get)
     }
 }
@@ -535,7 +567,7 @@ mod tests;
 
 #[cfg(test)]
 #[path = "task_worker_lane_settings_registry_test.rs"]
-pub(crate) mod registry_tests;
+pub mod registry_tests;
 
 #[cfg(test)]
 #[path = "task_worker_lane_settings_deps_test.rs"]

@@ -161,7 +161,7 @@ pub fn build_budget_env(jobs: u32) -> Vec<(&'static str, OsString)> {
 /// into its bound and left no marker. This is the DEFAULT of a project that
 /// builds C through `cc`; the owner's settings can replace it
 /// ([`crate::core::task_worker_lane_settings`]).
-pub(crate) fn compiler_temp_env_for(macos: bool) -> Vec<(&'static str, OsString)> {
+pub fn compiler_temp_env_for(macos: bool) -> Vec<(&'static str, OsString)> {
     if macos {
         MACOS_TARGET_CFLAGS_ENV
             .into_iter()
@@ -240,7 +240,7 @@ pub fn apply_build_budget(command: &mut std::process::Command, work_dir: &Path) 
 
 /// [`apply_build_budget`] with the budget and the operator's environment
 /// injected. A name the command already carries, or the operator set, wins.
-pub(crate) fn apply_build_budget_with(
+pub fn apply_build_budget_with(
     command: &mut std::process::Command,
     work_dir: &Path,
     budget: Vec<(&'static str, OsString)>,
@@ -404,7 +404,7 @@ impl WorkerLane {
     /// KT-1751 review — every dependency directory this lane takes from the
     /// main checkout (relative to the repository, `/` separated): the layered
     /// ones and the frontend's own link.
-    pub(crate) fn dependency_paths(&self) -> Vec<String> {
+    pub fn dependency_paths(&self) -> Vec<String> {
         let (layered, _) = self.layered_dependency_dirs();
         std::iter::once(format!("{FRONTEND_DIR}/{NODE_MODULES}"))
             .chain(layered.into_iter().map(|(path, _)| path))
@@ -770,7 +770,7 @@ mod layers;
 use layers::link_entries;
 #[path = "task_worker_env_probes.rs"]
 mod probes;
-pub(crate) use probes::check_frontend;
+pub use probes::check_frontend;
 use probes::check_rust;
 
 /// How the worktree's frontend dependencies were made available.
@@ -903,7 +903,7 @@ impl SharedCaches {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum LinkState {
+pub enum LinkState {
     Created,
     AlreadyLinked,
 }
@@ -911,7 +911,7 @@ pub(crate) enum LinkState {
 /// Link `destination` to `source`, replacing a link that points elsewhere. A
 /// real file or directory at `destination` is never touched: it is the
 /// operator's (or the worker's) own and is reported as an error.
-pub(crate) fn ensure_symlink(source: &Path, destination: &Path) -> Result<LinkState, String> {
+pub fn ensure_symlink(source: &Path, destination: &Path) -> Result<LinkState, String> {
     match std::fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             if std::fs::read_link(destination).is_ok_and(|current| current == source) {
@@ -1238,7 +1238,7 @@ impl ProbeRunner for ProcessProbeRunner {
 /// runs in a terminal. `setsid` must not follow `setpgid` (a group leader
 /// cannot create a session), so this replaces `process_group`, never adds to it.
 #[cfg(unix)]
-pub(crate) fn detach_from_terminal(command: &mut std::process::Command) {
+pub fn detach_from_terminal(command: &mut std::process::Command) {
     // SAFETY: the hook only calls `setsid`, which is async-signal-safe, and
     // touches no memory of the parent.
     unsafe {
@@ -1408,7 +1408,7 @@ pub fn smoke_check(
 
 /// [`smoke_check`] with the loopback bind injected, so a test never depends on
 /// the host letting it bind a port.
-pub(crate) fn smoke_check_with(
+pub fn smoke_check_with(
     lane: &WorkerLane,
     provisioned: &Provisioned,
     loopback_binding_allowed: bool,

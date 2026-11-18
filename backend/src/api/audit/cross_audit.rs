@@ -19,7 +19,7 @@ use crate::models::*;
 use crate::AppState;
 
 /// The chosen agents, read from `docs/briefing.md` first, then the DB notes.
-pub(crate) fn briefing_cross_agents(
+pub fn briefing_cross_agents(
     file_notes: Option<&str>,
     db_notes: Option<&str>,
 ) -> Option<Vec<AgentType>> {
@@ -30,7 +30,7 @@ pub(crate) fn briefing_cross_agents(
 
 /// What one model call returned.
 #[derive(Debug, Clone)]
-pub(crate) struct AgentReply {
+pub struct AgentReply {
     pub text: String,
     pub usage: StepTokens,
     pub cost_usd_micros: Option<u64>,
@@ -38,7 +38,7 @@ pub(crate) struct AgentReply {
 
 /// Runs one prompt on one agent. The production runner launches the audit's
 /// agents; tests script it.
-pub(crate) trait CrossAgentRunner: Send + Sync {
+pub trait CrossAgentRunner: Send + Sync {
     fn run<'a>(
         &'a self,
         agent: &'a AgentType,
@@ -50,7 +50,7 @@ pub(crate) trait CrossAgentRunner: Send + Sync {
 const CALL_STALL: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Launches each agent the way an audit step does, collecting its answer.
-pub(crate) struct LauncherRunner {
+pub struct LauncherRunner {
     pub state: AppState,
     pub tier: ModelTier,
     pub project_path: PathBuf,
@@ -120,7 +120,7 @@ impl CrossAgentRunner for LauncherRunner {
 
 /// What the cross-checked step produced, before it is written.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct CrossStepReport {
+pub struct CrossStepReport {
     pub records: Vec<CrossFindingRecord>,
     pub dropped: Vec<DroppedFinding>,
     pub checklists: Vec<(AgentType, Vec<ChecklistLine>)>,
@@ -176,7 +176,7 @@ enum CallCost {
 /// Steps 1 to 7: independent detection, citation filter, matching,
 /// cross-check, right of reply, arbitration. Model calls only for detection,
 /// refutation and reply.
-pub(crate) async fn run_cross_step(
+pub async fn run_cross_step(
     runner: &dyn CrossAgentRunner,
     root: &Path,
     agents: &[AgentType],
@@ -342,7 +342,7 @@ pub(crate) async fn run_cross_step(
     Ok(report)
 }
 
-pub(crate) fn heading_for(
+pub fn heading_for(
     target_file: &str,
     docs_root: &crate::core::docs_location::DocsRoot,
 ) -> &'static str {
@@ -455,7 +455,7 @@ fn carried_from_previous(
 /// existing sheet keeps its body; only its Kronn provenance block changes.
 /// The previous index's undetected rows, settled sheets and human-owned
 /// sections are kept. Returns whether any file changed.
-pub(crate) fn write_outputs(
+pub fn write_outputs(
     root: &Path,
     target_file: &str,
     agents: &[AgentType],
@@ -505,7 +505,7 @@ pub(crate) fn write_outputs(
 
 /// The human cards of the serious disagreements, in their own discussion:
 /// one `kronn-question` per dispute, both arguments side by side.
-pub(crate) fn dispute_discussion(
+pub fn dispute_discussion(
     project_id: &str,
     agent: &AgentType,
     language: &str,
@@ -595,7 +595,7 @@ pub(crate) fn dispute_discussion(
 
 /// Persists the dispute discussion (its cards are ingested with the message)
 /// and the step's provenance, in one transaction.
-pub(crate) fn persist(
+pub fn persist(
     conn: &rusqlite::Connection,
     run_id: &str,
     step_index: u32,
@@ -636,7 +636,7 @@ pub(crate) fn persist(
 }
 
 /// One line per verdict for the SSE `cross_audit` event.
-pub(crate) fn summary_json(
+pub fn summary_json(
     report: &CrossStepReport,
     step: usize,
     dispute_discussion: Option<&str>,
@@ -664,7 +664,7 @@ pub(crate) fn summary_json(
 /// Detection runs the step once per agent; the cross-check and the reply add
 /// at most one call per agent each, every one reading code again. Hence a
 /// range from N to 2N times the step's single-agent cost.
-pub(crate) fn estimate(
+pub fn estimate(
     agents: u32,
     base: Option<(String, Option<u64>, Option<u64>)>,
     measured: Option<crate::db::audit_cross::MeasuredStep>,

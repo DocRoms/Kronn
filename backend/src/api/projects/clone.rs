@@ -49,7 +49,7 @@ fn https_to_ssh(url: &str) -> Option<String> {
     Some(format!("git@{}:{}", host, path))
 }
 
-pub(crate) use crate::core::secret_scrub::redact_url_credentials;
+pub use crate::core::secret_scrub::redact_url_credentials;
 
 /// Build an ordered list of clone URLs to try, most-likely-to-succeed first.
 ///

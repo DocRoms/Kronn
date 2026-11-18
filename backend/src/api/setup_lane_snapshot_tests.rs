@@ -146,7 +146,7 @@ async fn a_reset_empties_the_lane_snapshot() {
         vec![project("p", &dir, Some(listing(&["before-reset"])))],
     )
     .await;
-    crate::arm_lane_settings(&state.db, &LaneWarmConfig::default())
+    crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &LaneWarmConfig::default())
         .await
         .expect("armed");
     set_project(&dir, Some(&listing(&["before-reset"])));

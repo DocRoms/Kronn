@@ -10,7 +10,7 @@
 use std::path::Path;
 
 fn source(relative: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .join("src")
         .join(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
@@ -41,7 +41,7 @@ fn production(text: &str) -> &str {
 fn function<'a>(text: &'a str, name: &str) -> &'a str {
     let start = [
         "pub fn ",
-        "pub(crate) fn ",
+        "pub fn ",
         "pub(super) fn ",
         "fn ",
         "async fn ",
@@ -199,7 +199,7 @@ fn production_files() -> Vec<String> {
             }
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src");
     let mut found = Vec::new();
     walk(&root, &root, &mut found);
     found.sort();

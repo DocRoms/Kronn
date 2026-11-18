@@ -3,61 +3,31 @@
 //! Ticks every 30s, checks triggers, enforces concurrency limits,
 //! and spawns runs.
 
+pub use kronn_l1::workflows::*;
 pub mod agent_fallback_step;
-pub mod api_auth_failure;
-pub mod api_call_binary;
-pub mod api_call_executor;
-pub mod api_call_ratelimit;
-pub mod api_call_security;
-pub mod api_call_step;
-pub mod authoring_doctrine;
-pub mod autocode_issue_template;
 pub mod batch_apicall_step;
 pub mod batch_step;
-pub mod big_ticket_template;
 pub mod cancellation;
 pub mod collect_api_data_step;
 pub mod concurrency;
 pub mod decide_step;
 pub mod delegate_subtasks_step;
-pub mod doctrine_warnings;
 pub mod exec_step;
-pub mod gate_checkpoint;
-pub mod gate_step;
-pub mod guard_counters;
-pub mod interrupted_worktrees;
-pub mod json_data_step;
-pub mod notify_step;
-pub mod project_scope;
 pub mod publish_page_step;
 pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod quota_wait;
 pub mod readiness;
-pub mod refs;
-pub mod run_artifacts;
 pub mod run_effect;
 pub mod run_pins;
-pub mod run_scope;
 pub mod runner;
-pub mod safety;
 pub mod shadow;
 pub mod shadow_merge;
 pub mod shadow_summary;
-pub mod step_agents;
-pub mod step_output_format;
-pub mod step_room;
-pub mod steps;
 pub mod sub_workflow_step;
-pub mod task_board_step;
-pub mod template;
-pub mod tracker;
-pub mod transform_data_step;
-pub mod triage;
-pub mod trigger;
 pub mod trigger_workflow_step;
-pub mod watch_trigger;
 pub mod workspace;
+pub mod watch_trigger;
 
 use chrono::Utc;
 use std::sync::Arc;
@@ -69,7 +39,7 @@ use crate::models::*;
 use crate::AppState;
 
 /// What a run's admission records atomically with its insert.
-pub(crate) enum AdmissionMark {
+pub enum AdmissionMark {
     TrackerIssue(String),
     WatchOccurrence(crate::db::workflow_watch_state::WatchOccurrence),
 }
@@ -216,7 +186,7 @@ impl WorkflowEngine {
 
     /// One scheduler tick over `(since, now]`, for tests outside this module.
     #[cfg(test)]
-    pub(crate) async fn check_triggers_since(
+    pub async fn check_triggers_since(
         &self,
         since: chrono::DateTime<Utc>,
     ) -> anyhow::Result<()> {

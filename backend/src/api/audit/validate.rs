@@ -24,7 +24,7 @@ use crate::AppState;
 /// some Agent message of the main channel ends on the terminal signal. A
 /// later message never undoes it (KT-1122) — the durable stamp on the run
 /// (`db::audit_validation`) is the same fact recorded at the time.
-pub(crate) fn validation_discussion_finished(discussion: &Discussion) -> bool {
+pub fn validation_discussion_finished(discussion: &Discussion) -> bool {
     discussion.messages.iter().any(|message| {
         matches!(message.role, MessageRole::Agent)
             && matches!(message.channel, MessageChannel::Main)
@@ -59,7 +59,7 @@ pub enum ValidationBlock {
 }
 
 impl ValidationBlock {
-    pub(crate) fn message(self, run_status: Option<&str>) -> String {
+    pub fn message(self, run_status: Option<&str>) -> String {
         match self {
             Self::NoLocalRun => "No audit run recorded for this project on this instance and no audit run state in the repository — read-only until the repository carries a committed, Completed run state that passes the gates (run the audit here, or fetch the commit of the colleague who ran it).".into(),
             Self::AuditRunning => "An audit is currently running on this project — validate once it has finished.".into(),
@@ -137,7 +137,7 @@ impl ValidationState {
 
 /// The single read-side gate of the timeline and the validation-state
 /// endpoint; the POST below applies the same durable completion.
-pub(crate) fn validation_state(
+pub fn validation_state(
     conn: &rusqlite::Connection,
     project_id: &str,
     audit_running: bool,
@@ -209,7 +209,7 @@ fn audit_running(state: &AppState, project_id: &str) -> bool {
 }
 
 /// The pseudo recorded as who started or validated, from this instance.
-pub(crate) async fn operator_pseudo(state: &AppState) -> String {
+pub async fn operator_pseudo(state: &AppState) -> String {
     let config = state.config.read().await;
     config
         .server
@@ -224,7 +224,7 @@ pub(crate) async fn operator_pseudo(state: &AppState) -> String {
 /// The validation state the repository describes, when it is the project's
 /// state here: this instance has no run, or the committed one is newer
 /// (KT-1199). `None` when the local run stays authoritative.
-pub(crate) fn repo_validation_state(
+pub fn repo_validation_state(
     project_path: &std::path::Path,
     project_id: &str,
     latest: Option<&AuditRun>,
@@ -691,7 +691,7 @@ pub async fn validate_audit(
 }
 
 /// Why validation is refused while dispute cards wait, if any do.
-pub(crate) fn open_disputes_refusal(
+pub fn open_disputes_refusal(
     items: &[TdReviewItem],
     pending: &[crate::db::audit_cross::PendingDispute],
 ) -> Option<String> {
@@ -710,7 +710,7 @@ pub(crate) fn open_disputes_refusal(
 /// Documents Kronn owns that still carry a placeholder or a `TODO:` marker.
 /// The validation's first phase settles every such unknown; TD sheets and
 /// dated reports have their own review and are not counted here.
-pub(crate) fn unresolved_unknowns(
+pub fn unresolved_unknowns(
     project_path: &std::path::Path,
     report: &crate::core::document_optimization::DocumentaryOptimizationReport,
 ) -> Vec<String> {

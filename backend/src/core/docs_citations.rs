@@ -73,7 +73,7 @@ pub struct MovedAnchor {
     pub total: usize,
 }
 
-pub(crate) use crate::core::anti_halluc::is_placeholder;
+pub use crate::core::anti_halluc::is_placeholder;
 
 /// `None` when the citation holds, else why it does not.
 fn check_reference(
@@ -191,7 +191,7 @@ impl MovedAnchor {
     /// Where the citation belongs when the file alone settles it: the one line
     /// that defines the symbol (or, with no definition, the one that holds it),
     /// whatever the distance it moved. `None` when several lines qualify.
-    pub(crate) fn placement(&self) -> Option<(usize, usize)> {
+    pub fn placement(&self) -> Option<(usize, usize)> {
         match (self.lines.as_slice(), self.occurrences.as_slice()) {
             ([line], [start]) => Some(placed_span(self.span, *line, *start, self.total)),
             _ => None,
@@ -663,7 +663,7 @@ fn reanchor_span(
 
 /// Safe line moves in one doc: where the Git diff from `base` maps the cited
 /// lines (still naming the anchor), else the symbol's unique definition.
-pub(crate) fn suggested_reanchors(
+pub fn suggested_reanchors(
     text: &str,
     root: &Path,
     base: Option<&str>,
@@ -703,7 +703,7 @@ pub(crate) fn suggested_reanchors(
 }
 
 /// Default base for audited-project revalidation.
-pub(crate) fn default_reanchor_base(root: &Path) -> Result<Option<String>, String> {
+pub fn default_reanchor_base(root: &Path) -> Result<Option<String>, String> {
     diff_map::default_merge_base(root)
 }
 
@@ -1762,7 +1762,7 @@ mod tests {
     /// the scope variables; `make docs-reanchor` sets the re-anchor one.
     #[test]
     fn docs_citations_resolve_in_the_repo() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).parent().unwrap();
         let run =
             gate(root, &|name: &str| std::env::var(name).ok()).unwrap_or_else(|e| panic!("{e}"));
         if run.verdict.blocking.is_empty() {

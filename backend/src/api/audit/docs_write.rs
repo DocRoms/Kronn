@@ -2,11 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::{AppState, AuditTracker};
 
-pub(crate) const DOCS_BUSY: &str =
+pub const DOCS_BUSY: &str =
     "An audit or documentation update is currently running on this project — wait for it to finish.";
 
 #[derive(Clone)]
-pub(crate) struct DocsWriteLease(Arc<LeaseOwner>);
+pub struct DocsWriteLease(Arc<LeaseOwner>);
 
 struct LeaseOwner {
     tracker: Arc<Mutex<AuditTracker>>,
@@ -22,7 +22,7 @@ impl Drop for LeaseOwner {
 }
 
 impl DocsWriteLease {
-    pub(crate) fn try_acquire(state: &AppState, project_id: &str) -> Result<Self, String> {
+    pub fn try_acquire(state: &AppState, project_id: &str) -> Result<Self, String> {
         let mut tracker = state.audit_tracker.lock().map_err(|_| DOCS_BUSY)?;
         if !tracker.try_acquire_lease(project_id) {
             return Err(DOCS_BUSY.into());
@@ -33,14 +33,14 @@ impl DocsWriteLease {
         })))
     }
 
-    pub(crate) async fn acquire(state: &AppState, project_id: &str) -> Result<Self, String> {
+    pub async fn acquire(state: &AppState, project_id: &str) -> Result<Self, String> {
         let lease = Self::try_acquire(state, project_id)?;
         super::full::stop_validation_agents(state, project_id).await;
         Ok(lease)
     }
 
     /// The blocking worker keeps the lease even if its HTTP waiter is dropped.
-    pub(crate) async fn blocking<T, F>(&self, write: F) -> Result<T, tokio::task::JoinError>
+    pub async fn blocking<T, F>(&self, write: F) -> Result<T, tokio::task::JoinError>
     where
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
@@ -54,7 +54,7 @@ impl DocsWriteLease {
     }
 }
 
-pub(crate) async fn validation_cancel_guard(
+pub async fn validation_cancel_guard(
     state: &AppState,
     discussion_id: String,
     dispatch_id: Option<String>,

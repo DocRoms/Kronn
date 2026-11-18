@@ -134,13 +134,13 @@ pub fn real_sandbox_refusal() -> Option<String> {
 /// developer installed under `~/.local/bin`, Homebrew, npm…) is the machine's,
 /// not the test's. The detection consults it when [`real_agents_forbidden`] so
 /// a test sees the same agents on every machine (KT-1189).
-pub(crate) fn is_test_controlled(path: &std::path::Path) -> bool {
+pub fn is_test_controlled(path: &std::path::Path) -> bool {
     let real = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let path = real(path);
     [
         std::env::temp_dir(),
         std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
     ]
     .iter()
     .any(|root| path.starts_with(real(root)))
@@ -154,7 +154,7 @@ pub(crate) fn is_test_controlled(path: &std::path::Path) -> bool {
 /// into whatever `HOME` the process points at — the real one when a test does
 /// not redirect it. Every agent launch and probe goes through [`async_cmd`] /
 /// [`sync_cmd`], so this is the one place that sees them all.
-pub(crate) mod real_agent_guard {
+pub mod real_agent_guard {
     use super::{is_test_controlled, ChildRoute};
     use crate::core::child_env::AgentFamily;
     use std::ffi::{OsStr, OsString};
@@ -175,7 +175,7 @@ pub(crate) mod real_agent_guard {
     /// probe, which has to start the real agent CLIs to see them refused the
     /// data directory.
     #[cfg(test)]
-    pub(crate) const LIVE_PROBE_GATE: &str = "KRONN_LIVE_VAULT_PROBE";
+    pub const LIVE_PROBE_GATE: &str = "KRONN_LIVE_VAULT_PROBE";
 
     /// Name fragment of the tests allowed to ask for [`LiveProbeAllowance`].
     #[cfg(test)]
@@ -187,7 +187,7 @@ pub(crate) mod real_agent_guard {
 
     /// Whether a live probe holds an allowance, so the guard stands down.
     /// Always `false` outside the library's own test build.
-    pub(crate) fn live_probe_open() -> bool {
+    pub fn live_probe_open() -> bool {
         #[cfg(test)]
         {
             LIVE_PROBES.load(std::sync::atomic::Ordering::SeqCst) > 0
@@ -203,14 +203,14 @@ pub(crate) mod real_agent_guard {
     /// `live_vault_probe_*`. Any other test, or the probe without the gate,
     /// stays refused.
     #[cfg(test)]
-    pub(crate) fn live_probe_may_open(thread: Option<&str>, gate: Option<&str>) -> bool {
+    pub fn live_probe_may_open(thread: Option<&str>, gate: Option<&str>) -> bool {
         gate == Some("1") && thread.is_some_and(|name| name.contains(LIVE_PROBE_TEST))
     }
 
     /// Held by a live probe for as long as it needs the real agents; the guard
     /// is armed again when it drops.
     #[cfg(test)]
-    pub(crate) struct LiveProbeAllowance(());
+    pub struct LiveProbeAllowance(());
 
     #[cfg(test)]
     impl Drop for LiveProbeAllowance {
@@ -225,14 +225,14 @@ pub(crate) mod real_agent_guard {
     /// probe does not name), so the probes run under `#[serial]` and the gate
     /// is only ever set for a run narrowed to them.
     #[cfg(test)]
-    pub(crate) fn allow_live_probe() -> Option<LiveProbeAllowance> {
+    pub fn allow_live_probe() -> Option<LiveProbeAllowance> {
         let gate = crate::core::child_env::var(LIVE_PROBE_GATE).ok();
         allow_live_probe_for(std::thread::current().name(), gate.as_deref())
     }
 
     /// [`allow_live_probe`] for a given thread name and gate value.
     #[cfg(test)]
-    pub(crate) fn allow_live_probe_for(
+    pub fn allow_live_probe_for(
         thread: Option<&str>,
         gate: Option<&str>,
     ) -> Option<LiveProbeAllowance> {
@@ -244,7 +244,7 @@ pub(crate) mod real_agent_guard {
     }
 
     #[cfg(test)]
-    pub(crate) fn refused() -> Vec<String> {
+    pub fn refused() -> Vec<String> {
         REFUSED.lock().map(|l| l.clone()).unwrap_or_default()
     }
 
@@ -260,7 +260,7 @@ pub(crate) mod real_agent_guard {
     }
 
     /// Whether a program called `name` is an agent CLI.
-    pub(crate) fn is_agent_name(name: &str) -> bool {
+    pub fn is_agent_name(name: &str) -> bool {
         let stem = Path::new(name)
             .file_stem()
             .and_then(OsStr::to_str)
@@ -271,7 +271,7 @@ pub(crate) mod real_agent_guard {
 
     /// Whether `path`, found for `name`, is an agent CLI of the machine rather
     /// than a stub the test put there: detection must not see it.
-    pub(crate) fn is_machine_agent(name: &str, path: &str) -> bool {
+    pub fn is_machine_agent(name: &str, path: &str) -> bool {
         is_agent_name(name) && !is_test_controlled(Path::new(path))
     }
 
@@ -279,7 +279,7 @@ pub(crate) mod real_agent_guard {
     /// launch: an agent route (a probe through `npx`, a Vibe runner started as
     /// `python3`) or a program named like an agent CLI. `None` when it is not
     /// an agent, does not exist, or is a stub the test controls.
-    pub(crate) fn real_agent_binary(
+    pub fn real_agent_binary(
         program: &OsStr,
         route: ChildRoute,
         search_path: Option<OsString>,
@@ -307,7 +307,7 @@ pub(crate) mod real_agent_guard {
     /// joined, and a detached refresh is never joined, so there the process is
     /// aborted instead: the test fails loudly rather than passing with a real
     /// CLI started.
-    pub(crate) fn refuse_real_agent(program: &OsStr, route: ChildRoute) {
+    pub fn refuse_real_agent(program: &OsStr, route: ChildRoute) {
         if !super::real_agents_forbidden() {
             return;
         }
@@ -362,7 +362,7 @@ pub fn async_cmd_with<S: AsRef<OsStr>>(
 }
 
 /// [`async_cmd_with`] for an already decided [`background_priority::Plan`].
-pub(crate) fn async_cmd_planned(
+pub fn async_cmd_planned(
     program: &OsStr,
     route: ChildRoute,
     plan: background_priority::Plan,
@@ -398,7 +398,7 @@ pub fn sync_cmd_with<S: AsRef<OsStr>>(
 }
 
 /// [`sync_cmd_with`] for an already decided [`background_priority::Plan`].
-pub(crate) fn sync_cmd_planned(
+pub fn sync_cmd_planned(
     program: &OsStr,
     route: ChildRoute,
     plan: background_priority::Plan,
@@ -797,7 +797,7 @@ fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command
 /// Test support: a committed repository and a program that leaves a marker
 /// when anything runs it, as a filter, hook or monitor an agent declares would.
 #[cfg(test)]
-pub(crate) mod hostile_git {
+pub mod hostile_git {
     use std::path::{Path, PathBuf};
 
     /// `git` for a fixture (identity set, no signing); panics on failure.
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn the_package_is_not_its_own_dev_dependency() {
         let manifest =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
+            std::fs::read_to_string(concat!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."), "/Cargo.toml")).unwrap();
         let dev = manifest
             .split("[dev-dependencies]")
             .nth(1)
@@ -1175,7 +1175,7 @@ mod tests {
         }
         let mut hits = Vec::new();
         walk(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src"),
             &mut hits,
         );
         assert!(hits.is_empty(), "{hits:?}");
@@ -1412,7 +1412,7 @@ mod tests {
     /// Every Rust file of the backend (sources and integration tests) and of
     /// the desktop crate, as (`crate/relative/path`, text).
     fn rust_sources() -> Vec<(String, String)> {
-        let backend = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let backend = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
         let roots = [
             ("backend/src", backend.join("src")),
             ("backend/tests", backend.join("tests")),
@@ -1505,7 +1505,7 @@ mod tests {
         assert_eq!(found, expected);
 
         // Crate-wide overrides: manifests and Cargo configurations.
-        let backend = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let backend = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
         for manifest in [
             backend.join("Cargo.toml"),
             backend.join("../desktop/src-tauri/Cargo.toml"),
@@ -1792,7 +1792,7 @@ mod tests {
     /// relaunch the app included (B5-05).
     #[test]
     fn both_clippy_files_ban_the_same_spawn_entry_points() {
-        let backend = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let backend = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
         let paths = |file: std::path::PathBuf| -> std::collections::BTreeSet<String> {
             std::fs::read_to_string(&file)
                 .unwrap()

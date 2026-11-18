@@ -122,7 +122,7 @@ pub enum ProvisionError {
 /// that Quick Exec will refuse — `cd frontend && …`, a `VAR=` prefix, a binary
 /// off the allowlist — is refused HERE, while the principal can still fix it,
 /// rather than at integration after the worker delivered and the review passed.
-pub(crate) fn validate_new_validation_specs(
+pub fn validate_new_validation_specs(
     validations: &[crate::models::ValidationSpec],
 ) -> Result<(), String> {
     let max_timeout = crate::core::quick_exec::MAX_TIMEOUT_SECS;
@@ -277,7 +277,7 @@ fn boot_resume_is_deferred(execution: &TaskExecution, action: ExecutionRecoveryA
     }
 }
 
-pub(crate) fn available_agent_types(
+pub fn available_agent_types(
     detected_agents: Vec<crate::models::AgentDetection>,
 ) -> Vec<AgentType> {
     detected_agents
@@ -291,7 +291,7 @@ pub(crate) fn available_agent_types(
         .collect()
 }
 
-pub(crate) async fn available_agent_types_for_state(state: &AppState) -> Vec<AgentType> {
+pub async fn available_agent_types_for_state(state: &AppState) -> Vec<AgentType> {
     let mut detected_agents = crate::agents::detect_all_cached(false).await;
     {
         let config = state.config.read().await;
@@ -708,7 +708,7 @@ async fn resume_deferred_at_boot(
 /// is left alone, and the reassignment re-checks all of this in its own
 /// transaction so a person acting in the meantime is never overridden. Returns
 /// the executions it handed back.
-pub(crate) async fn return_quota_escalations_past_reset(state: &AppState) -> Vec<String> {
+pub async fn return_quota_escalations_past_reset(state: &AppState) -> Vec<String> {
     let now = chrono::Utc::now();
     let due = match state
         .db
@@ -799,7 +799,7 @@ pub(crate) async fn return_quota_escalations_past_reset(state: &AppState) -> Vec
 
 /// Stop the processes a task worker's dispatch left behind (KT-1266). Only a
 /// dispatch that is a worker's launch has any; an ordinary turn costs one read.
-pub(crate) async fn reap_task_worker_processes(state: &AppState, dispatch_job_id: &str) {
+pub async fn reap_task_worker_processes(state: &AppState, dispatch_job_id: &str) {
     let lookup = dispatch_job_id.to_string();
     let is_worker = state
         .db
@@ -817,29 +817,29 @@ pub(crate) async fn reap_task_worker_processes(state: &AppState, dispatch_job_id
 
 /// KT-1758 — how much of a refusal the rooms quote. The native ACP refusal is
 /// about 230 characters; the whole sentence is the point.
-pub(crate) const LAUNCH_REFUSAL_DETAIL_CHARS: usize = 600;
+pub const LAUNCH_REFUSAL_DETAIL_CHARS: usize = 600;
 
 /// KT-1758 — consecutive deferrals of a task worker's dispatch for the same
 /// unavailable-runtime reason before Kronn stops retrying and says why: ten
 /// tries at 30 s is five minutes, longer than any start that is only slow. A
 /// refusal that never changes used to be retried forever (live: a native ACP
 /// agent refused as a task worker, every 30 s for 1h35).
-pub(crate) const RUNTIME_UNAVAILABLE_MAX_DEFERRALS: u32 = 10;
+pub const RUNTIME_UNAVAILABLE_MAX_DEFERRALS: u32 = 10;
 
 /// KT-1758 — how long a quota fallback's dispatch may stay `Pending` before the
 /// room is told why. A free slot starts it within seconds, so five minutes is
 /// already a dispatch that something is holding.
-pub(crate) const FALLBACK_DISPATCH_WAIT_NOTICE_AFTER_SECONDS: i64 = 300;
+pub const FALLBACK_DISPATCH_WAIT_NOTICE_AFTER_SECONDS: i64 = 300;
 
 /// KT-1758 — the room line of a fallback dispatch that is still waiting.
-pub(crate) fn fallback_dispatch_waiting_message_id(dispatch_id: &str) -> String {
+pub fn fallback_dispatch_waiting_message_id(dispatch_id: &str) -> String {
     format!("fallback-dispatch-waiting:{dispatch_id}")
 }
 
 /// KT-1758 — why a fallback dispatch is not running, from what the queue holds
 /// against it, most specific first. Never a guess: when nothing explains the
 /// wait, it says so, which is itself the finding.
-pub(crate) fn fallback_dispatch_wait_reason(
+pub fn fallback_dispatch_wait_reason(
     wait: &crate::db::agent_dispatch::WaitingFallbackDispatch,
     limits: &serde_json::Value,
     now: chrono::DateTime<chrono::Utc>,
@@ -933,7 +933,7 @@ pub(crate) fn fallback_dispatch_wait_reason(
 /// so work continues while the original provider is limited; a dispatch that
 /// sits `Pending` silently defeats that without anyone noticing. Returns the
 /// dispatches announced now.
-pub(crate) async fn notify_waiting_fallback_dispatches(state: &AppState) -> Vec<String> {
+pub async fn notify_waiting_fallback_dispatches(state: &AppState) -> Vec<String> {
     let now = chrono::Utc::now();
     let since = now - chrono::Duration::seconds(FALLBACK_DISPATCH_WAIT_NOTICE_AFTER_SECONDS);
     let waiting = match state
@@ -1007,7 +1007,7 @@ pub(crate) async fn notify_waiting_fallback_dispatches(state: &AppState) -> Vec<
 /// re-check resolved. Its id carries the refused dispatch the escalation notice
 /// (`provider-quota-escalation:<dispatch>`) is keyed by, so the room shows that
 /// notice as settled and a replay cannot post it twice.
-pub(crate) fn quota_resumed_message_id(refused_dispatch_id: &str) -> String {
+pub fn quota_resumed_message_id(refused_dispatch_id: &str) -> String {
     format!("provider-quota-resumed:{refused_dispatch_id}")
 }
 
@@ -1017,7 +1017,7 @@ pub(crate) fn quota_resumed_message_id(refused_dispatch_id: &str) -> String {
 /// its parent room gets one line saying so. Never another provider. The
 /// reassignment re-checks in its own transaction that the execution is still
 /// parked on that quota, so an owner who acted meanwhile is never overridden.
-pub(crate) async fn resume_quota_escalation_after_probe(
+pub async fn resume_quota_escalation_after_probe(
     state: &AppState,
     execution_id: &str,
 ) -> Result<()> {
@@ -1912,7 +1912,7 @@ fn handoff_notice_en(
 /// KT-1713 — the room line saying a task worker went back to its declared
 /// worker once the quota window behind its fallback ended. It names the
 /// execution and that it is a task worker, like the fallback notice does.
-pub(crate) fn fallback_return_notice(
+pub fn fallback_return_notice(
     execution_id: &str,
     from_provider: &str,
     declared_provider: &str,
@@ -2126,7 +2126,7 @@ async fn wake_recovered_worker(db: &Database, exec_id: &str) -> Result<String> {
     .await
 }
 
-pub(crate) async fn wake_recovered_principal(db: &Database, exec_id: &str) -> Result<String> {
+pub async fn wake_recovered_principal(db: &Database, exec_id: &str) -> Result<String> {
     let id = exec_id.to_string();
     db.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
@@ -2230,7 +2230,7 @@ where
 /// KT-1345 — the optional `max_review_rounds` of a launch: absent is fine (the
 /// Settings > Workers default applies), anything that is not an integer in
 /// range or `"unlimited"` is refused rather than defaulted.
-pub(crate) fn review_rounds_argument(
+pub fn review_rounds_argument(
     value: Option<&serde_json::Value>,
 ) -> Result<Option<u32>, String> {
     value
@@ -3250,7 +3250,7 @@ fn validate_worker_scope_in_worktree(
 
 /// A prelocalized target that no longer fits the file the next round reads.
 #[derive(Debug)]
-pub(crate) struct StaleWorkerScope(pub String);
+pub struct StaleWorkerScope(pub String);
 
 impl std::fmt::Display for StaleWorkerScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -4294,9 +4294,9 @@ async fn integration_project_id(
 }
 
 /// How the sweep asks GitHub about a task's issue or pull request.
-pub(crate) struct GithubLookup {
-    pub(crate) api_base: String,
-    pub(crate) token: zeroize::Zeroizing<String>,
+pub struct GithubLookup {
+    pub api_base: String,
+    pub token: zeroize::Zeroizing<String>,
 }
 
 /// KT-1519 — close every task of `project_id` integrated into a feature branch
@@ -4310,7 +4310,7 @@ pub(crate) struct GithubLookup {
 /// `refresh_origin` first fetches the default branch from `origin`: after a merge
 /// on the remote nothing else moves `refs/remotes/origin/<default>` in the host
 /// checkout. The landing path passes `false` (its own ref has just moved).
-pub(crate) async fn close_merged_awaiting_tasks(
+pub async fn close_merged_awaiting_tasks(
     db: &Database,
     project_id: &str,
     repo: &std::path::Path,
@@ -4384,7 +4384,7 @@ async fn fetch_default_branch(repo: &std::path::Path) {
     }
 }
 
-pub(crate) async fn close_merged_awaiting_tasks_with(
+pub async fn close_merged_awaiting_tasks_with(
     db: &Database,
     repo: &std::path::Path,
     awaiting: Vec<crate::db::planning::AwaitingMergeTask>,
@@ -5347,10 +5347,10 @@ where
 
 /// What a reclaim over one project's finished executions did.
 #[derive(Debug, Default)]
-pub(crate) struct FinishedWorktreeReclaim {
-    pub(crate) released: usize,
+pub struct FinishedWorktreeReclaim {
+    pub released: usize,
     /// Directory names of the finished executions' worktrees that were kept.
-    pub(crate) kept: Vec<String>,
+    pub kept: Vec<String>,
 }
 
 /// The finished executions of `project_id` that still hold a managed checkout:
@@ -5498,7 +5498,7 @@ async fn reclaim_clean_checkouts(
 ///
 /// Never fails the caller: the task is already closed, and what stays is the
 /// periodic sweep's to take.
-pub(crate) async fn release_closed_task_checkouts(
+pub async fn release_closed_task_checkouts(
     db: &Database,
     task_id: &str,
 ) -> FinishedWorktreeReclaim {
@@ -5577,7 +5577,7 @@ async fn reclaim_over_catalogue_cap(
 /// [`reclaim_over_catalogue_cap`] for the launch and preparation boundaries
 /// (KT-1646), which only know the task and the worker: a no-op unless the worker
 /// is a Claude agent and the task has exactly one project.
-pub(crate) async fn reclaim_finished_worktrees_for_launch(
+pub async fn reclaim_finished_worktrees_for_launch(
     db: &Database,
     task_reference: &str,
     worker: &MessageTarget,
@@ -5914,7 +5914,7 @@ async fn release_closed_task_executions(db: &Database, report: &mut Orchestratio
 /// and the event says what happened. Either way the dead Git entry is pruned, so
 /// it stops counting against the worktree cap. A project whose repository
 /// cannot be found is left alone: an unmounted disk is not a removal.
-pub(crate) async fn reconcile_missing_managed_checkouts(db: &Database) -> Result<usize> {
+pub async fn reconcile_missing_managed_checkouts(db: &Database) -> Result<usize> {
     let workspaces = db
         .with_conn(|conn| {
             let mut gone = Vec::new();
@@ -6073,7 +6073,7 @@ async fn release_terminal_worktrees(
 /// attribute, why it must stay (absent = its execution is provably finished),
 /// plus the lanes durable lineage attributes to an execution although no marker
 /// says so (KT-1397).
-pub(crate) async fn lane_target_claims(
+pub async fn lane_target_claims(
     db: &Database,
     project_id: &str,
     repo_path: &std::path::Path,
@@ -6688,7 +6688,7 @@ fn widened_access(
 /// KT-1492 — the access a trust level opens on its own, and the approval to
 /// journal when it widened what the project and the discussion already gave:
 /// Trusted reaches Docker, Full access drops the sandbox. Never narrows.
-pub(crate) fn widened_by_trust(
+pub fn widened_by_trust(
     access: crate::models::ValidationsAccess,
     level: crate::models::TrustLevel,
 ) -> (
@@ -8327,7 +8327,7 @@ enum DeliveryManifestAuthorship {
 /// arguments. The dispatch trigger pins a particular run even when two agents
 /// of the same provider coexist in one room.
 #[derive(Clone, Copy)]
-pub(crate) struct NativeExecutionCaller<'a> {
+pub struct NativeExecutionCaller<'a> {
     pub discussion_id: &'a str,
     pub agent_type: &'a AgentType,
     pub source_message_id: Option<&'a str>,
@@ -8402,7 +8402,7 @@ async fn spawned_native_worker_execution_for_caller(
 /// Native HTTP agents do not own a CLI session. Their trusted executor supplies the
 /// current discussion, typed provider and dispatch trigger, so the backend can
 /// authenticate the worker without accepting identity from model arguments.
-pub(crate) async fn deliver_native_worker_manifest(
+pub async fn deliver_native_worker_manifest(
     db: &Database,
     task_execution_id: &str,
     caller: NativeExecutionCaller<'_>,
@@ -9411,7 +9411,7 @@ pub async fn decide_review(
 /// Review entry point for a native HTTP agent. The executor, not the model,
 /// supplies the current room and typed provider. Parent-room callers are principals;
 /// child-room callers must match the execution's native worker provider exactly.
-pub(crate) async fn decide_native_review(
+pub async fn decide_native_review(
     db: &Database,
     task_execution_id: &str,
     decision_json: &str,
@@ -9478,7 +9478,7 @@ pub(crate) async fn decide_native_review(
 /// `task_exec_launch` accepts as principal). It is authorized only during its
 /// running turn in the execution's parent room, and a dispatch that belongs to
 /// an execution is refused there, so this caller is never the worker.
-pub(crate) async fn decide_room_agent_review(
+pub async fn decide_room_agent_review(
     db: &Database,
     task_execution_id: &str,
     decision_json: &str,
@@ -9502,7 +9502,7 @@ pub(crate) async fn decide_room_agent_review(
 
 /// Review entry point for a `DelegateSubtasks` workflow step (KT-909). The step
 /// owns its principal room, so it decides as that room's principal, with no session.
-pub(crate) async fn decide_review_as_delegation_step(
+pub async fn decide_review_as_delegation_step(
     db: &Database,
     task_execution_id: &str,
     decision_json: &str,
@@ -9529,7 +9529,7 @@ pub(crate) async fn decide_review_as_delegation_step(
 /// can coexist in a child room. The trusted executor carries the dispatch
 /// trigger message outside model-controlled arguments, and the execution pins
 /// the corresponding job id across retries/restarts.
-pub(crate) fn native_worker_dispatch_matches(
+pub fn native_worker_dispatch_matches(
     conn: &rusqlite::Connection,
     execution: &TaskExecution,
     caller_source_message_id: Option<&str>,
@@ -9962,7 +9962,7 @@ async fn decide_authorized_review(
 /// Returning the refreshed execution matters: callers must see `Done`, a
 /// validation send-back, or an explicit integration refusal — never a silent
 /// `Approved` row that no public tool can advance.
-pub(crate) async fn continue_approved_review(
+pub async fn continue_approved_review(
     db: &Database,
     outcome: ReviewOutcome,
 ) -> Result<ReviewOutcome, ProvisionError> {
@@ -10406,7 +10406,7 @@ fn build_review_findings_message(
 /// be a local one, and a checkout holding it must be Kronn-owned: integration
 /// writes into that checkout, so the owner's working checkout (or any foreign
 /// worktree) is refused here, before anything is created.
-pub(crate) fn resolve_launch_target(
+pub fn resolve_launch_target(
     conn: &rusqlite::Connection,
     parent_discussion_id: &str,
     repo_path: &std::path::Path,
@@ -10444,7 +10444,7 @@ pub(crate) fn resolve_launch_target(
 /// KT-1688 — the integration-target check of the preflight. A named or declared
 /// target that would be refused makes the task not launchable; with neither, the
 /// preflight only warns, since `base_rev` is still given at launch.
-pub(crate) fn integration_target_preparation(
+pub fn integration_target_preparation(
     conn: &rusqlite::Connection,
     preparation: &mut crate::models::TaskExecutionPreparation,
     base_rev: Option<&str>,
@@ -10830,7 +10830,7 @@ fn model_tier_to_db(t: &ModelTier) -> &'static str {
     }
 }
 
-pub(crate) fn model_tier_from_db(s: &str) -> Option<ModelTier> {
+pub fn model_tier_from_db(s: &str) -> Option<ModelTier> {
     match s {
         "economy" => Some(ModelTier::Economy),
         "default" => Some(ModelTier::Default),
@@ -12823,7 +12823,7 @@ async fn announce_global_commit_identity(
 /// An orchestrator-authored discussion message (brief, control offer, attach notice):
 /// a backend-authored `User`/`Main` message with the `Orchestrateur` pseudonym. The
 /// caller sets the deterministic id so a resume can never double-post.
-pub(crate) fn orchestrator_message(id: String, content: String) -> DiscussionMessage {
+pub fn orchestrator_message(id: String, content: String) -> DiscussionMessage {
     DiscussionMessage {
         id,
         role: MessageRole::User,
@@ -12980,7 +12980,7 @@ fn preparation_reason(code: &str, detail: impl Into<String>) -> crate::models::C
 /// Refusals that depend only on the typed target. The catalogue and preflight
 /// deliberately share this helper so an identity cannot be advertised with a
 /// different transport/capability verdict than the launch boundary applies.
-pub(crate) fn worker_static_refusal(
+pub fn worker_static_refusal(
     worker: &MessageTarget,
 ) -> Option<crate::models::CampaignTaskReason> {
     if let Err(error) = crate::db::orchestration::ensure_task_worker_transport_compatible(worker) {
@@ -13113,7 +13113,7 @@ fn worker_launch_refusal(
     Ok(refusal)
 }
 
-pub(crate) fn worker_scope_contract_refusal(
+pub fn worker_scope_contract_refusal(
     intent: Option<TaskWorkerScopeIntent>,
     scope: Option<&TaskWorkerScope>,
 ) -> Option<crate::models::CampaignTaskReason> {
@@ -13139,7 +13139,7 @@ pub(crate) fn worker_scope_contract_refusal(
 ///
 /// The same predicate the launch boundary enforces, so a `launchable: true`
 /// answer cannot be followed by a launch refused for its validations.
-pub(crate) fn validations_refusal(
+pub fn validations_refusal(
     validations: &[crate::models::ValidationSpec],
 ) -> Option<crate::models::CampaignTaskReason> {
     validate_new_validation_specs(validations)
@@ -13236,7 +13236,7 @@ fn is_full_suite_validation(command: &str) -> bool {
 /// KT-1636 — non-blocking preflight note for each full-suite gate. The PR's CI
 /// owns the full suite; a local integration validation is fmt + clippy +
 /// targeted `--lib` tests. The gate still runs if the principal keeps it.
-pub(crate) fn full_suite_validation_warnings(
+pub fn full_suite_validation_warnings(
     validations: &[crate::models::ValidationSpec],
 ) -> Vec<crate::models::CampaignTaskReason> {
     validations
@@ -13257,7 +13257,7 @@ pub(crate) fn full_suite_validation_warnings(
         .collect()
 }
 
-pub(crate) fn worker_scope_refusal(
+pub fn worker_scope_refusal(
     worker: &MessageTarget,
     scope: Option<&TaskWorkerScope>,
 ) -> Option<crate::models::CampaignTaskReason> {
@@ -13276,7 +13276,7 @@ pub(crate) fn worker_scope_refusal(
     None
 }
 
-pub(crate) fn prepare_task_execution(
+pub fn prepare_task_execution(
     conn: &rusqlite::Connection,
     task_reference: &str,
     parent_discussion_id: &str,
@@ -13805,7 +13805,7 @@ fn summarize_http_turn_usage(
     })
 }
 
-pub(crate) fn execution_detail(
+pub fn execution_detail(
     conn: &rusqlite::Connection,
     exec_id: &str,
 ) -> Result<crate::models::TaskExecutionDetail> {
@@ -14335,7 +14335,7 @@ fn execution_metrics(
     }
 }
 
-pub(crate) fn execution_observability(
+pub fn execution_observability(
     conn: &rusqlite::Connection,
     exec_id: &str,
 ) -> Result<crate::models::TaskExecutionObservability> {
@@ -15436,7 +15436,7 @@ fn dod_readopted_note(
     )
 }
 
-pub(crate) async fn reassign_native_execution(
+pub async fn reassign_native_execution(
     state: &AppState,
     exec_id: &str,
     selection: crate::models::CampaignWorkerSelection,
@@ -15450,7 +15450,7 @@ pub(crate) async fn reassign_native_execution(
 /// fallback a campaign opted into, and the return to the worker that fallback
 /// (or the refused provider) left once the announced reset has passed.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum ReassignCause {
+pub enum ReassignCause {
     Human,
     /// Opted-in provider fallback; the worker being left is remembered, with
     /// the reset the refusal announced, so the sweep can bring it back.
@@ -15520,8 +15520,8 @@ impl ReassignCause {
 /// since. The failed dispatch's hand-over has nothing left to do, and says
 /// nothing about an execution that is no longer its own.
 #[derive(Debug)]
-pub(crate) struct ExecutionMovedOn {
-    pub(crate) execution_id: String,
+pub struct ExecutionMovedOn {
+    pub execution_id: String,
 }
 
 impl std::fmt::Display for ExecutionMovedOn {
@@ -15537,12 +15537,12 @@ impl std::fmt::Display for ExecutionMovedOn {
 impl std::error::Error for ExecutionMovedOn {}
 
 /// Whether `error` is [`ExecutionMovedOn`].
-pub(crate) fn is_execution_moved_on(error: &anyhow::Error) -> bool {
+pub fn is_execution_moved_on(error: &anyhow::Error) -> bool {
     error.downcast_ref::<ExecutionMovedOn>().is_some()
 }
 
 /// [`reassign_native_execution`] with the [`ReassignCause`] behind the move.
-pub(crate) async fn reassign_native_execution_as(
+pub async fn reassign_native_execution_as(
     state: &AppState,
     exec_id: &str,
     selection: crate::models::CampaignWorkerSelection,
@@ -15557,7 +15557,7 @@ pub(crate) async fn reassign_native_execution_as(
 /// execution must still point at it, checked before anything is written and
 /// again inside the transaction; otherwise nothing is done and the error is
 /// [`ExecutionMovedOn`].
-pub(crate) async fn reassign_native_execution_for_dispatch(
+pub async fn reassign_native_execution_for_dispatch(
     state: &AppState,
     exec_id: &str,
     selection: crate::models::CampaignWorkerSelection,
@@ -16255,14 +16255,14 @@ pub struct TaskExecReassignRequest {
 /// every session, see `mcp_surface_budget.py`). The two changes are never combined:
 /// each is journaled and refused on its own terms, and a half-applied pair would
 /// be neither.
-pub(crate) enum ExecutionAmendment {
+pub enum ExecutionAmendment {
     Reassign(MessageTarget),
     ReplaceValidations(Vec<crate::models::ValidationSpec>),
     /// KT-1345 — more review rounds, without an escalation + reassignment.
     ExtendReviewRounds(crate::db::orchestration::ReviewRoundsExtension),
 }
 
-pub(crate) fn execution_amendment(
+pub fn execution_amendment(
     worker: Option<MessageTarget>,
     validations: Option<Vec<crate::models::ValidationSpec>>,
     extend_review_rounds: Option<&serde_json::Value>,
@@ -16508,7 +16508,7 @@ inventory::submit! {
     crate::core::uplink::TaskDodAdoption(crate::db::orchestration::adopt_task_dod_into_live_executions)
 }
 
-pub(crate) fn resolve_task_execution_reference(
+pub fn resolve_task_execution_reference(
     conn: &rusqlite::Connection,
     reference: &str,
 ) -> Result<Option<TaskExecution>> {
@@ -16737,7 +16737,7 @@ struct WorkerPreflight<'a> {
 
 /// What the catalogue says about a named connection's network. A missing or
 /// expired observation is unverified: the absence of a probe is never success.
-pub(crate) fn connection_connectivity(
+pub fn connection_connectivity(
     observation: Option<&crate::core::endpoint_reachability::EndpointObservation>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> crate::models::WorkerConnectivity {
@@ -17236,7 +17236,7 @@ async fn bounded_provider_quota_details(
 /// Kept beside the catalogue rather than inside it so the builder stays pure:
 /// reading a provider catalogue is a network call, and the two other bounded
 /// preflights above are already the shape this follows.
-pub(crate) struct MediaCapabilityEntry {
+pub struct MediaCapabilityEntry {
     pub connection_id: String,
     pub modality: crate::models::MediaModality,
     pub model: String,
@@ -17308,7 +17308,7 @@ fn with_local_media_source(
     connections
 }
 
-pub(crate) async fn task_worker_catalogue_for_discussion(
+pub async fn task_worker_catalogue_for_discussion(
     state: &AppState,
     parent_discussion_id: &str,
 ) -> Result<crate::models::TaskWorkerCatalogue> {
@@ -17361,7 +17361,7 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     ))
 }
 
-pub(crate) async fn target_aware_task_worker_catalogue_for_discussion(
+pub async fn target_aware_task_worker_catalogue_for_discussion(
     state: &AppState,
     parent_discussion_id: &str,
 ) -> Result<crate::models::TaskWorkerCatalogue> {
@@ -17958,7 +17958,7 @@ fn compact_status_chars(compact: &TaskExecutionCompactStatus) -> usize {
         .unwrap_or(usize::MAX)
 }
 
-pub(crate) fn compact_execution_status(
+pub fn compact_execution_status(
     detail: &crate::models::TaskExecutionDetail,
     wait: Option<ExecutionWaitOutcome>,
 ) -> TaskExecutionCompactStatus {
@@ -18320,7 +18320,7 @@ fn bridge_is_execution_principal(
         && !execution.sub_discussion_id.as_deref().is_some_and(owns)
 }
 
-pub(crate) async fn task_exec_reassign_as(
+pub async fn task_exec_reassign_as(
     state: AppState,
     exec_id: String,
     request: TaskExecReassignRequest,
@@ -18435,7 +18435,7 @@ pub(crate) async fn task_exec_reassign_as(
 /// never run would only move the failure back to integration — and the swap is
 /// journaled with its actor and reason, so nothing is relaunched and nothing
 /// about the earlier gates is lost.
-pub(crate) async fn replace_execution_validations(
+pub async fn replace_execution_validations(
     db: &Database,
     exec_id: &str,
     validations: Vec<crate::models::ValidationSpec>,
@@ -18474,7 +18474,7 @@ pub(crate) async fn replace_execution_validations(
 /// itself escalated is also given its findings again and re-offered to its
 /// current worker: raising the number alone would leave it parked. Nothing is
 /// relaunched, the room, worktree and earlier rounds stay.
-pub(crate) async fn extend_execution_review_rounds(
+pub async fn extend_execution_review_rounds(
     state: &AppState,
     exec_id: &str,
     extension: crate::db::orchestration::ReviewRoundsExtension,
@@ -18605,7 +18605,7 @@ async fn reoffer_after_review_budget_extension(
 /// no `Display` on purpose (each variant carries structured fields), so both handlers
 /// share this. A mid-saga workspace failure is `Conflict` (resumable), never a bare 500 —
 /// DoD-6's "no silent orphan" surfaced to the caller.
-pub(crate) fn provision_error_parts(error: &ProvisionError) -> (ApiErrorCode, String) {
+pub fn provision_error_parts(error: &ProvisionError) -> (ApiErrorCode, String) {
     match error {
         ProvisionError::TaskNotFound => (ApiErrorCode::NotFound, "task not found".to_string()),
         ProvisionError::NotLaunchable(reason) => (ApiErrorCode::Validation, reason.clone()),
@@ -19189,7 +19189,7 @@ pub struct DeliverResponse {
 /// tested without an `AppState`: an unknown execution and a wrong caller collapse into ONE
 /// opaque refusal. `NotDeliverable`/`InvalidManifest` are reachable only AFTER the caller
 /// == worker check, so naming the real state there is not an oracle.
-pub(crate) fn deliver_outcome_to_response(outcome: DeliverOutcome) -> ApiResponse<DeliverResponse> {
+pub fn deliver_outcome_to_response(outcome: DeliverOutcome) -> ApiResponse<DeliverResponse> {
     match outcome {
         DeliverOutcome::Delivered {
             review_discussion_id,
@@ -19500,7 +19500,7 @@ fn approve_block_message(reason: &ApproveBlockReason) -> String {
 /// collapse into ONE opaque refusal. `SelfReviewForbidden` / `NotReviewable` / `ApproveBlocked`
 /// / `InvalidDecision` are reachable only AFTER the caller is established as a party, so naming
 /// the real reason there is not an oracle.
-pub(crate) fn review_outcome_to_response(outcome: ReviewOutcome) -> ApiResponse<ReviewResponse> {
+pub fn review_outcome_to_response(outcome: ReviewOutcome) -> ApiResponse<ReviewResponse> {
     match outcome {
         ReviewOutcome::Reviewed { verdict, execution } => ApiResponse::ok(ReviewResponse {
             verdict: match verdict {
@@ -19689,7 +19689,7 @@ pub async fn human_review(
 }
 
 #[cfg(all(test, feature = "full-tests"))]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use crate::models::{
         AgentType, AiAuditStatus, AiConfigStatus, CreatePlanningDodItem, CreatePlanningTaskRequest,
@@ -22803,7 +22803,7 @@ pub(crate) mod tests {
         );
     }
 
-    pub(crate) fn git(repo: &Path, args: &[&str]) -> std::process::Output {
+    pub fn git(repo: &Path, args: &[&str]) -> std::process::Output {
         Command::new("git")
             .args(args)
             .current_dir(repo)
@@ -22811,7 +22811,7 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    pub(crate) fn init_repo() -> tempfile::TempDir {
+    pub fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::Builder::new()
             .prefix("kronn-t3-")
             .tempdir()
@@ -22825,12 +22825,12 @@ pub(crate) mod tests {
         dir
     }
 
-    pub(crate) fn git_rev(repo: &Path, rev: &str) -> String {
+    pub fn git_rev(repo: &Path, rev: &str) -> String {
         let out = git(repo, &["rev-parse", rev]);
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    pub(crate) fn test_actor() -> PlanningActor {
+    pub fn test_actor() -> PlanningActor {
         PlanningActor {
             kind: PlanningActorKind::Backend,
             id: Some("test".into()),
@@ -22843,7 +22843,7 @@ pub(crate) mod tests {
         MessageTarget::agent(AgentType::ClaudeCode)
     }
 
-    pub(crate) fn test_project(id: &str, path: &str) -> Project {
+    pub fn test_project(id: &str, path: &str) -> Project {
         let now = chrono::Utc::now();
         Project {
             id: id.into(),
@@ -22872,7 +22872,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn plain_discussion(id: &str, project_id: &str) -> Discussion {
+    pub fn plain_discussion(id: &str, project_id: &str) -> Discussion {
         let now = chrono::Utc::now();
         Discussion {
             connection_id: None,
@@ -36306,7 +36306,7 @@ pub(crate) mod tests {
         )
     }
 
-    pub(crate) async fn projected_manifest_for_execution(db: &Database, exec_id: &str) -> String {
+    pub async fn projected_manifest_for_execution(db: &Database, exec_id: &str) -> String {
         let execution_id = exec_id.to_string();
         let dod_count = db
             .with_conn(move |conn| {
@@ -44177,7 +44177,7 @@ pub(crate) mod tests {
         .expect("canonical path")
     }
 
-    pub(crate) async fn exec_of(db: &Database, exec_id: &str) -> TaskExecution {
+    pub async fn exec_of(db: &Database, exec_id: &str) -> TaskExecution {
         let e = exec_id.to_string();
         db.with_conn(move |conn| {
             Ok(crate::db::orchestration::get_task_execution(conn, &e)?.expect("execution"))

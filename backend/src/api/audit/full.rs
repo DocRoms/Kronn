@@ -223,7 +223,7 @@ async fn wait_for_cancel_ack(
 /// KT-1134 — stop every agent still answering in a validation discussion linked
 /// to one of the project's audit runs: it writes `docs/`, which the audit
 /// starting now owns. Returns the discussions stopped.
-pub(crate) async fn stop_validation_agents(state: &AppState, project_id: &str) -> Vec<String> {
+pub async fn stop_validation_agents(state: &AppState, project_id: &str) -> Vec<String> {
     let pid = project_id.to_string();
     let linked = state
         .db
@@ -3954,7 +3954,7 @@ pub async fn full_audit(
 }
 
 /// The `outcome` of a Full step's `step_done`, as the partial pipeline names it.
-pub(crate) fn step_outcome_label(success: bool, unchanged: bool) -> &'static str {
+pub fn step_outcome_label(success: bool, unchanged: bool) -> &'static str {
     match (success, unchanged) {
         (false, _) => "failed",
         (true, true) => "unchanged",
@@ -3964,7 +3964,7 @@ pub(crate) fn step_outcome_label(success: bool, unchanged: bool) -> &'static str
 
 /// What the user sees a step as: its target file, or "Final review" for the
 /// synthetic review step.
-pub(crate) fn step_file_label(step: &super::AnalysisStep) -> &'static str {
+pub fn step_file_label(step: &super::AnalysisStep) -> &'static str {
     if step.target_file == "REVIEW" {
         "Final review"
     } else {
@@ -3974,7 +3974,7 @@ pub(crate) fn step_file_label(step: &super::AnalysisStep) -> &'static str {
 
 /// KT-931 — what a finished Full run is worth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunOutcome {
+pub enum RunOutcome {
     /// Every step of the chain succeeded.
     Complete,
     /// Some steps succeeded, the others failed or never ran: the successful
@@ -3987,13 +3987,13 @@ pub(crate) enum RunOutcome {
 /// KT-931 — the target file of the founding step of a Full chain: the entry
 /// point every other document hangs off. Relocated with the chain (KT-1192),
 /// so it is matched by file name under whatever root the chain uses.
-pub(crate) const FOUNDING_STEP_TARGET: &str = "docs/AGENTS.md";
+pub const FOUNDING_STEP_TARGET: &str = "docs/AGENTS.md";
 
 /// KT-931 — the 1-based position in `steps` of the founding step, found by its
 /// target file and never by a hard-coded index (the chain is assembled, its
 /// order is not this function's to know). `None` when no step of the chain
 /// writes the entry point.
-pub(crate) fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> {
+pub fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> {
     steps
         .iter()
         .position(|step| {
@@ -4008,7 +4008,7 @@ pub(crate) fn founding_step_index(steps: &[super::AnalysisStep]) -> Option<u32> 
 /// reduces to "the last step that succeeded" or "did anything warn": a failed
 /// step in the middle of the chain says nothing about the ones after it.
 #[derive(Debug)]
-pub(crate) struct RunProgress {
+pub struct RunProgress {
     total_steps: u32,
     /// Every step that is done: written, or verified `unchanged`.
     succeeded: std::collections::BTreeSet<u32>,
@@ -4026,7 +4026,7 @@ pub(crate) struct RunProgress {
 impl RunProgress {
     /// `carried` is the set of steps a predecessor completed cleanly (empty on
     /// a fresh run); indices outside `1..=total_steps` are ignored.
-    pub(crate) fn new(total_steps: u32, carried: impl IntoIterator<Item = u32>) -> Self {
+    pub fn new(total_steps: u32, carried: impl IntoIterator<Item = u32>) -> Self {
         Self {
             total_steps,
             succeeded: carried
@@ -4041,7 +4041,7 @@ impl RunProgress {
     }
 
     /// Carried steps that the predecessor recorded `unchanged`.
-    pub(crate) fn with_carried_unchanged(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
+    pub fn with_carried_unchanged(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
         let carried: Vec<u32> = carried
             .into_iter()
             .filter(|step| self.succeeded.contains(step))
@@ -4051,7 +4051,7 @@ impl RunProgress {
     }
 
     /// Carried steps a human accepted.
-    pub(crate) fn with_carried_accepted(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
+    pub fn with_carried_accepted(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
         let carried: Vec<u32> = carried
             .into_iter()
             .filter(|step| self.succeeded.contains(step))
@@ -4061,14 +4061,14 @@ impl RunProgress {
     }
 
     /// Name the step producing the entry point (`founding_step_index`).
-    pub(crate) fn with_founding_step(mut self, step: Option<u32>) -> Self {
+    pub fn with_founding_step(mut self, step: Option<u32>) -> Self {
         self.founding_step = step;
         self
     }
 
     /// Record a success and return the exact number of steps that succeeded so
     /// far — the figure the run row persists.
-    pub(crate) fn record_success(&mut self, step: u32) -> u32 {
+    pub fn record_success(&mut self, step: u32) -> u32 {
         self.failed.retain(|failed| *failed != step);
         self.unchanged.remove(&step);
         self.accepted.remove(&step);
@@ -4078,20 +4078,20 @@ impl RunProgress {
 
     /// Record a step whose target was already up to date, every gate green: it
     /// is done like a success and listed apart. Returns the same count.
-    pub(crate) fn record_unchanged(&mut self, step: u32) -> u32 {
+    pub fn record_unchanged(&mut self, step: u32) -> u32 {
         let count = self.record_success(step);
         self.unchanged.insert(step);
         count
     }
 
-    pub(crate) fn record_failure(&mut self, step: u32) {
+    pub fn record_failure(&mut self, step: u32) {
         if !self.succeeded.contains(&step) && !self.failed.contains(&step) {
             self.failed.push(step);
         }
     }
 
     /// A post-generation gate found a blocker in an earlier successful step.
-    pub(crate) fn invalidate_success(&mut self, step: u32) {
+    pub fn invalidate_success(&mut self, step: u32) {
         self.succeeded.remove(&step);
         self.unchanged.remove(&step);
         self.accepted.remove(&step);
@@ -4099,19 +4099,19 @@ impl RunProgress {
     }
 
     /// Steps a human accepted, in step order.
-    pub(crate) fn accepted_steps(&self) -> Vec<u32> {
+    pub fn accepted_steps(&self) -> Vec<u32> {
         self.accepted.iter().copied().collect()
     }
 
     /// Steps that ended `unchanged`, in step order.
-    pub(crate) fn unchanged_steps(&self) -> Vec<u32> {
+    pub fn unchanged_steps(&self) -> Vec<u32> {
         self.unchanged.iter().copied().collect()
     }
 
     /// The run's per-step outcomes as stored in `audit_runs.step_outcomes_json`:
     /// requested = succeeded + unchanged + accepted + failed (failed counts
     /// every step not done, the ones that never ran included).
-    pub(crate) fn outcomes_json(&self) -> String {
+    pub fn outcomes_json(&self) -> String {
         let succeeded: Vec<u32> = self
             .succeeded
             .iter()
@@ -4128,24 +4128,24 @@ impl RunProgress {
         .to_string()
     }
 
-    pub(crate) fn succeeded_count(&self) -> u32 {
+    pub fn succeeded_count(&self) -> u32 {
         self.succeeded.len() as u32
     }
 
     /// Steps that ran this run and failed.
-    pub(crate) fn failed_steps(&self) -> &[u32] {
+    pub fn failed_steps(&self) -> &[u32] {
         &self.failed
     }
 
     /// Every step a resume has to run: the failed ones AND the ones that never
     /// ran (a stream that ended early).
-    pub(crate) fn steps_to_redo(&self) -> Vec<u32> {
+    pub fn steps_to_redo(&self) -> Vec<u32> {
         (1..=self.total_steps)
             .filter(|step| !self.succeeded.contains(step))
             .collect()
     }
 
-    pub(crate) fn outcome(&self) -> RunOutcome {
+    pub fn outcome(&self) -> RunOutcome {
         if self.succeeded.is_empty() {
             RunOutcome::Nothing
         } else if self.succeeded_count() == self.total_steps {
@@ -4159,7 +4159,7 @@ impl RunProgress {
     /// carries over. A chain with no founding step (every sub-audit: each is
     /// one step, so it is never `Partial` anyway) has none to gate on, so
     /// this holds vacuously.
-    pub(crate) fn founding_step_succeeded(&self) -> bool {
+    pub fn founding_step_succeeded(&self) -> bool {
         match self.founding_step {
             Some(step) => self.succeeded.contains(&step),
             None => true,
@@ -4170,7 +4170,7 @@ impl RunProgress {
     /// A partial one does only if its founding step succeeded: without the
     /// entry point the documentation has nowhere to start from, so the run
     /// stays Interrupted with no validation and a resume names what is left.
-    pub(crate) fn is_validatable(&self) -> bool {
+    pub fn is_validatable(&self) -> bool {
         match self.outcome() {
             RunOutcome::Complete => true,
             RunOutcome::Partial => self.founding_step_succeeded(),
@@ -4180,7 +4180,7 @@ impl RunProgress {
 }
 
 /// Why a run ended Interrupted, as stored on its row (`report_path`).
-pub(crate) fn interruption_reason(
+pub fn interruption_reason(
     succeeded: u32,
     total_steps: u32,
     failed: &[u32],
@@ -4198,7 +4198,7 @@ pub(crate) fn interruption_reason(
 }
 
 /// Everything the run's terminal transaction writes.
-pub(crate) struct TerminalWrite {
+pub struct TerminalWrite {
     pub run_id: String,
     pub ended_at: chrono::DateTime<Utc>,
     /// The run ends `Completed` (else `Interrupted`).
@@ -4222,7 +4222,7 @@ pub(crate) struct TerminalWrite {
 /// The run's terminal transaction: status, TD counters, and the validation
 /// discussion with its durable link — all or nothing, so a validation
 /// discussion never exists without the status that goes with it.
-pub(crate) fn write_terminal_state(
+pub fn write_terminal_state(
     conn: &rusqlite::Connection,
     write: &TerminalWrite,
 ) -> anyhow::Result<()> {
@@ -4308,7 +4308,7 @@ pub(crate) fn write_terminal_state(
 /// the step stopped before reaching its gates): `insert_audit_step_start`
 /// defaults `cli_success` to 1, so the flag alone would skip a step that never
 /// completed.
-pub(crate) fn already_succeeded_step_indices(
+pub fn already_succeeded_step_indices(
     steps: &[crate::models::AuditRunStep],
 ) -> std::collections::HashSet<u32> {
     steps
@@ -4320,7 +4320,7 @@ pub(crate) fn already_succeeded_step_indices(
 
 /// KT-1131 — a carried step a human accepted as it stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AcceptedStep {
+pub struct AcceptedStep {
     pub step: u32,
     pub by: String,
     pub reason: Option<String>,
@@ -4329,7 +4329,7 @@ pub(crate) struct AcceptedStep {
 }
 
 /// KT-1131 — the predecessor's steps a human accepted.
-pub(crate) fn accepted_steps(steps: &[crate::models::AuditRunStep]) -> Vec<AcceptedStep> {
+pub fn accepted_steps(steps: &[crate::models::AuditRunStep]) -> Vec<AcceptedStep> {
     steps
         .iter()
         .filter(|s| s.accepted_at.is_some())
@@ -4344,7 +4344,7 @@ pub(crate) fn accepted_steps(steps: &[crate::models::AuditRunStep]) -> Vec<Accep
 
 /// KT-1169 — why a launch without `resume_run_id` is refused: the project's
 /// latest run can still be resumed, and only an explicit `fresh` replays it all.
-pub(crate) fn fresh_launch_refusal(
+pub fn fresh_launch_refusal(
     latest_resumable: Option<&crate::models::AuditRun>,
     fresh: bool,
 ) -> Option<String> {
@@ -4362,7 +4362,7 @@ pub(crate) fn fresh_launch_refusal(
 /// KT-1312 — whether a resume of `run` would still run a step. A run whose
 /// failed steps are all accepted has none: it blocks no refresh or
 /// revalidation, though a resume could still finalize it.
-pub(crate) fn resume_has_steps_left(
+pub fn resume_has_steps_left(
     run: &crate::models::AuditRun,
     steps: &[crate::models::AuditRunStep],
 ) -> bool {
@@ -4376,7 +4376,7 @@ pub(crate) fn resume_has_steps_left(
 
 /// KT-1131 — the steps a single-step retry runs: each one must exist and must
 /// not be done already (succeeded, unchanged or accepted).
-pub(crate) fn retry_selection(
+pub fn retry_selection(
     requested: &[u32],
     total_steps: u32,
     done: &std::collections::HashSet<u32>,
@@ -4403,7 +4403,7 @@ pub(crate) fn retry_selection(
 
 /// KT-1130 — the subset of `already_succeeded_step_indices` that ended
 /// `unchanged`: a resume skips them like any done step and still lists them.
-pub(crate) fn already_unchanged_step_indices(
+pub fn already_unchanged_step_indices(
     steps: &[crate::models::AuditRunStep],
 ) -> std::collections::HashSet<u32> {
     steps
@@ -4415,7 +4415,7 @@ pub(crate) fn already_unchanged_step_indices(
 
 /// KT-841 — outcome of the Full pipeline's rewrite-proof gate.
 #[derive(Debug, PartialEq)]
-pub(crate) enum RewriteProofVerdict {
+pub enum RewriteProofVerdict {
     /// The synthetic "REVIEW" pseudo-step (or an empty target) writes no
     /// file — same exemption as `validate_step_output`.
     Skipped,
@@ -4435,7 +4435,7 @@ pub(crate) enum RewriteProofVerdict {
 /// read post-agent snapshot, decide whether the step actually rewrote its
 /// target. Isolated from the SSE stream so it's unit-testable without a
 /// mocked agent process.
-pub(crate) fn rewrite_proof_verdict(
+pub fn rewrite_proof_verdict(
     target_file: &str,
     pre: &super::validation::TargetSnapshot,
     post: Result<super::validation::TargetSnapshot, String>,
@@ -4466,7 +4466,7 @@ pub(crate) fn rewrite_proof_verdict(
 /// had, so a retry of an economy audit never drifts to the costliest tier. The
 /// third value says the connection is the run's own (inherited, or echoed back
 /// by the client), so a deleted one may fall back to the agent's default.
-pub(crate) fn launch_footing(
+pub fn launch_footing(
     req: &crate::models::LaunchAuditRequest,
     resumed: Option<&crate::models::AuditRun>,
 ) -> (crate::models::ModelTier, Option<String>, bool) {
@@ -4492,7 +4492,7 @@ pub(crate) fn launch_footing(
     (tier, inherited, from_run)
 }
 
-pub(crate) fn resolve_resume_row(
+pub fn resolve_resume_row(
     run_id: &str,
     row: Option<&crate::models::AuditRun>,
     project_id: &str,
@@ -4517,11 +4517,11 @@ pub(crate) fn resolve_resume_row(
 /// audit runs a single step and must never rewrite the 9 foundation-doc
 /// checksums, which would mark stale foundation docs "fresh" without ever
 /// re-auditing them against current source.
-pub(crate) fn should_write_full_baseline(kind: crate::models::AuditKind) -> bool {
+pub fn should_write_full_baseline(kind: crate::models::AuditKind) -> bool {
     matches!(kind, crate::models::AuditKind::Full)
 }
 
-pub(crate) fn should_optimize_documents(kind: crate::models::AuditKind) -> bool {
+pub fn should_optimize_documents(kind: crate::models::AuditKind) -> bool {
     matches!(kind, crate::models::AuditKind::Full)
 }
 
@@ -4690,7 +4690,7 @@ pub fn cleanup_audit_files(project_path: &std::path::Path) -> Result<(), String>
 
 /// KT-1134 — delete the validation discussion linked to `run_id`, when it
 /// belongs to the project. Earlier runs' validations are never touched.
-pub(crate) fn delete_run_validation_discussion(
+pub fn delete_run_validation_discussion(
     conn: &rusqlite::Connection,
     project_id: &str,
     run_id: &str,
@@ -4887,7 +4887,7 @@ pub async fn cancel_audit(
 // ─── 0.8.2 helpers for `audit_runs` completion ─────────────────────────
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct SeverityCounts {
+pub struct SeverityCounts {
     pub critical: u32,
     pub high: u32,
     pub medium: u32,
@@ -4896,7 +4896,7 @@ pub(crate) struct SeverityCounts {
 
 /// What changed in the sources between the run a resume continues and now,
 /// `None` when nothing did or when the earlier run recorded nothing to compare.
-pub(crate) fn resume_drift_message(
+pub fn resume_drift_message(
     previous: &AuditRun,
     head: Option<&str>,
     fingerprint: Option<&str>,
@@ -4932,7 +4932,7 @@ pub(crate) fn resume_drift_message(
 /// We accept variations in casing/spacing but only on the canonical
 /// four values — anything else (e.g. an agent-emitted `Severe`) doesn't
 /// count. Better to under-count than mis-categorize.
-pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
+pub fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
     let mut counts = SeverityCounts::default();
     let Ok(entries) = std::fs::read_dir(td_dir) else {
         return counts;
@@ -4984,7 +4984,7 @@ pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
 ///   - `td_new_since_last` = TD files that exist now but weren't in
 ///     the pre-audit snapshot.
 ///   - `td_carried_over` = TDs present in both (Unchanged or Updated).
-pub(crate) fn compute_reconciliation_counts(
+pub fn compute_reconciliation_counts(
     snapshot: &[super::reconciliation::TdSnapshot],
     td_dir: &std::path::Path,
 ) -> (u32, u32, u32) {
@@ -5031,7 +5031,7 @@ pub(crate) fn compute_reconciliation_counts(
 ///
 /// Returns `None` when nothing matches — those TDs don't drive
 /// progressive-disclosure recommendations.
-pub(crate) fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static str> {
+pub fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static str> {
     // 1) Explicit category line wins. Format: `- **Category**: docker`
     let lower_body = body.to_ascii_lowercase();
     for line in lower_body.lines() {
@@ -5129,12 +5129,12 @@ pub(crate) fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static
 /// project dashboard. 3 is the minimum that signals \"pattern\" vs
 /// \"one-off\" (a single docker finding doesn't justify launching a
 /// focused Docker audit; three or more does).
-pub(crate) const CLUSTER_RECOMMENDATION_THRESHOLD: u32 = 3;
+pub const CLUSTER_RECOMMENDATION_THRESHOLD: u32 = 3;
 
 /// Scan the TD directory and return per-kind cluster recommendations
 /// for the audit_runs row. The JSON shape is `[{\"kind\":..., \"reason\":..., \"cluster_size\":N}]`
 /// matching the `AuditRecommendation` struct in `models/projects.rs`.
-pub(crate) fn compute_cluster_recommendations(
+pub fn compute_cluster_recommendations(
     td_dir: &std::path::Path,
 ) -> Vec<crate::models::AuditRecommendation> {
     use std::collections::HashMap;

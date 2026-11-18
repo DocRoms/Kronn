@@ -38,7 +38,7 @@ const MAX_CONFIG_BYTES: u64 = 16 * MIB;
 
 /// How the server stores the KV cache (`OLLAMA_KV_CACHE_TYPE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KvCacheType {
+pub enum KvCacheType {
     F16,
     Q8_0,
     Q4_0,
@@ -48,7 +48,7 @@ impl KvCacheType {
     /// `None` for a value Kronn cannot price: an estimate built on a guess of
     /// the cache's width would be a made-up figure. Unset or empty is the
     /// server's default, f16.
-    pub(crate) fn from_setting(raw: Option<&str>) -> Option<Self> {
+    pub fn from_setting(raw: Option<&str>) -> Option<Self> {
         match raw
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -75,7 +75,7 @@ impl KvCacheType {
 
 /// What one token of context adds to the cache, as a count of values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct KvShape {
+pub struct KvShape {
     /// Keys and values stored for one token, summed over every layer whose cache
     /// grows with the context. Layers with a constant state (linear attention)
     /// or a bounded window add nothing per token and are not counted.
@@ -90,7 +90,7 @@ impl KvShape {
         })
     }
 
-    pub(crate) fn bytes_per_token(self, cache: KvCacheType) -> u64 {
+    pub fn bytes_per_token(self, cache: KvCacheType) -> u64 {
         cache.bytes_for(self.values_per_token)
     }
 }
@@ -130,7 +130,7 @@ fn cached_layers(text: &Value, layers: u64) -> Option<u64> {
 /// (safetensors) model publishes it: `/api/show` carries neither the KV head
 /// count nor the head dimension for those. Multimodal checkpoints nest the
 /// language model under `text_config`.
-pub(crate) fn kv_shape_from_config(config: &Value) -> Option<KvShape> {
+pub fn kv_shape_from_config(config: &Value) -> Option<KvShape> {
     let text = config
         .get("text_config")
         .filter(|v| v.is_object())
@@ -152,7 +152,7 @@ pub(crate) fn kv_shape_from_config(config: &Value) -> Option<KvShape> {
 /// The attention shape from an `/api/show` answer, for the GGUF models that
 /// publish it as `<arch>.block_count`, `<arch>.attention.head_count_kv` and
 /// friends.
-pub(crate) fn kv_shape_from_show(show: &Value) -> Option<KvShape> {
+pub fn kv_shape_from_show(show: &Value) -> Option<KvShape> {
     let info = show.get("model_info")?.as_object()?;
     let arch = info.get("general.architecture")?.as_str()?;
     let get = |suffix: &str| info.get(&format!("{arch}.{suffix}"));
@@ -197,7 +197,7 @@ pub(crate) fn kv_shape_from_show(show: &Value) -> Option<KvShape> {
 /// The memory the GPU may use. `iogpu.wired_limit_mb` when it was set (non-zero),
 /// else about three quarters of installed memory — never more than the machine has.
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
-pub(crate) fn gpu_budget_bytes(total_ram_bytes: u64, wired_limit_mb: Option<u64>) -> u64 {
+pub fn gpu_budget_bytes(total_ram_bytes: u64, wired_limit_mb: Option<u64>) -> u64 {
     match wired_limit_mb.filter(|mb| *mb > 0) {
         Some(mb) => mb.saturating_mul(MIB).min(total_ram_bytes),
         None => total_ram_bytes / 100 * APPLE_GPU_SHARE_PERCENT,
@@ -205,7 +205,7 @@ pub(crate) fn gpu_budget_bytes(total_ram_bytes: u64, wired_limit_mb: Option<u64>
 }
 
 /// What is kept free of the budget for prefill buffers and activations.
-pub(crate) fn prefill_margin_bytes(budget_bytes: u64) -> u64 {
+pub fn prefill_margin_bytes(budget_bytes: u64) -> u64 {
     (budget_bytes / 100 * MARGIN_SHARE_PERCENT).max(MARGIN_FLOOR_BYTES)
 }
 
@@ -213,7 +213,7 @@ pub(crate) fn prefill_margin_bytes(budget_bytes: u64) -> u64 {
 /// margin. Zero when the weights alone leave nothing, which the caller raises to
 /// the floor: a model the machine cannot hold with any window must say so
 /// rather than be given a band it cannot honour.
-pub(crate) fn window_within_gpu_budget(
+pub fn window_within_gpu_budget(
     budget_bytes: u64,
     weights_bytes: u64,
     kv_bytes_per_token: u64,
@@ -226,7 +226,7 @@ pub(crate) fn window_within_gpu_budget(
 
 /// Where a ceiling came from, as far as the origin shown to the user goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CeilingBasis {
+pub enum CeilingBasis {
     /// The coarse band of installed memory — nothing was known of the model.
     MemoryBand,
     /// Computed for this model from its weights and the cost of its cache.
@@ -234,7 +234,7 @@ pub(crate) enum CeilingBasis {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ModelCeiling {
+pub struct ModelCeiling {
     pub tokens: u64,
     pub basis: CeilingBasis,
 }
@@ -251,7 +251,7 @@ impl From<u64> for ModelCeiling {
 /// Everything the ceiling of one model on one machine depends on. An absent
 /// field is a fact Kronn does not have.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CeilingInputs {
+pub struct CeilingInputs {
     pub total_ram_bytes: Option<u64>,
     /// Set only where the GPU shares the machine's memory and its limit is
     /// readable (Apple Silicon). Elsewhere the budget is not RAM and the
@@ -271,7 +271,7 @@ pub(crate) struct CeilingInputs {
 /// attention shape and the configured cache type. Elsewhere, and whenever an
 /// input is missing: what Kronn did before, a measured slope over a share of RAM
 /// or the memory band.
-pub(crate) fn ceiling_for_model(inputs: &CeilingInputs) -> ModelCeiling {
+pub fn ceiling_for_model(inputs: &CeilingInputs) -> ModelCeiling {
     use super::runner::{
         ram_ceiling_for_model, ram_derived_ceiling, window_the_machine_can_hold,
         OLLAMA_NUM_CTX_FLOOR,
@@ -336,14 +336,14 @@ fn server_env(name: &str) -> Option<String> {
 
 /// Machine facts read once per decision rather than per model.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct MachineFacts {
+pub struct MachineFacts {
     pub total_ram_bytes: Option<u64>,
     pub gpu_budget_bytes: Option<u64>,
     pub kv_cache_type: Option<KvCacheType>,
 }
 
 impl MachineFacts {
-    pub(crate) fn read() -> Self {
+    pub fn read() -> Self {
         let total_ram_bytes = super::runner::total_system_memory_bytes();
         Self {
             total_ram_bytes,
@@ -353,7 +353,7 @@ impl MachineFacts {
     }
 }
 
-pub(crate) fn server_is_local(base: &str) -> bool {
+pub fn server_is_local(base: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base) else {
         return false;
     };
@@ -486,7 +486,7 @@ fn config_blob_name(manifest: &Value) -> Option<String> {
 /// read from the first store that has the tag. `None` for a GGUF model (it has
 /// no such layer), for a store this process cannot read — Kronn in a container
 /// does not see the host's `~/.ollama` — and for anything unreadable.
-pub(crate) fn read_model_config(stores: &[PathBuf], model: &str) -> Option<Value> {
+pub fn read_model_config(stores: &[PathBuf], model: &str) -> Option<Value> {
     let relatives = manifest_paths(model);
     for store in stores {
         for relative in &relatives {
@@ -504,7 +504,7 @@ pub(crate) fn read_model_config(stores: &[PathBuf], model: &str) -> Option<Value
 
 /// `kv_shape_from_config` of the model's own `config.json`, off the async
 /// executor since it is file I/O.
-pub(crate) async fn kv_shape_from_store(model: &str) -> Option<KvShape> {
+pub async fn kv_shape_from_store(model: &str) -> Option<KvShape> {
     let model = model.to_string();
     tokio::task::spawn_blocking(move || {
         kv_shape_from_config(&read_model_config(&model_stores(), &model)?)

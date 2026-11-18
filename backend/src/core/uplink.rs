@@ -66,6 +66,16 @@ inventory::collect!(TrustWithdrawal);
 pub struct ApiCallSecrets(pub fn(&McpServer, &HashMap<String, String>) -> SecretSet);
 inventory::collect!(ApiCallSecrets);
 
+/// The declarations of every tool family `tools_load` can bring in.
+pub struct LoadableToolDeclarations(pub fn() -> Vec<serde_json::Value>);
+inventory::collect!(LoadableToolDeclarations);
+
+/// The Quick Prompts and skills behind a Page: (connection, page id or slug).
+pub struct PageResources(
+    pub fn(&Connection, &str) -> Result<Option<Vec<crate::models::LivePageResource>>>,
+);
+inventory::collect!(PageResources);
+
 /// A setting the running process reads outside the config, republished at
 /// every save by the crate that holds it.
 pub struct ConfigApplied(pub fn(&crate::models::AppConfig));

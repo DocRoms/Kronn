@@ -211,13 +211,13 @@ async fn secret_set(
 
 /// What an assistant conversation may store or send to a model: known values
 /// first, then the common token shapes.
-pub(crate) fn protect(set: &SecretSet, text: &str) -> String {
+pub fn protect(set: &SecretSet, text: &str) -> String {
     crate::core::redact::redact_secrets(&set.scrub(text))
 }
 
 /// Checks a creation's assistant context and masks the title and the first
 /// message with it. Returns the link to insert in the creation transaction.
-pub(crate) async fn prepare_creation(
+pub async fn prepare_creation(
     state: &AppState,
     context: AssistantContext,
     title: &mut String,
@@ -247,7 +247,7 @@ pub(crate) async fn prepare_creation(
 
 /// Masks a message before it is stored or dispatched: in an assistant
 /// conversation always, elsewhere only when the client named secrets.
-pub(crate) async fn protect_message(
+pub async fn protect_message(
     state: &AppState,
     discussion_id: &str,
     content: &mut String,
@@ -280,14 +280,14 @@ pub(crate) async fn protect_message(
 /// The turns a message starts, one per dispatch, holding its transient
 /// values in memory until each dispatch ends. Dropped without `keep`, it
 /// forgets them at once (the message was refused or deduplicated).
-pub(crate) struct TurnRegistration {
+pub struct TurnRegistration {
     guard: std::sync::Arc<store::AssistantGuard>,
     ids: Vec<String>,
     kept: bool,
 }
 
 impl TurnRegistration {
-    pub(crate) fn begin(
+    pub fn begin(
         state: &AppState,
         discussion_id: &str,
         dispatch_ids: Vec<String>,
@@ -305,7 +305,7 @@ impl TurnRegistration {
     }
 
     /// The dispatches exist: each turn now ends with its dispatch.
-    pub(crate) fn keep(mut self) {
+    pub fn keep(mut self) {
         self.kept = true;
     }
 }

@@ -202,7 +202,7 @@ impl KeyVault for SidecarFile {
 /// Write `bytes` to `path` atomically and durably: owner-only temp (fsynced),
 /// rename, then fsync of the directory so the rename itself survives a power
 /// loss. Every key or credential file goes through here.
-pub(crate) fn write_private_atomic(tmp: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_private_atomic(tmp: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_private_temp(tmp, bytes)?;
     if let Err(e) = std::fs::rename(tmp, path) {
         let _ = std::fs::remove_file(tmp);
@@ -216,11 +216,11 @@ pub(crate) fn write_private_atomic(tmp: &Path, path: &Path, bytes: &[u8]) -> std
 
 #[cfg(test)]
 thread_local! {
-    pub(crate) static DIR_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static DIR_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Best-effort fsync of a directory (Unix), counted in tests.
-pub(crate) fn sync_dir(dir: &Path) {
+pub fn sync_dir(dir: &Path) {
     #[cfg(test)]
     DIR_SYNCS.with(|c| c.set(c.get() + 1));
     #[cfg(unix)]
@@ -236,7 +236,7 @@ pub(crate) fn sync_dir(dir: &Path) {
 /// A leftover entry at `tmp` (stale file or planted symlink) is removed first
 /// and `create_new` never follows one, so the secret cannot land elsewhere or
 /// sit briefly under the umask's 0644.
-pub(crate) fn write_private_temp(tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_private_temp(tmp: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     if let Ok(meta) = std::fs::symlink_metadata(tmp) {
         if !meta.is_dir() {
@@ -307,7 +307,7 @@ pub struct KeyStore {
 /// the authorization DOES persist. `KRONN_USE_KEYCHAIN=1|0` overrides both ways
 /// (e.g. testing the keychain path from a dev build). Elsewhere than macOS and
 /// Windows the crate has no backend, so the default is off there.
-pub(crate) fn use_os_keychain() -> bool {
+pub fn use_os_keychain() -> bool {
     match crate::core::child_env::var("KRONN_USE_KEYCHAIN")
         .ok()
         .as_deref()
@@ -583,7 +583,7 @@ mod tests {
     /// Both entry points take the key out before any thread starts.
     #[test]
     fn both_binaries_take_the_key_override_first() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
         for (file, before) in [
             (root.join("src/main.rs"), "runtime_builder()"),
             (

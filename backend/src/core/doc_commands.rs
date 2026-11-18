@@ -43,7 +43,7 @@ const SHOWN_NAMES: usize = 12;
 
 /// What the repository defines, gathered once per gate run.
 #[derive(Debug, Default)]
-pub(crate) struct ProjectCommands {
+pub struct ProjectCommands {
     root: PathBuf,
     /// Makefiles already read (found by the walk or by an `include`).
     read_makefiles: BTreeSet<PathBuf>,
@@ -85,7 +85,7 @@ impl Tool {
 }
 
 impl ProjectCommands {
-    pub(crate) fn scan(project: &Path) -> Self {
+    pub fn scan(project: &Path) -> Self {
         let mut found = Self {
             root: project.to_path_buf(),
             ..Self::default()
@@ -385,7 +385,7 @@ impl ProjectCommands {
 
     /// One message per cited command the repository does not define, in
     /// document order and without repeats.
-    pub(crate) fn problems(&self, content: &str) -> Vec<String> {
+    pub fn problems(&self, content: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for (command, in_fence, line) in code_lines(content) {
             // A line that says the command is unavailable or gone does not claim

@@ -6,7 +6,7 @@ use crate::models::{AgentType, MessageTarget, MessageTargetKind};
 /// the same pure policy below. This keeps the human-send and joined-peer paths
 /// from drifting as new room modes are added.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum DispatchRoute {
+pub enum DispatchRoute {
     /// The room explicitly has no native responder.
     NoNativeResponder,
     /// One or more joined peers already own the reply.
@@ -23,7 +23,7 @@ pub(crate) enum DispatchRoute {
 /// an ordinary turn always belongs to the configured discussion agent, a
 /// punctual `Agent` target launches that native agent once, and only an exact
 /// `Cli` target belongs to a joined peer.
-pub(crate) fn route_human_turn(
+pub fn route_human_turn(
     no_agent_room: bool,
     target: Option<&MessageTarget>,
 ) -> DispatchRoute {
@@ -47,7 +47,7 @@ pub(crate) fn route_human_turn(
 /// only”. A workflow step reports to the room rather than handing it the
 /// turn, so its untargeted append never wakes the native principal (KT-1253);
 /// an explicit target still does.
-pub(crate) fn route_joined_peer_turn(
+pub fn route_joined_peer_turn(
     is_live_peer_turn: bool,
     no_agent_room: bool,
     requested_target: Option<&AgentType>,

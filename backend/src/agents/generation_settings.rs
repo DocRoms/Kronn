@@ -2,7 +2,7 @@
 use crate::models::AgentType;
 use serde_json::{json, Value};
 
-pub(crate) fn validate(
+pub fn validate(
     agent: &AgentType,
     effort: Option<&str>,
     max_tokens: Option<u64>,
@@ -38,7 +38,7 @@ fn ollama_think(effort: &str) -> Result<Value, String> {
 
 /// Apply after context fitting, which otherwise supplies its default num_predict.
 /// The shared tool loop keeps this body, so the same controls survive each turn.
-pub(crate) fn apply_http(
+pub fn apply_http(
     body: &mut Value,
     agent: &AgentType,
     effort: Option<&str>,

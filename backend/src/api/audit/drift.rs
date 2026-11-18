@@ -438,7 +438,7 @@ pub async fn partial_audit(
 /// validation, per-step gates, cancel, terminal write. A revalidation
 /// (KT-1168) runs through it with its findings and its own restore rules.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_partial_pipeline(
+pub async fn run_partial_pipeline(
     state: AppState,
     project: Project,
     requested_steps: Vec<usize>,
@@ -2363,7 +2363,7 @@ fn detached_partial_audit_response(stream: SseStream) -> Sse<SseStream> {
 /// `Err` (the caller refuses the run), never an empty baseline that would
 /// silently drop the non-selected scope. A missing file stays legitimate
 /// (fresh project, foundation-only baseline).
-pub(crate) fn compute_merged_baseline(
+pub fn compute_merged_baseline(
     project_path: &std::path::Path,
     succeeded_steps: &[usize],
     chain: &[super::AnalysisStep],
@@ -2402,7 +2402,7 @@ pub(crate) fn compute_merged_baseline(
 
 /// SSE `done.status` for a terminal branch — the ONLY mapping from the
 /// persisted terminal to the wire status, so DB and SSE cannot diverge.
-pub(crate) fn done_status_of(terminal: &PartialTerminal) -> &'static str {
+pub fn done_status_of(terminal: &PartialTerminal) -> &'static str {
     match terminal {
         PartialTerminal::Success(_) => "complete",
         PartialTerminal::Interrupted { .. } => "interrupted",
@@ -2414,7 +2414,7 @@ type PendingValidation = (Discussion, DiscussionMessage);
 
 /// The terminal branch for a run's partition. `validation` is the scoped
 /// discussion of the done steps, absent when their validation came back.
-pub(crate) fn partial_terminal(
+pub fn partial_terminal(
     failed_steps: Vec<usize>,
     rewrote: bool,
     validation: Option<PendingValidation>,
@@ -2433,7 +2433,7 @@ pub(crate) fn partial_terminal(
 }
 
 /// Terminal branch of a partial run (Codex lot-3 matrix v2, KT-1207).
-pub(crate) enum PartialTerminal {
+pub enum PartialTerminal {
     /// failed == 0 && succeeded >= 1 — validation discussion SCOPED to the
     /// done sections, Completed + link, all in one commit.
     Success(Box<PendingValidation>),
@@ -2457,7 +2457,7 @@ pub(crate) enum PartialTerminal {
 /// have moved — a 0-row update aborts the tx so the server never reports
 /// a terminal status the DB does not carry). The caller disarms the
 /// drop-guard only after this returns Ok.
-pub(crate) async fn finalize_partial_run(
+pub async fn finalize_partial_run(
     db: &std::sync::Arc<crate::db::Database>,
     run_id: String,
     project_path: std::path::PathBuf,

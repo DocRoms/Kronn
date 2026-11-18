@@ -150,7 +150,7 @@ pub use crate::db::workflows::pending_wait;
 /// Parks the wait `run` was read with, so it stops being polled and shows why.
 /// Compare-and-set on that same wait: a run resumed, cancelled or waiting
 /// again since the read is left untouched. Returns whether it parked.
-pub(crate) async fn park(
+pub async fn park(
     state: &AppState,
     run: &WorkflowRun,
     reason: QuotaParkReason,
@@ -360,7 +360,7 @@ async fn wake_one(state: &AppState, workflow: Workflow, mut run: WorkflowRun) ->
 /// The Agent step a `WaitingQuota` run is really parked on (KT-1657). A
 /// sub-workflow step mirrors its child's wait, so the step that holds the
 /// provider refusal sits in a run further down.
-pub(crate) struct WaitingLeaf {
+pub struct WaitingLeaf {
     /// The run owning the Agent step.
     pub run: WorkflowRun,
     /// Its workflow as saved, without the run's own agent choices.
@@ -372,7 +372,7 @@ pub(crate) struct WaitingLeaf {
 /// Deepest chain of mirrored waits followed; the engine nests no deeper.
 const MAX_LEAF_DEPTH: usize = 8;
 
-pub(crate) fn waiting_leaf(
+pub fn waiting_leaf(
     conn: &rusqlite::Connection,
     mut run: WorkflowRun,
 ) -> anyhow::Result<WaitingLeaf> {

@@ -4,6 +4,13 @@
 //! command-line syntax. Native and adapted runtimes implement `AcpTransport`;
 //! callers only deal with negotiated capabilities and opaque session targets.
 
+pub mod adapter_process;
+pub mod claude_adapter;
+pub mod codex_adapter;
+pub mod bridge_env;
+pub mod permission_broker;
+
+pub use kronn_l0::acp::*;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -18,12 +25,6 @@ use tokio::time::{timeout, Duration};
 
 use crate::models::AgentType;
 
-mod adapter_process;
-pub(crate) mod bridge_env;
-mod claude_adapter;
-mod codex_adapter;
-mod permission_broker;
-pub(crate) mod secret_files;
 
 pub use claude_adapter::ClaudeAcpAdapter;
 pub use codex_adapter::CodexAcpAdapter;
@@ -33,7 +34,7 @@ pub use permission_broker::{
 
 /// Shared by the Claude/Codex adapter test modules.
 #[cfg(test)]
-pub(crate) mod test_support {
+pub mod test_support {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -49,7 +50,7 @@ pub(crate) mod test_support {
     /// A Claude Code `stream-json` turn shaped like a real one: the served
     /// model on the assistant event, one `Read` call, a reply, and a `result`
     /// whose usage counts cache reads and writes apart from `input_tokens`.
-    pub(crate) const CLAUDE_TURN_WITH_CACHE: &str = r#"
+    pub const CLAUDE_TURN_WITH_CACHE: &str = r#"
 cat >/dev/null
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"fixture-session","model":"claude-opus-5-5"}'
 printf '%s\n' '{"type":"assistant","message":{"model":"claude-opus-5-5-20260915","content":[]}}'
@@ -68,7 +69,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
     /// answer it got under `$OPENCODE_FIXTURE_OUT` (an `OPENCODE_` name, so the
     /// built environment passes it to OpenCode), then goes on with its turn.
     #[cfg(unix)]
-    pub(crate) const OPENCODE_ACP_FIXTURE: &str = r#"
+    pub const OPENCODE_ACP_FIXTURE: &str = r#"
 import json, os, sys
 
 def send(frame):
@@ -111,7 +112,7 @@ for line in sys.stdin:
     /// Write the stand-in as an executable named `opencode`, for a test that puts
     /// `dir` first on `PATH` so that Kronn's own spawn of `opencode acp` finds it.
     #[cfg(unix)]
-    pub(crate) fn write_fake_opencode(dir: &Path) -> PathBuf {
+    pub fn write_fake_opencode(dir: &Path) -> PathBuf {
         let path = dir.join("opencode");
         fs::write(
             &path,
@@ -126,7 +127,7 @@ for line in sys.stdin:
         path
     }
 
-    pub(crate) fn write_fixture_script(dir: &Path, body: &str) -> PathBuf {
+    pub fn write_fixture_script(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("fixture-cli");
         fs::write(
             &path,
@@ -473,7 +474,7 @@ fn collect_config_values(values: &[Value], out: &mut Vec<AcpConfigValue>) {
 /// ACP does not standardize which option carries the model catalogue, so a
 /// runtime's option is the catalogue when its id names a model. Shared by
 /// discovery (what to list) and launch (what a chosen model must be found in).
-pub(crate) fn is_model_option_id(id: &str) -> bool {
+pub fn is_model_option_id(id: &str) -> bool {
     id.to_lowercase().contains("model")
 }
 
@@ -597,7 +598,7 @@ pub trait AcpTransport: Send + Sync {
 /// Whether an adapter's stdout line is a JSON frame from the runtime, as
 /// opposed to blank or stray text: a frame is progress even when it carries
 /// nothing to show.
-pub(crate) fn is_runtime_frame(line: &str) -> bool {
+pub fn is_runtime_frame(line: &str) -> bool {
     serde_json::from_str::<Value>(line.trim()).is_ok_and(|value| value.is_object())
 }
 
@@ -638,7 +639,7 @@ const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Budget for `session/new` and `session/resume`, which start every declared
 /// MCP server before answering. OpenCode gives each server up to 30 s, so the
 /// control budget lost that race to a single slow or mute server.
-pub(crate) const SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
+pub const SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Backstop for a prompt turn.
 ///
@@ -665,14 +666,14 @@ const PROMPT_REQUEST_TIMEOUT: Duration =
 
 /// The per-method budgets of one transport. Tests shorten them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AcpRequestTimeouts {
+pub struct AcpRequestTimeouts {
     pub control: Duration,
     pub session_setup: Duration,
     pub prompt: Duration,
 }
 
 impl AcpRequestTimeouts {
-    pub(crate) const DEFAULT: Self = Self {
+    pub const DEFAULT: Self = Self {
         control: CONTROL_REQUEST_TIMEOUT,
         session_setup: SESSION_SETUP_TIMEOUT,
         prompt: PROMPT_REQUEST_TIMEOUT,
@@ -1116,7 +1117,7 @@ impl AcpJsonRpcTransport {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_request_timeouts(mut self, timeouts: AcpRequestTimeouts) -> Self {
+    pub fn with_request_timeouts(mut self, timeouts: AcpRequestTimeouts) -> Self {
         self.timeouts = timeouts;
         self
     }
@@ -1351,7 +1352,7 @@ fn session_bridge_id(agent: AcpAgent) -> String {
 
 /// The bridge among a session's servers: the one declared under the session's
 /// own name, never a project server that merely resembles it.
-pub(crate) fn session_bridge<'a>(
+pub fn session_bridge<'a>(
     servers: &'a [AcpMcpServer],
     bridge_id: &str,
 ) -> Option<&'a AcpMcpServer> {
@@ -1360,7 +1361,7 @@ pub(crate) fn session_bridge<'a>(
 
 /// `kronn-internal` and any `kronn-internal*` name, whatever its case: only the
 /// runtime supplies the bridge, a project server named like it is dropped.
-pub(crate) fn is_bridge_like(id: &str) -> bool {
+pub fn is_bridge_like(id: &str) -> bool {
     id.to_ascii_lowercase().starts_with("kronn-internal")
 }
 
@@ -1369,7 +1370,7 @@ pub(crate) fn is_bridge_like(id: &str) -> bool {
 /// workspace's `.mcp.json`/`.github/mcp.json`, where a server may be named
 /// `kronn-internal`. So the well-known name is disabled and the session's
 /// bridge, with its step tool list, is added under its per-launch name.
-pub(crate) fn native_mcp_launch_args(
+pub fn native_mcp_launch_args(
     agent: AcpAgent,
     bridge: Option<&AcpMcpServer>,
 ) -> Vec<String> {

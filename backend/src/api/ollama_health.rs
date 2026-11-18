@@ -17,7 +17,7 @@ pub fn resolve_base_url_pub(explicit: Option<&str>) -> String {
 
 /// Resolve the Ollama API base URL.
 /// Priority: OLLAMA_HOST env var > Docker heuristic > localhost.
-pub(super) fn ollama_base_url() -> String {
+pub fn ollama_base_url() -> String {
     if let Ok(host) = crate::core::child_env::var("OLLAMA_HOST") {
         if !host.is_empty() && !crate::core::net_expose::is_exposed_host(&host) {
             if host.starts_with("http://") || host.starts_with("https://") {
@@ -88,7 +88,7 @@ pub(super) fn version_from_body(body: &serde_json::Value) -> Option<String> {
 /// below it the MLX engine lacks prompt-prefix reuse (ollama/ollama#17829),
 /// which is not what a suggestion should steer a user towards. An unknown
 /// version is not capable.
-pub(crate) fn mlx_capable(apple_silicon: bool, version: Option<&str>) -> bool {
+pub fn mlx_capable(apple_silicon: bool, version: Option<&str>) -> bool {
     apple_silicon
         && crate::agents::runner::mlx_prefix_cache_reused(
             version.and_then(crate::agents::runner::parse_ollama_version),

@@ -67,7 +67,7 @@ pub struct LegacyMigrationReport {
 }
 
 impl LegacyMigrationReport {
-    pub(crate) fn skipped(reason: impl Into<String>) -> Self {
+    pub fn skipped(reason: impl Into<String>) -> Self {
         Self {
             migrated: false,
             skip_reason: reason.into(),
@@ -234,7 +234,7 @@ pub fn move_user_docs_to_legacy_in(
 ///   - it must not be confused with the project's templated docs
 ///   - we want a single source of truth for the wording (one place
 ///     to update if the message changes across releases)
-pub(crate) const LEGACY_README_BODY: &str =
+pub const LEGACY_README_BODY: &str =
     "# Legacy docs — preserved from before Kronn bootstrap\n\
 \n\
 This folder holds documentation that lived in `docs/` BEFORE this project was \
@@ -362,7 +362,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
         let template = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs/AGENTS.md"),
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs/AGENTS.md"),
         )
         .unwrap();
         assert!(template.trim_start().starts_with("<!--"));

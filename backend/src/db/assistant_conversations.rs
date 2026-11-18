@@ -508,7 +508,7 @@ pub fn lend_guard(guard: std::sync::Arc<AssistantGuard>) -> LentGuard {
 }
 
 /// The values of every stored config of `server_id`, in their wire forms.
-pub(crate) fn stored_plugin_secrets(
+pub fn stored_plugin_secrets(
     conn: &Connection,
     server_id: &str,
     key: &str,
@@ -546,7 +546,7 @@ pub(crate) fn stored_plugin_secrets(
 }
 
 /// The plugin whose stored credentials an assistant conversation may meet.
-pub(crate) fn plugin_of(
+pub fn plugin_of(
     kind: AssistantKind,
     target_id: Option<&str>,
     plugin_id: Option<&str>,

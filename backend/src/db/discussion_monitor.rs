@@ -133,7 +133,7 @@ pub fn preview(conn: &Connection, id: &str) -> Result<Option<DiscussionMonitorPr
 
 /// Aggregate in SQLite: at most six rows, without task descriptions, events,
 /// DoD or dependency hydration. Keep precedence aligned with get_discussion_plan.
-pub(crate) fn plan_stats(conn: &Connection, id: &str) -> Result<PlanningPlanStats> {
+pub fn plan_stats(conn: &Connection, id: &str) -> Result<PlanningPlanStats> {
     let mut statement = conn.prepare(
         "SELECT CASE
             WHEN relation.placement = 'later' THEN 'later'

@@ -1,7 +1,7 @@
 //! Artifact portability: a bounded, versioned graph of content and automation
 //! definitions. Export and preview are read-only; import never starts a run.
 mod import;
-pub(crate) use import::import_shipped_in_transaction;
+pub use import::import_shipped_in_transaction;
 pub use import::{import, preview};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -17,13 +17,13 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::db::discussion_actions::{ActionFence, DiscussionActionKind};
 use crate::{models::*, AppState};
 
-pub(crate) const BUNDLE_KIND: &str = "kronn.artifact";
+pub const BUNDLE_KIND: &str = "kronn.artifact";
 /// 2 adds bundled custom skills and workflow refs (KT-1446, KT-1448);
 /// version 1 bundles still import.
-pub(crate) const BUNDLE_VERSION: u32 = 2;
-pub(crate) const MIN_BUNDLE_VERSION: u32 = 1;
+pub const BUNDLE_VERSION: u32 = 2;
+pub const MIN_BUNDLE_VERSION: u32 = 1;
 /// Holds a Page at its 24 MiB HTML guard plus its datasets (#252).
-pub(crate) const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BUNDLE_ITEMS: usize = 512;
 
 use ArtifactResourceKind as ResourceKind;
@@ -67,14 +67,14 @@ fn export_embed_origins(conn: &Connection, page_id: &str, html: &str) -> Result<
 }
 
 /// The page with its datasets' contents: what a project resource file carries.
-pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
+pub fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
     read_page(conn, id, true)
 }
 
 /// The page as an Artifact file carries it: its datasets keep their name,
 /// kind, schema and limits, never their snapshot or points. Those are the
 /// data the page published (API answers, names, links), not its definition.
-pub(crate) fn export_bare_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
+pub fn export_bare_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
     read_page(conn, id, false)
 }
 

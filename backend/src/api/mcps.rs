@@ -337,7 +337,7 @@ async fn probe_plugin(
     build_probe_response(&server.id, checks)
 }
 
-pub(crate) async fn probe_api(
+pub async fn probe_api(
     state: &AppState,
     server: &McpServer,
     config: &McpConfig,
@@ -355,7 +355,7 @@ pub(crate) async fn probe_api(
     .await
 }
 
-pub(crate) async fn probe_api_with_policy(
+pub async fn probe_api_with_policy(
     state: &AppState,
     server: &McpServer,
     config: &McpConfig,
@@ -979,7 +979,7 @@ pub async fn create_config(
 /// Slugify a user-typed label into an `UPPER_SNAKE_CASE` env key.
 /// Examples: "Bearer Token" → "BEARER_TOKEN", "Org ID" → "ORG_ID",
 /// "x-api-key (header)" → "X_API_KEY_HEADER".
-pub(crate) fn slug_env_key(label: &str) -> String {
+pub fn slug_env_key(label: &str) -> String {
     let mut out = String::with_capacity(label.len());
     let mut prev_underscore = true; // skip leading underscores
     for ch in label.chars() {
@@ -1004,7 +1004,7 @@ pub(crate) fn slug_env_key(label: &str) -> String {
 /// unique `custom-{slug}-{nano}` so two instances of the same vendor with
 /// different credentials don't collide. `source = Manual` to distinguish
 /// from registry-sourced entries in the UI and analytics.
-pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer {
+pub fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer {
     let slug = name_slug(&payload.name);
     let nano: String = Uuid::new_v4().simple().to_string()[..8].to_string();
     let id = format!("custom-{}-{}", slug, nano);
@@ -1095,7 +1095,7 @@ fn validate_custom_auth(auth: &ApiAuthKind) -> Result<(), String> {
 }
 
 /// Every check a user-authored or imported Custom API spec must pass.
-pub(crate) fn validate_custom_payload(payload: &CustomApiPayload) -> Result<(), String> {
+pub fn validate_custom_payload(payload: &CustomApiPayload) -> Result<(), String> {
     validate_custom_auth(&payload.auth)?;
     validate_default_headers(payload)?;
     validate_test_endpoint(payload)
@@ -1267,7 +1267,7 @@ fn validate_default_headers(payload: &CustomApiPayload) -> Result<(), String> {
 
 /// Lower-snake-case slug for server-id construction. Mirrors the env-key
 /// slugifier but keeps lowercase: "Salesforce Sales API" → "salesforce-sales-api".
-pub(crate) fn name_slug(name: &str) -> String {
+pub fn name_slug(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_dash = true;
     for ch in name.chars() {
@@ -1354,7 +1354,7 @@ pub struct UpdateCustomSpecResponse {
 ///
 /// Secret-safe by construction: only key NAMES are read; values stay
 /// encrypted at the DB layer. Pure fn = unit-testable without a DB.
-pub(crate) fn compute_orphan_env_keys(
+pub fn compute_orphan_env_keys(
     prev: &McpServer,
     payload: &CustomApiPayload,
     configs: &[McpConfigDisplay],
@@ -3209,7 +3209,7 @@ pub fn build_custom_plugin_export(server: &McpServer) -> Option<CustomApiPayload
 
 /// A file from a configuration-only export may hold placeholders (KT-1040):
 /// the file route has no review to ask for them, so its answer names them.
-pub(crate) fn unfilled_placeholder_notice(server: &McpServer) -> Option<String> {
+pub fn unfilled_placeholder_notice(server: &McpServer) -> Option<String> {
     let unfilled = crate::api::plugin_portability::placeholders_in(server);
     (!unfilled.is_empty()).then(|| {
         format!(

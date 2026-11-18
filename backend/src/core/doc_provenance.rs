@@ -888,7 +888,7 @@ pub fn source_provenance(project: &Path, reference: &str) -> Option<SourceProven
 }
 
 /// A learning batch can share one citation report across its evidence rows.
-pub(crate) fn source_provenance_with_citations(
+pub fn source_provenance_with_citations(
     project: &Path,
     reference: &str,
     citations: Option<&crate::core::citation_drift::CitationDriftReport>,

@@ -17,7 +17,7 @@ use crate::models::QuotaWait;
 /// A hard quota must never reach this: callers test
 /// [`is_hard_quota_exhausted`] first, and the shared-capacity wordings it
 /// deliberately excludes are transient, so they belong here.
-pub(crate) fn is_transient_provider_overload(output: &str) -> bool {
+pub fn is_transient_provider_overload(output: &str) -> bool {
     let lower = output.to_lowercase();
     if is_hard_quota_exhausted(output) {
         return false;
@@ -54,7 +54,7 @@ const TRANSIENT_UPSTREAM_REPLY_MAX_CHARS: usize = 1_500;
 /// `please run /login`, an expired token — all refused here, as is a hard
 /// quota. The reply must also be short, i.e. the error and nothing else: a
 /// report that merely quotes "403" is the agent's own work.
-pub(crate) fn is_transient_upstream_auth_error(output: &str) -> bool {
+pub fn is_transient_upstream_auth_error(output: &str) -> bool {
     let trimmed = output.trim();
     if trimmed.is_empty() || trimmed.chars().count() > TRANSIENT_UPSTREAM_REPLY_MAX_CHARS {
         return false;
@@ -97,7 +97,7 @@ pub(crate) fn is_transient_upstream_auth_error(output: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-pub(crate) fn is_hard_quota_exhausted(output: &str) -> bool {
+pub fn is_hard_quota_exhausted(output: &str) -> bool {
     let lower = output.to_lowercase();
     // NVIDIA's hosted NIM uses ResourceExhausted for shared worker saturation;
     // that is transient capacity, not the user's plan. Check it first.
@@ -154,7 +154,7 @@ pub(crate) fn is_hard_quota_exhausted(output: &str) -> bool {
 /// guessed instant would tell a human to re-arm at the wrong hour. Anything
 /// else, or an instant already past or more than 45 days out, is `None` — the
 /// caller then simply has no time to show.
-pub(crate) fn announced_quota_reset(
+pub fn announced_quota_reset(
     output: &str,
     now: chrono::DateTime<Utc>,
 ) -> Option<chrono::DateTime<Utc>> {

@@ -230,7 +230,7 @@ pub fn scan_build_artifacts(repo_path: &Path) -> Vec<BuildArtifactTarget> {
 ///
 /// Returns `(bytes, partial)`. Symlinks are counted as entries but never
 /// followed, so a link into a huge tree cannot make this walk unbounded.
-pub(crate) fn measure_within_budget(root: &Path) -> (u64, bool) {
+pub fn measure_within_budget(root: &Path) -> (u64, bool) {
     let measured = measure_real_within_budget(root);
     (measured.bytes, measured.partial)
 }
@@ -238,7 +238,7 @@ pub(crate) fn measure_within_budget(root: &Path) -> (u64, bool) {
 /// [`measure_within_budget`] with the unique (non-shared) bytes too: a lane
 /// cloned from the seed counts the blocks it shares in full in `bytes`, and
 /// only `unique_bytes` is what deleting it frees (KT-1691).
-pub(crate) fn measure_real_within_budget(root: &Path) -> crate::core::disk_usage::Measured {
+pub fn measure_real_within_budget(root: &Path) -> crate::core::disk_usage::Measured {
     crate::core::disk_usage::measure_bounded(
         root,
         &[],
@@ -741,7 +741,7 @@ fn read_lane_owner(lane_target: &Path) -> Option<LaneOwner> {
 
 /// Every `<repo>/target/wt-*` entry, sorted so a dry run matches the pass that
 /// acts on it.
-pub(crate) fn lane_target_dirs(repo_path: &Path) -> Vec<PathBuf> {
+pub fn lane_target_dirs(repo_path: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(repo_path.join("target")) else {
         // No target directory means no lane was ever built here.
         return Vec::new();
@@ -1459,7 +1459,7 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
 /// write. Use this entry point only where no agent has touched the checkout yet
 /// (worktree provisioning, the worker environment). Code that runs after an
 /// agent uses [`ensure_local_git_exclude_pinned`].
-pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
+pub fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
     // Already ignored (a committed rule, or a previous run): write nothing.
     // `repo_path` may be a worker's worktree (lane seeds, the lane's Cargo target):
     // pinned to its registration there, so neither the `.git` pointer nor a nested
@@ -1558,7 +1558,7 @@ fn already_ignored(repo_path: &Path, pattern: &str) -> bool {
 /// `commondir`. A linked worktree (a `.git` FILE) or a repo with a `commondir`
 /// is refused with an error, never followed: the exclude of a linked worktree
 /// is the main repository's, written when the worktree was provisioned.
-pub(crate) fn ensure_local_git_exclude_pinned(
+pub fn ensure_local_git_exclude_pinned(
     repo_path: &Path,
     pattern: &str,
 ) -> Result<(), String> {
@@ -1611,7 +1611,7 @@ pub(crate) fn ensure_local_git_exclude_pinned(
 /// at that directory, so a link at `info` or `exclude` is refused. A project
 /// below the repository top gets the rule anchored under its prefix; a path git
 /// does not know as a repository is left alone.
-pub(crate) fn ensure_local_git_exclude_pinned_for(
+pub fn ensure_local_git_exclude_pinned_for(
     judge: &Path,
     repo_path: &Path,
     pattern: &str,
@@ -1701,7 +1701,7 @@ fn anchored_under_prefix(prefix: &str, pattern: &str) -> String {
 /// from `main_checkout`, so a link at `.git`, `worktrees` or an entry is
 /// refused. The returned path is under `main_checkout`: pass `main_checkout` as
 /// the root of the `guarded_*` calls that use it.
-pub(crate) fn registered_worktree_git_dir(
+pub fn registered_worktree_git_dir(
     main_checkout: &Path,
     worktree: &Path,
 ) -> Result<PathBuf, String> {
@@ -1873,7 +1873,7 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 
 /// Keep OS junk out of `git status` for the repository and every worktree of it
 /// (the local exclude is shared), without touching a tracked `.gitignore`.
-pub(crate) fn ensure_os_junk_excluded(repo_path: &Path) -> Result<(), String> {
+pub fn ensure_os_junk_excluded(repo_path: &Path) -> Result<(), String> {
     for pattern in os_junk_patterns() {
         ensure_local_git_exclude(repo_path, &pattern)?;
     }
@@ -1882,7 +1882,7 @@ pub(crate) fn ensure_os_junk_excluded(repo_path: &Path) -> Result<(), String> {
 
 /// What every Kronn checkout needs ignored: its own `.kronn/` directory (an
 /// error when that fails) and OS junk (only logged: it never blocks a launch).
-pub(crate) fn ensure_managed_excludes(repo_path: &Path) -> Result<(), String> {
+pub fn ensure_managed_excludes(repo_path: &Path) -> Result<(), String> {
     ensure_local_git_exclude(repo_path, ".kronn/")?;
     if let Err(error) = ensure_os_junk_excluded(repo_path) {
         tracing::warn!(path = %repo_path.display(), "cannot exclude OS junk files: {error}");
@@ -1936,7 +1936,7 @@ fn truncate_slug(s: &str) -> String {
 /// Apply the Windows extended-length path prefix `\\?\` so file APIs accept
 /// paths longer than 260 chars. No-op on non-Windows. Idempotent.
 #[allow(dead_code)]
-pub(crate) fn long_path(p: &Path) -> PathBuf {
+pub fn long_path(p: &Path) -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         let s = p.to_string_lossy();
@@ -2253,7 +2253,7 @@ fn review_worktree_holds_something(path: &Path) -> Result<Option<String>, String
 /// `repo_path` (itself first), whatever directory they live in. Asked of the
 /// registered checkout, never of a lane, so a lane's own `.git` pointer cannot
 /// make it claim another project.
-pub(crate) fn registered_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
+pub fn registered_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
     worktree_entries(repo_path)
         .into_iter()
         .map(|entry| entry.path)
@@ -2359,7 +2359,7 @@ const AGENT_CONFIG_FILES: [&[&str]; 4] = [
 /// The agents' project configs are gitignored, so a new worktree lacks them:
 /// without `.mcp.json` a Claude agent gets no `--strict-mcp-config` and
 /// inherits the host's personal MCP servers instead of the project's.
-pub(crate) fn copy_agent_configs(repo_path: &Path, worktree_path: &Path) {
+pub fn copy_agent_configs(repo_path: &Path, worktree_path: &Path) {
     for parts in AGENT_CONFIG_FILES {
         let relative: PathBuf = parts.iter().collect();
         let source = repo_path.join(&relative);
@@ -2379,7 +2379,7 @@ pub(crate) fn copy_agent_configs(repo_path: &Path, worktree_path: &Path) {
 
 /// The copies [`copy_agent_configs`] made that still equal the main
 /// checkout's file: Kronn's own, not the work of what ran in the worktree.
-pub(crate) fn unchanged_agent_configs(repo_path: &Path, worktree_path: &Path) -> Vec<PathBuf> {
+pub fn unchanged_agent_configs(repo_path: &Path, worktree_path: &Path) -> Vec<PathBuf> {
     let Ok(root) = worktree_path.canonicalize() else {
         return Vec::new();
     };
@@ -3458,7 +3458,7 @@ fn apply_config(config: &crate::models::AppConfig) {
 inventory::submit! { crate::core::uplink::ConfigApplied(apply_config) }
 
 #[cfg(test)]
-pub(crate) mod ownership_seam {
+pub mod ownership_seam {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -3468,7 +3468,7 @@ pub(crate) mod ownership_seam {
         repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf())
     }
 
-    pub(crate) fn enforce_for(repo: &Path) {
+    pub fn enforce_for(repo: &Path) {
         ENFORCED.lock().unwrap().push(key(repo));
     }
 
@@ -4850,13 +4850,13 @@ pub fn committed_file_changes(
 /// `GIT_GRAFT_FILE` value that reads as "no grafts": `<git-dir>/info/grafts`
 /// is shared by every worktree of the repository, so a worker can write it to
 /// give a commit other parents and hide the commits behind it from a log.
-pub(crate) const NO_GRAFTS_ENV: (&str, &str) = (
+pub const NO_GRAFTS_ENV: (&str, &str) = (
     "GIT_GRAFT_FILE",
     if cfg!(windows) { "NUL" } else { "/dev/null" },
 );
 
 /// The `(sha, full message)` records of `git log -z --format=%H%n%B`.
-pub(crate) fn parse_commit_log(stdout: &[u8]) -> Vec<(String, String)> {
+pub fn parse_commit_log(stdout: &[u8]) -> Vec<(String, String)> {
     String::from_utf8_lossy(stdout)
         .split('\0')
         .filter(|record| !record.trim().is_empty())

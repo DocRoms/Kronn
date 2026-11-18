@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use crate::core::docs_location::DocsRoot;
 
-pub(crate) use crate::agents::read_only_repos::KRONN_OWNED;
+pub use crate::agents::read_only_repos::KRONN_OWNED;
 
 fn kronn_owned(rel: &str) -> bool {
     KRONN_OWNED
@@ -46,7 +46,7 @@ fn kronn_owned(rel: &str) -> bool {
 
 /// What [`StepRemit::settle`] did and saw.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct RemitReport {
+pub struct RemitReport {
     /// Commits the step made, undone by a soft reset (short sha + subject).
     pub commits_undone: Vec<String>,
     /// Files of another AI-doc folder put back to their pre-step content.
@@ -57,7 +57,7 @@ pub(crate) struct RemitReport {
 
 /// A file restored by [`StepRemit::settle`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Reverted {
+pub struct Reverted {
     pub path: String,
     /// Blob holding the content that was overwritten (`git cat-file -p`);
     /// `None` when the step had deleted the file.
@@ -110,7 +110,7 @@ impl RemitReport {
 }
 
 /// The state of the repository when the step began.
-pub(crate) struct StepRemit {
+pub struct StepRemit {
     project: PathBuf,
     /// Project folder inside the repository (`sub/` or empty).
     prefix: String,
@@ -275,7 +275,7 @@ const FLAGGED_CONTENT_MAX: usize = 2_000;
 /// The largest file whose bytes the remit keeps or compares: a larger one is
 /// never read whole into memory; it is left as it is and reported when it
 /// changed.
-pub(crate) const REMIT_CONTENT_MAX: u64 = 64 * 1024 * 1024;
+pub const REMIT_CONTENT_MAX: u64 = 64 * 1024 * 1024;
 
 /// The bytes of `rel` through the rooted primitive (`None` when absent), or an
 /// error for a link, a non-regular entry or a file past [`REMIT_CONTENT_MAX`].
@@ -1231,7 +1231,7 @@ impl StepRemit {
 }
 
 /// One `step_warning` event per finding, for a pipeline to relay.
-pub(crate) fn warning_events(
+pub fn warning_events(
     step: impl serde::Serialize + Copy,
     file: &str,
     report: &RemitReport,
@@ -1255,7 +1255,7 @@ pub(crate) fn warning_events(
 }
 
 /// The remit told to the agent (KT-1360). Appended to every step prompt.
-pub(crate) fn remit_prompt_block(docs_root: &DocsRoot) -> String {
+pub fn remit_prompt_block(docs_root: &DocsRoot) -> String {
     let root = docs_root.rel();
     format!(
         "## Remit of this audit (strict)\n\

@@ -778,14 +778,14 @@ pub fn set_aside_unchanged(dir: &Path, path: &Path) -> Result<Aside> {
 // the way a racing process could.
 #[cfg(all(unix, test))]
 thread_local! {
-    pub(crate) static BEFORE_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    pub static BEFORE_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 // Run by a test after a mismatch was found, before the entry is moved back.
 #[cfg(all(unix, test))]
 thread_local! {
-    pub(crate) static BEFORE_MOVE_BACK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    pub static BEFORE_MOVE_BACK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 

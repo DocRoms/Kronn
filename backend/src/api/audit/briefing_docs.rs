@@ -19,10 +19,10 @@ use crate::AppState;
 
 use super::project_doc::{cell, check_text};
 
-pub(crate) const DOCS_HEADING: &str = "## Existing documentation";
-pub(crate) const DOCS_ANSWERS_PREFIX: &str = "<!-- kronn:existing-docs v1 ";
+pub const DOCS_HEADING: &str = "## Existing documentation";
+pub const DOCS_ANSWERS_PREFIX: &str = "<!-- kronn:existing-docs v1 ";
 const DOCS_ANSWERS_SUFFIX: &str = " -->";
-pub(crate) const NOTE_MAX_CHARS: usize = 200;
+pub const NOTE_MAX_CHARS: usize = 200;
 
 fn kind_label(kind: BriefingDocKind) -> &'static str {
     match kind {
@@ -50,7 +50,7 @@ fn state_label(state: BriefingDocState) -> &'static str {
 /// Validate the answers against the repository: each path is re-normalised
 /// and re-classified, duplicates keep their first entry, and a kind has at
 /// most one source of truth, which cannot be obsolete. Dates are left empty.
-pub(crate) fn normalize(
+pub fn normalize(
     root: &std::path::Path,
     answers: &BriefingDocsAnswers,
 ) -> Result<BriefingDocsAnswers, String> {
@@ -99,7 +99,7 @@ pub(crate) fn normalize(
 }
 
 /// [`normalize`], then the last commit date of every location.
-pub(crate) async fn normalize_with_dates(
+pub async fn normalize_with_dates(
     root: &std::path::Path,
     answers: &BriefingDocsAnswers,
 ) -> Result<BriefingDocsAnswers, String> {
@@ -138,7 +138,7 @@ fn location_line(l: &BriefingDocLocation) -> String {
 }
 
 /// The `## Existing documentation` section, or `None` without any location.
-pub(crate) fn render_section(answers: &BriefingDocsAnswers) -> Option<String> {
+pub fn render_section(answers: &BriefingDocsAnswers) -> Option<String> {
     if answers.locations.is_empty() {
         return None;
     }
@@ -161,7 +161,7 @@ pub(crate) fn render_section(answers: &BriefingDocsAnswers) -> Option<String> {
 }
 
 /// The documentation answers recorded in a briefing, if any.
-pub(crate) fn parse(notes: &str) -> Option<BriefingDocsAnswers> {
+pub fn parse(notes: &str) -> Option<BriefingDocsAnswers> {
     notes.lines().find_map(|line| {
         let json = line
             .trim()
@@ -174,7 +174,7 @@ pub(crate) fn parse(notes: &str) -> Option<BriefingDocsAnswers> {
 /// `notes` without the documentation section: the briefing block of a step
 /// prompt never carries it. [`prompt_block`] gives the steps that use it their
 /// own, when the setting is on (KT-999).
-pub(crate) fn strip_section(notes: &str) -> String {
+pub fn strip_section(notes: &str) -> String {
     super::project_doc::strip_sections(notes, &[DOCS_HEADING], &[DOCS_ANSWERS_PREFIX])
 }
 
@@ -182,15 +182,15 @@ pub(crate) fn strip_section(notes: &str) -> String {
 
 /// Set to `1` to give the audit steps the documentation section for one run
 /// (the bench switch); the `audit_briefing_docs` setting does it for good.
-pub(crate) const ENV_SWITCH: &str = "KRONN_EXP_BRIEFING_DOCS";
+pub const ENV_SWITCH: &str = "KRONN_EXP_BRIEFING_DOCS";
 
 /// Longest documentation block, in characters, in a step prompt. It counts
 /// inside the briefing cap: the briefing text gives up the room it takes.
-pub(crate) const PROMPT_MAX_CHARS: usize = 3_000;
+pub const PROMPT_MAX_CHARS: usize = 3_000;
 
 /// Whether the audit prompts carry the documentation section: the setting, or
 /// the env switch of a bench run. Off by default.
-pub(crate) fn prompt_enabled(setting: bool) -> bool {
+pub fn prompt_enabled(setting: bool) -> bool {
     setting
         || crate::core::child_env::var(ENV_SWITCH)
             .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
@@ -308,7 +308,7 @@ fn prompt_safe(l: &BriefingDocLocation) -> bool {
 /// briefing without a location; the caller decides whether the setting is on
 /// ([`prompt_enabled`]). At most [`PROMPT_MAX_CHARS`]: the obsolete locations
 /// are the last to be dropped.
-pub(crate) fn prompt_block(target_file: &str, notes: &str, docs_root: &DocsRoot) -> String {
+pub fn prompt_block(target_file: &str, notes: &str, docs_root: &DocsRoot) -> String {
     let Some(step) = docs_step(target_file) else {
         return String::new();
     };

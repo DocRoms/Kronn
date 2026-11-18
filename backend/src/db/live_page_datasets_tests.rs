@@ -114,7 +114,7 @@ fn publish(
 }
 
 /// A workflow whose PublishPageData step writes `dataset` into `target`.
-pub(crate) fn writer(conn: &Connection, id: &str, target: &str, dataset: &str) {
+pub fn writer(conn: &Connection, id: &str, target: &str, dataset: &str) {
     let mut workflow = crate::db::tests::sample_workflow(id);
     workflow.name = format!("Feed {id}");
     workflow.steps[0].step_type = StepType::PublishPageData;

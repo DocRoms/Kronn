@@ -18,7 +18,7 @@ use crate::core::version_sources::{verify_dep_marker, DependencySnapshot};
 use std::path::Path;
 
 pub use crate::core::anti_halluc::{named_sections, NamedSection};
-pub(crate) use crate::core::anti_halluc::{code_line_mask, parse_named_sections};
+pub use crate::core::anti_halluc::{code_line_mask, parse_named_sections};
 pub(super) use crate::core::anti_halluc::{extract_attr, is_human_owned_marker};
 
 /// Total attempts (1 initial + retries) allowed per step in enforce mode.
@@ -1164,7 +1164,7 @@ pub fn evaluate_enforce_gate(
 
 /// The reason of a step that still holds fabricated citations once its
 /// attempts are spent.
-pub(crate) fn enforce_failure_reason(count: usize, max_attempts: usize) -> String {
+pub fn enforce_failure_reason(count: usize, max_attempts: usize) -> String {
     format!(
         "{} {}(s) still present after {} attempts (enforce mode)",
         count,

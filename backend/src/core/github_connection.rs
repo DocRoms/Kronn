@@ -33,7 +33,7 @@ pub const MAX_TOKEN_CHARS: usize = 512;
 // ─── Remote detection ───────────────────────────────────────────────────────
 
 /// Normalize a repo URL for comparison (strip .git suffix, lowercase, strip protocol prefix)
-pub(crate) fn normalize_repo_url(url: &str) -> String {
+pub fn normalize_repo_url(url: &str) -> String {
     url.to_lowercase()
         .trim_end_matches('/')
         .trim_end_matches(".git")

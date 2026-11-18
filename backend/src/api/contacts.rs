@@ -504,7 +504,7 @@ pub async fn advertised_host_async(server: &crate::models::ServerConfig) -> Stri
 
 /// HTTP client for requests to a contact: short timeout, no redirects (a
 /// peer must not bounce Kronn to another address).
-pub(crate) fn guarded_client() -> reqwest::Client {
+pub fn guarded_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .redirect(reqwest::redirect::Policy::none())

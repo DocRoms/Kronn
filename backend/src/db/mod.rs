@@ -1,108 +1,50 @@
 pub mod acp_runtime_sessions;
-pub mod agent_decisions;
 pub mod agent_dispatch;
-pub mod agent_jobs;
 pub mod api_access_policies;
-pub mod api_call_logs;
 pub mod assistant_conversations;
-pub mod audit_cross;
 pub mod audit_documents;
-pub mod audit_run_cost;
 pub mod audit_runs;
-pub mod audit_validation;
 pub mod cli_telemetry;
-pub(crate) mod cli_worker_bindings;
-pub mod compare;
 pub mod contacts;
-pub mod context_audits;
 pub mod credential_scrub;
-pub mod default_contents;
 pub mod delivery_summaries;
 pub mod disc_source;
-pub mod discussion_actions;
-pub mod discussion_ceiling_requests;
-pub mod discussion_effort;
-pub mod discussion_important;
-pub(crate) mod discussion_launch_settings;
-pub mod message_ingest;
 pub mod discussion_monitor;
-pub mod discussion_questions;
-pub mod discussion_scope;
-pub mod discussion_scope_grants;
 pub mod discussion_sessions;
-pub mod discussion_video_sequences;
-pub mod discussion_weight;
 pub mod discussion_workspaces;
 pub mod discussions;
 pub mod execution_activity;
 pub mod execution_variable_snapshots;
 pub mod external_api_connections;
 pub mod github_connections;
-pub mod human_credentials;
-pub mod id_resolver;
-pub(crate) mod kronn_action_engine;
-pub mod learnings;
 pub mod legacy_shadow;
-pub mod lite_llm_model_failures;
-pub mod live_page_action_trusts;
-pub mod live_page_actions;
-pub mod live_pages;
 pub mod mcps;
 pub mod media_jobs;
 pub mod message_usage;
 pub mod migrations;
-pub mod model_catalog;
-pub mod orchestration;
 pub mod planning;
 pub mod planning_proposals;
-pub mod project_skill_references;
 pub mod projects;
-pub mod quick_apis;
-pub mod quick_exec_runs;
-pub mod quick_execs;
-pub mod quick_prompts;
 pub mod repository_resources;
 pub mod resource_changes;
-pub mod resource_identities;
 pub mod review_ledger;
 pub mod run_outcome;
-pub mod run_retention;
 pub mod run_state;
 pub mod schema_check;
-pub mod shared_runs;
-pub mod step_shadow_merges;
-pub mod step_shadows;
 pub mod stored_credentials;
-pub mod task_boards;
-pub mod trust;
-pub mod ui_preferences;
 pub mod worker_deliveries;
-pub mod worker_offers;
 pub mod worker_reviews;
 pub mod workflow_run_pins;
-pub mod workflow_step_rooms;
 pub mod workflow_watch_state;
-pub mod workflows;
 
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "tests.rs"]
-mod tests;
 
-#[cfg(all(test, feature = "full-tests"))]
-mod release_gate_tests;
 
-#[cfg(all(test, feature = "full-tests"))]
-mod large_db_measure;
 
-#[cfg(test)]
-mod insert_redaction_measure;
 
-#[cfg(all(test, feature = "full-tests"))]
-mod upgrade_fixture_tests;
 
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
 #[cfg(test)]
-pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+pub fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
     let mut statement = conn
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
         .expect("query plan");
@@ -119,7 +61,7 @@ pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
 /// covering index. On `workflow_runs` such a read walks the run's step results
 /// to reach any later column.
 #[cfg(test)]
-pub(crate) fn table_reads_outside_index(plan: &[String], aliases: &[&str]) -> Vec<String> {
+pub fn table_reads_outside_index(plan: &[String], aliases: &[&str]) -> Vec<String> {
     plan.iter()
         .filter(|line| {
             let mut words = line.split_whitespace();
@@ -141,7 +83,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::config;
 
-fn parse_dt(s: String) -> DateTime<Utc> {
+pub fn parse_dt(s: String) -> DateTime<Utc> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
         return dt.with_timezone(&Utc);
     }
@@ -249,7 +191,7 @@ impl Database {
     /// Open the one production database after the caller has acquired the
     /// process-wide data-directory lock. Only this mode may discard commit
     /// leases: no Git worker from an earlier backend can still be live.
-    pub(crate) fn open_path_for_backend_boot(path: &PathBuf) -> Result<Self> {
+    pub fn open_path_for_backend_boot(path: &PathBuf) -> Result<Self> {
         Self::open_path_internal(path, true)
     }
 
@@ -378,7 +320,7 @@ impl Database {
     /// `&Database`). Reads, writes, the change signal and the assistant guard
     /// are shared; the boot-interrupted list and the catalogue refresh locks
     /// are NOT — drain and lock them on the original only.
-    pub(crate) fn share_handle(&self) -> Database {
+    pub fn share_handle(&self) -> Database {
         Database {
             conn: Arc::clone(&self.conn),
             read_conn: self.read_conn.clone(),
@@ -390,7 +332,7 @@ impl Database {
         }
     }
 
-    pub(crate) async fn lock_catalog_refresh(
+    pub async fn lock_catalog_refresh(
         &self,
         target: &str,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
@@ -465,7 +407,7 @@ impl Database {
     /// Whether no closure currently holds the write connection: lets a test
     /// assert that slow work runs outside `with_conn` (KT-1646).
     #[cfg(test)]
-    pub(crate) fn write_connection_is_free(&self) -> bool {
+    pub fn write_connection_is_free(&self) -> bool {
         !matches!(
             self.conn.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
@@ -524,7 +466,7 @@ impl Database {
 /// encryption key: no other account on the machine may read them (KT-990).
 /// Agents run as the same user, so this does not keep them out; that is the
 /// isolation work planned for 0.14.3.
-pub(crate) fn restrict_data_dir_to_owner(dir: &std::path::Path) {
+pub fn restrict_data_dir_to_owner(dir: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -16998,7 +16998,7 @@ sleep 3600
         // measure nothing.
         if real_project.is_none() {
             let real_doc = std::fs::read_to_string(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/AGENTS.md"),
+                std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../docs/AGENTS.md"),
             )
             .expect("the project's own docs/AGENTS.md");
             std::fs::write(

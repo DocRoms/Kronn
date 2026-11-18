@@ -1,0 +1,78 @@
+//! Layer 2 of the Kronn backend: a crate of its own so that no single
+//! compilation holds the whole backend. Modules keep their `crate::<top>::<name>`
+//! paths in every layer; a layer sees its own modules and the ones below.
+// Test fixtures may start processes directly; production code cannot (clippy.toml).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+// Without `full-tests` (the macOS portability job) most unit-test modules are
+// configured out, so test-only helpers that remain `cfg(test)` go unused.
+#![cfg_attr(
+    all(test, not(feature = "full-tests")),
+    allow(dead_code, unused_imports)
+)]
+
+pub mod acp {
+    pub use kronn_l1::acp::*;
+}
+pub use kronn_l1::agents;
+pub mod api {
+    pub use kronn_l1::api::*;
+    pub mod agent_jobs;
+    pub mod contacts;
+    pub mod delivery_publication;
+    pub mod disc_git;
+    pub mod disc_introspection;
+    pub mod disc_invite;
+    pub mod disk;
+    pub mod federation;
+    pub mod mcp_remote;
+    pub mod media;
+    pub mod media_reference_settings;
+    pub mod media_request_guard;
+    pub mod orchestration;
+    pub mod planning;
+    pub mod quick_apis;
+    pub mod quick_execs;
+    pub mod quick_prompts;
+    pub mod shared_runs;
+    pub mod signal_catalog;
+    pub mod worker_time_limit;
+    pub mod workflows;
+    pub mod ws;
+}
+pub mod core {
+    pub use kronn_l1::core::*;
+    pub mod agent_fallback;
+    pub mod audit_validation;
+    pub mod connection_fallback;
+    pub mod cross_audit;
+    pub mod cross_audit_decision;
+    pub mod project_profile;
+    pub mod run_notify;
+    pub mod task_worker_lane_seeds;
+    pub mod td_decisions;
+    pub mod td_review;
+    pub mod td_tasks;
+    pub mod ws_client;
+}
+pub mod db {
+    pub use kronn_l1::db::*;
+    pub mod audit_cross;
+    pub mod cli_worker_bindings;
+    pub mod discussion_actions;
+    pub mod discussion_scope;
+    pub mod kronn_action_engine;
+    pub mod orchestration;
+    pub mod step_shadow_merges;
+    pub mod step_shadows;
+    pub mod worker_offers;
+}
+pub use kronn_l1::delivery;
+pub use kronn_l1::http_transport;
+pub use kronn_l1::models;
+pub use kronn_l1::state;
+pub mod workflows;
+
+pub use crate::db::Database;
+pub use crate::models::AppConfig;
+pub use crate::state::*;
+pub use crate::workflows::WorkflowEngine;

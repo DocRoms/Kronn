@@ -287,7 +287,7 @@ pub async fn agent_api_call(
 /// to that project, or opted into General for a project-less token. Checked
 /// here because the executor would otherwise fall back to the config's own
 /// first project for a project-less call.
-pub(crate) async fn config_visible_to(
+pub async fn config_visible_to(
     state: &AppState,
     config_id: Option<String>,
     quick_api_id: Option<String>,

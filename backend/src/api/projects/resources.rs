@@ -26,7 +26,7 @@ pub(super) use crate::core::repository_skills::{read_repository_file, side_text}
 #[cfg(all(test, feature = "full-tests"))]
 use crate::core::repository_skills::MAX_CONTENT_BYTES;
 
-pub(crate) use crate::core::repository_skills::PROJECT_SKILL_ROOTS;
+pub use crate::core::repository_skills::PROJECT_SKILL_ROOTS;
 
 /// Every directory whose files the listing dates: `kronn/` and the native
 /// skill folders.
@@ -282,44 +282,6 @@ fn lock_entry(
             required_secrets: Vec::new(),
         },
     )
-}
-
-impl ProjectRepositoryResourceKind {
-    pub(super) fn identity_kind(self) -> &'static str {
-        match self {
-            Self::Skill => "skill",
-            Self::Workflow => "workflow",
-            Self::QuickPrompt => "quick_prompt",
-            Self::QuickApi => "quick_api",
-            Self::QuickExec => "quick_exec",
-            Self::Artifact => "artifact",
-        }
-    }
-
-    fn level(self) -> ProjectRepositoryResourceLevel {
-        match self {
-            Self::Skill | Self::QuickPrompt | Self::QuickExec => {
-                ProjectRepositoryResourceLevel::UsableWithoutKronn
-            }
-            Self::Workflow | Self::QuickApi | Self::Artifact => {
-                ProjectRepositoryResourceLevel::KronnRequired
-            }
-        }
-    }
-
-    fn paths(self, slug: &str) -> Vec<String> {
-        match self {
-            Self::Skill => vec![crate::core::repository_resources::skill_path(slug)],
-            Self::Workflow => vec![format!("kronn/workflows/{slug}.yaml")],
-            Self::QuickPrompt => vec![format!("kronn/prompts/{slug}.md")],
-            Self::QuickApi => vec![format!("kronn/quick-apis/{slug}.yaml")],
-            Self::QuickExec => vec![format!("kronn/quick-execs/{slug}.yaml")],
-            Self::Artifact => vec![
-                format!("kronn/artifacts/{slug}/artifact.yaml"),
-                format!("kronn/artifacts/{slug}/index.html"),
-            ],
-        }
-    }
 }
 
 pub(super) fn parse_identity_time(value: &str) -> Option<DateTime<Utc>> {

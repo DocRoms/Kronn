@@ -869,7 +869,7 @@ async fn provision_review_workspace(
     })
 }
 
-pub(crate) use crate::api::disc_git::{release_review_worktree, sweep_archived_review_worktrees};
+pub use crate::api::disc_git::{release_review_worktree, sweep_archived_review_worktrees};
 
 /// PATCH /api/discussions/:id
 pub async fn update(

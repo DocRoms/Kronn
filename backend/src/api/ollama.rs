@@ -18,7 +18,7 @@ use std::{convert::Infallible, pin::Pin, time::Duration};
 type OllamaSseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
 pub use crate::api::ollama_health::{health, resolve_base_url_pub};
-pub(crate) use crate::api::ollama_health::mlx_capable;
+pub use crate::api::ollama_health::mlx_capable;
 use crate::api::ollama_health::ollama_base_url;
 #[cfg(test)]
 use crate::api::ollama_health::{fetch_server_version, online_health, version_from_body};
@@ -195,7 +195,7 @@ fn context_origin_label(origin: &crate::agents::runner::CtxCapOrigin) -> String 
     .to_string()
 }
 
-pub(crate) use crate::core::ollama_registry::format_size;
+pub use crate::core::ollama_registry::format_size;
 
 /// POST /api/ollama/context-override
 ///

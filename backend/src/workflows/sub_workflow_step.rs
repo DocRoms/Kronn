@@ -58,7 +58,7 @@ pub struct ChildLaunch<'a> {
 /// A mapping may not read a parent variable resolved from the project
 /// environment or the Kronn context: secrets are never forwarded, the child
 /// declares its own. Pure, shared by save-time validation and the executors.
-pub(crate) fn secret_mapping_error(
+pub fn secret_mapping_error(
     step: &WorkflowStep,
     parent_variables: &[PromptVariable],
 ) -> Option<String> {
@@ -100,7 +100,7 @@ pub(crate) fn secret_mapping_error(
 /// The project a child runs in: the parent run's when the child serves it
 /// (a multi-project child, KT-851), else its own when pinned, else the
 /// parent run's.
-pub(crate) fn child_project_id(
+pub fn child_project_id(
     child: &Workflow,
     parent_project_id: Option<&str>,
 ) -> Option<String> {
@@ -117,12 +117,12 @@ pub(crate) fn child_project_id(
 
 /// A child running for another project must not attach to the parent's
 /// worktree: that checkout belongs to another repository.
-pub(crate) fn pinned_to_another_project(child: &Workflow, parent_project_id: Option<&str>) -> bool {
+pub fn pinned_to_another_project(child: &Workflow, parent_project_id: Option<&str>) -> bool {
     child_project_id(child, parent_project_id).as_deref() != parent_project_id
 }
 
 /// Every mapped name must be a launch variable of the child.
-pub(crate) fn undeclared_mapping_error(step: &WorkflowStep, child: &Workflow) -> Option<String> {
+pub fn undeclared_mapping_error(step: &WorkflowStep, child: &Workflow) -> Option<String> {
     let mut names: Vec<_> = step.sub_workflow_variables.keys().collect();
     names.sort();
     names
@@ -142,7 +142,7 @@ pub(crate) fn undeclared_mapping_error(step: &WorkflowStep, child: &Workflow) ->
 }
 
 /// Renders a step's `sub_workflow_variables` strictly in the parent run.
-pub(crate) fn render_child_variables(
+pub fn render_child_variables(
     step: &WorkflowStep,
     ctx: &TemplateContext,
 ) -> Result<std::collections::HashMap<String, String>, String> {
@@ -814,7 +814,7 @@ const MAX_FOREACH_ITEMS: usize = 30;
 
 /// Save-time shape of `sub_workflow_foreach_file`: a plain path relative to
 /// the worktree. Blank means no fan-out.
-pub(crate) fn validate_foreach_file(path: &str) -> Result<(), String> {
+pub fn validate_foreach_file(path: &str) -> Result<(), String> {
     let path = path.trim();
     if path.is_empty() {
         return Ok(());
@@ -904,7 +904,7 @@ fn read_foreach_file(worktree: &str, path: &str) -> Result<String, String> {
 /// Phase 3b — parse the foreach file content into items. Pure for tests.
 /// Must be a JSON array; empty or oversized arrays are explicit errors (an
 /// empty work-list almost always means the upstream step misfired).
-pub(crate) fn parse_foreach_items(content: &str) -> Result<Vec<serde_json::Value>, String> {
+pub fn parse_foreach_items(content: &str) -> Result<Vec<serde_json::Value>, String> {
     let v: serde_json::Value = serde_json::from_str(content)
         .map_err(|e| format!("foreach file is not valid JSON: {e}"))?;
     let arr = v
@@ -928,7 +928,7 @@ pub(crate) fn parse_foreach_items(content: &str) -> Result<Vec<serde_json::Value
 /// Flip économique (2026-06-12) — map an item's `complexity` onto a model
 /// tier for the child's Agent steps: low → Economy (cheap model on boilerplate),
 /// high → Reasoning, med/absent → None (agent default). Pure for tests.
-pub(crate) fn tier_for_complexity(complexity: Option<&str>) -> Option<crate::models::ModelTier> {
+pub fn tier_for_complexity(complexity: Option<&str>) -> Option<crate::models::ModelTier> {
     match complexity {
         Some("low") => Some(crate::models::ModelTier::Economy),
         Some("high") => Some(crate::models::ModelTier::Reasoning),
@@ -945,7 +945,7 @@ pub(crate) fn tier_for_complexity(complexity: Option<&str>) -> Option<crate::mod
 ///   completeness contract still holds without an agent).
 ///
 /// Pure for tests.
-pub(crate) fn validate_mechanical_files(
+pub fn validate_mechanical_files(
     item: &serde_json::Value,
 ) -> Result<Vec<(String, String)>, String> {
     let files = item
@@ -995,7 +995,7 @@ pub(crate) fn validate_mechanical_files(
 }
 
 /// Phase 3b — aggregate per-item outcomes into (status, signal). Pure for tests.
-pub(crate) fn aggregate_foreach(succeeded: usize, failed: usize) -> (&'static str, &'static str) {
+pub fn aggregate_foreach(succeeded: usize, failed: usize) -> (&'static str, &'static str) {
     if failed == 0 {
         ("OK", "OK")
     } else if succeeded == 0 {
@@ -1014,7 +1014,7 @@ pub(crate) fn aggregate_foreach(succeeded: usize, failed: usize) -> (&'static st
 /// string-valued top-level keys in the child's `trigger_context`, which the
 /// runner's generic injector ([`inject_trigger_context`]) turns into template
 /// vars. Pure for tests.
-pub(crate) fn current_task_template_vars(item: &serde_json::Value) -> Vec<(String, String)> {
+pub fn current_task_template_vars(item: &serde_json::Value) -> Vec<(String, String)> {
     let mut out = vec![("current_task".to_string(), item.to_string())];
     if let Some(obj) = item.as_object() {
         for (k, v) in obj {

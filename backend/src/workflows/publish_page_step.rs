@@ -225,7 +225,7 @@ fn exec_value(
     })
 }
 
-pub(crate) fn typed_source_key(source: &str) -> Result<&str> {
+pub fn typed_source_key(source: &str) -> Result<&str> {
     let source = source.trim();
     if let Some(inner) = source
         .strip_prefix("{{")

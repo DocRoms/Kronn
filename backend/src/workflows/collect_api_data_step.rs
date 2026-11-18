@@ -533,7 +533,7 @@ fn collector_failure_message(
     }
 }
 
-pub(crate) fn quick_exec_value(
+pub fn quick_exec_value(
     envelope_data: &Value,
     output_format: CollectQuickExecOutputFormat,
 ) -> Result<Value, String> {

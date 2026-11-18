@@ -437,7 +437,7 @@ pub fn launch_confinement() -> Option<LevelConfinement> {
 
 /// The data directory as Claude's rules name it: `Read(//abs/path/**)`, the
 /// double slash being Claude's spelling of a path from the filesystem root.
-pub(crate) fn claude_rule(tool: &str, dir: &Path) -> String {
+pub fn claude_rule(tool: &str, dir: &Path) -> String {
     format!(
         "{tool}(/{}/**)",
         dir.to_string_lossy().trim_end_matches('/')

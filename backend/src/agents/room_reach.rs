@@ -14,7 +14,7 @@ use super::read_only_repos::VerifiedCheckout;
 
 /// What the agent can do with a granted project's files this turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Files {
+pub enum Files {
     /// Opened as a read-only directory for this launch (Claude Code).
     ReadOnlyDir,
     /// A `code` grant (KT-1491): the checkout is opened writable for this
@@ -37,7 +37,7 @@ pub(crate) enum Files {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlannedProject {
+pub struct PlannedProject {
     pub project: ReachedProject,
     pub files: Files,
     /// The validated checkout behind `Files::ReadOnlyDir`: what the launch
@@ -46,7 +46,7 @@ pub(crate) struct PlannedProject {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct RoomReachPlan {
+pub struct RoomReachPlan {
     pub granted: Vec<PlannedProject>,
     pub requestable: Vec<String>,
 }
@@ -61,7 +61,7 @@ pub(crate) struct RoomReachPlan {
 /// directory it can already read would be a regression. Codex is left with
 /// its default sandbox too: nothing is opened for it, a `code` grant included
 /// (its file sandbox is a separate work item).
-pub(crate) fn plan(
+pub fn plan(
     agent: &AgentType,
     work_dir: Option<&Path>,
     full_access: bool,
@@ -129,7 +129,7 @@ fn one_line(text: &str) -> String {
 impl RoomReachPlan {
     /// The validated checkouts to hand to the launch: read-only roots, and the
     /// writable ones of a `code` grant (`VerifiedCheckout::is_writable`).
-    pub(crate) fn checkouts(&self) -> Vec<VerifiedCheckout> {
+    pub fn checkouts(&self) -> Vec<VerifiedCheckout> {
         self.granted
             .iter()
             .filter_map(|entry| entry.checkout.clone())
@@ -138,7 +138,7 @@ impl RoomReachPlan {
 
     /// The agent's context block; empty when the room reaches nothing and has
     /// nothing to ask for.
-    pub(crate) fn prompt(&self) -> String {
+    pub fn prompt(&self) -> String {
         if self.granted.is_empty() && self.requestable.is_empty() {
             return String::new();
         }

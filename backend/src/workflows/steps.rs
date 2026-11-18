@@ -23,18 +23,18 @@ pub struct StepOutcome {
 
 /// Output from a single agent run, including token usage.
 #[derive(Debug)]
-pub(crate) struct AgentOutput {
+pub struct AgentOutput {
     attempt_id: u32,
-    pub(crate) text: String,
+    pub text: String,
     /// `None`: the runtime reported no usage for this run.
-    pub(crate) tokens_used: Option<u64>,
+    pub tokens_used: Option<u64>,
     prompt_cache: runner::PromptCacheUsage,
     /// The usage `tokens_used` came from, parts kept apart: an attempt's cost is
     /// computed from these, never from the total (KT-894). `None` when the
     /// runtime reported only a total, or nothing.
-    pub(crate) reported_usage: Option<runner::ReportedUsage>,
+    pub reported_usage: Option<runner::ReportedUsage>,
     /// The cost the agent itself reported, when it gives one.
-    pub(crate) reported_cost_usd: Option<f64>,
+    pub reported_cost_usd: Option<f64>,
     native_tool_calls: Vec<NativeToolCallLog>,
     runtime_notices: Vec<String>,
 }
@@ -66,7 +66,7 @@ pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
 
 /// The refusal of a native ACP step agent whose full-access setting is off,
 /// read as the runner reads it; `None` when the agent may start.
-pub(crate) fn native_full_access_refusal_for(agent: &AgentType) -> Option<String> {
+pub fn native_full_access_refusal_for(agent: &AgentType) -> Option<String> {
     (runner::requires_explicit_full_access(agent) && !crate::core::config::saved_full_access(agent))
         .then(|| runner::native_full_access_refusal(agent))
 }
@@ -106,7 +106,7 @@ fn refusal_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
     }
 }
 
-pub(crate) fn step_model_override(
+pub fn step_model_override(
     step: &WorkflowStep,
     connection: Option<&ExternalApiConnection>,
 ) -> Option<String> {
@@ -128,7 +128,7 @@ pub(crate) fn step_model_override(
 /// KT-910 — the run's artifacts directory, granted read-only to a Claude Code
 /// or Codex step whose prompt names it. Other agents get no grant: their
 /// launch has no read-only policy to carry it.
-pub(crate) fn artifacts_read_only_dirs(
+pub fn artifacts_read_only_dirs(
     step: &WorkflowStep,
     ctx: &TemplateContext,
     prompt: &str,
@@ -159,7 +159,7 @@ pub(crate) fn artifacts_read_only_dirs(
 /// Returns `Err(String)` when strict rendering rejects an unknown variable,
 /// incomplete placeholder or unsupported filter —
 /// the caller maps that into a `Failed` StepOutcome.
-pub(crate) fn build_step_prompt(
+pub fn build_step_prompt(
     step: &WorkflowStep,
     ctx: &TemplateContext,
 ) -> Result<String, String> {
@@ -1074,7 +1074,7 @@ pub async fn execute_step(
 /// True when a step's last error came from the stall watchdog (no agent output
 /// for `stall_timeout_secs`), as opposed to a crash/non-zero exit. Kept in sync
 /// with the `bail!` in `drive_agent_to_output`; pure + unit-tested.
-pub(crate) fn is_stall_error(err_msg: &str) -> bool {
+pub fn is_stall_error(err_msg: &str) -> bool {
     err_msg.contains("Agent stalled")
 }
 
@@ -1084,7 +1084,7 @@ pub(crate) fn is_stall_error(err_msg: &str) -> bool {
 /// anything else (crash, or a stall without `on_timeout`) fails normally and
 /// tips into the rollback chain. Returns `(output, condition_result,
 /// condition_action)`. Pure so the routing is unit-tested without an agent.
-pub(crate) fn timeout_routing(
+pub fn timeout_routing(
     stalled: bool,
     on_timeout: &Option<ConditionAction>,
     max_attempts: u32,
@@ -1169,7 +1169,7 @@ fn reviewer_shares_step_connection(step: &WorkflowStep, reviewer_agent: &AgentTy
     *reviewer_agent == step.agent
 }
 
-pub(crate) async fn resolve_step_connection(
+pub async fn resolve_step_connection(
     step: &WorkflowStep,
     catalog_db: Option<&crate::db::Database>,
 ) -> Result<Option<ExternalApiConnection>> {
@@ -1584,7 +1584,7 @@ fn format_silent_exit_error(exit_desc: &str, killed_by_signal: bool, stdout: &st
 /// timeout, then collect text + tokens. Generic over [`runner::AgentIo`]
 /// (0.8.8 test-seam) so the loop is exercised by a `ScriptedProcess` in
 /// tests without spawning a CLI.
-pub(crate) async fn drive_agent_to_output(
+pub async fn drive_agent_to_output(
     mut process: impl runner::AgentIo,
     progress_tx: Option<&ProgressSender>,
     activity: Option<&AgentActivitySink>,
@@ -2098,7 +2098,7 @@ async fn run_multi_agent_debate(
 /// *quotes* `[SIGNAL: ERROR]` in the MIDDLE of a sentence in the last 5
 /// lines no longer triggers a false Stop/Goto. (`contains` did; strict
 /// equality would have regressed content-then-signal lines.)
-pub(crate) fn evaluate_conditions(
+pub fn evaluate_conditions(
     rules: &[StepConditionRule],
     output: &str,
 ) -> Option<ConditionAction> {

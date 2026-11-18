@@ -242,7 +242,7 @@ async fn plan(
     })
 }
 
-pub(crate) use crate::api::orchestration::LAUNCH_REFUSAL_DETAIL_CHARS;
+pub use crate::api::orchestration::LAUNCH_REFUSAL_DETAIL_CHARS;
 
 pub(super) fn system_notice(
     content: String,
@@ -285,7 +285,7 @@ pub(super) fn system_notice(
 /// A task worker's QUOTA refusal is left to the caller: its settlement and the
 /// campaign's own opt-in (`quota_fallback`) come first, and the chain is asked
 /// from there through [`worker_after_quota`].
-pub(crate) async fn intercept_failed_turn(
+pub async fn intercept_failed_turn(
     state: &AppState,
     job: &AgentDispatchJob,
     response: &str,
@@ -300,7 +300,7 @@ pub(crate) async fn intercept_failed_turn(
 
 /// [`intercept_failed_turn`] with the installed agents given, so the policy is
 /// testable without the CLIs of the host.
-pub(crate) async fn intercept_failed_turn_among(
+pub async fn intercept_failed_turn_among(
     state: &AppState,
     job: &AgentDispatchJob,
     response: &str,
@@ -362,7 +362,7 @@ pub(crate) async fn intercept_failed_turn_among(
 /// The task worker's quota refusal, once its settlement and the campaign's own
 /// fallback have been looked at: the agent chain. `Ok(true)`: the execution
 /// moved to the next link.
-pub(crate) async fn worker_after_quota(
+pub async fn worker_after_quota(
     state: &AppState,
     job: &AgentDispatchJob,
     error: &str,
@@ -370,7 +370,7 @@ pub(crate) async fn worker_after_quota(
     worker_after_quota_among(state, job, error, None).await
 }
 
-pub(crate) async fn worker_after_quota_among(
+pub async fn worker_after_quota_among(
     state: &AppState,
     job: &AgentDispatchJob,
     error: &str,
@@ -411,7 +411,7 @@ pub(crate) async fn worker_after_quota_among(
 /// `trigger` says which stop it is, which is what the room line says:
 /// [`Trigger::LaunchRefused`] for a refusal, [`Trigger::LaunchUnavailable`] for
 /// retries that ran out.
-pub(crate) async fn worker_after_launch_refusal_among(
+pub async fn worker_after_launch_refusal_among(
     state: &AppState,
     job: &AgentDispatchJob,
     trigger: Trigger,
@@ -794,7 +794,7 @@ async fn apply_worker(state: &AppState, job: &AgentDispatchJob, plan: &Plan) -> 
 /// as a failing turn (cooldown, opt-in for a paid link, capabilities), applied
 /// through the same reassignment. `Ok(false)`: no chain, or nothing in it can
 /// take the work.
-pub(crate) async fn offer_to_escalated_execution_among(
+pub async fn offer_to_escalated_execution_among(
     state: &AppState,
     execution_id: &str,
     usable: Option<Vec<AgentType>>,

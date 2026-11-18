@@ -49,7 +49,7 @@ fn version_path(dir: &Path, index: u32) -> PathBuf {
 
 /// Adds `raw` as the next version of `slug`, unless it is the latest one
 /// already: a save that changes nothing adds nothing. Returns the new index.
-pub(crate) fn record(skills_dir: &Path, slug: &str, raw: &str) -> Result<Option<u32>, String> {
+pub fn record(skills_dir: &Path, slug: &str, raw: &str) -> Result<Option<u32>, String> {
     let dir = history_dir(skills_dir, slug);
     let existing = indexes(&dir);
     if let Some(last) = existing.last() {
@@ -70,14 +70,14 @@ pub(crate) fn record(skills_dir: &Path, slug: &str, raw: &str) -> Result<Option<
 
 /// A skill written before its history existed gets its current file as v1,
 /// so the first change made afterwards can still be undone.
-pub(crate) fn record_baseline(skills_dir: &Path, slug: &str, raw: &str) -> Result<(), String> {
+pub fn record_baseline(skills_dir: &Path, slug: &str, raw: &str) -> Result<(), String> {
     if indexes(&history_dir(skills_dir, slug)).is_empty() {
         record(skills_dir, slug, raw)?;
     }
     Ok(())
 }
 
-pub(crate) fn forget(skills_dir: &Path, slug: &str) -> Result<(), String> {
+pub fn forget(skills_dir: &Path, slug: &str) -> Result<(), String> {
     let dir = history_dir(skills_dir, slug);
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(()),

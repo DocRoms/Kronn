@@ -258,7 +258,7 @@ fn digest(text: &str) -> String {
 }
 
 /// The digest of every section, as recorded with the citation fingerprints.
-pub(crate) fn section_digests(content: &str) -> BTreeMap<String, String> {
+pub fn section_digests(content: &str) -> BTreeMap<String, String> {
     split_sections(content)
         .into_iter()
         .map(|s| (s.key, digest(&s.text)))
@@ -677,7 +677,7 @@ fn clause_says_file_gone(clause: &str, file: &str) -> bool {
 /// fact, is its own claim and keeps the citation broken. Only an explicit
 /// absence counts: "`a.rs` is used to check tokens" stays a claim that the file
 /// exists.
-pub(crate) fn says_cite_gone(content: &str, cite: &str) -> bool {
+pub fn says_cite_gone(content: &str, cite: &str) -> bool {
     let mut found = false;
     for clause in content.lines().flat_map(clauses) {
         for raw in crate::core::anti_halluc::extract_source_markers(clause) {
@@ -874,7 +874,7 @@ fn is_list_item(line: &str) -> bool {
 
 /// The changelog, release notes and history / archive docs name files that
 /// are gone because that is their job: they are not claims about the code now.
-pub(crate) fn is_historical_doc(doc: &str) -> bool {
+pub fn is_historical_doc(doc: &str) -> bool {
     let lower = doc.to_lowercase();
     let mut parts: Vec<&str> = lower.split('/').collect();
     let name = parts.pop().unwrap_or_default();
@@ -1145,7 +1145,7 @@ fn section_prose_paths(project: &Path, section: &Section) -> Vec<String> {
 
 /// Per section key, the prose paths of a doc that are gone. Empty for a
 /// historical doc.
-pub(crate) fn missing_by_section(
+pub fn missing_by_section(
     project: &Path,
     doc: &str,
     content: &str,
@@ -1170,7 +1170,7 @@ pub(crate) fn missing_by_section(
 /// Per section key, the gone prose paths of `doc` that no human
 /// acknowledgement accepted: what is still to be shown, and what keeps the
 /// doc "to re-verify".
-pub(crate) fn unaccepted_missing(
+pub fn unaccepted_missing(
     project: &Path,
     doc: &str,
     content: &str,
@@ -1216,7 +1216,7 @@ pub fn vanished_paths(project: &Path, doc: &str) -> Vec<VanishedPaths> {
 
 /// Whether the prose of `doc` names a path that is gone and that no human
 /// acknowledgement accepted, section by section.
-pub(crate) fn has_stale_prose_paths(project: &Path, doc: &str, content: &str) -> bool {
+pub fn has_stale_prose_paths(project: &Path, doc: &str, content: &str) -> bool {
     !unaccepted_missing(project, doc, content).is_empty()
 }
 

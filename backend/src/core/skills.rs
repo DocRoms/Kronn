@@ -194,15 +194,15 @@ const BUILTIN_SKILLS: &[BuiltinSkill] = &[
 /// `metadata` keys a skill written by Kronn carries for Kronn's own use: the
 /// Agent Skills format keeps `name` for the folder slug, so the display name,
 /// icon, category and attribution live here.
-pub(crate) const KRONN_NAME_KEY: &str = "kronn-name";
-pub(crate) const KRONN_ICON_KEY: &str = "kronn-icon";
-pub(crate) const KRONN_CATEGORY_KEY: &str = "kronn-category";
-pub(crate) const KRONN_EXTERNAL_KEY: &str = "kronn-external";
-pub(crate) const KRONN_SOURCE_URL_KEY: &str = "kronn-source-url";
-pub(crate) const KRONN_PROJECT_KEY: &str = "kronn-project";
+pub const KRONN_NAME_KEY: &str = "kronn-name";
+pub const KRONN_ICON_KEY: &str = "kronn-icon";
+pub const KRONN_CATEGORY_KEY: &str = "kronn-category";
+pub const KRONN_EXTERNAL_KEY: &str = "kronn-external";
+pub const KRONN_SOURCE_URL_KEY: &str = "kronn-source-url";
+pub const KRONN_PROJECT_KEY: &str = "kronn-project";
 
 /// The lowercase word a category is written as in a skill file.
-pub(crate) fn category_str(category: &SkillCategory) -> &'static str {
+pub fn category_str(category: &SkillCategory) -> &'static str {
     match category {
         SkillCategory::Language => "language",
         SkillCategory::Domain => "domain",
@@ -219,7 +219,7 @@ fn category_from_str(value: &str) -> Option<SkillCategory> {
     }
 }
 
-pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
+pub fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Skill> {
     let trimmed = raw.trim_start();
     if !trimmed.starts_with("---") {
         tracing::warn!("Skill '{}' missing YAML frontmatter", id);
@@ -451,7 +451,7 @@ fn custom_skills_dir() -> Option<PathBuf> {
     Some(config_dir.join("skills"))
 }
 
-pub(crate) fn skills_dir() -> Result<PathBuf, String> {
+pub fn skills_dir() -> Result<PathBuf, String> {
     custom_skills_dir().ok_or_else(|| "Cannot determine config directory".into())
 }
 

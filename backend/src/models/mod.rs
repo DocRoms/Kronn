@@ -83,7 +83,7 @@ pub use workflows::*;
 /// - Absent key → `None` (outer Option is None → use existing value)
 /// - Explicit null → `Some(None)` (set to null)
 /// - Present value → `Some(Some(value))` (set to value)
-pub(crate) fn deserialize_optional_field<'de, D, T>(
+pub fn deserialize_optional_field<'de, D, T>(
     deserializer: D,
 ) -> Result<Option<Option<T>>, D::Error>
 where
@@ -357,4 +357,4 @@ pub struct UploadContextFileResponse {
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "tests.rs"]
-mod tests;
+pub mod tests;

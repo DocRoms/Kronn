@@ -21,7 +21,7 @@ use crate::AppState;
 /// agent is running in it; then the discussion's pointer to it is cleared, so a
 /// later run is refused rather than started in the main checkout. Anything else
 /// is left in place and reported.
-pub(crate) async fn release_review_worktree(
+pub async fn release_review_worktree(
     db: &crate::db::Database,
     discussion_id: &str,
 ) -> crate::core::worktree::ReviewRelease {
@@ -97,7 +97,7 @@ pub(crate) async fn release_review_worktree(
 /// KT-1645 — release the worktrees of every archived review that still has one
 /// (archived before this ran, or kept at the time because an agent was live).
 /// Returns how many were removed.
-pub(crate) async fn sweep_archived_review_worktrees(db: &crate::db::Database) -> usize {
+pub async fn sweep_archived_review_worktrees(db: &crate::db::Database) -> usize {
     let ids = match db
         .with_conn(crate::db::discussions::archived_review_ids_with_workspace)
         .await
@@ -407,7 +407,7 @@ fn default_disc_pr_base() -> String {
 /// KT-1745: Kronn runs git in a worker's worktree only when it is the one git
 /// registered and its `.git` pointer still says so. When it is not, the panel
 /// says why, instead of showing an empty answer as if the workspace were clean.
-pub(crate) fn git_allowed_in(dir: &std::path::Path) -> Result<(), String> {
+pub fn git_allowed_in(dir: &std::path::Path) -> Result<(), String> {
     crate::core::lane_git::LaneGit::resolve(dir)
         .map(|_| ())
         .map_err(|reason| {
@@ -1379,7 +1379,7 @@ async fn build_global_mcp_context(state: &AppState) -> Option<String> {
 }
 
 /// Build global MCP context AND write .mcp.json for general (no-project) discussions.
-pub(crate) async fn prepare_general_mcp(
+pub async fn prepare_general_mcp(
     state: &AppState,
     workspace_path: &Option<String>,
 ) -> Option<String> {

@@ -1848,7 +1848,7 @@ pub fn join_disc_session(
 /// entropy is plenty).
 /// Crate-visible so a fixture can mint a session credential the same way the
 /// product does, instead of a test inventing a second hashing scheme.
-pub(crate) fn sha256_hex(input: &str) -> String {
+pub fn sha256_hex(input: &str) -> String {
     let mut h = Sha256::new();
     h.update(input.as_bytes());
     let digest = h.finalize();

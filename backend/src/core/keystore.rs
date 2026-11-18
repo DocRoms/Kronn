@@ -825,7 +825,7 @@ fn record_moves(dir: &Path, moved: Vec<String>, pending: Vec<String>, pending_ro
 }
 
 #[cfg(test)]
-pub(crate) fn record_report_for_tests(
+pub fn record_report_for_tests(
     dir: &Path,
     copies: usize,
     stale: &[&'static str],
@@ -898,7 +898,7 @@ pub fn set_recovery_passphrase(
 }
 
 #[cfg(test)]
-pub(crate) fn set_recovery_passphrase_in(
+pub fn set_recovery_passphrase_in(
     dir: &Path,
     config: &AppConfig,
     passphrase: &str,
@@ -910,7 +910,7 @@ pub(crate) fn set_recovery_passphrase_in(
 /// `replace_unverified`: the user confirmed replacing a recovery.key (from
 /// before 0.14.3, or one whose passphrase is forgotten) without its passphrase;
 /// it is kept and a restore still tries it.
-pub(crate) fn set_recovery_passphrase_with(
+pub fn set_recovery_passphrase_with(
     dir: &Path,
     config: &AppConfig,
     passphrase: &str,

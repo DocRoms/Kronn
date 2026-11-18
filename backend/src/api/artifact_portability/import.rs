@@ -1103,7 +1103,7 @@ fn commit_plan(
 /// Import a bundle Kronn ships itself, inside the caller's transaction: every
 /// dependency is a fresh copy, so nothing the user already has is reused or
 /// changed. Workflows land disabled, as for any import.
-pub(crate) fn import_shipped_in_transaction(
+pub fn import_shipped_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     content: String,
 ) -> Result<ArtifactImportResult> {

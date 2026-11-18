@@ -292,4 +292,4 @@ impl RecentActivity {
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "activity_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

@@ -24,12 +24,12 @@ const INVALID_SLUG_MESSAGE: &str = "Page slug must contain lowercase ASCII lette
 /// JSON-RPC request of at most 8 MiB (KT-1139), so an MCP agent writes a Page
 /// of up to about 8 MiB in one call; heavier Pages come through the UI, an
 /// import or the native tools.
-pub(crate) const PAGE_HTML_SAFETY_BYTES: usize = 24 * 1024 * 1024;
+pub const PAGE_HTML_SAFETY_BYTES: usize = 24 * 1024 * 1024;
 /// Weight grades shown in the UI and sent as a write notice (#252).
-pub(crate) const PAGE_HTML_HEAVY_BYTES: usize = 1024 * 1024;
-pub(crate) const PAGE_HTML_VERY_HEAVY_BYTES: usize = 4 * 1024 * 1024;
+pub const PAGE_HTML_HEAVY_BYTES: usize = 1024 * 1024;
+pub const PAGE_HTML_VERY_HEAVY_BYTES: usize = 4 * 1024 * 1024;
 
-pub(crate) fn validate_page_html(html: &str) -> Result<(), String> {
+pub fn validate_page_html(html: &str) -> Result<(), String> {
     if html.trim().is_empty() {
         return Err("Page HTML must be non-empty".into());
     }
@@ -45,7 +45,7 @@ pub(crate) fn validate_page_html(html: &str) -> Result<(), String> {
 
 /// The notice a successful write carries when the HTML is heavy, for the
 /// agent (`kronn_notice`); the Pages UI grades `html_size_bytes` itself.
-pub(crate) fn page_html_weight_notice(bytes: usize) -> Option<String> {
+pub fn page_html_weight_notice(bytes: usize) -> Option<String> {
     let advice = "consider optimizing it: WebP images, data moved to datasets, minification";
     if bytes > PAGE_HTML_VERY_HEAVY_BYTES {
         Some(format!(
@@ -928,7 +928,7 @@ fn normalize_page_title(title: &str) -> Result<String, &'static str> {
 
 /// A slug never looks like a page id: pages resolve by id or slug, and one
 /// page's slug equal to another's id would make the id ambiguous.
-pub(crate) fn valid_slug(slug: &str) -> bool {
+pub fn valid_slug(slug: &str) -> bool {
     Uuid::parse_str(slug).is_err()
         && !slug.is_empty()
         && slug.len() <= 100

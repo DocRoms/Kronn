@@ -140,7 +140,7 @@ pub async fn check_connection(
 
 /// [`check_connection`] at a given time and network policy (tests probe a
 /// loopback provider).
-pub(crate) async fn check_connection_with(
+pub async fn check_connection_with(
     state: &AppState,
     config_id: &str,
     now: DateTime<Utc>,

@@ -207,7 +207,7 @@ fn action_of(decision: TdReviewDecision) -> TdResolutionAction {
 
 /// Checks a whole batch against the sheets on disk before anything is
 /// written: unknown or duplicate ids refuse the batch.
-pub(crate) fn check_batch(items: &[TdDecisionItem], known: &[TdReviewItem]) -> Result<(), String> {
+pub fn check_batch(items: &[TdDecisionItem], known: &[TdReviewItem]) -> Result<(), String> {
     if items.is_empty() {
         return Err("Choose at least one tech-debt sheet".into());
     }
@@ -241,7 +241,7 @@ pub(crate) fn check_batch(items: &[TdDecisionItem], known: &[TdReviewItem]) -> R
 }
 
 /// Settles the batch on the sheets: all of them, or none.
-pub(crate) fn decide_at(
+pub fn decide_at(
     project_path: &std::path::Path,
     items: &[TdDecisionItem],
 ) -> Result<TdDecideOutcome, String> {
@@ -491,7 +491,7 @@ pub async fn td_talk(
 
 /// The creation request of a sheet's discussion: the first target leads, the
 /// others answer the same first turn.
-pub(crate) fn talk_discussion_request(
+pub fn talk_discussion_request(
     project_id: &str,
     item: &TdReviewItem,
     message: &str,

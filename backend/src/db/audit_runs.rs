@@ -1348,7 +1348,7 @@ impl StepTokens {
     /// Sum reported usage across two executed attempts. A component either
     /// attempt did not report stays unknown: a partial sum would read as
     /// complete and be priced (KT-1094).
-    pub(crate) fn plus(self, other: Self) -> Self {
+    pub fn plus(self, other: Self) -> Self {
         let sum = |a: Option<u64>, b: Option<u64>| Some(a?.saturating_add(b?));
         let reported = |tokens: &Self| tokens.input.is_some() || tokens.output.is_some();
         Self {
@@ -1367,7 +1367,7 @@ impl StepTokens {
     /// report a component adds nothing to it (a sum over a turn is a floor that
     /// is still consumed, unlike across attempts where a silent one makes it
     /// unknown).
-    pub(crate) fn across_turns(self, other: Self) -> Self {
+    pub fn across_turns(self, other: Self) -> Self {
         let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
@@ -1383,7 +1383,7 @@ impl StepTokens {
 
     /// The usage of a step's attempts so far, `previous` being `None` before
     /// the first one: no attempt yet is not an attempt that reported nothing.
-    pub(crate) fn after_attempt(previous: Option<Self>, attempt: Self) -> Self {
+    pub fn after_attempt(previous: Option<Self>, attempt: Self) -> Self {
         previous.map_or(attempt, |previous| previous.plus(attempt))
     }
 
@@ -1508,7 +1508,7 @@ impl StepTokens {
 
 /// A later documentary gate can invalidate an earlier successful agent step.
 /// Preserve its timing/usage and original warning; resume must not skip it.
-pub(crate) fn invalidate_documentary_steps(
+pub fn invalidate_documentary_steps(
     conn: &Connection,
     run_id: &str,
     warnings: &[(u32, String)],

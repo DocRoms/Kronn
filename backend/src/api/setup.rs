@@ -2983,7 +2983,7 @@ async fn do_import_db(
     // commit, before the file writes below, and a failed listing leaves the
     // snapshot empty and unarmed (`arm_lane_settings`), never the old one.
     let lane_warm = state.config.read().await.workers.lane_warm.clone();
-    if let Err(e) = crate::arm_lane_settings(&state.db, &lane_warm).await {
+    if let Err(e) = crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &lane_warm).await {
         tracing::warn!("Import could not reload the lane settings: {e:#}");
         warnings.push(
             "The lane settings of the imported projects could not be reloaded: restart Kronn \
@@ -3325,7 +3325,7 @@ fn reset_refusal(proxy_declared: bool) -> Option<String> {
 async fn reset_data(state: &AppState) -> anyhow::Result<()> {
     clear_reset_tables(state).await?;
     let global = config::default_config().workers.lane_warm;
-    if let Err(e) = crate::arm_lane_settings(&state.db, &global).await {
+    if let Err(e) = crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &global).await {
         // The table is empty either way: nothing of a project stays.
         tracing::warn!("Reset could not reload the lane settings: {e:#}");
         crate::core::task_worker_lane_settings::rebuild(&global, &[]);

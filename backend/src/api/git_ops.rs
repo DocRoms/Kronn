@@ -6,13 +6,13 @@ use crate::models::*;
 use std::path::Path;
 
 const PROJECT_GIT_GRAPH_LIMIT: usize = 80;
-pub(crate) const GIT_COMMIT_PAGE_DEFAULT: u32 = 40;
-pub(crate) const GIT_COMMIT_PAGE_MAX: u32 = 100;
+pub const GIT_COMMIT_PAGE_DEFAULT: u32 = 40;
+pub const GIT_COMMIT_PAGE_MAX: u32 = 100;
 
 /// Parse `git diff --name-status <base>...HEAD` output into structured file
 /// statuses. Each non-rename line is `<code>\t<path>`; rename/copy lines are
 /// `R<score>\t<old>\t<new>` (we keep the destination path).
-pub(crate) fn parse_committed_diff(diff_output: &str) -> Vec<GitFileStatus> {
+pub fn parse_committed_diff(diff_output: &str) -> Vec<GitFileStatus> {
     diff_output
         .lines()
         .filter_map(|line| {
@@ -200,7 +200,7 @@ pub fn run_git_status_page_without_pr_lookup(
 /// Selected discussion workspaces replace branch-relative evidence with their
 /// durable base..head range. Skip the redundant branch diff/count/log while
 /// still collecting the independent working-tree and repository metadata.
-pub(crate) fn run_git_status_without_commit_evidence(
+pub fn run_git_status_without_commit_evidence(
     repo_path: &Path,
     github_env: &[(String, String)],
 ) -> Result<GitStatusResponse, String> {
@@ -641,7 +641,7 @@ pub fn run_git_switch_branch(
 /// Supports HTTPS, SSH URLs and SCP-like Git remotes. Local filesystem
 /// remotes intentionally return `None`. Any credentials embedded in an HTTP
 /// remote are removed before the URL reaches the frontend.
-pub(crate) fn normalize_git_remote_web_url(raw: &str) -> Option<String> {
+pub fn normalize_git_remote_web_url(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;

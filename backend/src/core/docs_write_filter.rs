@@ -153,7 +153,7 @@ fn line_of(content: &str, offset: usize) -> usize {
 
 /// Regex denylist match. Returns the matched pattern name and the byte
 /// offset of the match on hit.
-pub(crate) fn match_denylist(content: &str) -> Option<(&'static str, usize)> {
+pub fn match_denylist(content: &str) -> Option<(&'static str, usize)> {
     static PATTERNS: &[(&str, &str)] = &[
         // Well-known token prefixes (vendor-attributable).
         ("sk-...", r"\bsk-[A-Za-z0-9_\-]{20,}"),

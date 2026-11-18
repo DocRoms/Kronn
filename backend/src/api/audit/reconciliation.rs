@@ -361,19 +361,19 @@ Leave their detail files as they are.\n",
 /// need a human decision: new, never decided, or deferred. Decisions live on
 /// the TD sheets (`docs/tech-debt/<id>.md`), whichever validation recorded them.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct TdValidationScope {
-    pub(crate) listed: usize,
-    pub(crate) undecided: Vec<String>,
+pub struct TdValidationScope {
+    pub listed: usize,
+    pub undecided: Vec<String>,
 }
 
 impl TdValidationScope {
     /// Listed TDs exist and every one of them is decided.
-    pub(crate) fn all_decided(&self) -> bool {
+    pub fn all_decided(&self) -> bool {
         self.listed > 0 && self.undecided.is_empty()
     }
 }
 
-pub(crate) fn td_validation_scope(
+pub fn td_validation_scope(
     project_path: &Path,
     index_files: &[String],
 ) -> TdValidationScope {
@@ -593,7 +593,7 @@ where
 
 /// The text of `path`, read through the project's directory fds (KT-1595);
 /// `None` when it is missing, not text, a link, or outside `root`.
-pub(crate) fn read_text_under(root: &Path, path: &Path) -> Option<String> {
+pub fn read_text_under(root: &Path, path: &Path) -> Option<String> {
     crate::core::fs_guard::guarded_read(root, path)
         .ok()
         .flatten()
@@ -602,7 +602,7 @@ pub(crate) fn read_text_under(root: &Path, path: &Path) -> Option<String> {
 
 /// Like [`read_text_under`], but a refusal of a link (or of a path leaving the
 /// root) is an error: the caller stops instead of reading "nothing".
-pub(crate) fn read_text_strict(root: &Path, path: &Path) -> Result<Option<String>, String> {
+pub fn read_text_strict(root: &Path, path: &Path) -> Result<Option<String>, String> {
     match crate::core::fs_guard::guarded_read(root, path) {
         Ok(Some(bytes)) => Ok(String::from_utf8(bytes).ok()),
         Ok(None) => Ok(None),

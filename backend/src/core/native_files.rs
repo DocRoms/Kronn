@@ -50,7 +50,7 @@ fn save_ledger(root: &Path, ledger: &Ledger) {
 
 /// Whether `rel` is a file Kronn wrote and that still holds those exact
 /// bytes: such a copy is Kronn's, not one of the repository's own skills.
-pub(crate) fn is_kronn_owned_file(root: &Path, rel: &str) -> bool {
+pub fn is_kronn_owned_file(root: &Path, rel: &str) -> bool {
     let Some(written) = load_ledger(root).files.get(rel).cloned() else {
         return false;
     };

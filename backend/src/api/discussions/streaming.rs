@@ -96,7 +96,7 @@ fn load_quick_prompt_snapshot(
 /// entry points from drifting into different catalogues. A database error is
 /// deliberately propagated: silently falling back to the broader principal
 /// catalogue would give a worker tools and budgets it must not receive.
-pub(crate) async fn native_http_tools_for_discussion(
+pub async fn native_http_tools_for_discussion(
     state: &AppState,
     discussion_id: &str,
     agent_type: &AgentType,
@@ -881,7 +881,7 @@ pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
 /// Durable dispatch settlement updates the dispatch job and its parent batch
 /// counters in one transaction. Keeping the broadcast separate lets that path
 /// notify the UI after commit without incrementing the counters a second time.
-pub(crate) fn broadcast_batch_progress(state: &AppState, disc_id: &str, updated_run: &WorkflowRun) {
+pub fn broadcast_batch_progress(state: &AppState, disc_id: &str, updated_run: &WorkflowRun) {
     let is_final = matches!(
         updated_run.status,
         RunStatus::Success | RunStatus::Partial | RunStatus::Failed
@@ -1260,7 +1260,7 @@ mod dispatch_liveness_tests {
 /// the internal channel's senders use `let _ = tx.send(...)` so a
 /// dropped receiver does NOT cancel the agent — the message still
 /// gets persisted to DB.
-pub(crate) async fn make_agent_stream(
+pub async fn make_agent_stream(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
@@ -1269,7 +1269,7 @@ pub(crate) async fn make_agent_stream(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum AgentExecutionOutcome {
+pub enum AgentExecutionOutcome {
     Finished { success: bool },
     PreflightFailed { diagnostic: String },
     RuntimeUnavailable { reason: String },
@@ -1521,7 +1521,7 @@ fn agent_start_error_content(
 /// which is how a refusal reached `agent_dispatch_jobs.last_error` carrying
 /// nothing an operator could act on — 76 rows of it in one instance. Each
 /// caller names the condition it just detected instead.
-pub(crate) fn finish_tracked_preflight(
+pub fn finish_tracked_preflight(
     completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
     diagnostic: &str,
 ) {
@@ -2105,7 +2105,7 @@ mod dispatch_prompt_snapshot_tests {
     }
 }
 
-pub(crate) async fn make_agent_stream_tracked(
+pub async fn make_agent_stream_tracked(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
@@ -2129,7 +2129,7 @@ pub(crate) async fn make_agent_stream_tracked(
     (stream, completion_rx)
 }
 
-pub(crate) async fn make_agent_stream_tracked_with_initial_event(
+pub async fn make_agent_stream_tracked_with_initial_event(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
@@ -2170,7 +2170,7 @@ fn prepend_initial_event(stream: SseStream, initial_event: Option<Event>) -> Sse
 /// under the trigger (direct replies and their descendants) so it can
 /// complement it, but never later User turns or unrelated branches. The
 /// durable transcript itself remains untouched.
-pub(crate) fn discussion_at_dispatch_trigger(
+pub fn discussion_at_dispatch_trigger(
     disc: &Discussion,
     trigger_message_id: Option<&str>,
 ) -> Discussion {
@@ -2596,7 +2596,7 @@ fn messages_not_yet_seen(
 /// is never silently replaced by the room's default.
 /// What a connection whose target does not match the agent being started means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConnectionMismatch {
+pub enum ConnectionMismatch {
     /// The job itself named this connection. A job that names a connection
     /// serving another agent is inconsistent, and starting it anyway would run
     /// the turn on something the caller did not ask for.
@@ -2612,7 +2612,7 @@ pub(crate) enum ConnectionMismatch {
     Ignore,
 }
 
-pub(crate) fn connection_mismatch(inherited: bool) -> ConnectionMismatch {
+pub fn connection_mismatch(inherited: bool) -> ConnectionMismatch {
     if inherited {
         ConnectionMismatch::Ignore
     } else {
@@ -2620,7 +2620,7 @@ pub(crate) fn connection_mismatch(inherited: bool) -> ConnectionMismatch {
     }
 }
 
-pub(crate) fn effective_connection_id<'a>(
+pub fn effective_connection_id<'a>(
     dispatch: Option<&'a String>,
     discussion: Option<&'a String>,
 ) -> Option<&'a String> {

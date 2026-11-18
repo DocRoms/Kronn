@@ -14,7 +14,7 @@ fn listing(entries: &[&str]) -> LaneWarmConfig {
     }
 }
 
-pub(crate) fn project(id: &str, path: &Path, lane_warm: Option<LaneWarmConfig>) -> Project {
+pub fn project(id: &str, path: &Path, lane_warm: Option<LaneWarmConfig>) -> Project {
     let now = chrono::Utc::now();
     Project {
         id: id.into(),
@@ -133,7 +133,7 @@ async fn arming_from_the_database_registers_every_project_and_loads_its_lane_ent
     .await
     .expect("insert projects");
 
-    crate::arm_lane_settings(&db, &current_global())
+    crate::core::task_worker_lane_settings::arm_lane_settings(&db, &current_global())
         .await
         .expect("armed");
     let in_sub = validation_executables_for(&t.sub.join("src"));

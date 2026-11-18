@@ -60,7 +60,7 @@ impl Confirm {
     }
 
     #[cfg(test)]
-    pub(crate) fn channel_for_tests(&self) -> Channel {
+    pub fn channel_for_tests(&self) -> Channel {
         self.channel
     }
 

@@ -74,7 +74,7 @@ fn canonical(path: &Path) -> PathBuf {
     without_verbatim_prefix(crate::core::fs_guard::real_path(path))
 }
 
-pub(crate) fn git_output(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
+pub fn git_output(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
     // KT-1745 — also asked of a worker's worktree (the doc citations gate): the
     // repository is the registered one, never what the worktree's `.git` names.
     let output = git(repo)
@@ -142,7 +142,7 @@ pub fn default_branch_refs(repo: &Path) -> Vec<String> {
 
 /// `path` as git can open it: on Windows `canonicalize` gives `\\?\C:\…`,
 /// and git refuses a repository named that way.
-pub(crate) fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+pub fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
     match path.to_str() {
         Some(text) if text.starts_with(r"\\?\UNC\") => PathBuf::from(format!(r"\\{}", &text[8..])),
         Some(text) if text.starts_with(r"\\?\") => PathBuf::from(&text[4..]),

@@ -48,7 +48,7 @@ pub struct ValidateVersionOutcome {
 /// range or `#symbol` does not hold. A block that only moved (same content at
 /// other lines) is not broken, it is re-anchored; one whose content changed is,
 /// moved or not. Sorted by doc, then citation.
-pub(crate) fn broken_citations(project_path: &FsPath) -> Vec<BrokenDocCitation> {
+pub fn broken_citations(project_path: &FsPath) -> Vec<BrokenDocCitation> {
     let report = citation_drift::check(project_path);
     let mut out: Vec<BrokenDocCitation> = Vec::new();
     // The fingerprint's own verdict, never the re-anchor suggestion's: a
@@ -152,7 +152,7 @@ impl Snapshot {
 /// placeholder left in a doc, an unreadable record) or a write that failed:
 /// then nothing is left half done, the docs and the records are put back (and
 /// when one cannot be, the error names it).
-pub(crate) fn validate_current_version(
+pub fn validate_current_version(
     project_path: &FsPath,
     by: &str,
 ) -> Result<ValidateVersionOutcome, String> {

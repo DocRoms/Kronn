@@ -60,7 +60,7 @@ pub fn mark_test_binary() {
 }
 
 /// The library's test build, a marked binary, or one under Cargo's `deps/`.
-pub(crate) fn in_test_binary() -> bool {
+pub fn in_test_binary() -> bool {
     cfg!(test)
         || is_test_binary(
             MARKED_TEST_BINARY.load(std::sync::atomic::Ordering::SeqCst),
@@ -108,7 +108,7 @@ pub fn saved_decision_model() -> bool {
     }
 }
 
-pub(crate) fn saved_decision_model_in(raw: &str) -> bool {
+pub fn saved_decision_model_in(raw: &str) -> bool {
     raw.parse::<toml::Table>()
         .ok()
         .and_then(|table| {
@@ -125,7 +125,7 @@ pub(crate) fn saved_decision_model_in(raw: &str) -> bool {
 
 /// The saved decision model a test states, per thread.
 #[cfg(test)]
-pub(crate) mod test_saved_decision {
+pub mod test_saved_decision {
     use std::cell::Cell;
 
     thread_local! {
@@ -133,7 +133,7 @@ pub(crate) mod test_saved_decision {
     }
 
     /// Restores the previous value when dropped.
-    pub(crate) struct SavedDecision(bool);
+    pub struct SavedDecision(bool);
 
     impl Drop for SavedDecision {
         fn drop(&mut self) {
@@ -141,11 +141,11 @@ pub(crate) mod test_saved_decision {
         }
     }
 
-    pub(crate) fn set(value: bool) -> SavedDecision {
+    pub fn set(value: bool) -> SavedDecision {
         SavedDecision(SAVED.with(|saved| saved.replace(value)))
     }
 
-    pub(crate) fn get() -> bool {
+    pub fn get() -> bool {
         SAVED.with(Cell::get)
     }
 }
@@ -153,7 +153,7 @@ pub(crate) mod test_saved_decision {
 /// The saved full-access setting a test states, per thread (each tokio test
 /// runs on its own thread).
 #[cfg(test)]
-pub(crate) mod test_saved_access {
+pub mod test_saved_access {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
@@ -162,7 +162,7 @@ pub(crate) mod test_saved_access {
     }
 
     /// Restores the previous value when dropped.
-    pub(crate) struct SavedAccess(String, Option<bool>);
+    pub struct SavedAccess(String, Option<bool>);
 
     impl Drop for SavedAccess {
         fn drop(&mut self) {
@@ -173,13 +173,13 @@ pub(crate) mod test_saved_access {
         }
     }
 
-    pub(crate) fn set(agent: &crate::models::AgentType, value: bool) -> SavedAccess {
+    pub fn set(agent: &crate::models::AgentType, value: bool) -> SavedAccess {
         let key = format!("{agent:?}");
         let previous = SAVED.with(|saved| saved.borrow_mut().insert(key.clone(), value));
         SavedAccess(key, previous)
     }
 
-    pub(crate) fn get(agent: &crate::models::AgentType) -> Option<bool> {
+    pub fn get(agent: &crate::models::AgentType) -> Option<bool> {
         SAVED.with(|saved| saved.borrow().get(&format!("{agent:?}")).copied())
     }
 }
@@ -187,14 +187,14 @@ pub(crate) mod test_saved_access {
 /// Points `KRONN_DATA_DIR` at a fresh directory for one test, restoring the
 /// previous value when dropped. Process-wide: the test must be `#[serial]`.
 #[cfg(test)]
-pub(crate) struct TestDataDir {
+pub struct TestDataDir {
     _dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
 }
 
 #[cfg(test)]
 impl TestDataDir {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let dir = tempfile::tempdir().expect("scratch data dir");
         let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
         crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path());
@@ -215,7 +215,7 @@ impl Drop for TestDataDir {
     }
 }
 
-pub(crate) fn saved_full_access_in(content: &str, agent: &crate::models::AgentType) -> bool {
+pub fn saved_full_access_in(content: &str, agent: &crate::models::AgentType) -> bool {
     use crate::models::AgentType;
     let key = match agent {
         AgentType::ClaudeCode => "claude_code",
@@ -252,7 +252,7 @@ pub fn saved_max_prompt_bytes() -> Option<usize> {
 }
 
 #[cfg_attr(test, allow(dead_code))]
-pub(crate) fn saved_max_prompt_bytes_in(content: &str) -> Option<usize> {
+pub fn saved_max_prompt_bytes_in(content: &str) -> Option<usize> {
     let bytes = content
         .parse::<toml::Table>()
         .ok()?
@@ -348,7 +348,7 @@ fn settle(
 
 /// The TOML written for `config` in `dir`. Credentials are left out once the
 /// encrypted store holds them (`strip_credentials`).
-pub(crate) fn disk_toml(
+pub fn disk_toml(
     config: &AppConfig,
     dir: &std::path::Path,
     strip_credentials: bool,
@@ -409,7 +409,7 @@ fn shelter_for_save(config: &AppConfig, dir: &std::path::Path) -> Result<()> {
 /// in what the shelter holds, and rebase the preserved values on the config as
 /// the boot leaves it (a credential the store filled in is not a change by the
 /// user). A shelter this key cannot open is left for the next save to set aside.
-pub(crate) fn adopt_shelter(dir: &std::path::Path, key: &str, config: &AppConfig) {
+pub fn adopt_shelter(dir: &std::path::Path, key: &str, config: &AppConfig) {
     let kept = preserved(dir);
     let held = match super::config_salvage::read_shelter(dir, key) {
         Ok(held) => held,
@@ -774,7 +774,7 @@ pub fn acquire_data_dir_lock() -> Result<std::fs::File> {
     acquire_lock_in(&dir)
 }
 
-pub(crate) fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
+pub fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
     #[cfg(not(windows))]
     use fs2::FileExt;
     #[cfg(windows)]
@@ -816,7 +816,7 @@ pub(crate) fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
 /// the data-directory lock and therefore cannot reap that Git operation's
 /// commit lease while Git (or one of its hooks) is still alive.
 #[cfg(unix)]
-pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
+pub fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
     lock.try_clone()
         .context("duplicate data-directory lock for Git child")
 }
@@ -827,7 +827,7 @@ pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<st
 /// `fork`, so clearing the flag there cannot leak the lock into an unrelated
 /// command spawned concurrently by another backend thread.
 #[cfg(unix)]
-pub(crate) fn inherit_data_dir_lock_on_command(
+pub fn inherit_data_dir_lock_on_command(
     command: &mut std::process::Command,
     lock: &std::fs::File,
 ) {
@@ -849,7 +849,7 @@ pub(crate) fn inherit_data_dir_lock_on_command(
 }
 
 #[cfg(windows)]
-pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
+pub fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::File> {
     lock.try_clone()
         .context("duplicate exclusive data-directory handle for Git child")
 }
@@ -859,7 +859,7 @@ pub(crate) fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<st
 /// duplicate for `Stdio`; the parent lock handle itself never becomes globally
 /// inheritable, so concurrent children cannot retain it.
 #[cfg(windows)]
-pub(crate) fn inherit_data_dir_lock_on_command(
+pub fn inherit_data_dir_lock_on_command(
     command: &mut std::process::Command,
     lock: &std::fs::File,
 ) -> Result<()> {
@@ -871,7 +871,7 @@ pub(crate) fn inherit_data_dir_lock_on_command(
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn inherit_data_dir_lock_for_child(_: &std::fs::File) -> Result<std::fs::File> {
+pub fn inherit_data_dir_lock_for_child(_: &std::fs::File) -> Result<std::fs::File> {
     anyhow::bail!("this platform cannot safely inherit the data-directory lock into Git")
 }
 
@@ -1235,13 +1235,13 @@ fn set_aside_unreadable_config(
 
 /// The top-level `encryption_secret` of `content` for the boot recovery: see
 /// [`read_key`] (the value it finds, whatever it says about the rest).
-pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
+pub fn salvage_key_line(content: &str) -> Option<String> {
     read_key(content).value
 }
 
 /// What a text says about its top-level `encryption_secret`.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct KeyRead {
+pub struct KeyRead {
     /// The key line's string, when the text gives one ([`read_key`]).
     pub value: Option<String>,
     /// The text mentions the key where it was not read (see [`read_key`]): it may
@@ -1285,7 +1285,7 @@ const PREFIX_MAX_BYTES: usize = 32 * 1024;
 /// top-level `encryption_secret` is a non-blank string that is no key. A name
 /// that only sits in the prefix (blank, a number, a comment, under a table) is
 /// read by toml and holds no key. A text that parses has no unread part.
-pub(crate) fn read_key(content: &str) -> KeyRead {
+pub fn read_key(content: &str) -> KeyRead {
     if let Ok(table) = content.parse::<toml::Table>() {
         return KeyRead {
             value: top_level_key(&table),
@@ -1920,7 +1920,7 @@ mod tests {
         crate::core::child_env::set_var("KRONN_AUTH_TOKEN", "operator-token");
         assert_eq!(take_env_auth_token().as_deref(), Some("operator-token"));
         assert_eq!(taken_env_auth_token().as_deref(), Some("operator-token"));
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
         let desktop =
             std::fs::read_to_string(root.join("../desktop/src-tauri/src/main.rs")).unwrap();
         let start = desktop.find("fn self_restart_command()").unwrap();

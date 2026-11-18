@@ -659,12 +659,12 @@ pub async fn disc_note_list(
 }
 
 /// Resolve the configurable absolute timeout captured when each run starts.
-pub(crate) fn configured_agent_global_timeout(minutes: u32) -> Duration {
+pub fn configured_agent_global_timeout(minutes: u32) -> Duration {
     let minutes = crate::models::clamp_agent_global_timeout_min(u64::from(minutes));
     Duration::from_secs(u64::from(minutes) * 60)
 }
 
-pub(crate) async fn checked_launch_connection(
+pub async fn checked_launch_connection(
     state: &AppState,
     agent: &AgentType,
     connection_id: Option<&str>,

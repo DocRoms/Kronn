@@ -539,7 +539,7 @@ pub fn stable_source_tree_fingerprint(project_path: &Path) -> Result<Option<Stri
 }
 
 #[cfg(test)]
-pub(crate) fn stable_source_tree_fingerprint_test_hook<F>(
+pub fn stable_source_tree_fingerprint_test_hook<F>(
     project_path: &Path,
     between_reads: F,
 ) -> Result<Option<String>, String>
@@ -806,7 +806,7 @@ pub fn write_checksums_file_fail_closed(
 }
 
 #[cfg(test)]
-pub(crate) fn write_checksums_file_fail_closed_test_hook<F>(
+pub fn write_checksums_file_fail_closed_test_hook<F>(
     project_path: &Path,
     mappings: &[ChecksumMapping],
     expected_source_tree: Option<&str>,

@@ -183,12 +183,12 @@ fn step_needs_agent(step: &WorkflowStep) -> bool {
         || !step.batch_chain_prompt_ids.is_empty()
 }
 
-pub(crate) const DEP_WORKFLOW: &str = "workflow";
-pub(crate) const DEP_QUICK_API: &str = "quick_api";
+pub const DEP_WORKFLOW: &str = "workflow";
+pub const DEP_QUICK_API: &str = "quick_api";
 
 /// The stored resources the workflow executes, as `(kind, id)` after the same
 /// reference resolution as a run, or why a trusted run could not freeze them.
-pub(crate) fn execution_dependencies(
+pub fn execution_dependencies(
     conn: &Connection,
     workflow: &Workflow,
     project_id: Option<&str>,
@@ -745,4 +745,4 @@ pub fn summary_for_page(conn: &Connection, live_page_id: &str) -> Result<serde_j
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "live_page_action_trusts_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

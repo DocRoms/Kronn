@@ -101,7 +101,7 @@ fn declares_vitest(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join("package.json")).is_ok_and(|text| text.contains("\"vitest\""))
 }
 
-pub(crate) fn check_frontend(
+pub fn check_frontend(
     lane: &WorkerLane,
     provisioned: &Provisioned,
     env: &[(String, OsString)],

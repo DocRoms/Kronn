@@ -4,7 +4,7 @@ use crate::models::AgentType;
 
 /// Files and folders outside the root that Kronn (or the agent CLI it
 /// launches) owns: root pointers, per-agent instruction and MCP config.
-pub(crate) const KRONN_OWNED: &[&str] = &[
+pub const KRONN_OWNED: &[&str] = &[
     "AGENTS.md",
     "CLAUDE.md",
     "GEMINI.md",
@@ -28,7 +28,7 @@ pub(crate) const KRONN_OWNED: &[&str] = &[
 
 /// Invocation-local policy shared by the adapters and direct CLI route.
 #[derive(Debug)]
-pub(crate) struct ReadOnlyRepos {
+pub struct ReadOnlyRepos {
     roots: Vec<PathBuf>,
     /// KT-1491 — checkouts a human granted `code` on: opened writable next to
     /// the working directory, their credential files kept out of reach.
@@ -137,7 +137,7 @@ const SCAN_SKIPPED_DIRS: &[&str] = &[".git", "node_modules", "target"];
 /// than a count per root. Linux limits one argument to 128 KiB; keeping the room
 /// policy below 96 KiB leaves headroom and makes additional code roots share the
 /// same finite budget.
-pub(crate) const ROOM_SETTINGS_MAX_BYTES: usize = 96 * 1024;
+pub const ROOM_SETTINGS_MAX_BYTES: usize = 96 * 1024;
 
 #[derive(Debug, Default)]
 struct ScannedSecrets {
@@ -530,7 +530,7 @@ impl VerifiedCheckout {
     /// that is, or passes through, a symbolic link is refused (it could lead
     /// to another project's checkout), as is anything that is not the root of
     /// a Git checkout or overlaps the working directory.
-    pub(crate) fn verify(
+    pub fn verify(
         agent: &AgentType,
         work_dir: &Path,
         location: &str,
@@ -581,7 +581,7 @@ impl VerifiedCheckout {
 
     /// The same validated checkout, opened for editing (a `code` grant): refused
     /// when it overlaps the Kronn data directory.
-    pub(crate) fn writable(mut self) -> Result<Self, String> {
+    pub fn writable(mut self) -> Result<Self, String> {
         refuse_protected_overlap(&self.root)?;
         self.writable = true;
         Ok(self)
@@ -590,16 +590,16 @@ impl VerifiedCheckout {
     /// The checkout sets `core.hooksPath` to its own root, so every file in it
     /// would be a hook: a `code` grant cannot open it for editing. The room gets
     /// it read-only and is told why.
-    pub(crate) fn hooks_at_root(&self) -> bool {
+    pub fn hooks_at_root(&self) -> bool {
         matches!(hooks_path(&self.root), Ok(HooksPath::Root))
     }
 
     #[cfg(test)]
-    pub(crate) fn is_writable(&self) -> bool {
+    pub fn is_writable(&self) -> bool {
         self.writable
     }
 
-    pub(crate) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         &self.root
     }
 
@@ -689,7 +689,7 @@ fn identity(_path: &Path) -> Result<Identity, String> {
 
 impl ReadOnlyRepos {
     #[cfg(test)]
-    pub(crate) fn resolve(
+    pub fn resolve(
         agent: &AgentType,
         work_dir: &Path,
         declared: &[String],
@@ -699,7 +699,7 @@ impl ReadOnlyRepos {
 
     /// `declared` Git checkouts plus plain `dirs` (no Git metadata, e.g. the
     /// run's artifacts directory), all read-only under one policy.
-    pub(crate) fn resolve_with_dirs(
+    pub fn resolve_with_dirs(
         agent: &AgentType,
         work_dir: &Path,
         declared: &[String],
@@ -834,7 +834,7 @@ impl ReadOnlyRepos {
     /// no longer the validated one is refused. Codex keeps its default
     /// sandbox (its read isolation is a separate work item), so it never gets
     /// a room policy.
-    pub(crate) fn resolve_room(
+    pub fn resolve_room(
         agent: &AgentType,
         work_dir: &Path,
         checkouts: &[VerifiedCheckout],
@@ -1022,7 +1022,7 @@ impl ReadOnlyRepos {
         Ok(())
     }
 
-    pub(crate) fn apply(&self, agent: &AgentType, work_dir: &Path, args: &mut Vec<String>) {
+    pub fn apply(&self, agent: &AgentType, work_dir: &Path, args: &mut Vec<String>) {
         let prompt = args.pop().expect("command builder ends with a prompt");
         args.retain(|arg| {
             arg != "--dangerously-skip-permissions" && !arg.starts_with("--sandbox=")
@@ -1035,7 +1035,7 @@ impl ReadOnlyRepos {
 
     /// KT-1587 — the directories this launch was granted besides its
     /// checkouts: the typed grant of the run artifacts directory.
-    pub(crate) fn granted_dirs(&self) -> &[PathBuf] {
+    pub fn granted_dirs(&self) -> &[PathBuf] {
         &self.granted_dirs
     }
 
@@ -1046,7 +1046,7 @@ impl ReadOnlyRepos {
             .map_or(&[], |(_, paths)| paths.as_slice())
     }
 
-    pub(crate) fn args(&self, agent: &AgentType, work_dir: &Path) -> Vec<String> {
+    pub fn args(&self, agent: &AgentType, work_dir: &Path) -> Vec<String> {
         match agent {
             AgentType::ClaudeCode => {
                 let mut deny: Vec<String> = self

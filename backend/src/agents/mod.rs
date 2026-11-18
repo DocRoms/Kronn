@@ -22,34 +22,22 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     }
 }
 
-pub mod acp_start;
 pub mod activity;
-pub mod chat_codec;
-pub(crate) mod generation_settings;
-pub(crate) mod http_diagnostics;
+pub mod http_diagnostics;
 pub mod idle_watchdog;
 pub mod media_asset_url;
 pub mod media_capabilities;
-pub mod media_codec;
-pub mod media_runner;
 pub mod media_worker;
-pub(crate) mod ollama_memory;
 pub mod provenance;
-pub(crate) mod read_only_repos;
-pub mod readiness;
-pub(crate) mod room_reach;
 pub mod run_progress;
-pub mod runner;
-pub mod tool_trace;
-pub mod tools;
 pub mod vision;
 pub mod wsl;
 
 #[derive(Clone, Debug, Default)]
-struct RuntimeProbe {
+pub struct RuntimeProbe {
     available: bool,
-    command: Vec<String>,
-    version: Option<String>,
+    pub command: Vec<String>,
+    pub version: Option<String>,
 }
 
 type RuntimeCache = Mutex<HashMap<(Vec<String>, std::path::PathBuf), (RuntimeProbe, Instant)>>;
@@ -166,7 +154,7 @@ const KNOWN_AGENTS: &[AgentDef] = &[
 /// Keep this list in sync with `entrypoint.sh`. The
 /// `cross_agent_macos_skip_covers_npm_agents` test enforces that every
 /// `npm install`-style agent is present here.
-pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
+pub const MACOS_HOST_BIN_SKIP: &[&str] = &[
     "claude", "codex", "opencode", "gemini", "copilot", "kiro-cli",
 ];
 
@@ -179,7 +167,7 @@ pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
 /// returns the Darwin `claude` and, without this guard, version detection
 /// execs it and surfaces an "Exec format error" instead of falling back to the
 /// npx runtime / the Linux copy installed by `entrypoint.sh`.
-pub(crate) fn should_skip_darwin_host_binary(
+pub fn should_skip_darwin_host_binary(
     name: &str,
     host_managed: bool,
     host_is_macos: bool,
@@ -205,7 +193,7 @@ pub fn agent_display_name(agent_type: &AgentType) -> String {
     }
 }
 
-pub(crate) const AGENT_ALIASES: [(&str, AgentType); 10] = [
+pub const AGENT_ALIASES: [(&str, AgentType); 10] = [
     ("@claude", AgentType::ClaudeCode),
     ("@codex", AgentType::Codex),
     ("@opencode", AgentType::OpenCode),
@@ -297,7 +285,7 @@ fn detect_host_label() -> String {
     "Unknown".into()
 }
 
-pub(crate) fn host_is_macos() -> bool {
+pub fn host_is_macos() -> bool {
     if let Ok(os) = crate::core::child_env::var("KRONN_HOST_OS") {
         return os.eq_ignore_ascii_case("macos");
     }
@@ -413,7 +401,7 @@ static COLD_DETECTION_HOLDS: std::sync::atomic::AtomicUsize =
 /// While held, [`installed_or_unknown`] answers as if no detection sweep had
 /// completed, whatever sweep another test completes meanwhile.
 #[cfg(test)]
-pub(crate) struct ColdDetection(());
+pub struct ColdDetection(());
 
 #[cfg(test)]
 impl Drop for ColdDetection {
@@ -423,7 +411,7 @@ impl Drop for ColdDetection {
 }
 
 #[cfg(test)]
-pub(crate) fn hold_cold_detection() -> ColdDetection {
+pub fn hold_cold_detection() -> ColdDetection {
     COLD_DETECTION_HOLDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     ColdDetection(())
 }
@@ -431,7 +419,7 @@ pub(crate) fn hold_cold_detection() -> ColdDetection {
 /// Run `f` as if no detection sweep had completed yet: for tests that need
 /// every CLI's files regardless of what ran before or beside them.
 #[cfg(test)]
-pub(crate) fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
+pub fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
     let _cold = hold_cold_detection();
     f()
 }
@@ -1167,7 +1155,7 @@ async fn probe_runtime(def: &AgentDef) -> RuntimeProbe {
     probe_npx_runtime(pkg, false, &std::env::temp_dir()).await
 }
 
-fn npx_invocation(package: &str, args: &[String]) -> (String, Vec<String>, bool) {
+pub fn npx_invocation(package: &str, args: &[String]) -> (String, Vec<String>, bool) {
     let location = find_binary("npx");
     let via_wsl = location.as_ref().is_some_and(|loc| loc.via_wsl);
     let executable = location.map(|loc| loc.path).unwrap_or_else(|| "npx".into());
@@ -1176,7 +1164,7 @@ fn npx_invocation(package: &str, args: &[String]) -> (String, Vec<String>, bool)
     (executable, argv, via_wsl)
 }
 
-async fn probe_npx_runtime(
+pub async fn probe_npx_runtime(
     package: &str,
     refresh: bool,
     work_dir: &std::path::Path,

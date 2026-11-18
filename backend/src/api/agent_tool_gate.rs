@@ -12,7 +12,7 @@ use crate::core::bridge_admit::{self, Admitted};
 use crate::core::bridge_token::{self, BridgeGrant, BridgeScope};
 
 /// The run id of the workflow editor's "Test step": no run row exists behind it.
-pub(crate) const TEST_STEP_RUN_ID: &str = "test-step";
+pub const TEST_STEP_RUN_ID: &str = "test-step";
 
 /// One tool call, as the route the gate decides it on.
 struct GateRequest {

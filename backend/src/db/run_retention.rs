@@ -93,7 +93,7 @@ fn not_referenced(alias: &str, class: Option<RunClass>) -> String {
 /// cutoff: an RFC 3339 instant, compared as text like every stored timestamp.
 /// A run that still owns a worktree (`workspace_path`) is left alone, and so
 /// is a child whose parent can still resume and read it.
-pub(crate) fn eligible_runs(alias: &str) -> String {
+pub fn eligible_runs(alias: &str) -> String {
     eligible_runs_of(alias, None)
 }
 
@@ -117,7 +117,7 @@ fn eligible_runs_of(alias: &str, class: Option<RunClass>) -> String {
 /// query-plan test checks the exact statement the purge runs. The index is
 /// named: on a table without statistics the planner may pick another one and
 /// read every candidate's row, payload included.
-pub(crate) fn payload_candidates_sql() -> String {
+pub fn payload_candidates_sql() -> String {
     format!(
         "SELECT run.id FROM workflow_runs run INDEXED BY idx_workflow_runs_payload_retention
           WHERE run.payload_compacted_at IS NULL AND {}
@@ -219,7 +219,7 @@ pub enum WorkflowScope {
     Except(Vec<String>),
 }
 
-pub(crate) fn delete_candidates_sql(class: RunClass, scope: &WorkflowScope) -> String {
+pub fn delete_candidates_sql(class: RunClass, scope: &WorkflowScope) -> String {
     let scope = match scope {
         WorkflowScope::Only(_) => "run.workflow_id = ?3",
         WorkflowScope::Except(_) => "run.workflow_id NOT IN (SELECT value FROM json_each(?3))",

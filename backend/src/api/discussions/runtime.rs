@@ -14,7 +14,7 @@ use super::SseStream;
 
 const RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS: i64 = 30;
 
-pub(crate) use crate::api::orchestration::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
+pub use crate::api::orchestration::RUNTIME_UNAVAILABLE_MAX_DEFERRALS;
 
 struct DispatchHandoffGuard {
     state: Option<AppState>,
@@ -68,7 +68,7 @@ impl Drop for DispatchHandoffGuard {
     }
 }
 
-pub(crate) struct DispatchSettlement {
+pub struct DispatchSettlement {
     changed: bool,
     batch_run: Option<crate::models::WorkflowRun>,
 }
@@ -196,7 +196,7 @@ fn interrupt_undelivered_with_notice(
 /// nothing else is going to resolve soon, so this does not give up: the
 /// interruption and the notice are tried twice, and if the notice is what keeps
 /// failing the execution is still parked, without it (said in the log).
-pub(crate) fn interrupt_undelivered_after_failure(
+pub fn interrupt_undelivered_after_failure(
     conn: &rusqlite::Connection,
     job_id: &str,
     discussion_id: &str,
@@ -237,7 +237,7 @@ pub(crate) fn interrupt_undelivered_after_failure(
 /// Persist a dispatch terminal state and its parent batch progress as one
 /// atomic unit. If either write fails, the job remains runnable and recovery
 /// can retry without leaving a batch permanently stuck at n-1/N.
-pub(crate) fn persist_dispatch_settlement(
+pub fn persist_dispatch_settlement(
     conn: &rusqlite::Connection,
     job_id: &str,
     discussion_id: &str,
@@ -263,7 +263,7 @@ pub(crate) fn persist_dispatch_settlement(
 /// there, as a quota fallback does) and the principal is not told to reassign
 /// what Kronn is reassigning. The caller owes
 /// [`interrupt_undelivered_after_failure`] when no link takes the work over.
-pub(crate) fn persist_dispatch_settlement_handing_over(
+pub fn persist_dispatch_settlement_handing_over(
     conn: &rusqlite::Connection,
     job_id: &str,
     discussion_id: &str,
@@ -549,7 +549,7 @@ async fn dispatch_job_by_id(state: AppState, job_id: String) {
 /// Claim a durable dispatch job and expose its live SSE stream when the caller
 /// is an HTTP request. The spawned completion monitor owns the power lease and
 /// terminal DB transition, so disconnecting the browser cannot orphan work.
-pub(crate) async fn stream_dispatch_job(
+pub async fn stream_dispatch_job(
     state: AppState,
     job_id: String,
     initial_event: Option<Event>,
@@ -579,7 +579,7 @@ pub(crate) async fn stream_dispatch_job(
     stream_claimed_dispatch_job(state, job, initial_event).await
 }
 
-pub(crate) async fn stream_claimed_dispatch_job(
+pub async fn stream_claimed_dispatch_job(
     state: AppState,
     job: crate::db::agent_dispatch::AgentDispatchJob,
     initial_event: Option<Event>,
@@ -770,7 +770,7 @@ pub(crate) async fn stream_claimed_dispatch_job(
 /// next link instead of failing silently; any other refusal is the dispatch's
 /// failure, made visible where it is read. `available`: the installed agents,
 /// detected when `None`.
-pub(crate) async fn settle_preflight_failure(
+pub async fn settle_preflight_failure(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     diagnostic: &str,
@@ -785,7 +785,7 @@ pub(crate) async fn settle_preflight_failure(
     ensure_failure_visible(state, job, diagnostic).await;
 }
 
-pub(crate) use crate::api::orchestration::reap_task_worker_processes;
+pub use crate::api::orchestration::reap_task_worker_processes;
 
 pub(super) fn dispatch_target_tier(
     targets: &[crate::models::MessageTarget],
@@ -839,7 +839,7 @@ async fn try_quota_provider_fallback(
 
 /// [`try_quota_provider_fallback`] with the providers known to be available
 /// given, so the policy is testable without the CLIs installed on the host.
-pub(crate) async fn try_quota_provider_fallback_among(
+pub async fn try_quota_provider_fallback_among(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     announced_reset: Option<chrono::DateTime<chrono::Utc>>,
@@ -998,7 +998,7 @@ async fn provider_fallback_among(
 /// `kronn:context` block, and a Codex failure can echo the whole prompt before the
 /// refusal. So the line that carries the quota signal is the message worth
 /// quoting; without one, the start of the raw output.
-pub(crate) fn provider_quota_message(response: &str) -> String {
+pub fn provider_quota_message(response: &str) -> String {
     const CONTEXT_CLOSE: &str = "<!-- /kronn:context -->";
     let raw = response
         .find("<!-- kronn:context")
@@ -1319,11 +1319,11 @@ async fn finish_dispatch_turn(
 /// KT-1743 — waits between the automatic redispatches of a turn that ended on a
 /// transient upstream error: 1, 3 then 6 minutes, ten in all. After the third
 /// retry the failure is real as far as Kronn can tell and settles as before.
-pub(crate) const TRANSIENT_UPSTREAM_BACKOFF_SECONDS: [i64; 3] = [60, 180, 360];
+pub const TRANSIENT_UPSTREAM_BACKOFF_SECONDS: [i64; 3] = [60, 180, 360];
 
 /// The wait before the next redispatch, given how many times the dispatch has
 /// been claimed (`turn_attempts`, 1 on the first run). `None`: retries spent.
-pub(crate) fn transient_upstream_delay(turn_attempts: u32) -> Option<i64> {
+pub fn transient_upstream_delay(turn_attempts: u32) -> Option<i64> {
     let retries_done = usize::try_from(turn_attempts.saturating_sub(1)).ok()?;
     TRANSIENT_UPSTREAM_BACKOFF_SECONDS
         .get(retries_done)
@@ -1814,7 +1814,7 @@ async fn hold_validation_during_audit(
 /// KT-1758 — a task-worker refusal that waiting cannot change: the launch path
 /// refuses the agent as this kind of worker (a native ACP agent carries neither
 /// the delivery context nor the permission scope).
-pub(crate) fn is_permanent_task_worker_refusal(reason: &str) -> bool {
+pub fn is_permanent_task_worker_refusal(reason: &str) -> bool {
     reason.contains(crate::agents::runner::TASK_WORKER_REFUSED_PREFIX)
 }
 
@@ -1872,7 +1872,7 @@ fn worker_launch_context(
 /// Only an execution a fallback moved is handled here: the caller keeps its own
 /// settlement for a worker that was never one. Returns whether the dispatch was
 /// settled here. `available`: the installed agents, detected when `None`.
-pub(crate) async fn settle_worker_launch_refusal_among(
+pub async fn settle_worker_launch_refusal_among(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     reason: &str,
@@ -2234,7 +2234,7 @@ async fn post_room_notice(state: &AppState, room: String, id: String, fr: String
 /// [`RUNTIME_UNAVAILABLE_MAX_DEFERRALS`] times in a row ends the retries and
 /// says why, in both rooms, with the reason as the runtime gave it. A dispatch
 /// that is not a task worker's keeps the durable deferral it always had.
-pub(crate) async fn defer_or_stop_runtime_unavailable(
+pub async fn defer_or_stop_runtime_unavailable(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     reason: &str,
@@ -2244,7 +2244,7 @@ pub(crate) async fn defer_or_stop_runtime_unavailable(
 
 /// [`defer_or_stop_runtime_unavailable`] with the installed agents given, so the
 /// move to the next link is testable without the CLIs of the host.
-pub(crate) async fn defer_or_stop_runtime_unavailable_among(
+pub async fn defer_or_stop_runtime_unavailable_among(
     state: &AppState,
     job: &crate::db::agent_dispatch::AgentDispatchJob,
     reason: &str,
@@ -2371,7 +2371,7 @@ async fn settle_cancelled_dispatch(
 /// past us (no double-substitution surface). When no previous agent
 /// reply is available, the chain-var resolves to empty string —
 /// template rendering must never fail the chain.
-pub(crate) fn render_chain_qp_prompt(
+pub fn render_chain_qp_prompt(
     template: &str,
     first_var_name: Option<&str>,
     batch_item: Option<&str>,

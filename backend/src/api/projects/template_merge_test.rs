@@ -25,7 +25,7 @@ fn write(root: &Path, rel: &str, content: &str) {
 }
 
 fn template_docs() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates/docs")
+    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs")
 }
 
 /// A committed, documented repo with an identity for the accept commit.

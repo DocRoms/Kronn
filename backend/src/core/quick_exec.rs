@@ -617,7 +617,7 @@ pub async fn run_confined(
 /// was spawned as its own group's leader ([`CommandConfinement::command`] puts it in a
 /// session of its own): the id of any other process may name an unrelated group.
 #[cfg(unix)]
-pub(crate) fn kill_process_group(leader: u32) {
+pub fn kill_process_group(leader: u32) {
     // SAFETY: `killpg` takes a plain process-group id.
     unsafe {
         libc::killpg(leader as libc::pid_t, libc::SIGKILL);

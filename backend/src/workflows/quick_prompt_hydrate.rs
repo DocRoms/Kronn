@@ -732,7 +732,7 @@ mod tests {
 }
 
 /// The content a Quick Prompt version saved, over the current Quick Prompt.
-pub(crate) fn apply_version(
+pub fn apply_version(
     qp: &mut crate::models::QuickPrompt,
     version: crate::models::QuickPromptVersion,
 ) {

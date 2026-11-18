@@ -8,16 +8,113 @@
     allow(dead_code, unused_imports)
 )]
 
-pub mod acp;
-pub mod agents;
-pub mod api;
-pub mod core;
-pub mod db;
-pub mod delivery;
-pub mod http_transport;
-pub mod models;
-pub mod state;
-pub mod workflows;
+
+pub mod acp {
+    pub use kronn_l3::acp::*;
+}
+pub mod agents {
+    pub use kronn_l3::agents::*;
+    pub mod media_runner;
+    pub mod readiness;
+}
+pub mod api {
+    pub use kronn_l3::api::*;
+    pub mod agents;
+    pub mod api_call_logs;
+    pub mod bundle;
+    pub mod cli_telemetry;
+    pub mod compare;
+    pub mod context_audit;
+    pub mod contribution;
+    pub mod debug;
+    pub mod default_contents;
+    pub mod desktop_port;
+    pub mod directives;
+    pub mod disc_portability;
+    pub mod disc_workspace;
+    pub mod discussion_actions;
+    pub mod discussion_video_sequence;
+    pub mod discussion_weight;
+    pub mod docs;
+    pub mod execution_variables;
+    pub mod external_api_connections;
+    pub mod github_connection;
+    pub mod health;
+    pub mod human_credentials;
+    pub mod id_resolver;
+    pub mod learnings;
+    pub mod live_page_actions;
+    pub mod maintenance;
+    pub mod model_catalog;
+    pub mod openapi;
+    pub mod profiles;
+    pub mod resource_refs;
+    pub mod rtk;
+    pub mod rtk_state;
+    pub mod setup;
+    pub mod stats;
+    pub mod themes;
+    pub mod ui_preferences;
+    pub mod usage;
+    pub mod user_context;
+    pub mod version;
+}
+pub mod core {
+    pub use kronn_l3::core::*;
+    pub mod backup;
+    pub mod context_audit;
+    pub mod faithfulness;
+    pub mod key_discovery;
+    pub mod learning_doc;
+    pub mod learning_gate;
+    pub mod learning_promote;
+    pub mod learning_scope;
+    pub mod learning_sweep;
+    pub mod media_probe;
+    pub mod quick_exec_templates;
+    pub mod review_payload;
+    pub mod set_aside;
+    pub mod static_context;
+    pub mod usage;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "registry_test.rs"]
+    pub mod registry_test;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "scanner_test.rs"]
+    pub mod scanner_test;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "mcp_scanner_test.rs"]
+    pub mod mcp_scanner_test;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "template_homogeneity_test.rs"]
+    pub mod template_homogeneity_test;
+}
+pub mod db {
+    pub use kronn_l3::db::*;
+    pub mod context_audits;
+    pub mod discussion_video_sequences;
+    pub mod discussion_weight;
+    pub mod id_resolver;
+    pub mod learnings;
+    pub mod quick_exec_runs;
+    pub mod ui_preferences;
+    #[cfg(all(test, feature = "full-tests"))]
+    pub mod release_gate_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    pub mod large_db_measure;
+    #[cfg(test)]
+    pub mod insert_redaction_measure;
+    #[cfg(all(test, feature = "full-tests"))]
+    pub mod upgrade_fixture_tests;
+}
+pub use kronn_l3::delivery;
+pub use kronn_l3::http_transport;
+pub use kronn_l3::models;
+pub use kronn_l3::state;
+pub mod workflows {
+    pub use kronn_l3::workflows::*;
+    pub mod interrupted_worktrees;
+}
 
 #[cfg(all(test, feature = "full-tests"))]
 mod api_tests;
@@ -40,6 +137,8 @@ use tower_http::{
 
 pub use crate::db::Database;
 pub use crate::models::AppConfig;
+pub use crate::core::task_worker_lane_settings::arm_lane_settings;
+pub(crate) use crate::http_transport::{bearer_credential, frontend_origins, is_local_ip, logged_uri};
 pub use crate::state::*;
 pub use crate::workflows::WorkflowEngine;
 
@@ -65,37 +164,6 @@ pub async fn arm_docs_locations(database: &Arc<Database>) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// KT-1751 fourth review — load the lane snapshot from the database: every
-/// project registered (with a lane entry or not) and each one's lane entry
-/// published, beside the global entry. Both boots call it before the first
-/// launch; an import and a reset call it once the project table is replaced.
-pub async fn arm_lane_settings(
-    database: &Arc<Database>,
-    global: &crate::models::LaneWarmConfig,
-) -> anyhow::Result<()> {
-    let listed = database
-        .with_read_conn(crate::db::projects::list_projects)
-        .await;
-    #[cfg(test)]
-    let listed = listed.and_then(|projects| {
-        if crate::core::task_worker_lane_settings::test_guard::listing_fails() {
-            anyhow::bail!("the project table could not be read (test)")
-        }
-        Ok(projects)
-    });
-    // KT-1751 fifth review — a listing that fails leaves no snapshot in force:
-    // emptied and unarmed, so neither a stale list nor a registry later filled
-    // by saves alone applies outside the managed layout.
-    let projects = match listed {
-        Ok(projects) => projects,
-        Err(error) => {
-            crate::core::task_worker_lane_settings::disarm(global);
-            return Err(error);
-        }
-    };
-    crate::core::task_worker_lane_settings::rebuild(global, &projects);
-    Ok(())
-}
 
 // `arm_mode` is injected so tests observe the arming without touching the
 // process-global mode that many other tests set.
@@ -445,16 +513,6 @@ fn auth_locked_refusal(proxy_fronted: bool) -> axum::response::Response {
         .into_response()
 }
 
-/// The credential of an `Authorization: Bearer …` header, the scheme matched
-/// case-insensitively (RFC 7235).
-pub(crate) fn bearer_credential(headers: &HeaderMap) -> Option<&str> {
-    let value = headers.get("authorization")?.to_str().ok()?.trim();
-    let (scheme, credential) = value.split_once(char::is_whitespace)?;
-    scheme
-        .eq_ignore_ascii_case("bearer")
-        .then(|| credential.trim())
-        .filter(|credential| !credential.is_empty())
-}
 
 /// Whether the Authorization header carries a bridge token, in any form.
 fn carries_bridge_token(headers: &HeaderMap) -> bool {
@@ -918,28 +976,6 @@ fn request_is_local_ip(headers: &HeaderMap, request: &axum::extract::Request) ->
     false
 }
 
-/// Check if an IP address is local (localhost or Docker internal network).
-/// Docker bridge uses 172.16-31.x.x; the host accesses the gateway from
-/// an IP like 172.18.0.1. Peers connect from Tailscale (100.x), LAN (192.168.x),
-/// or public IPs — those are NOT local.
-///
-/// Strings only — HTTP source IPs always arrive as numeric strings
-/// (axum's `SocketAddr::ip()` already resolves hostnames upstream).
-/// We previously matched "localhost" defensively, but that opened a
-/// tiny attack surface where a misconfigured nginx could forge
-/// `X-Real-IP: localhost` to bypass auth. Numeric-only is safer.
-pub(crate) fn is_local_ip(ip: &str) -> bool {
-    if ip == "127.0.0.1" || ip == "::1" {
-        return true;
-    }
-    // Docker bridge: 172.16.0.0/12
-    if let Some(rest) = ip.strip_prefix("172.") {
-        if let Some(second) = rest.split('.').next().and_then(|s| s.parse::<u8>().ok()) {
-            return (16..=31).contains(&second);
-        }
-    }
-    false
-}
 
 // ─── CORS ────────────────────────────────────────────────────────────────────
 
@@ -955,37 +991,7 @@ fn redacted_request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
     )
 }
 
-/// The part of a request URI that may be logged: the path, never the query.
-pub(crate) fn logged_uri(uri: &axum::http::Uri) -> &str {
-    uri.path()
-}
 
-/// Browser origins of the local frontend, for CORS and the WS Origin check.
-/// The nginx gateway ports exist only in the Docker deployment: a desktop or
-/// native backend on another port must not trust a page served there.
-pub(crate) fn frontend_origins(domain: &Option<String>, port: u16, in_docker: bool) -> Vec<String> {
-    match domain {
-        Some(d) => vec![
-            format!("https://{}", d),
-            format!("http://{}", d),
-            format!("https://{}:{}", d, port),
-            format!("http://{}:{}", d, port),
-        ],
-        None => {
-            let mut origins = vec![
-                format!("http://localhost:{}", port),
-                format!("http://127.0.0.1:{}", port),
-            ];
-            if in_docker {
-                for gateway in [3140, 3141] {
-                    origins.push(format!("http://localhost:{gateway}"));
-                    origins.push(format!("http://127.0.0.1:{gateway}"));
-                }
-            }
-            origins
-        }
-    }
-}
 
 /// The listed local origins, plus — read from the live config on each request,
 /// since the declaration is made from Settings without a restart — the one

@@ -189,7 +189,7 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
 /// project stays `Audited` until this discussion ends on the terminal
 /// signal and the user validates, exactly like a full run. Fully
 /// localized (fr/en/es) — protocol included, not just the header.
-pub(crate) fn build_partial_validation_prompt(
+pub fn build_partial_validation_prompt(
     refreshed_files: &[String],
     run_td_ids: &[String],
     language: &str,
@@ -254,7 +254,7 @@ pub(crate) fn build_partial_validation_prompt(
 /// EVERY `TD-*.md` on disk and could re-validate (or alter) findings that
 /// belong to previous audits. Localized and phase-agnostic — the callers
 /// number their own phases.
-pub(crate) fn run_scope_block(run_td_ids: &[String], language: &str) -> String {
+pub fn run_scope_block(run_td_ids: &[String], language: &str) -> String {
     if run_td_ids.is_empty() {
         return String::new();
     }
@@ -287,7 +287,7 @@ pub(crate) fn run_scope_block(run_td_ids: &[String], language: &str) -> String {
 /// fall back to reading every TD on disk, those of previous audits included.
 /// Every TD the run listed was already decided: without this block an empty
 /// scope would let the TD phases fall back to every sheet on disk.
-pub(crate) fn all_tds_decided_block(language: &str) -> &'static str {
+pub fn all_tds_decided_block(language: &str) -> &'static str {
     match language {
         "en" => "## SCOPE — no TD to decide\nEvery TD this run lists was already decided by an earlier validation: skip the TD review phases and emit no TD card.\n\n",
         "es" => "## SCOPE — ningun TD por decidir\nCada TD que lista este run ya fue decidido por una validacion anterior: omite las fases de revision de TDs y no emitas ninguna tarjeta TD.\n\n",
@@ -297,7 +297,7 @@ pub(crate) fn all_tds_decided_block(language: &str) -> &'static str {
 
 /// The full validation after a resume names the partial validation of the
 /// run it resumed: decisions taken there are already on the TD sheets.
-pub(crate) fn prior_partial_validation_block(discussion_id: &str, language: &str) -> String {
+pub fn prior_partial_validation_block(discussion_id: &str, language: &str) -> String {
     let (title, body) = match language {
         "en" => (
             "## AFTER A RESUME — partial validation",
@@ -318,7 +318,7 @@ pub(crate) fn prior_partial_validation_block(discussion_id: &str, language: &str
 /// KT-1211 (M6) — the sources moved between the run this one resumed and the
 /// resume: the steps it inherited describe the earlier sources. Said in the
 /// validation prompt so the reviewer does not take them for current.
-pub(crate) fn resume_drift_block(drift: &str, language: &str) -> String {
+pub fn resume_drift_block(drift: &str, language: &str) -> String {
     let (title, lead) = match language {
         "en" => (
             "## SOURCE DRIFT DURING THE RESUME",
@@ -339,7 +339,7 @@ pub(crate) fn resume_drift_block(drift: &str, language: &str) -> String {
     )
 }
 
-pub(crate) fn partial_run_block(
+pub fn partial_run_block(
     steps_to_redo: &[(u32, String)],
     total_steps: u32,
     no_run_tds: bool,
@@ -389,7 +389,7 @@ pub(crate) fn partial_run_block(
 
 /// The sections a partial refresh did not update: outside its validation's
 /// scope and still stale. Empty when every step is done.
-pub(crate) fn partial_refresh_failed_block(
+pub fn partial_refresh_failed_block(
     failed: &[(u32, String)],
     total_steps: u32,
     language: &str,
@@ -424,7 +424,7 @@ pub(crate) fn partial_refresh_failed_block(
 
 /// Dead references inside human-owned sections: the audit may not fix them,
 /// so the human is asked to. Empty when there is none.
-pub(crate) fn human_references_block(
+pub fn human_references_block(
     items: &[crate::core::document_optimization::Diagnostic],
     language: &str,
 ) -> String {
@@ -460,7 +460,7 @@ pub(crate) fn human_references_block(
 /// to the human: the citation problems the committed docs already held in
 /// documents no step owns, and the exact replacements Kronn applied. Empty when
 /// there is nothing of either.
-pub(crate) fn documentary_notes_block(
+pub fn documentary_notes_block(
     preexisting: &[crate::core::document_optimization::Diagnostic],
     advisories: &[crate::core::document_optimization::Diagnostic],
     autofixes: &[(u32, crate::core::document_optimization::AppliedFix)],
@@ -598,7 +598,7 @@ pub(crate) fn documentary_notes_block(
 
 /// KT-1130 — the steps that verified their document and had nothing to
 /// change, listed apart so the human confirms them. Empty when there is none.
-pub(crate) fn unchanged_steps_block(
+pub fn unchanged_steps_block(
     unchanged: &[(u32, String)],
     total_steps: u32,
     language: &str,
@@ -632,7 +632,7 @@ pub(crate) fn unchanged_steps_block(
 }
 
 /// KT-1131 — one step a human accepted, as the validation prompt lists it.
-pub(crate) struct AcceptedStepLine {
+pub struct AcceptedStepLine {
     pub step: u32,
     pub file: String,
     pub by: String,
@@ -642,7 +642,7 @@ pub(crate) struct AcceptedStepLine {
 
 /// KT-1131 — the steps a human accepted instead of fixing: the validation names
 /// them apart, with who accepted, why, and the failure they still carry.
-pub(crate) fn accepted_steps_block(
+pub fn accepted_steps_block(
     accepted: &[AcceptedStepLine],
     total_steps: u32,
     language: &str,
@@ -713,7 +713,7 @@ pub(crate) fn accepted_steps_block(
 /// - Phase 4 light: for RGAA only, the explicit reminder that
 ///   automated audits cover 30-40% of criteria and that the user
 ///   MUST re-test manually OR call Access42 / get Opquast-certified.
-pub(crate) fn build_sub_audit_validation_prompt(
+pub fn build_sub_audit_validation_prompt(
     kind: crate::models::AuditKind,
     language: &str,
     has_issue_tracker_mcp: bool,
@@ -859,7 +859,7 @@ fn validation_card_protocol(language: &str, has_issue_tracker_mcp: bool) -> Stri
     prompt
 }
 
-pub(crate) fn build_validation_prompt(
+pub fn build_validation_prompt(
     language: &str,
     info: &AuditInfo,
     has_issue_tracker_mcp: bool,
@@ -923,7 +923,7 @@ fn first_existing_marker(project_path: &std::path::Path, candidates: &[&str]) ->
 /// Skills the project's stack suggests, each with the file that triggered it
 /// (`("devops", "Dockerfile")`). Pure filesystem look, no logging: the listing
 /// calls it on every read.
-pub(crate) fn detect_project_skill_markers(
+pub fn detect_project_skill_markers(
     project_path: &std::path::Path,
 ) -> Vec<(String, String)> {
     let mut skills: Vec<(String, String)> = Vec::new();
@@ -1021,7 +1021,7 @@ pub(crate) fn detect_project_skill_markers(
 }
 
 /// Auto-detect skills from project filesystem (config files, package managers, etc.)
-pub(crate) fn detect_project_skills(project_path: &std::path::Path) -> Vec<String> {
+pub fn detect_project_skills(project_path: &std::path::Path) -> Vec<String> {
     let valid: Vec<String> = detect_project_skill_markers(project_path)
         .into_iter()
         .map(|(id, _)| id)
@@ -1051,7 +1051,7 @@ pub(super) fn detect_issue_tracker_mcp(project_path: &std::path::Path) -> bool {
 
 /// Try to detect permission issues on an existing docs/ directory.
 /// Returns Ok(()) if all files are accessible, or Err with description if unfixable.
-pub(crate) fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), String> {
+pub fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), String> {
     for entry in walkdir::WalkDir::new(ai_dir).max_depth(5).into_iter() {
         let entry = match entry {
             Ok(e) => e,
@@ -1068,13 +1068,13 @@ pub(crate) fn check_ai_dir_permissions(ai_dir: &std::path::Path) -> Result<(), S
 }
 
 #[derive(Debug)]
-pub(crate) struct ValidatedDocsSnapshot {
+pub struct ValidatedDocsSnapshot {
     files: Vec<(String, String)>,
     briefing: (std::path::PathBuf, Option<Vec<u8>>),
 }
 
 /// Every doc an audit may edit, plus the immutable briefing before the step.
-pub(crate) fn capture_validated_docs(
+pub fn capture_validated_docs(
     project_path: &std::path::Path,
 ) -> Result<ValidatedDocsSnapshot, String> {
     let files = crate::core::doc_provenance::snapshot_tracked(project_path)?;
@@ -1093,7 +1093,7 @@ pub(crate) fn capture_validated_docs(
 
 /// Restoration of a project-wide badge must cover every previously validated
 /// doc, including documents outside this refresh's declared step targets.
-pub(crate) fn validation_restore_snapshots(
+pub fn validation_restore_snapshots(
     project_path: &std::path::Path,
     targets: &[&str],
 ) -> Result<Vec<(String, super::validation::TargetSnapshot)>, String> {
@@ -1120,7 +1120,7 @@ pub(crate) fn validation_restore_snapshots(
 
 /// Mark every tracked doc one agent attempt changed "to reconfirm". The
 /// write itself stays on disk: human ownership never reverts it (KT-1079).
-pub(crate) fn mark_validated_doc_writes(
+pub fn mark_validated_doc_writes(
     project_path: &std::path::Path,
     snapshot: &ValidatedDocsSnapshot,
     writer: crate::core::doc_provenance::DocWriter,
@@ -1133,7 +1133,7 @@ pub(crate) fn mark_validated_doc_writes(
 }
 
 /// An audit step may read the briefing, but only a human briefing review may edit it.
-pub(crate) fn restore_step_briefing(
+pub fn restore_step_briefing(
     project_path: &std::path::Path,
     snapshot: &ValidatedDocsSnapshot,
 ) -> Result<(), String> {
@@ -1198,7 +1198,7 @@ pub(super) fn remove_bootstrap_block(project_path: &std::path::Path, index_file:
 /// flow (kept for backwards-compat — callers that never wrote to the
 /// form still work).
 #[cfg(test)]
-pub(crate) fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str>) -> String {
+pub fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str>) -> String {
     build_briefing_prompt_in(
         language,
         prefilled_notes,
@@ -1208,7 +1208,7 @@ pub(crate) fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str
 
 /// `build_briefing_prompt` with Kronn's text pointing at `docs_root`
 /// (KT-1192). The user's own answers are inserted after the relocation.
-pub(crate) fn build_briefing_prompt_in(
+pub fn build_briefing_prompt_in(
     language: &str,
     prefilled_notes: Option<&str>,
     docs_root: &crate::core::docs_location::DocsRoot,
@@ -1652,7 +1652,7 @@ mod compute_audit_info_tests {
         let dir = tempdir().unwrap();
         let docs = dir.path().join("docs");
         fs::create_dir_all(&docs).unwrap();
-        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let template_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .parent()
             .unwrap()
             .join("templates/docs/AGENTS.md");

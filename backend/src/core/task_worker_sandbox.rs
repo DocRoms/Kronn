@@ -79,7 +79,7 @@ impl Mechanism {
     }
 
     /// The program that applies this mechanism.
-    pub(crate) fn launcher(self) -> &'static str {
+    pub fn launcher(self) -> &'static str {
         match self {
             Self::Seatbelt => SANDBOX_EXEC,
             Self::Bubblewrap => BWRAP,
@@ -264,7 +264,7 @@ impl SandboxPolicy {
     }
 }
 
-pub(crate) use crate::core::fs_guard::real_path;
+pub use crate::core::fs_guard::real_path;
 
 /// `path` with its parent resolved through symlinks and its own last component
 /// kept as is: a file replaced by a symlink is still that file's name.
@@ -276,7 +276,7 @@ fn protected_path(path: &Path) -> PathBuf {
 }
 
 /// A Seatbelt string literal: `\` and `"` escaped.
-pub(crate) fn seatbelt_literal(path: &Path) -> String {
+pub fn seatbelt_literal(path: &Path) -> String {
     let text = path.to_string_lossy();
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -498,7 +498,7 @@ fn seatbelt_profile_hiding(
 }
 
 /// `profile` plus a write deny over each `read_only` file, last so it wins.
-pub(crate) fn seatbelt_profile_read_only(
+pub fn seatbelt_profile_read_only(
     mut profile: String,
     read_only: &[PathBuf],
     git_under: &[PathBuf],
@@ -554,7 +554,7 @@ fn seatbelt_regex_escape(path: &Path) -> String {
 
 /// The `.git` entries (directories or files) below `root`, a few levels deep and
 /// outside build output: the nested repositories of a worktree.
-pub(crate) fn nested_git_entries(root: &Path) -> Vec<PathBuf> {
+pub fn nested_git_entries(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -581,7 +581,7 @@ pub(crate) fn nested_git_entries(root: &Path) -> Vec<PathBuf> {
 /// `args` with each existing `read_only` file bound read-only over itself, before
 /// the namespace flags. A file that does not exist is left out: `bwrap` refuses a
 /// bind whose source is missing.
-pub(crate) fn bubblewrap_args_read_only(
+pub fn bubblewrap_args_read_only(
     mut args: Vec<String>,
     read_only: &[PathBuf],
     git_under: &[PathBuf],

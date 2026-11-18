@@ -3,7 +3,7 @@ use serde_json::json;
 
 /// Routes that return or move secrets, or run commands (design note §3 rows
 /// 3 and 4): a bridge token is never accepted there.
-pub(crate) const SECRET_CLASS: &[(&str, &str)] = &[
+pub const SECRET_CLASS: &[(&str, &str)] = &[
     ("POST", "/api/mcps/configs/{id}/reveal"),
     ("POST", "/api/external-api/connections/{id}/reveal"),
     ("POST", "/api/execution-context/{run_kind}/{run_id}/reveal"),
@@ -1111,7 +1111,7 @@ fn every_session_keyed_request_is_reviewed() {
         ),
     ];
     let found = deserialized_session_keyed_types(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("src"),
     );
     let unreviewed: Vec<&String> = found
         .iter()

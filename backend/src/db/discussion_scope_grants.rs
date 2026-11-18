@@ -9,10 +9,10 @@ use crate::models::discussion_scope::{
     DiscussionProjectGrant, ScopeAccess, ScopeGrantSource,
 };
 
-pub(crate) const GRANT_COLUMNS: &str = "g.id, g.discussion_id, g.project_id, p.name, g.access, g.source, \
+pub const GRANT_COLUMNS: &str = "g.id, g.discussion_id, g.project_id, p.name, g.access, g.source, \
      g.request_id, g.granted_by, g.granted_at, g.revoked_by, g.revoked_at, g.revoked_reason";
 
-pub(crate) fn grant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiscussionProjectGrant> {
+pub fn grant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DiscussionProjectGrant> {
     let parse = |index: usize, value: String| {
         rusqlite::Error::FromSqlConversionFailure(
             index,
@@ -49,7 +49,7 @@ pub enum ScopeError {
     Conflict(String),
 }
 
-pub(crate) fn grant_target(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<String> {
+pub fn grant_target(conn: &Connection, grant: &DiscussionProjectGrant) -> Result<String> {
     if grant.source == ScopeGrantSource::General {
         return Ok("the general resources (seen by every project)".into());
     }
@@ -72,7 +72,7 @@ fn project_label(conn: &Connection, project: Option<&str>) -> Result<String> {
 
 /// A non-dispatching System line in the room: the agents and the human see
 /// every change of scope where they work.
-pub(crate) fn receipt(conn: &Connection, discussion_id: &str, receipt_id: String, body: String) -> Result<()> {
+pub fn receipt(conn: &Connection, discussion_id: &str, receipt_id: String, body: String) -> Result<()> {
     let message = crate::models::DiscussionMessage {
         recovered_partial: false,
         kind: Default::default(),
@@ -102,7 +102,7 @@ pub(crate) fn receipt(conn: &Connection, discussion_id: &str, receipt_id: String
     Ok(())
 }
 
-pub(crate) fn grant_by_id(conn: &Connection, grant_id: &str) -> Result<DiscussionProjectGrant> {
+pub fn grant_by_id(conn: &Connection, grant_id: &str) -> Result<DiscussionProjectGrant> {
     let sql = format!(
         "SELECT {GRANT_COLUMNS} FROM discussion_project_grants g \
          LEFT JOIN projects p ON p.id = g.project_id WHERE g.id = ?1"

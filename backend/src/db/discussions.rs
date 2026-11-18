@@ -959,7 +959,7 @@ pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Re
     Ok(changed)
 }
 
-pub(crate) fn set_disc_no_agent_within_tx(
+pub fn set_disc_no_agent_within_tx(
     transaction: &rusqlite::Transaction<'_>,
     disc_id: &str,
     no_agent: bool,
@@ -2904,7 +2904,7 @@ pub fn insert_message(
 /// placeholder (`redact::redact_agent_output`: its false-positive rate was
 /// measured, `db::insert_redaction_measure`). Only the agent's own role: what a
 /// human typed is theirs.
-pub(crate) fn mask_agent_output(role: &crate::models::MessageRole, content: String) -> String {
+pub fn mask_agent_output(role: &crate::models::MessageRole, content: String) -> String {
     if matches!(role, crate::models::MessageRole::Agent) {
         crate::core::redact::redact_agent_output(&content)
     } else {
@@ -3462,7 +3462,7 @@ pub struct ReviseMessageParams<'a> {
     pub dispatches: &'a [UserDispatchSpec<'a>],
 }
 
-pub(crate) fn content_hash(content: &str) -> String {
+pub fn content_hash(content: &str) -> String {
     Sha256::digest(content.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -4074,7 +4074,7 @@ pub fn update_message_tokens(
 /// joined CLI of that provider unless the provider is the room's own agent.
 /// `None` keeps the native meaning (punctual spawn or discussion agent).
 /// Human-composed mentions never go through this: KT-211 keeps them literal.
-pub(crate) fn agent_alias_cli_target(
+pub fn agent_alias_cli_target(
     provider: &AgentType,
     reply_author: Option<&MessageTarget>,
     joined_cli: &[MessageTarget],
@@ -4098,7 +4098,7 @@ pub(crate) fn agent_alias_cli_target(
 }
 
 /// Every joined, non-workflow CLI session of a discussion as a typed target.
-pub(crate) fn joined_cli_targets(
+pub fn joined_cli_targets(
     conn: &Connection,
     discussion_id: &str,
 ) -> Result<Vec<MessageTarget>> {
@@ -4114,7 +4114,7 @@ pub(crate) fn joined_cli_targets(
 /// A joined session as a typed CLI target, or `None` when the bridge could not
 /// identify its provider (it joins as `Unknown`): such a peer cannot be addressed
 /// by type, and it must not make the whole room unreadable.
-pub(crate) fn session_cli_target(agent_type: &str, session_pk: i64) -> Option<MessageTarget> {
+pub fn session_cli_target(agent_type: &str, session_pk: i64) -> Option<MessageTarget> {
     match parse_agent_type(agent_type) {
         Ok(agent) => Some(MessageTarget::cli(agent, session_pk)),
         Err(_) => {
@@ -4128,7 +4128,7 @@ pub(crate) fn session_cli_target(agent_type: &str, session_pk: i64) -> Option<Me
     }
 }
 
-pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
+pub fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
     Ok(match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,
@@ -4151,7 +4151,7 @@ pub(crate) fn parse_agent_type(s: &str) -> rusqlite::Result<AgentType> {
     })
 }
 
-pub(crate) fn format_agent_type(a: &AgentType) -> String {
+pub fn format_agent_type(a: &AgentType) -> String {
     match a {
         AgentType::ClaudeCode => "ClaudeCode".into(),
         AgentType::Codex => "Codex".into(),
@@ -4603,7 +4603,7 @@ pub struct ContextEntry {
 /// mid-sentence. Gate-grade: used by validate-audit.
 /// Markdown emphasis around the line (`**…**`, backticks) is tolerated: the
 /// stream truncates right after the signal, which leaves `**KRONN:…` behind.
-pub(crate) fn ends_with_terminal_signal(text: &str, signal: &str) -> bool {
+pub fn ends_with_terminal_signal(text: &str, signal: &str) -> bool {
     text.trim_end()
         .lines()
         .last()

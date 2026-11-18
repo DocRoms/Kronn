@@ -371,7 +371,7 @@ const TIMEOUT_CHECKPOINT_PERIOD: std::time::Duration = std::time::Duration::from
 #[cfg(test)]
 const TIMEOUT_CHECKPOINT_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
-pub(crate) const TIMEOUT_ACTIVE_MS_STATE_KEY: &str = "__kronn.timeout_active_ms";
+pub const TIMEOUT_ACTIVE_MS_STATE_KEY: &str = "__kronn.timeout_active_ms";
 
 /// Durable active time from earlier execution segments plus a monotonic clock
 /// for this segment. A run starts a new segment after every persisted pause,
@@ -660,7 +660,7 @@ mod shared_budget_deadline_tests {
 /// longer in the workflow (the workflow was edited mid-run): treat the run
 /// as already past the end so the runner gracefully wraps up rather than
 /// re-running steps the operator removed.
-pub(crate) fn next_step_index_for_resume(
+pub fn next_step_index_for_resume(
     steps: &[crate::models::WorkflowStep],
     step_results: &[crate::models::StepResult],
 ) -> usize {
@@ -702,7 +702,7 @@ pub(crate) fn next_step_index_for_resume(
 /// the resume cursor then keyed off `plan_review` and re-entered the run
 /// AT THE GATE — the human's "request changes" never reached the triage.
 /// Falls back to the bounded positional index when the target never ran.
-pub(crate) fn request_changes_cut(
+pub fn request_changes_cut(
     step_results: &[crate::models::StepResult],
     target_step_name: Option<&str>,
     fallback_idx: usize,
@@ -719,7 +719,7 @@ pub(crate) fn request_changes_cut(
 /// every preset and every hand-built workflow surfaces the feedback without a
 /// `{{state.last_human_feedback}}` placeholder. Returns true when injected.
 /// Extracted from the run loop so the consume-once contract is unit-testable.
-pub(crate) fn inject_and_consume_gate_feedback(
+pub fn inject_and_consume_gate_feedback(
     prompt_template: &mut String,
     state: &mut std::collections::HashMap<String, String>,
 ) -> bool {
@@ -975,7 +975,7 @@ async fn refuse_run_for_safety(
 /// The definition a run executes against: the run's launch project wins over
 /// the workflow's, so a global workflow keeps its project across a gate pause,
 /// a restart, or an edit of the workflow while the run waited.
-pub(crate) fn workflow_in_run_project<'a>(
+pub fn workflow_in_run_project<'a>(
     workflow: &'a Workflow,
     run: &WorkflowRun,
 ) -> std::borrow::Cow<'a, Workflow> {
@@ -1164,7 +1164,7 @@ async fn execute_run_with_notify_policy(
 }
 
 /// What a run tells its reader when its end kept a checkout holding work.
-pub(crate) fn kept_checkout_note(kept: &super::workspace::KeptCheckout) -> String {
+pub fn kept_checkout_note(kept: &super::workspace::KeptCheckout) -> String {
     format!(
         "Worktree `{}` kept with its branch: {}. Commit, push or discard what it holds (unlock it if git says it is locked), or remove it yourself (`git worktree remove --force`); Kronn removes it at a later start once it is clean.",
         kept.path.display(),
@@ -1175,7 +1175,7 @@ pub(crate) fn kept_checkout_note(kept: &super::workspace::KeptCheckout) -> Strin
 /// Finished runs whose checkout is gone no longer own a worktree. Clearing
 /// the durable path lets run retention reach them without the boot janitor; a
 /// checkout still on disk, or a run not yet terminal in the database, keeps it.
-pub(crate) async fn forget_removed_workspace(state: &AppState, run: &WorkflowRun) {
+pub async fn forget_removed_workspace(state: &AppState, run: &WorkflowRun) {
     let Some(path) = run.workspace_path.clone() else {
         return;
     };
@@ -3202,7 +3202,7 @@ async fn execute_run_body(
                     .await
                 }
                 StepType::Decide => {
-                    let base = crate::api::ollama::resolve_base_url_pub(
+                    let base = crate::api::ollama_health::resolve_base_url_pub(
                         state.ollama_base_url_override.as_deref(),
                     );
                     super::decide_step::execute_decide_step(
@@ -4345,7 +4345,7 @@ async fn execute_run_body(
                     .await
                 }
                 StepType::Decide => {
-                    let base = crate::api::ollama::resolve_base_url_pub(
+                    let base = crate::api::ollama_health::resolve_base_url_pub(
                         state.ollama_base_url_override.as_deref(),
                     );
                     super::decide_step::execute_decide_step(
@@ -4546,7 +4546,7 @@ async fn execute_run_body(
 
 /// Build the maximum iteration safeguard for a given step count.
 /// Formula: total_steps * 10 + 50.
-pub(crate) fn max_iterations_for(total_steps: usize) -> usize {
+pub fn max_iterations_for(total_steps: usize) -> usize {
     total_steps * 10 + 50
 }
 
@@ -4840,7 +4840,7 @@ async fn root_llm_calls_spent(
 
 /// Raises the root's durable count to the shared total: a child's calls must
 /// survive a crash before its parent's step returns (KT-1046).
-pub(crate) async fn record_tree_llm_calls(state: &AppState, budget: &SharedBudget) -> Result<()> {
+pub async fn record_tree_llm_calls(state: &AppState, budget: &SharedBudget) -> Result<()> {
     let Some(root) = budget.root_run_id().map(str::to_string) else {
         return Ok(());
     };
@@ -4857,7 +4857,7 @@ pub(crate) async fn record_tree_llm_calls(state: &AppState, budget: &SharedBudge
 
 /// Takes back one call counted before launch that the provider refused for
 /// quota: a refused call spent nothing (KT-1046). Interrupted calls stay counted.
-pub(crate) async fn release_quota_refused_llm_call(
+pub async fn release_quota_refused_llm_call(
     state: &AppState,
     budget: &SharedBudget,
 ) -> Result<()> {
@@ -4956,7 +4956,7 @@ fn append_resume_transition(run: &mut WorkflowRun) {
         .insert(RUN_RESUME_HISTORY_KEY.to_string(), history.to_string());
 }
 
-pub(crate) async fn claim_interrupted_run_row(
+pub async fn claim_interrupted_run_row(
     state: &AppState,
     run: &mut WorkflowRun,
 ) -> Result<()> {
@@ -4972,7 +4972,7 @@ pub(crate) async fn claim_interrupted_run_row(
 /// workflow's concurrency limit refused it; `run` is then left unchanged, so
 /// the caller may wait and try again. `deadline`: the earliest timeout the
 /// runners above a sub-workflow child enforce; past it the claim is refused.
-pub(crate) async fn try_claim_interrupted_run_row(
+pub async fn try_claim_interrupted_run_row(
     state: &AppState,
     run: &mut WorkflowRun,
     deadline: Option<chrono::DateTime<Utc>>,
@@ -5072,7 +5072,7 @@ pub async fn claim_interrupted_run(
 /// The refusals every top-level resume applies, manual or after a quota reset
 /// (KT-811): children and batches, a vanished worktree, and an external effect
 /// with no durable result (fail-closed, KT-150).
-pub(crate) fn check_resume_preconditions(
+pub fn check_resume_preconditions(
     run: &mut WorkflowRun,
     retry_uncertain_effect: bool,
 ) -> Result<()> {
@@ -5123,7 +5123,7 @@ pub(crate) fn check_resume_preconditions(
 
 /// Continues a run its caller already claimed, in the background, with the
 /// same settle and unattended-failure notification as every resume.
-pub(crate) fn spawn_claimed_resume(state: AppState, workflow: Workflow, mut run: WorkflowRun) {
+pub fn spawn_claimed_resume(state: AppState, workflow: Workflow, mut run: WorkflowRun) {
     tokio::spawn(async move {
         let cfg = state.config.read().await;
         let tokens = cfg.tokens.clone();
@@ -5201,7 +5201,7 @@ fn append_decision_footer(result: &mut StepResult, verdict: &str, comment: Optio
 /// Failures are logged but never propagate — a workflow run shouldn't
 /// fail because the disk is full or the path is unwritable; the agent's
 /// output is still in `StepResult.output` and the template context.
-pub(crate) fn persist_declared_artifacts(
+pub fn persist_declared_artifacts(
     workflow: &Workflow,
     extracted: &::std::collections::HashMap<String, String>,
     work_dir: &std::path::Path,
@@ -5246,7 +5246,7 @@ pub(crate) fn persist_declared_artifacts(
 
 /// Replays a run's recorded step results into the context, in run order, as
 /// if the run had never paused.
-pub(crate) fn replay_prior_results(ctx: &mut TemplateContext, results: &[StepResult]) {
+pub fn replay_prior_results(ctx: &mut TemplateContext, results: &[StepResult]) {
     for prior in results {
         ctx.set_step_output(&prior.step_name, &prior.output);
         ctx.set_step_kind(&prior.step_name, prior.step_kind.as_deref());
@@ -5282,7 +5282,7 @@ pub(crate) fn replay_prior_results(ctx: &mut TemplateContext, results: &[StepRes
 /// workflow between runs — history must describe THIS run), THEN seed the
 /// template ctx (`steps.X.output/agent/model`) from the snapshotted result.
 /// One function so the order can't silently regress.
-pub(crate) fn record_step_completion(
+pub fn record_step_completion(
     step: &WorkflowStep,
     result: &mut StepResult,
     ctx: &mut TemplateContext,
@@ -5305,7 +5305,7 @@ pub(crate) fn record_step_completion(
     );
 }
 
-pub(crate) fn apply_step_snapshot(
+pub fn apply_step_snapshot(
     step: &WorkflowStep,
     result: &mut StepResult,
     model_tiers: Option<&crate::models::setup::ModelTiersConfig>,

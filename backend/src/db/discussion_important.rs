@@ -267,7 +267,7 @@ pub fn validate_spec(spec: &ImportantSpec) -> bool {
 /// keep an ordinary message from being converted — `UNIQUE(message_id)` alone
 /// would only stop a second card on a message that already had one.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn publish(
+pub fn publish(
     conn: &Connection,
     id: &str,
     discussion_id: &str,

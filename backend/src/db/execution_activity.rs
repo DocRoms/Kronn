@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::TaskExecutionStatus;
 
-pub(crate) fn parse_dt(value: String) -> DateTime<Utc> {
+pub fn parse_dt(value: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&value)
         .map(|date| date.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
@@ -26,7 +26,7 @@ pub const DEFAULT_REVIEW_TIMEOUT_SECS: u32 = 4 * 60 * 60;
 const ACTIVITY_TIMEOUT_ENV: &str = "KRONN_TASK_ACTIVITY_TIMEOUT_SECS";
 const REVIEW_TIMEOUT_ENV: &str = "KRONN_TASK_REVIEW_TIMEOUT_SECS";
 
-pub(crate) fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
+pub fn timeout_secs_from_env(name: &str, fallback: u32) -> u32 {
     crate::core::child_env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<u32>().ok())
@@ -48,7 +48,7 @@ pub fn default_review_timeout_secs() -> u32 {
 /// `Working`; the default therefore arms nowhere else, so an `Interrupted`,
 /// `AwaitingReview` or `Escalated` row is never "silent". An explicit campaign
 /// policy keeps the clock it always armed.
-pub(crate) fn effective_activity_secs(
+pub fn effective_activity_secs(
     policy: Option<i64>,
     status: TaskExecutionStatus,
 ) -> Option<i64> {
@@ -57,7 +57,7 @@ pub(crate) fn effective_activity_secs(
     })
 }
 
-pub(crate) fn effective_review_secs(policy: Option<i64>) -> i64 {
+pub fn effective_review_secs(policy: Option<i64>) -> i64 {
     policy.unwrap_or_else(|| i64::from(default_review_timeout_secs()))
 }
 

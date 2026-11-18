@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use crate::core::task_worker_sandbox::real_path;
 use crate::models::RunStatus;
 
-pub(crate) use crate::core::rooted_fd as fd;
+pub use crate::core::rooted_fd as fd;
 
 /// Where versions before KT-1585 kept the run directories, in the data dir.
 const LEGACY_DIR_NAME: &str = "run-artifacts";
@@ -152,7 +152,7 @@ fn safe_run_id(run_id: &str) -> bool {
 
 /// What the sweep and the migration may touch: a directory named exactly as
 /// Kronn names a run (a hyphenated lowercase UUID).
-pub(crate) fn is_run_dir_name(name: &str) -> bool {
+pub fn is_run_dir_name(name: &str) -> bool {
     uuid::Uuid::parse_str(name).is_ok_and(|id| id.hyphenated().to_string() == name)
 }
 
@@ -246,7 +246,7 @@ fn remove_under(root: &Path, run_id: &str) {
 
 /// A run's directory (`{{run.artifacts_dir}}`) opened from the root fd,
 /// never through a link: where Kronn writes approved copies and full outputs.
-pub(crate) fn open_run_dir(artifacts_dir: &Path) -> std::io::Result<fd::Dir> {
+pub fn open_run_dir(artifacts_dir: &Path) -> std::io::Result<fd::Dir> {
     let missing = || std::io::Error::from(std::io::ErrorKind::NotFound);
     let run_id = artifacts_dir.file_name().ok_or_else(missing)?;
     let root = artifacts_dir.parent().ok_or_else(missing)?;

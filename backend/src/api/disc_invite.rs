@@ -1233,7 +1233,7 @@ pub struct WaitForPeerResponse {
 
 /// stab-3 — pacing for a disc: hot while the last User message is within
 /// the attention lease. DB errors degrade to cold (the conservative regime).
-pub(crate) async fn pacing_for_disc(
+pub async fn pacing_for_disc(
     state: &AppState,
     disc_id: &str,
 ) -> crate::api::disc_introspection::PacingState {
