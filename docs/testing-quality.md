@@ -356,7 +356,7 @@ so:
   exceeds 200 000 lines, tests included. Run it locally with
   `python3 backend/scripts/ci/crate_size.py`; it prints every crate's size.
 - `backend/scripts/ci/rustc_memory.py` fails `test-backend-build` when the
-  compilation of one crate peaked over 8 GB, as measured by the rustc wrapper
+  compilation of one crate peaked over 7 GB, as measured by the rustc wrapper
   during the instrumented build. A cache hit compiles nothing and passes.
 
 A failing gate is fixed by moving modules to another crate or adding a layer

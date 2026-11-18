@@ -30,15 +30,15 @@ class RustcMemory(unittest.TestCase):
         self.assertEqual(rustc_memory.peaks(text), {"kronn": GB})
 
     def test_a_crate_under_the_cap_passes(self):
-        self.assertEqual(self.run_gate(f"{7 * GB} kronn_l1 test\n"), 0)
+        self.assertEqual(self.run_gate(f"{6 * GB} kronn_l1 test\n"), 0)
 
     def test_a_crate_over_the_cap_fails(self):
         self.assertEqual(self.run_gate(f"{GB} kronn_l0\n{9 * GB} kronn_l1 test\n"), 1)
         self.assertEqual(rustc_memory.over({"a": 9 * GB, "b": GB}, 8.0), ["a"])
 
     def test_the_cap_is_the_last_passing_value(self):
-        self.assertEqual(self.run_gate(f"{8 * GB} kronn\n"), 0)
-        self.assertEqual(self.run_gate(f"{8 * GB + 1} kronn\n"), 1)
+        self.assertEqual(self.run_gate(f"{7 * GB} kronn\n"), 0)
+        self.assertEqual(self.run_gate(f"{7 * GB + 1} kronn\n"), 1)
 
     def test_the_cap_can_be_set_on_the_command_line(self):
         self.assertEqual(self.run_gate(f"{3 * GB} kronn\n", "--max-gb", "2"), 1)

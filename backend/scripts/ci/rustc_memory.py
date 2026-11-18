@@ -6,6 +6,8 @@ repository's crates: `<peak resident kB> <crate name>[ test]`. This gate keeps
 the highest peak of each crate and fails above MAX_GB: the hosted runner has
 16 GB, and a compilation that swaps does not finish within the job's time limit.
 The size gate (crate_size.py) stops a crate early; this one measures the cost.
+The cap sits above the highest peak measured in CI (5.76 GB for a crate of
+184 000 lines) by what a crate at the size limit and run-to-run variation need.
 
 usage: rustc_memory.py <log> [--max-gb N]
 """
@@ -13,7 +15,7 @@ import pathlib
 import re
 import sys
 
-MAX_GB = 8.0
+MAX_GB = 7.0
 LINE = re.compile(r'^(\d+) ([A-Za-z0-9_]+(?: test)?)$')
 
 

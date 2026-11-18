@@ -108,7 +108,7 @@ exports the TypeScript bindings of every crate into `backend/bindings/`.
 | Gate | What it refuses | When |
 |---|---|---|
 | `backend/scripts/ci/crate_size.py` | A crate over 200 000 lines (its root and every module file reached from it, tests included) | Quality job, before any compilation |
-| `backend/scripts/ci/rustc_memory.py` | A crate whose compilation peaked over 8 GB of resident memory | After the instrumented build, from the peaks `scripts/ci/rustc_one_at_a_time.sh` records |
+| `backend/scripts/ci/rustc_memory.py` | A crate whose compilation peaked over 7 GB of resident memory (highest peak measured in CI: 5.76 GB) | After the instrumented build, from the peaks `scripts/ci/rustc_one_at_a_time.sh` records |
 
 When the size gate fails, move modules to another crate (the lowest one that
 can hold them) or add a layer crate: a new `backend/crates/l<k>/Cargo.toml`
