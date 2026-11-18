@@ -496,7 +496,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("Add the ci-build label before merging", build)
         # ci-test serves a cheaper e2e build: the real release profile is
         # built here, for every pull request.
-        self.assertIn("cargo build --release --locked --bin kronn", build)
+        self.assertIn("cargo build --release --locked -p kronn --bin kronn", build)
         self.assertIn("      - build-release", build)
         desktop = (WORKFLOWS / "desktop-build.yml").read_text()
         for name in ("ci-test.yml", "ci-build.yml"):
@@ -508,7 +508,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             CI_WORKFLOW.read_text(),
             re.MULTILINE | re.DOTALL,
         ).group("section")
-        self.assertIn("run: cargo build --locked --bin kronn", e2e)
+        self.assertIn("run: cargo build --locked -p kronn --bin kronn", e2e)
         self.assertIn("./target/debug/kronn", e2e)
         self.assertNotIn("--release", e2e)
         self.assertIn("target/debug/deps", e2e)
@@ -517,7 +517,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             BUILD_WORKFLOW.read_text(),
             re.MULTILINE | re.DOTALL,
         ).group("section")
-        self.assertIn("cargo build --release --locked --bin kronn", release)
+        self.assertIn("cargo build --release --locked -p kronn --bin kronn", release)
 
     def test_backend_readiness_wait_is_posix_and_latched(self):
         workflow = CI_WORKFLOW.read_text()

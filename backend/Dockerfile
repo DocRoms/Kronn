@@ -20,7 +20,7 @@ RUN mkdir src && echo "fn main(){}" > src/main.rs && echo "" > src/lib.rs \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --profile ${CARGO_PROFILE} 2>/dev/null || true
+    cargo build --profile ${CARGO_PROFILE} -p kronn 2>/dev/null || true
 
 # Build app (only our code recompiles, deps are cached)
 COPY src ./src
@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         cargo clean -p "$(sed -n 's|^name = "\(kronn-l[0-9]*\)"$|\1|p' "$manifest")"; \
       done; } 2>/dev/null || true \
     && touch src/*.rs \
-    && cargo build --profile ${CARGO_PROFILE} \
+    && cargo build --profile ${CARGO_PROFILE} -p kronn \
     && cp target/${CARGO_PROFILE}/kronn /usr/local/bin/kronn
 
 # ── Lint stage (optional, used by `make lint-backend`) ───────────────────────

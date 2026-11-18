@@ -139,7 +139,7 @@ Never load everything "just in case".
 ## 4. Development constraints
 
 - **Docker-first**: the full app runs via `docker compose`. Backend, frontend, and gateway are separate services.
-- **Quality is mandatory**: `cargo clippy -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must be running, Vite is auto-spawned). Fixtures, page objects and specs: `frontend/e2e/README.md`.
+- **Quality is mandatory**: `cargo clippy --workspace -- -D warnings` must pass. Frontend: `npx tsc --noEmit` + `pnpm test`. Shell: `make test-shell`. E2E: `pnpm test:e2e` (Playwright; backend must run, Vite auto-spawned). Fixtures, page objects and specs: `frontend/e2e/README.md`.
 - **Release versions are mechanically synchronized**: `make bump V=x.y.z`, then
   `make check-version` before tagging. The guard compares `VERSION`, manifests,
   lockfiles, the first changelog release, both READMEs and the FR/EN/ES public

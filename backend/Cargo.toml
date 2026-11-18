@@ -30,7 +30,8 @@ full-tests = []
 
 [workspace]
 members = [".", "crates/*"]
-# A bare `cargo clippy` or `cargo test` covers every crate, not the top one alone.
+# A bare `cargo clippy` or `cargo test` covers every crate, not the top one
+# alone. The server is built with `-p kronn`, which resolves its features only.
 default-members = [".", "crates/*"]
 resolver = "2"
 

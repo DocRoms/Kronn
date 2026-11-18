@@ -304,7 +304,7 @@ clean:
 ## Production build (no Docker)
 build:
 	@echo "$(GREEN)▸ Building backend...$(RESET)"
-	cd backend && cargo build --release
+	cd backend && cargo build --release -p kronn
 	@echo "$(GREEN)▸ Building frontend...$(RESET)"
 	cd frontend && pnpm install && pnpm build
 	@echo "$(GREEN)▸ Done. Binary at target/release/$(APP_NAME)$(RESET)"
@@ -323,7 +323,7 @@ dev-backend:
 # lands HERE, not in backend/target/.
 run-backend:
 	@echo "$(GREEN)▸ Building backend...$(RESET)"
-	cd backend && cargo build
+	cd backend && cargo build -p kronn
 	@echo "$(GREEN)▸ Starting backend (bare binary — no watcher)...$(RESET)"
 	./target/debug/kronn
 

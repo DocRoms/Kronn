@@ -97,8 +97,9 @@ provider; a test fails when a declared hook is missing from that list.
   `backend/crates/l<k>` in a layer crate.
 
 Every crate is a default member of the workspace, so a bare `cargo clippy` or
-`cargo test` in `backend/` covers the five of them. CI and the Makefile still
-name it: commands take `--workspace`: `cargo nextest run
+`cargo test --lib <filter>` in `backend/` covers the five of them; CI and the
+Makefile still say `--workspace`. The server is built with `-p kronn`, which
+resolves the features of the server and nothing else. Commands: `cargo nextest run
 --workspace`, `cargo clippy --workspace --all-targets`, and `make typegen`
 exports the TypeScript bindings of every crate into `backend/bindings/`.
 

@@ -355,7 +355,7 @@ jobs:
           restore-keys: release-v1-${{ runner.os }}-
       - name: Build backend (release)
         working-directory: backend
-        run: cargo build --release --locked --bin kronn
+        run: cargo build --release --locked -p kronn --bin kronn
       - name: Save cargo registry and release dependencies (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-release.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -542,7 +542,7 @@ jobs:
 
       - name: Build kronn.exe
         working-directory: backend
-        run: cargo build --locked --bin kronn
+        run: cargo build --locked -p kronn --bin kronn
 
       - name: Install the Playwright browser
         working-directory: frontend

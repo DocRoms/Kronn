@@ -566,6 +566,9 @@ jobs:
         run: |
           LEAKED=$(cargo tree -p kronn -e normal,build -f '{p} {f}' --locked | grep -E 'kronn-l[0-9]+ .*(test-support|full-tests)' || true)
           test -z "$LEAKED" || { echo "$LEAKED"; exit 1; }
+          # A build that names no package takes every crate: still no test-support.
+          LEAKED=$(cargo tree -e normal,build -f '{p} {f}' --locked | grep -E 'kronn(-l[0-9]+)? .*test-support' || true)
+          test -z "$LEAKED" || { echo "$LEAKED"; exit 1; }
       - name: Tech-debt registry — index rows match open detail files
         if: github.event_name != 'push'
         run: |
@@ -828,7 +831,7 @@ jobs:
 
       - name: Build backend (dev profile)
         working-directory: backend
-        run: cargo build --locked --bin kronn
+        run: cargo build --locked -p kronn --bin kronn
 
       - name: Save cargo registry and the e2e backend dependencies (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-e2e-dev.outputs.cache-hit != 'true'

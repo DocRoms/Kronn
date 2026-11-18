@@ -46,8 +46,8 @@ Run from the repository root unless a working directory is shown.
 | Version surfaces | `make check-version` | Every manifest, README, site and the first changelog release agree |
 | Diff hygiene | `make check-diff` (`scripts/check-diff.sh`: `git diff --check` from the merge base with `origin/main`, plus staged and unstaged changes; CI job `diff-hygiene`) | No whitespace errors or conflict markers |
 | Rust formatting | `cd backend && cargo fmt --all -- --check` | Clean |
-| Rust lint | `cd backend && cargo clippy --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
-| Backend tests | `make test-backend` (`cd backend && cargo nextest run --workspace`: library, binary and integration tests, one process per test, with CI's runner and `backend/.config/nextest.toml`, then `cargo test --doc`) | Entire Rust suite passes |
+| Rust lint | `cd backend && cargo clippy --workspace --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
+| Backend tests | `make test-backend` (`cd backend && cargo nextest run --workspace`: library, binary and integration tests, one process per test, with CI's runner and `backend/.config/nextest.toml`, then `cargo test --workspace --doc`) | Entire Rust suite passes |
 | Backend coverage | `make test-backend-cov` (`cargo llvm-cov nextest` with CI's 83 % floors, then `scripts/check-keymgmt-coverage.sh`) | Both floors hold |
 | Python helpers | `make test-python` | Entire helper suite passes |
 | Shell | `make test-shell` | Entire bats suite passes |
@@ -64,7 +64,7 @@ Run from the repository root unless a working directory is shown.
 `make test-backend-lib` runs the library unit tests only: a quick loop, not
 evidence for the gate. The release gate above is CI's: a local or orchestration
 integration validation is `cargo fmt --check`, `cargo clippy` and targeted lib
-tests (`cargo test --lib <filter>`, 3.3 min against ~20 min for the full local
+tests (`cargo test --workspace --lib <filter>`, 3.3 min against ~20 min for the full local
 `cargo test`, KT-1630 audit); a full-suite validation is flagged `full_suite_ci_owned`
 (see [task orchestration](guides/task-orchestration.md#default-validations-fmt--clippy--targeted-lib-tests)). `export_bindings` is skipped locally (the default
 nextest profile filters it) so the ts-rs bindings stay untouched; CI's `ci`
@@ -235,7 +235,7 @@ aggregates accept those skips only for a push. A save runs only on
 `success()`: a half-built tree saved under the exact key would be restored
 as a hit, and never replaced, until the next `Cargo.lock` change. The
 backend save keeps its own verified `ready` marker instead.
-[src: file: .github/workflows/ci-test.yml:230-242#archive] [src: file: .github/workflows/ci-test.yml:466-501#cache-clippy] [src: file: .github/workflows/ci-test.yml:790-817#cache-e2e-dev]
+[src: file: .github/workflows/ci-test.yml:230-242#archive] [src: file: .github/workflows/ci-test.yml:466-501#cache-clippy] [src: file: .github/workflows/ci-test.yml:793-820#cache-e2e-dev]
 [src: file: .github/workflows/ci-build.yml:238-279#cache-portability] [src: file: .github/workflows/ci-build.yml:321-346#cache-release]
 
 The backend performance observer publishes the duration for every eligible run
@@ -255,7 +255,7 @@ debug layout, so the first run is an explicit warmup.
 [src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:166-191#main] [src: file: scripts/ci/backend_ci_slo.mjs:100-104#effectiveMeasurementMode] [src: file: scripts/ci/backend_ci_slo.mjs:83-94#comparableSuccessfulHotRuns]
 [src: file: .github/workflows/ci-test.yml:131-160#verify-backend-cache] [src: file: .github/workflows/ci-test.yml:195-206#cold] [src: file: .github/workflows/ci-test.yml:1055-1092#backend-ci-performance]
 The observer's Node unit test runs in the blocking `test-python` gate.
-[src: file: .github/workflows/ci-test.yml:653-660#SLO]
+[src: file: .github/workflows/ci-test.yml:656-663#SLO]
 
 Each shard fails its artifact step when nextest does not produce the expected
 JUnit report, then uploads it as `backend-junit-N` (N = 1 to 3). nextest writes its
@@ -343,8 +343,8 @@ gate is skipped or fails. A timeout is a functional failure; the SLO observer
 does not retry, sleep, or mask it. An SLO breach is a warning, while missing,
 duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
-[src: file: .github/workflows/ci-test.yml:95#timeout-minutes] [src: file: .github/workflows/ci-test.yml:401#timeout-minutes] [src: file: .github/workflows/ci-test.yml:774#timeout-minutes] [src: file: .github/workflows/ci-build.yml:234-238#timeout-minutes] [src: file: .github/workflows/ci-build.yml:337#timeout-minutes]
-[src: file: .github/workflows/ci-test.yml:996-1038#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
+[src: file: .github/workflows/ci-test.yml:95#timeout-minutes] [src: file: .github/workflows/ci-test.yml:401#timeout-minutes] [src: file: .github/workflows/ci-test.yml:777#timeout-minutes] [src: file: .github/workflows/ci-build.yml:234-238#timeout-minutes] [src: file: .github/workflows/ci-build.yml:337#timeout-minutes]
+[src: file: .github/workflows/ci-test.yml:999-1041#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
 
 ## Crate size
 
