@@ -307,8 +307,15 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
     }
     let referenced_skills = crate::core::skill_bundle::bundle_skills(&skill_ids);
     let quick_prompts: Vec<_> = quick_prompts.into_values().collect();
+    let (referenced_directives, referenced_profiles) = crate::core::binding_bundle::bundle_for(
+        &workflows.iter().collect::<Vec<_>>(),
+        &quick_prompts.iter().collect::<Vec<_>>(),
+        &quick_apis.iter().collect::<Vec<_>>(),
+    );
     let carried = crate::core::export_report::Carried {
         skills: referenced_skills.iter().map(|s| s.id.clone()).collect(),
+        directives: referenced_directives.iter().map(|d| d.id.clone()).collect(),
+        profiles: referenced_profiles.iter().map(|p| p.id.clone()).collect(),
         objects: [artifact.id.clone(), artifact.slug.clone()]
             .into_iter()
             .chain(pages.values().flat_map(|p| [p.id.clone(), p.slug.clone()]))
@@ -321,6 +328,7 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
     let not_carried = crate::core::export_report::not_carried(
         &workflows.iter().collect::<Vec<_>>(),
         &quick_prompts.iter().collect::<Vec<_>>(),
+        &quick_apis.iter().collect::<Vec<_>>(),
         &carried,
         &crate::core::export_report::KnownIds::load(conn)?,
     );
@@ -335,6 +343,8 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
         referenced_quick_apis: quick_apis,
         referenced_quick_execs: quick_execs,
         referenced_skills,
+        referenced_directives,
+        referenced_profiles,
         redacted_fields,
         not_carried,
     };

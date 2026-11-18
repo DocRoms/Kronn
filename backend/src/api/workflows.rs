@@ -4465,8 +4465,17 @@ pub async fn export_workflow(
                 .into_response()
         }
     };
+    let (referenced_directives, referenced_profiles) = crate::core::binding_bundle::bundle_for(
+        &std::iter::once(&exported)
+            .chain(&referenced_workflows)
+            .collect::<Vec<_>>(),
+        &referenced_quick_prompts.iter().collect::<Vec<_>>(),
+        &referenced_quick_apis.iter().collect::<Vec<_>>(),
+    );
     let carried = crate::core::export_report::Carried {
         skills: referenced_skills.iter().map(|s| s.id.clone()).collect(),
+        directives: referenced_directives.iter().map(|d| d.id.clone()).collect(),
+        profiles: referenced_profiles.iter().map(|p| p.id.clone()).collect(),
         objects: std::iter::once(exported.id.clone())
             .chain(referenced_workflows.iter().map(|w| w.id.clone()))
             .chain(referenced_quick_prompts.iter().map(|q| q.id.clone()))
@@ -4480,6 +4489,7 @@ pub async fn export_workflow(
             .chain(&referenced_workflows)
             .collect::<Vec<_>>(),
         &referenced_quick_prompts.iter().collect::<Vec<_>>(),
+        &referenced_quick_apis.iter().collect::<Vec<_>>(),
         &carried,
         &known,
     );
@@ -4494,6 +4504,8 @@ pub async fn export_workflow(
         referenced_pages,
         referenced_workflows,
         referenced_skills,
+        referenced_directives,
+        referenced_profiles,
         redacted_fields,
         not_carried,
     };
@@ -4891,8 +4903,16 @@ pub async fn import_workflow_preview(
         &envelope.referenced_quick_prompts,
         &bundled,
     );
+    let bindings = match crate::core::binding_bundle::plan(
+        &envelope.referenced_directives,
+        &envelope.referenced_profiles,
+    ) {
+        Ok(bindings) => bindings,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
     Json(ApiResponse::ok(WorkflowImportPreview {
         skills,
+        bindings,
         missing_skills,
     }))
 }
@@ -4923,6 +4943,13 @@ async fn import_workflow_written(
         .iter()
         .map(|skill| skill.id.clone())
         .collect();
+    // KT-1843 — bundled directives and profiles are checked now and written
+    // with the skills, once every check below has passed.
+    let (bundled_directives, bundled_profiles) =
+        (envelope.referenced_directives, envelope.referenced_profiles);
+    if let Err(error) = crate::core::binding_bundle::plan(&bundled_directives, &bundled_profiles) {
+        return Json(ApiResponse::err(error));
+    }
 
     // #10 — the import BUNDLE = the root workflow + its (transitive) sub-workflow
     // children (`referenced_workflows`, empty on legacy single-workflow exports).
@@ -5192,9 +5219,15 @@ async fn import_workflow_written(
         Ok(ids) => ids,
         Err(error) => return Json(ApiResponse::err(error)),
     };
+    let binding_ids =
+        match crate::core::binding_bundle::apply(&bundled_directives, &bundled_profiles) {
+            Ok(ids) => ids,
+            Err(error) => return Json(ApiResponse::err(error)),
+        };
     for w in &mut prepared {
         for step in w.steps.iter_mut().chain(w.on_failure.iter_mut()) {
             crate::core::skill_bundle::remap_ids(&mut step.skill_ids, &skill_ids);
+            binding_ids.remap(&mut step.profile_ids, &mut step.directive_ids);
             if let Some(payload) = step.json_data_payload.as_mut() {
                 crate::core::skill_bundle::remap_payload(payload, &skill_ids);
             }
@@ -5210,6 +5243,10 @@ async fn import_workflow_written(
     }
     for qp in &mut qps_to_insert {
         crate::core::skill_bundle::remap_ids(&mut qp.skill_ids, &skill_ids);
+        binding_ids.remap(&mut qp.profile_ids, &mut qp.directive_ids);
+    }
+    for qa in &mut qas_to_insert {
+        binding_ids.remap(&mut qa.profile_ids, &mut qa.directive_ids);
     }
     let missing_notice = missing_skills_notice(&missing_skills(
         prepared.iter(),
@@ -10398,6 +10435,8 @@ mod tests {
         child.id = "child-id".into();
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10421,6 +10460,8 @@ mod tests {
         // Legacy single-workflow exports stay byte-compatible (field skipped).
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10444,6 +10485,8 @@ mod tests {
     fn export_envelope_serializes_with_kind_and_version() {
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -10472,6 +10515,8 @@ mod tests {
         // when no QPs are bundled — common case for solo dev workflows.
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -11107,6 +11152,8 @@ mod tests {
         wf.steps = vec![emit];
         let content = serde_json::to_string(&WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -11542,6 +11589,8 @@ mod tests {
         wf.steps = vec![emit];
         let content = serde_json::to_string(&WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -11613,6 +11662,8 @@ mod tests {
         wf.steps = vec![plan];
         let envelope = |wf: Workflow| WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
@@ -11739,6 +11790,8 @@ mod tests {
         // it doesn't know about).
         let env = WorkflowExportEnvelope {
             referenced_skills: vec![],
+            referenced_directives: vec![],
+            referenced_profiles: vec![],
             kind: WORKFLOW_EXPORT_KIND.into(),
             version: EXPORT_VERSION + 1,
             exported_at: chrono::Utc::now(),

@@ -164,7 +164,7 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
             </div>;
           })}
         </div>
-        <SkillImportDecisions decisions={preview.skills} choices={skillChoices} disabled={busy} t={t}
+        <SkillImportDecisions decisions={preview.skills} bindings={preview.bindings} choices={skillChoices} disabled={busy} t={t}
           onChoose={next => { setSkillChoices(next); setDirty(true); }} />
         {preview.entries.some(entry => entry.quick_exec && !entry.quick_exec.approved)
           && <p className="artifact-import-note">{t('pages.import.execApprovalRequired')}</p>}

@@ -4784,6 +4784,7 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                       {importSkills && (
                         <SkillImportDecisions
                           decisions={importSkills.skills}
+                          bindings={importSkills.bindings}
                           missing={importSkills.missing_skills}
                           choices={importSkillChoices}
                           onChoose={setImportSkillChoices}

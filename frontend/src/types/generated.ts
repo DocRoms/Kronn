@@ -919,6 +919,11 @@ export type ArtifactBundle = { kind: string, version: number, exported_at: strin
  */
 referenced_skills?: Array<BundledSkill>,
 /**
+ * KT-1843 — custom directives and profiles the steps and the bundled
+ * Quick objects bind; an import reuses the local one that says the same.
+ */
+referenced_directives?: Array<Directive>, referenced_profiles?: Array<AgentProfile>,
+/**
  * Literal credentials replaced before export; locations only, never values.
  */
 redacted_fields?: Array<RedactedField>,
@@ -976,7 +981,11 @@ embed_origins: Array<ArtifactImportEmbedOrigin>,
 /**
  * What the import does with each bundled custom skill (KT-1446).
  */
-skills: Array<SkillImportDecision>, };
+skills: Array<SkillImportDecision>,
+/**
+ * What the import does with each bundled directive and profile (KT-1843).
+ */
+bindings: Array<BindingImportDecision>, };
 
 export type ArtifactImportRequest = { content: string, project_id?: string | null, choices?: Array<ArtifactImportChoice>,
 /**
@@ -998,6 +1007,10 @@ allow_embed_origins?: Array<string>,
 skill_choices?: Array<SkillImportChoice>, };
 
 export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>, skills: Array<SkillImportDecision>,
+/**
+ * What the import did with each bundled directive and profile (KT-1843).
+ */
+bindings: Array<BindingImportDecision>,
 /**
  * Origins this import added to the allowed sites.
  */
@@ -1715,6 +1728,25 @@ parent_workflow_id: string | null, parent_workflow_name: string | null,
  * workflow (ordered by started_at). None for manual batches.
  */
 parent_run_sequence: number | null, };
+
+/**
+ * One bundled directive or profile as an import preview shows it (KT-1843):
+ * reused when a local custom one says the same thing, created otherwise.
+ */
+export type BindingImportDecision = { kind: BindingKind, source_id: string, name: string,
+/**
+ * `reuse` or `create`.
+ */
+action: SkillImportAction,
+/**
+ * The local entry reused.
+ */
+existing_id: string | null, };
+
+/**
+ * What a bundled binding is (KT-1843).
+ */
+export type BindingKind = "directive" | "profile";
 
 /**
  * The saved Quick Exec behind a blocker, and the program it hands run values to.
@@ -13441,6 +13473,11 @@ referenced_workflows?: Array<Workflow>,
  */
 referenced_skills?: Array<BundledSkill>,
 /**
+ * KT-1843 — custom directives and profiles the steps and the bundled
+ * Quick objects bind; an import reuses the local one that says the same.
+ */
+referenced_directives?: Array<Directive>, referenced_profiles?: Array<AgentProfile>,
+/**
  * Fields whose literal secret was replaced before export (never the
  * value). An importer shows them so nothing silently runs without them.
  */
@@ -13488,6 +13525,10 @@ loop_detection_max_revisits?: number | null, };
  * (KT-1446), for the import dialog.
  */
 export type WorkflowImportPreview = { skills: Array<SkillImportDecision>,
+/**
+ * What the import does with each bundled directive and profile (KT-1843).
+ */
+bindings: Array<BindingImportDecision>,
 /**
  * Skills the steps name that neither this Kronn nor the file has.
  */

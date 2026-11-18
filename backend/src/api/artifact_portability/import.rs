@@ -59,6 +59,10 @@ struct ImportPlan {
     /// The bundle's custom skills and what the import does with each.
     bundled_skills: Vec<BundledSkill>,
     skills: Vec<SkillImportDecision>,
+    /// The bundle's custom directives and profiles (KT-1843).
+    bundled_directives: Vec<Directive>,
+    bundled_profiles: Vec<AgentProfile>,
+    bindings: Vec<BindingImportDecision>,
     preview: ArtifactImportPreview,
     /// Distinct origins the bundle's Pages embed from, sorted.
     embed_origins: Vec<String>,
@@ -110,6 +114,15 @@ type Remap = BTreeMap<ResourceKind, HashMap<String, String>>;
 struct SkillRemap<'a> {
     bundled: &'a BTreeSet<String>,
     ids: &'a HashMap<String, String>,
+    /// Bundled directives and profiles, by source id (KT-1843).
+    bindings: &'a crate::core::binding_bundle::BindingIds,
+}
+
+/// A bundle's files beside its resources: skills, directives, profiles.
+struct BundledFiles {
+    skills: Vec<BundledSkill>,
+    directives: Vec<Directive>,
+    profiles: Vec<AgentProfile>,
 }
 
 fn kind_key(kind: ResourceKind) -> String {
@@ -251,7 +264,7 @@ fn validate_page(page: &ArtifactBundlePage) -> Result<()> {
     Ok(())
 }
 
-fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Vec<BundledSkill>)> {
+fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, BundledFiles)> {
     if request.content.len() > MAX_BUNDLE_BYTES {
         bail!("Artifact bundle exceeds 64 MiB");
     }
@@ -263,6 +276,7 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
         bail!("Unsupported Artifact bundle kind or version");
     }
     let skills = bundle.referenced_skills;
+    let (directives, profiles) = (bundle.referenced_directives, bundle.referenced_profiles);
     let bundled_skill_ids: BTreeSet<String> = skills.iter().map(|skill| skill.id.clone()).collect();
     let mut resources = Vec::new();
     for page in std::iter::once(bundle.artifact).chain(bundle.referenced_artifacts) {
@@ -328,7 +342,14 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<(Vec<Resource>, Ve
             }
         }
     }
-    Ok((resources, skills))
+    Ok((
+        resources,
+        BundledFiles {
+            skills,
+            directives,
+            profiles,
+        },
+    ))
 }
 
 fn remap_for(resources: &[PlannedResource]) -> Remap {
@@ -437,6 +458,9 @@ fn remap_value(
                         .clone();
                 }
                 crate::core::skill_bundle::remap_ids(&mut step.skill_ids, skills.ids);
+                skills
+                    .bindings
+                    .remap(&mut step.profile_ids, &mut step.directive_ids);
                 if let Some(payload) = step.json_data_payload.as_mut() {
                     crate::core::skill_bundle::remap_payload(payload, skills.ids);
                 }
@@ -462,7 +486,17 @@ fn remap_value(
         ResourceKind::QuickPrompt => {
             let mut prompt: QuickPrompt = serde_json::from_value(value)?;
             crate::core::skill_bundle::remap_ids(&mut prompt.skill_ids, skills.ids);
+            skills
+                .bindings
+                .remap(&mut prompt.profile_ids, &mut prompt.directive_ids);
             value = serde_json::to_value(prompt)?;
+        }
+        ResourceKind::QuickApi => {
+            let mut api: QuickApi = serde_json::from_value(value)?;
+            skills
+                .bindings
+                .remap(&mut api.profile_ids, &mut api.directive_ids);
+            value = serde_json::to_value(api)?;
         }
         _ => {}
     }
@@ -553,7 +587,16 @@ fn execution_requirements(
 }
 
 fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<ImportPlan> {
-    let (resources, bundled_skills) = parse_resources(request)?;
+    let (resources, files) = parse_resources(request)?;
+    let BundledFiles {
+        skills: bundled_skills,
+        directives: bundled_directives,
+        profiles: bundled_profiles,
+    } = files;
+    let bindings = crate::core::binding_bundle::plan(&bundled_directives, &bundled_profiles)
+        .map_err(anyhow::Error::msg)?;
+    // A preview knows only the ids of what it reuses.
+    let predicted_bindings = crate::core::binding_bundle::predicted_ids(&bindings);
     let skills = crate::core::skill_bundle::plan(
         &bundled_skills,
         &request.skill_choices,
@@ -568,6 +611,7 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
     let skill_remap = SkillRemap {
         bundled: &bundled_skill_ids,
         ids: &predicted_skill_ids,
+        bindings: &predicted_bindings,
     };
     let embed_origins = bundle_embed_origins(&resources);
     if let Some(project) = &request.project_id {
@@ -816,11 +860,15 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         // Filled by the caller, which knows this Kronn's allowed sites.
         embed_origins: Vec::new(),
         skills: skills.clone(),
+        bindings: bindings.clone(),
     };
     Ok(ImportPlan {
         resources: planned,
         bundled_skills,
         skills,
+        bundled_directives,
+        bundled_profiles,
+        bindings,
         preview,
         embed_origins,
     })
@@ -986,9 +1034,13 @@ fn commit_plan(
         .iter()
         .map(|skill| skill.id.clone())
         .collect();
+    let binding_ids =
+        crate::core::binding_bundle::apply(&plan.bundled_directives, &plan.bundled_profiles)
+            .map_err(anyhow::Error::msg)?;
     let skill_remap = SkillRemap {
         bundled: &bundled_skill_ids,
         ids: &skill_ids,
+        bindings: &binding_ids,
     };
     // Create action targets first, so Page action ingestion can resolve all of
     // them. Workflows contain JSON references and remain disabled throughout.
@@ -1094,6 +1146,7 @@ fn commit_plan(
         artifact: root.context("Imported root Artifact missing")?,
         entries: plan.preview.entries,
         skills: plan.skills,
+        bindings: plan.bindings,
         allowed_embed_origins: Vec::new(),
         not_allowed_embed_origins: Vec::new(),
         embed_origins_error: None,

@@ -3097,6 +3097,9 @@ pub struct ImportWorkflowRequest {
 #[ts(export)]
 pub struct WorkflowImportPreview {
     pub skills: Vec<super::SkillImportDecision>,
+    /// What the import does with each bundled directive and profile (KT-1843).
+    #[serde(default)]
+    pub bindings: Vec<super::BindingImportDecision>,
     /// Skills the steps name that neither this Kronn nor the file has.
     pub missing_skills: Vec<String>,
 }
@@ -3191,6 +3194,14 @@ pub struct WorkflowExportEnvelope {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<Vec<super::BundledSkill>>")]
     pub referenced_skills: Vec<super::BundledSkill>,
+    /// KT-1843 — custom directives and profiles the steps and the bundled
+    /// Quick objects bind; an import reuses the local one that says the same.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<super::Directive>>")]
+    pub referenced_directives: Vec<super::Directive>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<super::AgentProfile>>")]
+    pub referenced_profiles: Vec<super::AgentProfile>,
     /// Fields whose literal secret was replaced before export (never the
     /// value). An importer shows them so nothing silently runs without them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

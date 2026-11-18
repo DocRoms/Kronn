@@ -59,13 +59,25 @@ all approvals. New Quick APIs show their saved method, endpoint and plugin;
 an unspecified method is shown as unknown, not inferred.
 The custom skills of bundled workflows and Quick Prompts travel as
 `referenced_skills` (file, name, version, sha256): those in steps' `skill_ids`,
-Quick Prompts, shadow variants and `refs`, plus any JsonData payload value
-spelled like a custom skill id (`custom-x`, `custom-x@N`) that names a local
-skill. The preview shows each one as
+Quick Prompts, shadow variants and `refs`, plus any whole custom skill id
+(`custom-x`, `custom-x@N`) a step text or a JsonData payload writes, and the
+custom skills a bundled skill names in turn. The preview shows each one as
 reused (same content here), created, or in conflict (same name, other content),
 where the user picks a copy (default) or the local skill (`skill_choices`, part
 of the reviewed digest). Steps, JsonData payload values and Quick Prompts are
 remapped to the resulting ids; see the glossary's "Bundled skill".
+The custom directives and profiles that steps, Quick Prompts and Quick APIs
+bind travel as `referenced_directives` and `referenced_profiles`. An import
+reuses the local custom entry that says the same thing (a directive's category
+and content; a profile's category, role, persona prompt and default engine),
+whatever its name, and creates the others under a free name: importing a file
+twice never makes a second copy. The preview lists each as reused or created
+(`bindings`); there is nothing to choose.
+What the exported content names and the file does not hold is listed in
+`not_carried` (kind, id, where it is named): a custom skill, directive or
+profile that no longer exists, and the id of a saved Page, workflow or Quick
+object pasted in a step text. The Workflows and Artifacts pages show that list
+before the file is downloaded.
 [src: file: backend/src/api/artifact_portability/import.rs:574-580#approved_quick_exec_ids]
 [src: file: backend/src/api/artifact_portability/import.rs:799-801#digest]
 [src: file: frontend/src/components/ArtifactImportDialog.tsx:71-74#setApprovedExecIds]

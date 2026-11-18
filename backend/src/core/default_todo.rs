@@ -337,6 +337,8 @@ pub fn bundle(conn: &Connection, language: &str) -> Result<String> {
         referenced_quick_apis: vec![],
         referenced_quick_execs: vec![],
         referenced_skills: vec![],
+        referenced_directives: vec![],
+        referenced_profiles: vec![],
         redacted_fields: vec![],
         not_carried: Vec::new(),
     };

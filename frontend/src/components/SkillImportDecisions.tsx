@@ -2,11 +2,15 @@
  * KT-1446 — what an import does with each custom skill its file carries:
  * reuse the identical local skill, create a missing one, or, for a skill of
  * the same name with other content, the importer's choice (a copy by default).
+ * KT-1843 — and with each custom directive and profile: the local one that
+ * says the same thing is reused, another is created; nothing to choose.
  */
-import type { SkillConflictResolution, SkillImportChoice, SkillImportDecision } from '../types/generated';
+import type { BindingImportDecision, SkillConflictResolution, SkillImportChoice, SkillImportDecision } from '../types/generated';
 
-export function SkillImportDecisions({ decisions, choices, onChoose, missing = [], disabled, t }: {
+export function SkillImportDecisions({ decisions, bindings = [], choices, onChoose, missing = [], disabled, t }: {
   decisions: SkillImportDecision[];
+  /** Bundled directives and profiles; absent from an older preview. */
+  bindings?: BindingImportDecision[];
   choices: SkillImportChoice[];
   onChoose: (next: SkillImportChoice[]) => void;
   /** Skills the steps name that neither this Kronn nor the file has. */
@@ -14,7 +18,7 @@ export function SkillImportDecisions({ decisions, choices, onChoose, missing = [
   disabled?: boolean;
   t: (key: string, ...args: (string | number)[]) => string;
 }) {
-  if (decisions.length === 0 && missing.length === 0) return null;
+  if (decisions.length === 0 && missing.length === 0 && bindings.length === 0) return null;
   const choose = (sourceId: string, resolution: SkillConflictResolution) => onChoose([
     ...choices.filter(choice => choice.source_id !== sourceId),
     { source_id: sourceId, resolution },
@@ -46,6 +50,18 @@ export function SkillImportDecisions({ decisions, choices, onChoose, missing = [
               </li>
             );
           })}
+        </ul>
+      </>}
+      {bindings.length > 0 && <>
+        <strong className="text-sm">{t('imp.bindings.title')}</strong>
+        <ul className="text-sm" data-testid="import-bindings">
+          {bindings.map(binding => (
+            <li key={`${binding.kind}:${binding.source_id}`} data-binding={binding.source_id}>
+              <span className="text-muted">{t(`imp.bindings.kind.${binding.kind}`)}</span>{' '}
+              <strong>{binding.name}</strong>{' '}
+              <span className="text-muted">{t(`imp.bindings.action.${binding.action === 'reuse' ? 'reuse' : 'create'}`)}</span>
+            </li>
+          ))}
         </ul>
       </>}
       {missing.length > 0 && (

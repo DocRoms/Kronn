@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ArtifactImportPreview, ArtifactImportResult } from '../../types/generated';
 import { ArtifactImportDialog } from '../ArtifactImportDialog';
@@ -23,12 +23,12 @@ const preview: ArtifactImportPreview = {
   title: 'Équipe 🦀', entries: [
     { kind: 'artifact', source_id: 'a', name: 'Équipe 🦀', disposition: 'create', existing_id: 'a', reason: 'root' },
     { kind: 'quick_api', source_id: 'qa', name: 'Metrics', disposition: 'reuse', existing_id: 'qa', reason: 'identical' },
-  ], issues: [], warnings: [], digest: 'digest-1', can_import: true, embed_origins: [], skills: [],
+  ], issues: [], warnings: [], digest: 'digest-1', can_import: true, embed_origins: [], skills: [], bindings: [],
 };
 const result: ArtifactImportResult = { artifact: {
   id: 'new-a', title: 'Équipe 🦀', slug: 'new-a', project_id: null, current_revision_id: 'new-r', data_revision: 0,
   created_at: '2026-09-23T00:00:00Z', updated_at: '2026-09-23T00:00:00Z', last_published_at: null, pinned: false, archived: false, html_size_bytes: 0,
-}, entries: preview.entries, skills: [], allowed_embed_origins: [], not_allowed_embed_origins: [], embed_origins_error: null };
+}, entries: preview.entries, skills: [], bindings: [], allowed_embed_origins: [], not_allowed_embed_origins: [], embed_origins_error: null };
 const content = JSON.stringify({ kind: 'kronn.artifact', version: 1 });
 const chooseFile = async (text = content, size?: number) => {
   const file = new File([text], 'team.kronn-artifact.json', { type: 'application/json' });
@@ -271,6 +271,21 @@ describe('ArtifactImportDialog', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('stale preview');
     expect(screen.getByRole('button', { name: 'pages.import.confirm' })).toBeDisabled();
     expect(imported).not.toHaveBeenCalled();
+  });
+
+  it('says which bundled directives and profiles are reused and which are created (KT-1843)', async () => {
+    mocks.preview.mockResolvedValue({ ...preview, bindings: [
+      { kind: 'directive', source_id: 'custom-style', name: 'House style', action: 'reuse', existing_id: 'custom-our-style' },
+      { kind: 'profile', source_id: 'custom-cap', name: 'Release captain', action: 'create', existing_id: null },
+    ] });
+    render(<ArtifactImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
+    await chooseFile(JSON.stringify({ kind: 'kronn.artifact', version: 2 }));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.import.preview' }));
+    const rows = within(await screen.findByTestId('import-bindings')).getAllByRole('listitem');
+    expect(rows.map(row => row.textContent)).toEqual([
+      'imp.bindings.kind.directive House style imp.bindings.action.reuse',
+      'imp.bindings.kind.profile Release captain imp.bindings.action.create',
+    ]);
   });
 
   it('shows what happens to each bundled skill and sends the conflict choice for review', async () => {

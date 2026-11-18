@@ -33360,8 +33360,15 @@ async fn workflow_export_lists_what_it_names_and_does_not_carry() {
     let workflow = created["data"]["id"].as_str().unwrap().to_string();
     let (_, deleted) = delete_json(app.clone(), &format!("/api/skills/{gone}")).await;
     assert_eq!(deleted["success"], true, "{deleted}");
+    // A directive that still exists travels with the file (below); a deleted one is named.
+    let (_, deleted) = delete_json(app.clone(), &format!("/api/directives/{directive}")).await;
+    assert_eq!(deleted["success"], true, "{deleted}");
 
     let (_, exported) = get_json(app.clone(), &format!("/api/workflows/{workflow}/export")).await;
+    assert!(
+        exported.get("referenced_directives").is_none(),
+        "{exported}"
+    );
     assert_eq!(
         exported["not_carried"],
         serde_json::json!([
@@ -33377,6 +33384,226 @@ async fn workflow_export_lists_what_it_names_and_does_not_carry() {
 
     let (_, clean) = get_json(app, &format!("/api/workflows/{other}/export")).await;
     assert!(clean.get("not_carried").is_none(), "{clean}");
+}
+
+/// KT-1843 — the custom directives and profiles a step, a Quick Prompt or a
+/// Quick API binds travel with the file. Another Kronn creates them once:
+/// importing the same file again, or a file from a Kronn that renamed them,
+/// reuses the one that says the same thing.
+#[tokio::test]
+async fn workflow_export_carries_directives_and_profiles_and_import_never_copies_one_twice() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_export_carries_directives_and_profiles_and_import_never_copies_one_twice",
+    ) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(test_state(), false);
+    let directive = |name: &'static str, content: &'static str| {
+        let app = app.clone();
+        async move {
+            let (_, created) = post_json(
+                app,
+                "/api/directives",
+                serde_json::json!({"name": name, "description": "How to answer", "icon": "T",
+                                   "category": "Output", "content": content}),
+            )
+            .await;
+            assert_eq!(created["success"], true, "{created}");
+            created["data"]["id"].as_str().unwrap().to_string()
+        }
+    };
+    let house = directive("House style", "Answer in a table.").await;
+    let brief = directive("Brief", "Three lines at most.").await;
+    let (_, profile) = post_json(
+        app.clone(),
+        "/api/profiles",
+        serde_json::json!({"name": "Release captain", "persona_name": "Cap", "role": "Ships",
+                           "avatar": "C", "color": "#123456", "category": "Technical",
+                           "persona_prompt": "You ship carefully."}),
+    )
+    .await;
+    assert_eq!(profile["success"], true, "{profile}");
+    let profile = profile["data"]["id"].as_str().unwrap().to_string();
+    let (_, prompt) = post_json(
+        app.clone(),
+        "/api/quick-prompts",
+        serde_json::json!({"name": "Summarise", "icon": "S", "prompt_template": "Summarise.",
+                           "agent": "ClaudeCode", "directive_ids": [brief]}),
+    )
+    .await;
+    assert_eq!(prompt["success"], true, "{prompt}");
+    let prompt = prompt["data"]["id"].as_str().unwrap().to_string();
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Bound", "project_id": null, "trigger": {"type": "Manual"},
+            "steps": [
+                {"name": "review", "step_type": {"type": "Agent"}, "prompt_template": "Review",
+                 "directive_ids": [house, "token-saver"], "profile_ids": [profile, "architect"]},
+                {"name": "sum", "step_type": {"type": "Agent"}, "quick_prompt_id": prompt},
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let workflow = created["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+    let ids = |key: &str| -> Vec<String> {
+        exported[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} missing: {exported}"))
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let mut expected = vec![brief.clone(), house.clone()];
+    expected.sort();
+    assert_eq!(ids("referenced_directives"), expected, "builtins stay ids");
+    assert_eq!(ids("referenced_profiles"), [profile.clone()]);
+    assert!(exported.get("not_carried").is_none(), "{exported}");
+    let file = serde_json::to_string(&exported).unwrap();
+
+    // A fresh Kronn creates each one once and the bindings name the copies.
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    let request = |content: &str| serde_json::json!({"content": content, "project_id": null, "skill_choices": []});
+    let actions = |preview: &Value| -> Vec<(String, String)> {
+        preview["data"]["bindings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{preview}"))
+            .iter()
+            .map(|b| {
+                (
+                    b["kind"].as_str().unwrap().to_string(),
+                    b["action"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let pair = |kind: &str, action: &str| (kind.to_string(), action.to_string());
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request(&file),
+    )
+    .await;
+    assert_eq!(
+        actions(&preview),
+        [
+            pair("directive", "create"),
+            pair("directive", "create"),
+            pair("profile", "create")
+        ],
+        "{preview}"
+    );
+    let (_, listed) = get_json(target.clone(), "/api/directives").await;
+    let customs = |listed: &Value| {
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["is_builtin"] == false)
+            .count()
+    };
+    assert_eq!(customs(&listed), 0, "a preview writes nothing: {listed}");
+
+    let (_, imported) = post_json(target.clone(), "/api/workflows/import", request(&file)).await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let step = &imported["data"]["steps"][0];
+    let local_directive = step["directive_ids"][0].as_str().unwrap().to_string();
+    assert_eq!(step["directive_ids"][1], "token-saver");
+    let local_profile = step["profile_ids"][0].as_str().unwrap().to_string();
+    assert_eq!(step["profile_ids"][1], "architect");
+    let (_, listed) = get_json(target.clone(), "/api/directives").await;
+    assert_eq!(customs(&listed), 2, "{listed}");
+    let found = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == local_directive.as_str())
+        .unwrap_or_else(|| panic!("{local_directive} missing: {listed}"));
+    assert_eq!(found["name"], "House style");
+    assert_eq!(found["content"], "Answer in a table.");
+    let (_, profiles) = get_json(target.clone(), "/api/profiles").await;
+    let found = profiles["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == local_profile.as_str())
+        .unwrap_or_else(|| panic!("{local_profile} missing: {profiles}"));
+    assert_eq!(found["persona_prompt"], "You ship carefully.");
+    // The bundled Quick Prompt names the local copy of its directive.
+    let prompt_id = imported["data"]["steps"][1]["quick_prompt_id"]
+        .as_str()
+        .unwrap();
+    let (_, prompts) = get_json(target.clone(), "/api/quick-prompts").await;
+    let bundled = prompts["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == prompt_id)
+        .unwrap_or_else(|| panic!("{prompts}"));
+    let brief_local = bundled["directive_ids"][0].as_str().unwrap();
+    let found = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == brief_local)
+        .unwrap_or_else(|| panic!("{brief_local} missing: {listed}"));
+    assert_eq!(found["content"], "Three lines at most.");
+
+    // The same file again, then after a local rename: nothing is added.
+    let (_, renamed) = put_json_root(
+        target.clone(),
+        &format!("/api/directives/{local_directive}"),
+        serde_json::json!({"name": "Our style", "description": "", "icon": "T",
+                           "category": "Output", "content": "Answer in a table."}),
+    )
+    .await;
+    assert_eq!(renamed["success"], true, "{renamed}");
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request(&file),
+    )
+    .await;
+    assert_eq!(
+        actions(&preview),
+        [
+            pair("directive", "reuse"),
+            pair("directive", "reuse"),
+            pair("profile", "reuse")
+        ],
+        "{preview}"
+    );
+    let (_, again) = post_json(target.clone(), "/api/workflows/import", request(&file)).await;
+    assert_eq!(again["success"], true, "{again}");
+    assert_eq!(
+        again["data"]["steps"][0]["directive_ids"][0],
+        local_directive.as_str()
+    );
+    assert_eq!(
+        again["data"]["steps"][0]["profile_ids"][0],
+        local_profile.as_str()
+    );
+    let (_, listed) = get_json(target.clone(), "/api/directives").await;
+    assert_eq!(customs(&listed), 2, "no second copy: {listed}");
+    let (_, profiles) = get_json(target, "/api/profiles").await;
+    assert_eq!(
+        profiles["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["is_builtin"] == false)
+            .count(),
+        1,
+        "no second copy: {profiles}"
+    );
 }
 
 /// A skill a JsonData payload lists arrives as a copy when this Kronn has
@@ -33506,6 +33733,295 @@ async fn artifact_import_points_a_json_data_payload_at_the_copy_it_created() {
     assert_ne!(local, skill, "the payload names the copy: {payload}");
     let copy = kronn::core::skills::get_skill(local).expect("created");
     assert_eq!(copy.content, "Follow them.");
+}
+
+/// KT-1843 — a Quick API bundled with a workflow binds directives and
+/// profiles too: they travel, and the imported Quick API names the copies.
+#[tokio::test]
+async fn workflow_export_carries_the_directives_and_profiles_of_a_bundled_quick_api() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_export_carries_the_directives_and_profiles_of_a_bundled_quick_api",
+    ) {
+        return;
+    }
+    let (state, _) = workflow_portability_fixture().await;
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let directive = kronn::core::directives::save_custom_directive(
+        "Api style",
+        "",
+        "T",
+        &kronn::models::DirectiveCategory::Output,
+        "Numbers only.",
+        &[],
+    )
+    .unwrap();
+    let persona =
+        kronn::core::profiles::save_custom_profile(&kronn::core::profiles::CustomProfileData {
+            name: "Analyst",
+            persona_name: "Ana",
+            role: "Reads numbers",
+            avatar: "A",
+            color: "#123456",
+            category: &kronn::models::ProfileCategory::Business,
+            persona_prompt: "You read numbers.",
+            default_engine: None,
+        })
+        .unwrap();
+    let bound = (directive.clone(), persona.clone());
+    state
+        .db
+        .with_conn(move |conn| {
+            let mut api = kronn::db::quick_apis::list_quick_apis(conn)?.remove(0);
+            api.directive_ids = vec![bound.0];
+            api.profile_ids = vec![bound.1];
+            kronn::db::quick_apis::update_quick_api(conn, &api)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+    let (_, exported) = get_json(app, "/api/workflows/workflow-portable/export").await;
+    assert_eq!(
+        exported["referenced_directives"][0]["id"],
+        directive.as_str()
+    );
+    assert_eq!(exported["referenced_profiles"][0]["id"], persona.as_str());
+    assert!(exported.get("not_carried").is_none(), "{exported}");
+
+    fresh_skill_dir(&root, "target");
+    // The target already uses these slugs for something else.
+    kronn::core::directives::save_custom_directive(
+        "Api style",
+        "",
+        "T",
+        &kronn::models::DirectiveCategory::Output,
+        "Unrelated.",
+        &[],
+    )
+    .unwrap();
+    let target_state = test_state();
+    let target = build_router_with_auth(target_state.clone(), false);
+    let (_, imported) = post_json(
+        target,
+        "/api/workflows/import",
+        serde_json::json!({"content": serde_json::to_string(&exported).unwrap(),
+                           "project_id": null}),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let api = target_state
+        .db
+        .with_read_conn(|conn| Ok(kronn::db::quick_apis::list_quick_apis(conn)?.remove(0)))
+        .await
+        .unwrap();
+    assert_ne!(api.directive_ids, [directive], "the slug was taken");
+    let local = kronn::core::directives::get_directive(&api.directive_ids[0]).expect("created");
+    assert_eq!(local.content, "Numbers only.");
+    assert_eq!(local.name, "Api style (2)");
+    let local = kronn::core::profiles::get_profile(&api.profile_ids[0]).expect("created");
+    assert_eq!(local.persona_prompt, "You read numbers.");
+}
+
+/// KT-1843 — an Artifact bundle carries the custom directives and profiles
+/// its workflows, Quick Prompts and Quick APIs bind. Another Kronn creates
+/// each once, points the three at its copies, and a second import adds none.
+#[tokio::test]
+async fn artifact_bundle_carries_directives_and_profiles_and_import_never_copies_one_twice() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "artifact_bundle_carries_directives_and_profiles_and_import_never_copies_one_twice",
+    ) {
+        return;
+    }
+    let (state, _) = workflow_portability_fixture().await;
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let save = |name: &str, content: &str| {
+        kronn::core::directives::save_custom_directive(
+            name,
+            "",
+            "T",
+            &kronn::models::DirectiveCategory::Output,
+            content,
+            &[],
+        )
+        .unwrap()
+    };
+    let (on_step, on_prompt, on_api) = (
+        save("Step style", "Answer in a table."),
+        save("Prompt style", "Three lines at most."),
+        save("Api style", "Numbers only."),
+    );
+    let persona =
+        kronn::core::profiles::save_custom_profile(&kronn::core::profiles::CustomProfileData {
+            name: "Release captain",
+            persona_name: "Cap",
+            role: "Ships",
+            avatar: "C",
+            color: "#123456",
+            category: &kronn::models::ProfileCategory::Technical,
+            persona_prompt: "You ship carefully.",
+            default_engine: None,
+        })
+        .unwrap();
+    let ids = (
+        on_step.clone(),
+        on_prompt.clone(),
+        on_api.clone(),
+        persona.clone(),
+    );
+    state
+        .db
+        .with_conn(move |conn| {
+            let (on_step, on_prompt, on_api, persona) = ids;
+            let mut workflow =
+                kronn::db::workflows::get_workflow(conn, "workflow-portable")?.unwrap();
+            workflow.steps[0].directive_ids = vec![on_step, "token-saver".into()];
+            workflow.steps[0].profile_ids = vec![persona.clone()];
+            kronn::db::workflows::update_workflow(conn, &workflow)?;
+            let mut prompt = kronn::db::quick_prompts::list_quick_prompts(conn)?.remove(0);
+            prompt.directive_ids = vec![on_prompt];
+            prompt.profile_ids = vec![persona.clone()];
+            kronn::db::quick_prompts::update_quick_prompt(conn, &prompt)?;
+            let mut api = kronn::db::quick_apis::list_quick_apis(conn)?.remove(0);
+            api.directive_ids = vec![on_api];
+            api.profile_ids = vec![persona];
+            kronn::db::quick_apis::update_quick_api(conn, &api)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, exported) = get_json(app, "/api/pages/page-portable/export").await;
+    let bundle = &exported["data"];
+    let ids_of = |key: &str| -> Vec<String> {
+        bundle[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} missing: {bundle}"))
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let mut expected = vec![on_step.clone(), on_prompt.clone(), on_api.clone()];
+    expected.sort();
+    assert_eq!(ids_of("referenced_directives"), expected);
+    assert_eq!(ids_of("referenced_profiles"), [persona.clone()]);
+    assert!(bundle.get("not_carried").is_none(), "{bundle}");
+    let content = serde_json::to_string(bundle).unwrap();
+
+    fresh_skill_dir(&root, "target");
+    let target_state = test_state();
+    let target = build_router_with_auth(target_state.clone(), false);
+    let request = |digest: Value| {
+        serde_json::json!({"content": content, "project_id": null, "choices": [],
+                           "approved_quick_exec_ids": ["qe-portable"],
+                           "preview_digest": digest})
+    };
+    let actions = |preview: &Value| -> Vec<String> {
+        preview["data"]["bindings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{preview}"))
+            .iter()
+            .map(|b| {
+                format!(
+                    "{} {}",
+                    b["kind"].as_str().unwrap(),
+                    b["action"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/pages/import/preview",
+        request(Value::Null),
+    )
+    .await;
+    assert_eq!(
+        actions(&preview),
+        [
+            "directive create",
+            "directive create",
+            "directive create",
+            "profile create"
+        ],
+        "{preview}"
+    );
+    assert!(
+        kronn::core::directives::list_all_directives()
+            .iter()
+            .all(|d| d.is_builtin),
+        "a preview writes nothing"
+    );
+    let (_, imported) = post_json(
+        target.clone(),
+        "/api/pages/import",
+        request(preview["data"]["digest"].clone()),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    assert_eq!(actions(&imported).len(), 4, "{imported}");
+    let read = || {
+        target_state.db.with_read_conn(|conn| {
+            let workflow = kronn::db::workflows::list_workflows(conn)?.remove(0);
+            let prompt = kronn::db::quick_prompts::list_quick_prompts(conn)?.remove(0);
+            let api = kronn::db::quick_apis::list_quick_apis(conn)?.remove(0);
+            Ok((workflow, prompt, api))
+        })
+    };
+    let (workflow, prompt, api) = read().await.unwrap();
+    let content_of = |id: &str| {
+        kronn::core::directives::get_directive(id)
+            .unwrap_or_else(|| panic!("directive {id} missing"))
+            .content
+    };
+    let step = &workflow.steps[0];
+    assert_eq!(content_of(&step.directive_ids[0]), "Answer in a table.");
+    assert_eq!(step.directive_ids[1], "token-saver");
+    assert_eq!(content_of(&prompt.directive_ids[0]), "Three lines at most.");
+    assert_eq!(content_of(&api.directive_ids[0]), "Numbers only.");
+    let local_persona = step.profile_ids[0].clone();
+    assert_eq!(
+        kronn::core::profiles::get_profile(&local_persona)
+            .unwrap()
+            .persona_prompt,
+        "You ship carefully."
+    );
+    assert_eq!(prompt.profile_ids, [local_persona.clone()]);
+    assert_eq!(api.profile_ids, [local_persona]);
+
+    // The same bundle again: every entry is reused, none is added.
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/pages/import/preview",
+        request(Value::Null),
+    )
+    .await;
+    assert_eq!(
+        actions(&preview),
+        [
+            "directive reuse",
+            "directive reuse",
+            "directive reuse",
+            "profile reuse"
+        ],
+        "{preview}"
+    );
+    let customs = || {
+        (
+            kronn::core::directives::list_all_directives()
+                .iter()
+                .filter(|d| !d.is_builtin)
+                .count(),
+            kronn::core::profiles::list_all_profiles()
+                .iter()
+                .filter(|p| !p.is_builtin)
+                .count(),
+        )
+    };
+    assert_eq!(customs(), (3, 1));
 }
 
 /// KT-1446 — a Page bundle carries the custom skills of its workflows and

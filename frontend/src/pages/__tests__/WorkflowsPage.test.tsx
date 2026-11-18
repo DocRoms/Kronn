@@ -3032,6 +3032,10 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
         { source_id: 'custom-review', name: 'Review', action: 'conflict', existing_id: 'custom-review', resolution: 'create_copy' },
         { source_id: 'custom-style', name: 'Style', action: 'create', existing_id: null },
       ],
+      bindings: [
+        { kind: 'directive', source_id: 'custom-style', name: 'House style', action: 'reuse', existing_id: 'custom-our-style' },
+        { kind: 'profile', source_id: 'custom-cap', name: 'Release captain', action: 'create', existing_id: null },
+      ],
       missing_skills: ['custom-gone'],
     });
     mockWorkflowsApi.importWorkflow.mockResolvedValueOnce({ id: 'wf-skills' });
@@ -3056,6 +3060,11 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(mockWorkflowsApi.previewImport).toHaveBeenCalledWith({ content, project_id: null });
     expect(within(skills).getByText('Style')).toBeInTheDocument();
     expect(screen.getByTestId('import-missing-skills')).toHaveTextContent('custom-gone');
+    // KT-1843 — bundled directives and profiles: reused or created, never copied twice.
+    expect(within(screen.getByTestId('import-bindings')).getAllByRole('listitem').map(row => row.textContent)).toEqual([
+      'Directive House style identique à un élément présent : réutilisé, aucune copie',
+      'Profil Release captain absent ici : créé',
+    ]);
     const choice = within(skills).getByRole('combobox');
     expect(choice).toHaveValue('create_copy');
     fireEvent.change(choice, { target: { value: 'use_existing' } });

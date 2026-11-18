@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::models::{QuickPrompt, Workflow, WorkflowStep};
+use crate::models::{QuickApi, QuickPrompt, Workflow, WorkflowStep};
 
 /// An object the exported content names and the file does not hold.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
@@ -59,6 +59,8 @@ impl KnownIds {
 #[derive(Debug, Default)]
 pub struct Carried {
     pub skills: BTreeSet<String>,
+    pub directives: BTreeSet<String>,
+    pub profiles: BTreeSet<String>,
     pub objects: BTreeSet<String>,
 }
 
@@ -119,10 +121,14 @@ impl Report<'_> {
 
     fn bindings(&mut self, profiles: &[String], directives: &[String], named_in: &str) {
         for id in profiles.iter().filter(|id| custom_profile(id)) {
-            self.add("profile", id, named_in);
+            if !self.carried.profiles.contains(id) {
+                self.add("profile", id, named_in);
+            }
         }
         for id in directives.iter().filter(|id| custom_directive(id)) {
-            self.add("directive", id, named_in);
+            if !self.carried.directives.contains(id) {
+                self.add("directive", id, named_in);
+            }
         }
     }
 
@@ -152,13 +158,14 @@ impl Report<'_> {
     }
 }
 
-/// What `workflows` and `quick_prompts` (the exported ones, bundled included)
-/// name that the file does not hold: a custom skill that no longer exists, a
-/// custom directive or profile (never carried), and the id of a saved Page,
+/// What `workflows`, `quick_prompts` and `quick_apis` (the exported ones,
+/// bundled included) name that the file does not hold: a custom skill,
+/// directive or profile that no longer exists, and the id of a saved Page,
 /// workflow or Quick object pasted in a step's text. Whole known ids only.
 pub fn not_carried(
     workflows: &[&Workflow],
     quick_prompts: &[&QuickPrompt],
+    quick_apis: &[&QuickApi],
     carried: &Carried,
     known: &KnownIds,
 ) -> Vec<NotCarried> {
@@ -181,6 +188,9 @@ pub fn not_carried(
             report.skill(id, &prompt.name);
         }
         report.bindings(&prompt.profile_ids, &prompt.directive_ids, &prompt.name);
+    }
+    for api in quick_apis {
+        report.bindings(&api.profile_ids, &api.directive_ids, &api.name);
     }
     report.found.into_iter().collect()
 }
@@ -245,6 +255,7 @@ mod tests {
         Carried {
             skills: skills.iter().map(|id| id.to_string()).collect(),
             objects: objects.iter().map(|id| id.to_string()).collect(),
+            ..Carried::default()
         }
     }
 
@@ -260,6 +271,7 @@ mod tests {
         let found = not_carried(
             &[&wf],
             &[&qp],
+            &[],
             &carried(&["custom-kept"], &[]),
             &KnownIds::default(),
         );
@@ -286,13 +298,41 @@ mod tests {
             "directive_ids": ["json-output", "custom-table"],
             "profile_ids": ["tech-lead", "custom-pm"],
         }));
-        let found = not_carried(&[&wf], &[&qp], &Carried::default(), &KnownIds::default());
+        let found = not_carried(
+            &[&wf],
+            &[&qp],
+            &[],
+            &Carried::default(),
+            &KnownIds::default(),
+        );
         assert_eq!(
             found,
             [
                 item("directive", "custom-table", "Daily"),
                 item("directive", "custom-tone", "Review › review"),
                 item("profile", "custom-lead", "Review › review"),
+                item("profile", "custom-pm", "Daily"),
+            ]
+        );
+
+        // A Quick API binds them too, and what the file holds is not reported.
+        let api: QuickApi = serde_json::from_value(serde_json::json!({
+            "id": "qa-1", "name": "Metrics", "icon": "x", "description": "",
+            "project_id": null, "api_plugin_slug": "x", "api_config_id": "c",
+            "api_endpoint_path": "/", "variables": [],
+            "directive_ids": ["custom-api", "custom-tone"], "profile_ids": ["custom-ops"],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        }))
+        .unwrap();
+        let held = Carried {
+            directives: ["custom-tone", "custom-table"].map(String::from).into(),
+            profiles: ["custom-lead", "custom-ops"].map(String::from).into(),
+            ..Carried::default()
+        };
+        assert_eq!(
+            not_carried(&[&wf], &[&qp], &[&api], &held, &KnownIds::default()),
+            [
+                item("directive", "custom-api", "Metrics"),
                 item("profile", "custom-pm", "Daily"),
             ]
         );
@@ -310,7 +350,7 @@ mod tests {
         }));
         let known = KnownIds::of(&[(OTHER, "workflow"), (PAGE, "page")]);
         assert_eq!(
-            not_carried(&[&wf], &[], &Carried::default(), &known),
+            not_carried(&[&wf], &[], &[], &Carried::default(), &known),
             [
                 item("page", PAGE, "Review › alert"),
                 item("page", PAGE, "Review › ctx"),
@@ -318,9 +358,9 @@ mod tests {
             ]
         );
         assert_eq!(
-            not_carried(&[&wf], &[], &carried(&[], &[PAGE]), &known),
+            not_carried(&[&wf], &[], &[], &carried(&[], &[PAGE]), &known),
             [item("workflow", OTHER, "Review › ctx")]
         );
-        assert!(not_carried(&[&wf], &[], &carried(&[], &[PAGE, OTHER]), &known).is_empty());
+        assert!(not_carried(&[&wf], &[], &[], &carried(&[], &[PAGE, OTHER]), &known).is_empty());
     }
 }
