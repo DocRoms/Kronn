@@ -10937,6 +10937,7 @@ Suite de la réponse.";
     /// edit `backend/.cargo/audit.toml`. The worker's settings answer that ask,
     /// for this worktree's own `.cargo` only.
     #[test]
+    #[serial] // the vault setting other tests turn off decides the deny list read here
     fn claude_task_worker_can_edit_its_projects_cargo_files_only_in_its_worktree() {
         let (_repo_dir, _repo, worktree) = managed_task_worktree();
         let settings: serde_json::Value =

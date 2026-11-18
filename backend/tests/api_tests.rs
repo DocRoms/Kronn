@@ -20830,6 +20830,7 @@ async fn network_exposure_post_is_refused_from_the_network_even_with_auth_off() 
 }
 
 #[tokio::test]
+#[serial] // a test that declares the proxy by environment must not run beside this one
 async fn recovery_behind_a_declared_proxy_needs_the_proof_read_at_the_machine() {
     // KT-1596 review: with auth locked (token undecryptable) and a proxy
     // declared, every request is a loopback request, so the peer address cannot
