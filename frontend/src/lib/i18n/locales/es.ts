@@ -301,7 +301,7 @@ const es: TranslationDict = {
   'pages.workflowNoRecentChange': 'Sin cambios recientes',
   'pages.syncHistory': 'Historial de sincronización',
   'pages.autoRefresh': 'Actualización automática',
-  'pages.recentChangesHint': '3 últimas publicaciones que cambiaron datos',
+  'pages.recentChangesHint': '3 últimos cambios',
   'pages.noRecentRefreshes': 'Ningún workflow ha cambiado aún los datos de esta Page.',
   'pages.htmlChangedElsewhere': 'El HTML de esta Page cambió desde que abriste el editor. Tomar el nuevo HTML descarta lo que escribiste.',
   'pages.htmlReloadDraft': 'Tomar el nuevo HTML',

@@ -300,7 +300,7 @@ const zh: TranslationDict = {
   "pages.workflowNoRecentChange": "最近无更改",
   "pages.syncHistory": "同步历史",
   "pages.autoRefresh": "自动刷新",
-  "pages.recentChangesHint": "最近 3 次更改数据的发布",
+  "pages.recentChangesHint": "最近 3 次数据更改",
   "pages.noRecentRefreshes": "尚无工作流更改此页面的数据。",
   "pages.htmlChangedElsewhere": "自您打开编辑器以来，此页面的 HTML 已更改。采用新的 HTML 将丢弃您输入的内容。",
   "pages.htmlReloadDraft": "采用新的 HTML",

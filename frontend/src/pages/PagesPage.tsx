@@ -1714,7 +1714,7 @@ export function PagesPage({
             <section className="live-pages-sync-section" data-testid="live-page-sync-history" aria-label={t('pages.syncHistory')}>
               <header>
                 <h3><History size={12} />{t('pages.syncHistory')}</h3>
-                <span className="live-pages-sync-total">{t('pages.recentChangesHint')}</span>
+                <span className="live-pages-sync-total live-pages-sync-hint" title={t('pages.recentChangesHint')}>{t('pages.recentChangesHint')}</span>
               </header>
                     <div className="live-pages-refresh-timeline">
                       {recentPublications.length > 0 ? recentPublications.map(publication => {
