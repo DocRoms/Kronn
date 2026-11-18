@@ -20869,8 +20869,18 @@ async fn recovery_behind_a_declared_proxy_needs_the_proof_read_at_the_machine() 
     assert_eq!(status, StatusCode::LOCKED);
     let (status, _) = call([192, 168, 1, 50], vec![(header, proof.clone())]).await;
     assert_eq!(status, StatusCode::LOCKED);
-    // The owner at the machine carries the proof and reaches the route.
-    let (status, _) = call([127, 0, 0, 1], vec![(header, proof)]).await;
+    // The owner at the machine carries the proof and reaches the route. Other
+    // tests of this binary move `KRONN_DATA_DIR`: the proof is the one of the
+    // directory the handler read, so the call is made again when it moved.
+    let status = loop {
+        let dir = kronn::core::config::config_dir().unwrap();
+        let proof = kronn::core::net_expose::local_proof(&dir).unwrap();
+        let (status, _) = call([127, 0, 0, 1], vec![(header, proof)]).await;
+        let moved = kronn::core::config::config_dir().unwrap() != dir;
+        if status != StatusCode::LOCKED || !moved {
+            break status;
+        }
+    };
     assert_ne!(status, StatusCode::LOCKED);
 
     // Without a proxy the loopback peer is the owner, as before (no proof).

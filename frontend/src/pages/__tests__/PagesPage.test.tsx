@@ -550,6 +550,13 @@ describe('PagesPage', () => {
       .map(([message]) => message as { type?: string; data?: { page: { data_revision: number } } })
       .filter(message => message.type === 'kronn:page-data')
       .map(message => message.data!.page.data_revision);
+    // The frame's own load event may post the revision first shown after the
+    // spy is in place: what counts is everything from the first newer one on.
+    const postedSinceNewer = (post: { mock: { calls: unknown[][] } }) => {
+      const revisions = revisionsPosted(post);
+      const first = revisions.findIndex(revision => revision !== page.data_revision);
+      return first < 0 ? [] : revisions.slice(first);
+    };
     const publish = async (revision: number, pageId = page.id) => {
       const { useWebSocket } = await import('../../hooks/useWebSocket');
       const handlers = vi.mocked(useWebSocket).mock.calls.map(([handler]) => handler);
@@ -569,12 +576,12 @@ describe('PagesPage', () => {
       await waitFor(() => expect(pagesApi.get).toHaveBeenCalledTimes(1));
       vi.mocked(pagesApi.data).mockResolvedValue({ page: { ...page, data_revision: 4 }, full: null, datasets: [] });
       await publish(4);
-      await waitFor(() => expect(revisionsPosted(post)).toEqual([4]));
+      await waitFor(() => expect(postedSinceNewer(post)).toEqual([4]));
 
       // The full read was asked before the publication: it still holds revision 3.
       await act(async () => { full.resolve(detail); });
 
-      expect(revisionsPosted(post)).toEqual([4]);
+      expect(postedSinceNewer(post)).toEqual([4]);
     });
 
     it('shows a newly selected Page when a publish for it arrives during its first load', async () => {
@@ -656,7 +663,7 @@ describe('PagesPage', () => {
 
       await act(async () => { slow.resolve({ page: { ...page, data_revision: 4 }, full: null, datasets: [] }); });
 
-      expect(revisionsPosted(post)).toEqual([4]);
+      expect(postedSinceNewer(post)).toEqual([4]);
     });
 
     it('keeps updating during a burst of publishes that each start before the last one answered', async () => {
