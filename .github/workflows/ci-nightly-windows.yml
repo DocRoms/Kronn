@@ -80,7 +80,7 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
           KRONN_TEMPLATES_DIR: ${{ github.workspace }}\templates
-        run: cargo nextest run --lib --locked --build-jobs 2
+        run: cargo nextest run --workspace --lib --locked --build-jobs 2
 
       - name: Upload the nextest JUnit report
         if: always()

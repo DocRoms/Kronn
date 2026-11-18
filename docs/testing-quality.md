@@ -212,9 +212,9 @@ directories and writes a versioned marker (`.kronn-backend-cache-v3`) when a
 complete bounded cache exists. Profraw files, the nextest store and other
 transient trees are never archived.
 The archive build compiles the crates of this repository one at a time
-(`RUSTC_WORKSPACE_WRAPPER`, a file lock; dependencies stay parallel):
-instrumented, the library needs about 10 GB and its test crate about 20 GB,
-which side by side do not fit in a hosted runner's 16 GB.
+(`RUSTC_WORKSPACE_WRAPPER`, a file lock; dependencies stay parallel), so two
+of them never share a hosted runner's 16 GB, and records the peak memory of
+each compilation.
 [src: file: .github/workflows/ci-test.yml:102-116#cache-backend-hot] [src: file: .github/workflows/ci-test.yml:243-276#mark-backend-cache]
 [src: file: .github/workflows/ci-test.yml:208-243#archive] [src: file: .github/workflows/ci-test.yml:278-329#test-backend-shard] [src: file: .github/workflows/ci-test.yml:359-437#test-backend] [src: file: scripts/ci/backend_ci_slo.mjs:46-62#collapseBackendJobs] [src: file: scripts/ci/rustc_one_at_a_time.sh:1-12#flock]
 
@@ -345,6 +345,22 @@ duplicate, incomplete, or contradictory measurement evidence fails the
 observer instead of publishing a misleading timing.
 [src: file: .github/workflows/ci-test.yml:95#timeout-minutes] [src: file: .github/workflows/ci-test.yml:393#timeout-minutes] [src: file: .github/workflows/ci-test.yml:753#timeout-minutes] [src: file: .github/workflows/ci-build.yml:234-238#timeout-minutes] [src: file: .github/workflows/ci-build.yml:335#timeout-minutes]
 [src: file: .github/workflows/ci-test.yml:975-1017#ci-quality-gates] [src: file: scripts/ci/backend_ci_slo.mjs:111-135#requireCurrentBackendJob]
+
+## Crate size
+
+The backend is five crates (`docs/architecture/backend-crates.md`) because the
+memory one compilation needs follows the size of its crate. Two gates keep it
+so:
+
+- `backend/scripts/ci/crate_size.py` fails the quality job when a crate
+  exceeds 200 000 lines, tests included. Run it locally with
+  `python3 backend/scripts/ci/crate_size.py`; it prints every crate's size.
+- `backend/scripts/ci/rustc_memory.py` fails `test-backend-build` when the
+  compilation of one crate peaked over 8 GB, as measured by the rustc wrapper
+  during the instrumented build. A cache hit compiles nothing and passes.
+
+A failing gate is fixed by moving modules to another crate or adding a layer
+crate, not by raising the limit.
 
 ## Test placement
 

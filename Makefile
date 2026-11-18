@@ -353,10 +353,11 @@ check:
 ## Generate TypeScript types from Rust models
 ## backend/bindings/ is owned by this target: it is wiped first so a type that
 ## was renamed or removed (or an older run's files) can never leak into the output.
+## Every crate of the backend exports into that one directory.
 typegen:
 	@echo "$(GREEN)▸ Generating ts-rs bindings from Rust models (clean bindings dir)...$(RESET)"
 	rm -rf backend/bindings
-	cd backend && cargo test --lib export_bindings -- --nocapture
+	cd backend && TS_RS_EXPORT_DIR="$(CURDIR)/backend/bindings" cargo test --workspace --lib export_bindings -- --nocapture
 	@echo "$(GREEN)▸ Assembling frontend/src/types/generated.ts from the bindings...$(RESET)"
 	@node frontend/scripts/assemble-generated-types.mjs
 	@echo "$(GREEN)▸ generated.ts regenerated — commit it with your Rust model change.$(RESET)"
@@ -367,7 +368,7 @@ typegen:
 typegen-check:
 	@echo "$(CYAN)▸ Regenerating bindings into a fresh dir and comparing with generated.ts...$(RESET)"
 	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/kronn-typegen.XXXXXX") && trap 'rm -rf "$$tmp"' EXIT && \
-	  (cd backend && TS_RS_EXPORT_DIR="$$tmp" cargo test --lib export_bindings) && \
+	  (cd backend && TS_RS_EXPORT_DIR="$$tmp" cargo test --workspace --lib export_bindings) && \
 	  node frontend/scripts/assemble-generated-types.mjs --bindings "$$tmp" --check
 
 ## Run the backend suite CI runs, with the runner CI uses (cargo-nextest,
@@ -378,7 +379,7 @@ typegen-check:
 test-backend: require-nextest
 	@echo "$(CYAN)▸ Running backend tests with cargo-nextest (as CI)...$(RESET)"
 	cd backend && cargo nextest run --workspace $(NEXTEST_ARGS)
-	cd backend && cargo test --doc
+	cd backend && cargo test --workspace --doc
 
 require-nextest:
 	@cargo nextest --version >/dev/null 2>&1 \
@@ -398,7 +399,7 @@ test-backend-cov:
 ## Library unit tests only: a quick loop, not the gate.
 test-backend-lib: require-nextest
 	@echo "$(CYAN)▸ Running backend library tests...$(RESET)"
-	cd backend && cargo nextest run --lib $(NEXTEST_ARGS)
+	cd backend && cargo nextest run --workspace --lib $(NEXTEST_ARGS)
 
 ## Install the backend test tools CI uses: cargo-nextest and cargo-llvm-cov
 ## (prebuilt through cargo-binstall when present, built from source otherwise).
@@ -644,4 +645,4 @@ docs-reanchor:
 		fi; \
 	fi; \
 	if [ -z "$$base" ]; then echo "docs-reanchor: no target-branch merge-base found; re-anchoring unique #symbol moves only (pass BASE=<rev> for the Git line map)" >&2; fi; \
-	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" KRONN_DOCS_REANCHOR_BASE="$$base" cargo test --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture
+	cd backend && KRONN_DOCS_REANCHOR="$(or $(DOCS),all)" KRONN_DOCS_REANCHOR_BASE="$$base" cargo test --workspace --lib core::docs_citations::tests::docs_citations_resolve_in_the_repo -- --nocapture

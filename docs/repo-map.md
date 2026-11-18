@@ -13,10 +13,13 @@ Rust backend (axum) + React/TypeScript frontend (Vite) + nginx gateway, all in D
 ```
 Kronn/
 ├── backend/                    # Rust backend (axum web server)
-│   ├── Cargo.toml              # Dependencies: axum 0.8, tokio, serde, ts-rs, anyhow (versions: docs/stack.md)
+│   ├── Cargo.toml              # Workspace root + `kronn` package. Dependencies: axum 0.8, tokio, serde, ts-rs, anyhow (versions: docs/stack.md)
+│   ├── crates/l0..l3/          # Manifests of the layer crates (sources stay in src/): docs/architecture/backend-crates.md
 │   └── src/
 │       ├── main.rs             # Entrypoint, server startup, graceful shutdown (SIGTERM/SIGINT)
-│       ├── lib.rs              # Router definition (build_router), auth middleware, CORS, AppState
+│       ├── lib.rs              # Top crate root: router definition (build_router), auth middleware, CORS
+│       ├── layer0.rs..layer3.rs # Roots of the layer crates: which module belongs to which crate
+│       ├── uptests/            # Wrappers for tests compiled by a higher crate than their module
 │       ├── models/             # Data models, one module per domain; mod.rs re-exports them (`pub use *`)
 │       ├── api/                # HTTP handlers (one file per domain)
 │       │   ├── mod.rs          # Re-exports

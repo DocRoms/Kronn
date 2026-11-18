@@ -9,8 +9,14 @@ ARG CARGO_PROFILE=release
 # Cache dependencies: copy manifests + dummy build.
 # BuildKit cache mounts keep cargo registry & target dir across rebuilds,
 # so only changed crates recompile (not the full dep tree every time).
+# The backend is a workspace: the `kronn` package and the layer crates under
+# `crates/`, whose sources all live in `src/` (one root file per crate).
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main(){}" > src/main.rs && echo "" > src/lib.rs
+COPY crates ./crates
+RUN mkdir src && echo "fn main(){}" > src/main.rs && echo "" > src/lib.rs \
+    && for manifest in crates/*/Cargo.toml; do \
+         : > "src/$(sed -n 's|^path = "../../src/\(.*\)"$|\1|p' "$manifest")"; \
+       done
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
@@ -33,8 +39,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     # with E0432. Cleaning only the `kronn` package preserves all deps in
     # the BuildKit cache → no extra dep-rebuild cost. Caught 2026-05-20
     # after adding `agent_api.rs` + `TokenExchange` variant.
-    cargo clean -p kronn 2>/dev/null || true \
-    && touch src/main.rs src/lib.rs \
+    # The layer crates were built from empty roots too: same cleaning.
+    { cargo clean -p kronn; \
+      for manifest in crates/*/Cargo.toml; do \
+        cargo clean -p "$(sed -n 's|^name = "\(kronn-l[0-9]*\)"$|\1|p' "$manifest")"; \
+      done; } 2>/dev/null || true \
+    && touch src/*.rs \
     && cargo build --profile ${CARGO_PROFILE} \
     && cp target/${CARGO_PROFILE}/kronn /usr/local/bin/kronn
 
@@ -43,7 +53,7 @@ FROM builder AS linter
 RUN rustup component add clippy
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM debian:trixie-slim

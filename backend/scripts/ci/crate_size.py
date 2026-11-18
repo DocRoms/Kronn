@@ -96,10 +96,10 @@ def measure(backend):
 
 def main(argv):
     args = [a for a in argv if not a.startswith('--')]
-    backend = args[0] if args else 'backend'
+    backend = args[0] if args else str(pathlib.Path(__file__).resolve().parents[2])
     limit = int(argv[argv.index('--max') + 1]) if '--max' in argv else MAX_LINES
     args = [a for a in args if a != str(limit)]
-    sizes = measure(args[0] if args else 'backend')
+    sizes = measure(backend)
     over = [(n, s) for n, s in sizes if s > limit]
     for name, size in sizes:
         print(f'{name:12} {size:>8} lines{"  <-- over " + str(limit) if size > limit else ""}')

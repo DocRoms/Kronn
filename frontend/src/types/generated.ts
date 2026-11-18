@@ -8017,7 +8017,7 @@ export type Project = { id: string, name: string, path: string, repo_url: string
  * Total tech-debt entries detected in the project's docs tree:
  * one count per file under `docs/tech-debt/` plus one count per
  * table row in `docs/inconsistencies-tech-debt.md`. Computed by
- * `scanner::count_tech_debt` and surfaced as a badge on the
+ * `td_index::count_tech_debt` and surfaced as a badge on the
  * project card so users see at a glance how many TD items remain
  * to address. Not persisted in DB.
  */

@@ -29,7 +29,7 @@ TARGETS=(
 # otherwise produce it here. --ignore-run-fail so pre-existing env-flaky tests
 # (git-worktree / mcp_scanner parallelism) don't abort the coverage report.
 json="$(cargo llvm-cov report --json 2>/dev/null \
-        || cargo llvm-cov --lib --ignore-run-fail --json)"
+        || cargo llvm-cov --workspace --lib --ignore-run-fail --json)"
 
 fail=0
 for entry in "${TARGETS[@]}"; do

@@ -17,6 +17,9 @@ Three Docker services behind nginx gateway:
 
 ## Key patterns (facts)
 
+### Backend crates
+- The backend is a workspace of five layered crates sharing `backend/src/`; a module belongs to the crate whose root declares it, and paths (`crate::core::…`) are the same in every crate. Rules, hooks between layers and size limits: `docs/architecture/backend-crates.md`.
+
 ### API pattern
 - All endpoints return `ApiResponse<T>` wrapper: `{ success: bool, data: T|null, error: string|null }`.
 - Routes registered in `backend/src/lib.rs` (`build_router()`), handlers in `backend/src/api/<domain>.rs`.

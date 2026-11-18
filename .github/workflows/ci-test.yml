@@ -244,8 +244,16 @@ jobs:
           export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-target"
           eval "$(cargo llvm-cov show-env --sh)"
           export RUSTC_WORKSPACE_WRAPPER="$GITHUB_WORKSPACE/scripts/ci/rustc_one_at_a_time.sh"
+          # The wrapper records each crate's peak memory with GNU time.
+          /usr/bin/time -f %M true >/dev/null
+          export KRONN_RUSTC_MEMORY_LOG="$RUNNER_TEMP/kronn-rustc-memory.log"
           cargo nextest archive --workspace --locked \
             --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst"
+
+      # A crate whose compilation nears the runner's memory is refused here,
+      # before it becomes a build that swaps until the job is cancelled.
+      - name: Crate memory gate — peak of each compilation
+        run: python3 scripts/ci/rustc_memory.py "$RUNNER_TEMP/kronn-rustc-memory.log"
 
       - name: Lint — no raw Command::new in prod code
         if: github.event_name != 'push'
@@ -460,6 +468,8 @@ jobs:
           NEXTEST_PROFILE: ci
           KRONN_TEMPLATES_DIR: ${{ github.workspace }}/templates
           LLVM_PROFILE_FILE: /dev/null
+          # One directory for the bindings of every backend crate.
+          TS_RS_EXPORT_DIR: ${{ github.workspace }}/backend/bindings
         run: |
           cargo nextest run --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst" \
             --workspace-remap "$PWD" -E 'test(export_bindings)'
@@ -503,12 +513,12 @@ jobs:
       # The generated-type drift check and the raw-command lint run in
       # `test-backend`, on the build the suite already made.
       - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       # nextest does not run doctests; none exist today, and this keeps a
       # future one from being silently skipped.
       - name: cargo test --doc
         if: github.event_name != 'push'
-        run: cargo test --doc
+        run: cargo test --workspace --doc
       - name: Save cargo registry and clippy dependencies (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-clippy.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -545,6 +555,17 @@ jobs:
         if: github.event_name != 'push'
         run: |
           python3 scripts/ci/nginx_body_limits.py
+      - name: Crate size gate — lines per backend crate
+        if: github.event_name != 'push'
+        run: |
+          python3 scripts/ci/crate_size.py
+      # `test-support` and `full-tests` belong to test builds: the server links
+      # the layer crates without either.
+      - name: Server build — no test feature on the layer crates
+        if: github.event_name != 'push'
+        run: |
+          LEAKED=$(cargo tree -p kronn -e normal,build -f '{p} {f}' --locked | grep -E 'kronn-l[0-9]+ .*(test-support|full-tests)' || true)
+          test -z "$LEAKED" || { echo "$LEAKED"; exit 1; }
       - name: Tech-debt registry — index rows match open detail files
         if: github.event_name != 'push'
         run: |

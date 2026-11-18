@@ -20,7 +20,7 @@ test-support = ["dep:tempfile", "dep:serial_test", "dep:http-body-util", "kronn-
 serial_test = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
-kronn-l0 = { path = "../l0" }
+kronn-l0 = { path = "../l0", default-features = false }
 axum = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true }
@@ -82,7 +82,7 @@ windows-sys = { workspace = true }
 errno = { workspace = true }
 
 [dev-dependencies]
-kronn-l0 = { path = "../l0", features = ["test-support"] }
+kronn-l0 = { path = "../l0", default-features = false, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }
 http-body-util = { workspace = true }

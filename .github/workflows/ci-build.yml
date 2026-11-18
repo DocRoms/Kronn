@@ -279,21 +279,23 @@ jobs:
         if: github.event_name == 'pull_request' && matrix.os == 'macos-latest' && needs.portability-scope.outputs.mac != 'true'
         run: echo "This change does not touch the macOS suites' modules; the push to main runs them."
 
+      # Each filter names a module twice: its own tests (`core::worktree`) and
+      # the ones a higher crate compiles for it (`uptests::core__worktree__..`).
       - name: Worktree lifecycle and disk guards
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features core::worktree
+        run: cargo test --workspace --lib --no-default-features -- core::worktree core__worktree
 
       - name: Disk maintenance surface
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features api::maintenance
+        run: cargo test --workspace --lib --no-default-features -- api::maintenance api__maintenance
 
       - name: Cleanup authorisation from durable state
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features db::orchestration
+        run: cargo test --workspace --lib --no-default-features -- db::orchestration db__orchestration
 
       - name: Windows to WSL agent launches
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features agents::wsl
+        run: cargo test --workspace --lib --no-default-features -- agents::wsl agents__wsl
 
       # KT-1595 — the write guards: rooted (directory-fd) writes on macOS, the
       # lstat walk + write by path kept on Windows (residual risk documented in
@@ -301,19 +303,19 @@ jobs:
       # tests of that behaviour; the swap tests are unix-only.
       - name: File write guards (rooted on unix, lstat walk on Windows)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features core::fs_guard
+        run: cargo test --workspace --lib --no-default-features -- core::fs_guard core__fs_guard
 
       - name: Secret file paths (drives, UNC shares, links)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features acp::secret_files
+        run: cargo test --workspace --lib --no-default-features -- acp::secret_files acp__secret_files
 
       - name: Sealed config copies (set-aside moves, never replacing)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features core::config_copies
+        run: cargo test --workspace --lib --no-default-features -- core::config_copies core__config_copies
 
       - name: Durable copies (backups synced on Windows)
         if: matrix.os != 'macos-latest' || github.event_name != 'pull_request' || needs.portability-scope.outputs.mac == 'true'
-        run: cargo test --lib --no-default-features core::durable_file
+        run: cargo test --workspace --lib --no-default-features -- core::durable_file core__durable_file
 
       - name: Save cargo registry and build (main)
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache-portability.outputs.cache-hit != 'true'
