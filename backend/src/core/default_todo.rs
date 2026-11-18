@@ -338,6 +338,7 @@ pub fn bundle(conn: &Connection, language: &str) -> Result<String> {
         referenced_quick_execs: vec![],
         referenced_skills: vec![],
         redacted_fields: vec![],
+        not_carried: Vec::new(),
     };
     Ok(serde_json::to_string(&bundle)?)
 }

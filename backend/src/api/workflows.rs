@@ -4450,6 +4450,39 @@ pub async fn export_workflow(
     for exec in &mut referenced_quick_execs {
         crate::core::export_secrets::redact_quick_exec(exec, &mut redacted_fields);
     }
+    let referenced_skills = crate::core::skill_bundle::bundle_skills(&skill_ids);
+    let known = match state
+        .db
+        .with_conn(crate::core::export_report::KnownIds::load)
+        .await
+    {
+        Ok(known) => known,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
+    };
+    let carried = crate::core::export_report::Carried {
+        skills: referenced_skills.iter().map(|s| s.id.clone()).collect(),
+        objects: std::iter::once(exported.id.clone())
+            .chain(referenced_workflows.iter().map(|w| w.id.clone()))
+            .chain(referenced_quick_prompts.iter().map(|q| q.id.clone()))
+            .chain(referenced_quick_apis.iter().map(|q| q.id.clone()))
+            .chain(referenced_quick_execs.iter().map(|q| q.id.clone()))
+            .chain(referenced_pages.iter().map(|p| p.id.clone()))
+            .collect(),
+    };
+    let not_carried = crate::core::export_report::not_carried(
+        &std::iter::once(&exported)
+            .chain(&referenced_workflows)
+            .collect::<Vec<_>>(),
+        &referenced_quick_prompts.iter().collect::<Vec<_>>(),
+        &carried,
+        &known,
+    );
     let envelope = WorkflowExportEnvelope {
         kind: WORKFLOW_EXPORT_KIND.to_string(),
         version: EXPORT_VERSION,
@@ -4460,8 +4493,9 @@ pub async fn export_workflow(
         referenced_quick_execs,
         referenced_pages,
         referenced_workflows,
-        referenced_skills: crate::core::skill_bundle::bundle_skills(&skill_ids),
+        referenced_skills,
         redacted_fields,
+        not_carried,
     };
 
     // Sanitised filename: `<workflow_name>.kronn-workflow.json`. Replace
@@ -10374,6 +10408,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![child],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
@@ -10396,6 +10431,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -10418,6 +10454,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("\"kind\":\"kronn.workflow\""));
@@ -10445,6 +10482,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(
@@ -11079,6 +11117,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         })
         .unwrap();
         let Json(imported) = import_workflow(
@@ -11513,6 +11552,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         })
         .unwrap();
         let imported = import_workflow(
@@ -11583,6 +11623,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let import = |wf: Workflow, by_agent: bool| {
             let state = state.clone();
@@ -11708,6 +11749,7 @@ mod tests {
             referenced_pages: vec![],
             referenced_workflows: vec![],
             redacted_fields: vec![],
+            not_carried: Vec::new(),
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();

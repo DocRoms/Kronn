@@ -921,7 +921,12 @@ referenced_skills?: Array<BundledSkill>,
 /**
  * Literal credentials replaced before export; locations only, never values.
  */
-redacted_fields?: Array<RedactedField>, };
+redacted_fields?: Array<RedactedField>,
+/**
+ * KT-1843 — what the exported content names and the file does not hold;
+ * shown before the file leaves.
+ */
+not_carried?: Array<NotCarried>, };
 
 export type ArtifactBundleDataset = { name: string, kind: LivePageDatasetKind,
 /**
@@ -7100,6 +7105,20 @@ detected_ips: Array<DetectedIp>, };
  * policy table has no row for them, and each is held by its own gate.
  */
 export type NeverCovered = "credentials" | "trust_settings" | "destructive_confirmations" | "peer_inheritance";
+
+/**
+ * An object the exported content names and the file does not hold.
+ */
+export type NotCarried = {
+/**
+ * `skill`, `directive`, `profile`, `page`, `workflow`, `quick_prompt`,
+ * `quick_api` or `quick_exec`.
+ */
+kind: string, id: string,
+/**
+ * Where it is named, e.g. `Review › write_ctx` (workflow, then step).
+ */
+named_in: string, };
 
 /**
  * Configuration for a `StepType::Notify` webhook step. Rendered at run-time
@@ -13425,7 +13444,12 @@ referenced_skills?: Array<BundledSkill>,
  * Fields whose literal secret was replaced before export (never the
  * value). An importer shows them so nothing silently runs without them.
  */
-redacted_fields?: Array<RedactedField>, };
+redacted_fields?: Array<RedactedField>,
+/**
+ * KT-1843 — what the exported content names and the file does not hold;
+ * shown before the file leaves.
+ */
+not_carried?: Array<NotCarried>, };
 
 export type WorkflowExportPage = { id: string, slug: string, title: string, html: string, created_by_agent: string | null, datasets: Array<WorkflowExportPageDataset>, };
 

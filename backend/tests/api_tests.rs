@@ -33300,6 +33300,85 @@ async fn workflow_export_carries_skills_a_script_or_a_prompt_names() {
     }
 }
 
+/// KT-1843 — an export says what its steps name and the file does not hold: a
+/// custom skill that no longer exists, a custom directive, the id of another
+/// saved object pasted in a script. A file that holds everything says nothing.
+#[tokio::test]
+async fn workflow_export_lists_what_it_names_and_does_not_carry() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_export_lists_what_it_names_and_does_not_carry",
+    ) {
+        return;
+    }
+    let state = test_state();
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(state.clone(), false);
+    let gone = create_skill(app.clone(), "Gone", "Deleted before the export.").await;
+    let kept = create_skill(app.clone(), "Kept", "Stays.").await;
+    let (_, directive) = post_json(
+        app.clone(),
+        "/api/directives",
+        serde_json::json!({"name": "House style", "description": "", "icon": "MessageSquare",
+                           "category": "Output", "content": "Answer in a table."}),
+    )
+    .await;
+    assert_eq!(directive["success"], true, "{directive}");
+    let directive = directive["data"]["id"].as_str().unwrap().to_string();
+    let (_, other) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Other", "project_id": null, "trigger": {"type": "Manual"},
+            "steps": [{"name": "only", "step_type": {"type": "Agent"}, "prompt_template": "Hello"}],
+        }),
+    )
+    .await;
+    assert_eq!(other["success"], true, "{other}");
+    let other = other["data"]["id"].as_str().unwrap().to_string();
+    // An id of nothing saved here, and a longer hexadecimal run: no report.
+    let script = format!(
+        "TARGET = '{other}'\nRUN = '00000000-0000-4000-8000-000000000000'\nHASH = 'a{other}'"
+    );
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Scripted", "project_id": null, "trigger": {"type": "Manual"},
+            "exec_allowlist": ["python3"],
+            "steps": [
+                {"name": "review", "step_type": {"type": "Agent"}, "prompt_template": "Review",
+                 "skill_ids": [gone, kept, "rust"], "directive_ids": [directive]},
+                {"name": "ctx", "step_type": {"type": "Exec"},
+                 "exec_command": "python3", "exec_args": ["-c", script]},
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let workflow = created["data"]["id"].as_str().unwrap().to_string();
+    let (_, deleted) = delete_json(app.clone(), &format!("/api/skills/{gone}")).await;
+    assert_eq!(deleted["success"], true, "{deleted}");
+
+    let (_, exported) = get_json(app.clone(), &format!("/api/workflows/{workflow}/export")).await;
+    assert_eq!(
+        exported["not_carried"],
+        serde_json::json!([
+            {"kind": "directive", "id": directive, "named_in": "Scripted › review"},
+            {"kind": "skill", "id": gone, "named_in": "Scripted › review"},
+            {"kind": "workflow", "id": other, "named_in": "Scripted › ctx"},
+        ]),
+        "{exported}"
+    );
+    let bundled = exported["referenced_skills"].as_array().unwrap();
+    assert_eq!(bundled.len(), 1, "{exported}");
+    assert_eq!(bundled[0]["id"], kept.as_str());
+
+    let (_, clean) = get_json(app, &format!("/api/workflows/{other}/export")).await;
+    assert!(clean.get("not_carried").is_none(), "{clean}");
+}
+
 /// A skill a JsonData payload lists arrives as a copy when this Kronn has
 /// another skill of that name: the imported payload names the copy.
 #[tokio::test]

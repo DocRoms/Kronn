@@ -19,7 +19,7 @@ import type {
   QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
   JsonValue, Skill, CreateSkillRequest, UnsafeExecStep, WorkflowStep,
 } from '../types/generated';
-import type { SkillImportChoice, WorkflowImportPreview } from '../types/generated';
+import type { NotCarried, SkillImportChoice, WorkflowImportPreview } from '../types/generated';
 import { SkillImportDecisions } from '../components/SkillImportDecisions';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
@@ -59,6 +59,8 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { mergeDeclaredAndDetected } from '../lib/workflowVariables';
 import { detectAutomationImport, type AutomationImportKind } from '../lib/automationImport';
 import { describeRedacted, exportRedactionNotice, redactedFieldsIn } from '../lib/redactedFields';
+import { notCarriedIn } from '../lib/exportReport';
+import { ExportNotCarriedDialog } from '../components/ExportNotCarriedDialog';
 import { AGENT_LABELS } from '../lib/constants';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import { isHeavyOutput } from '../lib/heavyOutput';
@@ -834,6 +836,16 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
   // the same workflow.
   const triggeringRef = useRef(false);
   const [cancellingRunIds, setCancellingRunIds] = useState<Set<string>>(new Set());
+
+  // A workflow export waiting for the "named but not in the file" dialog (KT-1843).
+  type WorkflowExportFile = { filename: string; blob: Blob; name: string };
+  const [pendingExport, setPendingExport] = useState<(WorkflowExportFile & { notCarried: NotCarried[] }) | null>(null);
+  const finishExport = async ({ filename, blob, name }: WorkflowExportFile) => {
+    triggerDownload(filename, blob);
+    if (toastProp) toastProp(t('wf.exportDone').replace('{name}', name), 'success');
+    const notice = await exportRedactionNotice(blob, t);
+    if (notice && toastProp) toastProp(notice, 'info');
+  };
 
   // Live run state for SSE streaming
   const [liveRun, setLiveRun] = useState<{
@@ -3231,13 +3243,25 @@ function WorkflowsPageView({ projects, installedAgentTypes, agentAccess, configL
                 onExport={async () => {
                   try {
                     const { filename, blob } = await workflowsApi.exportWorkflow(detailWorkflow.id);
-                    triggerDownload(filename, blob);
-                    if (toastProp) toastProp(t('wf.exportDone').replace('{name}', detailWorkflow.name), 'success');
-                    const notice = await exportRedactionNotice(blob, t);
-                    if (notice && toastProp) toastProp(notice, 'info');
+                    const pending = { filename, blob, name: detailWorkflow.name };
+                    // What the file names and does not hold is shown before it leaves.
+                    const notCarried = notCarriedIn(await blob.text());
+                    if (notCarried.length > 0) setPendingExport({ ...pending, notCarried });
+                    else await finishExport(pending);
                   } catch (e) {
                     if (toastProp) toastProp(userError(e), 'error');
                   }
+                }}
+              />
+            )}
+            {pendingExport && (
+              <ExportNotCarriedDialog
+                items={pendingExport.notCarried}
+                onCancel={() => setPendingExport(null)}
+                onDownload={() => {
+                  const pending = pendingExport;
+                  setPendingExport(null);
+                  void finishExport(pending);
                 }}
               />
             )}

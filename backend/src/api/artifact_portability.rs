@@ -305,6 +305,25 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
     for exec in &mut quick_execs {
         crate::core::export_secrets::redact_quick_exec(exec, &mut redacted_fields);
     }
+    let referenced_skills = crate::core::skill_bundle::bundle_skills(&skill_ids);
+    let quick_prompts: Vec<_> = quick_prompts.into_values().collect();
+    let carried = crate::core::export_report::Carried {
+        skills: referenced_skills.iter().map(|s| s.id.clone()).collect(),
+        objects: [artifact.id.clone(), artifact.slug.clone()]
+            .into_iter()
+            .chain(pages.values().flat_map(|p| [p.id.clone(), p.slug.clone()]))
+            .chain(workflows.iter().map(|w| w.id.clone()))
+            .chain(quick_prompts.iter().map(|q| q.id.clone()))
+            .chain(quick_apis.iter().map(|q| q.id.clone()))
+            .chain(quick_execs.iter().map(|q| q.id.clone()))
+            .collect(),
+    };
+    let not_carried = crate::core::export_report::not_carried(
+        &workflows.iter().collect::<Vec<_>>(),
+        &quick_prompts.iter().collect::<Vec<_>>(),
+        &carried,
+        &crate::core::export_report::KnownIds::load(conn)?,
+    );
     let bundle = ArtifactBundle {
         kind: BUNDLE_KIND.into(),
         version: BUNDLE_VERSION,
@@ -312,11 +331,12 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
         artifact,
         referenced_artifacts: pages.into_values().collect(),
         referenced_workflows: workflows,
-        referenced_quick_prompts: quick_prompts.into_values().collect(),
+        referenced_quick_prompts: quick_prompts,
         referenced_quick_apis: quick_apis,
         referenced_quick_execs: quick_execs,
-        referenced_skills: crate::core::skill_bundle::bundle_skills(&skill_ids),
+        referenced_skills,
         redacted_fields,
+        not_carried,
     };
     if serde_json::to_vec(&bundle)?.len() > MAX_BUNDLE_BYTES {
         bail!("Artifact bundle exceeds 64 MiB");

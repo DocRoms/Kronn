@@ -75,6 +75,11 @@ pub struct ArtifactBundle {
     /// Literal credentials replaced before export; locations only, never values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redacted_fields: Vec<crate::core::export_secrets::RedactedField>,
+    /// KT-1843 — what the exported content names and the file does not hold;
+    /// shown before the file leaves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<crate::core::export_report::NotCarried>>")]
+    pub not_carried: Vec<crate::core::export_report::NotCarried>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]

@@ -28,6 +28,8 @@ import {
 } from '../lib/live-page-sandbox';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
+import { ExportNotCarriedDialog } from '../components/ExportNotCarriedDialog';
+import type { NotCarried } from '../types/generated';
 import { triggerDownload } from '../lib/downloadBlob';
 import { exportRedactionNotice } from '../lib/redactedFields';
 import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
@@ -263,16 +265,25 @@ export function PagesPage({
   const [exportNotice, setExportNotice] = useState<{ pageId: string; text: string } | null>(null);
   const closeImport = useCallback(() => setImportOpen(false), []);
   const artifactExportInFlight = useRef(false);
+  type ArtifactExportFile = { pageId: string; filename: string; blob: Blob };
+  const [pendingArtifactExport, setPendingArtifactExport] = useState<(ArtifactExportFile & { notCarried: NotCarried[] }) | null>(null);
+  const finishArtifactExport = async ({ pageId, filename, blob }: ArtifactExportFile) => {
+    triggerDownload(filename, blob);
+    const notice = await exportRedactionNotice(blob, t);
+    if (notice) setExportNotice({ pageId, text: notice });
+  };
   const exportArtifact = async () => {
     if (!detail || artifactExportInFlight.current) return;
     artifactExportInFlight.current = true; setExportBusy('json'); setExportNotice(null);
     try {
       const bundle = await pagesApi.exportArtifact(detail.id);
       const blob = new Blob([JSON.stringify(bundle)], { type: 'application/json' });
-      triggerDownload(`${detail.slug}.kronn-artifact.json`, blob);
+      const pending = { pageId: detail.id, filename: `${detail.slug}.kronn-artifact.json`, blob };
       setError(null);
-      const notice = await exportRedactionNotice(blob, t);
-      if (notice) setExportNotice({ pageId: detail.id, text: notice });
+      // What the file names and does not hold is shown before it leaves.
+      const notCarried = bundle.not_carried ?? [];
+      if (notCarried.length > 0) setPendingArtifactExport({ ...pending, notCarried });
+      else await finishArtifactExport(pending);
     } catch (cause) { setError(userError(cause)); }
     finally { artifactExportInFlight.current = false; setExportBusy(null); }
   };
@@ -1784,6 +1795,17 @@ export function PagesPage({
           </div>
           )}
         </SidePanelShell>
+      )}
+      {pendingArtifactExport && (
+        <ExportNotCarriedDialog
+          items={pendingArtifactExport.notCarried}
+          onCancel={() => setPendingArtifactExport(null)}
+          onDownload={() => {
+            const pending = pendingArtifactExport;
+            setPendingArtifactExport(null);
+            void finishArtifactExport(pending);
+          }}
+        />
       )}
       {importOpen && <ArtifactImportDialog onClose={closeImport} onImported={page => {
         setImportOpen(false);

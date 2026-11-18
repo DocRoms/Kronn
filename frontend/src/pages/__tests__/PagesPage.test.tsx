@@ -266,6 +266,31 @@ describe('PagesPage', () => {
     expect(await screen.findByTestId('artifact-export-redacted')).toHaveTextContent('imp.exportRedacted');
   });
 
+  it('lists what the bundle names and does not hold before it downloads (KT-1843)', async () => {
+    vi.mocked(triggerDownload).mockClear();
+    vi.mocked(pagesApi.exportArtifact).mockResolvedValue({ kind: 'kronn.artifact', version: 1, not_carried: [
+      { kind: 'workflow', id: '4339ea95-0000-4000-8000-000000000001', named_in: 'Refresh › call' },
+    ] } as never);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    fireEvent.click(screen.getByText('pages.export'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.exportArtifact' }));
+    const dialog = await screen.findByTestId('export-not-carried');
+    expect(dialog).toHaveTextContent('4339ea95-0000-4000-8000-000000000001');
+    expect(triggerDownload).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.cancel' }));
+    expect(screen.queryByTestId('export-not-carried')).toBeNull();
+    expect(triggerDownload).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText('pages.export'));
+    fireEvent.click(screen.getByRole('button', { name: 'pages.exportArtifact' }));
+    fireEvent.click(await screen.findByTestId('export-not-carried-download'));
+    await waitFor(() => expect(triggerDownload).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(triggerDownload).mock.calls[0][0]).toBe('adobe-signals.kronn-artifact.json');
+    expect(screen.queryByTestId('export-not-carried')).toBeNull();
+  });
+
   it('offers an import even when no Artifact exists', async () => {
     vi.mocked(pagesApi.list).mockResolvedValue([]);
     render(<PagesPage />);
