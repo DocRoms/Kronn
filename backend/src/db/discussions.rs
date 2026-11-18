@@ -943,7 +943,8 @@ pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool
         .optional()?;
     value
         .map(|disabled| {
-            Ok(disabled != 0 || super::execution_activity::discussion_has_cli_worker(conn, disc_id)?)
+            Ok(disabled != 0
+                || super::execution_activity::discussion_has_cli_worker(conn, disc_id)?)
         })
         .transpose()
 }
@@ -1911,10 +1912,7 @@ pub fn insert_native_agent_message_with_audit_documents(
     if validation_documents.is_some() {
         anyhow::ensure!(
             child_run_was_success
-                && ends_with_terminal_signal(
-                    &msg.content,
-                    "KRONN:VALIDATION_COMPLETE"
-                ),
+                && ends_with_terminal_signal(&msg.content, "KRONN:VALIDATION_COMPLETE"),
             "Document fingerprints require a successful terminal validation reply"
         );
     }
@@ -2003,13 +2001,10 @@ pub fn insert_native_agent_message_with_audit_documents(
     };
     let mut alias_cli_targets: Vec<MessageTarget> = Vec::new();
     let mut providers_resolved_to_cli: Vec<AgentType> = Vec::new();
-    for provider in
-        candidate_agents
-            .iter()
-            .cloned()
-            .chain(crate::agents::agent_mentions_in_prose(
-                &msg.content,
-            ))
+    for provider in candidate_agents
+        .iter()
+        .cloned()
+        .chain(crate::agents::agent_mentions_in_prose(&msg.content))
     {
         if &provider == source_agent || providers_resolved_to_cli.contains(&provider) {
             continue;
@@ -2373,10 +2368,9 @@ pub fn archived_review_ids_with_workspace(conn: &Connection) -> Result<Vec<Strin
           ORDER BY updated_at",
     )?;
     let ids = statement
-        .query_map(
-            params![REVIEW_WORKSPACE_MODE],
-            |row| row.get::<_, String>(0),
-        )?
+        .query_map(params![REVIEW_WORKSPACE_MODE], |row| {
+            row.get::<_, String>(0)
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ids)
 }
@@ -2992,8 +2986,7 @@ fn insert_message_inner(
             &msg.id,
             &content,
         )?;
-        if let Some(hook) =
-            crate::core::uplink::linked::<crate::core::uplink::AgentMessageIngest>()
+        if let Some(hook) = crate::core::uplink::linked::<crate::core::uplink::AgentMessageIngest>()
         {
             (hook.0)(conn, discussion_id, msg, &content)?;
         }
@@ -4098,10 +4091,7 @@ pub fn agent_alias_cli_target(
 }
 
 /// Every joined, non-workflow CLI session of a discussion as a typed target.
-pub fn joined_cli_targets(
-    conn: &Connection,
-    discussion_id: &str,
-) -> Result<Vec<MessageTarget>> {
+pub fn joined_cli_targets(conn: &Connection, discussion_id: &str) -> Result<Vec<MessageTarget>> {
     Ok(
         crate::db::discussion_sessions::list_participant_views(conn, discussion_id)?
             .into_iter()
@@ -4658,9 +4648,9 @@ pub fn list_attachment_files(
     Ok(rows)
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 #[path = "discussions_test.rs"]
-mod discussions_test;
+pub mod discussions_test;
 
 /// KT-251 DoD 3 — the id an in-flight answer already carries.
 ///

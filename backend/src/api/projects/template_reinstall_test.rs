@@ -286,7 +286,8 @@ fn a_symlinked_target_refuses_the_whole_reinstall_before_any_write() {
 #[test]
 fn the_real_template_reinstalls_cleanly_and_is_stable() {
     let tmp = TempDir::new().unwrap();
-    let template = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs");
+    let template =
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs");
     write(tmp.path(), "docs/AGENTS.md", "# broken {{X}}");
     write(tmp.path(), "docs/coding-rules.md", "");
 

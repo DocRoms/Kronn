@@ -193,7 +193,10 @@ fn run_processes(rows: &[ProcessRow], own_pid: u32) -> Vec<Target> {
 ///
 /// An environment value may hold a newline (an exported shell function does):
 /// the lines that do not open with two numbers continue the previous process.
-#[cfg(any(any(test, feature = "test-support"), not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(any(
+    any(test, feature = "test-support"),
+    not(any(target_os = "linux", target_os = "macos"))
+))]
 fn parse_process_table(output: &str, dispatch_job_id: &str) -> Vec<ProcessRow> {
     let needle = format!("{DISPATCH_ENV}={dispatch_job_id}");
     let mut rows: Vec<ProcessRow> = Vec::new();
@@ -222,7 +225,10 @@ fn parse_process_table(output: &str, dispatch_job_id: &str) -> Vec<ProcessRow> {
     rows
 }
 
-#[cfg(any(any(test, feature = "test-support"), not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(any(
+    any(test, feature = "test-support"),
+    not(any(target_os = "linux", target_os = "macos"))
+))]
 fn carries_token(line: &str, needle: &str) -> bool {
     line.match_indices(needle).any(|(at, _)| {
         let before = line[..at].chars().next_back();

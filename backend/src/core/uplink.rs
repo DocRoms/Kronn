@@ -49,7 +49,9 @@ pub enum ExecutionOf {
     Reference,
 }
 
-pub struct TaskExecutionLookup(pub fn(&Connection, &str, ExecutionOf) -> Result<Option<TaskExecution>>);
+pub struct TaskExecutionLookup(
+    pub fn(&Connection, &str, ExecutionOf) -> Result<Option<TaskExecution>>,
+);
 inventory::collect!(TaskExecutionLookup);
 
 /// A task's edited DoD adopted by its live executions, in the caller's transaction.

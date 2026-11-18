@@ -555,7 +555,7 @@ pub fn parent_var_string(name: &str) -> Option<String> {
 
 /// Environment names compare like the platform does: case-insensitively on
 /// Windows.
-fn same_name(left: &OsStr, right: &OsStr) -> bool {
+pub fn same_name(left: &OsStr, right: &OsStr) -> bool {
     if cfg!(windows) {
         left.eq_ignore_ascii_case(right)
     } else {
@@ -565,10 +565,10 @@ fn same_name(left: &OsStr, right: &OsStr) -> bool {
 
 /// The desktop's withheld variables and whether it withholds at all.
 #[derive(Default, Clone)]
-struct Withheld {
+pub struct Withheld {
     /// Set once the desktop withholds its environment.
-    active: bool,
-    vars: Vec<(OsString, OsString)>,
+    pub active: bool,
+    pub vars: Vec<(OsString, OsString)>,
 }
 
 /// Variables moved out of the process environment, kept for the builder
@@ -592,11 +592,7 @@ pub fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> 
 
 /// [`with_withheld_env`] with the withholding switched on or not yet.
 #[cfg(any(test, feature = "test-support"))]
-pub fn with_withheld_state<T>(
-    active: bool,
-    vars: &[(&str, &str)],
-    body: impl FnOnce() -> T,
-) -> T {
+pub fn with_withheld_state<T>(active: bool, vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
     let state = Withheld {
         active,
         vars: vars
@@ -644,7 +640,7 @@ fn withheld() -> Vec<(OsString, OsString)> {
 }
 
 /// The live environment plus the withheld variables it no longer holds.
-fn with_withheld(
+pub fn with_withheld(
     mut live: Vec<(OsString, OsString)>,
     withheld: &[(OsString, OsString)],
 ) -> Vec<(OsString, OsString)> {
@@ -693,7 +689,7 @@ pub fn vars_os() -> Vec<(OsString, OsString)> {
 
 /// What a write does to the live process environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LiveWrite {
+pub enum LiveWrite {
     /// Only the withheld set changes.
     None,
     Set,
@@ -701,7 +697,7 @@ enum LiveWrite {
 
 /// Once the desktop withholds, a name off the webview allow-list is never
 /// live: a write only updates the withheld set.
-fn live_write(state: &Withheld, name: &OsStr) -> LiveWrite {
+pub fn live_write(state: &Withheld, name: &OsStr) -> LiveWrite {
     if state.active && !webview_keeps(name) {
         LiveWrite::None
     } else {
@@ -808,7 +804,7 @@ const WEBVIEW_PREFIXES: &[&str] = &[
 ];
 
 /// Whether the desktop keeps `name` in its live environment.
-fn webview_keeps(name: &OsStr) -> bool {
+pub fn webview_keeps(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false; // not valid Unicode: withheld like a credential
     };
@@ -819,7 +815,7 @@ fn webview_keeps(name: &OsStr) -> bool {
 
 /// Remove from this process's environment every variable `keep` refuses.
 #[allow(clippy::disallowed_methods)] // reads the live environment it empties
-fn take_process_environment_where(keep: impl Fn(&OsStr) -> bool) -> Vec<(OsString, OsString)> {
+pub fn take_process_environment_where(keep: impl Fn(&OsStr) -> bool) -> Vec<(OsString, OsString)> {
     let held: Vec<(OsString, OsString)> = std::env::vars_os()
         .filter(|(name, _)| !keep(name))
         .collect();
@@ -846,7 +842,7 @@ pub fn withhold_process_environment() {
 /// Withhold every live variable `keep` refuses, merged into the withheld set
 /// (a later call never drops what an earlier one, or [`set_var`], put there),
 /// and route later writes of such names to the set.
-fn withhold_where(keep: impl Fn(&OsStr) -> bool) {
+pub fn withhold_where(keep: impl Fn(&OsStr) -> bool) {
     let held = take_process_environment_where(keep);
     with_state(|state| {
         state.active = true;
@@ -1069,7 +1065,7 @@ pub fn isolate(command: &mut std::process::Command, route: ChildRoute) {
 }
 
 /// Test helpers shared by the spawn sites' environment tests.
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 pub mod probe {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1194,7 +1190,3 @@ pub mod probe {
         }
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "child_env_test.rs"]
-mod child_env_test;

@@ -1180,8 +1180,10 @@ fn a_worktree_without_lock_files_produces_an_empty_record() {
 #[ignore = "runs the real cargo against the host's registry cache"]
 fn the_staged_cargo_project_is_accepted_by_the_real_cargo() {
     use crate::core::task_worker_env::ProcessProbeRunner;
-    let lock =
-        std::fs::read_to_string(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("Cargo.lock")).unwrap();
+    let lock = std::fs::read_to_string(
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("Cargo.lock"),
+    )
+    .unwrap();
     let scan = scan_cargo_lock(&lock).unwrap();
     assert!(scan.registry_packages > 100);
     let manifest = staged_cargo_manifest(&scan.crates).unwrap();

@@ -37,11 +37,6 @@ pub mod worker_reviews;
 pub mod workflow_run_pins;
 pub mod workflow_watch_state;
 
-
-
-
-
-
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
 #[cfg(any(test, feature = "test-support"))]
 pub fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {

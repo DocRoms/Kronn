@@ -236,7 +236,7 @@ fn describe_subjects(subjects: &[ApiAccessSubject]) -> String {
 /// A path's segments, or `None` when the path is ambiguous: an empty segment,
 /// a dot segment, or an encoded slash, backslash or dot that a server could
 /// read differently from this matcher.
-fn request_segments(path: &str) -> Option<Vec<String>> {
+pub fn request_segments(path: &str) -> Option<Vec<String>> {
     let trimmed = path.strip_prefix('/').unwrap_or(path);
     let trimmed = trimmed.strip_suffix('/').unwrap_or(trimmed);
     if trimmed.is_empty() {
@@ -259,7 +259,7 @@ fn request_segments(path: &str) -> Option<Vec<String>> {
 /// written as its UTF-8 escapes: the form the request URL is sent in. So `/users/%6De` is `/users/me` and `%3a` is `%3A`.
 /// `None` for an escape that could change the path's shape (slash, backslash,
 /// dot), a raw backslash, or a malformed escape.
-fn canonical_segment(segment: &str) -> Option<String> {
+pub fn canonical_segment(segment: &str) -> Option<String> {
     let mut out = String::with_capacity(segment.len());
     let mut chars = segment.chars();
     while let Some(c) = chars.next() {
@@ -394,7 +394,7 @@ fn segment_matches(want: &str, got: &str) -> bool {
     }
 }
 
-fn template_matches<S: AsRef<str>>(template: &str, segments: &[S]) -> bool {
+pub fn template_matches<S: AsRef<str>>(template: &str, segments: &[S]) -> bool {
     let declared = template_segments(template);
     declared.len() == segments.len()
         && declared
@@ -563,9 +563,9 @@ pub async fn principal_for(
                     // The definition the run executes is its pin, never the
                     // editable one; a run without a readable pin is unknown.
                     let workflow = match run_id {
-                        Some(run_id) => {
-                            Some(crate::db::workflow_run_pins::pinned_workflow(conn, &run_id)?)
-                        }
+                        Some(run_id) => Some(crate::db::workflow_run_pins::pinned_workflow(
+                            conn, &run_id,
+                        )?),
                         None => None,
                     };
                     Ok((audience, workflow))
@@ -737,7 +737,3 @@ pub fn describe_policy(policy: &ApiAccessPolicy) -> String {
     }
     out
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "api_access_test.rs"]
-mod tests;

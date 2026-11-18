@@ -25,8 +25,8 @@ use axum::{extract::State, Json};
 /// provider can never borrow the other's key.
 pub const PROVIDER: &str = "nvidia";
 
-pub use crate::db::external_api_connections::nvidia_resolve_base_url_pub as resolve_base_url_pub;
 use crate::db::external_api_connections::nvidia_resolve_base_url as resolve_base_url;
+pub use crate::db::external_api_connections::nvidia_resolve_base_url_pub as resolve_base_url_pub;
 #[cfg(any(test, feature = "test-support"))]
 use crate::db::external_api_connections::NVIDIA_DEFAULT_BASE_URL as DEFAULT_BASE_URL;
 

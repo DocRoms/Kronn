@@ -534,10 +534,9 @@ fn ensure_live_check_principal(
     } else {
         ExecutionOf::ActiveForTask
     };
-    let execution = (crate::core::uplink::required::<TaskExecutionLookup>()?.0)(
-        conn, task_id, execution,
-    )?
-    .ok_or_else(refused)?;
+    let execution =
+        (crate::core::uplink::required::<TaskExecutionLookup>()?.0)(conn, task_id, execution)?
+            .ok_or_else(refused)?;
     if session.disc_id != execution.parent_discussion_id
         || execution.worker_cli_session_id == Some(session.id)
     {

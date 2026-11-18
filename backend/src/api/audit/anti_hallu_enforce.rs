@@ -17,9 +17,9 @@ use crate::core::anti_halluc::{self, SourceCheck};
 use crate::core::version_sources::{verify_dep_marker, DependencySnapshot};
 use std::path::Path;
 
-pub use crate::core::anti_halluc::{named_sections, NamedSection};
 pub use crate::core::anti_halluc::{code_line_mask, parse_named_sections};
 pub(super) use crate::core::anti_halluc::{extract_attr, is_human_owned_marker};
+pub use crate::core::anti_halluc::{named_sections, NamedSection};
 
 /// Total attempts (1 initial + retries) allowed per step in enforce mode.
 /// Design caps the corrective loop at 2-3 attempts: the agent already carries

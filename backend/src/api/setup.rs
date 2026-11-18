@@ -1513,7 +1513,7 @@ pub async fn get_auth_token(State(state): State<AppState>) -> Json<ApiResponse<O
 }
 
 /// Write or remove the OpenAI key from ~/.codex/auth.json
-fn sync_codex_auth(key: Option<&str>) -> Result<(), String> {
+pub fn sync_codex_auth(key: Option<&str>) -> Result<(), String> {
     if let Some(refusal) = crate::core::mcp_scanner::home_credential_write_refusal() {
         return Err(refusal.to_string());
     }
@@ -1522,7 +1522,7 @@ fn sync_codex_auth(key: Option<&str>) -> Result<(), String> {
 
 /// In Docker `KRONN_HOST_HOME` is a host path absent from the container, and
 /// the container `HOME/.codex` is the bind-mounted host directory.
-fn codex_auth_path() -> std::path::PathBuf {
+pub fn codex_auth_path() -> std::path::PathBuf {
     let host_home = crate::core::child_env::var("KRONN_HOST_HOME")
         .ok()
         .filter(|home| !home.is_empty() && !crate::core::env::is_docker());
@@ -2627,7 +2627,7 @@ fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
 
 /// The context file bytes read out of an archive, by file id (KT-1602).
 #[derive(Default)]
-struct ContextBlobs(std::collections::HashMap<String, Vec<u8>>);
+pub struct ContextBlobs(std::collections::HashMap<String, Vec<u8>>);
 
 /// Counts only: a failed assertion must not print the files.
 impl std::fmt::Debug for ContextBlobs {
@@ -2701,7 +2701,7 @@ fn write_context_blobs(
 }
 
 /// Import DB data from a DbExport struct. Returns warnings and invalid paths.
-async fn do_import_db(
+pub async fn do_import_db(
     state: &AppState,
     data: &DbExport,
     blobs: ContextBlobs,
@@ -2983,7 +2983,9 @@ async fn do_import_db(
     // commit, before the file writes below, and a failed listing leaves the
     // snapshot empty and unarmed (`arm_lane_settings`), never the old one.
     let lane_warm = state.config.read().await.workers.lane_warm.clone();
-    if let Err(e) = crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &lane_warm).await {
+    if let Err(e) =
+        crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &lane_warm).await
+    {
         tracing::warn!("Import could not reload the lane settings: {e:#}");
         warnings.push(
             "The lane settings of the imported projects could not be reloaded: restart Kronn \
@@ -3322,10 +3324,12 @@ fn reset_refusal(proxy_declared: bool) -> Option<String> {
 /// KT-1751 fourth review — the lane snapshot is then rebuilt from the emptied
 /// table, with the global entry a reset installs: no deleted project's list
 /// stays in force.
-async fn reset_data(state: &AppState) -> anyhow::Result<()> {
+pub async fn reset_data(state: &AppState) -> anyhow::Result<()> {
     clear_reset_tables(state).await?;
     let global = config::default_config().workers.lane_warm;
-    if let Err(e) = crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &global).await {
+    if let Err(e) =
+        crate::core::task_worker_lane_settings::arm_lane_settings(&state.db, &global).await
+    {
         // The table is empty either way: nothing of a project stays.
         tracing::warn!("Reset could not reload the lane settings: {e:#}");
         crate::core::task_worker_lane_settings::rebuild(&global, &[]);
@@ -4304,36 +4308,6 @@ mod tests {
 
         sync_codex_auth_at(&path, None).unwrap();
         assert!(!path.exists());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn codex_writer_refuses_an_isolated_instance_and_names_no_key() {
-        let _restore = crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&[
-            "HOME",
-            "KRONN_DATA_DIR",
-            "KRONN_HOST_HOME",
-            "KRONN_HOST_MCP_SYNC",
-            "KRONN_IN_DOCKER",
-        ]);
-        let dir = tempfile::tempdir().unwrap();
-        crate::core::child_env::set_var("HOME", dir.path());
-        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path().join("data"));
-        for name in ["KRONN_HOST_HOME", "KRONN_HOST_MCP_SYNC", "KRONN_IN_DOCKER"] {
-            crate::core::child_env::remove_var(name);
-        }
-
-        for key in [Some("sk-kt1162-never-leaks"), None] {
-            let error = sync_codex_auth(key).unwrap_err();
-            assert!(error.contains("KRONN_HOST_HOME"), "{error}");
-            assert!(!error.contains("sk-kt1162"), "{error}");
-        }
-        assert!(!dir.path().join(".codex").exists());
-
-        // The explicit redirect is honoured outside Docker.
-        let host = dir.path().join("host");
-        crate::core::child_env::set_var("KRONN_HOST_HOME", &host);
-        assert_eq!(codex_auth_path(), host.join(".codex/auth.json"));
     }
 
     #[cfg(unix)] // asserts POSIX mode bits, which Windows does not have
@@ -6829,80 +6803,9 @@ mod network_exposure_tests {
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
-mod default_docs_dir_tests {
-    use super::*;
-
-    async fn docs_dir_reply(response: Response) -> (StatusCode, serde_json::Value) {
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (status, serde_json::from_slice(&body).unwrap())
-    }
-
-    /// KT-263: the default AI doc folder is normalized and persisted (it only
-    /// pre-fills the briefing, KT-1192), and refused with a 400 when it could
-    /// leave a project.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn default_docs_dir_is_normalized_saved_and_refused_when_unsafe() {
-        // Saving persists config.toml: never the developer's real one.
-        let _restore =
-            crate::core::mcp_scanner::host_sync_tests::EnvRestore::capture(&["KRONN_DATA_DIR"]);
-        let data = tempfile::tempdir().unwrap();
-        crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
-        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
-        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
-        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
-
-        let (status, body) = docs_dir_reply(
-            save_default_docs_dir(State(state.clone()), Json(Some(" ./handbook/ ".into()))).await,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["data"], "handbook");
-        assert_eq!(
-            state.config.read().await.scan.default_docs_dir.as_deref(),
-            Some("handbook")
-        );
-
-        for bad in ["../outside", "/etc", "C:\\docs", ".git/x"] {
-            let (status, body) = docs_dir_reply(
-                save_default_docs_dir(State(state.clone()), Json(Some(bad.into()))).await,
-            )
-            .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
-            assert_eq!(body["error_code"], "validation");
-            assert!(!body["error"].as_str().unwrap().is_empty());
-            assert_eq!(
-                state.config.read().await.scan.default_docs_dir.as_deref(),
-                Some("handbook"),
-                "a refused value leaves the saved one"
-            );
-        }
-
-        let (status, body) = docs_dir_reply(
-            save_default_docs_dir(State(state.clone()), Json(Some("  ".into()))).await,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(body["data"].is_null());
-        assert_eq!(state.config.read().await.scan.default_docs_dir, None);
-    }
-}
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "setup_workers_tests.rs"]
-mod workers_config_tests;
-
 #[cfg(test)]
 #[path = "setup_context_files_tests.rs"]
 mod context_files_tests;
-
-#[cfg(test)]
-#[path = "setup_lane_snapshot_tests.rs"]
-mod lane_snapshot_tests;
 
 /// GET /api/config/agent-fallback
 /// Every mode row that has a fallback (KT-1693) with the cooldowns still running.

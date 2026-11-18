@@ -122,8 +122,7 @@ pub struct PendingGrant {
 }
 
 /// Why a save that counted on a level was refused.
-pub const TRUST_CHANGED: &str =
-    "The trust level changed while the Quick Exec was being saved: it \
+pub const TRUST_CHANGED: &str = "The trust level changed while the Quick Exec was being saved: it \
      was not saved. Save it again.";
 
 /// KT-1492 — under Trusted, a line an agent wrote that passes values to a CLI is
@@ -1167,11 +1166,7 @@ pub fn activation_card_content(item: &QuickExec, program: &str) -> String {
 /// Posts the one-click activation card in the room an agent saved a waiting
 /// Quick Exec from. One card per line: saving the same line again adds none,
 /// a changed line adds a new one. The save never fails for the card.
-pub async fn announce_activation(
-    state: &AppState,
-    discussion_id: Option<&str>,
-    item: &QuickExec,
-) {
+pub async fn announce_activation(state: &AppState, discussion_id: Option<&str>, item: &QuickExec) {
     let (Some(discussion_id), Some(program)) = (discussion_id, waiting_program(item)) else {
         return;
     };

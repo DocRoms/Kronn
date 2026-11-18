@@ -715,13 +715,7 @@ impl QuotaRechecker {
                         >() else {
                             continue;
                         };
-                        match (offer.0)(
-                            state,
-                            &escalation.execution_id,
-                            usable.clone(),
-                        )
-                        .await
-                        {
+                        match (offer.0)(state, &escalation.execution_id, usable.clone()).await {
                             Ok(true) => tracing::info!(
                                 execution_id = %escalation.execution_id,
                                 provider,

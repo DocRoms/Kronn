@@ -198,9 +198,7 @@ fn secret_rules(tools: &[&str], root: &str) -> Vec<String> {
 
 /// What a later program runs, at the top and at any depth.
 fn executable_names() -> impl Iterator<Item = &'static &'static str> {
-    CODE_ROOT_EXECUTABLE_PATHS
-        .iter()
-        .chain(KRONN_OWNED)
+    CODE_ROOT_EXECUTABLE_PATHS.iter().chain(KRONN_OWNED)
 }
 
 /// Claude permission rules refusing writes to what a later program runs.
@@ -530,11 +528,7 @@ impl VerifiedCheckout {
     /// that is, or passes through, a symbolic link is refused (it could lead
     /// to another project's checkout), as is anything that is not the root of
     /// a Git checkout or overlaps the working directory.
-    pub fn verify(
-        agent: &AgentType,
-        work_dir: &Path,
-        location: &str,
-    ) -> Result<Self, String> {
+    pub fn verify(agent: &AgentType, work_dir: &Path, location: &str) -> Result<Self, String> {
         check_platform(agent)?;
         let work_dir = canonical_directory(work_dir)?;
         let path = crate::core::scanner::resolve_host_path(location);

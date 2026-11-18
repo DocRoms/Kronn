@@ -48,10 +48,7 @@ pub fn default_review_timeout_secs() -> u32 {
 /// `Working`; the default therefore arms nowhere else, so an `Interrupted`,
 /// `AwaitingReview` or `Escalated` row is never "silent". An explicit campaign
 /// policy keeps the clock it always armed.
-pub fn effective_activity_secs(
-    policy: Option<i64>,
-    status: TaskExecutionStatus,
-) -> Option<i64> {
+pub fn effective_activity_secs(policy: Option<i64>, status: TaskExecutionStatus) -> Option<i64> {
     policy.or_else(|| {
         (status == TaskExecutionStatus::Working).then(|| i64::from(default_activity_timeout_secs()))
     })

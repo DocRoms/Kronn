@@ -526,7 +526,7 @@ pub fn parse_report(period_kind: &str, json: &[u8]) -> Result<UsageReport, Strin
 
 /// The `ccusage` process: the base environment only (KT-1006), plus where
 /// Claude's logs live when the user moved them.
-fn ccusage_command(program: &std::path::Path, period_kind: &str) -> tokio::process::Command {
+pub fn ccusage_command(program: &std::path::Path, period_kind: &str) -> tokio::process::Command {
     use crate::core::child_env::{self, ChildRoute};
     let mut command = crate::core::cmd::async_cmd(program, ChildRoute::Tool);
     command.arg(period_kind).arg("--json");
@@ -574,27 +574,6 @@ pub async fn fetch_usage(period: &str) -> Result<UsageReport, String> {
 mod tests {
     use super::*;
     use std::fs;
-
-    #[test]
-    fn ccusage_gets_claude_logs_location_and_no_backend_secret() {
-        use crate::core::child_env::probe;
-        let mut parent = probe::parent_with_secrets("/usr/bin", "/home/u");
-        parent.push(("CLAUDE_CONFIG_DIR".into(), "/home/u/.claude-alt".into()));
-        let borrowed: Vec<(&str, &str)> = parent
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
-        let command = crate::core::child_env::with_parent_env(&borrowed, || {
-            ccusage_command(std::path::Path::new("/usr/bin/ccusage"), "daily")
-        });
-        probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
-        assert_eq!(
-            probe::env_of(command.as_std())
-                .get("CLAUDE_CONFIG_DIR")
-                .map(String::as_str),
-            Some("/home/u/.claude-alt")
-        );
-    }
 
     #[test]
     fn normalize_period_whitelists() {

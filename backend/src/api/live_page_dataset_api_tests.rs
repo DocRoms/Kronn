@@ -39,7 +39,9 @@ async fn seeded() -> AppState {
     state
         .db
         .with_conn(|conn| {
-            crate::db::live_pages::datasets::tests::writer(conn, "wf-feed", "stats", "fed");
+            crate::uptests::db__live_page_datasets__tests::tests::writer(
+                conn, "wf-feed", "stats", "fed",
+            );
             Ok(())
         })
         .await

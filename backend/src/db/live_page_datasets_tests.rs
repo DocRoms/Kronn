@@ -431,7 +431,8 @@ fn the_limits_request_tells_absent_from_null() {
 
 #[test]
 fn deleting_clearing_or_pruning_keeps_an_approved_button_trusted() {
-    use crate::db::live_page_action_trusts::{self as trusts, tests as fixture};
+    use crate::db::live_page_action_trusts as trusts;
+    use crate::uptests::db__live_page_action_trusts__tests::tests as fixture;
     let conn = connection();
     fixture::setup(
         &conn,

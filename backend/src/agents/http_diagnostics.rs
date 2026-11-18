@@ -13,10 +13,7 @@ struct Failure {
     http_status: Option<u16>,
 }
 
-pub fn record_failure(
-    stderr: &Arc<Mutex<Vec<String>>>,
-    status: Option<reqwest::StatusCode>,
-) {
+pub fn record_failure(stderr: &Arc<Mutex<Vec<String>>>, status: Option<reqwest::StatusCode>) {
     let failure = Failure {
         version: 1,
         http_status: status.map(|s| s.as_u16()),

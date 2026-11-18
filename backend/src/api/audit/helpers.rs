@@ -923,9 +923,7 @@ fn first_existing_marker(project_path: &std::path::Path, candidates: &[&str]) ->
 /// Skills the project's stack suggests, each with the file that triggered it
 /// (`("devops", "Dockerfile")`). Pure filesystem look, no logging: the listing
 /// calls it on every read.
-pub fn detect_project_skill_markers(
-    project_path: &std::path::Path,
-) -> Vec<(String, String)> {
+pub fn detect_project_skill_markers(project_path: &std::path::Path) -> Vec<(String, String)> {
     let mut skills: Vec<(String, String)> = Vec::new();
     let mut push = |id: &str, marker: Option<String>| {
         if let Some(marker) = marker {

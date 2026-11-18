@@ -100,10 +100,7 @@ pub fn secret_mapping_error(
 /// The project a child runs in: the parent run's when the child serves it
 /// (a multi-project child, KT-851), else its own when pinned, else the
 /// parent run's.
-pub fn child_project_id(
-    child: &Workflow,
-    parent_project_id: Option<&str>,
-) -> Option<String> {
+pub fn child_project_id(child: &Workflow, parent_project_id: Option<&str>) -> Option<String> {
     if let (Some(scope), Some(parent)) = (child.project_scope.as_ref(), parent_project_id) {
         if scope.allows(child.project_id.as_deref(), parent) {
             return Some(parent.to_string());

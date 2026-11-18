@@ -565,7 +565,7 @@ pub mod test_guard {
 #[path = "task_worker_lane_settings_test.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "task_worker_lane_settings_registry_test.rs"]
 pub mod registry_tests;
 

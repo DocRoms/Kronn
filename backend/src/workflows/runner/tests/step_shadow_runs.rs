@@ -9,6 +9,7 @@ use crate::models::{AgentType, ShadowAgent, ShadowBudget, ShadowPrompt, StepShad
 use crate::workflows::shadow::{self, ShadowStatus};
 
 // KT-1544 — the optional merge of a step with its shadows.
+#[path = "step_shadow_runs/merge_runs.rs"]
 mod merge_runs;
 
 /// Answers a prompt as scripted and records the prompt it received.

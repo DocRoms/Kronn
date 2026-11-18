@@ -95,7 +95,7 @@ impl ClaudeAcpAdapter {
 
     /// Test-only: drive a fixture script instead of the real `claude` binary.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn new_with_program(
+    pub fn new_with_program(
         program: impl Into<String>,
         model: Option<String>,
         full_access: bool,

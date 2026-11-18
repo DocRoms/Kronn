@@ -897,6 +897,10 @@ fn offer_for_uplink<'a>(
     execution_id: &'a str,
     usable: Option<Vec<AgentType>>,
 ) -> crate::core::uplink_state::Async<'a, anyhow::Result<bool>> {
-    Box::pin(offer_to_escalated_execution_among(state, execution_id, usable))
+    Box::pin(offer_to_escalated_execution_among(
+        state,
+        execution_id,
+        usable,
+    ))
 }
 inventory::submit! { crate::core::uplink_state::EscalatedFallback(offer_for_uplink) }

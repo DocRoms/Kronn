@@ -8,7 +8,6 @@
     allow(dead_code, unused_imports)
 )]
 
-
 pub mod acp {
     pub use kronn_l3::acp::*;
 }
@@ -70,24 +69,24 @@ pub mod core {
     pub mod learning_promote;
     pub mod learning_scope;
     pub mod learning_sweep;
-    pub mod media_probe;
-    pub mod quick_exec_templates;
-    pub mod review_payload;
-    pub mod set_aside;
-    pub mod static_context;
-    pub mod usage;
-    #[cfg(all(test, feature = "full-tests"))]
-    #[path = "registry_test.rs"]
-    pub mod registry_test;
-    #[cfg(all(test, feature = "full-tests"))]
-    #[path = "scanner_test.rs"]
-    pub mod scanner_test;
     #[cfg(all(test, feature = "full-tests"))]
     #[path = "mcp_scanner_test.rs"]
     pub mod mcp_scanner_test;
+    pub mod media_probe;
+    pub mod quick_exec_templates;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "registry_test.rs"]
+    pub mod registry_test;
+    pub mod review_payload;
+    #[cfg(all(test, feature = "full-tests"))]
+    #[path = "scanner_test.rs"]
+    pub mod scanner_test;
+    pub mod set_aside;
+    pub mod static_context;
     #[cfg(all(test, feature = "full-tests"))]
     #[path = "template_homogeneity_test.rs"]
     pub mod template_homogeneity_test;
+    pub mod usage;
 }
 pub mod db {
     pub use kronn_l3::db::*;
@@ -95,15 +94,18 @@ pub mod db {
     pub mod discussion_video_sequences;
     pub mod discussion_weight;
     pub mod id_resolver;
+    #[cfg(test)]
+    pub mod insert_redaction_measure;
+    #[cfg(all(test, feature = "full-tests"))]
+    pub mod large_db_measure;
     pub mod learnings;
     pub mod quick_exec_runs;
-    pub mod ui_preferences;
     #[cfg(all(test, feature = "full-tests"))]
     pub mod release_gate_tests;
     #[cfg(all(test, feature = "full-tests"))]
-    pub mod large_db_measure;
-    #[cfg(test)]
-    pub mod insert_redaction_measure;
+    #[path = "tests.rs"]
+    pub mod tests;
+    pub mod ui_preferences;
     #[cfg(all(test, feature = "full-tests"))]
     pub mod upgrade_fixture_tests;
 }
@@ -135,10 +137,12 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-pub use crate::db::Database;
-pub use crate::models::AppConfig;
 pub use crate::core::task_worker_lane_settings::arm_lane_settings;
-pub(crate) use crate::http_transport::{bearer_credential, frontend_origins, is_local_ip, logged_uri};
+pub use crate::db::Database;
+pub(crate) use crate::http_transport::{
+    bearer_credential, frontend_origins, is_local_ip, logged_uri,
+};
+pub use crate::models::AppConfig;
 pub use crate::state::*;
 pub use crate::workflows::WorkflowEngine;
 
@@ -163,7 +167,6 @@ pub async fn arm_docs_locations(database: &Arc<Database>) -> anyhow::Result<()> 
     crate::core::docs_location::load_project_overrides(rows);
     Ok(())
 }
-
 
 // `arm_mode` is injected so tests observe the arming without touching the
 // process-global mode that many other tests set.
@@ -512,7 +515,6 @@ fn auth_locked_refusal(proxy_fronted: bool) -> axum::response::Response {
     )
         .into_response()
 }
-
 
 /// Whether the Authorization header carries a bridge token, in any form.
 fn carries_bridge_token(headers: &HeaderMap) -> bool {
@@ -976,7 +978,6 @@ fn request_is_local_ip(headers: &HeaderMap, request: &axum::extract::Request) ->
     false
 }
 
-
 // ─── CORS ────────────────────────────────────────────────────────────────────
 
 /// Build CORS layer based on config domain.
@@ -990,8 +991,6 @@ fn redacted_request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
         version = ?request.version(),
     )
 }
-
-
 
 /// The listed local origins, plus — read from the live config on each request,
 /// since the declaration is made from Settings without a restart — the one
@@ -4081,4 +4080,71 @@ mod startup_config_tests {
         crate::core::docs_location::set_project_override(&path, None);
         assert_eq!(resolved, std::path::Path::new(&path).join(".ai"));
     }
+}
+
+// Tests of lower modules that need this layer.
+#[cfg(test)]
+mod uptests {
+    #[cfg(all(test, feature = "full-tests"))]
+    mod agents__runner_test__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__audit__agent_launch__acp_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__audit__agent_launch__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__audit__briefing_docs__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__audit__cross_audit__tests;
+    #[cfg(test)]
+    mod api__audit__run__docs_writer_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__live_page_actions__trust_api_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__live_pages__dataset_api_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__mcps__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__orchestration__tests;
+    #[cfg(test)]
+    mod api__projects__crud__lane_registry_wiring_test;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__projects__docker__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__resource_refs__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__setup__default_docs_dir_tests;
+    #[cfg(test)]
+    mod api__setup__lane_snapshot_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__setup__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__setup__workers_config_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__trust__trust_gate_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__workflows__readiness_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api_tests__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__audit_validation__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__credential_store__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__rtk_state__rtk_state_test;
+    #[cfg(test)]
+    mod core__strong_confirm__strong_confirm_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__usage__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__discussions_test__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__external_api_connections__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__live_page_action_trusts__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__live_page_actions__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__live_page_datasets__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__delegate_subtasks_step__tests;
 }

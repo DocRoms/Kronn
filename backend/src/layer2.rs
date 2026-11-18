@@ -76,3 +76,32 @@ pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::state::*;
 pub use crate::workflows::WorkflowEngine;
+
+// Tests of lower modules that need this layer.
+#[cfg(test)]
+mod uptests {
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__discover__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod api__git_ops__tests;
+    #[cfg(test)]
+    mod core__lane_git__lane_git_test;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__agent_dispatch__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__discussion_workspaces__tests;
+    #[cfg(test)]
+    mod db__schema_check__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod models__workflows__step_deserialization_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__api_call_binary__broker_tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__authoring_doctrine__tests;
+    #[cfg(test)]
+    mod workflows__autocode_issue_template__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__doctrine_warnings__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__steps__provenance_tests;
+}

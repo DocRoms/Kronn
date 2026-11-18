@@ -1128,8 +1128,11 @@ mod tests {
     /// so no cargo feature is needed.
     #[test]
     fn the_package_is_not_its_own_dev_dependency() {
-        let manifest =
-            std::fs::read_to_string(concat!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."), "/Cargo.toml")).unwrap();
+        let manifest = std::fs::read_to_string(concat!(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../.."),
+            "/Cargo.toml"
+        ))
+        .unwrap();
         let dev = manifest
             .split("[dev-dependencies]")
             .nth(1)

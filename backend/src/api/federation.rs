@@ -103,11 +103,7 @@ fn federated_content(msg: &DiscussionMessage, stored: Option<String>) -> String 
 /// Announce files that were pinned after their message had already federated.
 /// This is the attachment equivalent of `federate_message`, and is a no-op for
 /// local discussions.
-pub async fn federate_attachments_for_message(
-    state: &AppState,
-    disc_id: &str,
-    message_id: &str,
-) {
+pub async fn federate_attachments_for_message(state: &AppState, disc_id: &str, message_id: &str) {
     let did = disc_id.to_string();
     let shared_id = state
         .db

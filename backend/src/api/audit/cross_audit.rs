@@ -126,8 +126,8 @@ pub struct CrossStepReport {
     pub checklists: Vec<(AgentType, Vec<ChecklistLine>)>,
     pub failed_agents: Vec<(AgentType, String)>,
     pub calls: u32,
-    usage: Option<StepTokens>,
-    cost: CallCost,
+    pub usage: Option<StepTokens>,
+    pub cost: CallCost,
 }
 
 impl CrossStepReport {
@@ -166,7 +166,7 @@ impl CrossStepReport {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-enum CallCost {
+pub enum CallCost {
     #[default]
     None,
     Known(u64),
@@ -353,7 +353,7 @@ pub fn heading_for(
 }
 
 /// Writes `content` unless the file already holds it; true when it wrote.
-fn write_if_changed(root: &Path, path: &Path, content: &str) -> Result<bool, String> {
+pub fn write_if_changed(root: &Path, path: &Path, content: &str) -> Result<bool, String> {
     match read_guarded(root, path)? {
         Some(existing) if existing == content => Ok(false),
         _ => crate::core::fs_guard::guarded_replace(root, path, content.as_bytes()).map(|()| true),
@@ -364,7 +364,7 @@ fn write_if_changed(root: &Path, path: &Path, content: &str) -> Result<bool, Str
 /// link at the name or in a parent — planted, or swapped in after the caller's
 /// walk — is an error, never followed, so what an outside file holds is never
 /// copied into a doc Kronn writes. `None` when the file is missing.
-fn read_guarded(root: &Path, path: &Path) -> Result<Option<String>, String> {
+pub fn read_guarded(root: &Path, path: &Path) -> Result<Option<String>, String> {
     match crate::core::fs_guard::guarded_read(root, path) {
         Ok(Some(bytes)) => String::from_utf8(bytes)
             .map(Some)
@@ -401,7 +401,7 @@ fn previous_finding_rows(previous: &str) -> Vec<(String, String)> {
 /// wrote), and settled sheets it named.
 type Carried = (Vec<String>, Vec<(String, String, String)>);
 
-fn carried_from_previous(
+pub fn carried_from_previous(
     root: &Path,
     previous: &str,
     td_dir: &Path,
@@ -752,7 +752,3 @@ pub async fn cross_audit_estimate(
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "cross_audit_tests.rs"]
-mod tests;

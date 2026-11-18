@@ -373,10 +373,7 @@ impl TdValidationScope {
     }
 }
 
-pub fn td_validation_scope(
-    project_path: &Path,
-    index_files: &[String],
-) -> TdValidationScope {
+pub fn td_validation_scope(project_path: &Path, index_files: &[String]) -> TdValidationScope {
     let td_dir =
         crate::core::docs_location::DocsRoot::of(project_path).file(project_path, "tech-debt");
     let listed: std::collections::BTreeSet<String> = index_files

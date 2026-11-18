@@ -577,9 +577,7 @@ pub async fn publish_accepted_delivery(
                 None => WorkerSpend::default(),
             };
             let refused_tool_calls = match sub_discussion_id.as_deref() {
-                Some(child) => {
-                    refused_tool_calls_of_worker(conn, child)?
-                }
+                Some(child) => refused_tool_calls_of_worker(conn, child)?,
                 None => Vec::new(),
             };
             let provider_changes = crate::db::orchestration::provider_changes(conn, &execution_id)?;

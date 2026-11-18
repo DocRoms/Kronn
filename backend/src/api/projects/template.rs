@@ -473,7 +473,8 @@ mod tests {
         let docs = tmp.path().join("docs");
         std::fs::create_dir(&docs).unwrap();
         ensure_agent_writable_subfolders(tmp.path(), &docs);
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates/docs");
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .join("../templates/docs");
         for (sub, _) in SUBFOLDER_READMES {
             let body = std::fs::read_to_string(docs.join(sub).join("README.md")).unwrap();
             assert!(
@@ -688,7 +689,8 @@ mod tests {
         // This checkout's own templates, whatever another test left in the env.
         crate::core::child_env::set_var(
             "KRONN_TEMPLATES_DIR",
-            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates"),
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+                .join("../templates"),
         );
         let tmp = tempfile::TempDir::new().unwrap();
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());

@@ -627,7 +627,7 @@ fn gitlab_cli_hostname(value: &str) -> Result<String, String> {
 
 /// The `glab api` process listing a user's projects: the git-host
 /// environment (KT-1006) without any token or host override.
-fn gitlab_cli_command(hostname: &str) -> tokio::process::Command {
+pub fn gitlab_cli_command(hostname: &str) -> tokio::process::Command {
     let mut command =
         crate::core::cmd::async_cmd("glab", crate::core::child_env::ChildRoute::GitHost);
     command
@@ -757,15 +757,6 @@ fn parse_gitlab_repo(r: &serde_json::Value) -> RemoteRepo {
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_glab_listing_gets_no_backend_secret_and_no_token() {
-        use crate::core::child_env::probe;
-        let command = probe::with_secret_parent("/usr/bin", "/home/u", || {
-            gitlab_cli_command("gitlab.example.com")
-        });
-        probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
-    }
 
     #[test]
     fn normalize_repo_url_strips_https_github_prefix() {

@@ -706,10 +706,6 @@ mod audit_status_tests {
 #[path = "audit_steps_root_tests.rs"]
 mod audit_steps_root_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "run_states_tests.rs"]
-mod run_states_tests;
-
-#[cfg(test)]
-#[path = "docs_writer_tests.rs"]
-mod docs_writer_tests;
+pub mod run_states_tests;

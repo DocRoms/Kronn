@@ -77,11 +77,7 @@ fn canonical(path: &Path) -> PathBuf {
 pub fn git_output(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
     // KT-1745 — also asked of a worker's worktree (the doc citations gate): the
     // repository is the registered one, never what the worktree's `.git` names.
-    let output = git(repo)
-        .ok()?
-        .args(args)
-        .output()
-        .ok()?;
+    let output = git(repo).ok()?.args(args).output().ok()?;
     output.status.success().then_some(output.stdout)
 }
 
@@ -293,7 +289,7 @@ fn registered_programs(common_dir: &Path) -> Vec<(String, String)> {
 /// Whether the program `value` of a filter, merge driver or textconv would run
 /// something that lives in the worktree: a relative path, or an argument naming
 /// a file the worktree holds (`sh tools/clean.sh`, `sh clean.sh`).
-fn names_worktree_content(value: &str, work_dir: &Path) -> bool {
+pub fn names_worktree_content(value: &str, work_dir: &Path) -> bool {
     let mut tokens = value.split_whitespace();
     let Some(first) = tokens.next() else {
         return false;
@@ -370,7 +366,7 @@ fn neutralised_programs(common_dir: &Path, work_dir: &Path) -> Vec<String> {
 /// Configuration keys a nested repository Kronn trusts may carry. Anything else
 /// (`filter.*`, `core.fsmonitor`, `core.hooksPath`, `include.path`, `gpg.*`,
 /// `diff.*`, `merge.*`, `url.*`) is something a worker could have added.
-fn nested_key_is_plain(key: &str) -> bool {
+pub fn nested_key_is_plain(key: &str) -> bool {
     const CORE: [&str; 8] = [
         "core.repositoryformatversion",
         "core.filemode",
@@ -405,7 +401,7 @@ fn nested_key_is_plain(key: &str) -> bool {
 /// reads the file alone: no repository (`--git-dir=/dev/null`), no `include`
 /// followed (`--no-includes`: the `include.*` key is listed, and is not plain), no
 /// system or global configuration. `Err` when git cannot parse the file.
-fn nested_config_keys(config: &Path) -> Result<Vec<String>, String> {
+pub fn nested_config_keys(config: &Path) -> Result<Vec<String>, String> {
     // lane-git-allow: reads one configuration file (`config --file`), not a worktree.
     let output = crate::core::cmd::git_cmd()
         .arg("--git-dir=/dev/null")
@@ -983,10 +979,6 @@ pub fn no_external_diff(subcommand: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
-
-#[cfg(test)]
-#[path = "lane_git_test.rs"]
-mod lane_git_test;
 
 #[cfg(test)]
 #[path = "lane_git_guard_test.rs"]

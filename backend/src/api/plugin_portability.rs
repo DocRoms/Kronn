@@ -1347,9 +1347,7 @@ const KNOWN_TOKEN_PREFIXES: [&str; 8] = [
 
 /// The definition a configuration-only export carries, and what it withheld.
 /// Leaves equal to the built-in catalogue's stay (KT-1040).
-pub fn redact_server_for_clear_export(
-    server: &McpServer,
-) -> (McpServer, Vec<ExportPlaceholder>) {
+pub fn redact_server_for_clear_export(server: &McpServer) -> (McpServer, Vec<ExportPlaceholder>) {
     redaction::redact_server(server, current_registry_server(&server.id).as_ref())
 }
 

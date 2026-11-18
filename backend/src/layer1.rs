@@ -20,8 +20,8 @@ pub mod agents {
     pub mod ollama_memory;
     pub mod read_only_repos;
     pub mod runner;
-    pub mod tools;
     pub mod tool_trace;
+    pub mod tools;
 }
 pub mod api {
     pub use kronn_l0::api::*;
@@ -38,7 +38,7 @@ pub mod api {
     pub mod live_pages;
     pub mod nvidia;
     pub mod ollama_health;
-    #[cfg(all(test, feature = "full-tests"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub mod other_projects_fixture;
     pub mod strong_confirm;
 }
@@ -87,6 +87,7 @@ pub mod core {
     pub mod resolution_proof;
     pub mod resource_refs;
     pub mod resource_snapshot;
+    pub mod run_provenance;
     pub mod run_retention;
     pub mod secret_facts;
     pub mod skill_bundle;
@@ -103,11 +104,10 @@ pub mod core {
     pub mod td_index;
     pub mod trust;
     pub mod trust_sandbox;
+    pub mod uplink_state;
     pub mod upstream_mirror;
     pub mod vault_guard;
     pub mod worktree;
-    pub mod uplink_state;
-    pub mod run_provenance;
 }
 pub mod db {
     pub use kronn_l0::db::*;
@@ -168,3 +168,20 @@ pub mod workflows {
 pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::state::*;
+
+// Tests of lower modules that need this layer.
+#[cfg(test)]
+mod uptests {
+    #[cfg(all(test, feature = "full-tests"))]
+    mod agents__run_progress__tests;
+    #[cfg(test)]
+    mod agents__wsl__tests;
+    #[cfg(test)]
+    mod core__checksums__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__child_env__child_env_test;
+    #[cfg(test)]
+    mod core__disk_usage__disk_usage_test;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__resource_changes__tests;
+}

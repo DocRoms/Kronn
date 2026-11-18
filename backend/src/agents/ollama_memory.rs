@@ -23,7 +23,10 @@ const GIB: u64 = 1024 * MIB;
 
 /// What macOS lets the GPU wire on Apple Silicon when `iogpu.wired_limit_mb` is
 /// left at 0: about three quarters of installed memory.
-#[cfg(any(any(test, feature = "test-support"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    any(test, feature = "test-support"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 const APPLE_GPU_SHARE_PERCENT: u64 = 75;
 /// Room kept on top of weights and cache for prefill buffers and activations,
 /// which grow with the prompt and are not part of either. A tenth of the budget,
@@ -196,7 +199,10 @@ pub fn kv_shape_from_show(show: &Value) -> Option<KvShape> {
 
 /// The memory the GPU may use. `iogpu.wired_limit_mb` when it was set (non-zero),
 /// else about three quarters of installed memory — never more than the machine has.
-#[cfg(any(any(test, feature = "test-support"), all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(
+    any(test, feature = "test-support"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
 pub fn gpu_budget_bytes(total_ram_bytes: u64, wired_limit_mb: Option<u64>) -> u64 {
     match wired_limit_mb.filter(|mb| *mb > 0) {
         Some(mb) => mb.saturating_mul(MIB).min(total_ram_bytes),

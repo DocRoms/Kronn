@@ -1,6 +1,6 @@
 //! Dataset lifecycle after creation (KT-1104): what uses a dataset, deleting
 //! it, and changing its retention limits.
-use super::*;
+pub use super::*;
 use crate::models::{
     DeleteLivePageDatasetResult, LivePageDatasetUsage, LivePageDatasetWriter,
     UpdateLivePageDatasetRequest, UpdateLivePageDatasetResult,
@@ -64,7 +64,7 @@ fn targets_page(target: &str, page: &LivePage, aliases: &HashSet<String>) -> boo
 
 /// `name` as a whole word of `html`: neither neighbour is a character a
 /// dataset name may contain.
-fn html_names(html: &str, name: &str) -> bool {
+pub fn html_names(html: &str, name: &str) -> bool {
     let is_name_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     html.match_indices(name).any(|(start, _)| {
         let before = html[..start].chars().next_back();
@@ -293,7 +293,3 @@ pub fn update_live_page_dataset_limits(
         data_revision,
     })
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "live_page_datasets_tests.rs"]
-pub mod tests;

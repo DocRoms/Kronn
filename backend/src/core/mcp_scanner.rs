@@ -4657,7 +4657,7 @@ mod inject_context_tests {
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 pub mod host_sync_tests {
     use super::*;
     use serial_test::serial;
@@ -5959,9 +5959,7 @@ Always send emails from contact@example.com
         home
     }
 
-    pub fn tree_digest(
-        dir: &Path,
-    ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    pub fn tree_digest(dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
         use sha2::Digest;
         let mut out = std::collections::BTreeMap::new();
         let mut stack = vec![dir.to_path_buf()];

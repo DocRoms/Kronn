@@ -359,7 +359,11 @@ pub fn allowed_ws_origins(
     let port = server.listening_port();
     let mut origins = crate::http_transport::frontend_origins(&None, port, in_docker);
     if server.domain.is_some() {
-        origins.extend(crate::http_transport::frontend_origins(&server.domain, port, in_docker));
+        origins.extend(crate::http_transport::frontend_origins(
+            &server.domain,
+            port,
+            in_docker,
+        ));
     }
     origins.extend(
         [
@@ -1167,11 +1171,7 @@ pub enum Ingest {
 /// Shared by the inbound `handle_socket` and the outbound `ws_client` receive
 /// halves so a frame is persisted exactly once regardless of which socket it
 /// arrives on.
-pub async fn ingest_relayable_frame(
-    state: &AppState,
-    msg: &WsMessage,
-    peer: &PeerAuth,
-) -> Ingest {
+pub async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -> Ingest {
     match ingest_authorized(state, msg, peer).await {
         Some(true) => Ingest::Broadcast,
         Some(false) => Ingest::Skip,

@@ -13,7 +13,7 @@ use axum::response::sse::Event;
 use futures::{Stream, StreamExt};
 
 pub mod accept;
-mod agent_launch;
+pub mod agent_launch;
 pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
@@ -69,9 +69,7 @@ pub use validate_version::validate_current_docs;
 // `crate::api::audit::Foo`. The remaining `pub(crate)` helpers
 // (`build_validation_prompt`, `build_briefing_prompt`) stay
 // `super::helpers::name`-reachable for sub-modules without leaking.
-pub use helpers::{
-    check_ai_dir_permissions, detect_project_skill_markers, detect_project_skills,
-};
+pub use helpers::{check_ai_dir_permissions, detect_project_skill_markers, detect_project_skills};
 
 pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
@@ -518,10 +516,7 @@ pub fn reverifies_target(
 
 /// The step's own instructions, headed by the re-verification block when the
 /// target is already filled.
-pub fn step_prompt_body(
-    step: &AnalysisStep,
-    reverify: bool,
-) -> std::borrow::Cow<'static, str> {
+pub fn step_prompt_body(step: &AnalysisStep, reverify: bool) -> std::borrow::Cow<'static, str> {
     if reverify {
         let block = if step.target_file.ends_with("REVIEW") || !step.target_file.ends_with(".md") {
             REVERIFY_BLOCK.replace(
@@ -2232,7 +2227,8 @@ mod prompt_tests {
 
     #[test]
     fn a_filled_target_gets_the_reverification_prompt_and_a_template_the_fill_prompt() {
-        let templates = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../templates");
+        let templates = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .join("../templates");
         let project = tempfile::tempdir().unwrap();
         let now = chrono::Utc::now();
         let prompt_of = |index: usize| {

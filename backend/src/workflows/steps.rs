@@ -159,10 +159,7 @@ pub fn artifacts_read_only_dirs(
 /// Returns `Err(String)` when strict rendering rejects an unknown variable,
 /// incomplete placeholder or unsupported filter —
 /// the caller maps that into a `Failed` StepOutcome.
-pub fn build_step_prompt(
-    step: &WorkflowStep,
-    ctx: &TemplateContext,
-) -> Result<String, String> {
+pub fn build_step_prompt(step: &WorkflowStep, ctx: &TemplateContext) -> Result<String, String> {
     let mut prompt = ctx
         .render_strict(&step.prompt_template)
         .map_err(|e| format!("Template render error: {}", e))?;
@@ -477,9 +474,7 @@ pub async fn execute_step(
         ollama_context_overrides.unwrap_or(&no_pinned_windows),
         crate::core::prompt_limit::saved_hard_ceiling(),
     );
-    if let Err(refusal) =
-        crate::core::prompt_limit::check(prompt.len(), &prompt_limit, "Prompt")
-    {
+    if let Err(refusal) = crate::core::prompt_limit::check(prompt.len(), &prompt_limit, "Prompt") {
         return refusal_outcome(step, refusal);
     }
 
@@ -996,7 +991,9 @@ pub async fn execute_step(
                 );
                 // KT-811 — a quota refusal does not clear within the retry
                 // backoff; retrying only spends the run's attempts.
-                if let Some(quota) = crate::core::quota_text::classify(&last_error, chrono::Utc::now()) {
+                if let Some(quota) =
+                    crate::core::quota_text::classify(&last_error, chrono::Utc::now())
+                {
                     provenance.selected_attempt = None;
                     return StepOutcome {
                         result: StepResult {
@@ -2098,10 +2095,7 @@ async fn run_multi_agent_debate(
 /// *quotes* `[SIGNAL: ERROR]` in the MIDDLE of a sentence in the last 5
 /// lines no longer triggers a false Stop/Goto. (`contains` did; strict
 /// equality would have regressed content-then-signal lines.)
-pub fn evaluate_conditions(
-    rules: &[StepConditionRule],
-    output: &str,
-) -> Option<ConditionAction> {
+pub fn evaluate_conditions(rules: &[StepConditionRule], output: &str) -> Option<ConditionAction> {
     // Look at the last 5 lines for a signal
     let tail: Vec<&str> = output.lines().rev().take(5).collect();
     for rule in rules {
@@ -3381,10 +3375,6 @@ mod drive_agent_to_output_tests {
         assert_eq!(super::add_tokens(None, Some(5)), None);
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "steps_provenance_test.rs"]
-mod provenance_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "steps_attempt_session_test.rs"]

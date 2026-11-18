@@ -426,7 +426,3 @@ pub async fn check_briefing_doc(
     }))
     .into_response()
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "briefing_docs_tests.rs"]
-mod tests;

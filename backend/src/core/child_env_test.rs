@@ -793,7 +793,8 @@ fn environment_names_compare_like_the_platform() {
 #[test]
 fn the_desktop_withholds_its_environment_before_the_webview_starts() {
     let main = std::fs::read_to_string(
-        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join("../desktop/src-tauri/src/main.rs"),
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .join("../desktop/src-tauri/src/main.rs"),
     )
     .unwrap();
     let withhold = main

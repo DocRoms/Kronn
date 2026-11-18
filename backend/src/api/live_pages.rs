@@ -1111,15 +1111,11 @@ pub async fn change_embed_origins(
 }
 
 #[cfg(all(test, feature = "full-tests"))]
-#[path = "live_page_dataset_api_tests.rs"]
-mod dataset_api_tests;
-
-#[cfg(all(test, feature = "full-tests"))]
 #[path = "live_page_data_api_tests.rs"]
 mod data_api_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
-mod tests {
+pub mod tests {
     use super::*;
 
     #[test]

@@ -617,12 +617,7 @@ pub fn update_live_page_html_from(
         "UPDATE live_pages SET current_revision_id = ?2, updated_at = ?3 WHERE id = ?1",
         params![canonical_page_id, revision.id, now.to_rfc3339()],
     )?;
-    ingest_page_actions(
-        &tx,
-        &canonical_page_id,
-        &revision.id,
-        &revision.html,
-    )?;
+    ingest_page_actions(&tx, &canonical_page_id, &revision.id, &revision.html)?;
     tx.commit()?;
     Ok(revision)
 }
@@ -1353,7 +1348,7 @@ fn parse_string_vec_sql(value: String, column: usize) -> rusqlite::Result<Vec<St
 }
 
 #[cfg(all(test, feature = "full-tests"))]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::models::{LivePageWrite, LivePageWriteOperation};
 
@@ -2250,7 +2245,10 @@ pub fn list_live_page_resources(
     conn: &Connection,
     page_id_or_slug: &str,
 ) -> Result<Option<Vec<crate::models::LivePageResource>>> {
-    (crate::core::uplink::required::<crate::core::uplink::PageResources>()?.0)(conn, page_id_or_slug)
+    (crate::core::uplink::required::<crate::core::uplink::PageResources>()?.0)(
+        conn,
+        page_id_or_slug,
+    )
 }
 
 /// The actions a revision's HTML declares, stored with it by the crate that

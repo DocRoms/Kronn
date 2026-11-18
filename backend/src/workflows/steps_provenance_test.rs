@@ -91,7 +91,7 @@ async fn run(step: &WorkflowStep, replies: Vec<(u16, serde_json::Value)>) -> Ste
     .result;
     // A later config change must not overwrite what these attempts captured.
     tiers.lite_llm.default = Some("changed-after-run".into());
-    super::super::runner::apply_step_snapshot(step, &mut result, Some(&tiers));
+    crate::workflows::runner::apply_step_snapshot(step, &mut result, Some(&tiers));
     let persisted = serde_json::to_string(&result).unwrap();
     assert!(
         !persisted.contains(&server.uri()),
@@ -340,7 +340,7 @@ fn provenance_snapshot_keeps_escalation_after_config_changes_and_unknown_acp_def
     step.agent = AgentType::Ollama;
     step.agent_settings.as_mut().unwrap().model = Some("new-config-local-model".into());
     let mut ctx = TemplateContext::new();
-    super::super::runner::record_step_completion(&step, &mut result, &mut ctx, None);
+    crate::workflows::runner::record_step_completion(&step, &mut result, &mut ctx, None);
     assert_eq!(result.step_agent, Some(AgentType::ClaudeCode));
     assert_eq!(
         result.step_model.as_deref(),
@@ -354,7 +354,7 @@ fn provenance_snapshot_keeps_escalation_after_config_changes_and_unknown_acp_def
     attempt.agent = AgentType::OpenCode;
     attempt.observed_models.clear();
     attempt.model_applied = Some(false);
-    super::super::runner::apply_step_snapshot(&step, &mut result, None);
+    crate::workflows::runner::apply_step_snapshot(&step, &mut result, None);
     assert_eq!(result.step_agent, Some(AgentType::OpenCode));
     assert!(
         result.step_model.is_none(),
@@ -363,7 +363,7 @@ fn provenance_snapshot_keeps_escalation_after_config_changes_and_unknown_acp_def
     let provenance = result.agent_provenance.as_mut().unwrap();
     provenance.selected_attempt = None;
     provenance.attempts.clear();
-    super::super::runner::apply_step_snapshot(&step, &mut result, None);
+    crate::workflows::runner::apply_step_snapshot(&step, &mut result, None);
     assert!(result.step_agent.is_none());
     assert!(
         result.step_model.is_none(),
@@ -476,7 +476,7 @@ async fn a_claude_code_step_reports_its_cache_reads_and_writes() {
     )
     .await
     .result;
-    super::super::runner::apply_step_snapshot(&step, &mut result, None);
+    crate::workflows::runner::apply_step_snapshot(&step, &mut result, None);
 
     assert_eq!(result.status, RunStatus::Success, "{}", result.output);
     assert_eq!(

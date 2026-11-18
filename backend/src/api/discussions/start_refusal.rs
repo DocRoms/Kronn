@@ -446,11 +446,7 @@ pub struct RefusedStart<'a> {
 
 /// Write the card the way a failed spawn writes its own: linked to its
 /// dispatch, federated, and clearing an untracked awaiting flag.
-pub async fn record_refusal_card(
-    state: &AppState,
-    start: RefusedStart<'_>,
-    content: String,
-) {
+pub async fn record_refusal_card(state: &AppState, start: RefusedStart<'_>, content: String) {
     let message = DiscussionMessage {
         recovered_partial: false,
         session_tokens_at_message: None,

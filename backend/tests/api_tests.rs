@@ -8740,7 +8740,7 @@ async fn a_project_keeping_its_ai_doc_in_dot_ai_is_detected_audited_and_badged()
         "{badge}"
     );
     // The evidence write lands in `.ai/`, and the badge follows it.
-    kronn::core::kronn_state::record_audit(&root, "full").unwrap();
+    kronn::core::template_manifest::record_audit(&root, "full").unwrap();
     assert!(root.join(".ai/.kronn.json").is_file());
     assert!(!root.join("docs").exists());
     let (_, badge) = get_json(app(), "/api/projects/p-docs-dot-ai").await;
@@ -8846,7 +8846,7 @@ async fn briefing_file_drives_http_reads_and_audited_project_cards() {
         .with_conn(move |conn| kronn::db::projects::insert_project(conn, &project))
         .await
         .unwrap();
-    kronn::core::kronn_state::record_audit(repo.path(), "full").unwrap();
+    kronn::core::template_manifest::record_audit(repo.path(), "full").unwrap();
     let app = || build_router_with_auth(state.clone(), false);
     for body in ["# Briefing\nCommitted on another machine.\n", " \n"] {
         std::fs::write(docs.join("briefing.md"), body).unwrap();
@@ -26906,7 +26906,7 @@ mod cold_api_handlers_tests {
         let items = listed["data"]["items"].as_array().unwrap();
         assert_eq!(items.len(), 3, "{listed}");
         assert_eq!(
-            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as usize,
+            kronn::core::td_index::count_tech_debt(repo.to_str().unwrap()) as usize,
             items.len(),
             "the card and the review count the same debts"
         );
@@ -26977,7 +26977,7 @@ mod cold_api_handlers_tests {
         assert_eq!(listed["data"]["items"].as_array().unwrap().len(), 3);
         assert_eq!(counts["rejected"], 1);
         assert_eq!(
-            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as u64,
+            kronn::core::td_index::count_tech_debt(repo.to_str().unwrap()) as u64,
             active,
             "card and review count the same active debts"
         );
@@ -27012,7 +27012,7 @@ mod cold_api_handlers_tests {
         let items = listed["data"]["items"].as_array().unwrap();
         assert_eq!(items.len(), 1, "{listed}");
         assert_eq!(
-            kronn::core::scanner::count_tech_debt(repo.to_str().unwrap()) as usize,
+            kronn::core::td_index::count_tech_debt(repo.to_str().unwrap()) as usize,
             items.len()
         );
 

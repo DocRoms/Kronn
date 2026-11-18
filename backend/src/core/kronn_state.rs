@@ -622,10 +622,6 @@ pub fn restore_from_git_history(project_path: &Path, commit: &str) -> Result<(),
     crate::core::fs_guard::guarded_replace(project_path, &target, &content)
 }
 
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "kronn_state_test.rs"]
-mod tests;
-
 #[cfg(all(test, unix, feature = "full-tests"))] // swaps a folder for a symlink (std::os::unix)
 mod swap_tests {
     use super::*;

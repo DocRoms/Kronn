@@ -452,7 +452,3 @@ pub fn idle_seconds(path: &Path) -> Option<u64> {
             .as_secs(),
     )
 }
-
-#[cfg(test)]
-#[path = "disk_usage_test.rs"]
-mod disk_usage_test;

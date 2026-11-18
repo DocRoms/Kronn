@@ -198,7 +198,7 @@ fn field(lines: &[&str], name: &str) -> Option<String> {
     })
 }
 
-fn covers(value: &str) -> Vec<String> {
+pub fn covers(value: &str) -> Vec<String> {
     value
         .split([',', ';'])
         .filter_map(|token| {
@@ -838,7 +838,3 @@ After the steps, Kronn settles every TD sheet these ADRs cover (by a TD slug in 
     }
     out
 }
-
-#[cfg(test)]
-#[path = "adr_test.rs"]
-mod tests;

@@ -192,7 +192,7 @@ fn opens_quote(prev: Option<char>) -> bool {
 
 /// Where the trailing comment of a line starts: a `#` outside quotes, at the
 /// start or after whitespace.
-fn comment_start(text: &str) -> Option<usize> {
+pub fn comment_start(text: &str) -> Option<usize> {
     let mut quote = None::<char>;
     let mut prev: Option<char> = None;
     let mut chars = text.char_indices();

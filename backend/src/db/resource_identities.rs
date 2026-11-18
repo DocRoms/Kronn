@@ -322,7 +322,7 @@ fn match_by_slug(
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 pub mod tests {
     use super::*;
 
@@ -420,13 +420,7 @@ pub mod tests {
         crate::db::quick_execs::insert_quick_exec(conn, &exec).unwrap();
     }
 
-    pub fn seed_page(
-        conn: &Connection,
-        id: &str,
-        title: &str,
-        slug: &str,
-        project: Option<&str>,
-    ) {
+    pub fn seed_page(conn: &Connection, id: &str, title: &str, slug: &str, project: Option<&str>) {
         let now = chrono::Utc::now();
         let page = crate::models::LivePage {
             id: id.into(),

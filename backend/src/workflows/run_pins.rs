@@ -32,8 +32,8 @@ pub const RESOLUTION: &str = "resolution";
 /// The repository profile a run read (KT-920), keyed by its project id.
 pub const PROJECT_PROFILE: &str = "project_profile";
 
-pub use crate::db::workflow_run_pins::{header, RunHeader};
 pub use crate::db::workflow_run_pins::pinned_workflow;
+pub use crate::db::workflow_run_pins::{header, RunHeader};
 
 /// Pins `workflow` and its dependencies the first time `run` executes and
 /// returns it; afterwards returns the pinned definition. `Ok(Err(reason))`
@@ -664,9 +664,9 @@ impl Deps {
         directives: &[String],
     ) {
         self.skill_ids.extend(skills.iter().cloned());
-        let repository = skills.iter().filter(|id| {
-            crate::core::repository_skills::parse_repository_skill_id(id).is_some()
-        });
+        let repository = skills
+            .iter()
+            .filter(|id| crate::core::repository_skills::parse_repository_skill_id(id).is_some());
         self.repository_skill_ids
             .entry(project_id.unwrap_or_default().to_string())
             .or_default()

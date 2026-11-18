@@ -174,10 +174,7 @@ pub type ConfirmedSecrets = std::collections::BTreeMap<String, Vec<String>>;
 /// The secret-looking files a human confirmed inside each declared lane seed
 /// (KT-1438). An unknown project or an unreadable value reads as nothing
 /// confirmed, which holds every seed that has such a file.
-pub fn lane_seeds_confirmed(
-    conn: &Connection,
-    project_id: &str,
-) -> Result<ConfirmedSecrets> {
+pub fn lane_seeds_confirmed(conn: &Connection, project_id: &str) -> Result<ConfirmedSecrets> {
     let value: Option<Option<String>> = conn
         .query_row(
             "SELECT lane_seeds_confirmed_json FROM projects WHERE id = ?1",

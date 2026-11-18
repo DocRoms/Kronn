@@ -329,9 +329,7 @@ fn citations_of(content: &str, per_anchor: bool) -> Vec<DocCitation> {
         };
         // `[src: …]` in a template's own text, `<path>` and `src/*.rs` show the
         // syntax: they name no file, so no file can be missing (KT-1489).
-        if !is_plain_relative(Path::new(&file))
-            || crate::core::anti_halluc::is_placeholder(&file)
-        {
+        if !is_plain_relative(Path::new(&file)) || crate::core::anti_halluc::is_placeholder(&file) {
             continue;
         }
         let cite = cite_label(&file, lines);

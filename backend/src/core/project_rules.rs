@@ -428,9 +428,7 @@ fn import_specs<'a>(line: &'a str, syntax: Syntax, go_block: &mut bool) -> Vec<&
             }
         }
         Syntax::Rust => {
-            let t = t
-                .trim_start_matches("pub ")
-                .trim_start_matches("pub ");
+            let t = t.trim_start_matches("pub ").trim_start_matches("pub ");
             path_after(t, "use ")
                 .or_else(|| path_after(t, "extern crate "))
                 .into_iter()

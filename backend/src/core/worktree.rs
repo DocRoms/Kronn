@@ -1558,10 +1558,7 @@ fn already_ignored(repo_path: &Path, pattern: &str) -> bool {
 /// `commondir`. A linked worktree (a `.git` FILE) or a repo with a `commondir`
 /// is refused with an error, never followed: the exclude of a linked worktree
 /// is the main repository's, written when the worktree was provisioned.
-pub fn ensure_local_git_exclude_pinned(
-    repo_path: &Path,
-    pattern: &str,
-) -> Result<(), String> {
+pub fn ensure_local_git_exclude_pinned(repo_path: &Path, pattern: &str) -> Result<(), String> {
     if already_ignored(repo_path, pattern) {
         return Ok(());
     }

@@ -528,11 +528,11 @@ pub fn stored_plugin_secrets(
                     set.add(value);
                 }
                 if let Some(server) = &server {
-                    set.extend(&(crate::core::uplink::linked::<crate::core::uplink::ApiCallSecrets>()
-            .expect("the API call secrets are linked into every binary that scrubs them")
-            .0)(
-                        server, &env,
-                    ));
+                    set.extend(&(crate::core::uplink::linked::<
+                        crate::core::uplink::ApiCallSecrets,
+                    >()
+                    .expect("the API call secrets are linked into every binary that scrubs them")
+                    .0)(server, &env));
                 }
             }
             Err(_) => tracing::warn!(

@@ -36,13 +36,7 @@ pub fn fresh_state() -> AppState {
     )
 }
 
-pub async fn register_project(
-    state: &AppState,
-    id: &str,
-    name: &str,
-    path: &str,
-    extra: Value,
-) {
+pub async fn register_project(state: &AppState, id: &str, name: &str, path: &str, extra: Value) {
     let mut row = json!({
         "id": id, "name": name, "path": path,
         "repo_url": null, "token_override": null, "ai_config": {"detected": false, "configs": []},

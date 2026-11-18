@@ -416,11 +416,7 @@ pub struct TargetWatch {
 
 impl TargetWatch {
     /// `None` for a step with no file target.
-    pub fn new(
-        project_path: &Path,
-        target: &str,
-        pre_content: Option<&str>,
-    ) -> Option<Self> {
+    pub fn new(project_path: &Path, target: &str, pre_content: Option<&str>) -> Option<Self> {
         if target == "REVIEW" || target.is_empty() {
             return None;
         }

@@ -16,22 +16,22 @@ use axum::{
 };
 
 use super::resources::{read_repository_file, side_text};
-use crate::db::project_skill_references::SkillReference;
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+use crate::core::repository_skills::read_at_commit;
 use crate::core::repository_skills::{
     catalog_ids_by_slug, catalog_ids_by_slug_of, project_used_skills, skill_root,
 };
-use crate::models::{
-    ApiErrorCode, ApiResponse, ProjectRepositoryResourceStatus, ProjectSkillFile,
-    ProjectUsedSkill, Skill,
-};
-use crate::AppState;
 pub use crate::core::repository_skills::{
     parse_repository_skill_id, repository_skills_for_discussion, resolve_repository_skills,
     resolve_repository_skills_from, RepositorySkillProblem, RepositorySkillSource,
     RepositorySkills, UnresolvedRepositorySkill, MAX_INJECTED_SKILL_BYTES,
 };
-#[cfg(all(test, feature = "full-tests"))]
-use crate::core::repository_skills::read_at_commit;
+use crate::db::project_skill_references::SkillReference;
+use crate::models::{
+    ApiErrorCode, ApiResponse, ProjectRepositoryResourceStatus, ProjectSkillFile, ProjectUsedSkill,
+    Skill,
+};
+use crate::AppState;
 
 /// `used` with each Kronn skill's sync state, the project card's own (KT-1140),
 /// plus the skills the project links that the repository already holds a file
@@ -214,8 +214,8 @@ pub async fn used_skill_file(
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;
-    use crate::models::ProjectRepositoryResourceKind;
     use crate::core::repository_resources::{RepositoryLock, RepositoryLockResource};
+    use crate::models::ProjectRepositoryResourceKind;
 
     fn write_skill(root: &Path, relative_root: &str, slug: &str, name: &str, body: &str) {
         let dir = root.join(relative_root).join(slug);

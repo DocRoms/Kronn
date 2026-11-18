@@ -267,7 +267,7 @@ fn ensure_frontmatter(lines: &mut Vec<String>) {
     lines.splice(0..0, block.map(str::to_string));
 }
 
-fn update_td(
+pub fn update_td(
     content: &str,
     action: TdResolutionAction,
     origin: TdDecisionOrigin,
@@ -548,7 +548,10 @@ pub fn apply_td_resolutions_at(
         let mut content = original
             .clone()
             .unwrap_or_else(|| "# Architecture decisions (why, not what)\n".to_string());
-        let date = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        let date = chrono::Utc::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
         let before: Vec<String> = crate::core::adr::parse(&content)
             .into_iter()
             .map(|adr| adr.id)
@@ -1030,27 +1033,6 @@ mod tests {
         );
         assert_eq!(written.matches("audit_history").count(), 1, "{written}");
         assert!(written.contains("# inline"), "{written}");
-    }
-
-    #[test]
-    fn a_hash_inside_quotes_is_not_taken_for_a_comment() {
-        // Was refused as "a metadata flow mapping on several lines".
-        let input = "---\nname: td-x\nmetadata: {type: tech-debt, note: \"a #b\"}\n---\n\n# TD-x\n\n- **Status**: Inferred\n";
-        let written = update_td(
-            input,
-            TdResolutionAction::Confirm,
-            TdDecisionOrigin::Review,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            strict_front_matter(&written)["metadata"]["note"].as_str(),
-            Some("a #b")
-        );
-        assert_eq!(comment_start("a: \"x # y\" # z"), Some(11));
-        assert_eq!(comment_start("a: 'x # y'"), None);
-        assert_eq!(comment_start("a: it's # z"), Some(8));
-        assert_eq!(comment_start("a: b#c"), None);
     }
 
     #[test]

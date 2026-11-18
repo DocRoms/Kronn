@@ -5,9 +5,7 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::discussion_scope::{
-    DiscussionProjectGrant, ScopeAccess, ScopeGrantSource,
-};
+use crate::models::discussion_scope::{DiscussionProjectGrant, ScopeAccess, ScopeGrantSource};
 
 pub const GRANT_COLUMNS: &str = "g.id, g.discussion_id, g.project_id, p.name, g.access, g.source, \
      g.request_id, g.granted_by, g.granted_at, g.revoked_by, g.revoked_at, g.revoked_reason";
@@ -72,7 +70,12 @@ fn project_label(conn: &Connection, project: Option<&str>) -> Result<String> {
 
 /// A non-dispatching System line in the room: the agents and the human see
 /// every change of scope where they work.
-pub fn receipt(conn: &Connection, discussion_id: &str, receipt_id: String, body: String) -> Result<()> {
+pub fn receipt(
+    conn: &Connection,
+    discussion_id: &str,
+    receipt_id: String,
+    body: String,
+) -> Result<()> {
     let message = crate::models::DiscussionMessage {
         recovered_partial: false,
         kind: Default::default(),

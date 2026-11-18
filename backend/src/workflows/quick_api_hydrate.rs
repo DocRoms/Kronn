@@ -12,7 +12,7 @@
 //! d'instancier juste un Db en mémoire sans monter un AppState.
 
 pub use super::api_call_executor::hydrate_step_from_quick_api;
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 use crate::db::Database;
 
 #[cfg(all(test, feature = "full-tests"))]

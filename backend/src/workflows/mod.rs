@@ -26,8 +26,8 @@ pub mod shadow_merge;
 pub mod shadow_summary;
 pub mod sub_workflow_step;
 pub mod trigger_workflow_step;
-pub mod workspace;
 pub mod watch_trigger;
+pub mod workspace;
 
 use chrono::Utc;
 use std::sync::Arc;
@@ -65,10 +65,9 @@ async fn citation_drift_tick(state: &crate::AppState) {
         .iter()
         .map(|p| crate::core::scanner::resolve_host_path(&p.path))
         .collect();
-    let _ = tokio::task::spawn_blocking(move || {
-        crate::core::citation_drift::reverify_projects(&paths)
-    })
-    .await;
+    let _ =
+        tokio::task::spawn_blocking(move || crate::core::citation_drift::reverify_projects(&paths))
+            .await;
 }
 
 /// The workflow engine — runs in the background, checks triggers, spawns runs.
@@ -186,10 +185,7 @@ impl WorkflowEngine {
 
     /// One scheduler tick over `(since, now]`, for tests outside this module.
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn check_triggers_since(
-        &self,
-        since: chrono::DateTime<Utc>,
-    ) -> anyhow::Result<()> {
+    pub async fn check_triggers_since(&self, since: chrono::DateTime<Utc>) -> anyhow::Result<()> {
         *self.last_trigger_check.lock().await = since;
         self.check_triggers().await
     }

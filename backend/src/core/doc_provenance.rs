@@ -816,9 +816,9 @@ pub fn confirm(project: &Path, docs: &[String]) -> Result<Vec<String>, String> {
     // Preflight the entire selection before advancing any provenance. Deleted
     // documents keep the established behavior of removing their old record.
     for doc in &targets {
-        if read_doc(project, doc).is_some_and(|content| {
-            crate::core::anti_halluc::contains_placeholder(&content)
-        }) {
+        if read_doc(project, doc)
+            .is_some_and(|content| crate::core::anti_halluc::contains_placeholder(&content))
+        {
             return Err(format!(
                 "Cannot confirm `{doc}`: unresolved template or TODO placeholders remain."
             ));

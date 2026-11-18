@@ -2398,7 +2398,9 @@ mod tests {
         assert!(!contains_placeholder(
             "Twig {{ asset('app.css') }} and prose `{{EXAMPLE_SLOT}}`"
         ));
-        let project = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).parent().unwrap();
+        let project = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .parent()
+            .unwrap();
         let mut template_citations = Vec::new();
         inspect_citations(
             project,

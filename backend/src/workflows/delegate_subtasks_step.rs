@@ -206,7 +206,7 @@ fn step_actor(run_id: &str, step_name: &str) -> PlanningActor {
     }
 }
 
-fn worker_selection(worker: &DelegateWorker) -> CampaignWorkerSelection {
+pub fn worker_selection(worker: &DelegateWorker) -> CampaignWorkerSelection {
     let target = if crate::agents::runner::is_http_chat_agent(&worker.agent) {
         MessageTarget::discussion_agent(worker.agent.clone())
     } else {
@@ -230,13 +230,13 @@ fn resolve_worker(config: &DelegateSubtasksConfig, tags: &[String]) -> Option<De
         .or_else(|| config.default_worker.clone())
 }
 
-fn review_message_id(execution_id: &str, attempt_no: u32) -> String {
+pub fn review_message_id(execution_id: &str, attempt_no: u32) -> String {
     format!("wf-review:{execution_id}:{attempt_no}")
 }
 
 /// Keyed by the reviewed attempt: a successful reassignment advances the
 /// attempt, so a marker for the current one means it is still pending.
-fn reassign_marker_id(execution_id: &str, attempt_no: u32) -> String {
+pub fn reassign_marker_id(execution_id: &str, attempt_no: u32) -> String {
     format!("wf-reassign:{execution_id}:{attempt_no}")
 }
 
@@ -793,7 +793,11 @@ async fn integration_conflicts(db: &Database, execution_id: &str) -> anyhow::Res
 /// KT-1802 — a subtask is settled when its task is closed, or when it stays
 /// open only to await the merge of its integration into the step's target
 /// (KT-1519). A task reopened since, or awaiting another branch, is not.
-fn subtask_settled(status: PlanningTaskStatus, awaiting_merge: Option<&str>, target: &str) -> bool {
+pub fn subtask_settled(
+    status: PlanningTaskStatus,
+    awaiting_merge: Option<&str>,
+    target: &str,
+) -> bool {
     match status {
         PlanningTaskStatus::Done | PlanningTaskStatus::Archived => true,
         PlanningTaskStatus::InProgress => awaiting_merge == Some(target),
@@ -1041,8 +1045,8 @@ async fn integrate(
 
 /// Typed reviewer output, a superset of `ReviewDecisionV1`'s verdicts.
 #[derive(Debug, Clone, serde::Deserialize)]
-struct ReviewerVerdict {
-    decision: String,
+pub struct ReviewerVerdict {
+    pub decision: String,
     #[serde(default)]
     comment: Option<String>,
     #[serde(default)]
@@ -1056,7 +1060,7 @@ struct ReviewerVerdict {
 }
 
 /// The last JSON object of the reply that carries a `decision`.
-fn parse_verdict(text: &str) -> Option<ReviewerVerdict> {
+pub fn parse_verdict(text: &str) -> Option<ReviewerVerdict> {
     let mut found = None;
     for (start, _) in text.match_indices('{') {
         let mut stream = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>();
@@ -1399,7 +1403,7 @@ async fn escalate(
     )))
 }
 
-fn orchestrator_note(id: String, content: String) -> DiscussionMessage {
+pub fn orchestrator_note(id: String, content: String) -> DiscussionMessage {
     let mut message = crate::api::orchestration::orchestrator_message(id, content);
     message.role = MessageRole::System;
     message
@@ -1930,7 +1934,3 @@ pub fn finish(step: &WorkflowStep, start: Instant, report: DelegationReport) -> 
         condition_action,
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "delegate_subtasks_step_tests.rs"]
-mod tests;

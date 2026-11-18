@@ -341,8 +341,8 @@ fn only_kronn_write_temps_are_excluded_by_name() {
 fn strip_kronn_regions_removes_managed_blocks_keeps_user_content() {
     let content = format!(
         "{}\nkronn pointer\n{}\n# My rules\nnever use lib X\n<!-- KRONN:FACTS — regenerated -->\nTest: cargo test\n<!-- END KRONN:FACTS -->\ntail rule\n",
-        super::super::root_agent_files::KRONN_BLOCK_START,
-        super::super::root_agent_files::KRONN_BLOCK_END,
+        crate::core::root_agent_files::KRONN_BLOCK_START,
+        crate::core::root_agent_files::KRONN_BLOCK_END,
     );
     let stripped = strip_kronn_regions(&content);
     assert!(stripped.contains("# My rules"));
@@ -353,8 +353,8 @@ fn strip_kronn_regions_removes_managed_blocks_keeps_user_content() {
     // A file that is ONLY Kronn regions normalizes to whitespace.
     let only_block = format!(
         "{}\nbody\n{}\n",
-        super::super::root_agent_files::KRONN_BLOCK_START,
-        super::super::root_agent_files::KRONN_BLOCK_END,
+        crate::core::root_agent_files::KRONN_BLOCK_START,
+        crate::core::root_agent_files::KRONN_BLOCK_END,
     );
     assert!(strip_kronn_regions(&only_block).trim().is_empty());
 }
@@ -396,8 +396,8 @@ fn source_tree_fingerprint_ignores_kronn_output_commits_but_not_source() {
         dir.join("CLAUDE.md"),
         format!(
             "{}\n> Kronn context pointer\n{}\n",
-            super::super::root_agent_files::KRONN_BLOCK_START,
-            super::super::root_agent_files::KRONN_BLOCK_END,
+            crate::core::root_agent_files::KRONN_BLOCK_START,
+            crate::core::root_agent_files::KRONN_BLOCK_END,
         ),
     )
     .unwrap();
@@ -415,8 +415,8 @@ fn source_tree_fingerprint_ignores_kronn_output_commits_but_not_source() {
         dir.join("CLAUDE.md"),
         format!(
             "{}\n> Kronn context pointer\n{}\n# House rules\nnever use lib X\n",
-            super::super::root_agent_files::KRONN_BLOCK_START,
-            super::super::root_agent_files::KRONN_BLOCK_END,
+            crate::core::root_agent_files::KRONN_BLOCK_START,
+            crate::core::root_agent_files::KRONN_BLOCK_END,
         ),
     )
     .unwrap();
@@ -899,27 +899,6 @@ fn failed_checksums_write_preserves_the_previous_manifest() {
     );
     assert!(read_checksums_file(&dir).is_some(), "and still parse");
     let _ = fs::remove_dir_all(&dir);
-}
-
-static DRIFT_COMPUTATIONS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
-> = std::sync::LazyLock::new(Default::default);
-
-pub(super) fn record_drift_computation(project_path: &Path) {
-    *DRIFT_COMPUTATIONS
-        .lock()
-        .unwrap()
-        .entry(project_path.to_path_buf())
-        .or_default() += 1;
-}
-
-fn drift_computations(project_path: &Path) -> usize {
-    DRIFT_COMPUTATIONS
-        .lock()
-        .unwrap()
-        .get(project_path)
-        .copied()
-        .unwrap_or(0)
 }
 
 fn audited_project(name: &str) -> PathBuf {

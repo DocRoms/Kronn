@@ -257,7 +257,7 @@ fn in_layered_dependency_dir(relative: &str, cwd: &Path, real: &Path) -> bool {
 /// shell and still see the refusal. Without that seam, a test of the denylist
 /// passes for the wrong reason — the name is simply absent from the allowlist —
 /// and would keep passing if the denylist were deleted.
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 fn check_binary(binary: &str, allowlist: &[&str]) -> Result<(), Rejection> {
     check_binary_with(binary, allowlist, &[])
 }

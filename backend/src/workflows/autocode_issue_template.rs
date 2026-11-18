@@ -57,7 +57,7 @@ pub struct AutocodeIssueTemplate {
 pub const CONTRIBUTE_NAME: &str = "autoCode Issue - start the campaign (contribution board)";
 pub const PUBLISH_NAME: &str = "autoCode Issue - publish the pull request (direct or from a fork)";
 
-const SEP: &str = "\n===SEP===\n";
+pub const SEP: &str = "\n===SEP===\n";
 
 /// A script of `autocode_issue/`, with the defaults the template shares.
 fn script(source: &str) -> String {
@@ -264,7 +264,3 @@ pub fn build_autocode_issue(params: &AutocodeIssueParams) -> AutocodeIssueTempla
         publish: request(PUBLISH_NAME, &params.project_id, publish),
     }
 }
-
-#[cfg(test)]
-#[path = "autocode_issue_template_test.rs"]
-mod tests;

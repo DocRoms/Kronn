@@ -86,18 +86,14 @@ pub mod timezone;
 pub mod totp;
 pub mod trust_proof;
 pub mod ui_captures;
+pub mod uplink;
 pub mod user_context;
 pub mod version_sources;
 pub mod versions;
 pub mod vibe_trust;
 pub mod yaml_lite;
-pub mod uplink;
 
 // crypto_test.rs removed 2026-07-01 — it was a strict subset of crypto.rs's
 // richer inline `tests` module (roundtrip / wrong-key / base64 / parse / mask),
 // adding duplicate tests with zero new coverage. The inline suite + proptest
 // module in crypto.rs is the single source of truth.
-
-
-
-

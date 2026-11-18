@@ -23,7 +23,7 @@ const MAX_CALLS_PER_TOOL: usize = 12;
 const MAX_WORKER_SEARCH_TEXT_CALLS: usize = 24;
 // A dimension audit writes many findings, then its index. These remain
 // per-attempt backstops; round, duration, repeat and error guards still apply.
-const MAX_AUDIT_WRITE_CALLS: usize = 64;
+pub const MAX_AUDIT_WRITE_CALLS: usize = 64;
 const MAX_AUDIT_SEARCH_CALLS: usize = 48;
 // 48, raised from 24 after a real delegation died of it: a task that crosses
 // an 11 000-line file needed ~30 honest 120-line slices, spent the budget
@@ -41,30 +41,30 @@ pub const MAX_READ_FILE_CALLS: usize = 48;
 // stop a loop, and they act long before these numbers do.
 const MAX_WEB_FETCH_CALLS: usize = 120;
 const MAX_API_ENUMERATION_CALLS: usize = 60;
-const MAX_ERRORS_PER_TOOL: usize = 3;
+pub const MAX_ERRORS_PER_TOOL: usize = 3;
 const MAX_ERROR_ONLY_TOOL_ROUNDS: usize = 6;
 // A refusal costs the model nothing, so it may ask again at once with new
 // arguments (KT-1545). Bounds on Kronn's own anti-loop refusals: per response,
 // later refused calls are dropped; per phase, refusal-only rounds lead to
 // synthesis (not for workers), then to a hard stop.
-const MAX_LOOP_REFUSALS_PER_RESPONSE: usize = 8;
-const MAX_REFUSAL_ONLY_ROUNDS_BEFORE_SYNTHESIS: usize = 2;
-const MAX_REFUSAL_ONLY_ROUNDS: usize = 3;
+pub const MAX_LOOP_REFUSALS_PER_RESPONSE: usize = 8;
+pub const MAX_REFUSAL_ONLY_ROUNDS_BEFORE_SYNTHESIS: usize = 2;
+pub const MAX_REFUSAL_ONLY_ROUNDS: usize = 3;
 // Refused calls listed in the room transcript per tool; the ceiling card and
 // the final diagnostic carry the count, so the rest need not each be a message.
-const MAX_REFUSAL_TRACES_PER_TOOL: usize = 2;
+pub const MAX_REFUSAL_TRACES_PER_TOOL: usize = 2;
 // Rounds an audit keeps, before its ceiling, to write its deliverable.
 const AUDIT_WRITE_RESERVE_ROUNDS: usize = 8;
 const ACP_DIAGNOSTIC_MAX_CHARS: usize = 1_024;
-const WORKER_EXPLORATION_NUDGE_AT: usize = 24;
+pub const WORKER_EXPLORATION_NUDGE_AT: usize = 24;
 // The window a worker gets to gather evidence before it must turn it into a
 // delivery. It used to be the global round cap by accident, so raising that
 // cap for analysis would have let a worker explore three times longer before
 // finalizing — a different question, and not one the incident asked. Fifty is
 // what the finalization flow was measured against; it stays.
-const WORKER_EXPLORATION_ROUNDS: usize = 50;
-const WORKER_FINALIZATION_ITERATIONS: usize = 12;
-const WORKER_FINALIZATION_READ_FILE_CALLS: usize = 3;
+pub const WORKER_EXPLORATION_ROUNDS: usize = 50;
+pub const WORKER_FINALIZATION_ITERATIONS: usize = 12;
+pub const WORKER_FINALIZATION_READ_FILE_CALLS: usize = 3;
 const WORKER_FINALIZATION_GIT_INSPECTION_CALLS: usize = 3;
 // A checkpoint must retain enough recent tool trajectory for the model to
 // continue its implementation plan. Resetting all the way to the brief was
@@ -77,60 +77,60 @@ const WORKER_CHECKPOINT_TOOL_ROUNDS: usize = WORKER_REPAIR_EDIT_ITERATIONS;
 // checkpoint prevents. Trim the retained tail against a small phase-local
 // target, then add explicit reply/tool headroom below.
 const WORKER_FINALIZATION_CTX_TARGET: u64 = 16_384;
-const WORKER_FINALIZATION_REPLY_HEADROOM: u64 = 4_096;
+pub const WORKER_FINALIZATION_REPLY_HEADROOM: u64 = 4_096;
 // One remembered tool call must not consume the only chance to execute the
 // required repair read. Two responses allow exactly one corrective retry; the
 // first successful read immediately advances the state, so at most one read is
 // ever executed by this phase.
-const WORKER_REPAIR_READ_ITERATIONS: usize = 2;
+pub const WORKER_REPAIR_READ_ITERATIONS: usize = 2;
 // Editing needs one more response than reading: a model may first repeat the
 // now-withdrawn read, then make one schema-invalid edit, and must receive that
 // executor error once to correct it. The first successful mutation advances
 // immediately, so this never executes more edits after success.
-const WORKER_REPAIR_EDIT_ITERATIONS: usize = 3;
-const WORKER_REPAIR_COMMIT_ITERATIONS: usize = 3;
-const WORKER_DELIVERY_ITERATIONS: usize = 3;
+pub const WORKER_REPAIR_EDIT_ITERATIONS: usize = 3;
+pub const WORKER_REPAIR_COMMIT_ITERATIONS: usize = 3;
+pub const WORKER_DELIVERY_ITERATIONS: usize = 3;
 // A worker response such as "I'll inspect that now" is an intention, not a
 // terminal result. Give it one corrective turn with the current bounded tool
 // catalogue, then fail explicitly instead of accepting prose without a commit
 // and DeliveryManifest or spending an open-ended local-model loop.
-const WORKER_PROSE_ONLY_ITERATIONS: usize = 2;
+pub const WORKER_PROSE_ONLY_ITERATIONS: usize = 2;
 // Older Ollama MLX servers lack prompt-prefix reuse and retain cache memory
 // (ollama/ollama#17829, #17875). Apply the delivery boundary below 0.34.
-const MLX_WORKER_EXPLORATION_ITERATIONS: usize = 32;
+pub const MLX_WORKER_EXPLORATION_ITERATIONS: usize = 32;
 // A scoped local subtask must turn repository evidence into a mutation instead
 // of paying for an open-ended repository tour. V15 of KT-404 had found the
 // named function after two observations but reached eighteen without changing
 // the workspace. Bound that exact signal for MLX only; finalization still
 // grants three exact CAS refreshes before its one-shot repair path.
-const MLX_WORKER_MAX_OBSERVATIONS_WITHOUT_MUTATION: usize = 12;
+pub const MLX_WORKER_MAX_OBSERVATIONS_WITHOUT_MUTATION: usize = 12;
 // Reserve a quarter of the context window for replies and tool results.
-const WORKER_CONTEXT_PRESSURE_PERCENT: u64 = 75;
+pub const WORKER_CONTEXT_PRESSURE_PERCENT: u64 = 75;
 // MLX fixes the slot when the model is loaded: a later request for 16K still
 // used a live 8K slot, while a cold 32K request loaded the real qwen3.8 model
 // in under eight seconds. The nominal 65K slot instead cost 31 GB and produced
 // no first tool call after seventeen minutes. Keep exploration below that
 // pathological tier; finalization still compacts its actual prompt to 16K.
-const MLX_WORKER_EFFECTIVE_CTX_CAP: u64 = 32_768;
+pub const MLX_WORKER_EFFECTIVE_CTX_CAP: u64 = 32_768;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerExplorationPolicy {
-    max_iterations: usize,
-    max_observations_without_mutation: Option<usize>,
-    context_pressure_percent: u64,
-    mlx_mitigation: bool,
-    mlx_detection_source: Option<&'static str>,
+pub struct WorkerExplorationPolicy {
+    pub max_iterations: usize,
+    pub max_observations_without_mutation: Option<usize>,
+    pub context_pressure_percent: u64,
+    pub mlx_mitigation: bool,
+    pub mlx_detection_source: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerExplorationBoundary {
+pub enum WorkerExplorationBoundary {
     RoundLimit,
     ObservationLimit,
     ContextPressure(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerRepairStage {
+pub enum WorkerRepairStage {
     Inactive,
     Read,
     Edit,
@@ -186,13 +186,13 @@ fn http_turn_phase(
     }
 }
 
-fn ollama_model_has_mlx_tag(model: &str) -> bool {
+pub fn ollama_model_has_mlx_tag(model: &str) -> bool {
     let tag = model.rsplit_once(':').map_or(model, |(_, tag)| tag);
     tag.split(|ch: char| !ch.is_ascii_alphanumeric())
         .any(|part| part.eq_ignore_ascii_case("mlx"))
 }
 
-fn worker_exploration_policy(
+pub fn worker_exploration_policy(
     model: &str,
     storage_format: Option<&str>,
     is_openai_wire: bool,
@@ -234,7 +234,7 @@ fn worker_exploration_policy(
     }
 }
 
-fn worker_effective_ctx_cap(
+pub fn worker_effective_ctx_cap(
     configured_ctx_cap: u64,
     tool_run_mode: crate::agents::tools::ToolRunMode,
     policy: WorkerExplorationPolicy,
@@ -246,7 +246,7 @@ fn worker_effective_ctx_cap(
     }
 }
 
-fn worker_oversized_prompt_remedy(
+pub fn worker_oversized_prompt_remedy(
     configured_ctx_cap: u64,
     policy: WorkerExplorationPolicy,
 ) -> &'static str {
@@ -259,7 +259,7 @@ fn worker_oversized_prompt_remedy(
     }
 }
 
-fn worker_exploration_boundary(
+pub fn worker_exploration_boundary(
     policy: WorkerExplorationPolicy,
     turn: usize,
     observations_without_mutation: usize,
@@ -294,7 +294,7 @@ fn worker_exploration_boundary(
 const CATALOGUE_BYTES_PER_TOKEN: u64 = 7;
 const CATALOGUE_BYTES_PER_TOKEN_SCALE: u64 = 2;
 
-fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
+pub fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
     let wire_bytes = super::vision::messages_wire_len(body) as u64;
     let mut estimate = (wire_bytes / 3) + 2048;
     for field in ["tools", "format"] {
@@ -309,25 +309,25 @@ fn estimated_chat_history_tokens(body: &serde_json::Value) -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkerHistoryCheckpoint {
-    before_messages: usize,
-    after_messages: usize,
-    before_tokens: u64,
-    after_tokens: u64,
-    seed_messages: usize,
-    tail_messages: usize,
-    compacted_tool_results: usize,
-    final_num_ctx: u64,
+pub struct WorkerHistoryCheckpoint {
+    pub before_messages: usize,
+    pub after_messages: usize,
+    pub before_tokens: u64,
+    pub after_tokens: u64,
+    pub seed_messages: usize,
+    pub tail_messages: usize,
+    pub compacted_tool_results: usize,
+    pub final_num_ctx: u64,
 }
 
 #[derive(Debug, Clone)]
-struct WorkerCheckpointSeed {
+pub struct WorkerCheckpointSeed {
     messages: Vec<serde_json::Value>,
     source_message_count: usize,
 }
 
 impl WorkerCheckpointSeed {
-    fn from_body(body: &serde_json::Value) -> Self {
+    pub fn from_body(body: &serde_json::Value) -> Self {
         let messages = body["messages"].as_array().cloned().unwrap_or_default();
         let first_user = messages
             .iter()
@@ -412,7 +412,7 @@ fn recent_worker_protocol_tail(
         .collect()
 }
 
-const WORKER_CHECKPOINT_TOOL_RESULT_BYTES: usize = 4_096;
+pub const WORKER_CHECKPOINT_TOOL_RESULT_BYTES: usize = 4_096;
 const WORKER_CHECKPOINT_EXCERPT_HEAD_BYTES: usize = 1_024;
 const WORKER_CHECKPOINT_EXCERPT_TAIL_BYTES: usize = 256;
 const WORKER_CHECKPOINT_MAX_FACTS: usize = 24;
@@ -599,7 +599,7 @@ fn compact_worker_checkpoint_tool_results(body: &mut serde_json::Value) -> usize
 /// complete tool-call/result rounds. Large observation payloads are clamped;
 /// the code-generated facts below state only runner-observed mutations and the
 /// catalogue that is actually declared for the next request.
-fn checkpoint_worker_finalization_history(
+pub fn checkpoint_worker_finalization_history(
     body: &mut serde_json::Value,
     seed: &WorkerCheckpointSeed,
     checkpoint_prompt: &str,
@@ -670,7 +670,7 @@ fn checkpoint_worker_finalization_history(
     }
 }
 
-fn worker_context_pressure(
+pub fn worker_context_pressure(
     body: &serde_json::Value,
     ctx_cap: u64,
     pressure_percent: u64,
@@ -682,7 +682,7 @@ fn worker_context_pressure(
     (estimated.saturating_mul(100) >= ctx_cap.saturating_mul(pressure_percent)).then_some(estimated)
 }
 
-fn max_calls_for_tool(name: &str, run_mode: crate::agents::tools::ToolRunMode) -> usize {
+pub fn max_calls_for_tool(name: &str, run_mode: crate::agents::tools::ToolRunMode) -> usize {
     // Reading several small files is legitimate repository analysis. Keep the
     // stricter anti-loop cap for API/MCP calls, where varying arguments caused
     // the observed 47-call paid loop. Exact duplicate reads are still stopped
@@ -735,7 +735,7 @@ fn withdraw_tools_for_convergence(
     }
 }
 
-fn is_workspace_observation_tool(name: &str) -> bool {
+pub fn is_workspace_observation_tool(name: &str) -> bool {
     matches!(
         name,
         "read_file"
@@ -761,12 +761,12 @@ fn is_workspace_progress_tool(name: &str) -> bool {
 }
 
 /// Task mutations invalidate these readers even when their arguments are unchanged.
-fn is_progress_observation_tool(name: &str) -> bool {
+pub fn is_progress_observation_tool(name: &str) -> bool {
     matches!(name, "task_get" | "task_list" | "plan_get")
 }
 
 /// Mutations that invalidate task progress, including room-plan membership changes.
-fn is_progress_mutation_tool(name: &str) -> bool {
+pub fn is_progress_mutation_tool(name: &str) -> bool {
     matches!(
         name,
         "task_create"
@@ -798,7 +798,7 @@ pub fn progress_readers_to_restore(
     )
 }
 
-fn observation_readers_to_restore(
+pub fn observation_readers_to_restore(
     withdrawn: &std::collections::HashSet<String>,
     open_circuits: &std::collections::HashSet<String>,
     calls_per_tool: &std::collections::HashMap<String, usize>,
@@ -826,7 +826,7 @@ fn observation_readers_to_restore(
 
 /// Preserve original reader declarations so a withdrawn reader can be restored
 /// without adding tools that were absent from the initial catalogue.
-fn progress_reader_declarations(catalogue: &[serde_json::Value]) -> Vec<serde_json::Value> {
+pub fn progress_reader_declarations(catalogue: &[serde_json::Value]) -> Vec<serde_json::Value> {
     catalogue
         .iter()
         .filter(|tool| {
@@ -840,7 +840,7 @@ fn progress_reader_declarations(catalogue: &[serde_json::Value]) -> Vec<serde_js
 
 /// Put back declarations the model can no longer see. Never widens the
 /// catalogue: a declaration already present is left alone.
-fn restore_tool_declarations(body: &mut serde_json::Value, restored: &[serde_json::Value]) {
+pub fn restore_tool_declarations(body: &mut serde_json::Value, restored: &[serde_json::Value]) {
     if restored.is_empty() {
         return;
     }
@@ -863,7 +863,7 @@ fn restore_tool_declarations(body: &mut serde_json::Value, restored: &[serde_jso
     }
 }
 
-fn invalidate_progress_observation_cache(
+pub fn invalidate_progress_observation_cache(
     seen_calls: &mut std::collections::HashMap<String, (bool, serde_json::Value)>,
     repeated_calls: &mut std::collections::HashMap<String, usize>,
     results_seen: &mut std::collections::HashMap<(String, u64), String>,
@@ -896,7 +896,7 @@ fn is_worker_finalization_tool(name: &str) -> bool {
     )
 }
 
-fn annotate_worker_exploration(
+pub fn annotate_worker_exploration(
     outcome: &mut crate::agents::tools::ToolOutcome,
     explored_without_progress: usize,
 ) {
@@ -929,7 +929,7 @@ fn annotate_worker_exploration(
 /// makes the signature about content. Every argument counts, so an `api_call`
 /// that only adds an `extract` or changes a query parameter asks a different
 /// question and is run, not answered as a repeat of the call it follows.
-fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, String) {
+pub fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, String) {
     let canonical_args = match arguments.as_object() {
         Some(map) => {
             let mut pairs: Vec<_> = map.iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -952,7 +952,7 @@ fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, St
 /// So annotate, never refuse: the payload the model just asked for stays intact
 /// and the note rides along with it. A model that is converging reads it and
 /// carries on; a model that is circling gets the only thing it was missing.
-fn annotate_unproductive_repetition(
+pub fn annotate_unproductive_repetition(
     outcome: &mut crate::agents::tools::ToolOutcome,
     tool: &str,
     canonical_args: &str,
@@ -1035,7 +1035,7 @@ fn outcome_digest_source(value: &serde_json::Value) -> String {
     }
 }
 
-fn tool_convergence_diagnostic(
+pub fn tool_convergence_diagnostic(
     calls: &std::collections::HashMap<String, usize>,
     errors: &std::collections::HashMap<String, usize>,
     refusals: &std::collections::HashMap<String, usize>,
@@ -1097,7 +1097,7 @@ fn remove_tool_declarations(
     }
 }
 
-fn retain_worker_finalization_tools(body: &mut serde_json::Value) {
+pub fn retain_worker_finalization_tools(body: &mut serde_json::Value) {
     let emptied = body
         .get_mut("tools")
         .and_then(serde_json::Value::as_array_mut)
@@ -1117,7 +1117,7 @@ fn retain_worker_finalization_tools(body: &mut serde_json::Value) {
     }
 }
 
-fn set_worker_tools_from_catalogue(
+pub fn set_worker_tools_from_catalogue(
     body: &mut serde_json::Value,
     original_catalogue: &[serde_json::Value],
     names: &[&str],
@@ -1164,7 +1164,7 @@ fn prelocalized_mutation_tool(scope: &crate::models::TaskWorkerScope) -> &'stati
 /// Freeze the first provider turn to one real read around the principal's
 /// authoritative target. The context padding is chosen by Kronn, not by the
 /// model, so a vague offset cannot turn back into repository exploration.
-fn constrain_prelocalized_read_tool(
+pub fn constrain_prelocalized_read_tool(
     body: &mut serde_json::Value,
     original_catalogue: &[serde_json::Value],
     scope: &crate::models::TaskWorkerScope,
@@ -1191,7 +1191,7 @@ fn constrain_prelocalized_read_tool(
     tool["function"]["parameters"]["additionalProperties"] = serde_json::json!(false);
 }
 
-fn constrain_prelocalized_edit_tool(
+pub fn constrain_prelocalized_edit_tool(
     body: &mut serde_json::Value,
     original_catalogue: &[serde_json::Value],
     scope: &crate::models::TaskWorkerScope,
@@ -1242,7 +1242,7 @@ fn constrain_prelocalized_edit_tool(
     tool["function"]["parameters"]["additionalProperties"] = serde_json::json!(false);
 }
 
-fn prelocalized_call_matches_scope(
+pub fn prelocalized_call_matches_scope(
     call: &crate::agents::tools::ToolCall,
     stage: WorkerRepairStage,
     scope: &crate::models::TaskWorkerScope,
@@ -1326,7 +1326,7 @@ fn prelocalized_call_matches_scope(
     }
 }
 
-fn constrain_worker_repair_tool(
+pub fn constrain_worker_repair_tool(
     body: &mut serde_json::Value,
     failed_call: &crate::agents::tools::ToolCall,
 ) {
@@ -1367,7 +1367,7 @@ fn constrain_worker_repair_tool(
     }
 }
 
-fn worker_repair_call_matches_target(
+pub fn worker_repair_call_matches_target(
     failed_call: &crate::agents::tools::ToolCall,
     repair_call: &crate::agents::tools::ToolCall,
 ) -> bool {
@@ -1400,7 +1400,7 @@ fn worker_repair_call_matches_target(
 
 /// Which pre-write validator refused an edit, if one did: its name leads the
 /// strict repair prompt.
-fn structural_refusal(outcome: &crate::agents::tools::ToolOutcome) -> Option<&'static str> {
+pub fn structural_refusal(outcome: &crate::agents::tools::ToolOutcome) -> Option<&'static str> {
     let error = outcome
         .content
         .get("error")
@@ -1414,7 +1414,7 @@ fn structural_refusal(outcome: &crate::agents::tools::ToolOutcome) -> Option<&'s
     }
 }
 
-fn worker_repair_iteration_limit(
+pub fn worker_repair_iteration_limit(
     stage: WorkerRepairStage,
     strict_syntax_repair: bool,
     prelocalized: bool,
@@ -1475,7 +1475,7 @@ fn restore_worker_tools_from_catalogue(
     }
 }
 
-fn declared_tool_names(body: &serde_json::Value) -> std::collections::HashSet<String> {
+pub fn declared_tool_names(body: &serde_json::Value) -> std::collections::HashSet<String> {
     body.get("tools")
         .and_then(serde_json::Value::as_array)
         .into_iter()
@@ -1488,7 +1488,7 @@ fn declared_tool_names(body: &serde_json::Value) -> std::collections::HashSet<St
         .collect()
 }
 
-fn invalidate_workspace_observation_cache(
+pub fn invalidate_workspace_observation_cache(
     seen_calls: &mut std::collections::HashMap<String, (bool, serde_json::Value)>,
     repeated_calls: &mut std::collections::HashMap<String, usize>,
     results_seen: &mut std::collections::HashMap<(String, u64), String>,
@@ -1502,7 +1502,6 @@ fn invalidate_workspace_observation_cache(
     repeated_calls.retain(|signature, _| !is_observation_signature(signature));
     results_seen.retain(|(name, _), _| !is_workspace_observation_tool(name));
 }
-
 
 /// Output mode — how to interpret stdout from the agent
 #[derive(Clone, Copy, PartialEq)]
@@ -1896,7 +1895,7 @@ impl StreamJsonFailure {
 
 /// How to handle stderr from an agent process
 #[derive(Clone, Copy)]
-enum StderrMode {
+pub enum StderrMode {
     /// Merge stderr into output stream (default — agent puts useful output on both)
     Merge,
     /// Only use stdout; log stderr but don't stream it (agent puts noise on stderr)
@@ -1909,37 +1908,37 @@ pub struct AgentProcess {
     pub child: tokio::process::Child,
     pub output_mode: OutputMode,
     pub work_dir: PathBuf,
-    agent_type: AgentType,
-    rx: mpsc::Receiver<String>,
+    pub agent_type: AgentType,
+    pub rx: mpsc::Receiver<String>,
     pub stderr_capture: Arc<Mutex<Vec<String>>>,
     /// Usage emitted by structured transports such as ACP. This is process
     /// telemetry, not a log scrape, so callers can attribute a completed run
     /// even when the transport has no stderr token marker.
-    usage: Arc<Mutex<AgentUsage>>,
-    stderr_task: Option<tokio::task::JoinHandle<()>>,
+    pub usage: Arc<Mutex<AgentUsage>>,
+    pub stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// HTTP agents run their provider/tool loop in a Tokio task rather than in
     /// `child`. Killing the lifeline process alone therefore does not stop the
     /// real work. Present only for HTTP agents; cancellation drops an in-flight
     /// request/tool future and prevents every later call in the same batch.
-    http_cancel: Option<tokio_util::sync::CancellationToken>,
+    pub http_cancel: Option<tokio_util::sync::CancellationToken>,
     /// On Unix, the process group ID of the spawned agent, used to terminate
     /// the entire process tree on cancellation. None on Windows.
-    pgid: Option<i32>,
+    pub pgid: Option<i32>,
     /// This transport delivers token fragments, not lines. Set by the ACP
     /// session core: every ACP agent — native or adapted — emits one
     /// `TextDelta` per model chunk, forwarded verbatim. Deducing this from the
     /// agent type is what broke: the type says which CLI runs, not how its
     /// output is framed.
-    token_fragments: bool,
+    pub token_fragments: bool,
     /// The run owns an activity watchdog that every runtime update beats (an
     /// ACP session: text, thoughts, tool calls, keepalives). Consumers then
     /// leave inactivity to it instead of timing the text alone.
-    activity_watched: bool,
+    pub activity_watched: bool,
     /// The launch's scoped bridge token; dropping the process revokes it.
-    bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
+    pub bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
     /// Set when the runtime refused the requested resume and the turn went out
     /// with the full history in a new session instead.
-    resume_fallback: Option<crate::models::SessionContinuityReason>,
+    pub resume_fallback: Option<crate::models::SessionContinuityReason>,
 }
 
 /// Reads an HTTP agent's tool activity from outside its run.
@@ -2016,22 +2015,22 @@ fn record_http_tool_call(
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct AgentUsage {
-    input_tokens: u64,
-    output_tokens: u64,
-    prompt_cache: PromptCacheUsage,
+pub struct AgentUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub prompt_cache: PromptCacheUsage,
     /// Cost the provider or CLI reported itself, summed over the run's
     /// responses, in micro-USD. `None` when never reported.
-    cost_usd_micros: Option<u64>,
+    pub cost_usd_micros: Option<u64>,
     /// At least one response reported no cost: the sum is then only a part of
     /// the run's cost, so the run's cost is unknown.
-    cost_incomplete: bool,
+    pub cost_incomplete: bool,
     /// The category of the last native tool an HTTP agent called, and how
     /// many it has called.
-    last_tool: Option<crate::models::ActivityCategory>,
-    tool_calls: u32,
+    pub last_tool: Option<crate::models::ActivityCategory>,
+    pub tool_calls: u32,
     /// The run's latest tool calls, for an audit's details panel.
-    recent: super::activity::RecentActivity,
+    pub recent: super::activity::RecentActivity,
 }
 
 pub use crate::models::{PromptCacheUsage, ReportedUsage};
@@ -2195,7 +2194,7 @@ fn signal_group_after_exit(pgid: Option<i32>) {
 /// Returns true if at least one process exists, false only if confirmed dead (ESRCH).
 /// Treats permission errors and other errors as "possibly alive / not confirmed".
 #[cfg(unix)]
-fn group_has_processes(pgid: i32) -> bool {
+pub fn group_has_processes(pgid: i32) -> bool {
     if pgid <= 1 {
         return true;
     }
@@ -2771,7 +2770,7 @@ pub fn codex_discussion_mcp_overrides() -> Vec<String> {
     render_codex_discussion_mcp_overrides(disc_introspection_mcp_command())
 }
 
-fn render_codex_discussion_mcp_overrides(launch: Option<InternalMcpCommand>) -> Vec<String> {
+pub fn render_codex_discussion_mcp_overrides(launch: Option<InternalMcpCommand>) -> Vec<String> {
     const KEY: &str = "mcp_servers.kronn-internal";
     // Without its command a key alone is an entry with no transport, and Codex
     // then rejects the whole configuration.
@@ -3047,7 +3046,7 @@ fn codex_task_worker_mcp_override() -> Option<String> {
     render_codex_task_worker_mcp_override(disc_introspection_mcp_command())
 }
 
-fn render_codex_task_worker_mcp_override(launch: Option<InternalMcpCommand>) -> Option<String> {
+pub fn render_codex_task_worker_mcp_override(launch: Option<InternalMcpCommand>) -> Option<String> {
     let launch = launch?;
     let command = serde_json::to_string(&launch.command).ok()?;
     let args = serde_json::to_string(&launch.args).ok()?;
@@ -3708,7 +3707,7 @@ fn tier_reasoning_effort(
 /// unlaunchable effort into an omitted flag: a
 /// caller must surface the catalogue mismatch instead of claiming the CLI
 /// default applied the setting.
-fn resolve_reasoning_effort(
+pub fn resolve_reasoning_effort(
     effort_override: Option<&str>,
     model_override: Option<&str>,
     agent_type: &AgentType,
@@ -3742,7 +3741,7 @@ fn resolve_reasoning_effort(
 
 /// A near-miss (case, or stray whitespace on the catalogue side) is refused
 /// with the actual mismatch named, instead of the generic "absent" reason.
-fn effort_catalogue_decision(
+pub fn effort_catalogue_decision(
     candidate: &str,
     model: &str,
     modes: Option<&[String]>,
@@ -3809,10 +3808,7 @@ pub enum EffortNearMiss<'a> {
     CatalogueWhitespace,
 }
 
-pub fn effort_close_match<'a>(
-    candidate: &str,
-    modes: &'a [String],
-) -> Option<EffortNearMiss<'a>> {
+pub fn effort_close_match<'a>(candidate: &str, modes: &'a [String]) -> Option<EffortNearMiss<'a>> {
     modes.iter().map(String::as_str).find_map(|mode| {
         if mode == candidate {
             None
@@ -4990,7 +4986,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 /// (set for Claude Code) records the model and session its stream announces;
 /// `gemini` turns Gemini's stream-json events back into reply lines as they
 /// arrive, keeping its usage in `usage` and its errors in `stderr_capture`.
-async fn pump_stdout<R: tokio::io::AsyncRead + Unpin>(
+pub async fn pump_stdout<R: tokio::io::AsyncRead + Unpin>(
     stdout: R,
     tx: mpsc::Sender<String>,
     claude_provenance: Option<Option<AgentProvenanceCapture>>,
@@ -5176,26 +5172,26 @@ fn adapter_task_worker_args(
 /// Bundled into one struct so `start_native_acp`/`start_adapted_acp`/
 /// `run_acp_session` stay under clippy's argument-count lint instead of
 /// growing an ever-longer positional parameter list.
-struct AcpSessionRequest<'a> {
-    agent_type: &'a AgentType,
-    work_dir: &'a Path,
-    prompt: &'a str,
-    system_context: &'a str,
-    project_path: &'a str,
-    model_flag: Option<&'a str>,
-    reasoning_effort: Option<&'a str>,
-    parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
-    discussion_id: Option<&'a str>,
-    resume_id: Option<&'a str>,
-    session_store: Option<AcpSessionStore>,
-    fallback_prompt: Option<&'a str>,
-    provenance: Option<AgentProvenanceCapture>,
-    activity: Option<super::activity::AgentActivitySink>,
+pub struct AcpSessionRequest<'a> {
+    pub agent_type: &'a AgentType,
+    pub work_dir: &'a Path,
+    pub prompt: &'a str,
+    pub system_context: &'a str,
+    pub project_path: &'a str,
+    pub model_flag: Option<&'a str>,
+    pub reasoning_effort: Option<&'a str>,
+    pub parent_cancel: Option<&'a tokio_util::sync::CancellationToken>,
+    pub discussion_id: Option<&'a str>,
+    pub resume_id: Option<&'a str>,
+    pub session_store: Option<AcpSessionStore>,
+    pub fallback_prompt: Option<&'a str>,
+    pub provenance: Option<AgentProvenanceCapture>,
+    pub activity: Option<super::activity::AgentActivitySink>,
     /// KT-932 — silence after which the turn is cancelled; `None` is the default.
-    idle_timeout: Option<Duration>,
-    run_progress: Option<super::run_progress::RunProgress>,
+    pub idle_timeout: Option<Duration>,
+    pub run_progress: Option<super::run_progress::RunProgress>,
     /// KT-908 — narrows the MCP servers offered to the session.
-    step_tools: Option<&'a crate::models::StepTools>,
+    pub step_tools: Option<&'a crate::models::StepTools>,
 }
 
 async fn start_native_acp(
@@ -5361,10 +5357,7 @@ pub fn configured_api_key(agent: &AgentType, tokens: &TokensConfig) -> Option<St
 }
 
 /// The project MCP servers an ACP session of `agent` would declare here.
-pub fn probe_mcp_servers(
-    agent: &AgentType,
-    project_path: &str,
-) -> Vec<crate::acp::AcpMcpServer> {
+pub fn probe_mcp_servers(agent: &AgentType, project_path: &str) -> Vec<crate::acp::AcpMcpServer> {
     acp_project_mcp_servers(project_path, *agent == AgentType::ClaudeCode)
 }
 
@@ -5598,7 +5591,7 @@ pub const ACP_TOOL_MARKER: &str = "[acp-tool] ";
 /// process is shut down regardless.
 const ACP_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
-async fn run_acp_session(
+pub async fn run_acp_session(
     request: AcpSessionRequest<'_>,
     transport: Arc<dyn crate::acp::AcpTransport>,
 ) -> Result<AgentProcess, String> {
@@ -6233,7 +6226,7 @@ pub fn declared_mcp_servers(
         .collect()
 }
 
-fn acp_project_mcp_servers(
+pub fn acp_project_mcp_servers(
     project_path: &str,
     env_by_reference: bool,
 ) -> Vec<crate::acp::AcpMcpServer> {
@@ -6372,7 +6365,7 @@ fn gemini_kronn_policy_path() -> Option<String> {
     Some(path.to_string_lossy().into_owned())
 }
 
-fn vibe_runner_path() -> String {
+pub fn vibe_runner_path() -> String {
     // 0. Explicit override (allows custom deployments)
     if let Ok(custom) = crate::core::child_env::var("KRONN_VIBE_RUNNER") {
         if std::path::Path::new(&custom).exists() {
@@ -6407,7 +6400,10 @@ fn vibe_runner_path() -> String {
         }
     }
     // 3. Dev mode: relative to cargo manifest
-    let dev_path = concat!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."), "/scripts/vibe-runner.py");
+    let dev_path = concat!(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../.."),
+        "/scripts/vibe-runner.py"
+    );
     dev_path.to_string()
 }
 
@@ -6449,7 +6445,10 @@ const BRIDGE_SOURCE_SEARCH_DEPTH: usize = 6;
 /// directory, then the checkout its binary sits in). Never from a path baked in
 /// at build time: a binary built in one checkout and run from another would
 /// launch the first checkout's script (KT-1316).
-fn disc_introspection_mcp_path_near(exe_dir: Option<&Path>, cwd: Option<&Path>) -> Option<String> {
+pub fn disc_introspection_mcp_path_near(
+    exe_dir: Option<&Path>,
+    cwd: Option<&Path>,
+) -> Option<String> {
     const SCRIPT: &str = "disc-introspection-mcp.py";
     let found = |candidate: PathBuf| {
         candidate
@@ -6490,7 +6489,7 @@ pub struct InternalMcpCommand {
 }
 
 impl InternalMcpCommand {
-    fn script(path: String) -> Self {
+    pub fn script(path: String) -> Self {
         Self {
             command: "python3".into(),
             args: vec![path],
@@ -6499,7 +6498,7 @@ impl InternalMcpCommand {
     }
 }
 
-fn resolve_internal_mcp_command(
+pub fn resolve_internal_mcp_command(
     bundled: Option<std::ffi::OsString>,
     script: impl FnOnce() -> Option<String>,
 ) -> Option<InternalMcpCommand> {
@@ -6581,14 +6580,14 @@ pub fn disc_introspection_mcp_path_for_shared_config() -> Option<String> {
 ///
 /// Fallback when Ollama reports no context size. Bound by available memory and
 /// overridable through KRONN_OLLAMA_NUM_CTX_CAP.
-const OLLAMA_NUM_CTX_CAP: u64 = 16_384;
+pub const OLLAMA_NUM_CTX_CAP: u64 = 16_384;
 pub const OLLAMA_NUM_CTX_FLOOR: u64 = 2048;
 /// Tenths of a byte per token. Keep estimates below the measured prose and JSON
 /// ratios so the context guard retains headroom; see docs/research/.
 const PROSE_TENTHS_PER_TOKEN: u64 = 45;
 const TOOLS_TENTHS_PER_TOKEN: u64 = 35;
 /// What a reply needs on top of the prompt.
-const REPLY_HEADROOM_TOKENS: u64 = 2048;
+pub const REPLY_HEADROOM_TOKENS: u64 = 2048;
 
 /// Tokens a prompt of `messages_bytes` of text plus `tools_bytes` of declared
 /// catalogue is worth, with the room a reply needs.
@@ -6732,7 +6731,7 @@ impl CtxCap {
 /// KT-382 — how many times to ask Ollama for a model's trained context before
 /// falling back. Two, not more: the failure this covers is a cold load, and a
 /// longer ladder would delay every genuinely-offline run by the same amount.
-const OLLAMA_SHOW_ATTEMPTS: usize = 2;
+pub const OLLAMA_SHOW_ATTEMPTS: usize = 2;
 const OLLAMA_SHOW_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(750);
 
 /// Pure parse of the ctx-cap override (split out so it's unit-testable without
@@ -6832,7 +6831,7 @@ pub fn resolve_ctx_cap_within(
 
 /// Resident context size and memory from /api/ps. Attention-shape arithmetic
 /// cannot reliably price the cache for sliding-window models.
-async fn sample_ollama_memory(base: &str, model: &str) {
+pub async fn sample_ollama_memory(base: &str, model: &str) {
     let sample = async {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(3))
@@ -6887,7 +6886,7 @@ pub fn kv_bytes_per_token_from_samples(
     (tokens > 0 && bytes > 0).then(|| bytes / tokens)
 }
 
-fn measured_kv_bytes_per_token(base: &str, model: &str) -> Option<u64> {
+pub fn measured_kv_bytes_per_token(base: &str, model: &str) -> Option<u64> {
     ollama_memory_samples()
         .lock()
         .ok()?
@@ -6970,11 +6969,11 @@ pub fn parse_context_length(show_response: &serde_json::Value) -> Option<u64> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OllamaModelProfile {
-    context_length: Option<u64>,
-    storage_format: Option<String>,
-    kv_shape: Option<KvShape>,
-    vision: super::vision::ImageSupport,
-    capabilities: Option<Vec<String>>,
+    pub context_length: Option<u64>,
+    pub storage_format: Option<String>,
+    pub kv_shape: Option<KvShape>,
+    pub vision: super::vision::ImageSupport,
+    pub capabilities: Option<Vec<String>>,
 }
 
 impl OllamaModelProfile {
@@ -7310,7 +7309,7 @@ pub fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
 
 /// Most names a shape lists per level. A wider record is cut with a count, and
 /// the whole-element example shows the rest.
-const SHAPE_MAX_KEYS: usize = 40;
+pub const SHAPE_MAX_KEYS: usize = 40;
 /// Names kept per level in the smaller rendering, for a window with no room left.
 const SHAPE_BRIEF_KEYS: usize = 12;
 /// Longest string a shape shows as a value rather than as a type.
@@ -7322,7 +7321,7 @@ const SHAPE_INLINE_CHARS: usize = 40;
 /// response holds and has a way to select a piece of it: this carries both.
 /// Built from the ORIGINAL response, before any shortening, so it stays true
 /// however many times the message is cut.
-struct PartialReadHint {
+pub struct PartialReadHint {
     /// The layout in full: the response's keys and the main collection's item
     /// keys one level deep. `None` when the call was already an extract, whose
     /// layout is not the response's and so cannot be addressed by a new one.
@@ -7623,7 +7622,7 @@ fn partial_read_hint(messages: &[serde_json::Value], index: usize) -> Option<Par
 /// `hint`, when the result is an API response, says what the response holds and
 /// how to ask for a part of it: a model told to "ask for a part you have not
 /// seen" with no way to do so asks for the same thing again.
-fn compact_tool_result(
+pub fn compact_tool_result(
     raw: &str,
     allowance: usize,
     hint: Option<&PartialReadHint>,
@@ -8503,7 +8502,7 @@ async fn remote_context_window(base: &str, model: &str, auth_key: Option<&str>) 
     window
 }
 
-fn smallest_endpoint_window(body: &serde_json::Value) -> Option<u64> {
+pub fn smallest_endpoint_window(body: &serde_json::Value) -> Option<u64> {
     body["data"]["endpoints"]
         .as_array()?
         .iter()
@@ -8512,8 +8511,8 @@ fn smallest_endpoint_window(body: &serde_json::Value) -> Option<u64> {
         .min()
 }
 
-const HTTP_TURN_TRACE_PREFIX: &str = "kronn_http_turn:";
-const HTTP_TOOL_EXEC_TRACE_PREFIX: &str = "kronn_http_tool_exec:";
+pub const HTTP_TURN_TRACE_PREFIX: &str = "kronn_http_turn:";
+pub const HTTP_TOOL_EXEC_TRACE_PREFIX: &str = "kronn_http_tool_exec:";
 const MAX_HTTP_TELEMETRY_TURNS_PER_DISPATCH: usize = 64;
 const MAX_HTTP_TELEMETRY_TOOLS_PER_TURN: usize = 8;
 const MAX_HTTP_TELEMETRY_TOOL_NAME_BYTES: usize = 64;
@@ -8591,7 +8590,7 @@ fn logged_refusal(
 /// Whether this is one of Kronn's own anti-loop refusals: the call was never
 /// executed and the model is being told to stop asking. Stage-specific worker
 /// refusals are not included, they have budgets of their own.
-fn is_loop_refusal(outcome: &crate::agents::tools::ToolOutcome) -> bool {
+pub fn is_loop_refusal(outcome: &crate::agents::tools::ToolOutcome) -> bool {
     !outcome.ok
         && [
             "round_ceiling_reached",
@@ -9165,13 +9164,13 @@ pub async fn forward_chat_line(
 // invocation. Once a tool has executed, the caller forces the budget to one:
 // even a read-looking tool can hide a remote side effect, so fail closed until
 // the tool contract carries an explicit idempotency guarantee.
-const HTTP_PROVIDER_MAX_ATTEMPTS: usize = 3;
+pub const HTTP_PROVIDER_MAX_ATTEMPTS: usize = 3;
 
 #[derive(Debug)]
-struct HttpProviderFailure {
-    status: Option<reqwest::StatusCode>,
-    detail: String,
-    attempts: usize,
+pub struct HttpProviderFailure {
+    pub status: Option<reqwest::StatusCode>,
+    pub detail: String,
+    pub attempts: usize,
 }
 
 fn is_permanent_provider_failure(detail: &str) -> bool {
@@ -9195,7 +9194,7 @@ fn is_permanent_provider_failure(detail: &str) -> bool {
     .any(|needle| detail.contains(needle))
 }
 
-fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &str) -> bool {
+pub fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &str) -> bool {
     // 501 declares an unimplemented capability; repeating the same body cannot
     // recover it. This differs from capacity/availability failures (503/504).
     if status == Some(reqwest::StatusCode::NOT_IMPLEMENTED) || is_permanent_provider_failure(detail)
@@ -9239,7 +9238,7 @@ fn is_transient_provider_failure(status: Option<reqwest::StatusCode>, detail: &s
 /// </function>`. That text is the one observed in production. The other needles
 /// are neighbouring wordings of the same parser failing, kept so a sibling model
 /// format is replayed the same way; none of them is a capacity or quota signal.
-fn is_unreadable_tool_call_failure(detail: &str) -> bool {
+pub fn is_unreadable_tool_call_failure(detail: &str) -> bool {
     let detail = detail.to_ascii_lowercase();
     [
         "xml syntax error",
@@ -9255,7 +9254,7 @@ fn is_unreadable_tool_call_failure(detail: &str) -> bool {
 /// stderr before the first request and would otherwise lead the failure: it is
 /// not the cause here, and it sends the reader to the wrong setting. It goes,
 /// and the sentence that names the real failure takes the head of the log.
-fn record_unreadable_tool_call_failure(
+pub fn record_unreadable_tool_call_failure(
     stderr: &Arc<Mutex<Vec<String>>>,
     backend: &str,
     model: &str,
@@ -9294,7 +9293,7 @@ fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
 /// Positive evidence that the provider rejects constrained output itself.
 /// Do not infer this from model names/storage formats, a generic 501, or an
 /// invalid schema: those must retain their original failure and request body.
-fn rejects_structured_output(failure: &HttpProviderFailure) -> bool {
+pub fn rejects_structured_output(failure: &HttpProviderFailure) -> bool {
     if !matches!(
         failure.status,
         Some(
@@ -9345,7 +9344,7 @@ fn push_provider_retry_trace(stderr: &Arc<Mutex<Vec<String>>>, line: String) {
     }
 }
 
-fn provider_failure_label(status: Option<reqwest::StatusCode>, detail: &str) -> String {
+pub fn provider_failure_label(status: Option<reqwest::StatusCode>, detail: &str) -> String {
     if detail
         .to_ascii_lowercase()
         .contains("worker local total request limit reached")
@@ -9524,7 +9523,7 @@ fn format_provider_failure(
 /// watchdog runs under. Production goes through `start_ollama_http_with_idle`.
 #[allow(clippy::too_many_arguments)]
 #[cfg(any(test, feature = "test-support"))]
-async fn start_ollama_http(
+pub async fn start_ollama_http(
     agent_type: &AgentType,
     user_prompt: &str,
     system_context: &str,
@@ -9583,7 +9582,7 @@ async fn start_ollama_http(
 /// them they ride the user message as image parts; otherwise the system context
 /// says, per image, that it is attached and unseen.
 #[allow(clippy::too_many_arguments)]
-async fn start_ollama_http_with_idle(
+pub async fn start_ollama_http_with_idle(
     agent_type: &AgentType,
     user_prompt: &str,
     system_context: &str,
@@ -12934,7 +12933,7 @@ pub fn cli_print_session_is_resumable(work_dir: &Path, conversation_id: &str) ->
 }
 
 /// The folder name `claude` gives a working directory inside its store.
-fn claude_project_slug(work_dir: &Path) -> String {
+pub fn claude_project_slug(work_dir: &Path) -> String {
     work_dir
         .to_string_lossy()
         .chars()
@@ -12954,7 +12953,7 @@ pub fn discussion_scratch_dir(discussion_id: &str) -> Result<PathBuf, String> {
 /// directory strictly inside `temp`. Both sides are canonicalised so macOS's
 /// `/var` -> `/private/var` link cannot make a scratch home look foreign.
 #[cfg(any(test, feature = "test-support"))]
-fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
+pub fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let (home_real, temp_real) = (canonical(home), canonical(temp));
     if home_real != temp_real && home_real.starts_with(&temp_real) {
@@ -12999,7 +12998,7 @@ impl Drop for ScratchHome {
     }
 }
 
-fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
+pub fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<PathBuf, String> {
     // The id becomes a path segment: anything but a plain id could escape it.
     if discussion_id.is_empty()
         || !discussion_id
@@ -13151,7 +13150,7 @@ printf '%s\n' '__ALLOW__'
 /// The widening is exactly what building and testing needs: loopback binding
 /// (no `allowedDomains`, so no external host), and read access to the host's
 /// dependency caches. Nothing else is added.
-fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
+pub fn claude_task_worker_settings(work_dir: &Path) -> Result<String, String> {
     let work_dir = work_dir.canonicalize().map_err(|error| {
         format!(
             "Claude task worker cannot start: unable to canonicalize managed worktree {}: {error}",
@@ -13240,7 +13239,7 @@ fn parse_claude_task_worker_auth_status(
     }
 }
 
-fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(), String> {
+pub fn claude_task_worker_auth_result(stdout: &[u8], exit_success: bool) -> Result<(), String> {
     match parse_claude_task_worker_auth_status(stdout, exit_success) {
         ClaudeTaskWorkerAuthStatus::LoggedIn => Ok(()),
         ClaudeTaskWorkerAuthStatus::LoggedOut => Err(
@@ -13270,7 +13269,7 @@ pub struct ClaudeSandboxCatalogueReceipt {
 }
 
 impl ClaudeSandboxCatalogueReceipt {
-    fn validate(self) -> Result<(), String> {
+    pub fn validate(self) -> Result<(), String> {
         self.validate_listing(&[])
     }
 
@@ -13326,7 +13325,7 @@ pub struct ClaudeSandboxCatalogueRoot {
     pub path: PathBuf,
 }
 
-fn claude_sandbox_catalogue_receipt(
+pub fn claude_sandbox_catalogue_receipt(
     repo_roots: &[ClaudeSandboxCatalogueRoot],
 ) -> Result<ClaudeSandboxCatalogueReceipt, String> {
     let mut common_dirs = std::collections::BTreeSet::new();
@@ -13433,9 +13432,7 @@ pub fn claude_task_worker_catalogue_measure(
 /// each repository left out: what a refusal names so a human knows which ones
 /// keep the catalogue over its cap (KT-1676). Best effort, read-only: a root
 /// Git cannot list contributes nothing, the refusal itself is the measure's.
-pub fn claude_task_worker_catalogue_worktrees(
-    project: &crate::models::Project,
-) -> Vec<PathBuf> {
+pub fn claude_task_worker_catalogue_worktrees(project: &crate::models::Project) -> Vec<PathBuf> {
     let mut common_dirs = std::collections::BTreeSet::new();
     let mut worktrees = Vec::new();
     for root in claude_sandbox_catalogue_roots(project) {
@@ -13493,7 +13490,7 @@ async fn run_claude_task_worker_auth_probe(
         .await
 }
 
-fn claude_task_worker_platform_check(windows: bool, via_wsl: bool) -> Result<(), String> {
+pub fn claude_task_worker_platform_check(windows: bool, via_wsl: bool) -> Result<(), String> {
     if windows && !via_wsl {
         return Err(
             "Claude task workers require a sandbox, which Claude does not support on native Windows. +             Use a worker on a supported isolated runtime; ordinary Claude discussions remain available."
@@ -13590,7 +13587,7 @@ impl CopilotTaskWorkerPreflight {
     }
 }
 
-fn parse_copilot_task_worker_preflight(
+pub fn parse_copilot_task_worker_preflight(
     stdout: &[u8],
     exit_success: bool,
 ) -> CopilotTaskWorkerPreflight {
@@ -13607,7 +13604,7 @@ fn parse_copilot_task_worker_preflight(
     }
 }
 
-fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
+pub fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> String {
     let failure_kind = status
         .reason_code()
         .expect("unusable Copilot preflight has a stable reason code");
@@ -13635,7 +13632,7 @@ fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> St
     )
 }
 
-const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
+pub const COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(4);
 
 async fn run_copilot_task_worker_preflight(
     resolved: (String, Vec<String>, bool),
@@ -13649,7 +13646,7 @@ async fn run_copilot_task_worker_preflight(
     .await
 }
 
-async fn run_copilot_task_worker_preflight_with_timeout(
+pub async fn run_copilot_task_worker_preflight_with_timeout(
     resolved: (String, Vec<String>, bool),
     work_dir: &Path,
     timeout: Duration,
@@ -13682,7 +13679,7 @@ async fn run_copilot_task_worker_preflight_with_timeout(
         .await
 }
 
-async fn wait_copilot_preflight_child_with_timeout(
+pub async fn wait_copilot_preflight_child_with_timeout(
     mut child: tokio::process::Child,
     timeout: Duration,
 ) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
@@ -13792,7 +13789,7 @@ async fn probe_copilot_task_worker_auth(
     }
 }
 
-fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {
+pub fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> {
     let source = project_root.join(".mcp.json");
     let raw = std::fs::read_to_string(&source).map_err(|error| {
         format!(
@@ -13844,7 +13841,7 @@ fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> 
     .map_err(|error| format!("Unable to encode the Claude task-worker MCP config: {error}"))
 }
 
-fn insert_claude_mcp_config(args: &mut Vec<String>, config: String, strict: bool) {
+pub fn insert_claude_mcp_config(args: &mut Vec<String>, config: String, strict: bool) {
     // The user prompt is always the last positional argument. MCP config must
     // precede --append-system-prompt when present, otherwise it can be consumed
     // as the system-prompt value. Locate the flag explicitly: inspecting the
@@ -13863,7 +13860,7 @@ fn insert_claude_mcp_config(args: &mut Vec<String>, config: String, strict: bool
 }
 
 #[cfg(any(test, feature = "test-support"))]
-fn agent_command(
+pub fn agent_command(
     agent_type: &AgentType,
     prompt: &str,
     full_access: bool,
@@ -13894,7 +13891,7 @@ fn agent_command(
 /// task worker. A worktree is an ownership boundary, not a sandbox by itself:
 /// every CLI that offers a global bypass must ignore it for worker runs.
 #[allow(clippy::too_many_arguments)]
-fn agent_command_with_task_worker_policy(
+pub fn agent_command_with_task_worker_policy(
     agent_type: &AgentType,
     prompt: &str,
     full_access: bool,
@@ -14296,10 +14293,10 @@ fn agent_command_with_task_worker_policy(
 /// Seen in the wild (EW-7189 analysis): large MCP + skills + prompt combined
 /// pushed past the limit, spawn_failed with `os error 7`.
 pub const MAX_SINGLE_ARG_BYTES: usize = 100 * 1024;
-const CLAUDE_SYSTEM_PROMPT_TRUNCATION_MARKER: &str =
+pub const CLAUDE_SYSTEM_PROMPT_TRUNCATION_MARKER: &str =
     "\n\n[... system prompt truncated by Kronn to fit ARG_MAX ...]";
 
-fn truncate_claude_system_prompt_argument(args: &mut [String]) -> Option<(usize, usize)> {
+pub fn truncate_claude_system_prompt_argument(args: &mut [String]) -> Option<(usize, usize)> {
     let index = args
         .iter()
         .position(|argument| argument == "--append-system-prompt")?;
@@ -14319,21 +14316,21 @@ fn truncate_claude_system_prompt_argument(args: &mut [String]) -> Option<(usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct InvocationSizeReceipt {
-    argv_payload_bytes: usize,
-    environment_payload_bytes: usize,
+pub struct InvocationSizeReceipt {
+    pub argv_payload_bytes: usize,
+    pub environment_payload_bytes: usize,
     argument_count: usize,
-    max_argument_bytes: usize,
+    pub max_argument_bytes: usize,
     environment_entry_count: usize,
     max_environment_entry_bytes: usize,
-    settings_bytes: usize,
-    mcp_config_bytes: usize,
-    system_prompt_bytes: usize,
-    stdin_bytes: usize,
+    pub settings_bytes: usize,
+    pub mcp_config_bytes: usize,
+    pub system_prompt_bytes: usize,
+    pub stdin_bytes: usize,
 }
 
 impl InvocationSizeReceipt {
-    fn compact(self) -> String {
+    pub fn compact(self) -> String {
         format!(
             "argv_payload_bytes={}, environment_payload_bytes={}, argument_count={}, \
              max_argument_bytes={}, environment_entry_count={}, \
@@ -14352,7 +14349,7 @@ impl InvocationSizeReceipt {
         )
     }
 
-    fn validate_single_argument_limit(self) -> Result<(), String> {
+    pub fn validate_single_argument_limit(self) -> Result<(), String> {
         if self.max_argument_bytes <= MAX_SINGLE_ARG_BYTES {
             return Ok(());
         }
@@ -14396,7 +14393,7 @@ fn os_str_bytes(value: &std::ffi::OsStr) -> usize {
     value.encode_wide().count() * std::mem::size_of::<u16>()
 }
 
-fn invocation_size_receipt(
+pub fn invocation_size_receipt(
     program: &std::ffi::OsStr,
     args: &[&std::ffi::OsStr],
     environment: &[(&std::ffi::OsStr, &std::ffi::OsStr)],
@@ -14430,7 +14427,7 @@ fn invocation_size_receipt(
     }
 }
 
-fn command_invocation_size_receipt(
+pub fn command_invocation_size_receipt(
     command: &tokio::process::Command,
     stdin_payload: Option<&str>,
 ) -> InvocationSizeReceipt {
@@ -14510,7 +14507,7 @@ fn os_str_bytes_eq(value: &std::ffi::OsStr, expected: &[u8]) -> bool {
 /// tokens. Same rule as `InvocationSizeReceipt` ("No argument content was
 /// logged"). An argument is identified by the flag it follows when there is
 /// one, since positions shift between agents.
-fn nul_byte_offender(command: &tokio::process::Command) -> Option<String> {
+pub fn nul_byte_offender(command: &tokio::process::Command) -> Option<String> {
     let command = command.as_std();
     if os_str_is_nul_bearing(command.get_program()) {
         return Some("the program name".to_string());
@@ -14666,7 +14663,7 @@ pub fn claude_auto_memory_opted_in() -> bool {
 /// The priority of one agent launch: a task worker runs in the background
 /// whatever the caller asked, any other launch at the priority its caller asked
 /// for (a workflow Agent step: background; a discussion turn: the backend's own).
-fn agent_launch_priority(
+pub fn agent_launch_priority(
     task_worker_context: Option<&TaskWorkerBridgeContext>,
     requested: Priority,
 ) -> Priority {
@@ -14686,7 +14683,7 @@ fn is_claude_code_launch(binary: &str, npx_package: Option<&str>) -> bool {
 
 /// A native discussion turn carries a discussion and none of the step, room
 /// principal or worker capabilities.
-fn claude_auto_memory_kept(
+pub fn claude_auto_memory_kept(
     opted_in: bool,
     discussion_id: Option<&str>,
     task_worker_context: Option<&TaskWorkerBridgeContext>,
@@ -14700,7 +14697,7 @@ fn claude_auto_memory_kept(
         && workflow_step_context.is_none()
 }
 
-fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> String {
+pub fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> String {
     let mut paths = vec![work_dir.to_path_buf()];
     if let (Ok(relative), Some(host_home)) = (work_dir.strip_prefix("/host-home"), host_home) {
         paths.push(Path::new(host_home).join(relative));
@@ -15671,14 +15668,14 @@ fn gemini_stream_usage(stats: &serde_json::Value) -> Option<GeminiUsage> {
 /// capture, where the text output's `[ERROR]` line used to land. Anything that
 /// is not an event (a warning, an older CLI's plain text) passes through.
 #[derive(Default)]
-struct GeminiStreamAdapter {
+pub struct GeminiStreamAdapter {
     /// Reply text received but not yet ended by a newline.
     partial: String,
 }
 
 impl GeminiStreamAdapter {
     /// The lines to emit now (possibly none) for one stdout line.
-    fn push(
+    pub fn push(
         &mut self,
         line: String,
         usage: &Mutex<AgentUsage>,
@@ -15731,7 +15728,7 @@ impl GeminiStreamAdapter {
     }
 
     /// The reply's last line, when the stream ends without a closing newline.
-    fn flush(&mut self) -> Option<String> {
+    pub fn flush(&mut self) -> Option<String> {
         (!self.partial.is_empty()).then(|| std::mem::take(&mut self.partial))
     }
 }
@@ -15770,9 +15767,9 @@ fn codex_token_count(marker: &str, count: &str) -> Option<u64> {
     }
 }
 
-#[cfg(all(test, feature = "full-tests"))]
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
 #[path = "runner_test.rs"]
-mod runner_test;
+pub mod runner_test;
 
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "runner_idle_test.rs"]
@@ -15787,7 +15784,7 @@ mod vault_probe_test;
 #[path = "runner_vision_test.rs"]
 mod runner_vision_test;
 
-fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
+pub fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     let provider = match env_key {
         "ANTHROPIC_API_KEY" => "anthropic",
         "OPENAI_API_KEY" => "openai",
@@ -16048,62 +16045,6 @@ mod acp_resume_tests {
             output.push_str(&line);
         }
         output
-    }
-
-    /// KT-1278 — over ACP the context and the task are ONE user message. An
-    /// audit step hands the session a prompt whose last words are its own
-    /// instruction, and the session puts that prompt last, after the context
-    /// (the workflow step and the task worker brief are pinned at their own
-    /// assembly: `build_step_prompt`, `worker_brief_markdown`).
-    #[tokio::test]
-    async fn an_acp_message_with_context_ends_with_the_tasks_own_instruction() {
-        let docs_root = crate::core::docs_location::DocsRoot::default_root();
-        let step = crate::api::audit::ANALYSIS_STEPS[7];
-        let prompt = crate::api::audit::finish_step_prompt(
-            "Step 8 instructions\n\n### Runtime versions pinned in the repository\n\nNone found.\n",
-            None,
-            8,
-            &step,
-            &docs_root,
-        );
-        let context = "=== ANTI-HALLUCINATION (pointer) ===\n\nCite your sources.\n\n=== AVAILABLE TOOLS ===\n\nA table of tools.";
-        let fixture = transport(ResumeOutcome::Ok, PromptOutcome::Complete);
-        let mut process = run_acp_session(
-            AcpSessionRequest {
-                step_tools: None,
-                agent_type: &AgentType::OpenCode,
-                work_dir: Path::new("."),
-                prompt: &prompt,
-                system_context: context,
-                project_path: "",
-                model_flag: None,
-                reasoning_effort: None,
-                parent_cancel: None,
-                discussion_id: None,
-                resume_id: None,
-                session_store: None,
-                fallback_prompt: None,
-                provenance: None,
-                activity: None,
-                idle_timeout: None,
-                run_progress: None,
-            },
-            fixture.clone(),
-        )
-        .await
-        .expect("run ACP fixture");
-        collect_output(&mut process).await;
-        let sent = fixture.prompts.lock().unwrap().clone();
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].starts_with(context), "context first");
-        assert!(sent[0].ends_with(&prompt), "the task's prompt comes last");
-        assert!(
-            sent[0]
-                .trim_end()
-                .ends_with("Stop once the work is written."),
-            "the message must end on the task's instruction, got …{}",
-            &sent[0][sent[0].len().saturating_sub(200)..]
-        );
     }
 
     #[tokio::test]

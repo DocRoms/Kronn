@@ -44,13 +44,10 @@ pub mod core {
 pub mod db {
     pub use kronn_l2::db::*;
     pub mod audit_validation;
-    pub mod message_ingest;
     pub mod discussion_questions;
     pub mod live_page_action_trusts;
     pub mod live_page_actions;
-    #[cfg(all(test, feature = "full-tests"))]
-    #[path = "tests.rs"]
-    pub mod tests;
+    pub mod message_ingest;
 }
 pub use kronn_l2::delivery;
 pub use kronn_l2::http_transport;
@@ -62,3 +59,30 @@ pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::state::*;
 pub use crate::workflows::WorkflowEngine;
+
+// Tests of lower modules that need this layer.
+#[cfg(test)]
+mod uptests {
+    #[cfg(all(test, feature = "full-tests"))]
+    mod agents__runner__acp_resume_tests;
+    #[cfg(test)]
+    mod core__adr__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__anti_halluc__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__api_access__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__kronn_state__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod core__scanner__tests;
+    #[cfg(test)]
+    mod core__td_index__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod db__audit_runs__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__concurrency__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__readiness__tests;
+    #[cfg(all(test, feature = "full-tests"))]
+    mod workflows__runner__tests;
+}

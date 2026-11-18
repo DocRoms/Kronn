@@ -14,9 +14,10 @@ path = "../../src/layer1.rs"
 default = ["full-tests"]
 full-tests = []
 # Test helpers of this crate, for the tests of the crates above it.
-test-support = ["dep:tempfile", "dep:http-body-util", "kronn-l0/test-support"]
+test-support = ["dep:tempfile", "dep:serial_test", "dep:http-body-util", "kronn-l0/test-support"]
 
 [dependencies]
+serial_test = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
 kronn-l0 = { path = "../l0" }

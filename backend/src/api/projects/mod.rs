@@ -261,7 +261,7 @@ pub fn enrich_audit_status_with_runs(project: &mut Project, completed_full_run: 
 
 /// Find the common parent directory of existing projects.
 /// E.g. if projects are at /home/user/Repos/A and /home/user/Repos/B, returns /home/user/Repos.
-pub(super) fn find_common_parent(projects: &[Project]) -> Option<String> {
+pub fn find_common_parent(projects: &[Project]) -> Option<String> {
     let paths: Vec<&str> = projects.iter().map(|p| p.path.as_str()).collect();
     if paths.is_empty() {
         return None;

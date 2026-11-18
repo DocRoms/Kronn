@@ -905,7 +905,3 @@ pub async fn disable_proof(
         Err(error) => internal(error.into()),
     }
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "trust_gate_tests.rs"]
-mod trust_gate_tests;

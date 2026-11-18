@@ -35,13 +35,13 @@ use crate::models::{ApiKey, AppConfig};
 pub const BACKUP_FILENAME: &str = "config.toml.pre-credential-store.enc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PlainCredential {
-    kind: String,
-    id: String,
-    name: String,
-    provider: String,
-    active: bool,
-    value: String,
+pub struct PlainCredential {
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub active: bool,
+    pub value: String,
 }
 
 impl PlainCredential {
@@ -122,7 +122,7 @@ pub async fn stored_auth_token_exists(db: &Database) -> Result<bool> {
 
 /// Table rows first, then config.toml entries; the file wins on the same id
 /// because it is only written while the store is not armed, so it is newer.
-fn merge(table: &[PlainCredential], file: &[PlainCredential]) -> Vec<PlainCredential> {
+pub fn merge(table: &[PlainCredential], file: &[PlainCredential]) -> Vec<PlainCredential> {
     let mut merged: Vec<PlainCredential> = table.to_vec();
     for cred in file {
         match merged.iter_mut().find(|c| c.row_key() == cred.row_key()) {
@@ -152,7 +152,7 @@ fn encrypt_rows(creds: &[PlainCredential], key_hex: &str) -> Result<Vec<StoredCr
         .collect()
 }
 
-fn decrypt_value(encrypted: &str, key_hex: &str) -> Result<String> {
+pub fn decrypt_value(encrypted: &str, key_hex: &str) -> Result<String> {
     let key = crypto::parse_secret(key_hex).map_err(anyhow::Error::msg)?;
     crypto::decrypt(encrypted, &key).map_err(anyhow::Error::msg)
 }
@@ -650,10 +650,7 @@ pub fn toml_holds_credentials(text: &str) -> bool {
 
 /// Encrypt the current config.toml to [`BACKUP_FILENAME`] (0600) when it still
 /// holds secrets. An existing backup is kept: it is the oldest original.
-pub fn back_up_config_if_it_holds_secrets(
-    dir: &Path,
-    key_hex: &str,
-) -> Result<Option<PathBuf>> {
+pub fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Option<PathBuf>> {
     let backup = dir.join(BACKUP_FILENAME);
     if backup.exists() {
         return Ok(Some(backup));
@@ -793,7 +790,3 @@ fn protect_config_copies(dir: &Path, key_hex: &str) -> Result<()> {
         report.failures.join("; ")
     )
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "credential_store_tests.rs"]
-mod tests;

@@ -6134,15 +6134,16 @@ pub async fn test_step(
     let http_endpoints = crate::models::setup::HttpEndpoints::from_agents(&agents);
     // A press of Test is its own scope for the media guard, and a dry run
     // starts no generation: it would bill, and a preamble does not stop that.
-    let native_tools =
-        crate::core::uplink::linked::<crate::core::uplink_state::WorkflowTestTools>().map(|tools| {
-            (tools.0)(
-                state.clone(),
-                req.project_id.clone(),
-                req.step.name.clone(),
-                req.dry_run,
-            )
-        });
+    let native_tools = crate::core::uplink::linked::<crate::core::uplink_state::WorkflowTestTools>(
+    )
+    .map(|tools| {
+        (tools.0)(
+            state.clone(),
+            req.project_id.clone(),
+            req.step.name.clone(),
+            req.dry_run,
+        )
+    });
 
     // In dry_run mode, prepend a simulation preamble. The preamble is
     // adaptive so it does not fight the output contract downstream steps rely on:
@@ -8168,10 +8169,6 @@ pub async fn test_api_call(
         error,
     }))
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "workflow_readiness_tests.rs"]
-mod readiness_tests;
 
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {

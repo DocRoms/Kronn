@@ -5,13 +5,13 @@
 //! callers only deal with negotiated capabilities and opaque session targets.
 
 pub mod adapter_process;
+pub mod bridge_env;
 pub mod claude_adapter;
 pub mod codex_adapter;
-pub mod bridge_env;
 pub mod permission_broker;
 
-pub use kronn_l0::acp::*;
 use async_trait::async_trait;
+pub use kronn_l0::acp::*;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,7 +24,6 @@ use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
 use crate::models::AgentType;
-
 
 pub use claude_adapter::ClaudeAcpAdapter;
 pub use codex_adapter::CodexAcpAdapter;
@@ -1370,10 +1369,7 @@ pub fn is_bridge_like(id: &str) -> bool {
 /// workspace's `.mcp.json`/`.github/mcp.json`, where a server may be named
 /// `kronn-internal`. So the well-known name is disabled and the session's
 /// bridge, with its step tool list, is added under its per-launch name.
-pub fn native_mcp_launch_args(
-    agent: AcpAgent,
-    bridge: Option<&AcpMcpServer>,
-) -> Vec<String> {
+pub fn native_mcp_launch_args(agent: AcpAgent, bridge: Option<&AcpMcpServer>) -> Vec<String> {
     if agent != AcpAgent::CopilotCli {
         return Vec::new();
     }

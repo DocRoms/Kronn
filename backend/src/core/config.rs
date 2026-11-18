@@ -827,10 +827,7 @@ pub fn inherit_data_dir_lock_for_child(lock: &std::fs::File) -> Result<std::fs::
 /// `fork`, so clearing the flag there cannot leak the lock into an unrelated
 /// command spawned concurrently by another backend thread.
 #[cfg(unix)]
-pub fn inherit_data_dir_lock_on_command(
-    command: &mut std::process::Command,
-    lock: &std::fs::File,
-) {
+pub fn inherit_data_dir_lock_on_command(command: &mut std::process::Command, lock: &std::fs::File) {
     use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
     let fd = lock.as_raw_fd();

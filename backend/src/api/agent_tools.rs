@@ -4925,9 +4925,7 @@ fn api_call_request(
 /// already takes from workflows (`ExtractSpec`). A bare JSONPath string is
 /// accepted as its `path`: local models write that as often as the object, and
 /// refusing it costs a turn to teach a spelling.
-pub fn api_call_extract(
-    arguments: &Value,
-) -> Result<Option<crate::models::ExtractSpec>, String> {
+pub fn api_call_extract(arguments: &Value) -> Result<Option<crate::models::ExtractSpec>, String> {
     let path_error =
         "`extract` needs a JSONPath in `path`, e.g. {\"path\": \"$.data[*]['name','id']\"}";
     let spec = match arguments.get("extract") {

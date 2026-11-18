@@ -980,7 +980,8 @@ pub fn quick_api_for(
     crate::db::workflow_run_pins::pinned_or_live(
         conn,
         run_id,
-        crate::db::workflow_run_pins::QUICK_API, "Quick API",
+        crate::db::workflow_run_pins::QUICK_API,
+        "Quick API",
         id,
         |conn, id| crate::db::quick_apis::get_quick_api(conn, id),
     )
@@ -1020,11 +1021,7 @@ pub async fn hydrate_step_from_quick_api(
     let pinned_run = run_id.map(str::to_string);
     let qa = match db
         .with_read_conn(move |conn| {
-            let api = match quick_api_for(
-                conn,
-                pinned_run.as_deref(),
-                &qa_lookup,
-            )? {
+            let api = match quick_api_for(conn, pinned_run.as_deref(), &qa_lookup)? {
                 Ok(api) => api,
                 Err(reason) => return Ok(Err(reason)),
             };
@@ -1103,12 +1100,7 @@ async fn load_broker_target(
     // un appel canonique côté QuickApi et de le réutiliser dans un step
     // ApiCall single sans tout re-saisir.
     let mut step_owned = step.clone();
-    hydrate_step_from_quick_api(
-        &mut step_owned,
-        &state.db,
-        pinned_run_id,
-    )
-    .await?;
+    hydrate_step_from_quick_api(&mut step_owned, &state.db, pinned_run_id).await?;
     let step = &step_owned;
 
     let Some(slug) = step.api_plugin_slug.as_ref() else {

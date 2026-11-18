@@ -4070,12 +4070,8 @@ pub fn post_docker_elevation_card(conn: &Connection, exec_id: &str) -> Result<()
         &[],
         None,
     )?;
-    let invalid = (crate::core::uplink::required::<crate::core::uplink::MessageQuestionIngest>()?.0)(
-        conn,
-        parent,
-        &message.id,
-        &message.content,
-    )?;
+    let invalid = (crate::core::uplink::required::<crate::core::uplink::MessageQuestionIngest>()?
+        .0)(conn, parent, &message.id, &message.content)?;
     anyhow::ensure!(invalid.is_empty(), "elevation card refused: {invalid:?}");
     Ok(())
 }
@@ -8135,10 +8131,8 @@ fn recovery_row(row: &Row) -> rusqlite::Result<TaskExecutionRecovery> {
 
 pub use super::execution_activity::{
     default_activity_timeout_secs, default_review_timeout_secs, discussion_has_cli_worker,
-    execution_dod_sentence,
-    note_dispatch_activity,
-    note_room_activity, touch_execution_activity, DEFAULT_ACTIVITY_TIMEOUT_SECS,
-    DEFAULT_REVIEW_TIMEOUT_SECS,
+    execution_dod_sentence, note_dispatch_activity, note_room_activity, touch_execution_activity,
+    DEFAULT_ACTIVITY_TIMEOUT_SECS, DEFAULT_REVIEW_TIMEOUT_SECS,
 };
 use super::execution_activity::{
     effective_activity_secs, effective_review_secs, timeout_secs_from_env,

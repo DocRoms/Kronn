@@ -296,7 +296,9 @@ pub fn revoke_all_after_restart(conn: &Connection) -> Result<usize> {
 fn boot_revoke(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
     match revoke_all_after_restart(conn) {
         Ok(0) => {}
-        Ok(n) => tracing::info!("Revoked {n} room membership(s) of workflow steps that died with the previous process"),
+        Ok(n) => tracing::info!(
+            "Revoked {n} room membership(s) of workflow steps that died with the previous process"
+        ),
         Err(e) => tracing::warn!("Failed to revoke stale workflow step room memberships: {e}"),
     }
     Ok(())

@@ -11,6 +11,9 @@ use uuid::Uuid;
 use super::resource_links::{
     definition_references, link_resources, ResourceKey, ResourceReferences,
 };
+#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]
+use crate::core::repository_skills::MAX_CONTENT_BYTES;
+pub(super) use crate::core::repository_skills::{read_repository_file, side_text};
 use crate::models::{
     ApiErrorCode, ApiResponse, ApproveProjectRepositoryResourceRequest, ArtifactBundlePage,
     CreateLivePageDataset, ImportProjectRepositoryResourceRequest, LivePage, LivePageRevision,
@@ -22,9 +25,6 @@ use crate::models::{
     RepositoryResourceFileDiff, ResourceAdrLevel, Skill, UpdateLivePageRequest, Workflow,
 };
 use crate::AppState;
-pub(super) use crate::core::repository_skills::{read_repository_file, side_text};
-#[cfg(all(test, feature = "full-tests"))]
-use crate::core::repository_skills::MAX_CONTENT_BYTES;
 
 pub use crate::core::repository_skills::PROJECT_SKILL_ROOTS;
 

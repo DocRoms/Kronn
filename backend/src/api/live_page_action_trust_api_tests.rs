@@ -2,7 +2,9 @@ use axum::extract::{Path, State};
 use axum::Json;
 
 use super::*;
-use crate::db::live_page_action_trusts::tests::{block, setup, workflow, ACTION, BOUND, PAGE};
+use crate::uptests::db__live_page_action_trusts__tests::tests::{
+    block, setup, workflow, ACTION, BOUND, PAGE,
+};
 
 fn state() -> AppState {
     let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));

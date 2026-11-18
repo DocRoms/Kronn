@@ -37,10 +37,7 @@ pub async fn bootstrap(
 
 /// Why `agent` cannot run a bootstrap, mirroring the form's `canAudit`: an
 /// audit-capable type that is installed (or reachable), enabled and signed in.
-pub fn bootstrap_agent_refusal(
-    agent: &AgentType,
-    detected: &[AgentDetection],
-) -> Option<String> {
+pub fn bootstrap_agent_refusal(agent: &AgentType, detected: &[AgentDetection]) -> Option<String> {
     if !crate::api::audit::agent_can_audit(agent) {
         return Some(format!(
             "{agent:?} cannot run a bootstrap: it has no file tools Kronn can scope to the new project."

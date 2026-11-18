@@ -79,7 +79,7 @@ impl Default for RunProgress {
     }
 }
 
-fn millis(duration: Duration) -> u32 {
+pub fn millis(duration: Duration) -> u32 {
     u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
 }
 
@@ -458,7 +458,3 @@ pub async fn publish_registered(
     .await;
     live.remove(&identity.run_id);
 }
-
-#[cfg(all(test, feature = "full-tests"))]
-#[path = "run_progress_tests.rs"]
-mod tests;

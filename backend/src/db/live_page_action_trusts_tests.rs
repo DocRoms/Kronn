@@ -58,12 +58,7 @@ fn insert_project(conn: &Connection, id: &str) {
 }
 
 /// A Todo page whose `todo-move` block targets `wf-move`, ingested as Kronn does.
-pub fn setup(
-    conn: &Connection,
-    workflow: &Workflow,
-    page_project: Option<&str>,
-    html: &str,
-) {
+pub fn setup(conn: &Connection, workflow: &Workflow, page_project: Option<&str>, html: &str) {
     crate::db::workflows::insert_workflow(conn, workflow).unwrap();
     let now = Utc::now().to_rfc3339();
     conn.execute(

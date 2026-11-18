@@ -1746,7 +1746,10 @@ pub fn price_steps(conn: &Connection, steps: &mut [AuditRunStep]) -> Result<()> 
 fn boot_reconcile(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
     match reconcile_stale_runs(conn, 0) {
         Ok(0) => {}
-        Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),
+        Ok(n) => tracing::info!(
+            "Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted",
+            n
+        ),
         Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
     }
     Ok(())
@@ -3405,67 +3408,6 @@ mod tests {
         assert_eq!(runs[0].id, "new");
         assert_eq!(runs[1].id, "mid");
         assert_eq!(runs[2].id, "old");
-    }
-
-    #[test]
-    fn documentary_failure_invalidates_prior_success_without_losing_usage() {
-        let conn = fresh_conn();
-        let now = Utc::now();
-        insert_running(&conn, "repair", "p1", "Full", "LiteLlm", now).unwrap();
-        let attempt = StepTokens {
-            input: Some(100),
-            output: Some(10),
-            cache_read: Some(50),
-            cache_write: None,
-            ..StepTokens::UNKNOWN
-        };
-        let combined = attempt.plus(attempt);
-        assert_eq!(combined.total(), Some(220), "input as reported");
-        assert_eq!(combined.cache_write, None);
-        for step in 1..=3 {
-            insert_audit_step_start(&conn, "repair", step, "docs/a.md", now).unwrap();
-            finalize_audit_step(
-                &conn,
-                "repair",
-                step,
-                now,
-                500,
-                &combined,
-                Some(660),
-                true,
-                None,
-                false,
-            )
-            .unwrap();
-        }
-        invalidate_documentary_steps(
-            &conn,
-            "repair",
-            &[
-                (1, "docs/a.md: invalid line".into()),
-                (3, "docs/c.md: invented path".into()),
-            ],
-        )
-        .unwrap();
-        let steps = list_audit_steps(&conn, "repair").unwrap();
-        assert_eq!(
-            crate::api::audit::full::already_succeeded_step_indices(&steps),
-            [2].into_iter().collect()
-        );
-        assert_eq!(steps[0].step_tokens, Some(220));
-        assert_eq!(steps[0].duration_ms, Some(500));
-        assert!(steps[2]
-            .step_warning
-            .as_ref()
-            .unwrap()
-            .contains("invented path"));
-        assert_eq!(
-            get_by_id(&conn, "repair")
-                .unwrap()
-                .unwrap()
-                .last_completed_step,
-            1
-        );
     }
     // ---- KT-1211: cancel and failed steps keep the docs whole ----
 

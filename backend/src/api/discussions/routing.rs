@@ -23,10 +23,7 @@ pub enum DispatchRoute {
 /// an ordinary turn always belongs to the configured discussion agent, a
 /// punctual `Agent` target launches that native agent once, and only an exact
 /// `Cli` target belongs to a joined peer.
-pub fn route_human_turn(
-    no_agent_room: bool,
-    target: Option<&MessageTarget>,
-) -> DispatchRoute {
+pub fn route_human_turn(no_agent_room: bool, target: Option<&MessageTarget>) -> DispatchRoute {
     if no_agent_room {
         return DispatchRoute::NoNativeResponder;
     }

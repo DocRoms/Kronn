@@ -3,14 +3,14 @@
 //! the model calls the step made: reviews only, never an orchestrator turn.
 
 use super::*;
-use crate::api::orchestration::tests::{
-    exec_of, git, git_rev, init_repo, projected_manifest_for_execution, test_actor, test_project,
-};
 use crate::api::orchestration::{
     deliver_native_worker_manifest, DeliverOutcome, NativeExecutionCaller,
 };
 use crate::models::{
     CreatePlanningDodItem, CreatePlanningTaskRequest, ModelTier, PlanningTaskStatus,
+};
+use crate::uptests::api__orchestration__tests::tests::{
+    exec_of, git, git_rev, init_repo, projected_manifest_for_execution, test_actor, test_project,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

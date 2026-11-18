@@ -803,7 +803,7 @@ fn no_older_task_worker_waiting() -> String {
 
 /// Local task workers `Running` now (claimed, whether or not the runtime has
 /// started yet).
-fn running_task_workers(conn: &Connection) -> Result<i64> {
+pub fn running_task_workers(conn: &Connection) -> Result<i64> {
     conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM agent_dispatch_jobs AS running
@@ -3958,32 +3958,6 @@ mod tests {
         );
         assert_eq!(running_task_workers(&connection).unwrap(), 1);
         assert!(claim_capped(&connection, &queued));
-    }
-
-    /// A quota escalation settles the worker's dispatch as failed and parks the
-    /// execution for a human: its slot goes to the next in line.
-    #[test]
-    fn a_quota_escalation_frees_the_slot_of_its_worker() {
-        let connection = connection();
-        let a = task_worker(&connection, "a", "ClaudeCode", "agent");
-        let b = task_worker(&connection, "b", "ClaudeCode", "agent");
-        let queued = task_worker(&connection, "c", "ClaudeCode", "agent");
-        assert!(claim_capped(&connection, &a));
-        assert!(claim_capped(&connection, &b));
-        assert!(!claim_capped(&connection, &queued));
-
-        crate::db::orchestration::attach_execution_dispatch(&connection, "exec-a", &a).unwrap();
-        assert!(mark_failed(&connection, &a, "quota exhausted").unwrap());
-        crate::db::orchestration::escalate_execution_for_dispatch_quota(
-            &connection,
-            &a,
-            "ClaudeCode",
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(running_task_workers(&connection).unwrap(), 1);
-        assert!(claim_capped(&connection, &queued), "the slot is handed on");
     }
 
     /// `task_exec_reassign` cancels the replaced dispatch and queues the new
