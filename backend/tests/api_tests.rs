@@ -16961,6 +16961,39 @@ async fn a_pinned_skill_version_is_checked_at_save() {
     delete_json(app(), &format!("/api/skills/{id}")).await;
 }
 
+/// KT-1843 — `directive_ids` takes directive ids: a skill id saved there
+/// loaded nothing at run time and nobody was told.
+#[tokio::test]
+async fn a_quick_prompt_refuses_a_directive_id_that_is_no_directive() {
+    let state = test_state();
+    let app = || build_router_with_auth(state.clone(), false);
+    let (_, listed) = get_json(app(), "/api/directives").await;
+    let directive = listed["data"][0]["id"].as_str().unwrap().to_string();
+    let qp = |ids: Vec<&str>| serde_json::json!({"name": "Framed", "prompt_template": "Frame.", "directive_ids": ids});
+
+    let (_, refused) = post_json(app(), "/api/quick-prompts", qp(vec!["rust"])).await;
+    assert_eq!(refused["success"], false, "a skill id: {refused}");
+    assert!(refused.to_string().contains("not a directive"), "{refused}");
+    let (_, created) = post_json(app(), "/api/quick-prompts", qp(vec![&directive])).await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+
+    let (_, refused) = put_json_root(
+        app(),
+        &format!("/api/quick-prompts/{id}"),
+        qp(vec![&directive, "custom-not-a-directive"]),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    let (_, kept) = put_json_root(
+        app(),
+        &format!("/api/quick-prompts/{id}"),
+        qp(vec![&directive]),
+    )
+    .await;
+    assert_eq!(kept["success"], true, "{kept}");
+}
+
 #[tokio::test]
 async fn directives_list_returns_builtins() {
     let app = test_app();
@@ -33175,6 +33208,96 @@ async fn workflow_export_carries_skills_a_json_data_payload_lists_by_id() {
             .any(|s| s["id"] == local && s["content"] == "Follow the conventions."),
         "the payload names the imported skill {local}: {listed}"
     );
+}
+
+/// KT-1843 — a skill a step only names, in the list an Exec script loads or in
+/// a prompt, travels with the workflow, and so does the skill it cites.
+#[tokio::test]
+async fn workflow_export_carries_skills_a_script_or_a_prompt_names() {
+    if crate::own_process::delegated(
+        module_path!(),
+        "workflow_export_carries_skills_a_script_or_a_prompt_names",
+    ) {
+        return;
+    }
+    let source = test_state();
+    let root = tempfile::tempdir().unwrap();
+    fresh_skill_dir(&root, "source");
+    let app = build_router_with_auth(source.clone(), false);
+    let cited = create_skill(app.clone(), "Output format", "Answer in a table.").await;
+    let in_script = create_skill(
+        app.clone(),
+        "Front conventions",
+        &format!("Follow the conventions, then {cited}."),
+    )
+    .await;
+    let in_prompt = create_skill(app.clone(), "Ticket framing", "Frame the ticket.").await;
+    let unnamed = create_skill(app.clone(), "Review rubric", "Unrelated.").await;
+    // The script tests a prefix that is the start of a real id: not a reference.
+    let prefix = unnamed
+        .rsplit_once('-')
+        .map_or("custom-none", |(head, _)| head);
+    let script = format!(
+        "SKILLS = ['{in_script}', 'php', 'typescript']\n\
+         keep = [s for s in SKILLS if not s.startswith('{prefix}-')]\nprint(keep)"
+    );
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        serde_json::json!({
+            "name": "Scripted", "project_id": null, "trigger": {"type": "Manual"},
+            "exec_allowlist": ["python3"],
+            "steps": [
+                {"name": "ctx", "step_type": {"type": "Exec"},
+                 "exec_command": "python3", "exec_args": ["-c", script]},
+                {"name": "review", "step_type": {"type": "Agent"},
+                 "prompt_template": format!("Read the skill {in_prompt} before you answer.")},
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let workflow = created["data"]["id"].as_str().unwrap().to_string();
+    let (_, exported) = get_json(app, &format!("/api/workflows/{workflow}/export")).await;
+    let mut bundled: Vec<&str> = exported["referenced_skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|skill| skill["id"].as_str().unwrap())
+        .collect();
+    bundled.sort_unstable();
+    let mut expected = vec![cited.as_str(), in_script.as_str(), in_prompt.as_str()];
+    expected.sort_unstable();
+    assert_eq!(bundled, expected, "{exported}");
+
+    fresh_skill_dir(&root, "target");
+    let target = build_router_with_auth(test_state(), false);
+    let request = serde_json::json!({"content": serde_json::to_string(&exported).unwrap(),
+                                     "project_id": null, "skill_choices": []});
+    let (_, preview) = post_json(
+        target.clone(),
+        "/api/workflows/import/preview",
+        request.clone(),
+    )
+    .await;
+    assert_eq!(
+        preview["data"]["missing_skills"],
+        serde_json::json!([]),
+        "{preview}"
+    );
+    let (_, imported) = post_json(target.clone(), "/api/workflows/import", request).await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let (_, listed) = get_json(target, "/api/skills").await;
+    for id in [&cited, &in_script, &in_prompt] {
+        assert!(
+            listed["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == id.as_str()),
+            "{id} is created under the id the script names: {listed}"
+        );
+    }
 }
 
 /// A skill a JsonData payload lists arrives as a copy when this Kronn has

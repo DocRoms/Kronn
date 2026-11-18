@@ -1751,8 +1751,9 @@ TOOLS = [
                 "artifacts": {"type": "object", "description": "Artifact declarations."},
                 "concurrency_limit": {"type": "integer", "description": "Max concurrent runs; scheduled default is 1."},
                 "safety": {"type": "object", "description": "Optional WorkflowSafety overrides."},
-                "actions": {"type": "array", "description": "Optional actions (legacy slot)."},
-                "workspace_config": {"type": "object", "description": "Direct or Isolated workspace."},
+                "actions": {"type": "array", "description": "Legacy slot."},
+                "workspace_config": {"type": "object", "description": "Direct or Isolated."},
+                "refs": {"type": "object", "description": "`{name:{kind,id}}`; steps read `{{refs.<name>}}`."},
             },
             "required": ["name", "trigger", "steps"],
         },
@@ -1847,7 +1848,8 @@ TOOLS = [
                 "name": {"type": "string"},
                 "trigger": {"type": "object", "description": "e.g. `{ \"type\": \"Manual\" }`."},
                 "steps": {"type": "array", "description": "Full replacement steps array (1-20). Fetch + edit via `workflow_get` first."},
-                "variables": {"type": "array", "description": "Launch-time PromptVariable declarations. Sources: user_input, project_env with `<env.NAME>`, or kronn_context with `<context.key>`; references resolve anew at run start. `label`/`placeholder` auto-default."},
+                "variables": {"type": "array", "description": "PromptVariable declarations, as in `workflow_create_draft`."},
+                "refs": {"type": "object", "description": "Replaces `{name:{kind,id}}`."},
                 "guards": {"type": "object"},
                 "on_failure": {"type": "array"},
                 "exec_allowlist": {"type": "array", "items": {"type": "string"}},
@@ -8660,6 +8662,7 @@ def call_workflow_update(args):
         "name", "project_id", "trigger", "steps", "actions", "safety",
         "workspace_config", "concurrency_limit", "concurrency_key", "guards",
         "artifacts", "on_failure", "exec_allowlist", "variables", "enabled",
+        "refs",
     )
     body = {k: args[k] for k in patchable if k in args}
     if not body:
@@ -10536,7 +10539,9 @@ TOOL_MANUALS = {
         "reviews and enables it. Use autonomous creation only after the conversation has "
         "converged. The payload mirrors CreateWorkflowRequest: required name, tagged trigger "
         "and 1-20 steps; optional project, variables, guards, failure chain, allowlist, "
-        "artifacts, concurrency, safety, actions and workspace config.\n\n"
+        "artifacts, concurrency, safety, actions, workspace config and `refs` "
+        "(`{name: {kind, id}}`, kind among page, workflow, quick_prompt, quick_api, "
+        "quick_exec, skill; also accepted by `workflow_update`).\n\n"
         "`concurrency_key` (e.g. `\"{{ticketKey}}\"`, also accepted by `workflow_update`, "
         "null clears it) makes `concurrency_limit` count runs per key rendered at launch: "
         "runs with different keys overlap, a launch whose key is already at the limit is "
@@ -10587,6 +10592,7 @@ TOOL_MANUALS = {
         "ask the user to change it in the editor (\"Run retention\").\n\n"
         "Mark every step that acts outside Kronn (posts, comments, sends, deploys, pushes, moves a ticket) with external_effect: true: a step shadow never runs it and the step cannot carry shadows. "
         "Write {{refs.<name>}} (Exec env KRONN_REF_<NAME>) rather than a pasted id. "
+        "An export carries a custom skill named by its whole id anywhere in a step; any other pasted id is not exported. "
         "`custom-x@N` in skill_ids pins a skill version. "
         "Step shadows are human-only: workflow_get shows each step's shadows, no agent tool sets them and a save keeps the stored ones; a shadow re-runs only its step beside the main execution, on the same input, with another agent, model, prompt or skills (or none, to measure determinism), and never runs a Gate or a step marked external_effect, nor fails or delays the main step; a step's optional shadow_merge (human-only too) waits for the shadows it selects, condenses them with the main output and verifies every point, and its result becomes the step's output; point the user to the step editor's Shadows section, and to the Resources panel of a Page the workflow feeds to promote a version. "
         'Details: tool_manual({tool: "workflow-architect", section: "Versions and shadow runs"}).'

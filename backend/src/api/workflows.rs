@@ -4174,8 +4174,9 @@ pub struct WorkflowDependencyIds {
     pub pages: std::collections::BTreeSet<String>,
     /// Every skill a step or a ref names (KT-1446); only custom ones travel.
     pub skills: std::collections::BTreeSet<String>,
-    /// JsonData values spelled like a custom skill id (#273): exported when
-    /// such a skill exists, but no step loads them, so none is "missing".
+    /// Custom skill ids a step only names: a JsonData value (#273), or an id
+    /// written in a script, a prompt or any other text of the step (KT-1843).
+    /// Exported when such a skill exists; no step loads them, so none is "missing".
     pub payload_skills: std::collections::BTreeSet<String>,
 }
 
@@ -4229,6 +4230,13 @@ pub fn workflow_dependency_ids<'a>(
                     payload,
                     &mut dependencies.payload_skills,
                 );
+            }
+            if let Ok(value) = serde_json::to_value(step) {
+                let mut texts = Vec::new();
+                crate::workflows::refs::collect_texts(&value, &mut texts);
+                for text in texts {
+                    crate::core::skill_bundle::ids_in_text(text, &mut dependencies.payload_skills);
+                }
             }
             if let Some(id) = step
                 .quick_prompt_id

@@ -249,6 +249,8 @@ Emits a literal JSON payload as the step's structured envelope. Zero token, zero
 
 No templating at runtime — the value is returned verbatim. If you need substitution, use an `Agent` or `ApiCall` step that produces the JSON.
 
+**Ids in a payload**: `{{refs.<name>}}` is not rendered here either. A value that is the whole id of a custom skill (`custom-x`, `custom-x@N`) is exported with the workflow and points at the imported skill after an import. Any other object id written in a payload (Page, workflow, Quick Prompt, Quick API, Quick Exec, directive, profile) is plain text: it is not exported and not remapped. Declare those in `refs` and read them from a templated step.
+
 ```json
 {
   "name": "host-list",
@@ -783,7 +785,7 @@ These shape engine behavior across the whole run.
 | `on_failure` | array of WorkflowStep | Rollback chain. **Fires only on `Failed`** (not Cancelled, not StoppedByGuard, not Gate reject). `Gate` is forbidden inside (deadlock). Each rollback step sees `{{failed_step.name}}` and `{{failed_step.output}}` |
 | `exec_allowlist` | array of string | Binaries that `Exec` steps may invoke for this workflow. Empty = Exec disabled (the safe default). Match is exact on the bare binary name (no path, no glob, no shell metas) |
 | `variables` | array of PromptVariable | Run inputs shared by Workflow/QP/QA/QE. Each declaration chooses `user_input`, `project_env`, or `kronn_context`; values become `{{var_name}}` in step prompts |
-| `refs` | object | `Record<name, { kind, id }>`, `kind` one of `page`, `workflow`, `quick_prompt`, `quick_api`, `quick_exec`, `skill`; name `[a-z][a-z0-9_]{0,40}`. Steps read the id as `{{refs.<name>}}` instead of a pasted id; Exec steps also get `KRONN_REF_<NAME>`. Saving checks the object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports point each ref at the imported copy |
+| `refs` | object | `Record<name, { kind, id }>`, `kind` one of `page`, `workflow`, `quick_prompt`, `quick_api`, `quick_exec`, `skill`; name `[a-z][a-z0-9_]{0,40}`. Steps read the id as `{{refs.<name>}}` instead of a pasted id; Exec steps also get `KRONN_REF_<NAME>`. Saving checks the object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports point each ref at the imported copy; a pasted id is not exported, except a custom skill's whole id |
 
 ### PromptVariable sources — references, never captured values
 
@@ -1350,7 +1352,7 @@ Creating, editing, removing or promoting a shadow, and setting `shadow_merge`, i
 
 ### Named refs
 
-`refs: {name: {kind, id}}` at the workflow level names a Page, workflow, Quick Prompt, Quick API, Quick Exec or skill once; steps write `{{refs.<name>}}` instead of a pasted id (accepted even in Exec inline code) and Exec steps also read `KRONN_REF_<NAME>` from their environment. Saving checks that each object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports remap each ref, so prefer a ref to an id written into a step.
+`refs: {name: {kind, id}}` at the workflow level names a Page, workflow, Quick Prompt, Quick API, Quick Exec or skill once; steps write `{{refs.<name>}}` instead of a pasted id (accepted even in Exec inline code) and Exec steps also read `KRONN_REF_<NAME>` from their environment. Saving checks that each object exists and is global or in the workflow's project, and that every `{{refs.<name>}}` is declared. Exports carry the objects and imports remap each ref, so prefer a ref to an id written into a step. An id pasted in a script, a prompt or a payload is not exported, with one exception: a custom skill named by its whole id anywhere in a step travels with the workflow (in a script or a prompt the id is kept as written, never remapped).
 
 ## Reach — the projects a workflow and its agents touch
 

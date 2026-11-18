@@ -7203,6 +7203,18 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
         self.assertEqual((method, path), ("PUT", "/api/workflows/wf-1"))
         self.assertEqual(body, {"name": "New"})  # bogus stripped, id not in body
 
+    def test_workflow_update_and_create_draft_declare_and_forward_refs(self):
+        # KT-1843: the manual tells agents to write {{refs.<name>}}; a save
+        # refuses an undeclared ref, so the tools must carry the declaration.
+        refs = {"conventions": {"kind": "skill", "id": "custom-conventions"}}
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_update({"workflow_id": "wf-1", "refs": refs})
+        self.assertEqual(fake.call_args.args[2], {"refs": refs})
+        for name in ("workflow_update", "workflow_create_draft"):
+            tool = next(t for t in self.mod.TOOLS if t["name"] == name)
+            self.assertIn("refs", tool["inputSchema"]["properties"], name)
+
     def test_workflow_update_normalizes_variables(self):
         fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
         with mock.patch.object(self.mod, "_http", fake):

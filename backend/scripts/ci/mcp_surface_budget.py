@@ -181,7 +181,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1681: `workflow_step_schema` takes `step_type` and `section` on the bridge
 # (the default read is now lean) and its description was cut to pay for them:
 # ceiling lowered by 4 B (84_233 -> 84_229), not raised.
-CATALOGUE_MAX_BYTES = 84_221  # KT-1459: workflow_get names step `shadows`; lowered 84_229 -> 84_221, not raised
+# KT-1459: workflow_get names step `shadows`; lowered 84_229 -> 84_221, not raised.
+# KT-1843: `workflow_update` and `workflow_create_draft` declare `refs`, paid for
+# by their `variables`, `actions` and `workspace_config` descriptions: ceiling
+# lowered by 4 B (84_221 -> 84_217), not raised.
+CATALOGUE_MAX_BYTES = 84_217
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

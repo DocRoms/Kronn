@@ -364,3 +364,77 @@ fn room_scope_names_the_same_access_levels_on_both_sides() {
     assert!(!ROOM_SCOPE_MANUAL.contains("write (planning only"));
     assert!(!bridge_manual.contains("write (planning only"));
 }
+
+/// KT-1843 — a workflow field an agent may author is declared and forwarded on
+/// both sides: `refs` existed for HTTP agents only, so a CLI agent following
+/// the manual (`{{refs.<name>}}`) could only be refused.
+#[test]
+fn workflow_authoring_fields_are_the_same_on_both_sides() {
+    // Routing or identity, not authored content.
+    const NOT_AUTHORED: &[&str] = &["workflow_id", "project_id", "enabled"];
+    // Accepted by both sides, described in the manuals only.
+    const MANUAL_ONLY: &[&str] = &["concurrency_key"];
+    let authored: BTreeSet<&str> = workflow_tools::AUTHORED_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| !MANUAL_ONLY.contains(field))
+        .collect();
+    let script = include_str!("../../scripts/disc-introspection-mcp.py");
+
+    for (tool, end) in [
+        (
+            "workflow_create_draft",
+            "\"required\": [\"name\", \"trigger\", \"steps\"]",
+        ),
+        ("workflow_update", "\"required\": [\"workflow_id\"]"),
+    ] {
+        let native = workflow_tools::declarations()
+            .into_iter()
+            .find(|declared| declared["function"]["name"] == tool)
+            .unwrap_or_else(|| panic!("{tool} in the native catalogue"));
+        let native: BTreeSet<String> = native["function"]["parameters"]["properties"]
+            .as_object()
+            .expect("native properties")
+            .keys()
+            .filter(|field| !NOT_AUTHORED.contains(&field.as_str()))
+            .cloned()
+            .collect();
+        assert_eq!(
+            native.iter().map(String::as_str).collect::<BTreeSet<_>>(),
+            authored,
+            "{tool}: native declaration"
+        );
+
+        let block = script
+            .split(&format!("\"name\": \"{tool}\","))
+            .nth(1)
+            .and_then(|rest| rest.split(end).next())
+            .unwrap_or_else(|| panic!("{tool} in the bridge"));
+        let bridge: BTreeSet<&str> = block
+            .lines()
+            .filter_map(|line| {
+                let field = line.strip_prefix("                \"")?;
+                let (name, rest) = field.split_once('"')?;
+                rest.starts_with(": {").then_some(name)
+            })
+            .filter(|field| !NOT_AUTHORED.contains(field))
+            .collect();
+        assert_eq!(bridge, authored, "{tool}: bridge declaration");
+    }
+
+    let patchable: BTreeSet<&str> = script
+        .split("patchable = (")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .expect("workflow_update's patchable keys in the bridge")
+        .split(',')
+        .map(|key| key.trim().trim_matches('"'))
+        .filter(|key| !key.is_empty())
+        .collect();
+    for field in workflow_tools::AUTHORED_FIELDS {
+        assert!(
+            patchable.contains(field),
+            "workflow_update drops `{field}` on the bridge"
+        );
+    }
+}
