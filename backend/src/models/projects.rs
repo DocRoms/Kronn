@@ -1957,7 +1957,7 @@ pub struct DiscoverReposResponse {
 pub struct AuditInfo {
     #[serde(default)]
     #[ts(optional)]
-    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
+    pub template_update: Option<TemplateUpdate>,
     pub files: Vec<AuditFileInfo>,
     pub todos: Vec<AuditTodo>,
     #[serde(default)]
@@ -1995,7 +1995,7 @@ pub struct AuditTodo {
 pub struct DriftCheckResponse {
     #[serde(default)]
     #[ts(optional)]
-    pub template_update: Option<crate::core::template_manifest::TemplateUpdate>,
+    pub template_update: Option<TemplateUpdate>,
     pub audit_date: Option<String>,
     pub stale_sections: Vec<DriftSection>,
     pub fresh_sections: Vec<String>,
@@ -2855,4 +2855,26 @@ pub struct ProjectRule {
 #[serde(default)]
 pub struct BriefingProjectRules {
     pub rules: Vec<ProjectRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateRename {
+    pub from: String,
+    pub to: String,
+    /// An occupied destination is preserved and needs human reconciliation.
+    pub conflict: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TemplateUpdate {
+    pub available: bool,
+    pub installed_version: Option<String>,
+    pub current_version: Option<String>,
+    pub missing_files: Vec<PlaceholderDoc>,
+    pub renames: Vec<TemplateRename>,
+    /// Removed upstream paths whose successor cannot be proven uniquely.
+    pub unresolved_files: Vec<String>,
+    pub spec_modified: bool,
 }

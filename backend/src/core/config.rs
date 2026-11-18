@@ -641,7 +641,11 @@ pub async fn load() -> Result<Option<AppConfig>> {
 
     // KT-1693 — the agent-level fallback chain of 0.15.3 moves onto the text
     // mode rows; nothing configured is lost, and the legacy field is not written.
-    if crate::core::agent_fallback::migrate_legacy_chains(&mut config.agents) {
+    let mut migrated = false;
+    for migration in inventory::iter::<crate::core::uplink::ConfigMigration> {
+        migrated |= (migration.0)(&mut config);
+    }
+    if migrated {
         needs_save = true;
         tracing::info!("Migrated the agent fallback chains onto the per-mode fallback rows");
     }
@@ -686,31 +690,16 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     // through the config on every use. Doing it here instead of at each of the
     // half-dozen save sites means a new one cannot forget: persisting a
     // threshold and applying it are the same action.
-    crate::core::worktree::set_disk_thresholds(
-        config.server.disk_warning_gib,
-        config.server.disk_critical_gib,
-    );
     crate::core::disk_usage::set_disk_policy(
         config.server.disk_launch_min_free_gib,
         config.server.disk_sweep_idle_hours,
     );
     crate::core::disk_usage::set_stalled_build_days(config.server.disk_stalled_build_days);
-    crate::core::task_worker_lane_seeds::set_seed_policy(
-        config.server.lane_seeds_copy_enabled,
-        config.server.lane_seeds_adopt_suggested,
-    );
     // KT-1633 — Settings > Workers: background priority of the workers' processes.
     crate::core::background_priority::set_enabled(config.workers.background_priority);
-    // KT-1718 — Settings > Workers: the shell limits of a Claude task worker.
-    crate::core::task_worker_env::set_bash_timeouts(&config.workers);
-    // KT-1750 — Settings > Workers: the OS junk files that never count as work.
-    crate::core::worktree::set_os_junk_patterns(&config.workers.os_junk_patterns);
-    // KT-1750 — Settings > Workers: the commit identity and sign-off projects inherit.
-    crate::core::commit_policy::set_global_settings(&config.workers.commit);
-    // KT-1748 — Settings > Workers: the extra roots of Kronn-managed worktrees.
-    crate::core::worktree::set_global_managed_worktree_roots(&config.workers);
-    // KT-1742 — Settings > Workers: how every project's lane is warmed.
-    crate::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
+    for applied in inventory::iter::<crate::core::uplink::ConfigApplied> {
+        (applied.0)(config);
+    }
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())

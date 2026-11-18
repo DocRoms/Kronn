@@ -1185,6 +1185,14 @@ pub fn suggest_seeds(repo: &Path) -> Result<Vec<LaneSeedCandidate>, String> {
     Ok(found)
 }
 
+fn apply_config(config: &crate::models::AppConfig) {
+    set_seed_policy(
+        config.server.lane_seeds_copy_enabled,
+        config.server.lane_seeds_adopt_suggested,
+    );
+}
+inventory::submit! { crate::core::uplink::ConfigApplied(apply_config) }
+
 #[cfg(test)]
 #[path = "task_worker_lane_seeds_test.rs"]
 mod task_worker_lane_seeds_test;

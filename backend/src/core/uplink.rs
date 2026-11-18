@@ -66,9 +66,14 @@ inventory::collect!(TrustWithdrawal);
 pub struct ApiCallSecrets(pub fn(&McpServer, &HashMap<String, String>) -> SecretSet);
 inventory::collect!(ApiCallSecrets);
 
-/// Audit steps the previous backend left running, settled when the database opens.
-pub struct AuditBootSettle(pub fn(&Connection) -> Result<usize>);
-inventory::collect!(AuditBootSettle);
+/// A setting the running process reads outside the config, republished at
+/// every save by the crate that holds it.
+pub struct ConfigApplied(pub fn(&crate::models::AppConfig));
+inventory::collect!(ConfigApplied);
+
+/// A migration of the loaded config; `true` when it changed something to save.
+pub struct ConfigMigration(pub fn(&mut crate::models::AppConfig) -> bool);
+inventory::collect!(ConfigMigration);
 
 /// Runs `work`, then the withdrawal, in one transaction: both stand or fall
 /// together. Inside a transaction the caller already holds, both join it.

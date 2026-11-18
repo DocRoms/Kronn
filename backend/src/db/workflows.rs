@@ -1,4 +1,5 @@
 use anyhow::Result;
+pub use super::ReconciledRun;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -84,14 +85,6 @@ fn run_status_str(s: &RunStatus) -> &'static str {
 /// the failure webhook for it. The process that would normally have notified
 /// (the engine spawn's tail) died with the run, so the boot path is the ONLY
 /// place an Interrupted notification can originate.
-#[derive(Debug, Clone)]
-pub struct ReconciledRun {
-    pub run_id: String,
-    pub workflow_name: String,
-    /// RFC3339, as stored.
-    pub started_at: String,
-}
-
 pub fn reconcile_stale_runs(
     conn: &Connection,
     stale_after_secs: i64,
@@ -3269,3 +3262,18 @@ const STEP_RESULTS_WITHOUT_OUTPUTS: &str = "CASE WHEN json_valid(step_results_js
 fn workflow_run_cols_without_outputs() -> String {
     WORKFLOW_RUN_COLS.replacen("step_results_json", STEP_RESULTS_WITHOUT_OUTPUTS, 1)
 }
+
+// At boot every `Running`/`Pending` run is a zombie: no grace window (cutoff 0).
+fn boot_reconcile(conn: &Connection, boot: &mut super::BootReport) -> Result<()> {
+    match reconcile_stale_runs(conn, 0) {
+        Ok(runs) => {
+            if !runs.is_empty() {
+                tracing::info!("Reconciled {} zombie workflow_runs left 'Running'/'Pending' by a previous process → Interrupted", runs.len());
+            }
+            boot.interrupted = runs;
+        }
+        Err(e) => tracing::warn!("Failed to reconcile stale workflow_runs: {}", e),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 50, run: boot_reconcile } }

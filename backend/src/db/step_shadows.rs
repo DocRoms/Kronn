@@ -151,6 +151,16 @@ pub fn interrupt_running(conn: &Connection) -> Result<usize> {
     )?)
 }
 
+fn boot_interrupt(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
+    match interrupt_running(conn) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Marked {n} step shadow(s) interrupted by the restart"),
+        Err(e) => tracing::warn!("Failed to settle running step shadows: {e}"),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 70, run: boot_interrupt } }
+
 #[cfg(test)]
 mod tests {
     use super::*;

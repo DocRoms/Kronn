@@ -434,6 +434,19 @@ pub fn sync_media(conn: &Connection, job: &crate::db::media_jobs::MediaJob) -> R
     upsert(conn, &media_run(job))
 }
 
+fn boot_repair(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
+    match repair_stale_workflow_projections(conn) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            "Re-synced {} shared runs still marked live for finished workflow runs",
+            n
+        ),
+        Err(e) => tracing::warn!("Failed to repair stale shared-run projections: {}", e),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 90, run: boot_repair } }
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;

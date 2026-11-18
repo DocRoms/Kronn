@@ -9567,6 +9567,23 @@ pub fn list_interrupted_execution_ids(conn: &Connection) -> Result<Vec<String>> 
     Ok(rows)
 }
 
+fn boot_recover_commit_leases(conn: &Connection, boot: &mut super::BootReport) -> Result<()> {
+    if !boot.recover_commit_leases {
+        return Ok(());
+    }
+    let recovered = anyhow::Context::context(
+        recover_spawned_commit_leases_after_restart(conn),
+        "Failed to reconcile spawned commit leases after restart",
+    )?;
+    if recovered > 0 {
+        tracing::info!(
+            "Reconciled {recovered} spawned commit lease(s) left by the previous backend"
+        );
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 10, run: boot_recover_commit_leases } }
+
 #[cfg(test)]
 #[path = "orchestration_tests.rs"]
 mod tests;

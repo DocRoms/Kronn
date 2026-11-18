@@ -1356,6 +1356,11 @@ pub fn get_pin(conn: &Connection, dispatch_job_id: &str) -> anyhow::Result<Optio
     .transpose()
 }
 
+fn migrate_config(config: &mut crate::models::AppConfig) -> bool {
+    migrate_legacy_chains(&mut config.agents)
+}
+inventory::submit! { crate::core::uplink::ConfigMigration(migrate_config) }
+
 #[cfg(all(test, feature = "full-tests"))]
 #[path = "agent_fallback_test.rs"]
 mod tests;

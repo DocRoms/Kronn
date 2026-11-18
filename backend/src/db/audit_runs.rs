@@ -1742,6 +1742,17 @@ pub fn price_steps(conn: &Connection, steps: &mut [AuditRunStep]) -> Result<()> 
     Ok(())
 }
 
+// At boot no audit runner exists in this process: every `Running` row is a zombie.
+fn boot_reconcile(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
+    match reconcile_stale_runs(conn, 0) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),
+        Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 30, run: boot_reconcile } }
+
 #[cfg(all(test, feature = "full-tests"))]
 mod tests {
     use super::*;

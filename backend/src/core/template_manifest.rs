@@ -23,28 +23,7 @@ const LEGACY_SPEC_SHA256: &[&str] = &[
 ];
 
 pub use crate::core::kronn_state::TemplateManifest;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct TemplateRename {
-    pub from: String,
-    pub to: String,
-    /// An occupied destination is preserved and needs human reconciliation.
-    pub conflict: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct TemplateUpdate {
-    pub available: bool,
-    pub installed_version: Option<String>,
-    pub current_version: Option<String>,
-    pub missing_files: Vec<PlaceholderDoc>,
-    pub renames: Vec<TemplateRename>,
-    /// Removed upstream paths whose successor cannot be proven uniquely.
-    pub unresolved_files: Vec<String>,
-    pub spec_modified: bool,
-}
+pub use crate::models::{TemplateRename, TemplateUpdate};
 
 fn version(text: &str) -> Option<String> {
     text.lines().find_map(|line| {

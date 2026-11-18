@@ -1503,25 +1503,6 @@ fn invalidate_workspace_observation_cache(
     results_seen.retain(|(name, _), _| !is_workspace_observation_tool(name));
 }
 
-/// Detect if we're running inside WSL (vs Windows native).
-/// In WSL, /proc/version contains "microsoft" or "WSL".
-#[allow(dead_code)]
-fn is_wsl() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        // WSL2 always sets WSL_DISTRO_NAME — most reliable check
-        if crate::core::child_env::var("WSL_DISTRO_NAME").is_ok() {
-            return true;
-        }
-        std::fs::read_to_string("/proc/version")
-            .map(|v| v.contains("microsoft") || v.contains("WSL"))
-            .unwrap_or(false)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
-}
 
 /// Output mode — how to interpret stdout from the agent
 #[derive(Clone, Copy, PartialEq)]
@@ -14575,27 +14556,9 @@ fn resolve_agent_invocation(
     }
 }
 
-/// Whether this launch crosses into WSL (Windows-native Kronn, WSL binary).
-fn agent_runs_in_wsl(command: &str, resolved_via_wsl: bool) -> bool {
-    super::wsl::runs_in_wsl(
-        cfg!(target_os = "windows") && !is_wsl(),
-        command,
-        resolved_via_wsl,
-    )
-}
-
-pub(crate) fn platform_agent_invocation(
-    command: String,
-    args: Vec<String>,
-    resolved_via_wsl: bool,
-    work_dir: &Path,
-) -> (String, Vec<String>, PathBuf) {
-    if agent_runs_in_wsl(&command, resolved_via_wsl) {
-        super::wsl::wrap_invocation(command, args, work_dir)
-    } else {
-        (command, args, work_dir.to_path_buf())
-    }
-}
+pub use super::wsl::platform_agent_invocation;
+#[allow(unused_imports)]
+pub(crate) use super::wsl::{agent_runs_in_wsl, is_wsl};
 
 /// True iff the agent's `HOME` should NOT be overridden to
 /// `KRONN_HOST_HOME` before spawn. Pure decision so we can test the

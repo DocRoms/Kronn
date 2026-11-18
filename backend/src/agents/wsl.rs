@@ -343,6 +343,48 @@ pub(crate) fn native_acp_wsl_refusal(program: &str) -> String {
     )
 }
 
+/// Detect if we're running inside WSL (vs Windows native).
+/// In WSL, /proc/version contains "microsoft" or "WSL".
+#[allow(dead_code)]
+pub(crate) fn is_wsl() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // WSL2 always sets WSL_DISTRO_NAME — most reliable check
+        if crate::core::child_env::var("WSL_DISTRO_NAME").is_ok() {
+            return true;
+        }
+        std::fs::read_to_string("/proc/version")
+            .map(|v| v.contains("microsoft") || v.contains("WSL"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Whether this launch crosses into WSL (Windows-native Kronn, WSL binary).
+pub(crate) fn agent_runs_in_wsl(command: &str, resolved_via_wsl: bool) -> bool {
+    runs_in_wsl(
+        cfg!(target_os = "windows") && !is_wsl(),
+        command,
+        resolved_via_wsl,
+    )
+}
+
+pub fn platform_agent_invocation(
+    command: String,
+    args: Vec<String>,
+    resolved_via_wsl: bool,
+    work_dir: &Path,
+) -> (String, Vec<String>, PathBuf) {
+    if agent_runs_in_wsl(&command, resolved_via_wsl) {
+        wrap_invocation(command, args, work_dir)
+    } else {
+        (command, args, work_dir.to_path_buf())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

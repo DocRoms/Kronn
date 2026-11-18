@@ -3439,6 +3439,24 @@ pub fn integration_target_idle(
 /// refuses as an integration target. Those repos are exempt; a test that
 /// exercises the refusal opts its repo in with [`ownership_seam::enforce_for`].
 /// Keyed by repository path, so concurrent tests never see each other's choice.
+fn apply_config(config: &crate::models::AppConfig) {
+    set_disk_thresholds(
+        config.server.disk_warning_gib,
+        config.server.disk_critical_gib,
+    );
+    // KT-1750 — Settings > Workers: the OS junk files that never count as work.
+    set_os_junk_patterns(&config.workers.os_junk_patterns);
+    // KT-1748 — Settings > Workers: the extra roots of Kronn-managed worktrees.
+    set_global_managed_worktree_roots(&config.workers);
+    // KT-1718 — Settings > Workers: the shell limits of a Claude task worker.
+    crate::core::task_worker_env::set_bash_timeouts(&config.workers);
+    // KT-1750 — Settings > Workers: the commit identity and sign-off projects inherit.
+    crate::core::commit_policy::set_global_settings(&config.workers.commit);
+    // KT-1742 — Settings > Workers: how every project's lane is warmed.
+    crate::core::task_worker_lane_settings::set_global(&config.workers.lane_warm);
+}
+inventory::submit! { crate::core::uplink::ConfigApplied(apply_config) }
+
 #[cfg(test)]
 pub(crate) mod ownership_seam {
     use std::path::{Path, PathBuf};

@@ -637,8 +637,6 @@ fn reap_tagged_agents_with(
 /// that outlived the backend write after the verdict ("it had written nothing")
 /// was recorded. A run something of which may still be alive is not settled.
 /// Returns how many steps were settled.
-inventory::submit! { crate::core::uplink::AuditBootSettle(stop_agents_and_settle_at_boot) }
-
 pub(crate) fn stop_agents_and_settle_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
     stop_agents_and_settle_with(conn, &crate::core::dispatch_reaper::reap_dispatch)
 }
@@ -987,6 +985,18 @@ pub(crate) fn interrupted_reason(step: u32, settlement: &KilledSettlement) -> St
         outcome_text(settlement)
     )
 }
+
+// An agent the previous backend left running would keep writing the docs a
+// resume rewrites: stopped first, then its unfinished step is put back.
+fn boot_settle(conn: &rusqlite::Connection, _: &mut crate::db::BootReport) -> anyhow::Result<()> {
+    match stop_agents_and_settle_at_boot(conn) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
+        Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),
+    }
+    Ok(())
+}
+inventory::submit! { crate::db::BootStep { order: 20, run: boot_settle } }
 
 #[cfg(test)]
 mod tests {

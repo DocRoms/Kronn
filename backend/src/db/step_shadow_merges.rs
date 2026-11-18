@@ -94,6 +94,16 @@ pub fn interrupt_running(conn: &Connection) -> Result<usize> {
     )?)
 }
 
+fn boot_interrupt(conn: &Connection, _: &mut super::BootReport) -> Result<()> {
+    match interrupt_running(conn) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("Marked {n} step merge(s) failed by the restart"),
+        Err(e) => tracing::warn!("Failed to settle running step merges: {e}"),
+    }
+    Ok(())
+}
+inventory::submit! { super::BootStep { order: 80, run: boot_interrupt } }
+
 #[cfg(test)]
 mod tests {
     use super::*;

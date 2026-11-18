@@ -169,7 +169,7 @@ pub struct Database {
     /// reconcile. Drained exactly once by the boot notifier
     /// (`run_notify::notify_boot_interrupted`) — the process that would have
     /// webhooked these failures died with them.
-    boot_interrupted: Mutex<Vec<workflows::ReconciledRun>>,
+    boot_interrupted: Mutex<Vec<ReconciledRun>>,
     catalog_refresh_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Raised whenever the write connection changes a row a repository
     /// resource is rendered from — see [`resource_changes`].
@@ -178,6 +178,29 @@ pub struct Database {
     /// the closures run on this database's connections.
     assistant_guard: Arc<assistant_conversations::AssistantGuard>,
 }
+
+/// A workflow run the boot reconcile flipped to Interrupted.
+#[derive(Debug, Clone)]
+pub struct ReconciledRun {
+    pub run_id: String,
+    pub workflow_name: String,
+    /// RFC3339, as stored.
+    pub started_at: String,
+}
+
+/// What the boot steps are told and what they report.
+pub struct BootReport {
+    pub recover_commit_leases: bool,
+    pub interrupted: Vec<ReconciledRun>,
+}
+
+/// One step of the reconcile a database open runs after its migrations.
+/// `order` is the position in that sequence; an `Err` aborts the open.
+pub struct BootStep {
+    pub order: u16,
+    pub run: fn(&Connection, &mut BootReport) -> Result<()>,
+}
+inventory::collect!(BootStep);
 
 impl Database {
     pub fn assistant_guard(&self) -> &Arc<assistant_conversations::AssistantGuard> {
@@ -278,112 +301,18 @@ impl Database {
         // Pass db path so a backup is created before pending migrations.
         migrations::run_with_backup(&conn, Some(path))?;
 
-        if recover_commit_leases {
-            let recovered_commit_leases =
-                orchestration::recover_spawned_commit_leases_after_restart(&conn)
-                    .context("Failed to reconcile spawned commit leases after restart")?;
-            if recovered_commit_leases > 0 {
-                tracing::info!(
-                    "Reconciled {recovered_commit_leases} spawned commit lease(s) left by the previous backend"
-                );
-            }
-        }
-
-        // 0.8.4 (#317 / B1) — reconcile stale `Running` audit_runs at
-        // boot. A backend crash, container restart, or kill -9 during
-        // an audit leaves the row stuck `Running` forever, polluting
-        // the recap chip strip + the "active audits" badge.
-        // Cutoff 0, same reasoning as the workflow_runs reconcile below:
-        // at boot no in-process audit runner exists, so every `Running`
-        // row is a zombie — and the flip is resume-safe because
-        // last_completed_step survives (see
-        // `reconcile_stale_runs_preserves_last_completed_step`).
-        // KT-1211 (M5), KT-1324 — an agent the previous backend left running
-        // would keep writing the docs the freed lease lets a resume rewrite:
-        // stop them all first (the recorded one, then whatever carries a run's
-        // tag). Then the step each was writing, which never ended, is put back
-        // from its pre-step snapshot (or marked partial) now — never before
-        // the agent is gone, and never left half-written and unmarked until
-        // the next launch.
-        let settled = match crate::core::uplink::linked::<crate::core::uplink::AuditBootSettle>() {
-            Some(hook) => (hook.0)(&conn),
-            None => Ok(0),
+        // What the previous backend left unfinished is settled now, each step
+        // by the crate that knows it, in the order the steps declare.
+        let mut boot = BootReport {
+            recover_commit_leases,
+            interrupted: Vec::new(),
         };
-        match settled {
-            Ok(0) => {}
-            Ok(n) => tracing::warn!("Settled {n} audit step(s) cut off with the previous backend"),
-            Err(e) => tracing::warn!("Failed to settle audit steps cut off at boot: {e}"),
+        let mut steps: Vec<&BootStep> = inventory::iter::<BootStep>.into_iter().collect();
+        steps.sort_by_key(|step| step.order);
+        for step in steps {
+            (step.run)(&conn, &mut boot)?;
         }
-        match audit_runs::reconcile_stale_runs(&conn, 0) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),
-            Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
-        }
-
-        // KT-1122 — recognise validations that already signalled completion
-        // and archive the stale ones an old audit left open. Idempotent.
-        match audit_validation::repair(&conn) {
-            Ok(audit_validation::RepairReport { completed: 0, archived: 0 }) => {}
-            Ok(report) => tracing::info!(
-                "Repaired audit validations: {} completion(s) recognised, {} stale discussion(s) archived",
-                report.completed,
-                report.archived
-            ),
-            Err(e) => tracing::warn!("Failed to repair audit validation state: {}", e),
-        }
-
-        // 0.8.11 (B5) — same reconcile for workflow_runs: a run that was in
-        // flight when the process died stays `Running`/`Pending` forever,
-        // poisoning the active-runs badge and cron "last run" checks.
-        // Cutoff 0 (not 30 min): at BOOT there is no in-process runner state,
-        // so every `Running`/`Pending` row is by definition a zombie — a grace
-        // window would just leave a freshly-interrupted run lying about its
-        // status for up to that long (Copilot review, PR #114).
-        let boot_interrupted = match workflows::reconcile_stale_runs(&conn, 0) {
-            Ok(v) => {
-                if !v.is_empty() {
-                    tracing::info!("Reconciled {} zombie workflow_runs left 'Running'/'Pending' by a previous process → Interrupted", v.len());
-                }
-                v
-            }
-            Err(e) => {
-                tracing::warn!("Failed to reconcile stale workflow_runs: {}", e);
-                Vec::new()
-            }
-        };
-        match workflow_step_rooms::revoke_all_after_restart(&conn) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Revoked {n} room membership(s) of workflow steps that died with the previous process"),
-            Err(e) => tracing::warn!("Failed to revoke stale workflow step room memberships: {e}"),
-        }
-        match step_shadows::interrupt_running(&conn) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Marked {n} step shadow(s) interrupted by the restart"),
-            Err(e) => tracing::warn!("Failed to settle running step shadows: {e}"),
-        }
-        match step_shadow_merges::interrupt_running(&conn) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Marked {n} step merge(s) failed by the restart"),
-            Err(e) => tracing::warn!("Failed to settle running step merges: {e}"),
-        }
-        match shared_runs::repair_stale_workflow_projections(&conn) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(
-                "Re-synced {} shared runs still marked live for finished workflow runs",
-                n
-            ),
-            Err(e) => tracing::warn!("Failed to repair stale shared-run projections: {}", e),
-        }
-
-        // 0.8.6 — auto-purge api_call_logs older than 90 days at boot.
-        // Generous default : keeps a quarter of audit trail for debug
-        // while preventing unbounded growth. User can manually trigger
-        // a tighter purge via the Settings → API audit "Purge" button.
-        match api_call_logs::purge_older_than(&conn, 90) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Purged {} api_call_logs rows older than 90 days", n),
-            Err(e) => tracing::warn!("Failed to auto-purge api_call_logs: {}", e),
-        }
+        let boot_interrupted = boot.interrupted;
 
         // ADR-001 O2 — open the read-only companion connection, ONLY when WAL
         // is actually effective: in DELETE/TRUNCATE journal modes a reader's
@@ -477,7 +406,7 @@ impl Database {
 
     /// Drain the boot-reconciled Interrupted runs (once). Returns empty on
     /// every subsequent call — the boot notifier is the single consumer.
-    pub fn take_boot_interrupted(&self) -> Vec<workflows::ReconciledRun> {
+    pub fn take_boot_interrupted(&self) -> Vec<ReconciledRun> {
         self.boot_interrupted
             .lock()
             .map(|mut v| std::mem::take(&mut *v))

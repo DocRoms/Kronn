@@ -43,7 +43,7 @@ pub mod runner;
 pub mod tool_trace;
 pub mod tools;
 pub mod vision;
-pub(crate) mod wsl;
+pub mod wsl;
 
 #[derive(Clone, Debug, Default)]
 struct RuntimeProbe {
@@ -1209,7 +1209,7 @@ async fn probe_npx_invocation(
         return RuntimeProbe::default();
     }
     let (executable, args, work_dir) =
-        runner::platform_agent_invocation(executable, args, via_wsl, work_dir);
+        wsl::platform_agent_invocation(executable, args, via_wsl, work_dir);
     let command: Vec<String> = std::iter::once(executable.clone())
         .chain(args.iter().cloned())
         .collect();
