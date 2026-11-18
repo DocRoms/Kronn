@@ -21,7 +21,7 @@ The editor lists only the names available to the selected project and inserts
 the recommended form; it never receives or displays their values.
 
 [src: file: backend/src/models/quick.rs:301-308#declarations_with_template_environment_variables]
-[src: file: backend/src/api/quick_prompts.rs:1007-1019#declarations_with_template_environment_variables]
+[src: file: backend/src/api/quick_prompts.rs:1028-1040#declarations_with_template_environment_variables]
 [src: file: backend/src/api/mcps.rs:189-210#project_environment_names]
 [src: file: frontend/src/components/workflows/QuickPromptForm.tsx:162-166#insertEnvironmentVariable]
 

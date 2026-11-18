@@ -86,8 +86,8 @@ pub struct ArtifactBundle {
     /// KT-1843 — what the exported content names and the file does not hold;
     /// shown before the file leaves.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[ts(optional, as = "Option<Vec<crate::core::export_report::NotCarried>>")]
-    pub not_carried: Vec<crate::core::export_report::NotCarried>,
+    #[ts(optional, as = "Option<Vec<NotCarried>>")]
+    pub not_carried: Vec<NotCarried>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
@@ -230,4 +230,16 @@ pub struct ArtifactImportResult {
 pub struct ArtifactImportWarning {
     pub kind: String,
     pub id: String,
+}
+
+/// An object the exported content names and the file does not hold.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NotCarried {
+    /// `skill`, `directive`, `profile`, `page`, `workflow`, `quick_prompt`,
+    /// `quick_api` or `quick_exec`.
+    pub kind: String,
+    pub id: String,
+    /// Where it is named, e.g. `Review › write_ctx` (workflow, then step).
+    pub named_in: String,
 }

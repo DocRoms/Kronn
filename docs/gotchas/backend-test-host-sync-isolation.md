@@ -83,7 +83,7 @@ and sends two ordinary concurrent create requests after initialization. The
 blocked child places a file inside the owned Codex fixture and verifies that a
 write failure leaves the outside sentinels unchanged. The parent re-executes its
 own test binary with `--exact`, has a 15-second deadline/kill path, and asserts
-that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:19395-19625#MCP_HOST_ISOLATION_CHILD]
+that its own two overrides are unchanged after every child. [src: file: backend/tests/api_tests.rs:19428-19658#MCP_HOST_ISOLATION_CHILD]
 
 The parent initializes the ordinary `OnceLock` before taking those environment
 snapshots. Otherwise a parallel non-serial router test can perform the first

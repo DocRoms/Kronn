@@ -3209,8 +3209,8 @@ pub struct WorkflowExportEnvelope {
     /// KT-1843 — what the exported content names and the file does not hold;
     /// shown before the file leaves.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[ts(optional, as = "Option<Vec<crate::core::export_report::NotCarried>>")]
-    pub not_carried: Vec<crate::core::export_report::NotCarried>,
+    #[ts(optional, as = "Option<Vec<crate::models::NotCarried>>")]
+    pub not_carried: Vec<crate::models::NotCarried>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

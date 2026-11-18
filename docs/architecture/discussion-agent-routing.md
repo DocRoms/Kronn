@@ -87,7 +87,7 @@ host needs an out-of-band push capability.
 [src: file: backend/src/api/disc_invite.rs:1691-1760#addressed_to_caller]
 [src: file: backend/src/api/disc_invite.rs:1086-1090#AWARENESS_MAX_MESSAGES]
 [src: file: backend/scripts/disc-introspection-mcp.py:7412-7443#_WAIT_PREEMPTED_NOTICE]
-[src: file: backend/scripts/disc-introspection-mcp.py:12387-12394#_with_wait_preempted]
+[src: file: backend/scripts/disc-introspection-mcp.py:12393-12400#_with_wait_preempted]
 
 Awareness delivery follows a scan / offer / ack contract with two durable
 per-session cursors. When a wake response attaches a batch, the server
@@ -103,7 +103,7 @@ New and migrated sessions start both cursors at the room's current tip.
 [src: file: backend/src/api/disc_invite.rs:1377-1405#ack_awareness_upto]
 [src: file: backend/scripts/disc-introspection-mcp.py:3528-3537#_PENDING_AWARENESS_ACK_BY_DISC]
 [src: file: backend/scripts/disc-introspection-mcp.py:4037-4054#_ack_pending_read_cursors]
-[src: file: backend/scripts/disc-introspection-mcp.py:4077-4089#_stage_awareness_ack]
+[src: file: backend/scripts/disc-introspection-mcp.py:4079-4091#_stage_awareness_ack]
 [src: file: backend/src/db/discussion_sessions.rs:450-484#create_session]
 
 ## Queue, restart, and edit/resend

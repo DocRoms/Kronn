@@ -24,7 +24,7 @@ room: `@claude` is the discussion agent in a ClaudeCode-configured room
 and a punctual spawn everywhere else. This is intentional and the
 autocomplete must always show which one is being picked (KT-211).
 [src: file: frontend/src/lib/messageTargets.ts:54-68#isPrincipal]
-[src: file: backend/scripts/disc-introspection-mcp.py:5261-5269#principal]
+[src: file: backend/scripts/disc-introspection-mcp.py:5263-5271#principal]
 
 ## 2. Alias resolution, exactly
 
@@ -152,7 +152,7 @@ context the short alias stays free (both identities may be wanted).
   native identity rotated (fresh session id) needs one `disc_join` with
   a token, which mints its credential — one-shot, by design. Unacked
   awareness survives reloads (server cursors, migrations 105/106).
-  [src: file: backend/scripts/disc-introspection-mcp.py:3588-3597#_BINDING_DIR]
+  [src: file: backend/scripts/disc-introspection-mcp.py:3590-3599#_BINDING_DIR]
   [src: file: backend/src/db/sql/106_awareness_offered_cursor.sql:1-11#awareness_offered_upto]
 
 ## 7. Autocomplete presentation (KT-211 contract)

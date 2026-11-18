@@ -100,7 +100,7 @@ its display name and current tier model, and Quick Prompt comparisons persist
 the stable connection identifier. Re-running a comparison keeps the provider
 and reasoning tier while resolving the model currently mapped to that tier, so
 an unavailable or deliberately replaced model is not forced back into a retry.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:123-136#externalConnectionSwitchTarget]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:125-138#externalConnectionSwitchTarget]
 [src: file: backend/src/models/quick.rs:502-506#connection_id]
 [src: file: frontend/src/lib/compareTargets.ts:5-9#CompareTarget]
 [src: file: backend/src/db/workflows.rs:955-1004#connection_tier_model]

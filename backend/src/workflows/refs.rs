@@ -65,7 +65,7 @@ pub fn validate_syntax(refs: &WorkflowRefs) -> Result<(), String> {
 }
 
 /// Every text of `value`, object keys included: where a step can name an id.
-pub(crate) fn collect_texts<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+pub fn collect_texts<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
     match value {
         serde_json::Value::String(text) => out.push(text),
         serde_json::Value::Array(items) => items.iter().for_each(|item| collect_texts(item, out)),

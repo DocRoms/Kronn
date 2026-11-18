@@ -267,7 +267,7 @@ or importing a QP preserves its editable `agent_settings`, while it does not
 reconstruct historic discussion launch overrides.
 [src: file: backend/src/db/discussion_effort.rs:1#Immutable]
 [src: file: backend/src/models/quick.rs:866-876#QuickPromptExportEnvelope]
-[src: file: backend/src/api/quick_prompts.rs:365-436#export_qp]
+[src: file: backend/src/api/quick_prompts.rs:386-457#export_qp]
 
 Settings → Agents exposes an effort selector per tier for Claude and Codex.
 It derives choices from the selected model's catalog entry, retains an invalid saved value only as an

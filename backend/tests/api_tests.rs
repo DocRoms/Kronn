@@ -33464,7 +33464,7 @@ async fn workflow_export_carries_directives_and_profiles_and_import_never_copies
     let mut expected = vec![brief.clone(), house.clone()];
     expected.sort();
     assert_eq!(ids("referenced_directives"), expected, "builtins stay ids");
-    assert_eq!(ids("referenced_profiles"), [profile.clone()]);
+    assert_eq!(ids("referenced_profiles"), std::slice::from_ref(&profile));
     assert!(exported.get("not_carried").is_none(), "{exported}");
     let file = serde_json::to_string(&exported).unwrap();
 
@@ -33604,6 +33604,67 @@ async fn workflow_export_carries_directives_and_profiles_and_import_never_copies
         1,
         "no second copy: {profiles}"
     );
+
+    // A Kronn that already words them under other names: the imported step and
+    // the bundled Quick Prompt bind its entries, whose ids the file never held.
+    fresh_skill_dir(&root, "worded");
+    let worded = build_router_with_auth(test_state(), false);
+    let create = |path: &'static str, body: Value| {
+        let app = worded.clone();
+        async move {
+            let (_, created) = post_json(app, path, body).await;
+            assert_eq!(created["success"], true, "{created}");
+            created["data"]["id"].as_str().unwrap().to_string()
+        }
+    };
+    let directive_body = |name: &str, content: &str| {
+        serde_json::json!({"name": name, "description": "", "icon": "T",
+                           "category": "Output", "content": content})
+    };
+    let our_house = create(
+        "/api/directives",
+        directive_body("Our tables", "Answer in a table."),
+    )
+    .await;
+    let our_brief = create(
+        "/api/directives",
+        directive_body("Short", "Three lines at most."),
+    )
+    .await;
+    let our_profile = create(
+        "/api/profiles",
+        serde_json::json!({"name": "Skipper", "persona_name": "Skip", "role": "Ships",
+                           "avatar": "S", "color": "#654321", "category": "Technical",
+                           "persona_prompt": "You ship carefully."}),
+    )
+    .await;
+    assert_ne!(our_house, house);
+    assert_ne!(our_brief, brief);
+    assert_ne!(our_profile, profile);
+    let (_, imported) = post_json(worded.clone(), "/api/workflows/import", request(&file)).await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let step = &imported["data"]["steps"][0];
+    assert_eq!(
+        step["directive_ids"],
+        serde_json::json!([our_house, "token-saver"])
+    );
+    assert_eq!(
+        step["profile_ids"],
+        serde_json::json!([our_profile, "architect"])
+    );
+    let prompt_id = imported["data"]["steps"][1]["quick_prompt_id"]
+        .as_str()
+        .unwrap();
+    let (_, prompts) = get_json(worded.clone(), "/api/quick-prompts").await;
+    let bundled = prompts["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == prompt_id)
+        .unwrap_or_else(|| panic!("{prompts}"));
+    assert_eq!(bundled["directive_ids"], serde_json::json!([our_brief]));
+    let (_, listed) = get_json(worded, "/api/directives").await;
+    assert_eq!(customs(&listed), 2, "nothing was added: {listed}");
 }
 
 /// A skill a JsonData payload lists arrives as a copy when this Kronn has
@@ -33907,7 +33968,10 @@ async fn artifact_bundle_carries_directives_and_profiles_and_import_never_copies
     let mut expected = vec![on_step.clone(), on_prompt.clone(), on_api.clone()];
     expected.sort();
     assert_eq!(ids_of("referenced_directives"), expected);
-    assert_eq!(ids_of("referenced_profiles"), [persona.clone()]);
+    assert_eq!(
+        ids_of("referenced_profiles"),
+        std::slice::from_ref(&persona)
+    );
     assert!(bundle.get("not_carried").is_none(), "{bundle}");
     let content = serde_json::to_string(bundle).unwrap();
 
@@ -33989,7 +34053,7 @@ async fn artifact_bundle_carries_directives_and_profiles_and_import_never_copies
             .persona_prompt,
         "You ship carefully."
     );
-    assert_eq!(prompt.profile_ids, [local_persona.clone()]);
+    assert_eq!(prompt.profile_ids, std::slice::from_ref(&local_persona));
     assert_eq!(api.profile_ids, [local_persona]);
 
     // The same bundle again: every entry is reused, none is added.
@@ -34022,6 +34086,69 @@ async fn artifact_bundle_carries_directives_and_profiles_and_import_never_copies
         )
     };
     assert_eq!(customs(), (3, 1));
+
+    // A Kronn that already words them under other names: the step, the Quick
+    // Prompt and the Quick API bind its entries, whose ids the bundle never held.
+    fresh_skill_dir(&root, "worded");
+    let ours = (
+        save("Our tables", "Answer in a table."),
+        save("Short", "Three lines at most."),
+        save("Digits", "Numbers only."),
+    );
+    let our_persona =
+        kronn::core::profiles::save_custom_profile(&kronn::core::profiles::CustomProfileData {
+            name: "Skipper",
+            persona_name: "Skip",
+            role: "Ships",
+            avatar: "S",
+            color: "#654321",
+            category: &kronn::models::ProfileCategory::Technical,
+            persona_prompt: "You ship carefully.",
+            default_engine: None,
+        })
+        .unwrap();
+    assert_ne!(ours.0, on_step);
+    assert_ne!(ours.1, on_prompt);
+    assert_ne!(ours.2, on_api);
+    assert_ne!(our_persona, persona);
+    let worded_state = test_state();
+    let worded = build_router_with_auth(worded_state.clone(), false);
+    let (_, preview) = post_json(
+        worded.clone(),
+        "/api/pages/import/preview",
+        request(Value::Null),
+    )
+    .await;
+    let (_, imported) = post_json(
+        worded,
+        "/api/pages/import",
+        request(preview["data"]["digest"].clone()),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let (workflow, prompt, api) = worded_state
+        .db
+        .with_read_conn(|conn| {
+            let workflow = kronn::db::workflows::list_workflows(conn)?.remove(0);
+            let prompt = kronn::db::quick_prompts::list_quick_prompts(conn)?.remove(0);
+            let api = kronn::db::quick_apis::list_quick_apis(conn)?.remove(0);
+            Ok((workflow, prompt, api))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        workflow.steps[0].directive_ids,
+        [ours.0.clone(), "token-saver".to_string()]
+    );
+    assert_eq!(
+        workflow.steps[0].profile_ids,
+        std::slice::from_ref(&our_persona)
+    );
+    assert_eq!(prompt.directive_ids, std::slice::from_ref(&ours.1));
+    assert_eq!(prompt.profile_ids, std::slice::from_ref(&our_persona));
+    assert_eq!(api.directive_ids, std::slice::from_ref(&ours.2));
+    assert_eq!(api.profile_ids, [our_persona]);
+    assert_eq!(customs(), (3, 1), "nothing was added");
 }
 
 /// KT-1446 — a Page bundle carries the custom skills of its workflows and

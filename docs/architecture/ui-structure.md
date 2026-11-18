@@ -329,9 +329,9 @@ Automation has no additional page-title band: the selected workflow, Quick
 Prompt, Quick API or Quick Exec header is the single visible content header.
 `[src: file: frontend/src/components/CollectionShell.css:2-5#collection-detail-header]`
 `[src: file: frontend/src/components/workflows/WorkflowDetail.tsx:1938#collection-detail-header]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3321#selectedQuickPromptId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:3801#selectedQuickApiId]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:4224#selectedQuickExecId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3345#selectedQuickPromptId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:3825#selectedQuickApiId]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:4248#selectedQuickExecId]`
 
 The Projects initial loading state keeps the complete master/detail shell
 mounted. Its indicators render inside the sidebar and detail slots rather than
@@ -355,16 +355,16 @@ resource and collapsed resource categories, while search expands matching
 categories only temporarily.
 `[src: file: frontend/src/lib/automationNavigation.ts:20-33#readAutomationLastVisit]`
 `[src: file: frontend/src/lib/automationNavigation.ts:35-41#writeAutomationLastVisit]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:263-273#readCollapsedAutomationSections]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:602-611#AUTOMATION_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/WorkflowsPage.tsx:2660-2665#isGroupCollapsed]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:265-275#readCollapsedAutomationSections]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:604-613#AUTOMATION_COLLAPSED_STORAGE_KEY]`
+`[src: file: frontend/src/pages/WorkflowsPage.tsx:2672-2677#isGroupCollapsed]`
 Pages follows the same contract for its active Page and sidebar categories, including a safe
 fallback when a saved Page was removed.
-`[src: file: frontend/src/pages/PagesPage.tsx:81#PAGE_NAVIGATION_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:83#PAGE_NAVIGATION_STORAGE_KEY]`
 `[src: file: frontend/src/pages/PagesPage.tsx:109-118#readPageNavigation]`
-`[src: file: frontend/src/pages/PagesPage.tsx:319-325#PAGE_COLLAPSED_STORAGE_KEY]`
-`[src: file: frontend/src/pages/PagesPage.tsx:385-427#refresh]`
-`[src: file: frontend/src/pages/PagesPage.tsx:849-852#isSectionCollapsed]`
+`[src: file: frontend/src/pages/PagesPage.tsx:330-336#PAGE_COLLAPSED_STORAGE_KEY]`
+`[src: file: frontend/src/pages/PagesPage.tsx:396-438#refresh]`
+`[src: file: frontend/src/pages/PagesPage.tsx:860-863#isSectionCollapsed]`
 Project detail restores the last valid tab across project switches and falls back to Overview
 when a stale value is found.
 `[src: file: frontend/src/components/ProjectCard.tsx:79-92#readProjectDetailView]`
@@ -593,8 +593,8 @@ run list and never encrypted, so it holds plain labels such as the ticket a run
 is about, never a secret. `GET /api/workflows/{id}/runs?state_key=ticketKey&state_value=EW-7791&limit=1`
 returns the newest run carrying that entry, whether it was seeded or written by
 a step, without reading any step output.
-`[src: file: backend/src/api/workflows.rs:5627-5659#validate_initial_run_state]`
-`[src: file: backend/src/api/workflows.rs:6272-6286#list_runs_by_state_visible]`
+`[src: file: backend/src/api/workflows.rs:5706-5738#validate_initial_run_state]`
+`[src: file: backend/src/api/workflows.rs:6351-6365#list_runs_by_state_visible]`
 `[src: file: backend/src/db/workflows.rs:1638-1674#list_runs_by_state_visible]`
 
 **6. Rollback / `on_failure`.** `Workflow.on_failure: Vec<WorkflowStep>` — a separate step list that fires **only** when the run terminates with `RunStatus::Failed`. Skipped on `Cancelled`, `StoppedByGuard`, and Gate `reject`. Templates `{{failed_step.name}}` and `{{failed_step.output}}` are exposed inside on_failure prompts. Migration `041_workflow_on_failure.sql`. The wizard rejects `Gate` inside the rollback list (Notify + Agent + ApiCall accepted).

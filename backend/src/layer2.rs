@@ -59,11 +59,13 @@ pub mod core {
     pub mod agent_fallback;
     pub mod approved_scripts;
     pub mod audit_validation;
+    pub mod binding_bundle;
     pub mod briefing_docs;
     pub mod cli_access_probe;
     pub mod connection_fallback;
     pub mod cross_audit;
     pub mod cross_audit_decision;
+    pub mod export_report;
     pub mod project_profile;
     pub mod repo_facts;
     pub mod run_notify;

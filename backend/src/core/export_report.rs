@@ -2,44 +2,30 @@
 //! handed to someone else is complete, or says exactly what it leaves out.
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
-
 use crate::models::{QuickApi, QuickPrompt, Workflow, WorkflowStep};
 
-/// An object the exported content names and the file does not hold.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct NotCarried {
-    /// `skill`, `directive`, `profile`, `page`, `workflow`, `quick_prompt`,
-    /// `quick_api` or `quick_exec`.
-    pub kind: String,
-    pub id: String,
-    /// Where it is named, e.g. `Review › write_ctx` (workflow, then step).
-    pub named_in: String,
-}
+pub use crate::models::NotCarried;
 
 /// The ids of this Kronn's saved objects an id pasted in a step can name.
 #[derive(Debug, Default)]
 pub struct KnownIds(BTreeMap<String, &'static str>);
 
 impl KnownIds {
+    /// Reads ids only: an export must not fail on a row another reader
+    /// would refuse (a page whose first revision is not written yet).
     pub fn load(conn: &rusqlite::Connection) -> anyhow::Result<Self> {
         let mut known = BTreeMap::new();
-        for page in crate::db::live_pages::list_live_pages(conn)? {
-            known.insert(page.id, "page");
-        }
-        for workflow in crate::db::workflows::list_workflows(conn)? {
-            known.insert(workflow.id, "workflow");
-        }
-        for prompt in crate::db::quick_prompts::list_quick_prompts(conn)? {
-            known.insert(prompt.id, "quick_prompt");
-        }
-        for api in crate::db::quick_apis::list_quick_apis(conn)? {
-            known.insert(api.id, "quick_api");
-        }
-        for exec in crate::db::quick_execs::list_quick_execs(conn)? {
-            known.insert(exec.id, "quick_exec");
+        for (table, kind) in [
+            ("live_pages", "page"),
+            ("workflows", "workflow"),
+            ("quick_prompts", "quick_prompt"),
+            ("quick_apis", "quick_api"),
+            ("quick_execs", "quick_exec"),
+        ] {
+            let mut rows = conn.prepare(&format!("SELECT id FROM {table}"))?;
+            for id in rows.query_map([], |row| row.get::<_, String>(0))? {
+                known.insert(id?, kind);
+            }
         }
         Ok(Self(known))
     }
@@ -198,6 +184,27 @@ pub fn not_carried(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ids_are_read_from_a_page_the_page_reader_refuses() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let known = db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO live_pages(id, project_id, title, slug, created_at, updated_at) \
+                     VALUES ('page-1', NULL, 'P', 'p', '2026-11-18T00:00:00Z', '2026-11-18T00:00:00Z')",
+                    [],
+                )?;
+                assert!(
+                    crate::db::live_pages::list_live_pages(conn).is_err(),
+                    "the fixture is a page without a revision"
+                );
+                KnownIds::load(conn)
+            })
+            .await
+            .unwrap();
+        assert_eq!(known.0.get("page-1"), Some(&"page"));
+    }
 
     #[test]
     fn uuids_are_found_whole_wherever_a_text_writes_them() {

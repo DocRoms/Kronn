@@ -37,7 +37,6 @@ pub mod embed_origins;
 pub mod endpoint_reachability;
 pub mod env;
 pub mod execution_variables;
-pub mod export_report;
 pub mod export_secrets;
 pub mod frontend_spa;
 pub mod fs_guard;
