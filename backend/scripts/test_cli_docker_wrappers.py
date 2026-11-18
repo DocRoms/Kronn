@@ -251,9 +251,9 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             re.MULTILINE | re.DOTALL,
         ).group("section")
         self.assertIn("components: clippy", quality)
-        self.assertIn("cargo clippy --all-targets -- -D warnings", quality)
+        self.assertIn("cargo clippy --workspace --all-targets -- -D warnings", quality)
         # nextest skips doctests: they run here so a new one is never lost.
-        self.assertIn("run: cargo test --doc", quality)
+        self.assertIn("run: cargo test --workspace --doc", quality)
         desktop = re.search(
             r"^  test-desktop-compile:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             build,

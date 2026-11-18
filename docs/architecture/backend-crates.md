@@ -96,7 +96,9 @@ provider; a test fails when a declared hook is missing from that list.
   `backend/` folder in every crate), not from `CARGO_MANIFEST_DIR`, which is
   `backend/crates/l<k>` in a layer crate.
 
-Commands take `--workspace` to cover the five crates: `cargo nextest run
+Every crate is a default member of the workspace, so a bare `cargo clippy` or
+`cargo test` in `backend/` covers the five of them. CI and the Makefile still
+name it: commands take `--workspace`: `cargo nextest run
 --workspace`, `cargo clippy --workspace --all-targets`, and `make typegen`
 exports the TypeScript bindings of every crate into `backend/bindings/`.
 
