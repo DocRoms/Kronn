@@ -118,7 +118,8 @@ A changed lockfile misses the exact cache key, and a cancelled job saves no
 cache, so a retry starts cold again.
 
 - On a pull request, the macOS leg now runs only when the tested modules
-  change (`portability-scope` output `mac`). A `Cargo.toml`, `Cargo.lock` or
+  change (`portability-scope` output `mac`). A `Cargo.toml`, `Cargo.lock`,
+  crate manifest (`backend/crates/`), layer root (`backend/src/layer<k>.rs`) or
   toolchain change still runs the Windows leg.
 - A push to main runs every suite on both legs, then saves the shared cache.
   That is where a dependency or toolchain bump is tested on macOS.

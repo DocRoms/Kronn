@@ -208,8 +208,8 @@ jobs:
           fi
           changed=$(git diff --name-only "$BASE" "$HEAD")
           echo "$changed"
-          suites='^backend/src/(core/worktree|core/fs_guard|core/rooted_fd|api/maintenance|db/orchestration|agents/wsl|acp/secret_files|core/config_copies|core/durable_file|core/backup|db/migrations)'
-          if echo "$changed" | grep -Eq "$suites|^backend/Cargo\.(toml|lock)\$|^rust-toolchain"; then
+          suites='^backend/src/(core/worktree|core/fs_guard|core/rooted_fd|api/maintenance|db/orchestration|agents/wsl|acp/secret_files|core/config_copies|core/durable_file|core/backup|core/atomic_file|db/migrations)'
+          if echo "$changed" | grep -Eq "$suites|^backend/Cargo\.(toml|lock)\$|^backend/crates/|^backend/src/layer[0-9]+\.rs\$|^rust-toolchain"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
