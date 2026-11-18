@@ -237,10 +237,13 @@ jobs:
       # cache main saves is exactly what a pull request compiles.
       # CARGO_TARGET_DIR keeps the instrumented tree where the hot cache
       # restores it. `eval`, not `source <(...)`: portable to any bash.
+      # Instrumented, the library and its test crate exceed the runner's
+      # memory side by side: this repository's crates compile one at a time.
       - name: Build the instrumented test archive
         run: |
           export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target/llvm-cov-target"
           eval "$(cargo llvm-cov show-env --sh)"
+          export RUSTC_WORKSPACE_WRAPPER="$GITHUB_WORKSPACE/scripts/ci/rustc_one_at_a_time.sh"
           cargo nextest archive --workspace --locked \
             --archive-file "$RUNNER_TEMP/kronn-tests.tar.zst"
 

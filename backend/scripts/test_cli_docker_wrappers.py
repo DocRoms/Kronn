@@ -405,6 +405,12 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         archive_build = step("test-backend-build", "Build the instrumented test archive")
         self.assertNotIn("if:", archive_build)
         self.assertIn("cargo nextest archive --workspace --locked", archive_build)
+        # The library and its test crate do not fit in a runner's memory side
+        # by side: the crates of this repository compile one at a time.
+        wrapper = 'export RUSTC_WORKSPACE_WRAPPER="$GITHUB_WORKSPACE/scripts/ci/rustc_one_at_a_time.sh"'
+        self.assertIn(wrapper, archive_build)
+        self.assertLess(archive_build.index(wrapper), archive_build.index("cargo nextest archive"))
+        self.assertTrue(os.access(ROOT / "scripts/ci/rustc_one_at_a_time.sh", os.X_OK))
         mac_suites = (
             "matrix.os != 'macos-latest' || github.event_name != 'pull_request' "
             "|| needs.portability-scope.outputs.mac == 'true'"
@@ -524,6 +530,43 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("backend_ready=1", workflow)
         self.assertIn('if [ "$backend_ready" -ne 1 ]', workflow)
         self.assertIn('kill -0 "$(cat /tmp/backend.pid)"', workflow)
+
+
+class RustcOneAtATimeTests(unittest.TestCase):
+    WRAPPER = ROOT / "scripts/ci/rustc_one_at_a_time.sh"
+
+    def run_wrapped(self, lock, *command):
+        return subprocess.run(
+            [str(self.WRAPPER), *command],
+            env={**os.environ, "KRONN_RUSTC_LOCK": str(lock)},
+            capture_output=True,
+            text=True,
+        )
+
+    def test_runs_the_command_with_its_arguments_and_its_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = pathlib.Path(tmp) / "lock"
+            result = self.run_wrapped(lock, "sh", "-c", 'printf "%s|" "$@"; exit 7', "rustc", "--crate-name", "a b")
+        self.assertEqual(result.stdout, "--crate-name|a b|")
+        self.assertEqual(result.returncode, 7)
+
+    @unittest.skipUnless(shutil.which("flock"), "flock(1) is what serialises: absent here, present on the runner")
+    def test_two_wrapped_commands_never_run_at_the_same_time(self):
+        script = 'echo "start $1" >> "$2"; sleep 0.4; echo "end $1" >> "$2"'
+        with tempfile.TemporaryDirectory() as tmp:
+            lock, log = pathlib.Path(tmp) / "lock", pathlib.Path(tmp) / "log"
+            running = [
+                subprocess.Popen(
+                    [str(self.WRAPPER), "sh", "-c", script, "sh", name, str(log)],
+                    env={**os.environ, "KRONN_RUSTC_LOCK": str(lock)},
+                )
+                for name in ("a", "b", "c")
+            ]
+            self.assertEqual([process.wait() for process in running], [0, 0, 0])
+            lines = log.read_text().split("\n")[:-1]
+        self.assertEqual(len(lines), 6)
+        for start, end in zip(lines[::2], lines[1::2]):
+            self.assertEqual(start.replace("start", "end"), end, lines)
 
 
 class DockerImagesWorkflowTests(unittest.TestCase):
