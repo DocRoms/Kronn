@@ -108,7 +108,7 @@ zero-warning Oxlint gate passes. The `with_conn` safety scanner also reads
 standalone Rust test files; a `#[cfg(test)]` on their parent module does not
 exclude their contents. Propagate fallible fixture setup inside the closure
 and assert its result after awaiting it.
-`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:155-195#find_violations]`
+`[src: file: backend/scripts/ci/lint_with_conn_unwrap.py:162-202#find_violations]`
 `[src: file: .github/workflows/ci-test.yml:535-539#with_conn]`
 
 Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded:

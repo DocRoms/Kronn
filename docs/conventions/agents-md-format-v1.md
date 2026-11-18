@@ -137,10 +137,10 @@ names, versions, behaviour). The grammar:
 
 ### File ref forms
 
-- `[src: file: backend/src/core/mod.rs:14]` — file + single line.
-- `[src: file: backend/src/core/mod.rs:14-22]` — file + line range.
+- `[src: file: backend/src/api/mod.rs:14]` — file + single line.
+- `[src: file: backend/src/api/mod.rs:14-22]` — file + line range.
 - `[src: <path>:<line>]` — the `file:` type is the default.
-- `[src: file: backend/src/lib.rs:22-30#context_audit]` — line or range + **symbol anchor**.
+- `[src: file: backend/src/api/mod.rs:14-22#context_audit]` — line or range + **symbol anchor**.
   The anchor (an identifier; `.` and `-` allowed inside, e.g. `Type.method`, `check-version`)
   must appear as a whole word inside the cited lines. When the range *contains* a definition
   of the symbol (`fn`, `def`, `class`, `struct`, `enum`, `const`, `interface`, `function` or

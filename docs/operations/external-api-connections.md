@@ -196,7 +196,7 @@ At startup, Kronn backfills the former single LiteLLM and NVIDIA settings into
 stable named connections. The insertion is idempotent and preserves a
 connection already created or edited through the new workflow. The canonical
 NVIDIA legacy row also receives the hosted default endpoint when its former
-configuration did not contain one. [src: file: backend/src/lib.rs:364-387#bootstrap_external_api_connections]
+configuration did not contain one. [src: file: backend/src/lib.rs:444-467#bootstrap_external_api_connections]
 [src: file: backend/src/db/external_api_connections.rs:403-434#backfill_legacy_config]
 
 The canonical LiteLLM and NVIDIA named cards are now the source of truth for
@@ -249,7 +249,7 @@ those tokens ahead of the call.
   tokens** in the plugin list header (`POST /api/mcps/check-tokens`). The desktop
   app starts the same scheduler.
   [src: file: backend/src/core/token_checks.rs:316-334#spawn_scheduler]
-  [src: file: backend/src/lib.rs:2181-2183#check_token]
+  [src: file: backend/src/lib.rs:2262-2264#check_token]
 - **What it sends.** One authenticated GET to the connection's own provider,
   through the same ApiCall path as any call (SSRF policy, secret injection and
   OAuth / token-exchange refresh included), with the 15 s timeout of the

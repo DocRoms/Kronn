@@ -163,6 +163,27 @@ class LintWithConnUnwrap(unittest.TestCase):
         )
         self.assertEqual(_mod.find_violations(src, "strunwrap.rs"), [])
 
+    def test_test_support_items_are_exempt_and_their_negation_is_not(self):
+        call = "fn f(db: &Db) {\n    db.with_conn(|c| { c.x().unwrap(); Ok(()) });\n}\n"
+        for attr in (
+            '#[cfg(any(test, feature = "test-support"))]',
+            '#[cfg(all(any(test, feature = "test-support"), unix))]',
+            '#[cfg(any(all(test, feature = "full-tests"), feature = "test-support"))]',
+        ):
+            self.assertEqual(_mod.find_violations(attr + "\n" + call, "support.rs"), [], attr)
+        for attr in (
+            '#[cfg(not(any(test, feature = "test-support")))]',
+            '#[cfg(feature = "full-tests")]',
+            "#[cfg(unix)]",
+        ):
+            self.assertEqual(len(_mod.find_violations(attr + "\n" + call, "prod.rs")), 1, attr)
+
+    def test_files_compiled_as_tests_by_a_higher_crate_are_skipped(self):
+        self.assertTrue(_mod.test_only_file("src/api/orchestration_tests_up.rs"))
+        self.assertTrue(_mod.test_only_file("src/uptests/api__orchestration__tests.rs"))
+        self.assertFalse(_mod.test_only_file("src/api/orchestration.rs"))
+        self.assertFalse(_mod.test_only_file("src/core/startup.rs"))
+
     def test_unbalanced_call_fails_loudly(self):
         with self.assertRaises(RuntimeError):
             _mod.find_violations("db.with_conn(|c| {", "broken.rs")

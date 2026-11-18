@@ -158,7 +158,7 @@ the previous file untouched.
    as it is. If this step fails before loading the token while a token is
    stored, auth is locked (below), never open. The stored token row also
    records whether auth is enabled, so a lost `config.toml` does not turn
-   auth off. [src: file: backend/src/core/credential_store.rs:465-612#boot] [src: file: backend/src/lib.rs:306-326#stored_auth_token_exists]
+   auth off. [src: file: backend/src/core/credential_store.rs:465-612#boot] [src: file: backend/src/lib.rs:403-423#stored_auth_token_exists]
 
    A set-aside `config.toml.corrupt.<ts>` is never deleted by Kronn. The owner
    deletes one in Settings → Recovery (`DELETE

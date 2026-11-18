@@ -186,6 +186,86 @@ mod uplink_tests {
     }
 }
 
+#[cfg(test)]
+mod crate_layout_tests {
+    use std::path::{Path, PathBuf};
+
+    fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The lints read `*_up.rs` and `uptests/` as test code without parsing a
+    /// `cfg`: that holds only while nothing but a `#[cfg(test)] mod uptests`
+    /// reaches them.
+    #[test]
+    fn up_files_are_reached_only_through_a_test_only_uptests_module() {
+        let src = Path::new(crate::BACKEND_DIR).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        let test_only = |path: &Path| {
+            path.parent().is_some_and(|dir| dir.ends_with("uptests"))
+                || path.to_string_lossy().ends_with("_up.rs")
+        };
+        let texts: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+            .collect();
+        let mut wrappers = 0;
+        for (path, _) in texts.iter().filter(|(path, _)| test_only(path)) {
+            let name = path.file_name().unwrap().to_string_lossy();
+            let wrapper = path.parent().unwrap().ends_with("uptests");
+            // A wrapper is declared by its module name, an up file by its path.
+            let needle = if wrapper {
+                format!("mod {};", name.trim_end_matches(".rs"))
+            } else {
+                format!("/{name}\"]")
+            };
+            let users: Vec<&PathBuf> = texts
+                .iter()
+                .filter(|(other, text)| other != path && text.contains(&needle))
+                .map(|(other, _)| other)
+                .collect();
+            assert!(
+                !users.is_empty(),
+                "{} is compiled by no crate",
+                path.display()
+            );
+            for user in users {
+                if wrapper {
+                    wrappers += 1;
+                    let root = std::fs::read_to_string(user).unwrap();
+                    let (before, inside) =
+                        root.split_once("\nmod uptests {").unwrap_or_else(|| {
+                            panic!("{} names {name} outside `mod uptests`", user.display())
+                        });
+                    assert!(
+                        inside.contains(&needle),
+                        "{} names {name} outside `mod uptests`",
+                        user.display()
+                    );
+                    let gate = before.lines().rev().find(|line| line.starts_with("#[cfg"));
+                    assert_eq!(gate, Some("#[cfg(test)]"), "{}", user.display());
+                } else {
+                    assert!(
+                        test_only(user),
+                        "{} is included by {}, which is not test-only",
+                        path.display(),
+                        user.display()
+                    );
+                }
+            }
+        }
+        assert!(wrappers > 0, "no wrapper was checked");
+    }
+}
+
 #[cfg(all(test, feature = "full-tests"))]
 mod api_tests;
 

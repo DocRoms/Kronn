@@ -100,7 +100,7 @@ A protected request carries one of:
    only exception to "refused to agents" on these routes
    (`lib.rs`, `strong_code_gate`), and only when a strong confirmation is
    enrolled. A bridge request on a route of its own list (`BRIDGE_ROUTES`) keeps
-   that list's scoping, as before. [src: file: backend/src/lib.rs:709-758#strong_code_gate]
+   that list's scoping, as before. [src: file: backend/src/lib.rs:789-838#strong_code_gate]
 
 A passkey stays UI-only by nature; the TOTP code works everywhere.
 
