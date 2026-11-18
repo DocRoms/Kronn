@@ -268,7 +268,7 @@ pub fn test_block(project: &Path, tracked: &[String]) -> String {
                 .any(|part| SKIPPED_DIRS.contains(&part.to_ascii_lowercase().as_str()))
             && opened < MAX_INLINE_SCAN
         {
-            // Rust tests live beside the code: `#[cfg(test)] mod tests` in `src/`.
+            // Rust tests live beside the code: `#[cfg(any(test, feature = "test-support"))] mod tests` in `src/`.
             opened += 1;
             if let Ok(bytes) =
                 crate::core::rooted_io::read_capped(project, Path::new(path), INLINE_FILE_CAP)

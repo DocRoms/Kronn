@@ -83,7 +83,7 @@ impl BatchTiming {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn zero() -> Self {
         Self {
             active_ms: 0,
@@ -1200,7 +1200,7 @@ fn render_qp_prompt(template: &str, first_var_name: Option<&str>, value: &str) -
 /// Fill EVERY `{{var}}` placeholder in `template` from the `vars` map. Mirrors
 /// the MCP `qp_batch_run` renderer (`render_qp_template`) so the workflow batch
 /// step and the MCP batch path produce identical prompts from the same vars.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn render_qp_template_vars(template: &str, vars: &HashMap<String, String>) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {

@@ -352,7 +352,7 @@ fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
 /// "no constraint" (logged, never blocks a launch). This is the net that
 /// stops a typo like `7152` (vs `EW-7152`) from reaching the API as a
 /// literal path param and 404ing.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
 pub fn validate_launch_variables(
     declared: &[crate::models::PromptVariable],
     provided: &std::collections::HashMap<String, String>,
@@ -2826,7 +2826,7 @@ pub const AGENT_RESUME_REFUSAL: &str = "This workflow is disabled, so its run ca
      be resumed by a human: ask the user to review the workflow and resume it from Kronn.";
 
 /// Lets a test run another write between an update's read and its write.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod before_write_hook {
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
@@ -3572,7 +3572,7 @@ pub async fn update_step(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_write_hook::pause(&format!("{id}#step-read")).await;
     let (list, key) = if req.on_failure {
         (existing.on_failure, "on_failure")
@@ -3974,7 +3974,7 @@ async fn update_written(
         return Json(ApiResponse::err(e));
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_write_hook::pause(&updated.id).await;
     let w = updated.clone();
     // A human turning it on has reviewed it: the record of why Kronn turned

@@ -4096,7 +4096,7 @@ impl KronnToolExecutor {
 
     /// Test seam for `resolve_config_id`, which is otherwise only reachable
     /// through a live tool call.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn resolve_config_id_pub(&self, slug: &str) -> Option<String> {
         self.resolve_config_id(slug).await
     }

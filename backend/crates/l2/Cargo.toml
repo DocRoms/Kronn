@@ -13,8 +13,12 @@ path = "../../src/layer2.rs"
 [features]
 default = ["full-tests"]
 full-tests = []
+# Test helpers of this crate, for the tests of the crates above it.
+test-support = ["dep:tempfile", "dep:http-body-util", "kronn-l0/test-support", "kronn-l1/test-support"]
 
 [dependencies]
+tempfile = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
 kronn-l0 = { path = "../l0" }
 kronn-l1 = { path = "../l1" }
 axum = { workspace = true }
@@ -78,6 +82,8 @@ windows-sys = { workspace = true }
 errno = { workspace = true }
 
 [dev-dependencies]
+kronn-l0 = { path = "../l0", features = ["test-support"] }
+kronn-l1 = { path = "../l1", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }
 http-body-util = { workspace = true }

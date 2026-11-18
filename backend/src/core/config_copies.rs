@@ -776,14 +776,14 @@ pub fn set_aside_unchanged(dir: &Path, path: &Path) -> Result<Aside> {
 
 // Run by a test between the open of the file and its rename, to swap the path
 // the way a racing process could.
-#[cfg(all(unix, test))]
+#[cfg(all(unix, any(test, feature = "test-support")))]
 thread_local! {
     pub static BEFORE_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 // Run by a test after a mismatch was found, before the entry is moved back.
-#[cfg(all(unix, test))]
+#[cfg(all(unix, any(test, feature = "test-support")))]
 thread_local! {
     pub static BEFORE_MOVE_BACK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
@@ -931,7 +931,7 @@ fn move_owner_only_no_follow(dir: &Path, path: &Path, target_name: &str) -> Resu
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .with_context(|| format!("make {} owner-only", path.display()))?;
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(hook) = BEFORE_RENAME.with(|h| h.borrow_mut().take()) {
         hook();
     }
@@ -957,7 +957,7 @@ fn move_owner_only_no_follow(dir: &Path, path: &Path, target_name: &str) -> Resu
         && moved.st_dev as u64 == meta.dev() as u64
         && moved.st_ino as u64 == meta.ino() as u64;
     if !same {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(hook) = BEFORE_MOVE_BACK.with(|h| h.borrow_mut().take()) {
             hook();
         }

@@ -174,7 +174,7 @@ mod imp {
 
     /// Makes a directory's new entries durable.
     fn sync_dir(dir: &OwnedFd) -> io::Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::tests::DIR_SYNCS.with(|count| count.set(count.get() + 1));
         // SAFETY: `dir` is an open descriptor.
         if unsafe { libc::fsync(dir.as_raw_fd()) } != 0 {
@@ -219,7 +219,7 @@ mod imp {
         let (dir, name) = parent_dir(root, rel, false)?;
         // O_NONBLOCK: opening a FIFO must fail or return, never hang.
         let file = File::from(open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK)?);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::tests::AFTER_OPEN.with(|hook| {
             if let Some(hook) = hook.borrow_mut().take() {
                 hook();
@@ -607,7 +607,7 @@ pub fn rename(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
     imp::rename(root, from, to)
 }
 
-#[cfg(all(test, unix))] // exercises rooted_io's openat/O_NOFOLLOW paths with symlinks, FIFOs, unix sockets and libc
+#[cfg(all(any(test, feature = "test-support"), unix))] // exercises rooted_io's openat/O_NOFOLLOW paths with symlinks, FIFOs, unix sockets and libc
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;

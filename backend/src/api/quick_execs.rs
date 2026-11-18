@@ -244,7 +244,7 @@ pub async fn store_quick_exec(
 
 /// Create a Quick Exec. `by_agent` (bridge token or Kronn agent tools) drops
 /// any approval of unmodelled programs: only a human gives one (KT-1017).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn create_as(
     state: AppState,
     request: CreateQuickExecRequest,
@@ -355,7 +355,7 @@ pub async fn update(
 }
 
 /// Update a Quick Exec; see [`create_as`] for `by_agent`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn update_as(
     state: AppState,
     id: String,

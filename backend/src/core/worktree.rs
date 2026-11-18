@@ -129,10 +129,10 @@ pub struct BuildArtifactTarget {
 /// walking it took over 44 minutes — on a machine that was already unusable.
 /// A partial answer delivered now beats an exact one delivered after the disk
 /// has filled, so the walk stops and says so rather than finishing at any cost.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const SCAN_ENTRY_BUDGET: usize = 20_000;
 /// Same walk, a budget a unit test can exceed without writing 20,000 files.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const SCAN_ENTRY_BUDGET: usize = 500;
 
 /// An entry that exists and must not be reclaimed, carried into the inventory
@@ -3366,7 +3366,7 @@ pub fn integration_target_ownership(
     project_roots: &[PathBuf],
     registered: &dyn Fn(&Path) -> bool,
 ) -> Result<Result<(), IntegrationTargetRefusal>, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if !ownership_seam::enforced(repo_path) {
         return Ok(Ok(()));
     }
@@ -3457,7 +3457,7 @@ fn apply_config(config: &crate::models::AppConfig) {
 }
 inventory::submit! { crate::core::uplink::ConfigApplied(apply_config) }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod ownership_seam {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;

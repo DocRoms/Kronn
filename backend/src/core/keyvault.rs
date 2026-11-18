@@ -214,14 +214,14 @@ pub fn write_private_atomic(tmp: &Path, path: &Path, bytes: &[u8]) -> std::io::R
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub static DIR_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Best-effort fsync of a directory (Unix), counted in tests.
 pub fn sync_dir(dir: &Path) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     DIR_SYNCS.with(|c| c.set(c.get() + 1));
     #[cfg(unix)]
     if let Ok(d) = std::fs::File::open(dir) {

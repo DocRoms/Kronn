@@ -385,7 +385,7 @@ pub fn cleanup_interactive(
 
 /// The library's own test build isolates the git config before `main`, for
 /// the same reason `tests/it.rs` does: every test of every module has it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[used]
 #[cfg_attr(
     any(target_os = "linux", target_os = "android"),

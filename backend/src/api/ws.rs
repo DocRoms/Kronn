@@ -114,7 +114,7 @@ mod rate_limit {
     }
 
     /// Clear bookkeeping for a specific IP (used by tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn reset(ip: IpAddr) {
         if let Ok(mut map) = state().lock() {
             map.remove(&ip);

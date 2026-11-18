@@ -21,7 +21,7 @@ pub fn config_dir() -> Result<PathBuf> {
     // A unit test that forgot KRONN_DATA_DIR must not touch the real install
     // (the operator secret and the encryption key live here); one directory
     // per process, so parallel test processes never share it either.
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-support")) {
         return Ok(std::env::temp_dir().join(format!("kronn-test-data-{}", std::process::id())));
     }
 
@@ -61,7 +61,7 @@ pub fn mark_test_binary() {
 
 /// The library's test build, a marked binary, or one under Cargo's `deps/`.
 pub fn in_test_binary() -> bool {
-    cfg!(test)
+    cfg!(any(test, feature = "test-support"))
         || is_test_binary(
             MARKED_TEST_BINARY.load(std::sync::atomic::Ordering::SeqCst),
             std::env::current_exe().ok().as_deref(),
@@ -77,13 +77,13 @@ fn is_test_binary(marked: bool, exe: Option<&std::path::Path>) -> bool {
 /// The agent's full-access setting as saved in config.toml, read without any
 /// other effect. Absent, unreadable or not `true`: `false`.
 pub fn saved_full_access(agent: &crate::models::AgentType) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         // A test states the setting per thread; KRONN_DATA_DIR is process-wide
         // and other tests change it concurrently.
         test_saved_access::get(agent).unwrap_or(false)
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         let Ok(path) = config_path() else {
             return false;
@@ -95,11 +95,11 @@ pub fn saved_full_access(agent: &crate::models::AgentType) -> bool {
 /// KT-1367 — whether config.toml names a decision model for Decide steps
 /// (`agents.model_tiers.ollama.decision`), read without any other effect.
 pub fn saved_decision_model() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         test_saved_decision::get()
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         let Ok(path) = config_path() else {
             return false;
@@ -124,7 +124,7 @@ pub fn saved_decision_model_in(raw: &str) -> bool {
 }
 
 /// The saved decision model a test states, per thread.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_saved_decision {
     use std::cell::Cell;
 
@@ -152,7 +152,7 @@ pub mod test_saved_decision {
 
 /// The saved full-access setting a test states, per thread (each tokio test
 /// runs on its own thread).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_saved_access {
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -186,13 +186,13 @@ pub mod test_saved_access {
 
 /// Points `KRONN_DATA_DIR` at a fresh directory for one test, restoring the
 /// previous value when dropped. Process-wide: the test must be `#[serial]`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct TestDataDir {
     _dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestDataDir {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().expect("scratch data dir");
@@ -205,7 +205,7 @@ impl TestDataDir {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestDataDir {
     fn drop(&mut self) {
         match &self.previous {
@@ -241,17 +241,17 @@ pub fn saved_full_access_in(content: &str, agent: &crate::models::AgentType) -> 
 /// effect. Absent, unreadable or not a non-negative integer: `None`. A test
 /// never reads the developer's file.
 pub fn saved_max_prompt_bytes() -> Option<usize> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         None
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         saved_max_prompt_bytes_in(&std::fs::read_to_string(config_path().ok()?).ok()?)
     }
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn saved_max_prompt_bytes_in(content: &str) -> Option<usize> {
     let bytes = content
         .parse::<toml::Table>()
@@ -719,11 +719,11 @@ async fn persist_atomic(dir: PathBuf, path: PathBuf, content: String) -> Result<
     // check is `in_test_binary` (the harness marks itself), never true for
     // `cargo run` or installed binaries. Reads stay free; only the
     // destructive act is fenced.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if crate::core::child_env::var("KRONN_DATA_DIR").is_err() {
         panic!("test attempted to WRITE the real config.toml — set KRONN_DATA_DIR (tempdir) in this test");
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     if crate::core::child_env::var("KRONN_DATA_DIR").is_err() && in_test_binary() {
         anyhow::bail!(
             "test binary attempted to WRITE the real config.toml — call isolate_config_dir() \

@@ -729,7 +729,7 @@ impl Confinement {
     /// its launcher injected. A mechanism that is not usable refuses before
     /// the lane is provisioned: nothing is prepared for a host that cannot
     /// confine.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn with_usable_mechanism(
         work_dir: &Path,
         mechanism: Option<Mechanism>,

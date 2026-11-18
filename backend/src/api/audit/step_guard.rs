@@ -557,7 +557,7 @@ pub fn settle_unfinished_steps(
 /// previous process is still running, so every step that never ended is
 /// settled now — not at the next launch, which may be days away with the doc
 /// half-written and nothing marking it. Returns how many steps were settled.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn settle_unfinished_at_boot(conn: &rusqlite::Connection) -> anyhow::Result<usize> {
     settle_unfinished_except(conn, &HashSet::new())
 }
@@ -738,25 +738,25 @@ type OpenRun = (String, Vec<crate::db::audit_runs::StepSnapshot>);
 /// survivor, a table nobody could read) that a real process cannot be made to
 /// produce.
 fn launch_reaper(tag: &str) -> crate::core::dispatch_reaper::ReapReport {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(report) = planted_reaps().lock().unwrap().get(tag).cloned() {
         return report;
     }
     crate::core::dispatch_reaper::reap_dispatch(tag)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type PlantedReaps =
     std::sync::Mutex<std::collections::HashMap<String, crate::core::dispatch_reaper::ReapReport>>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn planted_reaps() -> &'static PlantedReaps {
     static PLANTED: std::sync::OnceLock<PlantedReaps> = std::sync::OnceLock::new();
     PLANTED.get_or_init(Default::default)
 }
 
 /// Make the launch-time reap of `run_id` report `report`, whatever runs.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn plant_reap_of_run(run_id: &str, report: crate::core::dispatch_reaper::ReapReport) {
     planted_reaps()
         .lock()
@@ -765,7 +765,7 @@ pub fn plant_reap_of_run(run_id: &str, report: crate::core::dispatch_reaper::Rea
 }
 
 /// Forget what [`plant_reap_of_run`] planted for `run_id`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn unplant_reap_of_run(run_id: &str) {
     planted_reaps()
         .lock()

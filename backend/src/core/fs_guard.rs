@@ -193,7 +193,7 @@ pub fn assert_contained_no_symlink(root: &Path, path: &Path) -> Result<(), Strin
 /// folder as an fd — after every path check and walk of the caller. The state
 /// is shared by every thread (a route runs its filesystem work on a blocking
 /// thread), keyed by the folder, which each test takes from its own tempdir.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub mod swap_probe {
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
@@ -365,7 +365,7 @@ mod imp {
         let (parent_rel, name) = split_under(root, path)?;
         let parent = Dir::open_path(root, &parent_rel, create)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::swap_probe::after_walk(path.parent());
         Ok(parent.map(|dir| (dir, name)))
     }
@@ -381,7 +381,7 @@ mod imp {
         let (parent_rel, name) = split_under(root, path)?;
         let parent = Dir::open_path(root, &parent_rel, create)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::swap_probe::after_walk(path.parent());
         Ok(parent.map(|dir| (dir, name)))
     }
@@ -400,7 +400,7 @@ mod imp {
         let rel = dir
             .strip_prefix(root)
             .map_err(|_| format!("{} escapes the root {}", dir.display(), root.display()))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::swap_probe::after_walk(dir.parent());
         Dir::open_path(root, rel, true)
             .map(|_| ())
@@ -850,7 +850,7 @@ mod imp {
             ))
         })?;
         let held = Dir::open_path(root, rel, false)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::swap_probe::after_walk(dir.parent());
         match held {
             Some(held) => held.names().map(Some),

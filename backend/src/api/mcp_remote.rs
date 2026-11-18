@@ -422,7 +422,7 @@ pub struct McpQpRunResponse {
 /// Render a QP template substituting `{{var}}` placeholders. Mirrors
 /// the front-end's `renderTemplate` so the server-side path produces
 /// the same prompt the UI would have sent.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn render_qp_template(template: &str, vars: &HashMap<String, String>) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {

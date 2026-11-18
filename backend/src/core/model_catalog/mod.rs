@@ -148,7 +148,7 @@ pub fn agent_default_for_tier(agent_type: &AgentType, tier: ModelTier) -> Option
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn migrated_default(agent_type: &AgentType, tier: ModelTier) -> Option<String> {
     agent_default_for_tier(agent_type, tier)
 }
@@ -388,7 +388,7 @@ pub fn is_catalog_managed(agent_type: &AgentType) -> bool {
 }
 
 async fn discover(agent_type: &AgentType) -> DiscoveryOutcome {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Ok(outcome) = TEST_DISCOVERY.try_with(Clone::clone) {
         let _ = TEST_DISCOVERY_CALLS.try_with(|calls| calls.set(calls.get() + 1));
         return outcome;
@@ -399,7 +399,7 @@ async fn discover(agent_type: &AgentType) -> DiscoveryOutcome {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     static TEST_DISCOVERY: DiscoveryOutcome;
     static TEST_DISCOVERY_CALLS: std::cell::Cell<usize>;
@@ -407,7 +407,7 @@ tokio::task_local! {
 
 /// Test-only: a launch routed to a fixture transport has no CLI to discover, so
 /// it resolves as a runtime without live discovery; an outer test scope wins.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn test_routed_discovery<F: std::future::Future>(
     routed: bool,
     future: F,

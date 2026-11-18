@@ -426,7 +426,7 @@ pub fn launch_confinement() -> Option<LevelConfinement> {
     // Unit tests spawn throwaway programs (`sh`, `python`) through the real
     // spawn point, from inside whatever sandbox the machine runs them in; the
     // ones about the wrap choose with `set_test_wrap`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if !test_wrap() {
             return None;
@@ -662,7 +662,7 @@ pub fn launch_confinement_for(
     sandbox: LaunchSandbox,
     full_access: bool,
 ) -> Option<LevelConfinement> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if !test_wrap() {
             return None;
@@ -683,16 +683,16 @@ fn confinement_hiding(stores: Vec<PathBuf>) -> Option<LevelConfinement> {
     trust_sandbox::credential_confinement().map(|confinement| confinement.hiding_also(stores))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_WRAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Tests opt into the real wrap of `try_spawn`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_test_wrap(on: bool) {
     TEST_WRAP.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_wrap() -> bool {
     TEST_WRAP.load(std::sync::atomic::Ordering::Relaxed)
 }

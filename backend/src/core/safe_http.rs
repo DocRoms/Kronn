@@ -29,7 +29,7 @@ pub enum SafeHttpPolicy {
     Configured,
     /// Public, plus loopback so a wiremock can stand in for a public host;
     /// link-local and private targets stay refused.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     PublicOrLoopbackForTests,
 }
 
@@ -38,7 +38,7 @@ impl SafeHttpPolicy {
         match self {
             Self::Public => is_global(ip),
             Self::Configured => true,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::PublicOrLoopbackForTests => is_global(ip) || canonical_ip(ip).is_loopback(),
         }
     }
@@ -304,7 +304,7 @@ pub fn peer_client(timeout: Duration) -> Result<SafeClient, String> {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn client_with_lookup(
     policy: SafeHttpPolicy,
     options: ClientOptions,

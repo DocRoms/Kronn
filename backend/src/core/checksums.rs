@@ -538,7 +538,7 @@ pub fn stable_source_tree_fingerprint(project_path: &Path) -> Result<Option<Stri
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn stable_source_tree_fingerprint_test_hook<F>(
     project_path: &Path,
     between_reads: F,
@@ -805,7 +805,7 @@ pub fn write_checksums_file_fail_closed(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn write_checksums_file_fail_closed_test_hook<F>(
     project_path: &Path,
     mappings: &[ChecksumMapping],

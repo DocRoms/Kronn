@@ -103,6 +103,10 @@ windows-sys = { workspace = true }
 errno = { workspace = true }
 
 [dev-dependencies]
+kronn-l0 = { path = "crates/l0", features = ["test-support"] }
+kronn-l1 = { path = "crates/l1", features = ["test-support"] }
+kronn-l2 = { path = "crates/l2", features = ["test-support"] }
+kronn-l3 = { path = "crates/l3", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true }
 http-body-util = { workspace = true }

@@ -13,8 +13,12 @@ path = "../../src/layer0.rs"
 [features]
 default = ["full-tests"]
 full-tests = []
+# Test helpers of this crate, for the tests of the crates above it.
+test-support = ["dep:tempfile", "dep:http-body-util"]
 
 [dependencies]
+tempfile = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true }

@@ -43,7 +43,7 @@ pub mod workflow_watch_state;
 
 
 /// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
     let mut statement = conn
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
@@ -60,7 +60,7 @@ pub fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
 /// Plan lines that read one of `aliases` from its table rather than from a
 /// covering index. On `workflow_runs` such a read walks the run's step results
 /// to reach any later column.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn table_reads_outside_index(plan: &[String], aliases: &[&str]) -> Vec<String> {
     plan.iter()
         .filter(|line| {
@@ -105,7 +105,7 @@ pub struct Database {
     /// holds its lock, so heavy reads stop freezing the whole API. `None`
     /// for in-memory databases (a second `:memory:` handle would be a
     /// DIFFERENT db) — `with_read_conn` falls back to the write connection.
-    read_conn: Option<Arc<Mutex<Connection>>>,
+    pub read_conn: Option<Arc<Mutex<Connection>>>,
     path: PathBuf,
     /// Runs flipped `Running`/`Pending` → `Interrupted` by THIS boot's
     /// reconcile. Drained exactly once by the boot notifier
@@ -406,7 +406,7 @@ impl Database {
 
     /// Whether no closure currently holds the write connection: lets a test
     /// assert that slow work runs outside `with_conn` (KT-1646).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn write_connection_is_free(&self) -> bool {
         !matches!(
             self.conn.try_lock(),

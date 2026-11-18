@@ -339,7 +339,7 @@ pub const SUBFOLDER_READMES: &[(&str, &str)] = &[
 /// allowed to touch. Existing files are never inspected or rewritten:
 /// a 0-byte or placeholder-bearing destination is user state until a
 /// manifest proves otherwise (Codex A2).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn copy_dir_nondestructive(
     src: &std::path::Path,
     dst: &std::path::Path,

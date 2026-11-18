@@ -508,14 +508,14 @@ pub fn inherited_from(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static PARENT_OVERRIDE: std::cell::RefCell<Option<Vec<(OsString, OsString)>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Runs `body` as if the backend's environment were `parent` (this thread only).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_parent_env<T>(parent: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
     let parent = parent
         .iter()
@@ -533,7 +533,7 @@ pub fn with_parent_env<T>(parent: &[(&str, &str)], body: impl FnOnce() -> T) -> 
 }
 
 fn parent_env() -> Vec<(OsString, OsString)> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(parent) = PARENT_OVERRIDE.with(|cell| cell.borrow().clone()) {
         return parent;
     }
@@ -578,20 +578,20 @@ static WITHHELD: std::sync::Mutex<Withheld> = std::sync::Mutex::new(Withheld {
     vars: Vec::new(),
 });
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static WITHHELD_OVERRIDE: std::cell::RefCell<Option<Withheld>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Runs `body` as if the desktop had withheld `vars` (this thread only).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
     with_withheld_state(true, vars, body)
 }
 
 /// [`with_withheld_env`] with the withholding switched on or not yet.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_withheld_state<T>(
     active: bool,
     vars: &[(&str, &str)],
@@ -617,7 +617,7 @@ pub fn with_withheld_state<T>(
 
 /// Run `f` on the withheld state (the test override on this thread, if any).
 fn with_state<T>(f: impl FnOnce(&mut Withheld) -> T) -> T {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         let mut f = Some(f);
         let overridden = WITHHELD_OVERRIDE.with(|cell| {
@@ -632,7 +632,7 @@ fn with_state<T>(f: impl FnOnce(&mut Withheld) -> T) -> T {
         let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut state)
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut state)

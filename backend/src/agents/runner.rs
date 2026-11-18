@@ -1971,19 +1971,19 @@ impl ToolActivityProbe {
     }
 
     /// One HTTP tool call, recorded as the tool loop records it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn record_http_call(&self, call: &crate::agents::tools::ToolCall) {
         record_http_tool_call(&self.0, None, call);
     }
 
     /// A probe no run backs, fed by the test the way an HTTP tool loop feeds it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn scripted() -> Self {
         Self(Arc::default())
     }
 
     /// One tool turn of a scripted run: its usage and, optionally, its tool.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn record_turn(&self, input_tokens: u64, output_tokens: u64, tool: Option<&str>) {
         let mut usage = self.0.lock().unwrap();
         usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
@@ -2524,10 +2524,10 @@ impl AgentIo for AgentProcess {
 /// (line accumulation, stream-json parsing, teardown) without spawning a CLI
 /// or burning tokens.
 ///
-/// `#[cfg(test)]` so it never ships in the binary. Visible to unit tests
+/// `#[cfg(any(test, feature = "test-support"))]` so it never ships in the binary. Visible to unit tests
 /// across the lib crate (cfg(test) is crate-wide); integration tests in
 /// `tests/` can't see it — but loop logic is unit-level anyway.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct ScriptedProcess {
     lines: std::collections::VecDeque<String>,
     output_mode: OutputMode,
@@ -2546,7 +2546,7 @@ pub struct ScriptedProcess {
     first_line_after: Option<Duration>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ScriptedProcess {
     /// Scripted process in raw-line mode (each line emitted verbatim).
     pub fn raw(lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -2634,7 +2634,7 @@ impl ScriptedProcess {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait::async_trait]
 impl AgentIo for ScriptedProcess {
     async fn next_line(&mut self) -> Option<String> {
@@ -3219,7 +3219,7 @@ pub struct AgentStartConfig<'a> {
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
     /// Test-only ACP boundary injection.  Production always spawns the
     /// vendor-native JSON-RPC transport in `start_native_acp`.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub test_acp_transport: Option<std::sync::Arc<dyn crate::acp::AcpTransport>>,
     /// ADR-005 slice 1 (KT-847) — when `Some`, skills/directives/profiles
     /// are resolved through the run snapshot cache keyed by this id instead
@@ -3302,7 +3302,7 @@ impl<'a> AgentStartConfig<'a> {
             idle_timeout: None,
             run_progress: None,
             cancel_token: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_acp_transport: None,
             run_snapshot_id: None,
         }
@@ -4538,7 +4538,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     let acp_route = crate::acp::resolve_acp_route(config.agent_type);
     // The adapter toggle is process environment: a test that routed this
     // launch must not be sent to the machine's CLI by another test's toggle.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let acp_route = if acp_route == crate::acp::AcpProductionRoute::DirectCliMigration
         && test_acp_routes::transport_for(&config, &work_dir).is_some()
     {
@@ -4580,7 +4580,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 run_progress: config.run_progress.clone(),
                 step_tools: config.step_tools,
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(request, transport).await;
             }
@@ -4635,7 +4635,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 run_progress: config.run_progress.clone(),
                 step_tools: config.step_tools,
             };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(
                     AcpSessionRequest {
@@ -5322,7 +5322,7 @@ pub fn adapter_policy_args(
 /// The direct CLI route's command line for a policy-confined launch: the CLI's
 /// own builder, the policy applied, the prompt last. Tests compare it with
 /// [`adapter_policy_args`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn direct_policy_args(
     agent_type: &AgentType,
     prompt: &str,
@@ -5392,9 +5392,9 @@ pub async fn probe_native_acp_session(
         .collect();
     // Held for the whole probe: the bridge the session starts uses it.
     let mut _bridge = None;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let routed = test_acp_routes::transport_at(&work_dir);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let routed: Option<Arc<dyn AcpTransport>> = None;
     let transport: Arc<dyn AcpTransport> = match routed {
         Some(transport) => transport,
@@ -5502,7 +5502,7 @@ pub async fn probe_native_acp_session(
 /// Test-only routing of every ACP launch in one working directory to a
 /// fixture transport, so tests can drive callers that build their own
 /// `AgentStartConfig` (workflow steps, discussion turns).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_acp_routes {
     use super::AgentStartConfig;
     use std::collections::HashMap;
@@ -9278,12 +9278,12 @@ fn record_unreadable_tool_call_failure(
 }
 
 fn provider_retry_delay(failed_attempt: usize) -> std::time::Duration {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         let _ = failed_attempt;
         std::time::Duration::from_millis(1)
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         // Long enough for a saturated worker slot to clear, still bounded so
         // the user is never left behind an invisible minute-long retry loop.
@@ -9523,7 +9523,7 @@ fn format_provider_failure(
 /// The default inactivity delay — what every test that does not care about the
 /// watchdog runs under. Production goes through `start_ollama_http_with_idle`.
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn start_ollama_http(
     agent_type: &AgentType,
     user_prompt: &str,
@@ -12953,7 +12953,7 @@ pub fn discussion_scratch_dir(discussion_id: &str) -> Result<PathBuf, String> {
 /// Test guard: the home a discussion folder is created under must be a scratch
 /// directory strictly inside `temp`. Both sides are canonicalised so macOS's
 /// `/var` -> `/private/var` link cannot make a scratch home look foreign.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let (home_real, temp_real) = (canonical(home), canonical(temp));
@@ -12969,13 +12969,13 @@ fn scratch_home_guard(home: &Path, temp: &Path) -> Result<(), String> {
 
 /// Points `HOME` at a fresh tempdir for one test and puts it back on drop, even
 /// on a panic. `HOME` is process-wide: callers must be `#[serial]`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct ScratchHome {
     dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ScratchHome {
     pub fn enter() -> Self {
         let dir = tempfile::tempdir().expect("scratch home");
@@ -12989,7 +12989,7 @@ impl ScratchHome {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ScratchHome {
     fn drop(&mut self) {
         match self.previous.take() {
@@ -13010,7 +13010,7 @@ fn discussion_scratch_dir_under(home: &Path, discussion_id: &str) -> Result<Path
     }
     // A test creating this under the developer's real home would litter (or, in
     // a worker sandbox, fail to create) `~/.kronn/discussions`: fail loudly.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Err(error) = scratch_home_guard(home, &std::env::temp_dir()) {
         panic!("{error}");
     }
@@ -13862,7 +13862,7 @@ fn insert_claude_mcp_config(args: &mut Vec<String>, config: String, strict: bool
     args.insert(mcp_index + 1, config);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn agent_command(
     agent_type: &AgentType,
     prompt: &str,
@@ -14745,7 +14745,7 @@ fn codex_project_trust_override(work_dir: &Path, host_home: Option<&str>) -> Str
 /// Tests only (KT-1587): a production launch always goes through
 /// [`try_spawn_granted`], so none can drop the run artifacts grant by calling
 /// this no-grant form.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
 pub fn try_spawn(
     binary: &str,
@@ -14788,7 +14788,7 @@ pub fn try_spawn(
 }
 
 /// Tests: the run artifacts grant each spawn was handed, by program.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod spawn_grants {
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -14833,7 +14833,7 @@ pub fn try_spawn_granted(
     full_access: bool,
     run_artifacts: &[PathBuf],
 ) -> Result<tokio::process::Child, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     spawn_grants::record(binary, run_artifacts);
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,

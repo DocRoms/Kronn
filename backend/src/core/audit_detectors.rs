@@ -463,7 +463,7 @@ fn root_has_file(root: &Path, rel_lower: &str) -> bool {
 /// outputs are repository hygiene debt. Only `git ls-files` entries are
 /// considered: an untracked local screenshot or cache is a developer-state
 /// concern, not a finding against the project.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn detect_tracked_repo_artifacts(root: &Path) -> Vec<DetectedSignal> {
     match tracked_listing(root) {
         Ok(listing) => {

@@ -369,7 +369,7 @@ static DETECT_ALL_REFRESHED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>
 /// Whether the last detection sweep found this agent installed. `true` while
 /// no sweep has completed, so a cold start never drops a CLI's files (KT-971).
 pub fn installed_or_unknown(agent: &AgentType) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if COLD_DETECTION_HOLDS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
         return true;
     }
@@ -394,23 +394,23 @@ pub fn cached_version(agent: &AgentType) -> Option<String> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static COLD_DETECTION_HOLDS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// While held, [`installed_or_unknown`] answers as if no detection sweep had
 /// completed, whatever sweep another test completes meanwhile.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct ColdDetection(());
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ColdDetection {
     fn drop(&mut self) {
         COLD_DETECTION_HOLDS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn hold_cold_detection() -> ColdDetection {
     COLD_DETECTION_HOLDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     ColdDetection(())
@@ -418,7 +418,7 @@ pub fn hold_cold_detection() -> ColdDetection {
 
 /// Run `f` as if no detection sweep had completed yet: for tests that need
 /// every CLI's files regardless of what ran before or beside them.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
     let _cold = hold_cold_detection();
     f()

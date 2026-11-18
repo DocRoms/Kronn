@@ -73,14 +73,14 @@ fn hook_command(cmd: &str, dir: &std::path::Path) -> tokio::process::Command {
     command
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     /// Per-test wait: the env var is process-wide and tests run in parallel.
     pub static MAIN_TREE_WAIT_FOR_TESTS: std::time::Duration;
 }
 
 pub fn main_tree_wait() -> std::time::Duration {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Ok(wait) = MAIN_TREE_WAIT_FOR_TESTS.try_with(|wait| *wait) {
         return wait;
     }
@@ -417,7 +417,7 @@ async fn nested_worktrees(repo_path: &Path, parent: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     /// Runs where a refused removal used to be forced: lets a test write work
     /// after the last inspection.
@@ -446,7 +446,7 @@ pub async fn remove_inspected_checkout(
         let Err(refusal) = remove_clean_checkout(repo_path, &target).await else {
             continue;
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let _ = AFTER_REFUSAL.try_with(|hook| hook(&target));
         let Err(held) = remove_checkout_with_submodules(repo_path, &target).await else {
             continue;
@@ -1328,7 +1328,7 @@ impl Workspace {
     ///
     /// Forced: test fixtures only. A finished run uses `cleanup_keeping_work`
     /// (KT-1806).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn cleanup(self) -> Result<CleanupOutcome> {
         self.cleanup_with(false).await
     }
@@ -1475,9 +1475,9 @@ impl Workspace {
             // would otherwise pin the run and its concurrency slot forever —
             // this await is outside the cancel race, so Stop can't reach it.
             // `kill_on_drop` ensures the timed-out child doesn't leak.
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-support")))]
             const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
             let mut command = hook_command(cmd, &self.path);
             let output = match tokio::time::timeout(HOOK_TIMEOUT, command.output()).await {

@@ -218,10 +218,10 @@ pub fn build_step_prompt(
 }
 
 /// One retry step of an agent step's backoff (15 s, 30 s, 45 s… capped at 90 s).
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const RETRY_BACKOFF_UNIT: Duration = Duration::from_secs(15);
 /// Unit tests check the retry order, not the wait: same shape, in milliseconds.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const RETRY_BACKOFF_UNIT: Duration = Duration::from_millis(15);
 
 /// Execute a single workflow step.
@@ -1213,7 +1213,7 @@ pub async fn resolve_step_connection(
 
 async fn preflight_workflow_launch(
     catalog_db: Option<&crate::db::Database>,
-    #[cfg_attr(not(test), allow(unused_variables))] work_dir: &str,
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))] work_dir: &str,
     step: &WorkflowStep,
     connection: Option<&ExternalApiConnection>,
     effective_model: Option<&str>,
@@ -1252,7 +1252,7 @@ async fn preflight_workflow_launch(
         model_tiers,
     );
     // A routed work dir stands in for the CLI, as in the runner's install check.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let resolution = crate::core::model_catalog::test_routed_discovery(
         runner::resolve_agent_work_dir(Some(work_dir), work_dir)
             .is_ok_and(|dir| runner::test_acp_routes::is_routed(&dir)),
@@ -1270,7 +1270,7 @@ async fn preflight_workflow_launch(
 /// its run's pin: read from the default branch when the run started, so the
 /// checkout's branch or the run's worktree never changes them. One the pin
 /// lacks stops the step by name instead of running without it.
-pub(super) fn step_skills(
+pub fn step_skills(
     skill_ids: &[String],
     project_id: Option<&str>,
     run_id: Option<&str>,

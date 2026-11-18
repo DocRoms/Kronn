@@ -848,7 +848,7 @@ pub fn atomic_write_if_unchanged(
 /// window where a normal 0644 document becomes the temp file's defensive 0600.
 /// The byte comparison is the final operation before rename, minimizing the
 /// remaining portable check-to-commit race window.
-#[cfg(any(windows, test))] // the unix `fs_guard` replaces through a held directory instead
+#[cfg(any(windows, any(test, feature = "test-support")))] // the unix `fs_guard` replaces through a held directory instead
 pub fn atomic_write_if_unchanged_preserving_permissions(
     target: &Path,
     content: &str,
@@ -3203,7 +3203,7 @@ pub fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
 ///     (orphan cleanup — config was deleted from Kronn)
 ///   - entries WITHOUT `_kronn` marker → PRESERVED as-is (user-managed)
 ///   - new Kronn configs → ADDED
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn merge_kronn_entries(
     existing: &mut serde_json::Value,
     kronn_entries: HashMap<String, serde_json::Value>,
@@ -3782,7 +3782,7 @@ impl HostMcpSync for GeminiSync {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn count_kronn_entries(value: &serde_json::Value) -> usize {
     value
         .get("mcpServers")

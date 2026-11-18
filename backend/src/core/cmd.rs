@@ -100,7 +100,7 @@ pub fn real_agent_guard_armed() -> bool {
 /// library's own test build, or an integration test binary that armed the
 /// guard. `false` in every production process, whatever its environment holds.
 pub fn real_agents_forbidden() -> bool {
-    let armed = cfg!(test) || real_agent_guard_armed();
+    let armed = cfg!(any(test, feature = "test-support")) || real_agent_guard_armed();
     armed && !real_agent_guard::live_probe_open()
 }
 
@@ -120,7 +120,7 @@ pub const REAL_SANDBOX_ENV: &str = "KRONN_TEST_REAL_SANDBOX";
 /// already handles (the launch runs unwrapped), so refusing here is what the
 /// test sees on a machine with no sandbox.
 pub fn real_sandbox_refusal() -> Option<String> {
-    if cfg!(test) || !real_agents_forbidden() {
+    if cfg!(any(test, feature = "test-support")) || !real_agents_forbidden() {
         return None;
     }
     let opted_in = crate::core::child_env::var(REAL_SANDBOX_ENV).is_ok_and(|value| value == "1");
@@ -174,25 +174,25 @@ pub mod real_agent_guard {
     /// The only gate that opens the guard (KT-1495): the opt-in live vault
     /// probe, which has to start the real agent CLIs to see them refused the
     /// data directory.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub const LIVE_PROBE_GATE: &str = "KRONN_LIVE_VAULT_PROBE";
 
     /// Name fragment of the tests allowed to ask for [`LiveProbeAllowance`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     const LIVE_PROBE_TEST: &str = "live_vault_probe_";
 
     /// Live probes holding an allowance right now.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     static LIVE_PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     /// Whether a live probe holds an allowance, so the guard stands down.
     /// Always `false` outside the library's own test build.
     pub fn live_probe_open() -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             LIVE_PROBES.load(std::sync::atomic::Ordering::SeqCst) > 0
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             false
         }
@@ -202,17 +202,17 @@ pub mod real_agent_guard {
     /// gate's value: the gate is exactly `1` **and** the test is a
     /// `live_vault_probe_*`. Any other test, or the probe without the gate,
     /// stays refused.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn live_probe_may_open(thread: Option<&str>, gate: Option<&str>) -> bool {
         gate == Some("1") && thread.is_some_and(|name| name.contains(LIVE_PROBE_TEST))
     }
 
     /// Held by a live probe for as long as it needs the real agents; the guard
     /// is armed again when it drops.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub struct LiveProbeAllowance(());
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     impl Drop for LiveProbeAllowance {
         fn drop(&mut self) {
             LIVE_PROBES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -224,14 +224,14 @@ pub mod real_agent_guard {
     /// process-wide (the agent is started from tasks and blocking threads the
     /// probe does not name), so the probes run under `#[serial]` and the gate
     /// is only ever set for a run narrowed to them.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn allow_live_probe() -> Option<LiveProbeAllowance> {
         let gate = crate::core::child_env::var(LIVE_PROBE_GATE).ok();
         allow_live_probe_for(std::thread::current().name(), gate.as_deref())
     }
 
     /// [`allow_live_probe`] for a given thread name and gate value.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn allow_live_probe_for(
         thread: Option<&str>,
         gate: Option<&str>,
@@ -243,7 +243,7 @@ pub mod real_agent_guard {
         Some(LiveProbeAllowance(()))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn refused() -> Vec<String> {
         REFUSED.lock().map(|l| l.clone()).unwrap_or_default()
     }
@@ -796,7 +796,7 @@ fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command
 
 /// Test support: a committed repository and a program that leaves a marker
 /// when anything runs it, as a filter, hook or monitor an agent declares would.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod hostile_git {
     use std::path::{Path, PathBuf};
 
@@ -2024,7 +2024,7 @@ mod tests {
 
 /// KT-1633. Not behind `full-tests`: the macOS portability leg builds without
 /// it and must still prove the argv of a background spawn.
-#[cfg(all(test, unix))] // asserts the taskpolicy/nice launchers, POSIX only
+#[cfg(all(any(test, feature = "test-support"), unix))] // asserts the taskpolicy/nice launchers, POSIX only
 mod background_argv_tests {
     use super::*;
     use background_priority::{plan, HostOs};

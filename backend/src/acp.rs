@@ -33,7 +33,7 @@ pub use permission_broker::{
 };
 
 /// Shared by the Claude/Codex adapter test modules.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::fs;
     #[cfg(unix)]
@@ -688,7 +688,7 @@ impl AcpRequestTimeouts {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn request_timeout(method: &str) -> Duration {
     AcpRequestTimeouts::DEFAULT.for_method(method)
 }
@@ -1116,7 +1116,7 @@ impl AcpJsonRpcTransport {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_request_timeouts(mut self, timeouts: AcpRequestTimeouts) -> Self {
         self.timeouts = timeouts;
         self

@@ -395,7 +395,7 @@ pub fn render_memo_has_room() -> bool {
 
 /// Whether rendering `source` (the resource as JSON) under `slug` would be
 /// served from the render memo right now.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn render_is_memoized(
     kind: ProjectRepositoryResourceKind,
     slug: &str,

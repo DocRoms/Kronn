@@ -73,7 +73,7 @@ pub fn start_stamp(pid: u32) -> Option<String> {
 }
 
 /// `proc:<boot id>:<ticks>` (`proc:<ticks>` when the boot id is unreadable).
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", any(test, feature = "test-support")))]
 fn linux_stamp(boot_id: Option<&str>, ticks: &str) -> String {
     match boot_id.map(str::trim).filter(|id| !id.is_empty()) {
         Some(id) => format!("proc:{id}:{ticks}"),
@@ -159,7 +159,7 @@ pub fn reap_recorded_agents(conn: &rusqlite::Connection) -> anyhow::Result<usize
     Ok(killed)
 }
 
-#[cfg(all(test, unix))] // exercises the unix half of agent_orphans (libc kill, /proc start times) on `sleep` processes
+#[cfg(all(any(test, feature = "test-support"), unix))] // exercises the unix half of agent_orphans (libc kill, /proc start times) on `sleep` processes
 mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;

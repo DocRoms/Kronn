@@ -42,9 +42,9 @@ const MAX_TASK_BYTES: usize = 16_000;
 /// What it reads of one execution's output.
 const MAX_EXECUTION_BYTES: usize = 60_000;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 pub fn shadow_token(shadow_id: &str) -> String {

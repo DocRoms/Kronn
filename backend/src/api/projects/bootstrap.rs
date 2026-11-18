@@ -725,7 +725,7 @@ mod prompt_tests {
 }
 
 /// An installed, enabled, signed-in detection of `agent`, for tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn usable_for_tests(agent: AgentType) -> AgentDetection {
     AgentDetection {
         name: format!("{agent:?}"),

@@ -138,7 +138,7 @@ impl SecurityPolicy {
     /// The outbound transport policy: public addresses only, except the
     /// test-only loopback allowance.
     pub fn destinations(self) -> safe_http::SafeHttpPolicy {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if !self.enforce_public_ip {
             return safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;
         }
@@ -148,7 +148,7 @@ impl SecurityPolicy {
     /// For integration tests that MUST hit localhost (wiremock). Host-match
     /// guard stays on because the plugin base URL is the same localhost —
     /// so the actual allowlist path still runs.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn allow_loopback_for_tests() -> Self {
         Self {
             enforce_host_match: true,

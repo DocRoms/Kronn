@@ -117,7 +117,7 @@ pub fn format_step_output_simple(data: Value, status: &str, summary: &str) -> St
 ///
 /// Panics if the output doesn't contain a canonical envelope —
 /// regression tests want a loud failure, not silent `None`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn parse_envelope_for_test(output: &str) -> Value {
     let env = crate::workflows::template::extract_step_envelope(output)
         .expect("output must contain a parseable Kronn envelope (---STEP_OUTPUT--- markers or strategy-2 JSON)");

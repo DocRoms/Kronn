@@ -366,9 +366,9 @@ where
 }
 
 /// How much active time a backend crash mid-step can lose from the guard.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const TIMEOUT_CHECKPOINT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const TIMEOUT_CHECKPOINT_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub const TIMEOUT_ACTIVE_MS_STATE_KEY: &str = "__kronn.timeout_active_ms";
@@ -1053,7 +1053,7 @@ async fn fire_gate_webhook(
 #[derive(Clone, Copy)]
 enum NotifySecurityPolicy {
     Production,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AllowLoopbackForTests,
 }
 
@@ -1061,7 +1061,7 @@ impl NotifySecurityPolicy {
     fn enforce_public_ip(self) -> bool {
         match self {
             Self::Production => true,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::AllowLoopbackForTests => false,
         }
     }
@@ -2086,10 +2086,10 @@ async fn execute_run_body(
                 .collect();
             // A test ACP route stands in for the agent binary; without this the
             // preflight would depend on what the host happens to have installed.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let routed = crate::agents::runner::resolve_agent_work_dir(Some(&work_dir), &work_dir)
                 .is_ok_and(|dir| crate::agents::runner::test_acp_routes::is_routed(&dir));
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-support")))]
             let routed = false;
             let mut missing: Vec<(String, String)> = Vec::new();
             for step in workflow
@@ -2181,7 +2181,7 @@ async fn execute_run_body(
                     model.as_deref(),
                     Some(&agents_config.model_tiers),
                 );
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 let resolution =
                     crate::core::model_catalog::test_routed_discovery(routed, resolution);
                 if let Err(failure) = resolution.await {

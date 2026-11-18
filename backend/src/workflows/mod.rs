@@ -185,7 +185,7 @@ impl WorkflowEngine {
     }
 
     /// One scheduler tick over `(since, now]`, for tests outside this module.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn check_triggers_since(
         &self,
         since: chrono::DateTime<Utc>,

@@ -43,7 +43,7 @@ pub fn set_stalled_build_days(days: u64) {
     STALLED_BUILD_DAYS.store(days.max(MIN_STALLED_BUILD_DAYS), Ordering::Relaxed);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Same reason as `TEST_POLICY`: a test reads its own thread's value.
     static TEST_STALLED_DAYS: std::cell::Cell<Option<u64>> =
@@ -53,7 +53,7 @@ thread_local! {
 /// The configured number of days a Blocked or Interrupted execution's build
 /// dir must be idle to be purgeable (the calling thread's own under `cfg(test)`).
 pub fn stalled_build_days() -> u64 {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         TEST_STALLED_DAYS
             .with(std::cell::Cell::get)
@@ -61,7 +61,7 @@ pub fn stalled_build_days() -> u64 {
                 days.max(MIN_STALLED_BUILD_DAYS)
             })
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         STALLED_BUILD_DAYS
             .load(Ordering::Relaxed)
@@ -76,17 +76,17 @@ pub fn stalled_build_idle() -> Duration {
 
 /// Sets the calling test thread's stalled-build period, restoring the previous
 /// one on drop.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct TestStalledDays(Option<u64>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestStalledDays {
     pub fn set(days: u64) -> Self {
         Self(TEST_STALLED_DAYS.with(|cell| cell.replace(Some(days))))
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestStalledDays {
     fn drop(&mut self) {
         TEST_STALLED_DAYS.with(|cell| cell.set(self.0));
@@ -115,7 +115,7 @@ pub fn set_disk_policy(launch_min_free_gib: u64, sweep_idle_hours: u64) {
 }
 
 /// What the process-wide policy currently holds.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn published_policy() -> (u64, u64) {
     (
         LAUNCH_MIN_FREE_GIB.load(Ordering::Relaxed),
@@ -123,7 +123,7 @@ fn published_policy() -> (u64, u64) {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// The policy a test runs under. The process-wide one is shared by every
     /// test thread (and `config::save` publishes into it), so a test never
@@ -138,14 +138,14 @@ thread_local! {
 /// the default idle period unless [`TestDiskPolicy`] set one), never the shared
 /// one, so tests that provision workers cannot refuse one another.
 pub fn disk_policy() -> (u64, u64) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         TEST_POLICY
             .with(std::cell::Cell::get)
             .map(|(gib, hours)| (gib, effective_sweep_idle_hours(hours)))
             .unwrap_or((0, DEFAULT_DISK_SWEEP_IDLE_HOURS))
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         published_policy()
     }
@@ -153,10 +153,10 @@ pub fn disk_policy() -> (u64, u64) {
 
 /// Sets the calling test thread's policy, restoring the previous one on drop
 /// (also when an assertion panics).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct TestDiskPolicy(Option<(u64, u64)>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestDiskPolicy {
     pub fn set(launch_min_free_gib: u64, sweep_idle_hours: u64) -> Self {
         let before =
@@ -165,7 +165,7 @@ impl TestDiskPolicy {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestDiskPolicy {
     fn drop(&mut self) {
         TEST_POLICY.with(|cell| cell.set(self.0));

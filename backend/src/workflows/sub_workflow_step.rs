@@ -832,9 +832,9 @@ pub fn validate_foreach_file(path: &str) -> Result<(), String> {
 }
 
 /// How often a foreach item re-checks its child workflow's capacity.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Time kept between the end of a capacity wait and the runner's timeout, so

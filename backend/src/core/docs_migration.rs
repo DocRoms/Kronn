@@ -20,7 +20,7 @@
 //! expected to commit the result via the operator's normal git flow.
 
 use std::path::Path;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -20,7 +20,7 @@ type OllamaSseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Se
 pub use crate::api::ollama_health::{health, resolve_base_url_pub};
 pub use crate::api::ollama_health::mlx_capable;
 use crate::api::ollama_health::ollama_base_url;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::api::ollama_health::{fetch_server_version, online_health, version_from_body};
 
 /// GET /api/ollama/models

@@ -57,7 +57,7 @@ const VERSION_PROBE_TIMEOUT: Duration = Duration::from_millis(750);
 /// answered `/api/tags`, and callers that wrap `health` in their own deadline
 /// (the worker reachability check allows four seconds) must never lose a
 /// reachable server to an optional extra.
-pub(super) async fn fetch_server_version(client: &reqwest::Client, base: &str) -> Option<String> {
+pub async fn fetch_server_version(client: &reqwest::Client, base: &str) -> Option<String> {
     let body = client
         .get(format!("{}/api/version", base.trim_end_matches('/')))
         .timeout(VERSION_PROBE_TIMEOUT)
@@ -73,7 +73,7 @@ pub(super) async fn fetch_server_version(client: &reqwest::Client, base: &str) -
 }
 
 /// `{"version": "0.34.2"}` → `"0.34.2"`; anything else is no answer.
-pub(super) fn version_from_body(body: &serde_json::Value) -> Option<String> {
+pub fn version_from_body(body: &serde_json::Value) -> Option<String> {
     body["version"]
         .as_str()
         .map(str::trim)
@@ -96,7 +96,7 @@ pub fn mlx_capable(apple_silicon: bool, version: Option<&str>) -> bool {
 }
 
 /// The health answer for a reachable server, from facts already gathered.
-pub(super) fn online_health(
+pub fn online_health(
     endpoint: String,
     models_count: u32,
     version: Option<String>,

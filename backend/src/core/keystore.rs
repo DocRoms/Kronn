@@ -354,7 +354,7 @@ pub const RETIRED_KEY_PREFIX: &str = "config.toml.retired-key.";
 /// config.toml is ever dropped and no old key lies in clear. The next starts
 /// open it with the key in use ([`file_keys`]).
 fn set_aside_retired_key(dir: &Path, value: &str, key: &str) -> std::io::Result<String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if FAIL_SET_ASIDE.with(|f| f.get()) {
         return Err(std::io::Error::other("set-aside failure (test)"));
     }
@@ -370,7 +370,7 @@ fn set_aside_retired_key(dir: &Path, value: &str, key: &str) -> std::io::Result<
     Ok(name)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAIL_SET_ASIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -824,7 +824,7 @@ fn record_moves(dir: &Path, moved: Vec<String>, pending: Vec<String>, pending_ro
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn record_report_for_tests(
     dir: &Path,
     copies: usize,
@@ -897,7 +897,7 @@ pub fn set_recovery_passphrase(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_recovery_passphrase_in(
     dir: &Path,
     config: &AppConfig,
@@ -1187,11 +1187,11 @@ fn primary_key(table: &str) -> &'static [&'static str] {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type SetAsideHook = fn(&rusqlite::Connection);
 
 /// Test seam: runs between reading the rows and removing them.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static SET_ASIDE_HOOK: std::sync::Mutex<Option<(std::path::PathBuf, SetAsideHook)>> =
     std::sync::Mutex::new(None);
 
@@ -1301,7 +1301,7 @@ pub async fn set_aside_locked_rows(
         .into_iter()
         .map(|r| (r.column, r.key, r.cipher))
         .collect();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let hook = SET_ASIDE_HOOK
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -1309,7 +1309,7 @@ pub async fn set_aside_locked_rows(
         .filter(|(d, _)| d == dir)
         .map(|(_, f)| f);
     db.with_conn(move |conn| {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(f) = hook {
             f(conn);
         }

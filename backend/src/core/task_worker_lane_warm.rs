@@ -63,7 +63,7 @@ const WARM_MARKER: &str = ".kronn-warm.json";
 const DEBUG_DIR: &str = "debug";
 /// Cargo's own advisory lock on a profile directory, held for a build's whole
 /// duration (`<target>/debug/.cargo-lock`).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const CARGO_BUILD_LOCK: &str = seed_prune::CARGO_BUILD_LOCK;
 const TIMED_OUT_DETAIL_PREFIX: &str = "timed out after";
 /// How a probe's detail starts when the runner refused it (the sandboxed runner,
@@ -568,7 +568,7 @@ pub fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 /// [`clone_tree`] through the `cp` at `cp` (a test gives a stand-in).
-#[cfg(any(all(unix, not(target_os = "macos")), all(unix, test)))]
+#[cfg(any(all(unix, not(target_os = "macos")), all(unix, any(test, feature = "test-support"))))]
 fn cp_reflink_tree(cp: &std::ffi::OsStr, source: &Path, destination: &Path) -> io::Result<()> {
     // Like `clonefile(2)`: `cp` would copy into an existing directory.
     if destination.symlink_metadata().is_ok() {

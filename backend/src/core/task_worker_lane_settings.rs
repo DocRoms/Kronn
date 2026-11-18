@@ -158,7 +158,7 @@ static SNAPSHOT: RwLock<Snapshot> = RwLock::new(Snapshot {
     },
     projects: BTreeMap::new(),
     registered: BTreeSet::new(),
-    armed: cfg!(test),
+    armed: cfg!(any(test, feature = "test-support")),
 });
 
 fn key_of(path: &Path) -> PathBuf {
@@ -210,7 +210,7 @@ pub fn rebuild(global: &LaneWarmConfig, projects: &[crate::models::Project]) {
             fresh.projects.insert(key, config.clone());
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if !test_guard::owns_snapshot() {
         return;
     }
@@ -227,7 +227,7 @@ pub fn disarm(global: &LaneWarmConfig) {
         registered: BTreeSet::new(),
         armed: false,
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if !test_guard::owns_snapshot() {
         return;
     }
@@ -464,7 +464,7 @@ pub async fn arm_lane_settings(
     let listed = database
         .with_read_conn(crate::db::projects::list_projects)
         .await;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let listed = listed.and_then(|projects| {
         if test_guard::listing_fails() {
             anyhow::bail!("the project table could not be read (test)")
@@ -485,7 +485,7 @@ pub async fn arm_lane_settings(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_guard {
     use std::cell::Cell;
     use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};

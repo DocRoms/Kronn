@@ -279,7 +279,7 @@ pub async fn execute_notify_step_with_policy(
 
 /// Public addresses only, except the test-only loopback allowance.
 fn notify_destinations(enforce_public_ip: bool) -> crate::core::safe_http::SafeHttpPolicy {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if !enforce_public_ip {
         return crate::core::safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;
     }

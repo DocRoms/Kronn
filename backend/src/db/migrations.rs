@@ -1648,7 +1648,7 @@ fn drop_retired_workflow_observer_column(conn: &Connection) {
 /// Test-only: apply migrations up to AND INCLUDING `stop_after` (by name), so a
 /// test can build an older schema, seed pre-migration data, then run the
 /// remaining migrations through [`run`]. Panics on an unknown migration name.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _migrations (

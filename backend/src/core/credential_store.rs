@@ -324,7 +324,7 @@ pub fn preserve_rows(dir: &Path, rows: &[(String, String)]) {
 }
 
 /// Test seam: data directories whose next credential boot fails.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub static FAIL_BOOT: LazyLock<std::sync::Mutex<HashSet<PathBuf>>> =
     LazyLock::new(Default::default);
 
@@ -473,7 +473,7 @@ pub async fn boot(
     env_auth_token: Option<&str>,
     mode: BootMode,
 ) -> Result<Option<CredentialBoot>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if FAIL_BOOT
         .lock()
         .unwrap_or_else(|p| p.into_inner())

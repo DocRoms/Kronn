@@ -250,7 +250,7 @@ impl LauncherState {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn force(&self, check: LauncherCheck) {
         let stored = match check {
             LauncherCheck::Unchecked => Self::UNCHECKED,
@@ -381,10 +381,10 @@ fn claim_recheck(
 /// Test seam: the stored answer of the launcher check, restored on drop. A test
 /// holding it must be `#[serial_test::serial(background_launcher)]`: the state
 /// is process-wide.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct LauncherGuard(LauncherCheck);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl LauncherGuard {
     pub fn set(check: LauncherCheck) -> Self {
         let previous = LAUNCHER.get();
@@ -393,7 +393,7 @@ impl LauncherGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for LauncherGuard {
     fn drop(&mut self) {
         LAUNCHER.force(self.0);

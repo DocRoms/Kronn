@@ -109,20 +109,20 @@ pub fn current_mode() -> AntiHallucMode {
 
 /// The only way a test changes the mode: it holds a process-wide lock, so two
 /// tests never interleave their modes, and puts the default back on drop.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct ModeOverride {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static MODE_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static MODE_OVERRIDE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ModeOverride {
     pub fn set(mode: &str) -> Self {
         // A second override on the same thread would wait on itself forever.
@@ -143,7 +143,7 @@ impl ModeOverride {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ModeOverride {
     fn drop(&mut self) {
         set_mode(DEFAULT_MODE_STR);

@@ -59,7 +59,7 @@ impl Confirm {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn channel_for_tests(&self) -> Channel {
         self.channel
     }

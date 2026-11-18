@@ -78,7 +78,7 @@ impl std::fmt::Display for Reverted {
 }
 
 impl RemitReport {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_empty(&self) -> bool {
         self.commits_undone.is_empty() && self.reverted.is_empty() && self.warnings.is_empty()
     }

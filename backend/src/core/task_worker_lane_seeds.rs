@@ -166,7 +166,7 @@ pub fn set_seed_policy(copy_enabled: bool, adopt_suggested: bool) {
     ADOPT_SUGGESTED.store(adopt_suggested, Ordering::Relaxed);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// The policy a test runs under: the process-wide one is shared by every
     /// test thread (and `config::save` publishes into it), so a test reads this.
@@ -177,7 +177,7 @@ thread_local! {
 /// The policy in force: the published one, or, under `cfg(test)`, the calling
 /// thread's own (the defaults unless [`TestSeedPolicy`] set one).
 pub fn seed_policy() -> SeedPolicy {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         TEST_SEED_POLICY
             .with(std::cell::Cell::get)
@@ -186,7 +186,7 @@ pub fn seed_policy() -> SeedPolicy {
                 adopt_suggested: false,
             })
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         SeedPolicy {
             copy_enabled: COPY_ENABLED.load(Ordering::Relaxed),
@@ -196,10 +196,10 @@ pub fn seed_policy() -> SeedPolicy {
 }
 
 /// Sets the calling test thread's policy, restoring the previous one on drop.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct TestSeedPolicy(Option<SeedPolicy>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestSeedPolicy {
     pub fn set(copy_enabled: bool, adopt_suggested: bool) -> Self {
         let before = TEST_SEED_POLICY.with(|cell| {
@@ -212,7 +212,7 @@ impl TestSeedPolicy {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestSeedPolicy {
     fn drop(&mut self) {
         TEST_SEED_POLICY.with(|cell| cell.set(self.0));

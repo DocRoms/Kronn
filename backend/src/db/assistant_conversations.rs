@@ -65,7 +65,7 @@ impl std::fmt::Debug for TransientSecrets {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl From<Vec<String>> for TransientSecrets {
     fn from(values: Vec<String>) -> Self {
         Self(values)
@@ -472,7 +472,7 @@ impl AssistantGuard {
     }
 
     /// Ages a turn, for the tests that cannot wait two hours.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn age_turn(&self, turn_id: &str, by: std::time::Duration) {
         if let Ok(mut turns) = self.turns.lock() {
             if let Some(turn) = turns.get_mut(turn_id) {
@@ -481,7 +481,7 @@ impl AssistantGuard {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn live_turns(&self) -> usize {
         self.turns.lock().map(|turns| turns.len()).unwrap_or(0)
     }

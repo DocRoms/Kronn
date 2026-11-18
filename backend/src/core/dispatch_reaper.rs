@@ -193,7 +193,7 @@ fn run_processes(rows: &[ProcessRow], own_pid: u32) -> Vec<Target> {
 ///
 /// An environment value may hold a newline (an exported shell function does):
 /// the lines that do not open with two numbers continue the previous process.
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(any(any(test, feature = "test-support"), not(any(target_os = "linux", target_os = "macos"))))]
 fn parse_process_table(output: &str, dispatch_job_id: &str) -> Vec<ProcessRow> {
     let needle = format!("{DISPATCH_ENV}={dispatch_job_id}");
     let mut rows: Vec<ProcessRow> = Vec::new();
@@ -222,7 +222,7 @@ fn parse_process_table(output: &str, dispatch_job_id: &str) -> Vec<ProcessRow> {
     rows
 }
 
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(any(any(test, feature = "test-support"), not(any(target_os = "linux", target_os = "macos"))))]
 fn carries_token(line: &str, needle: &str) -> bool {
     line.match_indices(needle).any(|(at, _)| {
         let before = line[..at].chars().next_back();
@@ -294,7 +294,7 @@ impl ProcessTable {
     }
 
     /// The processes that may be the run's but could not be checked.
-    #[cfg(any(unix, test))]
+    #[cfg(any(unix, any(test, feature = "test-support")))]
     fn unverifiable(&self, targets: &[Target], own_pid: u32) -> usize {
         self.unreadable + hidden_kin(&self.rows, targets, own_pid, self.restricted)
     }
@@ -305,7 +305,7 @@ impl ProcessTable {
 /// Any other hidden process of this user (`(sd-pam)`, an `ssh-agent`) was not
 /// started from the run's tree. Under a restricted `/proc` every hidden row
 /// counts.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, any(test, feature = "test-support")))]
 fn hidden_kin(rows: &[ProcessRow], targets: &[Target], own_pid: u32, restricted: bool) -> usize {
     let parent_of = |pid: u32| rows.iter().find(|row| row.pid == pid).map(|row| row.ppid);
     let is_run = |pid: u32| targets.iter().any(|target| target.pid == pid);
@@ -333,7 +333,7 @@ fn hidden_kin(rows: &[ProcessRow], targets: &[Target], own_pid: u32, restricted:
 
 /// State and parent from `/proc/<pid>/stat`. The command (field 2) may hold
 /// spaces and parentheses: the fields are read after its last ')'.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", any(test, feature = "test-support")))]
 fn parse_stat(stat: &str) -> Option<(char, u32)> {
     let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
     let state = fields.next()?.chars().next()?;
@@ -343,7 +343,7 @@ fn parse_stat(stat: &str) -> Option<(char, u32)> {
 
 /// A zombie (or dead) process has exited: nothing of it runs, its
 /// environment is gone (the kernel refuses to read it) and its parent reaps it.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", any(test, feature = "test-support")))]
 fn has_exited(state: char) -> bool {
     matches!(state, 'Z' | 'X' | 'x')
 }
@@ -351,7 +351,7 @@ fn has_exited(state: char) -> bool {
 /// An unreadable `/proc` entry matters only if it could be this user's: every
 /// agent runs as the backend's own user, and another user's processes are
 /// always unreadable to it.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", any(test, feature = "test-support")))]
 fn could_be_ours(owner_uid: Option<u32>, own_uid: u32) -> bool {
     owner_uid.is_none_or(|uid| uid == own_uid)
 }
@@ -513,7 +513,7 @@ fn macos_procargs(pid: libc::pid_t) -> Option<Vec<u8>> {
 
 /// The environment strings of a `KERN_PROCARGS2` buffer: `argc`, the
 /// executable path, NUL padding, `argc` arguments, then the environment.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", any(test, feature = "test-support")))]
 fn procargs_environment(raw: &[u8]) -> Vec<&[u8]> {
     let Some((argc, mut rest)) = raw.split_first_chunk::<4>() else {
         return Vec::new();

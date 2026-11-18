@@ -1749,12 +1749,12 @@ fn check_dirty_files_for_handoff(
 /// `None` for a plain resume; a reassignment numbers its handoffs.
 /// If `tx` and `execution_id` are provided, the message will reflect any uncommitted
 /// changes in the worktree; otherwise a generic message is used.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn handoff_notice(has_delivered: bool, generation: Option<u32>) -> String {
     handoff_notice_with_context(has_delivered, generation, None, None)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn handoff_notice_with_context(
     has_delivered: bool,
     generation: Option<u32>,
@@ -2266,7 +2266,7 @@ pub async fn provision_single_task_execution(
 
 /// Launch one task with mechanical gates selected by the authorized principal.
 /// The worker cannot influence this policy through its brief or delivery manifest.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn provision_single_task_execution_with_validations(
     db: &Database,
     input: ProvisionInput,
@@ -2284,7 +2284,7 @@ pub async fn provision_single_task_execution_with_validations(
     .await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn provision_single_task_execution_with_scope_and_validations(
     db: &Database,
     input: ProvisionInput,
@@ -2866,7 +2866,7 @@ const WARM_UP_STATE_POLL: std::time::Duration = std::time::Duration::from_millis
 /// repository, so a scenario that depends on the watcher NOT having fired yet
 /// does not race the wall clock.
 fn warm_up_state_poll(repo_path: &str) -> std::time::Duration {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(poll) = test_warm_up_state_polls()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2878,7 +2878,7 @@ fn warm_up_state_poll(repo_path: &str) -> std::time::Duration {
     WARM_UP_STATE_POLL
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_warm_up_state_polls(
 ) -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Duration>> {
     static POLLS: std::sync::OnceLock<
@@ -2895,7 +2895,7 @@ fn worker_probe_runner(
     repo_path: &str,
     worktree: &std::path::Path,
 ) -> std::sync::Arc<dyn crate::core::task_worker_env::ProbeRunner> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(runner) = test_probe_runners()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2909,7 +2909,7 @@ fn worker_probe_runner(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_probe_runners() -> &'static std::sync::Mutex<
     std::collections::HashMap<
         String,
@@ -7172,7 +7172,7 @@ async fn run_pending_validations(
 /// `.cargo/config.toml` are code. Every command of the validation — Cargo's
 /// target resolution included — therefore runs under the lane's sandbox
 /// profile (KT-1268), and a host that has none refuses the validation.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn run_one_validation(
     spec: &crate::models::ValidationSpec,
     cwd: &std::path::Path,
@@ -7316,7 +7316,7 @@ fn host_validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, Str
     crate::core::task_worker_sandbox::Confinement::for_worktree(cwd).map(ValidationLaunch::Confined)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
     host_validation_launch(cwd)
 }
@@ -7324,7 +7324,7 @@ fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> 
 /// Tests choose, per directory, the mechanism the host "has"
 /// (`Mechanism::of_host()` for the real one, `None` for a host without any);
 /// a directory they did not register runs unconfined.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> {
     let registered = test_validation_mechanisms()
         .lock()
@@ -7340,7 +7340,7 @@ fn validation_launch(cwd: &std::path::Path) -> Result<ValidationLaunch, String> 
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_validation_mechanisms() -> &'static std::sync::Mutex<
     std::collections::HashMap<
         std::path::PathBuf,
@@ -10984,7 +10984,7 @@ fn build_brief(
 
 /// The brief's "what you can run" section (KT-1246), from the launch-time smoke
 /// check: the worker reads it instead of discovering a refusal mid-task.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn toolchain_brief_section(toolchain: &ToolchainCapabilities, lang: RoomLang) -> String {
     toolchain_brief_section_in(toolchain, None, lang)
 }
@@ -11161,7 +11161,7 @@ fn brief_for_agent(content: String, agent_type: Option<&str>, lang: RoomLang) ->
 }
 
 /// Put the capability section right before the brief's `## Tests` section.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn insert_toolchain_section(
     content: String,
     toolchain: &ToolchainCapabilities,
@@ -11894,7 +11894,7 @@ fn project_signs_off(worktree_path: &str) -> bool {
 }
 
 /// The French brief, which the existing brief tests pin.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
 fn worker_brief_markdown(
     task_reference: &str,

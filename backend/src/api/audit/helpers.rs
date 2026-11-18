@@ -1197,7 +1197,7 @@ pub(super) fn remove_bootstrap_block(project_path: &std::path::Path, index_file:
 /// When `prefilled_notes` is `None`, the agent runs the legacy 6-Q
 /// flow (kept for backwards-compat — callers that never wrote to the
 /// form still work).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn build_briefing_prompt(language: &str, prefilled_notes: Option<&str>) -> String {
     build_briefing_prompt_in(
         language,

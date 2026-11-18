@@ -594,7 +594,7 @@ impl VerifiedCheckout {
         matches!(hooks_path(&self.root), Ok(HooksPath::Root))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_writable(&self) -> bool {
         self.writable
     }
@@ -688,7 +688,7 @@ fn identity(_path: &Path) -> Result<Identity, String> {
 }
 
 impl ReadOnlyRepos {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn resolve(
         agent: &AgentType,
         work_dir: &Path,

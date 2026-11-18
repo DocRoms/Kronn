@@ -444,14 +444,14 @@ pub fn host_sandbox() -> Result<(), String> {
 fn host_mechanism() -> Result<Mechanism, String> {
     // Unit tests do not depend on the sandbox of the machine they run on
     // (a Seatbelt cannot be applied from inside another one): they choose.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         match test_unavailable() {
             Some(reason) => Err(reason),
             None => Ok(Mechanism::of_host().unwrap_or(Mechanism::Seatbelt)),
         }
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         Mechanism::usable_on_host()
     }
@@ -521,16 +521,16 @@ impl CommandConfinement for LevelConfinement {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_UNAVAILABLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Tests pretend the host has no sandbox (`Some(reason)`), or restore it (`None`).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_test_unavailable(reason: Option<&str>) {
     *TEST_UNAVAILABLE.lock().unwrap_or_else(|p| p.into_inner()) = reason.map(str::to_owned);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_unavailable() -> Option<String> {
     TEST_UNAVAILABLE
         .lock()

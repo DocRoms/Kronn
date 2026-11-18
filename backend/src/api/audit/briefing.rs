@@ -113,7 +113,7 @@ pub const BRIEFING_PROMPT_MAX_CHARS: usize = 6_000;
 /// at [`BRIEFING_PROMPT_MAX_CHARS`] with an explicit truncation marker. The
 /// machine copy of the project answers is dropped: the readable facts above
 /// it say the same thing. The documentation section stays out (KT-999).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn briefing_prompt_section(
     notes: &str,
     docs_root: &crate::core::docs_location::DocsRoot,
@@ -885,7 +885,7 @@ pub fn compose_briefing(
 
 /// Appends the Kronn options section, only when an option is set, so a
 /// briefing without one keeps its historical shape.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_kronn_options(body: String, td_to_tasks: bool) -> String {
     with_all_kronn_options(body, td_to_tasks, &[])
 }

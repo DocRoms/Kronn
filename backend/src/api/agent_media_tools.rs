@@ -21,9 +21,9 @@ mod tests;
 /// Longest one `media_job_status` call blocks. The media worker keeps running
 /// past it: the step calls again, or the asset is simply found in the run.
 const MAX_WAIT_SECS: u64 = 300;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const POLL_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Where a generation comes from, and so where its asset goes.
